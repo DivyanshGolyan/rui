@@ -20,7 +20,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 76;
+pub const schema_version: u32 = 77;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -63,6 +63,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 74, .digest = 0xda8e267adbfcef45 },
     .{ .schema_version = 75, .digest = 0xcea5bf4db0d3978d },
     .{ .schema_version = 76, .digest = 0x0d2cb1706af6379c },
+    .{ .schema_version = 77, .digest = 0xfe55eb1052c6bd9a },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -766,6 +767,25 @@ pub const migrations = [_]Migration{
             "CREATE TABLE action_control_command(\n command_key VARCHAR(128) NOT NULL,\n action_id TEXT NOT NULL,\n selected_action_id BIGINT,\n selection VARCHAR(10),\n selection_position BIGINT,\n PRIMARY KEY(command_key),\n FOREIGN KEY(command_key) REFERENCES core_command(command_key),\n FOREIGN KEY(selected_action_id) REFERENCES action_operation(action_id),\n CHECK(OCTET_LENGTH(action_id) BETWEEN 1 AND 20 AND (NOT REGEXP_LIKE(action_id,'[^0-9]','c'))),\n CHECK(selection IS NULL OR selection IN ('background','final')),\n CHECK(selection_position>0),\n CHECK((selected_action_id IS NULL AND selection IS NULL AND selection_position IS NULL) OR (selected_action_id IS NOT NULL AND selection IS NOT NULL AND selection_position IS NOT NULL))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
         },
     },
+    .{
+        .from = 76,
+        .sqlite = &.{
+            "ALTER TABLE message_admission RENAME TO message_admission_before_77",
+            "CREATE TABLE message_admission(\n admission_id INTEGER PRIMARY KEY NOT NULL CHECK(admission_id>0),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n command_key TEXT NOT NULL UNIQUE REFERENCES core_command(command_key),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n admission_position INTEGER CHECK(admission_position>0),\n turn_id INTEGER REFERENCES turn(turn_id),\n admitted_at INTEGER NOT NULL CHECK(admitted_at>0),\n sender_session_ref TEXT REFERENCES session(session_ref),\n sender_position INTEGER CHECK(sender_position>0),\n source_action_id INTEGER UNIQUE REFERENCES action_operation(action_id),\n CHECK((sender_session_ref IS NULL)=(sender_position IS NULL)),\n CHECK(source_action_id IS NULL OR sender_session_ref IS NULL)\n) STRICT",
+            "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position) SELECT admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position FROM message_admission_before_77",
+            "DROP TABLE message_admission_before_77",
+            "CREATE UNIQUE INDEX message_admission_sent ON message_admission(sender_session_ref,sender_position) WHERE sender_session_ref IS NOT NULL",
+            "CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id)",
+            "CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL",
+            "CREATE INDEX message_admission_session_pending ON message_admission(session_ref,admission_id) WHERE turn_id IS NULL",
+            "CREATE INDEX message_admission_person ON message_admission(session_ref,admission_position) WHERE sender_session_ref IS NULL",
+            "CREATE INDEX message_admission_unpositioned ON message_admission(session_ref) WHERE admission_position IS NULL",
+            "CREATE INDEX message_admission_position ON message_admission(session_ref,admission_position)",
+        },
+        .mysql = &.{
+            "ALTER TABLE message_admission ADD COLUMN source_action_id BIGINT AFTER sender_position, ADD UNIQUE(source_action_id), ADD FOREIGN KEY(source_action_id) REFERENCES action_operation(action_id), ADD CHECK(source_action_id IS NULL OR sender_session_ref IS NULL)",
+        },
+    },
 };
 
 comptime {
@@ -1344,9 +1364,10 @@ pub const tables = [_]Table{
             .{ .name = "admitted_at", .type = .int, .check = "admitted_at>0", .read_by = .both },
             .{ .name = "sender_session_ref", .type = .{ .text = null }, .nullable = true, .read_by = .both },
             .{ .name = "sender_position", .type = .int, .nullable = true, .check = "sender_position>0", .read_by = .both },
+            .{ .name = "source_action_id", .type = .int, .nullable = true },
         },
         .primary_key = &.{"admission_id"},
-        .uniques = &.{&.{"command_key"}},
+        .uniques = &.{ &.{"command_key"}, &.{"source_action_id"} },
         .foreign_keys = &.{
             references("session_ref", "session", session_reference),
             references("command_key", "core_command", command_reference),
@@ -1355,8 +1376,9 @@ pub const tables = [_]Table{
             // Admission is written with turn_id NULL, and set once its Turn exists.
             references("turn_id", "turn", &.{"turn_id"}),
             references("sender_session_ref", "session", session_reference),
+            references("source_action_id", "action_operation", &.{"action_id"}),
         },
-        .checks = &.{"(sender_session_ref IS NULL)=(sender_position IS NULL)"},
+        .checks = &.{ "(sender_session_ref IS NULL)=(sender_position IS NULL)", "source_action_id IS NULL OR sender_session_ref IS NULL" },
     },
     .{
         .name = "sent_rejection",

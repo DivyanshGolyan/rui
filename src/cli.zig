@@ -4902,7 +4902,7 @@ test "a saved rejection code this build does not know keeps the answer and says 
 }
 
 test "native promotion saved refusals keep their catalog code and refused exit" {
-    inline for (.{ "source_stopped", "background_unavailable" }) |code| {
+    inline for (.{"source_stopped"}) |code| {
         const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"action_background_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":true,\"session\":\"k7m2qx\",\"action\":\"42\",\"code\":\"" ++ code ++ "\"}}";
         var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = body }, "k7m2qx", .{ .action_background = 42 });
         try reply.context.store.set("/s");

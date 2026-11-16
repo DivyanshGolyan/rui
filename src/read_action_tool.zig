@@ -58,13 +58,8 @@ test "read_action core reads own pending and immutable final windows without cre
             const target = try storage.testing.queryU64(&database, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1", .{first_model.operation_id});
             var background: @import("command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = target };
             try background.key.set("read-background");
-            const free: usize = 2;
-            const capacity: storage.ActionCapacityView = .{ .total = 2, .context = &free, .freeFn = struct {
-                fn read(context: *const anyopaque) usize {
-                    return @as(*const usize, @ptrCast(@alignCast(context))).*;
-                }
-            }.read };
-            try std.testing.expect(database.backgroundAction(&background, capacity, .{}) == .accepted);
+
+            try std.testing.expect(database.backgroundAction(&background, .{}) == .accepted);
             var own: action_read.Read = undefined;
             try database.readAction(&.{ .session = session, .action_id = target }, &own);
             try std.testing.expect(own.status == .pending and own.status.pending == .waiting_approval);

@@ -612,14 +612,9 @@ test "each Store entry point takes its round budget on its common path" {
             meter.stop(.settleActionAttempt);
             var background: @import("../../command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = allowed };
             try background.key.set("budget-background");
-            const credit: usize = 2;
-            const capacity: @import("../domain/action_control.zig").CapacityView = .{ .total = 2, .context = &credit, .freeFn = struct {
-                fn read(context: *const anyopaque) usize {
-                    return @as(*const usize, @ptrCast(@alignCast(context))).*;
-                }
-            }.read };
+
             meter.start();
-            const selected_final = storage.backgroundAction(&background, capacity, .{});
+            const selected_final = storage.backgroundAction(&background, .{});
             try std.testing.expect(selected_final == .accepted and selected_final.accepted.selection.kind == .final);
             meter.stop(.backgroundAction);
             var deny: protocol.PermissionDecisionCommand = .{ .action_id = denied, .decision = .deny };

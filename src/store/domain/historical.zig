@@ -21,6 +21,7 @@ const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const historical_domain = @This();
 const operation_effort = @import("operation_effort.zig");
+const action_read_domain = @import("action_read.zig");
 const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
 const skills_domain = @import("skills.zig");
@@ -115,6 +116,7 @@ pub const HistoricalEntry = struct {
     kind: HistoricalEntryKind,
     content: ?HistoricalContent = null,
     requested_model: ?Bounded(model_capability.max_model_bytes) = null,
+    source_action: ?struct { id: u64, session: Bounded(session_id.bytes) } = null,
     // A User entry's peer sender, in this view's Store.
     sender: ?Bounded(session_id.max_reference_bytes) = null,
     /// An Operation entry's frozen effort.
@@ -1561,6 +1563,12 @@ fn entryAfter(a: *ReadAccess, view: *RequestPage, after_position: u64) !?*const 
     if (view.next_tool_group) |*group| {
         if (group.position < ordinary.position) return activateHistoricalToolGroup(view);
     }
+    if (ordinary.source_action) |source| {
+        const final = try action_read_domain.readResolution(a, source.session.slice(), source.id);
+        const reference = if (ordinary.content) |*value| value else return error.CorruptStore;
+        if (reference.content_id != final.location.content_id or reference.length != final.location.reference.length or
+            !std.mem.eql(u8, &reference.digest, &final.location.reference.digest)) return error.CorruptStore;
+    }
     return ordinary;
 }
 
@@ -1569,7 +1577,7 @@ fn entryAfter(a: *ReadAccess, view: *RequestPage, after_position: u64) !?*const 
 /// order.
 const historical_entries = rsql.Read(.{
     .sql = "SELECT e.session_position,CASE WHEN e.entry_kind=4 THEN 5 ELSE e.entry_kind END AS entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,(e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ") AS consistent," ++
-        "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS sender,NULL AS effort," ++
+        "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS sender,(SELECT m.source_action_id FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS source_action,e.session_ref AS source_session,NULL AS effort," ++
         "NULL AS tool_set_id,NULL AS declares," ++ pageBytesSql("content", "bytes") ++ " " ++
         "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
         "LEFT JOIN content ON content.content_id=e.content_id " ++
@@ -1582,7 +1590,7 @@ const historical_entries = rsql.Read(.{
         "AND owner.attempt_ordinal=item.attempt_ordinal AND owner.admission_position<item.session_position " ++
         "AND owner.admission_position<current.admission_position AND " ++
         "(item.item_kind!=3 OR " ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ") AND " ++
-        "((" ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call tool_call WHERE tool_call.operation_id=owner.operation_id)),NULL,NULL,NULL,NULL,NULL " ++
+        "((" ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call tool_call WHERE tool_call.operation_id=owner.operation_id)),NULL,NULL,NULL,NULL,NULL,NULL,NULL " ++
         "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
         "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
         "LEFT JOIN turn owner_turn ON owner_turn.turn_id=owner.turn_id " ++
@@ -1592,7 +1600,7 @@ const historical_entries = rsql.Read(.{
         // Every earlier Operation of the Session above the floor, whatever
         // its outcome: its request carried its own boundary, so later ones do too.
         // With each, its tool set and whether it declares any tool.
-        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL," ++ operation_effort.effectiveSql("earlier") ++ ",earlier.tool_set_id," ++
+        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL,NULL,NULL," ++ operation_effort.effectiveSql("earlier") ++ ",earlier.tool_set_id," ++
         "EXISTS(SELECT 1 FROM " ++ declared_members_from ++ " WHERE " ++ declared_members_where("earlier.tool_set_id", "earlier.admission_position", "?6") ++ "),NULL " ++
         "FROM model_operation current JOIN model_operation earlier ON earlier.session_ref=current.session_ref " ++
         "JOIN session_revision revision ON revision.session_ref=earlier.session_ref AND revision.revision=earlier.settings_revision " ++
@@ -1613,6 +1621,8 @@ const historical_entries = rsql.Read(.{
         item_id_digest: ?[32]u8,
         consistent: ?bool,
         sender: ?Bounded(session_id.max_reference_bytes),
+        source_action: ?rsql.Positive,
+        source_session: ?Bounded(session_id.bytes),
         effort: ?model_capability.ReasoningEffort,
         tool_set_id: ?rsql.Positive,
         declares: ?bool,
@@ -2312,6 +2322,7 @@ fn historicalEntry(view: *RequestPage, row: *const historical_entries.Row) error
         .kind = kind,
         .requested_model = requested_model,
         .sender = row.sender,
+        .source_action = if (row.source_action) |action| .{ .id = action.get(), .session = row.source_session orelse return error.CorruptStore } else null,
         .content = content,
     };
 }

@@ -14,6 +14,7 @@ const Bounded = @import("../../bounded.zig").Bounded;
 const session_id = @import("../../session_id.zig");
 const tool_defs = @import("../../tool_record.zig");
 const store_core = @import("../Store.zig");
+const sourced_input = @import("sourced_input.zig");
 const rsql = @import("../rsql.zig");
 const content_domain = @import("content.zig");
 const reads_domain = @import("reads.zig");
@@ -311,7 +312,7 @@ const CoreSelection = struct {
     fn queue(selection: *CoreSelection, a: anytype, capacity: Capacity) void {
         const names: CoreNames = .of();
         a.read(owed_stop, .{}, &selection.stop);
-        if (capacity.includesMcp()) a.read(next_mcp_action, .{ .foreground = capacity.hasCredit(), .background = capacity.hasHeadroom() }, &selection.mcp);
+        if (capacity.includesMcp()) a.read(next_mcp_action, .{ .foreground = capacity.hasCredit(), .background = capacity.hasCredit() }, &selection.mcp);
         a.read(owed_ending, .{}, &selection.ending);
         a.read(forward_domain.next, .{}, &selection.forward);
         a.read(next_core_action, names.args(.{}), &selection.action);
@@ -322,7 +323,7 @@ const CoreSelection = struct {
 /// `admitNextActionAttempt` selects, and the work read's Bash answer.
 fn queueNextActionAttempt(a: anytype, capacity: Capacity, next: *next_action_attempt.Result) void {
     const names: CoreNames = .of();
-    a.read(next_action_attempt, names.args(.{ .foreground = capacity.hasCredit(), .background = capacity.hasHeadroom() }), next);
+    a.read(next_action_attempt, names.args(.{ .foreground = capacity.hasCredit(), .background = capacity.hasCredit() }), next);
 }
 
 /// Whether `nextCoreWork` and `admitNextActionAttempt` would find work:
@@ -753,6 +754,7 @@ pub const SettleAttempt = struct {
     pub const Declined = error{};
 
     input: Input,
+    final_input: sourced_input.Final = .{},
     facts: settle_facts.Result = undefined,
     code: ActionResolutionCode = undefined,
     /// The bytes the Action settles with, which its payload write reads
@@ -767,7 +769,7 @@ pub const SettleAttempt = struct {
             r.read(settle_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, &t.facts);
             return .{ .round = .facts };
         };
-        const found = t.facts orelse return error.StaleActionAttemptBinding;
+        const found = if (t.facts) |*row| row else return error.StaleActionAttemptBinding;
         switch (at) {
             .facts => {
                 if (found.turn_id.get() != binding.turn_id) return error.StaleActionAttemptBinding;
@@ -793,6 +795,7 @@ pub const SettleAttempt = struct {
                     .parent_operation_id = binding.parent_operation_id,
                     .session = found.session,
                 });
+                try t.final_input.admit(r, &found.session, binding.action_id, content_id, .{ .background = found.background, .stopped = found.stopped });
                 try turn_domain.queueStopCompletion(r, t.completion, binding.turn_id);
                 turn_domain.queueContinuation(r, binding.turn_id, found.session);
                 if (r.faults().before_commit) return error.InjectedCommitFailure;
@@ -817,11 +820,11 @@ const uncertain_actions = rsql.Read(.{
 
 /// The Session and Turn of the Attempt `action_id`, while it is unresolved.
 const uncertain_facts = rsql.Read(.{
-    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,operation.turn_id,action.background_position IS NOT NULL AS background," ++ attemptRunnerSql() ++ " AS runner FROM action_operation action " ++
+    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,operation.turn_id,action.background_position IS NOT NULL AS background," ++ attemptRunnerSql() ++ " AS runner," ++ actionStoppedSql("action", "operation") ++ " AS stopped FROM action_operation action " ++
         "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE action.action_id=?1 AND action.resolution_code IS NULL AND action." ++ action_attempted_sql,
     .Args = struct { action_id: u64 },
-    .Row = struct { session: rsql.SessionHead, turn_id: rsql.Positive, background: bool, runner: tool_defs.Runner },
+    .Row = struct { session: rsql.SessionHead, turn_id: rsql.Positive, background: bool, runner: tool_defs.Runner, stopped: bool },
     .cardinality = .optional,
 });
 
@@ -879,6 +882,7 @@ pub const RecoverUncertain = struct {
     pub const Declined = error{};
 
     input: Input,
+    final_input: sourced_input.Final = .{},
     choice: UncertainChoice = undefined,
     facts: uncertain_facts.Result = undefined,
     content: content_domain.Import = undefined,
@@ -904,11 +908,12 @@ pub const RecoverUncertain = struct {
                 return .{ .round = .completion };
             },
             .completion => {
-                const found = t.facts.?;
+                const found = &t.facts.?;
                 const turn_id = found.turn_id.get();
                 const positions = try r.positions(found.session);
                 const content_id = try content_domain.importBytes(r, &t.content, found.runner.indeterminateText());
                 r.write(resolve_uncertain, .{ .action_id = action_id, .content_id = content_id, .position = try positions.take(1), .session = found.session });
+                try t.final_input.admit(r, &found.session, action_id, content_id, .{ .background = found.background, .stopped = found.stopped });
                 try turn_domain.queueStopCompletion(r, t.completion, turn_id);
                 turn_domain.queueContinuation(r, turn_id, found.session);
                 return .commit;
@@ -978,7 +983,7 @@ pub fn nextAction(a: anytype, comptime runner: tool_defs.Runner, capacity: Capac
     if (runner != .mcp) @compileError("only Action runners can select Actions");
     var row: next_mcp_action.Result = undefined;
     if (!capacity.includesMcp()) return null;
-    a.read(next_mcp_action, .{ .foreground = capacity.hasCredit(), .background = capacity.hasHeadroom() }, &row);
+    a.read(next_mcp_action, .{ .foreground = capacity.hasCredit(), .background = capacity.hasCredit() }, &row);
     try a.run();
     const found = row orelse return null;
     return .{ .action_id = found.action_id.get(), .runner = .mcp, .background = found.background, .server = found.server };
@@ -1024,6 +1029,7 @@ pub const ResolveSelected = struct {
     pub const Declined = error{};
 
     input: Input,
+    final_input: sourced_input.Final = .{},
     facts: mcp_facts.Result = undefined,
     content: content_domain.Import = undefined,
 
@@ -1034,10 +1040,11 @@ pub const ResolveSelected = struct {
             content_domain.lookup(r, &t.content);
             return .{ .round = .facts };
         }
-        const found = t.facts orelse return .commit;
+        const found = if (t.facts) |*row| row else return .commit;
         if (r.faults().content_import) return error.InjectedContentImportFailure;
         const content_id = try content_domain.importBytes(r, &t.content, t.input.text);
         try queueResolution(r, .{ .action_id = t.input.selected.action_id, .parent_operation_id = found.parent_operation_id.get(), .turn_id = found.turn_id.get() }, found.session, t.input.code, content_id);
+        try t.final_input.admit(r, &found.session, t.input.selected.action_id, content_id, .{ .background = found.background, .stopped = false });
         if (r.faults().before_commit) return error.InjectedCommitFailure;
         return .commit;
     }

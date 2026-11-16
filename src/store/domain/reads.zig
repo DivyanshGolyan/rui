@@ -363,7 +363,7 @@ pub const queued = rsql.Read(.{
     .sql = "SELECT m.admission_id,m.admission_position," ++
         "EXISTS(SELECT 1 FROM conversation_entry e WHERE e.source_admission_id=m.admission_id AND e.session_position<=?2) OR " ++
         "EXISTS(SELECT 1 FROM session_stop s WHERE s.session_ref=?1 AND s.admission_cutoff>=m.admission_id AND s.position<=?2) AS taken " ++
-        "FROM message_admission m @index(message_admission_person) WHERE m.session_ref=?1 AND m.sender_session_ref IS NULL " ++
+        "FROM message_admission m @index(message_admission_person) WHERE m.session_ref=?1 AND m.sender_session_ref IS NULL AND m.source_action_id IS NULL " ++
         "AND m.admission_position<=?2 ORDER BY m.admission_position DESC",
     .Args = struct { session: []const u8, position: u64 },
     .Row = struct { admission_id: rsql.Positive, admission_position: rsql.Positive, taken: bool },

@@ -459,15 +459,6 @@ pub const Host = struct {
     test_observation: ?*TestObservation = null,
     last_unprocessed_completions: ?u64 = null,
 
-    pub fn dispatchCapacity(host: *const Host) store_module.ActionCapacityView {
-        return .{ .total = host.custody.records.len, .context = &host.custody, .freeFn = struct {
-            fn free(context: *const anyopaque) usize {
-                const pool: *const execution.CustodyPool = @ptrCast(@alignCast(context));
-                return pool.records.len - pool.occupied();
-            }
-        }.free };
-    }
-
     // Canonical permission belongs to Store; process-local permission belongs
     // to Host. The Store handoff must enter this gate, in that lock order, for
     // every effect. A preflight observation alone cannot authorize a launch.

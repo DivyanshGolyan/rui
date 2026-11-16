@@ -12,16 +12,6 @@ const action_domain = @import("action.zig");
 const content_domain = @import("content.zig");
 const turn_domain = @import("turn.zig");
 
-pub const CapacityView = struct {
-    total: usize,
-    context: *const anyopaque,
-    freeFn: *const fn (*const anyopaque) usize,
-
-    fn snapshot(view: CapacityView) control.Capacity {
-        return .{ .total = view.total, .free = view.freeFn(view.context) };
-    }
-};
-
 const target = rsql.Read(.{
     .sql = "SELECT session_ref,workspace_key,next_position FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
@@ -30,7 +20,7 @@ const target = rsql.Read(.{
 });
 const facts = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,action.parent_operation_id,operation.turn_id," ++
-        "action.background_position,action.acceptance_position,action.attempt_ordinal=1 AS attempted," ++
+        "action.background_position,action.acceptance_position," ++
         action_domain.actionStopPositionSql("action", "operation") ++ " AS stop_position " ++
         "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN session s ON s.session_ref=action.session_ref WHERE action.action_id=?1",
     .Args = struct { action_id: u64 },
@@ -40,7 +30,6 @@ const facts = rsql.Read(.{
         turn_id: rsql.Positive,
         background_position: ?rsql.Positive,
         acceptance_position: ?rsql.Positive,
-        attempted: bool,
         stop_position: ?rsql.Positive,
 
         fn selected(row: @This()) control.Facts {
@@ -48,7 +37,6 @@ const facts = rsql.Read(.{
                 .background = if (row.background_position) |position| position.get() else null,
                 .final = if (row.acceptance_position) |position| position.get() else null,
                 .stopped = if (row.stop_position) |position| position.get() else null,
-                .attempted = row.attempted,
             };
         }
     },
@@ -96,7 +84,7 @@ pub const Control = struct {
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = .facts;
     pub const Scratch = struct { receipt: action_receipt.Bytes };
-    pub const Input = struct { command: *const command_input.ActionBackgroundCommand, capacity: CapacityView, scratch: *Scratch };
+    pub const Input = struct { command: *const command_input.ActionBackgroundCommand, scratch: *Scratch };
     pub const Result = control.Reply;
     pub const Ordinary = store_core.Ordinary.none;
     pub const Guards = error{ActionSelectionChanged};
@@ -144,7 +132,7 @@ pub const Control = struct {
         const rejection: ?control.Rejection = if (!session_id.valid(request.session.slice())) .invalid_session_reference else if (!validId(request.action_id)) .invalid_target else if (t.receiver == null) .unknown_session else if (t.action == null) .unknown_action else if (!std.mem.eql(u8, &t.action.?.session.ref, request.session.slice())) .target_mismatch else null;
         if (rejection) |code| return t.refuse(r, code);
         const found = t.action.?;
-        const choice = control.choose(found.selected(), t.input.capacity.snapshot());
+        const choice = control.choose(found.selected());
         if (choice == .refused) return t.refuse(r, choice.refused);
         t.answer = .{ .accepted = true };
         try command_domain.queueCommand(r, request.key.slice(), .action_background, request.session.slice(), &t.digest, null, null, &t.answer);

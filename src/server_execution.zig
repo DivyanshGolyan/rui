@@ -1591,7 +1591,7 @@ fn admitBashAttempt(
         fenceDispatch(host, "Bash Action selection", err);
         return .retry_later;
     }) orelse return .no_work;
-    const token = (if (selected.background) host.custody.reserveLeaving(1) else host.custody.reserve()) orelse return .no_work;
+    const token = host.custody.reserve() orelse return .no_work;
     var admission = host.store.admitActionAttempt(selected, host.bash_timeout_ms, host.hooks.storeFaults(.attempt_admission)) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "Bash Attempt admission", err);

@@ -73,7 +73,7 @@ pub const Calls = struct {
         const entry = place orelse return .retry_later;
         // Reserve the local owner before the durable attempt. After that
         // commit every failure either settles or fences, never retries.
-        const token = (if (call.background) host.custody.reserveLeaving(1) else host.custody.reserve()) orelse return .retry_later;
+        const token = host.custody.reserve() orelse return .retry_later;
         const active = host.allocator.create(Active) catch {
             host.custody.releaseUnused(token) catch unreachable;
             return .retry_later;

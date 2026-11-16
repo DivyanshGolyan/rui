@@ -684,14 +684,6 @@ const NativePromotion = struct {
         return store_testing.queryU64(storage, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1", .{model.operation_id});
     }
 
-    fn capacity(total: usize, free: *const usize) @import("../domain/action_control.zig").CapacityView {
-        return .{ .total = total, .context = free, .freeFn = struct {
-            fn read(context: *const anyopaque) usize {
-                return @as(*const usize, @ptrCast(@alignCast(context))).*;
-            }
-        }.read };
-    }
-
     fn command(session: []const u8, key: []const u8, action: u64) !@import("../../command_input.zig").ActionBackgroundCommand {
         var result: @import("../../command_input.zig").ActionBackgroundCommand = .{ .action_id = action };
         try result.session.set(session);
@@ -701,10 +693,10 @@ const NativePromotion = struct {
 
     fn promoted(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8) !u64 {
         const action = try propose(storage, tmp, session);
-        const free: usize = 2;
+
         var key: [64]u8 = undefined;
         var request = try command(session, try std.fmt.bufPrint(&key, "promote-{s}", .{session}), action);
-        try std.testing.expect(storage.backgroundAction(&request, capacity(2, &free), .{}) == .accepted);
+        try std.testing.expect(storage.backgroundAction(&request, .{}) == .accepted);
         return action;
     }
 
@@ -749,7 +741,7 @@ test "historical fixture rewinds refuse retained pin background and stop-cutoff 
                     try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                     defer storage.close() catch unreachable;
                     const session = try shared_fixtures.configureTestSessionWithMode(&storage, "rewind-config", "bypass");
-                    const free: usize = 2;
+
                     switch (evidence) {
                         .pin => {
                             var command: protocol.SessionPinCommand = .{ .pinned = false, .session = session };
@@ -758,7 +750,7 @@ test "historical fixture rewinds refuse retained pin background and stop-cutoff 
                         },
                         .refused_control => {
                             var command = try NativePromotion.command(session.slice(), "rewind-refused-control", 0);
-                            try std.testing.expect(storage.backgroundAction(&command, NativePromotion.capacity(2, &free), .{}) == .rejected);
+                            try std.testing.expect(storage.backgroundAction(&command, .{}) == .rejected);
                         },
                         .background => _ = try NativePromotion.promoted(&storage, &tmp, session.slice()),
                         .stop_cutoff => {
@@ -788,7 +780,7 @@ test "historical fixture rewinds refuse retained pin background and stop-cutoff 
     }.run);
 }
 
-test "native promotion keeps one attempted invocation and its immutable receipt while final polling stays explicit" {
+test "native promotion keeps one attempted invocation and receipt while final input wakes the Session" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -805,16 +797,9 @@ test "native promotion keeps one attempted invocation and its immutable receipt 
             try storage.readActionExecutionInput(.bash, binding, &input);
             const sender = input.sender_handle;
             const arguments = input.arguments;
-            var free: usize = 0;
-            var command = try NativePromotion.command(session.slice(), "refused-promotion", action);
-            const refused = storage.backgroundAction(&command, NativePromotion.capacity(2, &free), .{});
-            try std.testing.expect(refused == .rejected and refused.rejected.code == .background_unavailable);
-            try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
-            free = 1;
-            const refusal_replay = storage.backgroundAction(&command, NativePromotion.capacity(2, &free), .{});
-            try std.testing.expect(refusal_replay == .rejected and refusal_replay.rejected.replayed);
-            try command.key.set("promote-existing-attempt");
-            const accepted = storage.backgroundAction(&command, NativePromotion.capacity(2, &free), .{});
+
+            var command = try NativePromotion.command(session.slice(), "promote-existing-attempt", action);
+            const accepted = storage.backgroundAction(&command, .{});
             try std.testing.expect(accepted == .accepted and accepted.accepted.selection.kind == .background);
             const receipt_position = accepted.accepted.selection.position;
             const receipt_content = try store_testing.queryU64(&storage, "SELECT background_content_id FROM action_operation WHERE action_id=?1", .{action});
@@ -832,10 +817,10 @@ test "native promotion keeps one attempted invocation and its immutable receipt 
             try std.testing.expectEqual(receipt_bytes, uncovered_before - covered_before);
             try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(binding, .succeeded, "One invocation's final", .{}));
             try NativePromotion.expectCount(&storage, &tmp, session.slice(), "0");
-            try std.testing.expectEqual(uncovered_before, try NativePromotion.uncoveredBytes(&storage, session.slice(), receipt_position - 1));
-            try std.testing.expectEqual(covered_before, try NativePromotion.uncoveredBytes(&storage, session.slice(), receipt_position));
-            free = 0;
-            const replay = storage.backgroundAction(&command, NativePromotion.capacity(1, &free), .{});
+            try std.testing.expectEqual(uncovered_before + "One invocation's final".len, try NativePromotion.uncoveredBytes(&storage, session.slice(), receipt_position - 1));
+            try std.testing.expectEqual(covered_before + "One invocation's final".len, try NativePromotion.uncoveredBytes(&storage, session.slice(), receipt_position));
+
+            const replay = storage.backgroundAction(&command, .{});
             try std.testing.expect(replay == .accepted and replay.accepted.replayed);
             try std.testing.expectEqual(receipt_position, replay.accepted.selection.position);
             var read: @import("../../action_read.zig").Read = undefined;
@@ -844,14 +829,14 @@ test "native promotion keeps one attempted invocation and its immutable receipt 
             try std.testing.expectEqualStrings("succeeded", read.status.resolved.resolution.code.slice());
             try std.testing.expectEqualStrings("One invocation's final", read.status.resolved.window.text.slice());
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND attempt_ordinal=1 AND background_position=?2 AND background_content_id=?3 AND resolution_code='succeeded'", .{ action, receipt_position, receipt_content }));
-            try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission", .{}));
+            try std.testing.expect((try storage.admitNextModelAttempt(.{})) != null);
+            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission", .{}));
             try std.testing.expectError(error.StaleActionAttemptBinding, storage.settleActionAttempt(binding, .failed, "Replacement", .{}));
         }
     }.run);
 }
 
-test "native promotion rollback and capacity one refusal leave the original foreground wait unchanged" {
+test "native promotion rollback and target refusal leave the original foreground wait unchanged" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -862,18 +847,15 @@ test "native promotion rollback and capacity one refusal leave the original fore
             const session = try shared_fixtures.configureTestSessionWithMode(&storage, "configure", "bypass");
             const other = try configureTestSessionAsk(&storage, "other");
             const action = try NativePromotion.propose(&storage, &tmp, session.slice());
-            const free: usize = 2;
-            var request = try NativePromotion.command(session.slice(), "cap-one", action);
-            const refused = storage.backgroundAction(&request, NativePromotion.capacity(1, &free), .{});
-            try std.testing.expect(refused == .rejected and refused.rejected.code == .background_unavailable);
-            try request.key.set("foreign");
+
+            var request = try NativePromotion.command(session.slice(), "foreign", action);
             request.session = other;
-            const foreign = storage.backgroundAction(&request, NativePromotion.capacity(2, &free), .{});
+            const foreign = storage.backgroundAction(&request, .{});
             try std.testing.expect(foreign == .rejected and foreign.rejected.code == .target_mismatch);
             request.session = session;
             try request.key.set("rollback");
             const contents = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
-            try std.testing.expect(storage.backgroundAction(&request, NativePromotion.capacity(2, &free), .{ .before_commit = true }) == .infrastructure_failure);
+            try std.testing.expect(storage.backgroundAction(&request, .{ .before_commit = true }) == .infrastructure_failure);
             try std.testing.expect(storage.isFenced());
             try storage.close();
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
@@ -881,9 +863,9 @@ test "native promotion rollback and capacity one refusal leave the original fore
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key='rollback'", .{}));
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE background_position IS NOT NULL OR attempt_ordinal!=0 OR resolution_code IS NOT NULL", .{}));
             try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
-            const accepted = storage.backgroundAction(&request, NativePromotion.capacity(2, &free), .{});
+            const accepted = storage.backgroundAction(&request, .{});
             try std.testing.expect(accepted == .accepted);
-            try std.testing.expect((try storage.nextAction(.bash, .fromFree(1, true))) == null);
+            try std.testing.expectEqual(action, (try storage.nextAction(.bash, .fromFree(1, true))).?.action_id);
             try std.testing.expectEqual(action, (try storage.nextAction(.bash, .fromFree(2, true))).?.action_id);
         }
     }.run);
@@ -925,7 +907,7 @@ test "native promotion preserves old Turn approval discovery without launching b
                     }
                 }
                 try NativePromotion.expectReported(&storage, &tmp, session.slice(), action, false, false);
-                try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+                try std.testing.expectEqual(choice != .stop, (try storage.admitNextModelAttempt(.{})) != null);
             }
         }
     }.run);
@@ -977,13 +959,14 @@ test "native promotion Session stop reaches old background Actions through attac
 
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code=?2", .{ binding.action_id, if (index == 3) @as([]const u8, "succeeded") else "cancelled" }));
             }
-            try std.testing.expectEqual(admissions, try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission", .{}));
-            try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+            try std.testing.expectEqual(admissions + 1, try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission", .{}));
+            const wake = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(bindings[3].action_id, try store_testing.queryU64(&storage, "SELECT source_action_id FROM message_admission WHERE turn_id=?1", .{wake.turn_id}));
         }
     }.run);
 }
 
-test "native promotion Host recovery retains background fulfillment and records uncertainty without another Attempt" {
+test "native promotion Host death delivers one final Resolution without resuming or retrying the Action" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -1015,7 +998,14 @@ test "native promotion Host recovery retains background fulfillment and records 
             try std.testing.expectEqualStrings("indeterminate", status.status.resolved.resolution.code.slice());
             try std.testing.expect(std.mem.indexOf(u8, status.status.resolved.window.text.slice(), "not replayed") != null);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND attempt_ordinal=1 AND background_position=?2", .{ action, receipt }));
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission m JOIN action_operation a ON a.action_id=m.source_action_id WHERE a.action_id=?1 AND m.content_id=a.resolution_content_id", .{action}));
+            try storage.close();
+            opened = false;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            opened = true;
+            try std.testing.expect(!try storage.recoverOneUncertainAction(active));
+            const wake = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try NativePromotion.finishModel(&storage, &tmp, wake);
             try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
             try std.testing.expectError(error.StaleActionAttemptBinding, storage.settleActionAttempt(binding, .succeeded, "Cannot replace recovery evidence", .{}));
         }
@@ -1086,6 +1076,230 @@ test "native promotion reports stopped Actions until settlement while suppressin
                     }
                 }
             }
+        }
+    }.run);
+}
+
+test "background final input joins the next Turn boundary without changing an in-flight request and wakes idle Sessions once" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]enum { running, answered, reopened_idle }{ .running, .answered, .reopened_idle }) |timing| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try shared_fixtures.configureTestSessionWithMode(&storage, "configure", "bypass");
+                const action = try NativePromotion.promoted(&storage, &tmp, session.slice());
+                const effect = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+                const current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const cutoff = try store_testing.queryU64(&storage, "SELECT input_cutoff FROM model_operation WHERE operation_id=?1", .{current.operation_id});
+                if (timing != .running) try NativePromotion.finishModel(&storage, &tmp, current);
+                if (timing == .reopened_idle) {
+                    try storage.close();
+                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                }
+                const text = "Final result \u{96ea}\nwith original bytes";
+                _ = try storage.settleActionAttempt(effect, .succeeded, text, .{});
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission m JOIN action_operation a ON a.action_id=m.source_action_id WHERE a.action_id=?1 AND m.content_id=a.resolution_content_id AND m.turn_id IS NULL", .{action}));
+                // The current request remains frozen. No final can interrupt it.
+                try std.testing.expectEqual(cutoff, try store_testing.queryU64(&storage, "SELECT input_cutoff FROM model_operation WHERE operation_id=?1", .{current.operation_id}));
+                if (timing == .running) {
+                    try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+                    const arguments = "{\"description\":\"Continue the running Turn\",\"cmd\":\"true\"}";
+                    const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, arguments, .{});
+                    defer std.testing.allocator.free(encoded);
+                    try settleCallsForTesting(&storage, &tmp, current, "next-calls", &.{.{
+                        .item_id = "next-call-item",
+                        .name = "bash",
+                        .encoded_call_id = "next-call-id",
+                        .decoded_call_id = "next-call-id",
+                        .encoded_arguments = encoded[1 .. encoded.len - 1],
+                        .decoded_arguments = arguments,
+                    }});
+                    const sibling = (try storage.admitNextActionAttempt(.fromFree(1, true), 30_000, .{})).?.permit.binding;
+                    _ = try storage.settleActionAttempt(sibling, .succeeded, "Continued", .{});
+                }
+                // Replay and a restart see the same one immutable admission.
+
+                var replay = try NativePromotion.command(session.slice(), "fresh-control-after-final", action);
+                try std.testing.expect(storage.backgroundAction(&replay, .{}) == .accepted);
+                try storage.close();
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                if (timing == .running) {
+                    try std.testing.expectEqual(current.turn_id, next.turn_id);
+                    try std.testing.expectEqual(current.turn_id, try store_testing.queryU64(&storage, "SELECT turn_id FROM message_admission WHERE source_action_id=?1", .{action}));
+                } else try std.testing.expect(current.turn_id != next.turn_id);
+                var page: store_testing.TestingPage = undefined;
+                page.open(&storage, next);
+                defer page.close();
+                var position: u64 = 0;
+                var finals: usize = 0;
+                while (try page.nextEntry(position)) |entry| {
+                    position = entry.position;
+                    if (entry.kind == .tool_results) {
+                        while (try page.nextToolResult()) |_| {}
+                    }
+                    if (entry.source_action) |source| {
+                        try std.testing.expectEqual(action, source.id);
+                        try std.testing.expectEqualStrings(session.slice(), source.session.slice());
+                        var reader: store_testing.TestingReader = undefined;
+                        try page.openContent(entry.content.?, &reader);
+                        defer reader.close();
+                        var bytes: [128]u8 = undefined;
+                        const count = try reader.read(0, &bytes);
+                        try std.testing.expectEqualStrings(text, bytes[0..count]);
+                        finals += 1;
+                    }
+                }
+                try std.testing.expectEqual(@as(usize, 1), finals);
+                _ = try store_core.activityPageForTesting(&storage, .{ .session = session });
+                try NativePromotion.finishModel(&storage, &tmp, next);
+                try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE source_action_id=?1", .{action}));
+            }
+        }
+    }.run);
+}
+
+test "background final input covers every live Action Resolution without a second payload" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for (std.enums.values(action_domain.ActionResolutionCode)) |code| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try shared_fixtures.configureTestSessionWithMode(&storage, "configure", "bypass");
+                const action = try NativePromotion.promoted(&storage, &tmp, session.slice());
+                const effect = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+                const current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try NativePromotion.finishModel(&storage, &tmp, current);
+                _ = try storage.settleActionAttempt(effect, code, @tagName(code), .{});
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission m JOIN action_operation a ON a.action_id=m.source_action_id WHERE a.action_id=?1 AND m.content_id=a.resolution_content_id AND a.resolution_code=?2", .{ action, @tagName(code) }));
+                try std.testing.expect((try storage.admitNextModelAttempt(.{})) != null);
+            }
+        }
+    }.run);
+}
+
+test "background final input and Resolution roll back together then recover once across Host restarts" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try shared_fixtures.configureTestSessionWithMode(&storage, "configure", "bypass");
+            const action = try NativePromotion.promoted(&storage, &tmp, session.slice());
+            const effect = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+            const current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try NativePromotion.finishModel(&storage, &tmp, current);
+            try std.testing.expectError(error.InjectedCommitFailure, storage.settleActionAttempt(effect, .succeeded, "Rolled back", .{ .before_commit = true }));
+            try storage.close();
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE source_action_id=?1", .{action}));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NOT NULL", .{action}));
+            try std.testing.expect(try storage.recoverOneUncertainAction(.empty()));
+            for (0..2) |_| {
+                try storage.close();
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                try std.testing.expect(!try storage.recoverOneUncertainAction(.empty()));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE source_action_id=?1", .{action}));
+            }
+            try std.testing.expect((try storage.admitNextModelAttempt(.{})) != null);
+        }
+    }.run);
+}
+
+test "background final input from stopped and archived sources never restarts their Session" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |archive| {
+                for ([_]bool{ false, true }) |recover| {
+                    var tmp = std.testing.tmpDir(.{});
+                    defer tmp.cleanup();
+                    var storage: Store = undefined;
+                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                    defer storage.close() catch unreachable;
+                    const session = try shared_fixtures.configureTestSessionWithMode(&storage, "configure", "bypass");
+                    const action = try NativePromotion.promoted(&storage, &tmp, session.slice());
+                    const effect = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+                    const current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    try NativePromotion.finishModel(&storage, &tmp, current);
+                    if (archive) {
+                        var command: protocol.SessionArchiveCommand = .{ .session = session, .archived = true };
+                        try command.key.set("archive-source");
+                        try std.testing.expect(storage.archiveSession(&command, .{}) == .accepted);
+                    } else {
+                        var command = try completeSessionStop("stop-source", session.slice());
+                        try std.testing.expect(storage.stopSession(&command, .{}) == .accepted);
+                    }
+                    if (recover) {
+                        try storage.close();
+                        try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                        try std.testing.expect(try storage.recoverOneUncertainAction(.empty()));
+                    } else {
+                        _ = try storage.settleActionAttempt(effect, .cancelled, "Stopped", .{});
+                        try std.testing.expectError(error.StaleActionAttemptBinding, storage.settleActionAttempt(effect, .cancelled, "Stopped twice", .{}));
+                    }
+                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE source_action_id=?1", .{action}));
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NOT NULL", .{action}));
+                    try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+                }
+            }
+        }
+    }.run);
+}
+
+test "background final input admitted before Session stop remains admitted without a fabricated Turn" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try shared_fixtures.configureTestSessionWithMode(&storage, "configure", "bypass");
+            const action = try NativePromotion.promoted(&storage, &tmp, session.slice());
+            const effect = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+            const current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try NativePromotion.finishModel(&storage, &tmp, current);
+            _ = try storage.settleActionAttempt(effect, .succeeded, "Before stop", .{});
+            const position = try store_testing.queryU64(&storage, "SELECT admission_position FROM message_admission WHERE source_action_id=?1", .{action});
+            var stop = try completeSessionStop("stop-after-admission", session.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE source_action_id=?1 AND admission_position=?2 AND turn_id IS NULL", .{ action, position }));
+            try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+            try storage.close();
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            try std.testing.expectEqual(position, try store_testing.queryU64(&storage, "SELECT admission_position FROM message_admission WHERE source_action_id=?1", .{action}));
+            try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+        }
+    }.run);
+}
+
+test "native promotion replays an old capacity refusal while fresh selection has no capacity policy" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try shared_fixtures.configureTestSessionWithMode(&storage, "configure", "bypass");
+            var old = try NativePromotion.command(session.slice(), "old-capacity-refusal", 0);
+            try std.testing.expect(storage.backgroundAction(&old, .{}) == .rejected);
+            try store_testing.exec(&storage, "UPDATE core_command SET code='background_unavailable' WHERE command_key=?1", .{old.key.slice()});
+            const replay = storage.backgroundAction(&old, .{});
+            try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+            try std.testing.expectEqual(@import("../../action_control.zig").Rejection.background_unavailable, replay.rejected.code);
+            const action = try NativePromotion.propose(&storage, &tmp, session.slice());
+            var fresh = try NativePromotion.command(session.slice(), "fresh-promotion", action);
+            try std.testing.expect(storage.backgroundAction(&fresh, .{}) == .accepted);
         }
     }.run);
 }

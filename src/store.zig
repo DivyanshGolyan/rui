@@ -204,5 +204,3 @@ test {
     _ = @import("store/mysql_session_tests.zig");
     _ = @import("store/wire/mysql_connection.zig");
 }
-
-pub const ActionCapacityView = @import("store/domain/action_control.zig").CapacityView;
