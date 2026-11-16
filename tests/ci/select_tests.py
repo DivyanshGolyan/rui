@@ -569,6 +569,8 @@ POLICY_SELF_CHECKS = (
     ("test_admission", ("tests/ci/*", ".github/*", "build.zig")),
     ("test_release_publication", ("tests/ci/*",)),
     ("test_build_artifact", ("tests/ci/*",)),
+    # TLC runs only when a model, its runner or its CI wrapper changes.
+    ("test_formal_models", ("tests/formal/*", "tests/ci/test_formal_models.py")),
 )
 
 
