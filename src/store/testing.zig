@@ -359,7 +359,7 @@ fn restoreScalarUpgradeInput(storage: *Store) !void {
         try Native.exec(storage, schema.migrations[74 - schema.migration_baseline].sqlite[1]);
         try Native.exec(storage, historicalFixtureStatement(baseline_sqlite_ddl, "CREATE TABLE message_admission("));
         try Native.exec(storage, schema.migrations[59 - schema.migration_baseline].sqlite[2]);
-        try Native.exec(storage, "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) SELECT c.command_key,c.kind,c.target,c.input_digest,CASE WHEN c.kind=2 AND c.accepted=1 THEN " ++ input_domain.messageTextIdSql("c") ++ " ELSE c.primary_content_id END,c.secondary_content_id,c.accepted,c.code,c.revision,c.created,c.command_seq FROM rewind_core_command c");
+        try Native.exec(storage, "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) SELECT c.command_key,c.kind,c.target,c.input_digest,CASE WHEN c.kind=2 AND c.accepted=1 THEN " ++ (comptime input_domain.messageTextIdSql("c")) ++ " ELSE c.primary_content_id END,c.secondary_content_id,c.accepted,c.code,c.revision,c.created,c.command_seq FROM rewind_core_command c");
         try Native.exec(storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position) SELECT m.admission_id,m.session_ref,m.command_key,c.primary_content_id,m.admission_position,m.turn_id,m.admitted_at,m.sender_session_ref,m.sender_position FROM rewind_message_admission m JOIN core_command c ON c.command_key=m.command_key");
         try Native.exec(storage, "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_catalog_position,source_skill_admission_id,source_skill_position,source_operation_id,source_item_ordinal,content_id,recorded_at) SELECT e.session_ref,e.entry_ordinal,e.session_position,e.entry_kind,e.turn_id,e.source_admission_id,e.source_revision,e.source_catalog_position,e.source_skill_admission_id,e.source_skill_position,e.source_operation_id,e.source_item_ordinal,CASE WHEN e.entry_kind=1 THEN (SELECT m.content_id FROM message_admission m WHERE m.admission_id=e.source_admission_id) ELSE e.content_id END,e.recorded_at FROM rewind_conversation_entry e");
         try Native.exec(storage, "DROP TABLE rewind_conversation_entry");
@@ -375,14 +375,14 @@ fn restoreScalarUpgradeInput(storage: *Store) !void {
 
 fn historicalFixtureStatement(comptime ddl: []const u8, comptime prefix: []const u8) [:0]const u8 {
     @setEvalBranchQuota(200_000);
-    comptime {
+    return comptime found: {
         var statements = std.mem.splitScalar(u8, ddl, ';');
         while (statements.next()) |statement| {
             const text = std.mem.trim(u8, statement, " \n\r\t");
-            if (std.mem.startsWith(u8, text, prefix)) return std.fmt.comptimePrint("{s}", .{text});
+            if (std.mem.startsWith(u8, text, prefix)) break :found std.fmt.comptimePrint("{s}", .{text});
         }
         @compileError("historical fixture statement not found: " ++ prefix);
-    }
+    };
 }
 
 /// Rewind pin-free upgrade fixtures before replaying the format-75 step.
