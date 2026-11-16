@@ -5925,7 +5925,6 @@ test "upgrade process retirement requires exact generation and complete census n
     for ([_][]const u8{ "", "42\n", "not-a-pid Z\n", "42 Z extra\n", "42 Z\n42 S\n" }) |malformed| try std.testing.expectError(error.HostProcessEnumerationFailed, retirementReading(malformed, pid, generation, generation, generation));
 }
 
-
 test "client upgrade retirement observes a live tail then an unreaped exit" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -5942,7 +5941,7 @@ test "client upgrade retirement observes a live tail then an unreaped exit" {
     const pid = child.id.?;
     const started = try @import("host_identity.zig").generation(pid);
     const until = @import("test_poll").after(io, .fromSeconds(5));
-    try std.testing.expect(!try upgradeGenerationRetired(gpa, io, pid, started, until));
+    try std.testing.expect(!try upgradeGenerationRetired(gpa, io, pid, started, until.raw.nanoseconds));
     child.stdin.?.close(io);
     child.stdin = null;
     const Wait = struct {
@@ -5955,9 +5954,9 @@ test "client upgrade retirement observes a live tail then an unreaped exit" {
             return upgradeGenerationRetired(self.gpa, self.io, self.pid, self.started, self.until);
         }
     };
-    var wait: Wait = .{ .gpa = gpa, .io = io, .pid = pid, .started = started, .until = until };
+    var wait: Wait = .{ .gpa = gpa, .io = io, .pid = pid, .started = started, .until = until.raw.nanoseconds };
     try @import("test_poll").waitUntil(io, until, &wait, Wait.ready);
     _ = try child.wait(io);
     // PID absence uses the same complete-census proof, not kill(pid, 0).
-    try std.testing.expect(try upgradeGenerationRetired(gpa, io, pid, started, @import("test_poll").after(io, .fromSeconds(5))));
+    try std.testing.expect(try upgradeGenerationRetired(gpa, io, pid, started, @import("test_poll").after(io, .fromSeconds(5)).raw.nanoseconds));
 }
