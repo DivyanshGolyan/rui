@@ -307,10 +307,9 @@ test('maintenance warms both producer parts on both platforms using the consumer
   assert.match(jobs.compiled, /\["check-full","test-logic","admission-debug-integration","stack-frames"\]/);
   assert.match(jobs.compiled, /\["check-full","test-logic","admission-debug-integration"\]/);
   assert.match(jobs.compiled, /^    timeout-minutes: 120$/m);
-  assert.match(jobs.compiled, /^        timeout-minutes: 90$/m);
 });
 
-test('every setup publisher explicitly saves after bounded work and before failure diagnostics', () => {
+test('publishers save after work without capping setup or shard recovery', () => {
   const directory = `${__dirname}/../../.github/workflows`;
   for (const file of readdirSync(directory).filter(file => file.endsWith('.yml'))) {
     const jobs = workflowJobs(readFileSync(`${directory}/${file}`, 'utf8'));
@@ -323,8 +322,8 @@ test('every setup publisher explicitly saves after bounded work and before failu
       assert.ok(save > setup, `${label} must save after setup and work`);
       assert.match(steps[save], name === 'previous_release' ? /if: \$\{\{ success\(\) \}\}/ : /if: \$\{\{ always\(\) \}\}/, label);
       assert.match(steps[save], /uses: \.\/\.github\/actions\/setup\/caches\n/, label);
-      assert.match(steps[save], /timeout-minutes: \d+/, label);
-      assert.match(steps[setup], /timeout-minutes: \d+/, `${label} bounds setup too`);
+      assert.doesNotMatch(steps[save], /timeout-minutes:/, `${label} uploads retain the save window`);
+      assert.doesNotMatch(steps[setup], /timeout-minutes:/, `${label} must not cap cold setup`);
       assert.match(steps[setup], /id: setup\n/, label);
       assert.match(steps[save], /setup-outcome: .*steps\.setup\.outcome/, label);
       assert.match(steps[save], /work-outcome: \$\{\{ steps\.compile\.outcome \}\}/, label);
@@ -334,15 +333,22 @@ test('every setup publisher explicitly saves after bounded work and before failu
       if (bisect >= 0) assert.ok(save < bisect, `${label} saves before long bisect`);
       const work = steps.slice(setup + 1, save).filter(step => /^(?:        |      - )run:/m.test(step));
       assert.ok(work.length, `${label} must do work before saving`);
-      // The last expensive build/test step is bounded below the job timeout;
-      // a step timeout fails rather than cancels the whole job's save window.
-      const last = work[work.length - 1];
-      assert.match(last, /timeout-minutes: \d+/, label);
-      const jobBudget = Number(body.match(/^    timeout-minutes: (\d+)$/m)?.[1] || 300);
-      const setupBudget = Number(steps[setup].match(/timeout-minutes: (\d+)/)[1]);
-      const workBudget = work.reduce((sum, step) => sum + Number(step.match(/timeout-minutes: (\d+)/)?.[1] || 0), 0);
-      const saveBudget = Number(steps[save].match(/timeout-minutes: (\d+)/)[1]);
-      assert.ok(setupBudget + workBudget + saveBudget < jobBudget, `${label} reserves job time for saves`);
+      if (name === 'linux_suites' || name === 'macos_suites') {
+        const restore = steps.find(step => /id: restore\n/.test(step));
+        assert.doesNotMatch(restore, /timeout-minutes:/, `${label} must retain fallback rebuild recovery`);
+        assert.doesNotMatch(steps[compile], /timeout-minutes:/, `${label} configuration follows an uncapped rebuild`);
+      }
+      // Only pre-existing acceptance/bisect deadlines may exist outside the
+      // measured compile step. Setup/fetch/linter/upload caps are not save windows.
+      for (const [index, step] of steps.entries()) {
+        if (index === compile || !step.includes('timeout-minutes:')) continue;
+        if (/name: Run (?:selected targets|required native targets)/.test(step)) {
+          assert.match(step, /timeout-minutes: 35\n/, label);
+        } else {
+          assert.match(step, /name: Bisect .*promotion batch/, `${label} introduced an unrelated step cap`);
+          assert.match(step, /timeout-minutes: 240\n/, label);
+        }
+      }
     }
   }
 });
@@ -541,5 +547,89 @@ test('existing job timeout budgets are not increased to make space for saves', (
     for (const [name, budget] of Object.entries(expected)) {
       assert.equal(jobs[name].match(/^    timeout-minutes: (.*)$/m)[1], budget, `${file}/${name}`);
     }
+  }
+});
+
+function deadlineValues(text) {
+  if (/^[0-9]+$/.test(text)) return {condition: null, minutes: [Number(text)]};
+  const conditional = text.match(/^\$\{\{ (.*?) && ([0-9]+) \|\| ([0-9]+) \}\}$/);
+  assert.ok(conditional, `unsupported deadline expression: ${text}`);
+  return {condition: conditional[1], minutes: [Number(conditional[2]), Number(conditional[3])]};
+}
+
+test('new work deadlines derive a save window and cover recorded green durations plus margin', () => {
+  // Read with gh api .../actions/runs/<id>/jobs, retaining only successful
+  // steps in successful jobs. These independent observations must not be
+  // weakened merely because a smaller deadline fits inside the job budget.
+  const green = {
+    'check.yml': {
+      linux_build: [851, '43732653500'], // Promote: compile selected gates.
+      linux_build_unit: [480, '43819213128'], // Promote: unit compilation.
+      macos_typecheck: [449, '43819213128'], // Promote: native Mac typecheck on Linux.
+      macos_build: [1117, '43720387127'], // Selected: compile selected gates (899 s in Promote 43701103697).
+      macos_build_unit: [760, '43720387127'], // Selected: unit compilation.
+      cache_execution: [351, '42755585733'], // Selected: warm-cache acceptance proof.
+      linux_codegen: [593, '43762678033'], // Selected: LLVM frame oracle.
+    },
+    'cache-maintenance.yml': {
+      baseline: [568, '43433947643'], // Main push: ReleaseSafe baseline, both platforms sampled.
+      compiled: [1117, '43720387127'], // Conservative proxy: equivalent consumer command; new matrix not yet run on main.
+      runner: [99, '43381025988'], // Upper bound from combined fetch/configure; no new standalone configure measurement.
+      previous_release: [354, '43381025988'], // Main push: non-skipped pinned-release build, including fetch.
+    },
+    'renderer-contracts.yml': {
+      contracts: [725, '43732653500'], // Promote: Renderer contracts.
+      mutations: [464, '42754650502'], // Latest green dispatched mutation campaign, test member.
+    },
+  };
+  const marginSeconds = 120; // Require two full minutes beyond each sampled maximum.
+  const observedSetupSeconds = 213; // Selected 43832831879, linux_build setup (unit setup: 194 s in 43739148635).
+  const retryWindows = 4; // Cold-fetch accounting, not a claim that unmeasured network tails are bounded.
+  const fetch = readFileSync(`${__dirname}/../../src/fetch_dependencies.sh`, 'utf8');
+  const retrySeconds = Math.max(...[...fetch.matchAll(/--retry-max-time (\d+)/g)].map(m => Number(m[1])));
+  const requestSeconds = Math.max(...[...fetch.matchAll(/--max-time (\d+)/g)].map(m => Number(m[1])));
+  for (const [file, observations] of Object.entries(green)) {
+    const source = readFileSync(`${__dirname}/../../.github/workflows/${file}`, 'utf8');
+    const setup = Number(source.match(/^# setup-allowance-minutes: (\d+)$/m)[1]);
+    const reserve = Number(source.match(/^# save-reserve-minutes: (\d+)$/m)[1]);
+    assert.ok(setup * 60 >= observedSetupSeconds + retryWindows * (retrySeconds + requestSeconds), `${file} must account for cold fetch, not just warm setup`);
+    assert.ok(reserve >= 3, `${file} must leave at least three minutes for publication`);
+    assert.match(source, /Selected 43832831879: setup 213 s/);
+    const jobs = workflowJobs(source);
+    const measured = new Set();
+    for (const [name, body] of Object.entries(jobs)) {
+      const steps = workflowSteps(body);
+      const setupStep = steps.find(step => /uses: \.\/\.github\/actions\/setup\n/.test(step));
+      if (!setupStep || setupStep.includes("publish-caches: 'false'")) continue;
+      const compile = steps.find(step => /id: compile\n/.test(step));
+      assert.ok(compile, `${file}/${name} must identify the work whose outcome is saved`);
+      if (name === 'linux_suites' || name === 'macos_suites') {
+        assert.doesNotMatch(compile, /timeout-minutes:/, `${file}/${name} follows unbounded artifact recovery`);
+        continue;
+      }
+      const recorded = observations[name];
+      assert.ok(recorded, `${file}/${name} needs an independently recorded green duration`);
+      measured.add(name);
+      const timing = compile.match(/# Cache timing: green (\d+) s, run (\d+); minimum margin (\d+) s\./);
+      assert.ok(timing, `${file}/${name} must cite the timing next to the deadline decision`);
+      assert.equal(Number(timing[1]), recorded[0], `${file}/${name} green duration`);
+      assert.equal(timing[2], recorded[1], `${file}/${name} evidence run`);
+      assert.equal(Number(timing[3]), marginSeconds, `${file}/${name} minimum margin`);
+      const budget = deadlineValues(body.match(/^    timeout-minutes: (.*)$/m)[1]);
+      const limits = budget.minutes.map(minutes => minutes - setup - reserve);
+      const minimumSeconds = recorded[0] + marginSeconds;
+      const fits = limits.every(minutes => minutes * 60 >= minimumSeconds);
+      const deadline = compile.match(/^        timeout-minutes: (.*)$/m);
+      if (!fits) {
+        assert.equal(deadline, null, `${file}/${name} must not cap work when the measured minimum cannot fit`);
+      } else {
+        assert.ok(deadline, `${file}/${name} can reserve a measured save window`);
+        const actual = deadlineValues(deadline[1]);
+        assert.equal(actual.condition, budget.condition, `${file}/${name} must follow the job's promotion condition`);
+        assert.deepEqual(actual.minutes, limits, `${file}/${name} deadline must equal job - cold setup - save reserve`);
+        for (const minutes of actual.minutes) assert.ok(minutes * 60 >= minimumSeconds, `${file}/${name} would time out a recent green run`);
+      }
+    }
+    assert.deepEqual([...measured].sort(), Object.keys(observations).sort(), `${file} timing records must cover real work steps`);
   }
 });
