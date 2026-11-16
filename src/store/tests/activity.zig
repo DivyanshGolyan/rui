@@ -947,7 +947,7 @@ test "call and forwarded approval rows expose saved identity description and ori
                     try std.testing.expectEqualDeep(call.tool, approval.tool);
                     try std.testing.expectEqualDeep(call.server, approval.server);
                     try expectActivityArguments(&storage, child, own.items[1], arguments);
-                    try std.testing.expect(try storage.deliverSessionForward((try storage.nextCoreWork()).?.forward, .{}));
+                    try std.testing.expect(try storage.deliverSessionForward((try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.forward, .{}));
                     const forwarded = try store_core.activityPageForTesting(&storage, .{ .session = parent, .kinds = .initOne(.approval_requested) });
                     try std.testing.expectEqual(@as(usize, 1), forwarded.count);
                     try std.testing.expectEqualDeep(approval, forwarded.items[0].value.approval_requested);

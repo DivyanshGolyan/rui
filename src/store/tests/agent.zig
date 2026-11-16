@@ -61,7 +61,7 @@ test "core_tools start_agent persists optional borrowed spec content" {
                 .encoded_arguments = "{}",
                 .decoded_arguments = "{}",
             }});
-            const action = (try storage.nextCoreWork()).?.action;
+            const action = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
             const core_tools = @import("../../core_tools.zig");
@@ -126,7 +126,7 @@ test "core_tools start_agent spec refusals fail calls and name the refused setti
             const core_tools = @import("../../core_tools.zig");
             const start = try arena.allocator().create(core_tools.StartAgent);
             inline for (cases, 0..) |entry, index| {
-                const action = (try storage.nextCoreWork()).?.action;
+                const action = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
                 const check = try core_tools.checkStartAgent(arena.allocator(), arguments[index], start);
                 const expected_reason = switch (check) {
                     .accepted => accepted: {
@@ -179,7 +179,7 @@ test "a start_agent call fails and starts nothing when its key is taken or its t
             const failed_sql = "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.digest=?2";
 
             // Another command already holds the call's key.
-            const taken = (try storage.nextCoreWork()).?.action;
+            const taken = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
             var key_buffer: [64]u8 = undefined;
             try submitTestMessage(&storage, &tmp, "unstarted-agent-taken", try std.fmt.bufPrint(&key_buffer, "rui.core/start_agent/{d}", .{taken.binding.action_id}), parent.slice(), "taken");
             // A fault injected before the failure's import rolls it back.
@@ -190,13 +190,13 @@ test "a start_agent call fails and starts nothing when its key is taken or its t
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             opened = true;
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NULL", .{taken.binding.action_id}));
-            try std.testing.expectEqual(taken.binding.action_id, (try storage.nextCoreWork()).?.action.binding.action_id);
+            try std.testing.expectEqual(taken.binding.action_id, (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action.binding.action_id);
             try std.testing.expect(try core_tools.checkStartAgent(arena.allocator(), arguments, start) == .accepted);
             try std.testing.expect(try storage.startAgent(taken.binding, parent.slice(), start.task, start.attached, &start.configuration, null, .{}) == .failed);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, failed_sql, .{ taken.binding.action_id, store_testing.Blob{ .bytes = &protocol.contentDigest("Rui could not start the agent: its command key is already taken. Nothing was started.") } }));
 
             // The task names a skill the Host could not read.
-            const unreadable = (try storage.nextCoreWork()).?.action;
+            const unreadable = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
             const diagnostic = "Skill missing is not in the new Session's catalog.";
             const captured: skills_fixture_domain.MessageCapture = .{ .failed = .{ .code = .skill_file_unavailable, .bytes = diagnostic } };
             try std.testing.expect(try core_tools.checkStartAgent(arena.allocator(), arguments, start) == .accepted);
@@ -206,7 +206,7 @@ test "a start_agent call fails and starts nothing when its key is taken or its t
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
 
             // A started agent's task keeps every skill it bound, in order.
-            const bound_call = (try storage.nextCoreWork()).?.action;
+            const bound_call = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
             const bound: skills_fixture_domain.MessageCapture = .{ .bound = &.{ .{ .name = "first", .bytes = "first body" }, .{ .name = "second", .bytes = "second body" } } };
             try std.testing.expect(try core_tools.checkStartAgent(arena.allocator(), arguments, start) == .accepted);
             try std.testing.expect(try storage.startAgentWithInitialSkills(bound_call.binding, parent.slice(), start.task, start.attached, &start.configuration, null, null, &bound, .{}) == .started);
@@ -242,7 +242,7 @@ test "a start_agent child works in its caller's Workspace with its provider" {
                     .encoded_arguments = "{}",
                     .decoded_arguments = "{}",
                 }});
-                const action = (try storage.nextCoreWork()).?.action;
+                const action = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
                 // D122/D221: a Bash spec names no Workspace; the child inherits both.
                 var spec = try testingAgentSpec(&.{"bash"}, "ask");
                 try spec.model.value.set("unlisted-effort-model");
@@ -310,7 +310,7 @@ test "start_agent narrows configured tool names including unloaded MCP members" 
             var started: u64 = 0;
             for (cases) |entry| {
                 if (entry.remove_tool_set) try storage.saveHostToolSet(&tool_defs.built_in_tool_set);
-                const action = (try storage.nextCoreWork()).?.action;
+                const action = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
                 var spec = try testingAgentSpec(entry.names, "ask");
                 var capture: Capture = .{};
                 const result = try storage.startAgent(action.binding, parent.slice(), "read", true, &spec, .{ .context = &capture, .call = Capture.call }, .{});
@@ -393,7 +393,7 @@ test "session message writer covers peer message_agent start_agent and ending wi
                         .{ .item_id = "missing", .name = name, .encoded_call_id = "missing", .decoded_call_id = "missing", .encoded_arguments = encoded, .decoded_arguments = arguments },
                     };
                     try settleCallsForTesting(&storage, &tmp, model, "writer-core-calls", &calls);
-                    action = (try storage.nextCoreWork()).?.action;
+                    action = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
                     key = try std.fmt.bufPrint(&key_buffer, "rui.core/{s}/{d}", .{ name, action.binding.action_id });
                 }
                 const sender_position = try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{sender.slice()});
@@ -442,7 +442,7 @@ test "session message writer covers peer message_agent start_agent and ending wi
                     missing.sender_handle = peer.sender_handle;
                     try std.testing.expectEqual(protocol.MessageRejection.unknown_session, storage.submitMessageWithModel(&missing, null, .{}).rejected.code);
                 } else if (source == .message_agent) {
-                    const missing = (try storage.nextCoreWork()).?.action;
+                    const missing = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
                     try std.testing.expectEqual(command_domain.AgentDelivery.failed, try storage.deliverAgentMessage(missing.binding, "zzzzzz", text, .{}));
                 }
             }
@@ -514,21 +514,21 @@ test "core call writes roll back on injected faults and save every bound skill" 
 
             const bound: skills_fixture_domain.MessageCapture = .{ .bound = &.{ .{ .name = "first", .bytes = "first body" }, .{ .name = "second", .bytes = "second body" } } };
             for (injected) |fault| for ([_]?*const skills_fixture_domain.MessageCapture{ null, &bound }) |captured| {
-                const send = (try storage.nextCoreWork()).?.action;
+                const send = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
                 try std.testing.expectError(fault[1], storage.deliverAgentMessageBound(send.binding, receiver.slice(), "hello", captured, fault[0]));
                 try reopen(case, &storage, &tmp, &opened);
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{receiver.slice()}));
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_skill", .{}));
-                try std.testing.expectEqual(send.binding.action_id, (try storage.nextCoreWork()).?.action.binding.action_id);
+                try std.testing.expectEqual(send.binding.action_id, (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action.binding.action_id);
             };
-            const send = (try storage.nextCoreWork()).?.action;
+            const send = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
             try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessageBound(send.binding, receiver.slice(), "hello", &bound, .{}));
             try expectSkills(&storage, receiver.slice(), &.{ "first", "second" });
 
             const Resolution = struct { code: []const u8, result: []const u8 };
             inline for (.{ Resolution{ .code = "failed", .result = "the call failed" }, Resolution{ .code = "succeeded", .result = "the call succeeded" } }) |expected| {
                 const resolve = if (comptime std.mem.eql(u8, expected.code, "failed")) Store.failCoreCall else Store.succeedCoreCall;
-                const call = (try storage.nextCoreWork()).?.action;
+                const call = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
                 for (injected) |fault| {
                     try std.testing.expectError(fault[1], resolve(&storage, call.binding, expected.result, fault[0]));
                     try reopen(case, &storage, &tmp, &opened);
@@ -541,7 +541,7 @@ test "core call writes roll back on injected faults and save every bound skill" 
             }
 
             // A non-Message command already owns the key; the call sends nothing.
-            const taken = (try storage.nextCoreWork()).?.action;
+            const taken = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
             var key_buffer: [128]u8 = undefined;
             const key = try std.fmt.bufPrint(&key_buffer, "rui.core/message_agent/{d}", .{taken.binding.action_id});
             try store_testing.exec(&storage, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES(?1,1,?2,?3,1,'',0,0,1000000)", .{ key, receiver.slice(), store_testing.Blob{ .bytes = &protocol.contentDigest("taken") } });
@@ -552,7 +552,7 @@ test "core call writes roll back on injected faults and save every bound skill" 
 
             // A call selected before its Session came to owe a stop is left
             // to that stop.
-            const owed = (try storage.nextCoreWork()).?.action;
+            const owed = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
             try stop(&storage, "faults-root-stop", root.slice());
             try std.testing.expect(!try storage.failCoreCall(owed.binding, "too late", .{}));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NULL", .{owed.binding.action_id}));
@@ -620,7 +620,7 @@ test "child ending Message includes bounded provider report done answer and quie
                 } else if (ending == .quiet) {
                     var stop = try completeSessionStop("report-parent-stop", parent.slice());
                     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-                    const owed = (try storage.nextCoreWork()).?.stop;
+                    const owed = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.stop;
                     var child_stop: protocol.SessionStopCommand = .{ .key = owed.key, .session = child };
                     try std.testing.expect(storage.stopOwedSession(&child_stop, .{}) == .accepted);
                 } else {
@@ -682,7 +682,7 @@ test "child ending forward is the single durable owed fact across recovery for e
                     var stop = try completeSessionStop("once-stop", if (ending == .quiet) parent.slice() else child.slice());
                     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
                     if (ending == .quiet) {
-                        const owed = (try storage.nextCoreWork()).?.stop;
+                        const owed = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.stop;
                         var child_stop: protocol.SessionStopCommand = .{ .key = owed.key, .session = child };
                         try std.testing.expect(storage.stopOwedSession(&child_stop, .{}) == .accepted);
                     }
@@ -696,7 +696,7 @@ test "child ending forward is the single durable owed fact across recovery for e
                 opened = true;
                 if (ending == .root) {
                     try std.testing.expect(!try storage.deliverChildEnding(model.turn_id, .{}));
-                    try std.testing.expect((try storage.nextCoreWork()) == null);
+                    try std.testing.expect((try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })) == null);
                     continue;
                 }
                 // Feed positioning does not settle the Message obligation.
@@ -718,13 +718,13 @@ test "child ending forward is the single durable owed fact across recovery for e
                 opened = true;
                 try std.testing.expect(!try storage.deliverChildEnding(model.turn_id, .{}));
                 try std.testing.expectEqual(@as(u64, if (ending == .quiet) 0 else 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{parent.slice()}));
-                const hop = (try storage.nextCoreWork()).?.forward;
+                const hop = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.forward;
                 try std.testing.expect(try storage.deliverSessionForward(hop, .{}));
                 try std.testing.expect(!try storage.deliverSessionForward(hop, .{}));
                 try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_forward WHERE source_id=?1 AND position IS NOT NULL", .{model.turn_id}));
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_forward WHERE source_id=?1 AND message_delivered IS NOT NULL", .{model.turn_id}));
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{ancestor.slice()}));
-                try std.testing.expect((try storage.nextCoreWork()) == null);
+                try std.testing.expect((try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })) == null);
             }
         }
     }.run);
@@ -838,7 +838,7 @@ test "configure parent inherits binding without a task, uses the create round bu
             }
             const item = "{\"type\":\"message\",\"id\":\"native-child-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}";
             try settleItemsForTesting(&storage, &tmp, model, &.{item}, "hello");
-            const ending = (try storage.nextCoreWork()).?.ending;
+            const ending = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.ending;
             try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1 AND sender_session_ref=?2", .{ parent.slice(), session.slice() }));
         }
@@ -943,7 +943,7 @@ test "received and sent Activity reject disagreement with their accepted Message
                     var encoded_buffer: [192]u8 = undefined;
                     const encoded = try std.fmt.bufPrint(&encoded_buffer, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"hello\\\"}}", .{receiver.slice()});
                     try settleCallsForTesting(&storage, &tmp, model, "source-check-call", &.{.{ .item_id = "send", .name = "message_agent", .encoded_call_id = "send", .decoded_call_id = "send", .encoded_arguments = encoded, .decoded_arguments = arguments }});
-                    const action = (try storage.nextCoreWork()).?.action;
+                    const action = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
                     const original = "\xef\xbb\xbfexact\x00peer";
                     try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(action.binding, receiver.slice(), original, .{}));
                     const request: protocol.ActivityPage = .{ .session = if (sent) sender else receiver, .kinds = if (sent) .initOne(.sent) else .initOne(.received) };

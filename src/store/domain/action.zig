@@ -1,6 +1,7 @@
 //! Action Attempts: admitting, dispatching, settling and recovering tool actions.
 
 const std = @import("std");
+const DispatchCapacity = @import("../../execution.zig").DispatchCapacity;
 const attempt = @import("../../attempt.zig");
 const turn_ending = @import("../../turn_ending.zig");
 const tool_proposal = @import("../../tool_proposal.zig");
@@ -278,10 +279,10 @@ const CoreSelection = struct {
     action: next_core_action.Result = undefined,
     mcp: next_mcp_action.Result = null,
 
-    fn queue(selection: *CoreSelection, a: anytype, include_mcp: bool) void {
+    fn queue(selection: *CoreSelection, a: anytype, capacity: DispatchCapacity) void {
         const names: CoreNames = .of();
         a.read(owed_stop, .{}, &selection.stop);
-        if (include_mcp) a.read(next_mcp_action, .{}, &selection.mcp);
+        if (capacity.includesMcp()) a.read(next_mcp_action, .{}, &selection.mcp);
         a.read(owed_ending, .{}, &selection.ending);
         a.read(forward_domain.next, .{}, &selection.forward);
         a.read(next_core_action, names.args(.{}), &selection.action);
@@ -302,8 +303,8 @@ pub const WorkProbe = struct {
     selection: CoreSelection = .{},
     bash_action: next_action_attempt.Result = undefined,
 
-    pub fn queue(probe: *WorkProbe, a: anytype, include_mcp: bool) void {
-        probe.selection.queue(a, include_mcp);
+    pub fn queue(probe: *WorkProbe, a: anytype, capacity: DispatchCapacity) void {
+        probe.selection.queue(a, capacity);
         queueNextActionAttempt(a, &probe.bash_action);
     }
 
@@ -322,9 +323,9 @@ pub const WorkProbe = struct {
     }
 };
 
-pub fn nextCoreWork(a: anytype, include_mcp: bool) !?CoreWork {
+pub fn nextCoreWork(a: anytype, capacity: DispatchCapacity) !?CoreWork {
     var selection: CoreSelection = .{};
-    selection.queue(a, include_mcp);
+    selection.queue(a, capacity);
     try a.run();
     const stop = selection.stop;
     const ending = selection.ending;
