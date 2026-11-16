@@ -4624,19 +4624,15 @@ test "a fresh Session draws its own command list after the first frame" {
     defer held.destroy();
     const self = &held.self;
     try stepKeys(held, "/set");
-    // Tab visits only drawn controls: the footer draws Model once the line
-    // names one, and the narrow chat draws ‹ before it.
-    self.line.read = .{ .revision = 1, .end = 1 };
-    try self.line.model.set("gpt-5.5");
+    try std.testing.expect(self.shownRow(null) == null);
     try held.frame();
-    try stepKeys(held, "\t\t");
-    try std.testing.expectEqualStrings("/set", self.input.composition().bytes);
-    try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
-    try held.keys("\x07");
-    try held.settle();
-    try held.keys("\r");
+    // The fresh Session owns the row it just drew. Per #1526, Tab accepts
+    // that row instead of navigating to a footer control.
+    try std.testing.expect(self.shownRow(null) != null);
+    try held.keys("\t");
     try std.testing.expectEqualStrings("/setup", self.input.takeCommand().?);
     try std.testing.expectEqualStrings("", self.input.composition().bytes);
+    try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
 }
 
 test "Esc closes the command list first only when the latest frame drew it" {
