@@ -82,6 +82,8 @@ pub fn closeMainPresentation(self: *Self) void {
 
 pub fn openSession(self: *Self, ctx: *vxfw.EventContext, session: vxfw.Widget, keys: ?Keys) !void {
     std.debug.assert(self.session == null);
+    self.focus_frame = .{};
+    self.focus_rects = @splat(null);
     self.session = session;
     self.session_keys = keys;
     try self.showMain(ctx);
@@ -203,6 +205,8 @@ pub fn focusList(self: *Self, ctx: *vxfw.EventContext) !bool {
 
 pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
     self.closeMainPresentation();
+    self.focus_frame = .{};
+    self.focus_rects = @splat(null);
     self.session = null;
     self.session_keys = null;
     self.session_focus = null;
