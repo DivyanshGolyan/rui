@@ -304,6 +304,8 @@ pub const Event = union(enum) {
     list_settled: struct { wide: bool, focused: bool },
 
     resized: Size,
+    launch_frame: struct { size: Size, wide: bool },
+    launch_poll,
 
     tick: u64,
     list: ListReply,
@@ -544,6 +546,7 @@ pub const IntentAdmission = enum { admitted, refused };
 
 pub const Effects = struct {
     browse_open: bool = false,
+    redraw: bool = false,
     intent_admission: IntentAdmission = .refused,
     items: [3]Effect = undefined,
     len: usize = 0,
@@ -683,6 +686,7 @@ pub const State = struct {
     default: ?Default = null,
 
     size: Size = .{},
+    launch: enum { sizing, waiting, creating, done } = .done,
 
     host_line: bool = false,
 
@@ -719,10 +723,11 @@ pub const State = struct {
         home: []const u8,
         login_at: ?u64 = null,
         default: ?Default = null,
+        launch: bool = false,
     };
 
     pub fn init(self: *State, gpa: Allocator, options: Options) error{OutOfMemory}!void {
-        self.* = .{ .gpa = gpa, .home = options.home, .cwd = 0, .login_at = options.login_at, .default = options.default };
+        self.* = .{ .gpa = gpa, .home = options.home, .cwd = 0, .login_at = options.login_at, .default = options.default, .launch = if (options.launch) .sizing else .done };
         errdefer self.deinit();
         self.cwd = try self.intern(options.cwd);
     }
@@ -796,6 +801,10 @@ pub const State = struct {
         if (self.selected != .session) return null;
         const row = self.find(self.selected.session) orelse return null;
         return if (visible(self, row)) row else null;
+    }
+
+    pub fn hidesOverview(self: *const State) bool {
+        return self.launch == .waiting or self.launch == .creating;
     }
 
     pub fn creating(self: *const State) bool {
@@ -1144,36 +1153,45 @@ fn lookup(keyed: []const Keyed, ref: Reference) ?u32 {
 pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
     var effects: Effects = .{};
     switch (event) {
-        .input => |input| try listInput(state, input, &effects),
+        .input => |input| {
+            if (input.key != .ignored) state.launch = .done;
+            try listInput(state, input, &effects);
+        },
         .list_settled => |frame| {
             const pending = state.browse_pending;
             state.browse_pending = false;
             if (pending and frame.wide and frame.focused) try activateList(state, .browse, &effects);
         },
         .tick => |now_ms| try tick(state, now_ms, &effects),
-        .list => |reply| switch (reply) {
-            .page => |page| try listPage(state, page, &effects),
-            .failed => {
-                std.debug.assert(state.listing);
-                state.listing = false;
-                state.pending.items.len = 0;
-                state.list_stale = true;
-            },
+        .list => |reply| {
+            switch (reply) {
+                .page => |page| try listPage(state, page, &effects),
+                .failed => {
+                    std.debug.assert(state.listing);
+                    state.listing = false;
+                    state.pending.items.len = 0;
+                    state.list_stale = true;
+                },
+            }
+            if (state.listed_at_ms == null and state.list_stale and (state.launch == .sizing or state.launch == .waiting)) state.launch = .done;
         },
         .first_line => |result| try firstLine(state, result),
-        .clicked => |input| if (!state.creating()) switch (input.target) {
-            .open => |reference| try clickOpen(state, reference, &effects),
-            .pin => |request| pinIntent(state, request, &effects),
-            .new_session => {
-                state.selected = .new_session;
-                try enter(state, &effects);
-            },
-            .sessions => try selectView(state, .active, &effects),
-            .archived => try selectView(state, .archived, &effects),
-            .settings => {
-                state.selected = .settings;
-                effects.add(.open_settings);
-            },
+        .clicked => |input| {
+            state.launch = .done;
+            if (!state.creating()) switch (input.target) {
+                .open => |reference| try clickOpen(state, reference, &effects),
+                .pin => |request| pinIntent(state, request, &effects),
+                .new_session => {
+                    state.selected = .new_session;
+                    try enter(state, &effects);
+                },
+                .sessions => try selectView(state, .active, &effects),
+                .archived => try selectView(state, .archived, &effects),
+                .settings => {
+                    state.selected = .settings;
+                    effects.add(.open_settings);
+                },
+            };
         },
         .unconfirmed => |left| {
             std.debug.assert(canHoldSend(state));
@@ -1248,6 +1266,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             state.next_list_ms = 0;
         },
         .created => |result| {
+            if (state.launch == .creating) state.launch = .done;
             const at = state.pendingAt(.create, null).?;
             switch (result) {
                 .created => |created| {
@@ -1281,6 +1300,24 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             state.releaseModels();
         },
         .resized => |size| state.size = size,
+        .launch_frame => |frame| {
+            state.size = frame.size;
+            if (state.launch == .sizing and frame.size.width != 0) state.launch = if (frame.wide) .waiting else .done;
+        },
+        .launch_poll => {
+            if (state.launch == .waiting and state.listed_at_ms != null and !state.list_stale) {
+                if (newestEmpty(state)) |reference| {
+                    state.launch = .done;
+                    state.selected = .{ .session = reference };
+                    effects.add(.{ .open = reference });
+                } else {
+                    state.selected = .new_session;
+                    try enter(state, &effects);
+                    state.launch = if (state.pendingAt(.create, null) != null) .creating else .done;
+                }
+                effects.redraw = true;
+            }
+        },
         .observed => |read| try state.observe(read),
         .conversation => |ref| {
             const selected_at = if (state.selected == .session) position(state, state.selected.session) else null;
@@ -1294,6 +1331,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             effects.add(.{ .open = ref });
         },
         .host => |facts| {
+            if (facts == null) state.launch = .done;
             state.host = facts;
             if (facts) |host| {
                 if (state.read_instance) |known| if (!std.mem.eql(u8, &known, &host.instance)) {
@@ -6126,4 +6164,127 @@ test "session list has exactly one noninteractive gap only between both pin grou
         _ = try press(&state, .next);
         try std.testing.expectEqual(Selection.settings, state.selected);
     };
+}
+
+test "launch core creation outcomes reveal or open exactly once" {
+    const Outcome = enum { accepted, refused, unconfirmed };
+    for (std.enums.values(Outcome)) |outcome| {
+        var state = try opened(&.{});
+        defer state.deinit();
+        state.launch = .sizing;
+        try expectEffects(&.{}, try step(&state, .{ .launch_frame = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } }));
+        try std.testing.expect(state.hidesOverview());
+        const admitted = try step(&state, .launch_poll);
+        try expectEffects(&.{.{ .create = null }}, admitted);
+        try std.testing.expect(admitted.redraw);
+        try std.testing.expect(state.hidesOverview());
+        const answered = try step(&state, .{ .created = switch (outcome) {
+            .accepted => .{ .created = .{ .reference = "abcdef".*, .handle = "created" } },
+            .refused => .{ .failed = "model_required" },
+            .unconfirmed => .{ .unconfirmed = "unknown-create" },
+        } });
+        try expectEffects(if (outcome == .accepted) &.{ .{ .open = "abcdef".* }, .list_models } else &.{}, answered);
+        try std.testing.expect(!state.hidesOverview());
+        try std.testing.expectEqual(.done, state.launch);
+        switch (outcome) {
+            .accepted => try std.testing.expectEqual(@as(usize, 0), state.request_count),
+            .refused => try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), "Not created") != null),
+            .unconfirmed => {
+                try std.testing.expectEqual(.unknown, state.requests[0].status);
+                try std.testing.expect(state.creating());
+                try std.testing.expectEqualStrings("! Creation unsure; details on exit", state.notice.?.text());
+            },
+        }
+        try expectEffects(&.{}, try step(&state, .launch_poll));
+    }
+}
+
+test "launch core reopens newest active empty Session" {
+    var older = session("aaaaaa", .{ .idle = ago(1) }, .{ .first = null });
+    var newest = session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null });
+    var archived = session("cccccc", .{ .idle = ago(1) }, .{ .first = null, .archive_state = .archived });
+    var populated = session("dddddd", .{ .idle = ago(1) }, .{});
+    older.created_at = 1;
+    newest.created_at = 2;
+    archived.created_at = 3;
+    populated.created_at = 4;
+    var state = try opened(&.{ older, newest, archived, populated });
+    defer state.deinit();
+    state.launch = .sizing;
+    _ = try step(&state, .{ .launch_frame = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+    const opened_effect = try step(&state, .launch_poll);
+    try expectEffects(&.{ .{ .open = "bbbbbb".* }, .list_models }, opened_effect);
+    try std.testing.expect(opened_effect.redraw);
+    try std.testing.expectEqual(@as(usize, 0), state.request_count);
+    try std.testing.expect(!state.hidesOverview());
+    try expectEffects(&.{}, try step(&state, .launch_poll));
+}
+
+test "launch core exposes overview after unsuccessful first listing" {
+    for ([_]bool{ false, true }) |first_frame| {
+        var state = try testState();
+        defer state.deinit();
+        state.launch = .sizing;
+        if (first_frame) _ = try step(&state, .{ .launch_frame = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+        _ = try step(&state, .{ .tick = test_now_s * 1000 });
+        try expectEffects(&.{}, try step(&state, .{ .list = .failed }));
+        try std.testing.expectEqual(.done, state.launch);
+        try std.testing.expect(!state.hidesOverview());
+        _ = try step(&state, .{ .launch_frame = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+        try expectEffects(&.{}, try step(&state, .launch_poll));
+    }
+}
+
+test "launch core exposes overview after an invalid first listing" {
+    var state = try testState();
+    defer state.deinit();
+    state.launch = .sizing;
+    _ = try step(&state, .{ .launch_frame = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+    _ = try step(&state, .{ .tick = test_now_s * 1000 });
+    const wrong: Token = .{ .instance = @splat(0xff), .generation = 1 };
+    _ = try step(&state, .{ .list = .{ .page = .{ .rows = &.{}, .answer = .{ .delta = .full, .since = wrong } } } });
+    try std.testing.expect(state.list_stale);
+    try std.testing.expectEqual(.done, state.launch);
+    try std.testing.expect(!state.hidesOverview());
+}
+
+test "launch core exposes overview when Host becomes unavailable" {
+    for ([_]bool{ false, true }) |first_frame| {
+        var state = try testState();
+        defer state.deinit();
+        state.launch = .sizing;
+        if (first_frame) _ = try step(&state, .{ .launch_frame = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+        try expectEffects(&.{}, try step(&state, .{ .host = null }));
+        try std.testing.expectEqual(.done, state.launch);
+        try std.testing.expect(!state.hidesOverview());
+        _ = try step(&state, .{ .launch_frame = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+        try expectEffects(&.{}, try step(&state, .launch_poll));
+    }
+}
+
+test "launch core exposes overview when Host is lost during creation" {
+    var state = try opened(&.{});
+    defer state.deinit();
+    state.launch = .sizing;
+    _ = try step(&state, .{ .launch_frame = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+    _ = try step(&state, .launch_poll);
+    try std.testing.expect(state.hidesOverview());
+    _ = try step(&state, .{ .host = null });
+    try std.testing.expectEqual(.done, state.launch);
+    try std.testing.expect(!state.hidesOverview());
+    try std.testing.expect(state.creating());
+    _ = try step(&state, .{ .created = .{ .unconfirmed = "lost-create" } });
+    try std.testing.expectEqualStrings("! Creation unsure; details on exit", state.notice.?.text());
+}
+
+test "launch core leaves narrow overview alone after widening" {
+    var state = try opened(&.{});
+    defer state.deinit();
+    state.launch = .sizing;
+    _ = try step(&state, .{ .launch_frame = .{ .size = .{ .width = 46, .height = 30 }, .wide = false } });
+    try std.testing.expectEqual(.done, state.launch);
+    try std.testing.expect(!state.hidesOverview());
+    _ = try step(&state, .{ .launch_frame = .{ .size = .{ .width = 140, .height = 30 }, .wide = true } });
+    try expectEffects(&.{}, try step(&state, .launch_poll));
+    try std.testing.expectEqual(@as(usize, 0), state.request_count);
 }
