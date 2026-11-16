@@ -81,6 +81,7 @@ fn cancelEdit(self: *Self) void {
 
 /// The page takes its panel's keys, and text while filtering models.
 pub fn takesKey(self: *const Self, key: vaxis.Key) bool {
+    if (@import("keypress.zig").named(key)) |name| if (@import("app_input.zig").keys.get(name) != null) return true;
     return (self.model_choice.active and ModelChoice.takesKey(key)) or Panel.takesKey(key);
 }
 
@@ -343,6 +344,11 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     }
     if (self.keys_open) return;
     self.bind();
+    if (!self.model_choice.active and input == .key_press) {
+        if (@import("keypress.zig").named(input.key_press)) |name| if (@import("app_input.zig").keys.get(name)) |direction| {
+            return self.panel.traverse(ctx, direction == .previous, @import("app_input.zig").tabNextValue);
+        };
+    }
     try self.panel.widget().handleEvent(ctx, input);
 }
 
@@ -1018,4 +1024,36 @@ test "App settings live Memory is optional read-only and independent of saved pr
             _ = arena.reset(.retain_capacity);
         }
     };
+}
+
+test "Tab wraps only drawn selectable targets and inline choices" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    const fields = [_]Panel.Field{
+        .{ .label = "one", .value = "1" },
+        .{ .label = "hidden", .value = "2", .visible = false },
+        .{ .label = "fact", .value = "3", .selectable = false },
+        .{ .label = "four", .value = "4" },
+    };
+    var panel: Panel = .{ .title = "Settings", .fields = &fields, .actions = &.{"Done"} };
+    const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 10 }, .cell_size = .{} };
+    _ = try panel.widget().draw(draw_ctx);
+    try panel.traverse(&ctx, false, @import("app_input.zig").tabNextValue);
+    try std.testing.expectEqual(@as(usize, 3), panel.selected);
+    try panel.traverse(&ctx, false, @import("app_input.zig").tabNextValue);
+    try std.testing.expectEqual(@as(usize, 4), panel.selected);
+    try panel.traverse(&ctx, false, @import("app_input.zig").tabNextValue);
+    try std.testing.expectEqual(@as(usize, 0), panel.selected);
+    try panel.traverse(&ctx, true, @import("app_input.zig").tabNextValue);
+    try std.testing.expectEqual(@as(usize, 4), panel.selected);
+    panel.selected = 0;
+    panel.openChoice(&.{ "yes", "no" }, 0);
+    _ = try panel.widget().draw(draw_ctx);
+    try panel.traverse(&ctx, true, @import("app_input.zig").tabNextValue);
+    try std.testing.expectEqual(@as(usize, 1), panel.choice.?.selected);
+    try std.testing.expectEqual(@as(usize, 0), panel.selected);
+    _ = try panel.widget().draw(draw_ctx.withConstraints(.{}, .{ .width = 0, .height = 0 }));
+    try panel.traverse(&ctx, false, @import("app_input.zig").tabNextValue);
+    try std.testing.expectEqual(@as(usize, 1), panel.choice.?.selected);
 }

@@ -467,6 +467,11 @@ fn focusField(raw: *anyopaque, set: ?@import("app_input.zig").Field) @import("ap
     return self.footer.focus;
 }
 
+fn modalFocus(raw: *anyopaque) bool {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return self.info_open or self.app_info.standaloneOpen();
+}
+
 fn acceptsTab(raw: *anyopaque) bool {
     const self: *Self = @ptrCast(@alignCast(raw));
     return self.footer.focus == .input and self.app_consent.request == null and self.input.composition().bytes.len != 0 and self.shownRow(self.app_palette.drawn) != null;
@@ -491,7 +496,7 @@ fn focusCandidates(raw: *anyopaque, items: *[std.enums.values(@import("app_input
 
 pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widget {
     self.app_hooks = hooks;
-    hooks.root.session_focus = .{ .context = self, .field = focusField, .accepts_tab = acceptsTab, .candidates = focusCandidates };
+    hooks.root.session_focus = .{ .context = self, .field = focusField, .accepts_tab = acceptsTab, .modal = modalFocus, .candidates = focusCandidates };
     self.app_info = .{ .backend = self.infoBackend(), .home = self.home };
     if (hooks.drafts) |drafts| if (drafts.take(self.init.gpa, self.session)) |draft| {
         defer draft.deinit(self.init.gpa);
@@ -10680,5 +10685,43 @@ test "App Session quote gesture preserves the caret and cancels under Escape mod
         try std.testing.expectEqual(null, self.leaving);
         for (fixture.ctx.cmds.items) |command| try std.testing.expect(command != .copy_to_clipboard);
         if (case == .insert) try std.testing.expectEqual(@as(usize, "left\n> quoted source\n".len), self.input.composition().cursor);
+    }
+}
+
+test "Session modal custody changes before a new focus projection is drawn" {
+    const focus = @import("app_input.zig");
+    for ([_]bool{ false, true }) |footer_choice| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        try captureInfo(held, "Chat");
+        held.self.line.read = .{ .revision = 1, .end = 1 };
+        try held.self.line.model.set("gpt-5.5");
+        held.self.line.effort = .high;
+        try held.frame();
+        held.root.input.area = .main;
+        held.self.footer.focus = .input;
+        var events = held.context();
+        if (footer_choice) {
+            try chromeClick(.{ .footer = .effort })(&held.self, &events);
+        } else {
+            try chromeClick(.status)(&held.self, &events);
+        }
+        try std.testing.expect(modalFocus(&held.self));
+        try std.testing.expect(!held.root.focus_frame.modal);
+        const area = held.root.input.area;
+        const field = held.self.footer.focus;
+        // Open then Tab without drawing: no background target may take it.
+        try held.keys("\t");
+        try std.testing.expectEqual(area, held.root.input.area);
+        try std.testing.expectEqual(field, held.self.footer.focus);
+        try held.frame();
+        try std.testing.expect(held.root.focus_frame.modal);
+        // Close then Tab in one batch: stale modal projection cannot retain custody.
+        try held.keys("\x07");
+        try std.testing.expect(!modalFocus(&held.self));
+        const current = focus.currentFocus(held.root.input, held.self.footer.focus);
+        const expected = focus.tabNext(held.root.focus_frame.slice(), current, false).?;
+        try held.keys("\t");
+        try std.testing.expectEqual(expected, focus.currentFocus(held.root.input, held.self.footer.focus));
     }
 }

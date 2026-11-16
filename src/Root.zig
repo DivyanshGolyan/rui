@@ -27,6 +27,8 @@ pub const FocusOwner = struct {
     /// Read or apply the existing footer's leaf focus. No navigation policy.
     field: *const fn (*anyopaque, ?app_input.Field) app_input.Field,
     accepts_tab: ?*const fn (*anyopaque) bool = null,
+    /// Live event custody; unlike the candidate order this is not draw state.
+    modal: ?*const fn (*anyopaque) bool = null,
     candidates: *const fn (*anyopaque, *[std.enums.values(app_input.Target).len]Candidate) Projection,
 };
 
@@ -149,8 +151,10 @@ fn navigate(self: *Self, ctx: *vxfw.EventContext, request: app_input.Input) !voi
 /// the page's answers for this event, read by value.
 fn facts(self: *const Self, key: ?vaxis.Key) app_input.Facts {
     const session_open = self.session != null;
+    var frame = self.focus_frame;
+    frame.modal = if (self.focusOwner()) |owner| if (owner.modal) |modal| modal(owner.context) else frame.modal else false;
     const field = if (self.focusOwner()) |owner| owner.field(owner.context, null) else .input;
-    if (!self.input.layer.settingsOpen()) return .{ .session_open = session_open, .wide = self.size.width >= split_at, .frame = self.focus_frame, .field = field, .accepts_tab = if (self.focusOwner()) |owner| if (owner.accepts_tab) |accepts| accepts(owner.context) else false else false };
+    if (!self.input.layer.settingsOpen()) return .{ .session_open = session_open, .wide = self.size.width >= split_at, .frame = frame, .field = field, .accepts_tab = if (self.focusOwner()) |owner| if (owner.accepts_tab) |accepts| accepts(owner.context) else false else false };
     const page = &self.settings_page;
     return .{ .session_open = session_open, .settings = .{
         .keys_open = page.keys_open,

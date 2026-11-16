@@ -353,7 +353,7 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
     if (state.layer == .sign_in) return .{ .route = .sign_in };
     if (input == .key and state.layer == .settings) return settingsKey(state, facts.settings, input.key);
     if (input == .key and !state.pasting and !facts.frame.modal) {
-        const move = if (facts.accepts_tab and input.key.named == .tab) null else if (input.key.named) |name| keys.get(name) else null;
+        const move = if (facts.accepts_tab and state.area == .main and facts.field == .input and input.key.named == .tab) null else if (input.key.named) |name| keys.get(name) else null;
         if (move) |direction| if (tabNext(facts.frame.slice(), currentFocus(state.*, facts.field), direction == .previous)) |target| {
             var effect: Effects = .{ .route = .swallow, .redraw = true };
             chooseFocus(state, target, &effect);
@@ -895,4 +895,22 @@ test "panel identities share wrapping traversal and absent focus recovery" {
     try std.testing.expectEqual(@as(?usize, 2), tabNextValue(usize, &order, 4, false));
     try std.testing.expectEqual(@as(?usize, 9), tabNextValue(usize, &order, 4, true));
     try std.testing.expectEqual(@as(?usize, null), tabNextValue(usize, &.{}, 2, false));
+}
+
+test "drawn slash Tab exemption does not trap sidebar or footer focus" {
+    var frame: Frame = .{};
+    frame.append(.list);
+    frame.append(.input);
+    frame.append(.model);
+    frame.append(.effort);
+    var sidebar: State = .{ .area = .list };
+    const into_input = step(&sidebar, .{ .session_open = true, .frame = frame, .accepts_tab = true }, .{ .key = .{ .named = .tab } });
+    try std.testing.expect(into_input.route == .swallow);
+    try std.testing.expectEqual(@as(?Field, .input), into_input.field);
+    try std.testing.expect(sidebar.area == .main);
+
+    var footer: State = .{};
+    const into_effort = step(&footer, .{ .session_open = true, .frame = frame, .field = .model, .accepts_tab = true }, .{ .key = .{ .named = .tab } });
+    try std.testing.expect(into_effort.route == .swallow);
+    try std.testing.expectEqual(@as(?Field, .effort), into_effort.field);
 }

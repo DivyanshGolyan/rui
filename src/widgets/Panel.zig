@@ -5,8 +5,6 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Self = @This();
 const Hover = @import("Hover.zig");
-const app_input = @import("../app_input.zig");
-const keypress = @import("../keypress.zig");
 const cell_line = @import("cell_line.zig");
 
 /// Aligned field values start here; callers may fit bounded values to it.
@@ -108,7 +106,6 @@ fn activate(self: *Self, ctx: *vxfw.EventContext, only: ?usize) !void {
 
 /// The only keys a panel takes; every other key is its caller's.
 pub fn takesKey(key: vaxis.Key) bool {
-    if (keypress.named(key)) |name| if (app_input.keys.get(name) != null) return true;
     return key.matches(vaxis.Key.up, .{}) or key.matches(vaxis.Key.down, .{}) or key.matches(vaxis.Key.enter, .{});
 }
 
@@ -123,7 +120,8 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     try self.eventFor(ctx, input, null);
 }
 
-fn traverse(self: *Self, ctx: *vxfw.EventContext, reverse: bool) !void {
+/// Applies a semantic traversal using the caller's sole order algorithm.
+pub fn traverse(self: *Self, ctx: *vxfw.EventContext, reverse: bool, comptime nextTarget: anytype) !void {
     const order = try ctx.alloc.alloc(usize, self.targets.len);
     defer ctx.alloc.free(order);
     var count: usize = 0;
@@ -136,7 +134,7 @@ fn traverse(self: *Self, ctx: *vxfw.EventContext, reverse: bool) !void {
         count += 1;
     }
     const current = if (self.choice) |choice| choice.selected else self.selected;
-    if (app_input.tabNextValue(usize, order[0..count], current, reverse)) |next| {
+    if (nextTarget(usize, order[0..count], current, reverse)) |next| {
         if (self.choice) |*choice| choice.selected = next else self.selected = next;
     }
     ctx.consumeAndRedraw();
@@ -158,9 +156,6 @@ fn eventFor(self: *Self, ctx: *vxfw.EventContext, input: vxfw.Event, only: ?usiz
     try self.hover.handleEvent(ctx, input);
     switch (input) {
         .key_press => |key| {
-            if (keypress.named(key)) |name| if (app_input.keys.get(name)) |direction| {
-                return self.traverse(ctx, direction == .previous);
-            };
             if (key.matches(vaxis.Key.up, .{})) {
                 self.move(false, only);
             } else if (key.matches(vaxis.Key.down, .{})) {
@@ -1154,39 +1149,4 @@ test "Panel subtitle and visible field projection share actual bounded body geom
     panel.scroll = 0;
     _ = try panel.widget().draw(ctx);
     try std.testing.expectEqual(@as(?u16, 2), panel.fieldRow(0));
-}
-
-test "Tab wraps only drawn selectable targets and inline choices" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    const fields = [_]Field{
-        .{ .label = "one", .value = "1" },
-        .{ .label = "hidden", .value = "2", .visible = false },
-        .{ .label = "fact", .value = "3", .selectable = false },
-        .{ .label = "four", .value = "4" },
-    };
-    var panel: Self = .{ .title = "Settings", .fields = &fields, .actions = &.{"Done"} };
-    const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 10 }, .cell_size = .{} };
-    _ = try panel.widget().draw(draw_ctx);
-    const tab: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.tab } };
-    const previous: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.tab, .mods = .{ .shift = true } } };
-    try std.testing.expect(takesKey(tab.key_press));
-    try panel.widget().handleEvent(&ctx, tab);
-    try std.testing.expectEqual(@as(usize, 3), panel.selected);
-    try panel.widget().handleEvent(&ctx, tab);
-    try std.testing.expectEqual(@as(usize, 4), panel.selected);
-    try panel.widget().handleEvent(&ctx, tab);
-    try std.testing.expectEqual(@as(usize, 0), panel.selected);
-    try panel.widget().handleEvent(&ctx, previous);
-    try std.testing.expectEqual(@as(usize, 4), panel.selected);
-    panel.selected = 0;
-    panel.openChoice(&.{ "yes", "no" }, 0);
-    _ = try panel.widget().draw(draw_ctx);
-    try panel.widget().handleEvent(&ctx, previous);
-    try std.testing.expectEqual(@as(usize, 1), panel.choice.?.selected);
-    try std.testing.expectEqual(@as(usize, 0), panel.selected);
-    _ = try panel.widget().draw(draw_ctx.withConstraints(.{}, .{ .width = 0, .height = 0 }));
-    try panel.widget().handleEvent(&ctx, tab);
-    try std.testing.expectEqual(@as(usize, 1), panel.choice.?.selected);
 }

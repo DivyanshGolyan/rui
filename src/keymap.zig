@@ -179,22 +179,22 @@ pub const Reference = struct {
 
 pub const list = [_]Reference{
     .{ .key = "enter", .meaning = "open / send", .keys = &.{.enter} },
-    .{ .key = "esc", .meaning = "back", .keys = &.{ .{ .key = .escape } }, .aliases = &.{.ctrl_g} },
+    .{ .key = "esc", .meaning = "back", .keys = &.{.{ .key = .escape }}, .aliases = &.{.ctrl_g} },
     .{ .key = "⇧enter", .meaning = "new line", .keys = &.{.newline} },
-    .{ .key = "tab", .meaning = "next focus", .keys = &.{ .{ .key = .tab } } },
-    .{ .key = "⇧tab", .meaning = "previous focus", .keys = &.{ .{ .key = .shift_tab } } },
-    .{ .key = "ctrl+x", .meaning = "stop", .keys = &.{ .{ .key = .ctrl_x } } },
+    .{ .key = "tab", .meaning = "next focus", .keys = &.{.{ .key = .tab }} },
+    .{ .key = "⇧tab", .meaning = "previous focus", .keys = &.{.{ .key = .shift_tab }} },
+    .{ .key = "ctrl+x", .meaning = "stop", .keys = &.{.{ .key = .ctrl_x }} },
     .{ .key = "↑↓", .meaning = "scroll", .keys = &.{ .{ .key = .up }, .{ .key = .down } }, .aliases = &.{ .shift_up, .shift_down, .page_up, .page_down, .home, .end, .ctrl_end } },
     // Left (an empty draft back to the list) and the info panel's actions
     // are handled apart from the screen keymaps, so only Right is checked.
-    .{ .key = "←→", .meaning = "list/chat · info actions", .keys = &.{ .{ .key = .right } } },
-    .{ .key = "ctrl+o", .meaning = "tool output", .keys = &.{ .{ .key = .ctrl_o } } },
-    .{ .key = "ctrl+p", .meaning = "earlier message", .keys = &.{ .{ .key = .ctrl_p } }, .aliases = &.{.ctrl_n} },
-    .{ .key = "ctrl+r", .meaning = "retry", .keys = &.{ .{ .key = .ctrl_r } } },
+    .{ .key = "←→", .meaning = "list/chat · info actions", .keys = &.{.{ .key = .right }} },
+    .{ .key = "ctrl+o", .meaning = "tool output", .keys = &.{.{ .key = .ctrl_o }} },
+    .{ .key = "ctrl+p", .meaning = "earlier message", .keys = &.{.{ .key = .ctrl_p }}, .aliases = &.{.ctrl_n} },
+    .{ .key = "ctrl+r", .meaning = "retry", .keys = &.{.{ .key = .ctrl_r }} },
     .{ .key = "/", .meaning = "skills", .keys = &.{.slash} },
     .{ .key = "alt+↑↓", .meaning = "switch chat", .keys = &.{ .{ .key = .alt_up }, .{ .key = .alt_down } } },
-    .{ .key = "alt+a", .meaning = "archive", .keys = &.{ .{ .key = .alt_a } } },
-    .{ .key = "ctrl+c", .meaning = "leave", .keys = &.{ .{ .key = .ctrl_c } }, .aliases = &.{.ctrl_d} },
+    .{ .key = "alt+a", .meaning = "archive", .keys = &.{.{ .key = .alt_a }} },
+    .{ .key = "ctrl+c", .meaning = "leave", .keys = &.{.{ .key = .ctrl_c }}, .aliases = &.{.ctrl_d} },
 };
 
 pub const ListError = enum { empty_row, missing_bound_key, unbound_row, duplicate_key };
@@ -296,7 +296,6 @@ test "keys reference aliases are explicit under their listed rows" {
     unbound.meanings.set(.ctrl_g, null);
     try std.testing.expectEqual(@as(?ListError, .unbound_row), referenceError(&list, .{unbound}));
 }
-
 
 test "every keys reference row names its input including non-table input" {
     for (list, 0..) |row, index| {
