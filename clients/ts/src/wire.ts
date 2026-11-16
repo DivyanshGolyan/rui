@@ -478,7 +478,7 @@ export interface components {
                 session: string;
                 action: components["schemas"]["Decimal"];
                 /** @enum {string} */
-                code: "invalid_session_reference" | "invalid_target" | "unknown_session" | "unknown_action" | "target_mismatch" | "source_stopped" | "background_unavailable";
+                code: "invalid_session_reference" | "invalid_target" | "unknown_session" | "unknown_action" | "target_mismatch" | "source_stopped" | "action_not_backgroundable" | "background_unavailable";
             };
         };
         ActionBackgroundRequest: {
@@ -514,6 +514,7 @@ export interface components {
                     state: "queued" | "applied" | "excluded";
                     admitted_at: components["schemas"]["Decimal"];
                     sender: components["schemas"]["NamedPeer"] | null;
+                    source_action: components["schemas"]["Decimal"] | null;
                     content: components["schemas"]["ActivityItemContent"];
                 };
             };
@@ -530,6 +531,7 @@ export interface components {
                     state: "queued" | "applied" | "excluded";
                     admitted_at: components["schemas"]["Decimal"];
                     sender: components["schemas"]["NamedPeer"] | null;
+                    source_action: components["schemas"]["Decimal"] | null;
                     content: components["schemas"]["ActivityItemContent"];
                 };
             };
@@ -648,6 +650,7 @@ export interface components {
                     state: "queued" | "applied" | "excluded";
                     admitted_at: components["schemas"]["Decimal"];
                     sender: components["schemas"]["NamedPeer"] | null;
+                    source_action: components["schemas"]["Decimal"] | null;
                     content: components["schemas"]["ActivityItemContent"];
                 };
             };
@@ -980,6 +983,7 @@ export interface components {
                 };
                 admitted_at: components["schemas"]["Decimal"];
                 sender: components["schemas"]["NamedPeer"] | null;
+                source_action: components["schemas"]["Decimal"] | null;
             } | {
                 position: components["schemas"]["Decimal"];
                 ordinal: components["schemas"]["Decimal"];
@@ -1060,6 +1064,7 @@ export interface components {
                 };
                 admitted_at: components["schemas"]["Decimal"];
                 sender: components["schemas"]["NamedPeer"] | null;
+                source_action: components["schemas"]["Decimal"] | null;
             } | {
                 position: components["schemas"]["Decimal"];
                 ordinal: components["schemas"]["Decimal"];
@@ -1308,6 +1313,8 @@ export interface components {
             execution?: {
                 /** @description How many Turns may run at once. */
                 activeCapacity?: number;
+                /** @description Background a live Host-run Action after this many milliseconds. */
+                backgroundAfterMs?: number;
                 /** @description Open with Turns held, as after host_pause. */
                 paused?: boolean;
             };

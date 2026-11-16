@@ -16,6 +16,7 @@ import live_engines
 import os_semantics
 import settings_fixture as frame_host
 import store_rounds_cases
+from request_routing_cases import capture_routing
 
 
 def main():
@@ -193,7 +194,9 @@ def main():
         # client. Neither the CLI environment nor argv contains the URL.
         for explicit_interface in (False, True):
             directory = root / ("saved-explicit" if explicit_interface else "saved-default")
-            client_env = dict(os.environ, RUI_SETTINGS_MYSQL_URL=url)
+            client_home = root / ("client-explicit" if explicit_interface else "client-default")
+            client_home.mkdir(mode=0o700)
+            client_env = dict(os.environ, RUI_SETTINGS_MYSQL_URL=url, HOME=str(client_home))
             client_env.pop("RUI_RUNTIME_DIR", None)
 
             def command(*args, message=None):
@@ -221,6 +224,7 @@ def main():
                 assert receipt["context"]["store"] == store_id, receipt
                 command("request", "inspect", "--store", directory, "--key", "directory-start")
                 command("request", "recover", "--store", directory, "--record", record, "--kind", "message")
+                capture_routing(rui, directory, root, client_env)
             finally:
                 if started is not None:
                     command("host", "pause", "--store", directory, "--instance", started["instance"])

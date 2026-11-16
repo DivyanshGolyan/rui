@@ -1591,7 +1591,9 @@ test "session_reads rendered row kinds keep their own text and feed_window draws
             window.draw(.{ .first = 0 }, pane, true, .{}, .{});
             var row: u16 = 0;
             for (order, 0..) |kind, at| {
-                if (at != 0 and !(kinds[order[at - 1]].packed_ and kinds[kind].packed_)) {
+                if (at != 0 and !((kinds[order[at - 1]].packed_ and kinds[kind].packed_) or
+                    ((order[at - 1] == 2 or order[at - 1] == 3) and (kind == 2 or kind == 3))))
+                {
                     try testing.expectEqualStrings("", Rows.at(&screen, row, &buffer));
                     row += 1;
                 }

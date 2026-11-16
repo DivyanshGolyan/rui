@@ -1268,12 +1268,12 @@
           ]
         },
         {
-          "sleep": 0.5
+          "gone": "enter pick"
         }
       ],
       "expect": [
-        "Draft lifecycle",
-        "gpt-6.1-sol"
+        "gpt-6.1-sol",
+        "alt+i info"
       ],
       "absent": [
         "\u203a /effort",
@@ -2068,8 +2068,10 @@
       ],
       "expect": [
         "\u2713 List project files",
-        "\u00d7 Fail with exit 127 \u00b7 127",
-        "\u00d7 Fail with an excerpt \u00b7 1",
+        "\u00d7 Fail with exit 127",
+        "exit 127",
+        "\u00d7 Fail with an excerpt",
+        "exit 1",
         "The project has a README",
         "retry policy notes"
       ],
@@ -2078,11 +2080,17 @@
         "Type a message",
         "enter sends",
         "Type a task",
-        "enter start"
+        "enter start",
+        "Fail with exit 127 \u00b7 127",
+        "Fail with an excerpt \u00b7 1"
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
-      ]
+      ],
+      "expect_next": {
+        "\u2713 List project files": "\u00d7 Fail with exit 127",
+        "\u00d7 Fail with exit 127": "\u00d7 Fail with an excerpt"
+      }
     },
     {
       "name": "chat-effort",
@@ -2158,8 +2166,10 @@
       ],
       "expect": [
         "\u2713 List project files",
-        "\u00d7 Fail with exit 127 \u00b7 127",
-        "\u00d7 Fail with an excerpt \u00b7 1",
+        "\u00d7 Fail with exit 127",
+        "exit 127",
+        "\u00d7 Fail with an excerpt",
+        "exit 1",
         "The project has a README",
         "retry policy notes",
         "Fail with an excerpt"
@@ -2169,7 +2179,9 @@
         "Type a message",
         "enter sends",
         " \u00b7 exit 127",
-        " \u00b7 exit 1"
+        " \u00b7 exit 1",
+        "Fail with exit 127 \u00b7 127",
+        "Fail with an excerpt \u00b7 1"
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
@@ -2207,8 +2219,10 @@
       ],
       "expect": [
         "\u2713 List project files",
-        "\u00d7 Fail with exit 127 \u00b7 127",
-        "\u00d7 Fail with an excerpt \u00b7 1",
+        "\u00d7 Fail with exit 127",
+        "exit 127",
+        "\u00d7 Fail with an excerpt",
+        "exit 1",
         "    Bash failed. Exit code: 1.",
         "    stderr:",
         "    usage: example",
@@ -2221,6 +2235,14 @@
       "note": "10a-tool-open: Ctrl-O selects the lowest tool; output is indented on its band, other rows folded; no extra mark; literal stored envelope in quiet colour",
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "expect_next": {
+        "\u2713 List project files": "\u00d7 Fail with exit 127",
+        "\u00d7 Fail with exit 127": "\u00d7 Fail with an excerpt"
+      },
+      "absent": [
+        "Fail with exit 127 \u00b7 127",
+        "Fail with an excerpt \u00b7 1"
       ]
     },
     {
@@ -2302,8 +2324,10 @@
         "    stdout:",
         "    README.md",
         "    src",
-        "\u00d7 Fail with exit 127 \u00b7 127",
-        "\u00d7 Fail with an excerpt \u00b7 1",
+        "\u00d7 Fail with exit 127",
+        "exit 127",
+        "\u00d7 Fail with an excerpt",
+        "exit 1",
         "    Bash failed. Exit code: 1.",
         "    stderr:",
         "    usage: example",
@@ -2316,11 +2340,17 @@
       "note": "10b-tool-open-two: open the literal excerpt, scroll twelve rows from the narrow tail to select List, then show both quiet stored results before and after the sidebar appears",
       "absent": [
         " \u00b7 exit 127",
-        " \u00b7 exit 1"
+        " \u00b7 exit 1",
+        "Fail with exit 127 \u00b7 127",
+        "Fail with an excerpt \u00b7 1"
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
-      ]
+      ],
+      "expect_next": {
+        "    src": "\u00d7 Fail with exit 127",
+        "\u00d7 Fail with exit 127": "\u00d7 Fail with an excerpt"
+      }
     },
     {
       "name": "tool-open-long",
@@ -2405,8 +2435,10 @@
       ],
       "expect": [
         "\u2713 List project files",
-        "\u00d7 Fail with exit 127 \u00b7 127",
-        "\u00d7 Fail with an excerpt \u00b7 1",
+        "\u00d7 Fail with exit 127",
+        "exit 127",
+        "\u00d7 Fail with an excerpt",
+        "exit 1",
         "    Bash failed. Exit code: 1.",
         "    stderr:",
         "    usage: example",
@@ -2419,6 +2451,14 @@
       "note": "10d-tool-open-nocolor: the same open tool is indented without selection or output backgrounds; no extra mark; literal stored envelope in quiet colour",
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "expect_next": {
+        "\u2713 List project files": "\u00d7 Fail with exit 127",
+        "\u00d7 Fail with exit 127": "\u00d7 Fail with an excerpt"
+      },
+      "absent": [
+        "Fail with exit 127 \u00b7 127",
+        "Fail with an excerpt \u00b7 1"
       ]
     },
     {
@@ -3106,7 +3146,7 @@
     },
     {
       "name": "slash",
-      "note": "21-slash: names only, with quiet fixed-choice words",
+      "note": "21-slash: listed chat commands with their descriptions",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -3124,14 +3164,15 @@
       ],
       "expect": [
         "/copy",
-        "code \u00b7 file",
-        "/effort"
+        "copy the last answer",
+        "/effort",
+        "/model"
       ],
       "absent": [
         "/help",
         "/status",
         "/configure",
-        "/model"
+        "code \u00b7 file"
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
@@ -3225,6 +3266,373 @@
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
+    },
+    {
+      "name": "slashlist-help",
+      "note": "Slash list, night: /help ranks the exact skill first, then a name holding help, matched part bold",
+      "open": "Slash help",
+      "cast": [
+        {
+          "label": "Slash help",
+          "workspace": "code/slashlist-help",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "help",
+            "review-help"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/help"
+        },
+        {
+          "wait": "Verify the project"
+        }
+      ],
+      "expect": [
+        "/help",
+        "/review-help"
+      ],
+      "expect_style": [
+        {
+          "text": "help",
+          "within": "/help",
+          "bold": true
+        },
+        {
+          "text": "help",
+          "within": "/review-help",
+          "bold": true
+        },
+        {
+          "text": "/review-",
+          "within": "/review-help",
+          "bold": false
+        },
+        {
+          "text": "/help",
+          "within": "\u203a /help",
+          "foreground": "#a9b6ec"
+        },
+        {
+          "text": "/help",
+          "within": "/help           Verify",
+          "foreground": "#d4cebf"
+        }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "expect_background": {
+        "/help           Verify": "#2b2f45"
+      }
+    },
+    {
+      "name": "slashlist-description",
+      "note": "Slash list, night: a word only skill descriptions hold lists them, the description's match bold",
+      "open": "Slash description",
+      "cast": [
+        {
+          "label": "Slash description",
+          "workspace": "code/slashlist-description",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "help",
+            "review-help"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/verify"
+        },
+        {
+          "wait": "/review-help"
+        }
+      ],
+      "expect": [
+        "/help",
+        "/review-help",
+        "Verify the project"
+      ],
+      "expect_style": [
+        {
+          "text": "Verify",
+          "within": "Verify the project",
+          "bold": true
+        },
+        {
+          "text": "/help",
+          "bold": false
+        },
+        {
+          "text": " the project",
+          "within": "Verify the project",
+          "bold": false
+        },
+        {
+          "text": "/verify",
+          "within": "\u203a /verify",
+          "foreground": "#d4cebf"
+        },
+        {
+          "text": "/help",
+          "within": "/help           Verify",
+          "foreground": "#d4cebf"
+        }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "expect_background": {
+        "/help           Verify": "#2b2f45"
+      }
+    },
+    {
+      "name": "slashlist-known",
+      "note": "Slash list, night: a command Rui knows is drawn in the command colour; descriptions holding new follow",
+      "open": "Slash known",
+      "cast": [
+        {
+          "label": "Slash known",
+          "workspace": "code/slashlist-known",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "help"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/new"
+        },
+        {
+          "wait": "start a new chat"
+        }
+      ],
+      "expect": [
+        "/new",
+        "/clear",
+        "/setup"
+      ],
+      "expect_style": [
+        {
+          "text": "/new",
+          "within": "\u203a /new",
+          "foreground": "#a9b6ec"
+        },
+        {
+          "text": "new",
+          "within": "/new",
+          "bold": true
+        },
+        {
+          "text": "/new",
+          "within": "/new            start",
+          "foreground": "#d4cebf"
+        }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "expect_background": {
+        "/new            start": "#2b2f45"
+      }
+    },
+    {
+      "name": "slashlist-help-day",
+      "note": "Slash list, day: /help ranks the exact skill first, then a name holding help, matched part bold",
+      "open": "Slash help day",
+      "cast": [
+        {
+          "label": "Slash help day",
+          "workspace": "code/slashlist-help-day",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "help",
+            "review-help"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/help"
+        },
+        {
+          "wait": "Verify the project"
+        }
+      ],
+      "expect": [
+        "/help",
+        "/review-help"
+      ],
+      "expect_style": [
+        {
+          "text": "help",
+          "within": "/help",
+          "bold": true
+        },
+        {
+          "text": "help",
+          "within": "/review-help",
+          "bold": true
+        },
+        {
+          "text": "/review-",
+          "within": "/review-help",
+          "bold": false
+        },
+        {
+          "text": "/help",
+          "within": "\u203a /help",
+          "foreground": "#1f2d6b"
+        },
+        {
+          "text": "/help",
+          "within": "/help           Verify",
+          "foreground": "#2f2b25"
+        }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "theme": "day",
+      "expect_background": {
+        "/help           Verify": "#dedad5"
+      }
+    },
+    {
+      "name": "slashlist-description-day",
+      "note": "Slash list, day: a word only skill descriptions hold lists them, the description's match bold",
+      "open": "Slash description day",
+      "cast": [
+        {
+          "label": "Slash description day",
+          "workspace": "code/slashlist-description-day",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "help",
+            "review-help"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/verify"
+        },
+        {
+          "wait": "/review-help"
+        }
+      ],
+      "expect": [
+        "/help",
+        "/review-help",
+        "Verify the project"
+      ],
+      "expect_style": [
+        {
+          "text": "Verify",
+          "within": "Verify the project",
+          "bold": true
+        },
+        {
+          "text": "/help",
+          "bold": false
+        },
+        {
+          "text": " the project",
+          "within": "Verify the project",
+          "bold": false
+        },
+        {
+          "text": "/verify",
+          "within": "\u203a /verify",
+          "foreground": "#2f2b25"
+        },
+        {
+          "text": "/help",
+          "within": "/help           Verify",
+          "foreground": "#2f2b25"
+        }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "theme": "day",
+      "expect_background": {
+        "/help           Verify": "#dedad5"
+      }
+    },
+    {
+      "name": "slashlist-known-day",
+      "note": "Slash list, day: a command Rui knows is drawn in the command colour; descriptions holding new follow",
+      "open": "Slash known day",
+      "cast": [
+        {
+          "label": "Slash known day",
+          "workspace": "code/slashlist-known-day",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "help"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/new"
+        },
+        {
+          "wait": "start a new chat"
+        }
+      ],
+      "expect": [
+        "/new",
+        "/clear",
+        "/setup"
+      ],
+      "expect_style": [
+        {
+          "text": "/new",
+          "within": "\u203a /new",
+          "foreground": "#1f2d6b"
+        },
+        {
+          "text": "new",
+          "within": "/new",
+          "bold": true
+        },
+        {
+          "text": "/new",
+          "within": "/new            start",
+          "foreground": "#2f2b25"
+        }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "theme": "day",
+      "expect_background": {
+        "/new            start": "#dedad5"
+      }
     },
     {
       "name": "misused-command",

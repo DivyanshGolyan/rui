@@ -5,11 +5,13 @@ const commands = @import("slash_commands.zig");
 const overview = @import("overview_view.zig");
 const Self = @This();
 const Hover = @import("widgets/Hover.zig");
+const widget_style = @import("widget_style.zig");
 
 shown: *commands.Shown,
 caps: overview.Caps = .{ .width = .unicode },
 style: vaxis.Style = .{},
 quiet: vaxis.Style = .{ .dim = true },
+matched: vaxis.Style = .{ .bold = true },
 max_height: u16 = std.math.maxInt(u16),
 hover_style: vaxis.Style = .{ .ul_style = .single },
 userdata: ?*anyopaque = null,
@@ -17,6 +19,15 @@ on_select: ?*const fn (*anyopaque, *vxfw.EventContext, commands.Shown.Pick) anye
 hover: Hover = .{},
 first: usize = 0,
 drawn: commands.Shown.Pick = .{ .index = 0, .revision = 0, .source = 0 },
+
+/// Resolve the list's styles through the same screen roles as its surface.
+pub fn setCaps(self: *Self, caps: overview.Caps) void {
+    self.caps = caps;
+    self.style = widget_style.of(caps, .{ .background = .input_surface });
+    self.quiet = widget_style.of(caps, .{ .colour = .quiet, .background = .input_surface });
+    self.matched = widget_style.of(caps, .{ .bold = true, .background = .input_surface });
+    self.hover_style = widget_style.of(caps, .{ .background = .hover });
+}
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
@@ -106,19 +117,25 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     for (targets, 0..) |*rect, index| rect.* = placed.row(index);
     self.hover.targets = targets;
     const column = list.descriptionColumn();
+    const selected_style = widget_style.of(self.caps, .{ .background = .selection });
+    const selected_matched = widget_style.of(self.caps, .{ .bold = true, .background = .selection });
     for (list.shown()[first..][0..count], first..) |entry, index| {
-        var style = self.style;
+        const selected = index == self.shown.highlight;
+        var style = if (selected) selected_style else self.style;
         const rect = placed.row(index - first);
-        const hovered = index != self.shown.highlight and self.on_select != null and self.hover.contains(rect);
-        style.reverse = index == self.shown.highlight;
+        const hovered = !selected and self.on_select != null and self.hover.contains(rect);
         if (hovered) style = Hover.look(style, self.hover_style);
         const start = @as(usize, @intCast(rect.row)) * width + @as(usize, @intCast(rect.col));
-        if (style.reverse or hovered) @memset(surface.buffer[start..][0..rect.width], .{ .style = style });
+        if (selected or hovered) @memset(surface.buffer[start..][0..rect.width], .{ .style = style });
         const line = body.child(.{ .y_off = @intCast(index - first), .height = 1 });
-        _ = line.printSegment(.{ .text = entry.shown, .style = style }, .{ .wrap = .none });
+        var matched = if (selected) selected_matched else self.matched;
+        if (hovered) matched = Hover.look(matched, self.hover_style);
+        printMarked(line, entry.shown, entry.matches.name, style, matched);
         if (column < rect.width) {
-            const fitted = try overview.fitted(ctx.arena, self.caps, entry.description, rect.width - column, .head);
-            _ = line.child(.{ .x_off = @intCast(column) }).printSegment(.{ .text = fitted.bytes, .style = style }, .{ .wrap = .none });
+            const source_span: ?overview.ByteSpan = if (entry.matches.description) |mark| .{ .start = mark.start, .len = mark.len } else null;
+            const fitted = try overview.fittedMarked(ctx.arena, self.caps, entry.description, rect.width - column, .head, source_span);
+            const span: ?commands.Span = if (fitted.span) |mark| .{ .start = mark.start, .len = mark.len } else null;
+            printMarked(line.child(.{ .x_off = @intCast(column) }), fitted.piece.bytes, span, style, matched);
         }
     }
     if (count < list.count and count < placed.content.height) {
@@ -128,8 +145,36 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     return surface;
 }
 
+/// Draw a row's matching bytes without changing its fitting or wrapping.
+fn printMarked(line: vaxis.Window, text: []const u8, span: ?commands.Span, plain: vaxis.Style, strong: vaxis.Style) void {
+    const mark = span orelse {
+        _ = line.printSegment(.{ .text = text, .style = plain }, .{ .wrap = .none });
+        return;
+    };
+    var start = @min(mark.start, text.len);
+    var end = @min(mark.start + mark.len, text.len);
+    if (start == end) {
+        _ = line.printSegment(.{ .text = text, .style = plain }, .{ .wrap = .none });
+        return;
+    }
+    // A byte match may end before a combining mark. Window segments start
+    // fresh grapheme iterators, so expand to whole clusters before splitting.
+    var clusters = vaxis.unicode.graphemeIterator(text);
+    while (clusters.next()) |cluster| {
+        if (cluster.start >= end) break;
+        if (cluster.start + cluster.len <= start) continue;
+        start = @min(start, cluster.start);
+        end = @max(end, cluster.start + cluster.len);
+    }
+    _ = line.print(&.{
+        .{ .text = text[0..start], .style = plain },
+        .{ .text = text[start..end], .style = strong },
+        .{ .text = text[end..], .style = plain },
+    }, .{ .wrap = .none });
+}
+
 test "Palette keeps the selected command visible at one row and hides closed or clipped choices" {
-    var shown = commands.Shown.next(null, 7, commands.conversation.suggest("/", .{})).?;
+    var shown = commands.Shown.next(null, 7, commands.conversation.listed()).?;
     shown.highlight = shown.list.count - 1;
     var palette: Self = .{ .shown = &shown };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -138,7 +183,7 @@ test "Palette keeps the selected command visible at one row and hides closed or 
     const surface = try palette.widget().draw(ctx);
     try std.testing.expectEqual(.drawn, shown.seen);
     try std.testing.expectEqual(@as(u16, 1), surface.size.height);
-    try std.testing.expect(surface.readCell(0, 0).style.reverse);
+    try std.testing.expectEqual(widget_style.of(palette.caps, .{ .background = .selection }), surface.readCell(0, 0).style);
     var text: [80]u8 = undefined;
     var used: usize = 0;
     for (surface.buffer) |cell| {
@@ -167,7 +212,7 @@ test "Palette hover is transient and clicks activate only visible command rows" 
         }
     };
     var selected: Selected = .{};
-    var shown = commands.Shown.next(null, 7, commands.conversation.suggest("/", .{})).?;
+    var shown = commands.Shown.next(null, 7, commands.conversation.listed()).?;
     var palette: Self = .{ .shown = &shown, .userdata = &selected, .on_select = Selected.select, .style = .{ .fg = .{ .index = 3 } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -181,12 +226,12 @@ test "Palette hover is transient and clicks activate only visible command rows" 
     const hovered = try palette.widget().draw(draw_ctx);
     try std.testing.expect(!hovered.readCell(2, 2).style.reverse);
     try std.testing.expectEqual(vaxis.Style.Underline.single, hovered.readCell(2, 2).style.ul_style);
-    try std.testing.expect(hovered.readCell(2, 1).style.reverse);
+    try std.testing.expectEqual(widget_style.of(palette.caps, .{ .background = .selection }), hovered.readCell(2, 1).style);
     try std.testing.expectEqual(palette.style.fg, hovered.readCell(2, 2).style.fg);
     palette.hover_style = .{ .bg = .{ .index = 5 } };
     const coloured = try palette.widget().draw(draw_ctx);
     for (2..78) |col| try std.testing.expectEqual(vaxis.Color{ .index = 5 }, coloured.readCell(@intCast(col), 2).style.bg);
-    try std.testing.expect(coloured.readCell(2, 1).style.reverse);
+    try std.testing.expectEqual(widget_style.of(palette.caps, .{ .background = .selection }), coloured.readCell(2, 1).style);
     try std.testing.expectEqual(@as(usize, 0), shown.highlight);
     try std.testing.expect(selected.index == null);
     try std.testing.expectEqual(vaxis.Mouse.Shape.pointer, ctx.cmds.items[ctx.cmds.items.len - 1].set_mouse_shape);
@@ -221,12 +266,47 @@ test "Palette hover is transient and clicks activate only visible command rows" 
     try std.testing.expect(selected.index == null);
 }
 
+test "Palette selection uses the shared ink wash for plain and matching cells in every skin and depth" {
+    const Select = struct {
+        fn select(_: *anyopaque, _: *vxfw.EventContext, _: commands.Shown.Pick) !void {}
+    };
+    for ([_]?overview.Rgb{ .{ 255, 255, 255 }, null }) |terminal| {
+        for ([_]overview.Caps.Depth{ .direct, .indexed, .none }) |depth| for ([_]bool{ true, false }) |unicode| {
+            const caps: overview.Caps = .{ .background = terminal, .depth = depth, .unicode = unicode };
+            var shown = commands.Shown.next(null, 1, commands.conversation.listed()).?;
+            shown.list.count = 2;
+            shown.list.entries[0].matches = .{ .name = .{ .start = 1, .len = 3 }, .description = .{ .start = 0, .len = 2 } };
+            var palette: Self = .{ .shown = &shown, .on_select = Select.select };
+            palette.setCaps(caps);
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 4 }, .cell_size = .{} };
+            const plain = widget_style.of(caps, .{ .background = .selection });
+            const strong = widget_style.of(caps, .{ .bold = true, .background = .selection });
+            const column = shown.list.descriptionColumn();
+            // Moving onto the selected row never replaces its ink wash with hover.
+            for ([_]i17{ 1, 2 }) |pointed| {
+                palette.hover.point = .{ .col = 2, .row = pointed };
+                const surface = try palette.widget().draw(ctx);
+                for (2..78) |col| {
+                    const marked = (col >= 3 and col < 6) or (col >= column + 2 and col < column + 4);
+                    try std.testing.expectEqual(if (marked) strong else plain, surface.readCell(@intCast(col), 1).style);
+                }
+                try std.testing.expectEqual(depth == .none, surface.readCell(2, 1).style.reverse);
+                const other = if (pointed == 2) Hover.look(palette.style, palette.hover_style) else palette.style;
+                try std.testing.expectEqual(other, surface.readCell(2, 2).style);
+                for ([_]u16{ 0, 79 }) |col| try std.testing.expectEqual(palette.quiet, surface.readCell(col, 1).style);
+            }
+        };
+    }
+}
+
 test "Palette renders every chat command and description in the same normal style" {
     const cases = .{
         .{ commands.conversation, &[_][]const u8{ "/archive", "/clear", "/copy", "/effort", "/model", "/new", "/pin", "/reload-skills", "/rename", "/requests", "/result", "/setup", "/unarchive", "/unpin" } },
     };
     inline for (cases) |case| {
-        var shown = commands.Shown.next(null, 1, case[0].suggest("/", .{})).?;
+        var shown = commands.Shown.next(null, 1, case[0].listed()).?;
         var palette: Self = .{ .shown = &shown };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
@@ -257,7 +337,7 @@ test "Palette description clipping ends with the list row ellipsis at every widt
     for ([_]bool{ true, false }) |unicode| {
         for (0..2) |selected| {
             for (0..81) |width| {
-                var shown = commands.Shown.next(null, 1, commands.conversation.suggest("/", .{})).?;
+                var shown = commands.Shown.next(null, 1, commands.conversation.listed()).?;
                 shown.list.count = 2;
                 shown.highlight = selected;
                 for (shown.list.entries[0..2]) |*entry| entry.description = description;
@@ -277,13 +357,13 @@ test "Palette description clipping ends with the list row ellipsis at every widt
                         const cell = surface.readCell(@intCast(column + index), @intCast(row));
                         try std.testing.expectEqualStrings(&.{byte}, cell.char.grapheme);
                         try std.testing.expect(!cell.style.dim);
-                        try std.testing.expectEqual(row == selected, cell.style.reverse);
+                        try std.testing.expectEqual(if (row == selected) widget_style.of(palette.caps, .{ .background = .selection }) else palette.style, cell.style);
                     }
                     if (clipped) {
                         const cell = surface.readCell(@intCast(width - 1), @intCast(row));
                         try std.testing.expectEqualStrings(if (unicode) "…" else ".", cell.char.grapheme);
                         try std.testing.expect(!cell.style.dim);
-                        try std.testing.expectEqual(row == selected, cell.style.reverse);
+                        try std.testing.expectEqual(if (row == selected) widget_style.of(palette.caps, .{ .background = .selection }) else palette.style, cell.style);
                     }
                 }
             }
@@ -292,21 +372,24 @@ test "Palette description clipping ends with the list row ellipsis at every widt
 }
 
 test "Palette description fitting keeps whole wide and combining clusters" {
-    const cases = [_]struct { text: []const u8, room: u16, expected: []const u8, unicode: bool = true }{
+    const cases = [_]struct { text: []const u8, room: u16, expected: []const u8, unicode: bool = true, query: ?[]const u8 = null, bold: bool = false }{
         .{ .text = "archive this chat", .room = 8, .expected = "archive…" },
         .{ .text = "archive this chat", .room = 1, .expected = "…" },
         .{ .text = "archive this chat", .room = 17, .expected = "archive this chat" },
         .{ .text = "界ab界c", .room = 6, .expected = "界ab…" },
-        .{ .text = "e\u{301}clair", .room = 5, .expected = "e\u{301}cla…" },
+        .{ .text = "e\u{301}clair", .room = 5, .expected = "e\u{301}cla…", .query = "e", .bold = true },
+        .{ .text = "e\u{301}clair", .room = 1, .expected = "…", .query = "e" },
+        .{ .text = "abcd e", .room = 4, .expected = "abc…", .query = "e" },
         .{ .text = "archive this chat", .room = 8, .expected = "archive.", .unicode = false },
         .{ .text = "界abcd", .room = 3, .expected = "?a.", .unicode = false },
         .{ .text = "", .room = 1, .expected = "" },
     };
     for (std.enums.values(vaxis.gwidth.Method)) |method| {
         for (cases) |case| {
-            var shown = commands.Shown.next(null, 1, commands.conversation.suggest("/", .{})).?;
+            var shown = commands.Shown.next(null, 1, commands.conversation.listed()).?;
             shown.list.count = 1;
             shown.list.entries[0].description = case.text;
+            if (case.query) |query| shown.list.entries[0].matches = @import("skill_completion.zig").match(query, "archive", case.text).?.spans;
             const column = shown.list.descriptionColumn();
             const width: u16 = @intCast(column + case.room);
             var palette: Self = .{ .shown = &shown, .caps = .{ .unicode = case.unicode, .width = method } };
@@ -323,6 +406,7 @@ test "Palette description fitting keeps whole wide and combining clusters" {
                 col += @max(1, cell.char.width);
             }
             try std.testing.expectEqualStrings(case.expected, std.mem.trimEnd(u8, text.written(), " "));
+            if (case.query != null) try std.testing.expectEqual(case.bold, surface.readCell(@intCast(column), 0).style.bold);
         }
     }
 }
@@ -331,12 +415,11 @@ test "Palette panel keeps every selected row visible across tiny bounds budgets 
     const Select = struct {
         fn select(_: *anyopaque, _: *vxfw.EventContext, _: commands.Shown.Pick) !void {}
     };
-    const widget_style = @import("widget_style.zig");
     for ([_]bool{ false, true }) |unicode| {
         for (0..14) |width_index| {
             const width: u16 = if (width_index == 13) 80 else @intCast(width_index);
             for (0..9) |height| for (0..9) |budget| {
-                var shown = commands.Shown.next(null, 7, commands.conversation.suggest("/", .{})).?;
+                var shown = commands.Shown.next(null, 7, commands.conversation.listed()).?;
                 for (0..shown.list.count) |selected| {
                     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
                     defer arena.deinit();
@@ -419,7 +502,7 @@ test "Palette border padding and overflow consume clicks without activating rows
     };
     for ([_]bool{ false, true }) |unicode| {
         var selected: Selected = .{};
-        var shown = commands.Shown.next(null, 7, commands.conversation.suggest("/", .{})).?;
+        var shown = commands.Shown.next(null, 7, commands.conversation.listed()).?;
         shown.highlight = shown.list.count - 1;
         var palette: Self = .{ .shown = &shown, .caps = .{ .unicode = unicode }, .userdata = &selected, .on_select = Selected.select };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);

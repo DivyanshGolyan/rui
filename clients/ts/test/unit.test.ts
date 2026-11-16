@@ -43,7 +43,7 @@ test("settings reach every Adapter without a provider-specific builder", () => {
 		providers: { codex: { credentialFile: "/c" }, openai: { endpoint: "https://example.com", key: "key" }, chatgpt: {} },
 		network: { caFile: "/trust" },
 		tools: { bash: { path: "/bash", timeoutMs: 42 }, mcp: { drift: { url: "http://127.0.0.1:3000/mcp", bearerToken: "secret", callTimeoutMs: 99 } } },
-		execution: { activeCapacity: 3, paused: true },
+		execution: { activeCapacity: 3, backgroundAfterMs: 1234, paused: true },
 	};
 	assert.deepEqual(documentFor(settings), {
 		...settings,

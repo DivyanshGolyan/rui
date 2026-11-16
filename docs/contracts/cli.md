@@ -247,7 +247,9 @@ Their destinations are captured exactly, with explicit Action targets where requ
 A direct-core mutation generates a fresh core key and durably captures its complete inputs in one private, enumerable caller record before transmission.
 Pre-send recovery notices use stderr; failed announcement prevents original transmission but leaves the capture recoverable.
 A fresh client can inspect or recover that original request, or create a fresh record for new intent.
-Recovery does not reread changed files or preferences, reapply settings or retarget an established result.
+Recovery does not reread changed input files or preferences, reapply request settings or retarget an established result.
+New generated and explicit records have a private bounded `.routing` companion containing the canonical Host-directory selector, or the runtime hint for legacy opaque MySQL selection, separately from immutable wire request bytes. The capture owner durably publishes routing before publishing the request marker, under the same lock; orphan routing alone is neither enumerable work nor admission authority. The raw request format is unchanged.
+Recover, inspect, wait and read-result share captured routing resolution through the placement owner and compare discovered Store identity with the captured identity before dispatch. They may follow edited saved placement only when that identity still matches; invalid, insecure or unknown-format companions refuse rather than fall back. Missing companions retain old-record lookup behavior. Read-only observation reads the bounded capture identity, not an entire replay body, and closes its reader before waiting. Explicit retry guidance names the selected directory; private record-parent aliases remain supported.
 A recovered Message carries the recovering process's environment, never one saved with the record, because the record never holds one.
 The explicit-key/record commands remain available.
 Records are recovery custody, not a Session directory, job database, dispatch queue or work-status authority.

@@ -1042,8 +1042,13 @@ fn readTransportFailure(io: std.Io, store: []const u8, err: anyerror) anyerror {
     holdStore(store);
     if (!client.hostUnreachable(err)) return err;
     const paths = platform.resolveClientPaths(io, store) catch |store_err| return storeFailure(store_err);
+    return readTransportFailureAt(io, &paths, err);
+}
+
+fn readTransportFailureAt(io: std.Io, paths: *const platform.Paths, err: anyerror) anyerror {
     holdStore(paths.selector());
-    return hostTransportFailure(io, paths.selector(), err);
+    if (!client.hostUnreachable(err)) return err;
+    return classifyHostTransportFailure(err, client.hostLockStateAt(io, paths));
 }
 
 fn hostTransportFailure(io: std.Io, store: []const u8, err: anyerror) anyerror {
@@ -2311,7 +2316,7 @@ fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed:
     const reply = blk: {
         defer captured.close(io);
         if (!interactive) try announceCapture(io, &captured);
-        break :blk takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), captured.identity().*, captured.replay);
+        break :blk takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), &captured);
     } catch |err| {
         if (human and interactive and err != error.CallerFailure) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
@@ -2388,7 +2393,7 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     defer captured.close(io);
     try announceCapture(io, &captured);
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), captured.identity().*, captured.replay);
+    const reply = try takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), &captured);
     if (!reply.isAccepted()) return writeMutationReply(io, reply, .json, captured.replay);
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
@@ -2410,18 +2415,19 @@ fn takeCapture(step: *?client.Step, stepped: anytype) !client.CapturedRecord {
     return captured;
 }
 
-fn takeReply(step: *?client.Step, stepped: anytype, context: protocol_reply.MutationIdentity, replay: client.Replay) !protocol_reply.MutationReply {
-    holdStore(context.store.slice());
+fn takeReply(step: *?client.Step, stepped: anytype, captured: *const client.CapturedRecord) !protocol_reply.MutationReply {
+    holdStore(captured.selector());
     const reply = takeStep(step, stepped) catch |err| {
         if (step.*) |failed| {
             if (failed.mayHaveReachedHost()) {
                 recordExit(caller_exit.forCode(.unconfirmed, .reply_unconfirmed));
-                reportUnconfirmed(context, replay, err);
+                reportUnconfirmed(captured.identity().*, captured.replay, err);
                 if (err == error.Cancelled or err == error.Canceled) return err;
                 return error.CallerFailure;
             }
             if (failed == .connect or failed == .endpoint) {
-                return hostTransportFailure(std.Io.Threaded.global_single_threaded.io(), context.store.slice(), err);
+                if (captured.paths) |*paths| return readTransportFailureAt(std.Io.Threaded.global_single_threaded.io(), paths, err);
+                return hostTransportFailure(std.Io.Threaded.global_single_threaded.io(), captured.selector(), err);
             }
             if (failed == .store) return storeFailure(err);
         }
@@ -3072,7 +3078,7 @@ fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecor
     const reply = blk: {
         defer captured.close(io);
         try announceCapture(io, captured);
-        break :blk try takeReply(step, sender.sendCaptured(captured, environment, &reply_buffer), captured.identity().*, captured.replay);
+        break :blk try takeReply(step, sender.sendCaptured(captured, environment, &reply_buffer), captured);
     };
     try writeMutationReply(io, reply, presentation, replay);
 }
@@ -3131,7 +3137,7 @@ fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const identity = try requestIdentity(init, parsed);
     const target = identity.key.slice();
     var reply_buffer: client.ObservationBuffer = .{};
-    const reply = client.observeCommand(io, identity.store.slice(), target, null, &reply_buffer) catch |err| return readTransportFailure(io, identity.store.slice(), err);
+    const reply = (client.Requests{ .io = io }).observeCommandAt(&identity.paths, target, null, &reply_buffer, null) catch |err| return readTransportFailureAt(io, &identity.paths, err);
     const observation = try checkedObservation(io, reply, target);
     try writeObservation(io, &observation, observationTime(io));
 }
@@ -3183,8 +3189,8 @@ fn waitRequest(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const identity = try requestIdentity(init, parsed);
     var interrupt = WaitInterrupt.init();
     defer interrupt.deinit();
-    const result = client.waitCommand(init.io, identity.store.slice(), identity.key.slice(), (try parsed.number(u32, "timeout-seconds")) orelse @import("request_wait.zig").default_timeout_seconds, &wait_cancellation) catch |err| {
-        const failure = readTransportFailure(init.io, identity.store.slice(), err);
+    const result = client.waitCommandAt(init.io, &identity.paths, identity.key.slice(), (try parsed.number(u32, "timeout-seconds")) orelse @import("request_wait.zig").default_timeout_seconds, &wait_cancellation) catch |err| {
+        const failure = readTransportFailureAt(init.io, &identity.paths, err);
         if (client.hostUnreachable(err)) {
             var read_failure: protocol_reply.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
             try read_failure.diagnostic.type.set("invocation_error");
@@ -3297,13 +3303,13 @@ fn readResult(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const identity = try requestIdentity(init, parsed);
     const target = identity.key.slice();
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = client.readResult(
-        io,
-        identity.store.slice(),
+    const reply = client.readResultAt(
+        .{ .io = io },
+        &identity.paths,
         target,
         std.Io.File.stdout(),
         &reply_buffer,
-    ) catch |err| return readTransportFailure(io, identity.store.slice(), err);
+    ) catch |err| return readTransportFailureAt(io, &identity.paths, err);
     switch (reply) {
         .answer => {},
         .failure => |failure| {
@@ -3512,9 +3518,9 @@ fn writeUnconfirmed(notice: *std.Io.Writer, context: protocol_reply.MutationIden
         .generated => try notice.writeAll(context.key.slice()),
         .explicit => |record| {
             try notice.writeAll("--store ");
-            try TerminalText.writeShellWord(notice, context.store.slice());
+            try TerminalText.writeShellWord(notice, if (record.host_directory.len != 0) record.host_directory.slice() else context.store.slice());
             try notice.writeAll(" --record ");
-            try TerminalText.writeShellWord(notice, record);
+            try TerminalText.writeShellWord(notice, record.record);
             switch (context.kind) {
                 inline else => |kind| try notice.print(" --kind {s}", .{comptime retryName(kind)}),
             }
@@ -3837,8 +3843,14 @@ test "unconfirmed guidance names the generated handle or the quoted explicit rec
     try writeUnconfirmed(&generated, context, .generated, error.TruncatedResponse);
     try std.testing.expectEqualStrings(prefix ++ "0f8fad5b-d9cb-469f-a165-70867728950e" ++ suffix, generated.buffered());
     var explicit = std.Io.Writer.fixed(&buffer);
-    try writeUnconfirmed(&explicit, context, .{ .explicit = "stop\x1b.json" }, error.TruncatedResponse);
+    try writeUnconfirmed(&explicit, context, .{ .explicit = .{ .record = "stop\x1b.json" } }, error.TruncatedResponse);
     try std.testing.expectEqualStrings(prefix ++ "--store $'/it\\'s \\\\store' --record $'stop\\033.json' --kind session-stop" ++ suffix, explicit.buffered());
+    // The immutable request identity is not a round-trip command selector.
+    var replay: client.Replay = .{ .explicit = .{ .record = "stop.json" } };
+    try replay.explicit.host_directory.set("/selected-host");
+    explicit = std.Io.Writer.fixed(&buffer);
+    try writeUnconfirmed(&explicit, context, replay, error.TruncatedResponse);
+    try std.testing.expectEqualStrings(prefix ++ "--store $'/selected-host' --record $'stop.json' --kind session-stop" ++ suffix, explicit.buffered());
 }
 
 const SavedRequest = protocol_reply.MutationIdentity;
@@ -3849,19 +3861,19 @@ fn savedRequest(init: std.process.Init, handle: []const u8) !SavedRequest {
 }
 
 const RequestIdentity = struct {
-    store: protocol.Bounded(protocol.max_store_bytes) = .{},
+    paths: platform.Paths,
     key: protocol.Bounded(protocol.max_key_bytes) = .{},
 };
 
 fn requestIdentity(init: std.process.Init, parsed: *const cli_args.Parsed) !RequestIdentity {
     if (parsed.positional) |handle| {
-        const saved = try savedRequest(init, handle);
-        return .{ .store = saved.store, .key = saved.key };
+        var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const captured = try client.inspectCapturedRequest(init.io, try requestDirectory(init, &directory_buffer), handle);
+        return .{ .paths = captured.paths, .key = captured.identity.key };
     }
-    var identity: RequestIdentity = .{};
-    try identity.key.set(parsed.get("key").?);
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    try identity.store.set(try selectedStore(init, parsed.get("store"), &selected_buffer));
+    var identity: RequestIdentity = .{ .paths = try client.resolveClientPaths(init.io, try selectedStore(init, parsed.get("store"), &selected_buffer)) };
+    try identity.key.set(parsed.get("key").?);
     return identity;
 }
 
@@ -3977,7 +3989,7 @@ fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const reply = blk: {
         defer captured.close(init.io);
         var step: ?client.Step = null;
-        break :blk try takeReply(&step, (client.Requests{ .io = init.io }).sendCaptured(&captured, .{ .map = init.environ_map }, &buffer), captured.identity().*, replay);
+        break :blk try takeReply(&step, (client.Requests{ .io = init.io }).sendCaptured(&captured, .{ .map = init.environ_map }, &buffer), &captured);
     };
     try writeMutationReply(init.io, reply, .json, replay);
 }
@@ -4590,7 +4602,7 @@ test "a saved rejection code this build does not know keeps the answer and says 
 }
 
 test "native promotion saved refusals keep their catalog code and refused exit" {
-    inline for (.{ "source_stopped", "background_unavailable" }) |code| {
+    inline for (.{"source_stopped"}) |code| {
         const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"action_background_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":true,\"session\":\"k7m2qx\",\"action\":\"42\",\"code\":\"" ++ code ++ "\"}}";
         var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = body }, "k7m2qx", .{ .action_background = 42 });
         try reply.context.store.set("/s");

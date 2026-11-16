@@ -111,8 +111,9 @@ Proposal metadata grants no authorization: a later approval still binds the fres
 
 ### Public Session activity
 
-Session activity is a separate projection of eleven row kinds, not Conversation repurposed as an inventory: a person's or script's Message admission (`admission`), another Session's Message admission (`received`, which always names its `sender`), applied User entry, assistant text, immutable Tool Call, complete-group Tool Result, hosted call, terminal Turn outcome, accepted Session stop, sent Message and refused send.
-`received` mirrors `sent` on the receiving side; it split from `admission` on 2026-11-03 so a page can list a person's Messages alone (design thread on Rui's core and plug-in points).
+Session activity is a separate projection of eleven row kinds, not Conversation repurposed as an inventory: a person's or script's Message admission (`admission`), a sourced input (`received`, naming either its peer `sender` or its background `source_action`), applied User entry, assistant text, immutable Tool Call, complete-group Tool Result, hosted call, terminal Turn outcome, accepted Session stop, sent Message and refused send.
+`received` mirrors `sent` for peer Messages and records final Action input with its Action identity; it split from `admission` on 2026-11-03 so a page can list a person's Messages alone (design thread on Rui's core and plug-in points).
+Activity and public Conversation retain `source_action` as a nullable Action ID alongside the shared Resolution content reference. Terminal history labels that input `Background Action <id>`; person-only admission queries exclude it.
 Admission, stop, send, refusal and every terminal outcome claim the existing Session sequence in their owning transaction, and each also records its commit time there.
 No copied log or second frontier exists; this schema change follows the [Store format policy](store.md#store-format-and-upgrades).
 A refused send's `send_failed.target` is required and nullable: it names the canonical attempted peer, including an unknown Session, or is null when the saved attempt has no valid Session reference.
@@ -158,7 +159,7 @@ This projection has fixed resident storage, not history-independent query cost.
 
 `POST /v1/activity-page` takes `kind:"activity_page"`, `session`, nullable `end`, decimal-string `position`, nullable decimal-string `ordinal`, `direction:"forward"|"backward"`, `kinds`, the row kinds to list as a non-empty array of their names, each at most once and in this order: `admission`, `user`, `assistant`, `call`, `tool_result`, `hosted_call`, `turn_ended`, `stop`, `sent`, `send_failed`, `received`, `approval_requested`, `session_changed`, `compacted`, `model_call`; and decimal-string `limit`, from 1 to 16.
 The cursor may name a row of any kind; the page lists only the asked kinds, and each row source is gated by the kinds before it reads, so a kind not asked for costs no read unless it shares a source with an asked one: `user` and `assistant` share the Conversation entries, and a `received`-only page passes over the person's admissions.
-A person's Messages alone are one seek in the index of Messages without a Session sender, whatever the history's length; a page that lists received Messages reads all of a Session's Messages by position, as every unfiltered page does.
+A person's Messages alone are one seek in the index of Messages without a Session sender or Action source, whatever the history's length; a page that lists received Messages reads all of a Session's Messages by position, as every unfiltered page does.
 Null end captures the current committed end; zero freezes empty history.
 Pages echo end/direction and return at most `limit` owned metadata rows with `more`, ordered by (position, ordinal).
 Only complete Tool Result groups share positions, using one-based call ordinals; a Session's own `approval_requested` row shares its call's position at ordinal 1; a revision's `session_changed` rows share its position, numbered from zero; other rows, including forwarded child facts, use zero.

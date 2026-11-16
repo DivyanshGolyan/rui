@@ -21,11 +21,11 @@ Delivery when due needs no rule of its own: in the code and the model, a backgro
 
 ## Run it
 
-`python3 tests/formal/check.py --trace` (Java 11+, TLC pinned and cached; see the `verify-mysql-ownership` skill for the runner). `Pr1550.cfg` describes #1550 as drafted, where `StopWins` is an expected violation. `OwedStopChecked.cfg` describes the fix, where every rule holds. When the fix merges, move `StopWins` into the holding list for `Pr1550.cfg` in `tests/formal/check.py`, or retire that config. Read results with the pstack `/statechart` skill.
+`python3 tests/formal/check.py --trace` (Java 11+, TLC pinned and cached; see the `verify-mysql-ownership` skill for the runner). `Pr1550.cfg` and `OwedStopChecked.cfg` both require `StopWins`. `AdmitChecksOwed=TRUE` matches the shared `action.stoppedSql` predicate, used by final admission facts and model input selection/binding. Read results with the pstack `/statechart` skill.
 
 ## Model steps and code
 
-Sync commit: `96a2611f` (feature/final-delivery, #1550).
+Sync: #1550 with the shared saved/owed-stop predicate and its `background owed stop` regression tests.
 
 | Model action | Code |
 | --- | --- |
@@ -34,7 +34,7 @@ Sync commit: `96a2611f` (feature/final-delivery, #1550).
 | `Settle`, `Recover` | `action.zig` `SettleAttempt` (`settle_facts`), `RecoverUncertain` (`uncertain_facts`), then `sourced_input.Final.admit`; `command.zig` permission `deny` takes the same path |
 | `UserStops`, `OwedStopSettles` | `command.zig` `StopSession`: `insert_stop` with `admission_cutoff` and `action_cutoff`; owed settlement |
 | `ParentStops` | `turn.zig` inserts `session_stop_owed` (settled=0) for attached children |
-| `StartTurn`, `InputBoundary` | `model_admission.zig` `queued_input_sql`, `bind_messages` |
+| `StartTurn`, `InputBoundary` | `model_admission.zig` `queuedInputSql`, `bind_messages` |
 
 Every Store write is one serialized transaction, so each model action is one transaction. Left out: several Sessions, MCP/Bash differences, core tools (never Actions), the auto-background threshold (it calls the same promotion owner), and content.
 

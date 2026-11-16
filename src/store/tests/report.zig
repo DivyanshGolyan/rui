@@ -185,13 +185,8 @@ test "work uses the latest Resolution position across foreground and background 
                 if (promoted) |index| {
                     var command: @import("../../command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = actions[index] };
                     try command.key.set("resolution-promote");
-                    const free: usize = 2;
-                    const capacity: @import("../domain/action_control.zig").CapacityView = .{ .total = 2, .context = &free, .freeFn = struct {
-                        fn read(context: *const anyopaque) usize {
-                            return @as(*const usize, @ptrCast(@alignCast(context))).*;
-                        }
-                    }.read };
-                    const accepted = storage.backgroundAction(&command, capacity, .{});
+
+                    const accepted = storage.backgroundAction(.{ .command = &command }, .{});
                     try std.testing.expect(accepted == .accepted);
                     fulfillments[index] = accepted.accepted.selection.position;
                 }
