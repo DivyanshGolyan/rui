@@ -116,7 +116,13 @@ pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, direc
     };
     var source_owned = true;
     defer if (source_owned) sources.deinit(allocator);
-    if (!std.mem.eql(u8, sources.request.dir, observed.directory())) return .{ .unsupported = .ownership_unconfirmed };
+    // The argv spelling can be an absolute alias of the selected Host DIR.
+    // Placement already canonicalizes selectors; compare the same fact here,
+    // without changing settings-file or assignment byte spellings.
+    var directory_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const canonical_directory = platform.canonicalStoreDestination(io, sources.request.dir, &directory_buffer) catch return .{ .unsupported = .ownership_unconfirmed };
+    if (!std.mem.eql(u8, canonical_directory, observed.directory())) return .{ .unsupported = .ownership_unconfirmed };
+    sources.request.dir = try sources.arena.allocator().dupe(u8, canonical_directory);
     const confirmed = client.observeHostForUpgradeProfile(io, directory, observed.profile, null) catch return .{ .unsupported = .ownership_unconfirmed };
     if (!sameHost(observed, confirmed) or (identity.generation(observed.pid) catch 0) != snapshot.started) return .{ .unsupported = .ownership_unconfirmed };
     owned = false;

@@ -837,6 +837,9 @@ pub fn discoverUpgradeHosts(allocator: std.mem.Allocator, io: std.Io, cancellati
             candidate.directory = try allocator.dupe(u8, directory);
             if (!std.fs.path.isAbsolute(directory)) break :result .{ .failed = error.HostServeStoreRelative };
             const paths = platform.resolveClientPaths(io, directory) catch |err| break :result .{ .failed = err };
+            const canonical_directory = try allocator.dupe(u8, paths.selector());
+            allocator.free(candidate.directory.?);
+            candidate.directory = canonical_directory;
             candidate.socket = try allocator.dupe(u8, paths.socket.slice());
             if (knownUpgradeSocket(candidates.items, paths.socket.slice())) break :result .{ .failed = error.HostPeerPidMismatch };
             var peer = observeUpgradePeer(allocator, io, directory, null) catch |err| break :result .{ .failed = err };
@@ -844,7 +847,6 @@ pub fn discoverUpgradeHosts(allocator: std.mem.Allocator, io: std.Io, cancellati
             if (peer.pid != pid or peer.started != snapshot.started) break :result .{ .failed = error.HostPeerPidMismatch };
             var observed = observeHostForUpgrade(io, directory, null) catch |err| break :result .{ .failed = err };
             if (observed.pid != pid or (identity.generation(pid) catch 0) != snapshot.started) break :result .{ .failed = error.HostPeerPidMismatch };
-            observed.host_directory.set(directory) catch |err| break :result .{ .failed = err };
             break :result .{ .observed = observed };
         };
         try appendUpgradeCandidate(allocator, &candidates, candidate);
@@ -891,7 +893,7 @@ fn retirementReading(bytes: []const u8, pid: c_int, started: u64, before: ?u64, 
     }
     if (!populated) return error.HostProcessEnumerationFailed;
     if (state) |status| return status[0] == 'Z' and before == started and after == started;
-    return true;
+    return before != started and after != started;
 }
 
 /// How long socket discovery retries a refused connect to a Store whose lease
@@ -5854,6 +5856,9 @@ test "upgrade process retirement requires exact generation and complete census n
     try std.testing.expect(!try retirementReading("42 Z\n80 R\n", pid, generation, null, generation));
     try std.testing.expect(try retirementReading("42 S\n80 R\n", pid, generation, generation + 1, generation + 1));
     try std.testing.expect(try retirementReading("80 R\n", pid, generation, null, null));
+    try std.testing.expect(!try retirementReading("80 R\n", pid, generation, generation, generation));
+    try std.testing.expect(!try retirementReading("80 R\n", pid, generation, generation, null));
+    try std.testing.expect(!try retirementReading("80 R\n", pid, generation, null, generation));
     for ([_][]const u8{ "", "42\n", "not-a-pid Z\n", "42 Z extra\n", "42 Z\n42 S\n" }) |malformed| try std.testing.expectError(error.HostProcessEnumerationFailed, retirementReading(malformed, pid, generation, generation, generation));
 }
 
