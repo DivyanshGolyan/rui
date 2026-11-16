@@ -2790,4 +2790,3 @@ test "Host restart sources preserve previous and current release provider semant
         try std.testing.expectEqual(case.served, Served{ .codex = entries.codex != null, .openai = entries.openai != null, .chatgpt = entries.chatgpt != null });
     }
 }
-

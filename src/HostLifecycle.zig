@@ -181,12 +181,15 @@ pub fn releaseVersion(reported: []const u8) ?candidate.Version {
     return candidate.Version.parse(reported[4..][0..end]) catch null;
 }
 
-
 // Only public command argv are composed here. Host-child argv belong solely to
 // host_start.spawn in the target process; values are never resolved into --set.
 fn arguments(allocator: std.mem.Allocator, binary: []const u8, request: host_start.Spawn, command: enum { check, start, status }) ![]const []const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(allocator, &.{ binary, "host", switch (command) { .check => "settings", .start => "start", .status => "status" } });
+    try argv.appendSlice(allocator, &.{ binary, "host", switch (command) {
+        .check => "settings",
+        .start => "start",
+        .status => "status",
+    } });
     if (command == .check) try argv.append(allocator, "--check");
     try argv.appendSlice(allocator, &.{ "--store", request.dir });
     if (command != .status) {
@@ -266,7 +269,8 @@ fn verify(init: std.process.Init, allocator: std.mem.Allocator, plan: *const Pla
                             if (replacementMatches(plan, facts, actual, version)) {
                                 return if (client.hostStatus(init.io, plan.sources.request.dir) == .incompatible)
                                     .{ .client_incompatible = after.pid }
-                                else .{ .ready = .{ .instance = facts.instance, .pid = after.pid } };
+                                else
+                                    .{ .ready = .{ .instance = facts.instance, .pid = after.pid } };
                             }
                             return .replacement_observed;
                         }
@@ -381,7 +385,6 @@ test "upgrade lifecycle control cannot equate different wire profiles or instanc
         try std.testing.expect(!sameHost(original, replacement));
     }
 }
-
 
 test "upgrade public commands preserve semantic sources and Host directory routing" {
     const gpa = std.testing.allocator;

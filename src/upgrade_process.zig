@@ -203,7 +203,6 @@ test "upgrade process deadline covers wait after child closes its output pipes" 
     _ = try std.Io.Dir.cwd().statFile(io, marker, .{});
 }
 
-
 test "upgrade process context is scoped to one invocation and closes stdin" {
     const gpa = std.testing.allocator;
     var env: std.process.Environ.Map = .init(gpa);
