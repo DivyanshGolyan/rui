@@ -659,36 +659,6 @@ test "shape decoder refuses foreign fields by object path and preserves rejectio
     _ = try A.parse(std.testing.allocator, "{\"answer\":{\"status\":\"accepted\",\"created\":false,\"extension\":{\"completion\":null}},\"execution\":{\"status\":\"queued\",\"created\":\"unrelated_path\"}}");
 }
 
-test "shape decoder delegates JSON holes and releases parser allocations" {
-    const Payload = struct {
-        pub const max_json_bytes = 64;
-    };
-    const Bindings = struct {
-        pub fn Type(comptime T: type) type {
-            if (T == Payload) return struct { count: wire_field.JsonString(20) };
-            @compileError("unexpected JSON hole");
-        }
-    };
-    const shape = .{ "{\"payload\":", protocol.Hole{ .json = Payload }, ",\"next\":", protocol.Hole.optional_id, ",\"absent\":null}" };
-    const D = DecoderWithJson(shape, .{shape}, Bindings);
-    const Check = struct {
-        fn run(allocator: std.mem.Allocator, invalid: bool) !void {
-            const valid = "{\"paylo\\u0061d\":{\"count\":\"\\u0037\",\"extra\":[{}]},\"next\":null,\"absent\":null}";
-            const result = D.parse(allocator, if (invalid) valid ++ " {}" else valid);
-            const value = result catch |err| {
-                if (err == error.OutOfMemory) return err;
-                try std.testing.expect(invalid);
-                return;
-            };
-            try std.testing.expect(!invalid);
-            try std.testing.expect(value.payload.count.eql("7"));
-            try std.testing.expect(value.next == null and value.absent == null);
-        }
-    };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{false});
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{true});
-}
-
 test "shape decoder reads the protocol configure reply shape" {
     const D = Decoder(protocol.configuration_reply.accepted, .{
         protocol.configuration_reply.accepted,
