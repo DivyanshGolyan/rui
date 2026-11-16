@@ -41,6 +41,7 @@ if __name__ == "__main__":
     os.execvp(sys.argv[2], sys.argv[2:])
 
 import atexit
+from contextlib import contextmanager
 import http.client
 import http.server
 import ctypes
@@ -461,6 +462,17 @@ def retain_failure_state(label, state):
 
 def canonical_fixture_root(path):
     return pathlib.Path(path).resolve(strict=True)
+
+
+@contextmanager
+def short_interface_directory():
+    """Own a private explicit-interface directory, independent of long TMPDIR.
+
+    Canonicalize /tmp first: on macOS it is an alias of /private/tmp. The
+    selected Host and all client/peer cleanup must retire before this scope ends.
+    """
+    with tempfile.TemporaryDirectory(prefix="rui-if-", dir=canonical_fixture_root("/tmp")) as directory:
+        yield canonical_fixture_root(directory)
 
 
 DARWIN_TEMPORARY_ROOT_BYTES = len("/private/var/folders/XX/" + "X" * 30 + "/T")
