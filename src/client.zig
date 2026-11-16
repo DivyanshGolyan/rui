@@ -2102,7 +2102,7 @@ const Capture = struct {
         try self.parent.renamePreserve(temporary, self.parent, name, self.io);
         self.routing_published = true;
         // Routing must be durable before the request marker can become visible.
-        if (std.c.fsync(self.parent.handle) != 0) return error.RecordDirectorySyncFailed;
+        try self.syncParent();
     }
 
     fn commit(self: *Capture) !void {
@@ -2117,10 +2117,17 @@ const Capture = struct {
             self.io,
         );
         self.published = true;
-        if (std.c.fsync(self.parent.handle) != 0) return error.RecordDirectorySyncFailed;
+        try self.syncParent();
         self.lock_file.close(self.io);
         self.parent.close(self.io);
         self.active = false;
+    }
+
+    fn syncParent(self: *const Capture) !void {
+        // Borrow the directory descriptor; File.sync is the same fsync syscall
+        // through the invocation's I/O owner, without taking descriptor custody.
+        const parent_file: std.Io.File = .{ .handle = self.parent.handle, .flags = .{ .nonblocking = false } };
+        parent_file.sync(self.io) catch return error.RecordDirectorySyncFailed;
     }
 
     fn write(self: *Capture, bytes: []const u8) !void {
@@ -3862,6 +3869,7 @@ test "capture publication transfers original inode across pathname replacement" 
     const Replacement = struct {
         fn rename(userdata: ?*anyopaque, old_dir: std.Io.Dir, old_path: []const u8, new_dir: std.Io.Dir, new_path: []const u8) std.Io.Dir.RenamePreserveError!void {
             try std.testing.io.vtable.dirRenamePreserve(userdata, old_dir, old_path, new_dir, new_path);
+            if (!std.mem.eql(u8, new_path, "record")) return;
             new_dir.rename(new_path, new_dir, "displaced-original", std.testing.io) catch return error.Unexpected;
             const file = new_dir.createFile(std.testing.io, new_path, .{}) catch return error.Unexpected;
             defer file.close(std.testing.io);
@@ -3904,7 +3912,8 @@ test "capture closes pinned reader when publication or handoff fails" {
             };
             std.testing.io.vtable.fileClose(userdata, files);
         }
-        fn sync(_: ?*anyopaque, _: std.Io.File) std.Io.File.SyncError!void {
+        fn sync(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.SyncError!void {
+            if (reader == -1) return std.testing.io.vtable.fileSync(userdata, file);
             return error.NoSpaceLeft;
         }
         fn length(_: ?*anyopaque, _: std.Io.File) std.Io.File.LengthError!u64 {
@@ -3926,6 +3935,7 @@ test "capture closes pinned reader when publication or handoff fails" {
         if (published) vtable.fileLength = Failure.length else vtable.fileSync = Failure.sync;
         const failing_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
         Failure.closed = 0;
+        Failure.reader = -1;
         try std.testing.expectError(if (published) error.AccessDenied else error.NoSpaceLeft, captureMessage(failing_io, .{ .store = root, .session = "k7m2qx", .text_path = "", .text = "original" }, .{ .explicit = .{ .record = path, .key = "original-key" } }).get());
         try std.testing.expectEqual(@as(usize, 1), Failure.closed);
         try std.testing.expect(std.c.fcntl(Failure.reader, std.c.F.GETFD) < 0);
@@ -3940,13 +3950,24 @@ test "capture recovery closes rejected records and retains only its reader lifet
     const Probe = struct {
         var opened: usize = 0;
         var closed: usize = 0;
+        var readers: [16]std.posix.fd_t = @splat(-1);
         fn open(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8, options: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
             const file = try std.testing.io.vtable.dirOpenFile(userdata, dir, path, options);
+            const slot = for (&readers) |*entry| {
+                if (entry.* == -1) break entry;
+            } else return error.Unexpected;
+            slot.* = file.handle;
             opened += 1;
             return file;
         }
         fn close(userdata: ?*anyopaque, files: []const std.Io.File) void {
-            closed += files.len;
+            for (files) |file| for (&readers) |*entry| {
+                if (entry.* == file.handle) {
+                    closed += 1;
+                    entry.* = -1;
+                    break;
+                }
+            };
             std.testing.io.vtable.fileClose(userdata, files);
         }
     };
@@ -5521,4 +5542,155 @@ test "pin captures preserve pin and unpin intent through generated and explicit 
         try std.testing.expectEqual(protocol.CommandKind.session_pin, (try inspectCaptured(io, root, identity.key.slice())).kind);
         try std.testing.expectError(error.RequestBindingMismatch, openCaptured(io, .{ .explicit = .{ .store = root, .record = path, .kind = .session_stop } }));
     }
+}
+
+test "capture routing round trips six placements without conflating selector and wire identity" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const Peer = struct {
+        fn serve(listener: *std.Io.net.Server, expected_store: []const u8) !void {
+            for (0..3) |_| {
+                const connection = try listener.accept(std.testing.io);
+                defer connection.close(std.testing.io);
+                const deadline = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 5 * std.time.ns_per_s;
+                var request: [2048]u8 = undefined;
+                var used: usize = 0;
+                while (used < request.len) {
+                    const count = try readRequest(.{ .io = std.testing.io }, connection.socket.handle, request[used .. used + 1], deadline);
+                    if (count == 0) return error.TestUnexpectedResult;
+                    used += count;
+                    if (std.mem.endsWith(u8, request[0..used], "\r\n\r\n")) break;
+                } else return error.TestUnexpectedResult;
+                const expected = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"host_info\",\"store\":\"\"}";
+                var body_used: usize = 0;
+                while (body_used < expected.len) {
+                    const count = try readRequest(.{ .io = std.testing.io }, connection.socket.handle, request[body_used..expected.len], deadline);
+                    if (count == 0) return error.TestUnexpectedResult;
+                    body_used += count;
+                }
+                try std.testing.expectEqualStrings(expected, request[0..body_used]);
+                var body: protocol.ResponseBuffer = .{};
+                const info: @import("host_reply.zig").HostInfo = .{ .store = expected_store, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .routes = protocol.routesAll(.unserved) };
+                try body.render(@import("host_reply.zig").renderHostInfo, .{info});
+                var head_buffer: [512]u8 = undefined;
+                const head = try std.fmt.bufPrint(&head_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\nConnection: close\r\n\r\n", .{body.len});
+                try writeAllRequest(.{ .io = std.testing.io }, connection.socket.handle, head, deadline);
+                try writeAllRequest(.{ .io = std.testing.io }, connection.socket.handle, body.slice(), deadline);
+            }
+        }
+    };
+    for ([_]enum { sqlite_default, sqlite_moved, mysql }{ .sqlite_default, .sqlite_moved, .mysql }) |kind| for ([_]bool{ false, true }) |explicit_interface| {
+        var tmp = try @import("socket_fixture.zig").Directory.init();
+        defer tmp.cleanup();
+        const root = tmp.root[0..tmp.root_len];
+        var host = try tmp.dir.createDirPathOpen(io, "host", .{ .permissions = .fromMode(0o700) });
+        defer host.close(io);
+        const directory = try std.fs.path.join(gpa, &.{ root, "host" });
+        defer gpa.free(directory);
+        const data = try std.fs.path.join(gpa, &.{ root, "data" });
+        defer gpa.free(data);
+        const runtime = try std.fs.path.join(gpa, &.{ root, "iface" });
+        defer gpa.free(runtime);
+        var document: std.Io.Writer.Allocating = .init(gpa);
+        defer document.deinit();
+        try document.writer.writeAll("{");
+        switch (kind) {
+            .sqlite_default => {},
+            .sqlite_moved => {
+                try document.writer.writeAll("\"store\":{\"sqlite\":{\"dir\":");
+                try std.json.Stringify.value(data, .{}, &document.writer);
+                try document.writer.writeAll("}},");
+            },
+            .mysql => try document.writer.writeAll("\"store\":{\"mysql\":{\"url\":{\"env\":\"RUI_ABSENT_CAPTURE_TEST_URL\"}}},"),
+        }
+        if (explicit_interface) {
+            try document.writer.writeAll("\"interface\":{\"dir\":");
+            try std.json.Stringify.value(runtime, .{}, &document.writer);
+            try document.writer.writeAll("},");
+        }
+        try document.writer.writeAll("\"providers\":{}}");
+        try host.writeFile(io, .{ .sub_path = "host.json", .data = document.written(), .flags = .{ .permissions = .fromMode(0o600) } });
+        var paths = try platform.resolveClientPaths(io, directory);
+        if (kind == .mysql) try paths.store_identity.set("0123456789abcdef0123456789abcdef");
+        var listener: ?std.Io.net.Server = null;
+        var future: ?std.Io.Future(anyerror!void) = null;
+        if (kind == .mysql) {
+            try std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(paths.socket.slice()).?, .{ .default_permissions = .fromMode(0o700) });
+            listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+            future = try io.concurrent(Peer.serve, .{ &listener.?, paths.store_identity.slice() });
+        }
+        defer if (listener) |*server| server.deinit(io);
+        defer if (future) |*pending| _ = pending.cancel(io) catch {};
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var key_buffer: [36]u8 = undefined;
+        const location = try (CaptureTarget{ .generated = root }).resolve(io, &path_buffer, &key_buffer);
+        var original = try writeSessionStopCapture(io, &paths, .{ .store = directory, .session = "k7m2qx" }, location);
+        const saved = original.saved;
+        const before = try tmp.dir.readFileAlloc(io, std.fs.path.basename(location.record), gpa, .limited(2048));
+        defer gpa.free(before);
+        original.close(io);
+        var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = saved.key.slice() } });
+        defer recovered.close(io);
+        try std.testing.expect(recovered.paths == null);
+        try std.testing.expectEqualStrings(directory, recovered.routing.?.host_directory.slice());
+        const rediscovered = try recovered.resolvePaths(io);
+        try std.testing.expectEqualStrings(directory, rediscovered.selector());
+        try std.testing.expectEqualStrings(paths.socket.slice(), rediscovered.socket.slice());
+        try std.testing.expectEqualStrings(saved.store.slice(), rediscovered.store_identity.slice());
+        var explicit = try openCaptured(io, .{ .explicit = .{ .store = directory, .record = location.record, .kind = .session_stop } });
+        defer explicit.close(io);
+        const explicit_paths = try explicit.resolvePaths(io);
+        try std.testing.expectEqualStrings(rediscovered.socket.slice(), explicit_paths.socket.slice());
+        var after: [2048]u8 = undefined;
+        const count = try recovered.file.readPositionalAll(io, &after, 0);
+        try std.testing.expectEqualStrings(before, after[0..count]);
+        if (future) |*pending| {
+            try pending.await(io);
+            future = null;
+        }
+        // An operator edit that points DIR to another SQLite database must not
+        // redirect the immutable request, even though placement can be resolved.
+        if (kind != .mysql) {
+            const changed = try std.fmt.allocPrint(gpa, "{{\"store\":{{\"sqlite\":{{\"dir\":\"{s}/different\"}}}}}}", .{root});
+            defer gpa.free(changed);
+            try host.writeFile(io, .{ .sub_path = "host.json", .data = changed, .flags = .{ .permissions = .fromMode(0o600) } });
+            try std.testing.expectError(error.RequestBindingMismatch, recovered.resolvePaths(io));
+        }
+    };
+}
+
+test "capture routing metadata rejects invalid private sources and keeps legacy raw records" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const root = tmp.root[0..tmp.root_len];
+    var captured = try captureSessionStop(io, .{ .store = root, .session = "k7m2qx" }, .{ .generated = root });
+    const key = captured.saved.key;
+    captured.close(io);
+    const name = try std.fmt.allocPrint(gpa, "{s}.json.routing", .{key.slice()});
+    defer gpa.free(name);
+    for ([_][]const u8{
+        "{",                                                                         "{}",                                                                   "{\"format\":2,\"host_directory\":\"/host\",\"runtime_hint\":\"\"}",
+        "{\"format\":1,\"host_directory\":\"/host\",\"runtime_hint\":\"/runtime\"}", "{\"format\":1,\"host_directory\":\"relative\",\"runtime_hint\":\"\"}", "{\"format\":1,\"host_directory\":\"\",\"runtime_hint\":\"\"}",
+        "{\"format\":1,\"host_directory\":\"/host\\u0000\",\"runtime_hint\":\"\"}",
+    }) |text| {
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = text, .flags = .{ .permissions = .fromMode(0o600) } });
+        try std.testing.expectError(error.InvalidRequestRouting, openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } }));
+    }
+    try tmp.dir.setFilePermissions(io, name, .fromMode(0o644), .{});
+    try std.testing.expectError(error.InsecureCredentialFile, openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } }));
+    try tmp.dir.deleteFile(io, name);
+    try tmp.dir.symLink(io, "missing-route", name, .{});
+    if (openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } })) |value| {
+        var unexpected = value;
+        unexpected.close(io);
+        return error.TestUnexpectedResult;
+    } else |_| {}
+    try tmp.dir.deleteFile(io, name);
+    var legacy = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } });
+    defer legacy.close(io);
+    try std.testing.expect(legacy.routing == null);
+    const paths = try legacy.resolvePaths(io);
+    try std.testing.expectEqualStrings(root, paths.store_identity.slice());
 }
