@@ -1,5 +1,3 @@
-//! Historical SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
@@ -131,9 +129,6 @@ test "complete historical tool-result traversal scales with groups and calls" {
     try std.testing.expect(more_calls < call_baseline * 8);
 }
 
-/// One bounded step through history in preparation order. Each served
-/// entry moves `after` past it, a tool group is drained, and the end sets
-/// `after` to the largest position.
 fn testingHistoricalStep(view: *TestingPage, after: *u64, bytes: *usize, items: *usize) !void {
     switch (try view.nextEntryStep(after.*, bytes, items)) {
         .pending => {},
@@ -167,8 +162,6 @@ test "historical preparation yields covered group populations under small allowa
         try settleCallsForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&prefix, "bounded-{d}", .{i}), &calls);
         binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     }
-    // An after-position covering every group must not drain discovery in one
-    // call, and a view closed mid-discovery leaves checkpoints free.
     {
         var view: TestingPage = undefined;
         view.open(&storage, binding);
@@ -197,9 +190,6 @@ test "historical preparation yields covered group populations under small allowa
         try testingHistoricalStep(&view, &after, &bytes, &items);
         if (after != before) served += 1;
     }
-    // One user input, 8 Operations each with its group of 16 calls, their
-    // 8 result groups and the end, each served by its own step: a page of
-    // the scan holds whole groups, so discovery yields none between them.
     try std.testing.expectEqual(@as(usize, 1 + 8 + 8 * calls.len + 8 + 1), served);
     try std.testing.expectEqual(served, turns);
     try std.testing.expect(!storage.isFenced());
@@ -253,7 +243,6 @@ test "large historical readers leave checkpoints free" {
 
 test "historical preparation rejects missing extra and reordered sibling classifications incrementally" {
     for ([_]bool{ false, true }) |covered| {
-        // `corrupts_bytes`: the fault breaks bytes replay reads, not rows.
         cases: for ([_]struct { sql: [:0]const u8, corrupts_bytes: bool = false }{
             .{ .sql = "UPDATE model_tool_call SET call_ordinal=99 WHERE call_ordinal=0; UPDATE model_tool_call SET call_ordinal=0 WHERE call_ordinal=1; UPDATE model_tool_call SET call_ordinal=1 WHERE call_ordinal=99" },
             .{ .sql = "DELETE FROM model_tool_call WHERE call_ordinal=1" },
@@ -293,9 +282,6 @@ test "historical preparation rejects missing extra and reordered sibling classif
                 try std.testing.expect(storage.isFenced());
                 continue :cases;
             })) {}
-            // Row faults fail while discovery walks the group, before any
-            // entry is served. Corrupt call bytes fence when replay reads
-            // the first call, whose digest no longer matches.
             const bytes_fault = fault.corrupts_bytes;
             var served: ?HistoricalEntry = null;
             while (true) {
@@ -310,14 +296,12 @@ test "historical preparation rejects missing extra and reordered sibling classif
                 switch (progress) {
                     .pending => {},
                     .ready => |entry| {
-                        // The view never reaches its end, so no request seals.
                         if (!bytes_fault) return error.MissingCorruptionFailure;
                         served = entry.?.*;
                         if (served.?.kind == .user or served.?.kind == .operation) continue;
                         try std.testing.expectEqual(HistoricalEntryKind.provider_output, served.?.kind);
                         const output = try view.openOutput(served.?.position);
                         try std.testing.expectEqual(OutputItemKind.function_call, output.kind);
-                        // The call's private bag holds its item ID.
                         var reader: TestingReader = undefined;
                         try view.openContent(output.bag.?, &reader);
                         defer reader.close();
@@ -382,11 +366,8 @@ test "replay fences part damage that keeps every digest" {
         "DELETE FROM model_output_part WHERE part_ordinal=1",
         "UPDATE model_output_item SET part_count=part_count+1 WHERE item_kind=2",
         "UPDATE model_output_part SET part_array=2,part_kind=3,text_length=NULL,text_content_id=extras_content_id WHERE part_ordinal=0",
-        // The text parts must cover the message text in order, exactly.
         "UPDATE model_output_part SET text_length=text_length+1 WHERE part_ordinal=0",
         "UPDATE model_output_part SET text_length=text_length-1 WHERE part_ordinal=1",
-        // The text keeps its digest while its bytes change: the parts'
-        // reads check it across both ranges.
         "UPDATE content SET payload=CAST('onetwx' AS BLOB) WHERE payload=CAST('onetwo' AS BLOB)",
     }) |fault| {
         var tmp = std.testing.tmpDir(.{});
@@ -501,8 +482,6 @@ test "historical accepted output completeness and provenance fence both read pat
                     try sqlite.bindU64(tie, 2, output.operation_id);
                     try sqlite.expectDone(tie);
                 }
-                // Message entries now reference their exact raw items. Bypass
-                // that FK only while injecting the intended missing-item fault.
                 try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
                 const mutation = try sqlite.prepare(storage.sqliteDatabase(), sql);
                 defer _ = c.sqlite3_finalize(mutation);
@@ -549,9 +528,6 @@ test "historical context selection work excludes nonmatching Operation populatio
                 try settleCompactionForTesting(&storage, &tmp, current, &.{ .reasoning, .compaction, .message });
                 current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             }
-            // Isolate search work from payload work: failed assistant/compaction
-            // Operations have no accepted output. Their population must not be
-            // scanned inside one source/frontier/anchor selection step.
             try store_testing.sqlite_only.exec(&storage, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL", .{});
             const insert = try sqlite.prepare(storage.sqliteDatabase(), "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
                 "SELECT value+1 FROM sequence WHERE value<?1) " ++
@@ -583,14 +559,6 @@ test "historical context selection work excludes nonmatching Operation populatio
 }
 
 test "a failed context read answers its reader's name and fences" {
-    // The report's `admission_context` names a failed step CorruptStore,
-    // as main named the estimate's. Admission reads the context with its
-    // facts in selection's round, whose failed step is SessionReadFailed. The second
-    // Message follows a Turn with usage under a trigger, so admission
-    // weighs the context, and the report estimates it. The report names a
-    // failed uncovered-byte read CorruptStore, after selecting the recipe;
-    // admission counts the bytes in its guard write, whose failed step is
-    // a write's StatementFailed.
     for ([_]struct { report: bool, bytes: bool }{
         .{ .report = false, .bytes = false },
         .{ .report = true, .bytes = false },
@@ -640,13 +608,6 @@ test "Attempt checks keep main cost and prefix seals include one frontier reconc
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const attempt = try TestingAttempt.admit(&storage, &tmp);
-    // Main's statements and VM steps at 72db6de9 and again at 2e8e8353,
-    // each on its warm second call: opening a view, recording a seal, the
-    // Operation's kind, a dispatch handoff and a content lookup.
-    // The set-based frontier projection and streamed hints add two statements
-    // and 797 VM steps to the seal's five statements / 124 VM steps. This
-    // bounded CPU work replaces client-side ancestor rounds; the seal keeps
-    // main's two Access rounds. Unrelated statement limits stay unchanged.
     const main_work = [_][2]i64{ .{ 2, 24 }, .{ 7, 921 }, .{ 3, 32 }, .{ 2, 24 }, .{ 1, 14 } };
     for (0..2) |call| {
         var work: [main_work.len][2]i64 = undefined;
@@ -673,9 +634,6 @@ test "Attempt checks keep main cost and prefix seals include one frontier reconc
             try std.testing.expect(measured[1] <= main[1]);
         }
     }
-    // Rounds, where main took 2 for a view, a check or a handoff, 3 for
-    // the Operation's kind, 5 for a seal and 1 for a content lookup: each
-    // Attempt check is one read; a seal reads, then projects inline with COMMIT.
     const entry = try store_core.enter(&storage, .none);
     defer entry.release();
     {
@@ -710,8 +668,6 @@ test "a prefix seal on a full disk answers CanonicalStorageFull and fences" {
     var view: TestingPage = undefined;
     view.open(&storage, attempt.binding);
     defer view.close();
-    // The seal rewrites a few bytes of one Session row in place, which a
-    // capped file still holds, so a trigger grows the file as it writes.
     try sqlite.exec(storage.sqliteDatabase(), "CREATE TABLE ballast(b BLOB)");
     const page_count = try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA page_count");
     var limit_buffer: [64:0]u8 = undefined;
@@ -736,13 +692,10 @@ test "a prefix seal reads its Attempt inside the transaction it writes in" {
     const database = storage.sqliteDatabase();
     const begins = runsOf(database, "BEGIN IMMEDIATE");
     const rollbacks = runsOf(database, "ROLLBACK");
-    // The read that finds the Attempt settled runs after BEGIN, and the
-    // seal's ROLLBACK ends the transaction it opened.
     try std.testing.expectError(error.StaleAttemptBinding, view.recordPrefixSeal(&TestingAttempt.seal));
     try std.testing.expectEqual(begins + 1, runsOf(database, "BEGIN IMMEDIATE"));
     try std.testing.expectEqual(rollbacks + 1, runsOf(database, "ROLLBACK"));
     try std.testing.expect(!storage.isFenced());
-    // A failed read leaves the question unanswered and must read again.
     try std.testing.expect(view.page.read.?.answer == null);
     try std.testing.expectError(error.StaleAttemptBinding, view.recordPrefixSeal(&TestingAttempt.seal));
     try std.testing.expectEqual(begins + 2, runsOf(database, "BEGIN IMMEDIATE"));

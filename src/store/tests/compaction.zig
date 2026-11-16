@@ -1,5 +1,3 @@
-//! Compaction Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -111,8 +109,6 @@ test "compaction pressure uses provider usage appended input and complete call r
                     try std.testing.expectEqual(HistoricalEntryKind.user, (try cursor.next(&view)).?.kind);
                     try std.testing.expect((try cursor.next(&view)) == null);
                     if (scenario == 0) {
-                        // Accepted suffix without usage must not revive the large
-                        // pre-base usage on the next admission.
                         try settleCallsForTesting(&storage, &tmp, successor, "suffix-output", &calls);
                         try submitTestMessage(&storage, &tmp, "three", "three", session.slice(), "small suffix");
                         const after_base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -191,8 +187,6 @@ test "compaction success retains host inputs and ordered anchor suffix across re
             try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSessionForTesting(session.slice())).pending_messages);
             try storage.close();
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            // Accepted compaction message items remain private, without a required
-            // assistant Conversation entry, across every public inventory on reopen.
             try std.testing.expectEqual(@as(usize, 1), (try store_core.publicConversationPageForTesting(&storage, request)).count);
             const activity = try store_core.activityPageForTesting(&storage, .{ .session = request.session });
             for (activity.items[0..activity.count]) |item| try std.testing.expect(item.value != .assistant);
@@ -228,8 +222,6 @@ test "compaction success retains host inputs and ordered anchor suffix across re
                 }
                 try std.testing.expect((try cursor.next(&view)) == null);
             }
-            // New applied input permits one new compaction; its unchanged successor
-            // must terminalize irreducible overflow rather than loop.
             try storage.settleModelAttemptFailure(successor, .{ .uncorrelated = "overflow" }, .context_overflow, .{});
             const second_base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleCompactionForTesting(&storage, &tmp, second_base, &.{.compaction});
@@ -247,7 +239,6 @@ test "compaction success retains host inputs and ordered anchor suffix across re
             }
             try storage.settleModelAttemptFailure(exhausted, .{ .uncorrelated = "overflow" }, .context_overflow, .{});
             try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
-            // Recovery eligibility changes the Turn outcome, never the failure fact.
             try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE resolution_code='context_overflow'", .{}));
             const observation = try store_testing.observeCommandForTesting(&storage, "input");
             try std.testing.expectEqualStrings("ResourceExceeded", observation.kind.message.?.queue.?.state.failed.code.slice());
@@ -258,7 +249,6 @@ test "compaction success retains host inputs and ordered anchor suffix across re
 test "explicit compaction thresholds and frozen retry survive reopen" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            // Representative reasoning models, plus unlisted bindings below.
             const supported_ids = [_][]const u8{ "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5" };
             for (supported_ids ++ [_][]const u8{ "model-a", "gpt-6-luna-alias" }) |model| {
                 var tmp = std.testing.tmpDir(.{});
@@ -269,7 +259,6 @@ test "explicit compaction thresholds and frozen retry survive reopen" {
                 var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
                 const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
                 var configure = try completeConfiguration("config", "", workspace, model);
-                // D111: the client supplies tokens even when it chooses 90%.
                 const expected: ?u64 = model_capability.contextWindow(@import("../../model_catalog.zig").shipped, model) * product_defaults.compaction_trigger_percent / 100;
                 var threshold: [20]u8 = undefined;
                 try configure.configuration.compaction_trigger.value.set(try std.fmt.bufPrint(&threshold, "{d}", .{expected.?}));
@@ -323,7 +312,6 @@ test "explicit compaction thresholds and frozen retry survive reopen" {
                     const report = try testingSessionReportWithProfile(&storage, &tmp, created_session_0.slice(), 1024 * 1024, .full);
                     defer std.testing.allocator.free(report);
                     try std.testing.expect(std.mem.indexOf(u8, report, "\"output_reservation_override\":null") != null);
-                    // D111: revision one records the client's explicit threshold.
                     try std.testing.expect(std.mem.indexOf(u8, report, "\"compaction_trigger\":null") == null);
                     try std.testing.expect(std.mem.indexOf(u8, report, "\"compaction_trigger\":\"10\",\"output_reservation\":\"8\"") != null);
                 }
@@ -332,8 +320,6 @@ test "explicit compaction thresholds and frozen retry survive reopen" {
                 try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(compact));
                 try settleCompactionForTesting(&storage, &tmp, compact, &.{.compaction});
                 const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-                // Overflow recovery compacts once; unchanged context cannot
-                // authorize another compaction.
                 try storage.settleModelAttemptFailure(successor, .{ .uncorrelated = "overflow" }, .context_overflow, .{});
                 try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
                 try expectActivityOutcome(&storage, created_session_0.slice(), successor, .context_full, "ResourceExceeded");
@@ -342,7 +328,6 @@ test "explicit compaction thresholds and frozen retry survive reopen" {
     }.run);
 }
 
-/// The Current report's `context_estimate`, or null.
 fn testingContextEstimate(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8) !?u64 {
     const report = try testingSessionReport(storage, tmp, session, 1024 * 1024);
     defer std.testing.allocator.free(report);
@@ -380,29 +365,22 @@ test "compaction exact threshold zero reservation and integer usage fallback" {
                 try patch.session.set(session.slice());
                 patch.configuration.compaction_trigger.state = .value;
                 try patch.configuration.compaction_trigger.value.set("1000");
-                // An unlisted model without an override compacts at the share of
-                // the small window Rui assumes for it.
                 if (index == 7) patch.configuration.compaction_trigger.state = .omitted;
                 patch.configuration.output_reservation.state = .value;
                 try patch.configuration.output_reservation.value.set("0");
                 try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
                 try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "original");
-                // A Session's first call never compacts, so nothing is compared.
                 try std.testing.expectEqual(@as(?u64, null), try testingContextEstimate(&storage, &tmp, session.slice()));
                 const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try submitTestMessage(&storage, &tmp, "two", "two", session.slice(), "");
                 try settleCallsForTestingWithFaults(&storage, &tmp, first, "usage-output", &.{}, .{}, usage);
                 if (index == 9) {
-                    // The counts are stored as reported; their sum passes SQLite's
-                    // signed range, and pressure saturates instead of wrapping.
                     try std.testing.expectEqual(@as(u64, std.math.maxInt(i64)), try store_testing.queryU64(&storage, "SELECT usage_output_tokens FROM model_operation WHERE output_item_count IS NOT NULL", .{}));
                 }
                 if (index == 10) {
                     try std.testing.expectEqual(@as(u64, 400), try store_testing.queryU64(&storage, "SELECT usage_uncached_tokens FROM model_operation WHERE output_item_count IS NOT NULL", .{}));
                     try std.testing.expectEqual(@as(u64, 600), try store_testing.queryU64(&storage, "SELECT usage_cache_read_tokens FROM model_operation WHERE output_item_count IS NOT NULL", .{}));
                 }
-                // The Current report's estimate is the pressure the next admission
-                // compares: at or past the trigger exactly when it compacts.
                 const compacts = index == 1 or index >= 7;
                 const estimate = (try testingContextEstimate(&storage, &tmp, session.slice())).?;
                 const trigger: u64 = if (index == 7) model_capability.compactionPolicy("model-a", null, null).compaction_trigger else 1000;
@@ -411,8 +389,6 @@ test "compaction exact threshold zero reservation and integer usage fallback" {
                 if (index == 7) try std.testing.expectEqual(@as(u64, 1000000), estimate);
                 const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try std.testing.expectEqual(if (compacts) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(next));
-                // The call after a compaction answers whatever the pressure, so
-                // nothing is compared while one runs.
                 if (compacts) try std.testing.expectEqual(@as(?u64, null), try testingContextEstimate(&storage, &tmp, session.slice()));
             }
         }
@@ -422,8 +398,6 @@ test "compaction exact threshold zero reservation and integer usage fallback" {
 test "an admission weighs uncovered bytes in its write, and admits the compaction they call for" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            // Usage leaves ten tokens of room under the trigger: the waiting
-            // Message's bytes decide the purpose, four to a token.
             var seen = [_]bool{ false, false };
             const filler: [64]u8 = @splat('x');
             for ([_]usize{ 0, 32, 36, 39, 40, 41, 44, 64 }) |length| {
@@ -445,8 +419,6 @@ test "an admission weighs uncovered bytes in its write, and admits the compactio
                 const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try submitTestMessage(&storage, &tmp, "two", "two", session.slice(), filler[0..length]);
                 try settleCallsForTestingWithFaults(&storage, &tmp, first, "usage-output", &.{}, .{}, "{\"input_tokens\":990,\"output_tokens\":0}");
-                // The report reads the bytes and compares; admission reads
-                // none and must agree at every count.
                 const compacts = (try testingContextEstimate(&storage, &tmp, session.slice())).? >= 1000;
                 seen[@intFromBool(compacts)] = true;
                 const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -488,8 +460,6 @@ test "compaction pressure anchors only usage of the selected replay recipe acros
             const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(base));
             try settleCompactionForTesting(storage, tmp, base, &.{.compaction});
-            // This usage measures the newly selected base, unlike the usage of
-            // the compaction request which produced it.
             const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try answer(storage, tmp, successor, saved_usage);
         }
@@ -505,8 +475,6 @@ test "compaction pressure anchors only usage of the selected replay recipe acros
                         try store_testing.testingStore(store_case, &storage, &tmp, std.testing.io);
                         defer storage.close() catch unreachable;
                         const session = try configureTestSession(&storage, "config");
-                        // First visit: start in B, then visit A once. Return:
-                        // start in A, visit B, then switch back to A.
                         try model(&storage, session.slice(), "seed-model", if (returning) "model-a" else "model-b", "1000000");
                         try submitTestMessage(&storage, &tmp, "seed", "seed", session.slice(), "original");
                         const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -529,9 +497,6 @@ test "compaction pressure anchors only usage of the selected replay recipe acros
                         try model(&storage, session.slice(), "requested-a", "model-a", "1000");
                         try submitTestMessage(&storage, &tmp, "next", "next", session.slice(), "next");
                         const compacts = base != .compatible and !(base == .none and returning and saved_usage);
-                        // Both public readers of pressure must agree. In the
-                        // A-base -> B-base -> A case, the restored large prefix
-                        // cannot be hidden behind A's compact-recipe usage.
                         const estimate = (try testingContextEstimate(&storage, &tmp, session.slice())).?;
                         try std.testing.expectEqual(compacts, estimate >= 1000);
                         const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -839,7 +804,6 @@ test "compaction repeated overflow consumes fixed pending prefix without a proac
                     const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                     try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
                     const assistant = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-                    // A new bound input after the base makes another recovery necessary.
                     try submitTestMessage(&storage, &tmp, "two", "two", session.slice(), "bound suffix");
                     try settleCompactionForTesting(&storage, &tmp, assistant, &.{.reasoning});
                     const suffix = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -1023,8 +987,6 @@ test "each compaction that succeeds is one compacted row, with the entries its f
             const session = (try storage.configure(&create, .{})).accepted.session;
             var request: protocol.ActivityPage = .{ .kinds = .initOne(.compacted) };
             try request.session.set(session.slice());
-            // model-a's levels aim at 512,000, 128,000 and 32,000 bytes:
-            // level 1 drops the 600 KB Message and keeps the first and last.
             const big = try std.testing.allocator.alloc(u8, 600_000);
             defer std.testing.allocator.free(big);
             @memset(big, 'b');
@@ -1035,12 +997,8 @@ test "each compaction that succeeds is one compacted row, with the entries its f
             try storage.settleModelAttemptFailure(call, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
             const full = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try storage.settleModelAttemptFailure(full, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
-            // An overflowed compaction has no row.
             try std.testing.expectEqual(@as(usize, 0), (try store_core.activityPageForTesting(&storage, request)).count);
             const room = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            // A poll while the compaction runs reads a frozen end past its
-            // admission; the row then takes a later position, so that
-            // prefix never gains it and a poll from its end finds it.
             const frozen = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 0), frozen.count);
             try settleCompactionForTesting(&storage, &tmp, room, &.{.compaction});
@@ -1052,7 +1010,6 @@ test "each compaction that succeeds is one compacted row, with the entries its f
             const followed = try store_core.activityPageForTesting(&storage, follow);
             try std.testing.expectEqual(@as(usize, 1), followed.count);
             try std.testing.expectEqual(room.operation_id, followed.items[0].value.compacted.operation);
-            // A later compaction without a floor drops nothing.
             try submitTestMessage(&storage, &tmp, "compacted-again", "compacted-again", session.slice(), "again");
             const again = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try storage.settleModelAttemptFailure(again, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});

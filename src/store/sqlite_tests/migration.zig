@@ -1,5 +1,3 @@
-//! Migration SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
@@ -62,7 +60,6 @@ test "a Store at the migration baseline with its rows takes every migration at o
         try std.testing.expectEqual(store_schema.schema_version, try sqlite.pragmaInt(raw, "PRAGMA user_version"));
         try writeRows(raw, &migrated_rows.writer);
     }
-    // Format 54 draws each migrated Store its own id.
     try std.testing.expect(!std.mem.eql(u8, &try storeId(migrated), &try storeId(fresh)));
     {
         const raw = try openRaw(fresh);
@@ -74,7 +71,6 @@ test "a Store at the migration baseline with its rows takes every migration at o
 }
 
 test "schema 74 migration deletes a populated Store's wire label, whatever it reads, and preserves its rows" {
-    // Format 73 Stores saved wire 16; an unknown label migrates the same way.
     for ([_][]const u8{ "16", "unknown-label" }) |label| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -101,7 +97,6 @@ test "schema 74 migration deletes a populated Store's wire label, whatever it re
             try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'", .{}));
         }
         const original_id = try storeId(path);
-        // The first open migrates; the second opens the current format with no label.
         for (0..2) |_| {
             var storage: Store = undefined;
             try storage.open(std.testing.io, path, root);
@@ -228,7 +223,6 @@ test "schema 66 migration freezes actual effort emission and prior admitted fall
         const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
         var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buffer, "{s}/effort-65.sqlite3", .{root});
-        // These cases exercise the schema 65 -> 66 effort migration.
         const previous: u32 = 65;
         {
             const raw = try openRaw(path);
@@ -249,8 +243,6 @@ test "schema 66 migration freezes actual effort emission and prior admitted fall
             try sqlite.bindText(meta, 2, std.fmt.comptimePrint("{d}", .{previous}));
             try sqlite.expectDone(meta);
         }
-        // Actual current emission differs from the previous Operation's value
-        // comparison after a base. Both facts must survive migration/reopen.
         for (0..2) |_| {
             var storage: Store = undefined;
             try storage.open(std.testing.io, path, root);
@@ -263,8 +255,6 @@ test "schema 66 migration freezes actual effort emission and prior admitted fall
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=101 AND previous_reasoning_effort='high' AND effort_source_revision=?1 AND effort_update=?2 AND resolution_code IS NULL", .{ source, @intFromBool(emitted) }));
             if (choice == .legacy_new_choice) {
                 if (try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE field='reasoning_effort_refused'", .{}) == 0) {
-                    // The newer legacy raw choice already existed when this
-                    // earlier source was refused. Source identity is immutable.
                     try store_testing.exec(&storage, "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at,provider_text,refused_operation_id) VALUES('d8mv7p',30,0,2,'reasoning_effort_refused',1793781802,'refused',99)", .{});
                 }
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session s WHERE session_ref='d8mv7p' AND " ++ configuration_domain.reasoningEffortOverrideSql("s") ++ "='xhigh'", .{}));
@@ -282,7 +272,6 @@ test "the previous Store format preserves change rows and admits bounded effort 
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buffer, "{s}/previous.sqlite3", .{root});
-    // Exercise the schema 65 -> 66 effort migration before later steps.
     const previous: u32 = 65;
     {
         const raw = try openRaw(path);
@@ -290,7 +279,6 @@ test "the previous Store format preserves change rows and admits bounded effort 
         try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
         const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format',?3)");
         defer _ = c.sqlite3_finalize(meta);
-        // The base format uses released wire 12; exercise its forward update too.
         try sqlite.bindText(meta, 1, "12");
         try sqlite.bindText(meta, 2, root);
         try sqlite.bindText(meta, 3, std.fmt.comptimePrint("{d}", .{previous}));
@@ -300,7 +288,6 @@ test "the previous Store format preserves change rows and admits bounded effort 
         inline for (store_schema.migrations) |step| if (step.from < previous) {
             inline for (step.sqlite) |sql| try sqlite.exec(raw, sql ++ ";");
         };
-        // Populate the exact old shape before the format-66 step rebuilds it.
         try sqlite.exec(raw, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('effort-migration',1,'d8mv7p',zeroblob(32),1,'',2,0,100)");
         try sqlite.exec(raw, "INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,model,instructions_content_id,instructions_updated,tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label) " ++
             "SELECT session_ref,2,'effort-migration',workspace,provider,model,instructions_content_id,0,tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,'high',label FROM session_revision WHERE session_ref='d8mv7p' AND revision=1");
@@ -381,8 +368,6 @@ test "schema 57 refusal rows migrate to wire 10 without changing command identit
         try command.session.set(case.target);
         try command.sender.?.store.set(root);
         try command.sender.?.session.set("brhkcj");
-        // A historical refusal outlives its live sender handle. Its saved
-        // digest is the production request identity, not a normalized target.
         try command.sender_handle.?.set("00112233445566778899aabbccddeeff");
     }
     {
@@ -397,8 +382,6 @@ test "schema 57 refusal rows migrate to wire 10 without changing command identit
         }
         try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version=57;PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF", .{store_schema.application_id}));
         try store_testing.sqliteExec(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','9'),('store_selector',?1),('format','57')", .{root});
-        // These are historical addressed rejections, including an empty
-        // address. None asserts that creation was requested or refused.
         for (commands, Legacy.cases, 0..) |*command, case, index| {
             const digest = command.semanticDigest();
             try store_testing.sqliteExec(raw, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES(?1,2,?2,?3,0,?4,0,0,?5)", .{ case.key, case.target, store_testing.Blob{ .bytes = &digest }, @tagName(case.code), 1000 + index });
@@ -410,8 +393,6 @@ test "schema 57 refusal rows migrate to wire 10 without changing command identit
         try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value='9'", .{}));
         try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(raw, "SELECT count(*) FROM pragma_foreign_key_check"));
     }
-    // Both the migrating open and a subsequent current-format open use the
-    // production owner, including canonical schema and foreign-key checks.
     var sender: protocol.Bounded(protocol.max_session_bytes) = .{};
     try sender.set("brhkcj");
     const facts = try arena.create(protocol.ActivityFacts);
@@ -478,8 +459,6 @@ test "schema 53 moves forward with loaded tools defaulting to NULL" {
         try sqlite.bindText(meta, 1, protocol.wire_version);
         try sqlite.bindText(meta, 2, root);
         try sqlite.expectDone(meta);
-        // Saved pre-T4a identities survive migration and must replay, not
-        // conflict. These golden digests use the old algorithm's bytes.
         try sqlite.exec(raw, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES" ++
             "('legacy-configure',1,'',X'e983bd4a7dce4a1ec777d065815928f654ac824dc57a57b397b8f78e7a4ede3a',0,'incomplete_initial_configuration',0,0,1000)," ++
             "('legacy-create-message',2,'',X'29da99db4ed9dcdf55128d1f956d9551106135b126ec23d2e97cc768618b8127',0,'incomplete_initial_configuration',0,0,1001)");
@@ -519,7 +498,6 @@ test "a migration whose step fails leaves its backup and the original Store read
     const store = try storeAtFormat(&tmp, &path_buffer, &root_buffer, 7);
     const backup_name = "store.backup";
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = backup_name, .data = "earlier" });
-    // Names that only begin like the copy's are someone else's.
     for ([_][]const u8{ "store.sqlite3.kept", "store.backup.saved", "store.backup-old" }) |kept| {
         try tmp.dir.writeFile(std.testing.io, .{ .sub_path = kept, .data = "kept" });
     }
@@ -543,7 +521,6 @@ test "a migration whose step fails leaves its backup and the original Store read
         try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session_revision"));
         try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM pragma_integrity_check WHERE integrity_check='ok'"));
     }
-    // A backup that cannot be written refuses the Store before any step runs.
     try tmp.dir.deleteFile(std.testing.io, backup_name);
     try tmp.dir.createDir(std.testing.io, backup_name, .default_dir);
     {
@@ -580,7 +557,6 @@ test "a Store at the maximum path backs itself up before a migration" {
     try std.testing.expect((try std.Io.Dir.cwd().statFile(io, backup, .{})).size > 0);
 }
 
-/// `object`'s CREATE text in the current schema.
 fn objectSql(comptime name: []const u8) [:0]const u8 {
     comptime {
         for (store_schema.objects(.sqlite)) |object| if (std.mem.eql(u8, object.name, name)) {
@@ -591,7 +567,6 @@ fn objectSql(comptime name: []const u8) [:0]const u8 {
     }
 }
 
-/// A current Store whose store_meta format reads `from`, with one Session.
 fn storeAtFormat(tmp: *std.testing.TmpDir, path_buffer: []u8, root_buffer: []u8, comptime from: u32) !struct { path: []const u8, root: []const u8 } {
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, root_buffer)];
     const path = try std.fmt.bufPrint(path_buffer, "{s}/store.sqlite3", .{root});
@@ -636,8 +611,6 @@ test "a migration that leaves other text than bootstrap's, or a broken reference
     var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const store = try storeAtFormat(&tmp, &path_buffer, &root_buffer, 7);
-    // SQLite splices an added column into the table's text, so the column
-    // bootstrap would write in place reads differently.
     const added = "ALTER TABLE session ADD COLUMN migration_probe INTEGER";
     const Case = struct { from: u32, statements: []const [:0]const u8, refusal: anyerror };
     const cases = [_]Case{

@@ -1,14 +1,3 @@
-//! A typed statement's arguments as MySQL literal text: an rsql
-//! `Template`'s parts, with each `Slot` written as a literal. Integers are
-//! decimal, booleans 0 or 1, bytes `X'hex'`, text and enum tags
-//! `_utf8mb4 X'hex' COLLATE utf8mb4_0900_bin`, and null `NULL`. Hex leaves
-//! nothing to escape, and the collation keeps a comparison of two literals
-//! binary, as a comparison of two columns is.
-//!
-//! `length` gives a statement's exact length before anything is written,
-//! so its caller knows whether it fits the open batch, or can frame a
-//! COM_QUERY for one it streams, and then `write` writes exactly that.
-//! Nothing is copied whole: `write` hex-encodes through the writer's buffer.
 const std = @import("std");
 const Bounded = @import("../bounded.zig").Bounded;
 const isBounded = @import("../bounded.zig").isBounded;
@@ -22,27 +11,19 @@ const bytes_head = "X'";
 const bytes_tail = "'";
 const null_text = "NULL";
 
-/// What a statement's slots other than its arguments take: the Access's
-/// second for `@now`, and the opening's served providers for `@served`.
 pub const Bound = struct {
     now: i64,
     served: *const provider_route.Routes,
 };
 
-/// An integer argument above the largest BIGINT, which SQLite also refuses
-/// to bind (`sqlite.bindU64`).
 pub const Error = error{IntegerOutOfRange};
 
-/// The length of `template` with `args` and `bound` in its slots, as
-/// `write` writes it.
 pub fn length(comptime template: rsql.Template, comptime Args: type, args: *const Args, bound: Bound) Error!usize {
     var total: usize = comptime partsLength(template);
     inline for (template.slots) |slot| total += try slotLength(Args, slot, args, bound);
     return total;
 }
 
-/// Writes `template` with its slots filled. `length` must have accepted
-/// the same values: an integer out of range is a programmer error here.
 pub fn write(comptime template: rsql.Template, comptime Args: type, args: *const Args, bound: Bound, w: *std.Io.Writer) std.Io.Writer.Error!void {
     try w.writeAll(template.parts[0]);
     inline for (template.slots, template.parts[1..]) |slot, part| {
@@ -51,18 +32,14 @@ pub fn write(comptime template: rsql.Template, comptime Args: type, args: *const
     }
 }
 
-/// The length of `n` bytes as `X'hex'`.
 pub fn bytesLength(n: usize) usize {
     return bytes_head.len + 2 * n + bytes_tail.len;
 }
 
-/// The length of `n` bytes of text as a literal.
 pub fn textLength(n: usize) usize {
     return text_head.len + 2 * n + text_tail.len;
 }
 
-/// `bytes` as hex digits, two per byte, with no quotes: what goes between
-/// the quotes of a literal, and what a content chunk streams.
 pub fn writeHex(w: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void {
     const digits = "0123456789abcdef";
     var chunk: [128]u8 = undefined;
@@ -112,8 +89,6 @@ fn writeSlot(comptime Args: type, comptime slot: rsql.Slot, args: *const Args, b
     }
 }
 
-/// The types `sqlite.bindValue` binds, each written as the literal of the
-/// value SQLite would bind.
 fn valueLength(comptime T: type, value: T) Error!usize {
     if (T == []const u8) return textLength(value.len);
     if (T == rsql.Positive) return std.fmt.count("{d}", .{value.get()});

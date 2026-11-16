@@ -1,5 +1,3 @@
-//! Mcp Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -88,8 +86,6 @@ test "MCP settlement saves one decoded presentation line or the tool name" {
                 errdefer std.debug.print("MCP arguments: {s}\n", .{line.arguments});
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE description=?1", .{line.expected}));
                 if (line.expected.len == 200) {
-                    // These projections must read the frozen row, not parse
-                    // the original arguments or shorten it to the Bash bound.
                     const page = try store_core.activityPageForTesting(&storage, .{ .session = session });
                     try std.testing.expectEqual(@as(usize, 1), page.call_activity.count);
                     try std.testing.expectEqualStrings(line.expected, page.call_activity.entries[0].presentation.description.?.slice());
@@ -152,8 +148,6 @@ test "saved MCP call lines survive all work reads pending, running and completed
         }
 
         fn reads(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, kind: []const u8, description: []const u8) !void {
-            // This compares the entire Current and Activity state, not just
-            // its kind. List and Message progress must project that same text.
             _ = try expectOneWork(storage, tmp, session, kind);
             var request: protocol.ActivityPage = .{};
             try request.session.set(session);
@@ -223,9 +217,6 @@ test "MCP read-only ordering uses frozen offers and admits read waves between wr
                 };
                 try settleCallsForTesting(&storage, &tmp, model, "read-only-calls", calls[0..pattern.reads.len]);
 
-                // Today's tool set now says the opposite. Admission must still
-                // follow each call's frozen offer, and both record identities
-                // must coexist rather than overwrite one another.
                 var changed_records = records;
                 var changed_digests = digests;
                 for (&changed_records, &changed_digests) |*record, *digest| {
@@ -247,7 +238,6 @@ test "MCP read-only ordering uses frozen offers and admits read waves between wr
                     try std.testing.expectEqual(record.read_only, saved_tool_set.records[index].read_only);
                     try std.testing.expectEqualSlices(u8, &digest, &saved_tool_set.digests[index]);
                 }
-                // Re-saving the original tool set reuses its set and records.
                 const sets = try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{});
                 try storage.saveHostToolSet(&host_tool_set);
                 try std.testing.expectEqual(sets, try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{}));
@@ -268,8 +258,6 @@ test "MCP read-only ordering uses frozen offers and admits read waves between wr
                         const selected = next.?;
                         try std.testing.expectEqual(ready[index].action_id, selected.action_id);
                         bindings[index] = (try storage.admitActionAttempt(selected, 1234, .{})).?.permit.binding;
-                        // A caller cannot bypass selection's barrier by holding
-                        // a later Action id and asking for admission directly.
                         for (ready[end..pattern.reads.len]) |blocked| {
                             try std.testing.expect((try storage.admitActionAttempt(blocked, 1234, .{})) == null);
                         }

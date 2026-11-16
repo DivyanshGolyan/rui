@@ -1,4 +1,3 @@
-//! The floating Palette drawing skill rows the composer's core built.
 const std = @import("std");
 const vxfw = @import("vaxis").vxfw;
 const Palette = @import("Palette.zig");
@@ -38,8 +37,6 @@ test "the Palette draws a /word's skill rows with their descriptions" {
     try std.testing.expectEqualStrings("/review  Review a change", rowText(surface, 1, &text));
     try std.testing.expect(surface.readCell(2, 1).style.reverse);
     try std.testing.expectEqual(surface.readCell(2, 1).style, surface.readCell(11, 1).style);
-    // Backing up to `/re` lists all three from the same page; descriptions
-    // start two columns past the widest name, `/rewrite`.
     shown = reads.shown(&rows, "please /re this", "please /re".len, 2, .{}, shown).?;
     const wider = try palette.widget().draw(ctx);
     try std.testing.expectEqual(@as(u16, 5), wider.size.height);

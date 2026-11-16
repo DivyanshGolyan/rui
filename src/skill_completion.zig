@@ -1,15 +1,8 @@
-//! Skill rows for the composer's list: the `/word` the caret is in, read by
-//! the rule the Host binds Message text with, the catalog's skills that
-//! word's name starts, and the edit Tab or Enter makes for a row. The text
-//! is the truth: a skill binds because its `/name` is in the sent text, so
-//! nothing here is kept beside the draft.
 const std = @import("std");
 const skill_reference = @import("skill_reference.zig");
 const slash_commands = @import("slash_commands.zig");
 const skill_suggestions = @import("skill_suggestions.zig");
 
-/// The `/word` the caret is in or ends: `draft[slash]` is its `/`, and
-/// `draft[slash + 1 .. end]` its name bytes, none while only `/` is typed.
 pub const Word = struct {
     slash: usize,
     end: usize,
@@ -19,12 +12,7 @@ pub const Word = struct {
     }
 };
 
-/// The `/word` around `caret`: a `/` where the Host's rule starts a
-/// reference, then name bytes up to the caret, through any name bytes after
-/// it. Null when the caret is in no such word.
 pub fn atCaret(draft: []const u8, caret: usize) ?Word {
-    // The rule reads only a word's own bytes and the byte before its `/`,
-    // so the caret's word is found near it, at any draft length.
     const References = skill_reference.References;
     const longest = @typeInfo(@FieldType(References, "name")).array.len;
     var start = caret;
@@ -38,21 +26,16 @@ pub fn atCaret(draft: []const u8, caret: usize) ?Word {
     while (end < draft.len and References.nameByte(draft[end])) : (end += 1) {
         if (end - start == longest) return null;
     }
-    // A name the Host would read as prose, as in `/re/file`, is no word.
     if (end < draft.len and !References.ends(draft[end])) return null;
     return .{ .slash = slash, .end = end };
 }
 
-/// The caret's `/word` a list row can fill: a skill reference, or the
-/// draft's first word, which names a command or a skill. A command line's
-/// later words are its arguments and belong to its parser.
 pub fn skillWordAt(draft: []const u8, caret: usize) ?Word {
     const word = atCaret(draft, caret) orelse return null;
     if (word.slash != 0 and slash_commands.conversation.draftOf(draft) == .command) return null;
     return word;
 }
 
-/// The longest name prefix the Host reads suggestions for.
 pub const max_prefix_bytes = 64;
 
 const Prefix = struct {
@@ -70,31 +53,17 @@ const Prefix = struct {
     }
 };
 
-/// A read for the shell's worker: the Host's `skill_suggestions` for
-/// `prefix`, in the conversation's scope (its Session's
-/// workspace). Its page or failure comes back numbered `read`. `prefix`
-/// borrows the `Reads` that asked.
 pub const Ask = struct { read: u64, prefix: []const u8 };
 
-/// The composer's suggestion reads: at most one in flight, and the page
-/// the latest useful answer held. Each read is numbered, so rows from
-/// another page are another list (`Shown.nextOf`'s source), which no key
-/// acts on until a frame draws it. Pages are the caller's allocation;
-/// every call that lets one go returns it to be freed.
 pub const Reads = struct {
     last: u64 = 0,
     pending: ?Numbered = null,
-    /// A name whose read failed: not asked again until the name changes.
     failed: ?Prefix = null,
     held: ?Held = null,
 
     const Numbered = struct { read: u64, prefix: Prefix };
     pub const Held = struct { read: u64, prefix: Prefix, page: skill_suggestions.Page };
 
-    /// The read `typed`, the caret word's name, needs, if any: none while
-    /// one runs, for a name the Host would refuse, after that name failed,
-    /// or while the held page answers `typed`: its own name, cut off or
-    /// not, or a longer one when it holds every skill its name matches.
     pub fn ask(self: *Reads, typed: []const u8) ?Ask {
         if (typed.len > max_prefix_bytes or self.pending != null) return null;
         if (self.failed) |*failed| if (std.mem.eql(u8, failed.slice(), typed)) return null;
@@ -105,10 +74,6 @@ pub const Reads = struct {
         return .{ .read = self.last, .prefix = self.pending.?.prefix.slice() };
     }
 
-    /// Read `read`'s page, for the caret word's name now, `typed` (null when
-    /// the caret is in no `/word`). It is held when it is the read in flight
-    /// and `typed` still starts with what it asked for; returns the page to
-    /// free: this one when stale, else the one it replaced.
     pub fn answer(self: *Reads, read: u64, page: skill_suggestions.Page, typed: ?[]const u8) ?skill_suggestions.Page {
         const pending = self.pending orelse return page;
         if (pending.read != read) return page;
@@ -121,7 +86,6 @@ pub const Reads = struct {
         return replaced;
     }
 
-    /// Read `read` failed; the held page stays.
     pub fn fail(self: *Reads, read: u64) void {
         const pending = self.pending orelse return;
         if (pending.read != read) return;
@@ -129,27 +93,17 @@ pub const Reads = struct {
         self.pending = null;
     }
 
-    /// A transport interruption left this read unanswered. Keep its prefix
-    /// retryable after Host reobservation, without dropping the held page.
     pub fn retry(self: *Reads, read: u64) void {
         const pending = self.pending orelse return;
         if (pending.read == read) self.pending = null;
     }
 
-    /// Another scope: nothing held or in flight counts. Returns the held
-    /// page to free.
     pub fn reset(self: *Reads) ?skill_suggestions.Page {
         const held = self.held;
         self.* = .{ .last = self.last };
         return if (held) |kept| kept.page else null;
     }
 
-    /// The Palette's rows for the draft at `revision`, with the caret at
-    /// `caret`, after `previous`. In the draft's first `/word`: the listed
-    /// commands its name starts, then the held page's skills it starts. In
-    /// a later `/word`: those skills alone. A new list for each page and
-    /// each word. Anywhere else, the command grammar's own list for the
-    /// draft, read against `context`. Null when nothing matches.
     pub fn shown(self: *const Reads, rows: *Rows, draft: []const u8, caret: usize, revision: u64, context: slash_commands.Context, previous: ?slash_commands.Shown) ?slash_commands.Shown {
         const word = skillWordAt(draft, caret) orelse {
             const source = if (context.model) |model| std.hash.Wyhash.hash(0, model) else 0;
@@ -159,16 +113,9 @@ pub const Reads = struct {
         const held = if (self.held) |*kept| (if (std.mem.startsWith(u8, typed, kept.prefix.slice())) kept else null) else null;
         const none: skill_suggestions.Page = .{};
         const page = if (held) |kept| &kept.page else &none;
-        // What the rows come from besides the draft: the caret's word and
-        // the page read for it. The held read, else none, in the high half;
-        // one past the word's `/` in the low. A draft holds far fewer than
-        // 2^32 bytes.
         const source = ((if (held) |kept| kept.read else 0) << 32) | (@as(u32, @intCast(word.slash)) + 1);
         const skills = rows.list(typed, page);
         if (word.slash != 0) return slash_commands.Shown.nextOf(previous, revision, source, skills);
-        // Both kinds of row start the one name the caret's word holds. A
-        // command owns its name, listed or not, so a skill of that name
-        // could never be sent from here and is left out.
         var listed = slash_commands.conversation.starting(typed);
         if (skills) |found| for (found.shown()) |entry| {
             if (slash_commands.conversation.nameOf(std.mem.trimEnd(u8, entry.word, " ")) != null) continue;
@@ -180,13 +127,9 @@ pub const Reads = struct {
     }
 };
 
-/// Each skill row's text, `/name `: a row shows `/name` and completes
-/// `name `. Held here, at one address, so a list can borrow it.
 pub const Rows = struct {
     text: [slash_commands.List.capacity][1 + 64 + 1]u8 = undefined,
 
-    /// The rows for a word whose name is `typed`: the held page's skills
-    /// `typed` starts, as many as the list holds. Null when nothing matches.
     pub fn list(self: *Rows, typed: []const u8, page: *const skill_suggestions.Page) ?slash_commands.List {
         var rows: slash_commands.List = .{ .typed = typed };
         for (page.entries) |entry| {
@@ -208,35 +151,23 @@ pub const Rows = struct {
     }
 };
 
-/// What Tab or Enter does to the draft.
 pub const Replacement = struct { start: usize, end: usize, text: []const u8 };
 
-/// `entry`'s word in place of the name in the caret's word, with the space
-/// after it only at the draft's end, where typing goes on.
 pub fn complete(draft: []const u8, word: Word, entry: slash_commands.Entry) Replacement {
     const text = if (word.end == draft.len) entry.word else std.mem.trimEnd(u8, entry.word, " ");
     return .{ .start = word.slash + 1, .end = word.end, .text = text };
 }
 
-/// What Tab does with `shown`'s highlighted row, built for `draft` with
-/// the caret at `caret`: the row's word in place of the caret's `/word`
-/// name, else, for a command's later word, the rest of the row's word at
-/// the draft's end.
 pub fn edit(draft: []const u8, caret: usize, shown: *const slash_commands.Shown) Replacement {
     if (skillWordAt(draft, caret)) |word| return complete(draft, word, shown.list.entries[shown.highlight]);
     return .{ .start = draft.len, .end = draft.len, .text = shown.completion() };
 }
 
-/// What Enter, or a click, does with `shown`'s highlighted row.
 pub const Taken = union(enum) {
-    /// Add these bytes at the draft's end, then run the line as a command.
     run: []const u8,
-    /// Put the row's word in, for the next word or Enter.
     edit: Replacement,
 };
 
-/// A row runs only where its word ends the draft, so the line it runs is
-/// the line the person sees; in the middle of a draft it only fills in.
 pub fn enter(draft: []const u8, caret: usize, shown: *const slash_commands.Shown) Taken {
     const taken = shown.list.enter(shown.highlight);
     const ends = if (skillWordAt(draft, caret)) |word| word.end == draft.len else true;
@@ -253,17 +184,13 @@ fn expectWord(draft: []const u8, caret: usize, expected: ?[]const u8) !void {
 
 test "skill completion finds the /word the caret is in by the Host's rule" {
     try expectWord("use /re on it", "use /re".len, "re");
-    // Mid-word, the whole name counts, not only the bytes before the caret.
     try expectWord("use /re on it", "use /r".len, "re");
     try expectWord("use /re on it", "use /".len, "re");
     try expectWord("hi /", 4, "");
     try expectWord("(/re", 4, "re");
     try expectWord("/st", 3, "st");
-    // Glued to other text, a path, a doubled slash, or before the slash.
     try expectWord("a/re", 4, null);
     try expectWord("/tmp/x", 6, null);
-    // A name followed by a byte the Host does not end a reference with is
-    // prose, wherever the caret is in it.
     try expectWord("use /re/file", "use /re".len, null);
     try expectWord("use /re/file", "use /r".len, null);
     try expectWord("use /re_name", "use /re".len, null);
@@ -275,8 +202,6 @@ test "skill completion finds the /word the caret is in by the Host's rule" {
 }
 
 test "skill completion agrees with the Host on every name the Host binds" {
-    // Every draft over these bytes up to five long: where the Host's
-    // scanner reports a name, the caret at that name's end finds it.
     const alphabet = "/a- (.x";
     var draft: [5]u8 = undefined;
     for (1..draft.len + 1) |len| {
@@ -353,8 +278,6 @@ test "skills do not replace a command argument or invent an argument list" {
 }
 
 test "leading skill collisions use the complete grammar including hidden commands" {
-    // Independent command-domain oracle: the two recovery actions are grammar,
-    // even though neither is a row in the slash list.
     const names = [_][]const u8{ "archive", "clear", "copy", "discard", "effort", "model", "new", "pin", "recover", "reload-skills", "rename", "requests", "result", "setup", "unarchive", "unpin" };
     var entries: [names.len]skill_suggestions.Entry = undefined;
     for (names, &entries) |name, *entry| entry.* = .{ .name = name, .description = "Colliding skill" };
@@ -363,7 +286,6 @@ test "leading skill collisions use the complete grammar including hidden command
     _ = reads.answer(reads.ask("").?.read, testPage(&entries), "");
     for (names) |name| {
         try std.testing.expect(slash_commands.conversation.nameOf(name) != null);
-        // Every prefix, including the empty slash list and exact hidden names.
         for (0..name.len + 1) |length| {
             var buffer: [80]u8 = undefined;
             const draft = try std.fmt.bufPrint(&buffer, "/{s}", .{name[0..length]});
@@ -378,7 +300,6 @@ test "leading skill collisions use the complete grammar including hidden command
                 try std.testing.expect(!std.mem.eql(u8, entry.description, "Colliding skill"));
             };
         }
-        // The same name inside a Message belongs to skills, not local commands.
         var buffer: [80]u8 = undefined;
         const inline_draft = try std.fmt.bufPrint(&buffer, "use /{s}", .{name});
         const inline_rows = reads.shown(&rows, inline_draft, inline_draft.len, 1, .{}, null).?.list;
@@ -386,8 +307,6 @@ test "leading skill collisions use the complete grammar including hidden command
         try std.testing.expectEqualStrings("Colliding skill", inline_rows.entries[0].description);
         try std.testing.expect(!inline_rows.entries[0].runs);
     }
-    // Similar spellings are not reserved just because a visible command shares
-    // a prefix. Only exact names in the grammar take precedence.
     const lookalikes = [_]skill_suggestions.Entry{
         .{ .name = "discarded", .description = "Skill" },
         .{ .name = "recovering", .description = "Skill" },
@@ -453,7 +372,6 @@ test "a caret moved to another /word is another list, which no key takes until d
     var first = reads.shown(&rows, draft, "a /re".len, 7, .{}, null).?;
     first.highlight = 1;
     first.drew(true);
-    // Same draft, same revision: only the caret moved.
     const second = reads.shown(&rows, draft, draft.len, 7, .{}, first).?;
     try std.testing.expectEqual(@as(usize, 0), second.highlight);
     try std.testing.expectEqual(.hidden, second.seen);
@@ -492,8 +410,6 @@ test "every list row starts the word the list was built for, at every caret of e
             for (0..shown.list.count) |row| {
                 shown.highlight = row;
                 const entry = shown.list.entries[row];
-                // The one prefix every row completes; a row never slices
-                // past its own word.
                 try std.testing.expect(std.mem.startsWith(u8, entry.word, shown.list.typed));
                 var buffer: [96]u8 = undefined;
                 const after = switch (enter(draft, caret, &shown)) {
@@ -501,8 +417,6 @@ test "every list row starts the word the list was built for, at every caret of e
                     .edit => |change| try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{ draft[0..change.start], change.text, draft[change.end..] }),
                 };
                 switch (enter(draft, caret, &shown)) {
-                    // A row runs only the line the person then sees whole:
-                    // a command line ending in that row's word.
                     .run => {
                         try std.testing.expect(entry.runs);
                         try std.testing.expectEqual(slash_commands.conversation.Draft.command, slash_commands.conversation.draftOf(after));
@@ -534,14 +448,11 @@ test "a list stays the drawn one only while its rows are the same, across every 
         }
         for (drafts) |draft| {
             for (0..draft.len + 1) |from| {
-                // A frame drew the list for the caret at `from`.
                 var drawn = reads.shown(&rows, draft, from, 1, .{ .model = "gpt-5.5" }, null) orelse continue;
                 drawn.drew(true);
                 for (0..draft.len + 1) |to| {
-                    // The caret moves; the draft and its revision do not.
                     const next = reads.shown(&other, draft, to, 1, .{ .model = "gpt-5.5" }, drawn) orelse continue;
                     if (next.seen != .drawn) continue;
-                    // Enter and a click act on it, so it is the list drawn.
                     try std.testing.expectEqual(drawn.source, next.source);
                     try std.testing.expectEqualStrings(drawn.list.typed, next.list.typed);
                     try std.testing.expectEqual(drawn.list.count, next.list.count);
@@ -561,12 +472,10 @@ test "Enter runs a row only where its word ends the draft" {
     var reads: Reads = .{};
     var rows: Rows = .{};
     _ = reads.answer(reads.ask("").?.read, testPage(&entries), "");
-    // The first word alone: the command row runs, the skill row fills in.
     var lone = reads.shown(&rows, "/arch", 5, 1, .{}, null).?;
     try std.testing.expectEqualStrings("ive", enter("/arch", 5, &lone).run);
     lone.highlight = 1;
     try expectReplacement(.{ .start = 1, .end = 5, .text = "archx " }, enter("/arch", 5, &lone).edit);
-    // Text after the word: the same rows only fill the word in.
     for ([_][]const u8{ "/arch this change", "/arch.foo" }) |draft| {
         var shown = reads.shown(&rows, draft, 5, 1, .{}, null).?;
         try std.testing.expectEqual(@as(usize, 2), shown.list.count);
@@ -574,7 +483,6 @@ test "Enter runs a row only where its word ends the draft" {
         shown.highlight = 1;
         try expectReplacement(.{ .start = 1, .end = 5, .text = "archx" }, enter(draft, 5, &shown).edit);
     }
-    // A command's choice ends the draft and runs.
     const copy = reads.shown(&rows, "/copy c", 7, 1, .{}, null).?;
     try std.testing.expectEqualStrings("ode", enter("/copy c", 7, &copy).run);
 }
@@ -589,22 +497,15 @@ test "skill reads ask once per name, one at a time, and not while the held page 
     const first = reads.ask("re").?;
     try std.testing.expectEqual(@as(u64, 1), first.read);
     try std.testing.expectEqualStrings("re", first.prefix);
-    // One read at a time: typing on waits for its answer.
     try std.testing.expectEqual(@as(?Ask, null), reads.ask("rev"));
     try std.testing.expectEqual(@as(?skill_suggestions.Page, null), reads.answer(1, testPage(&entries), "rev"));
-    // The whole catalog under `re` is held, so narrowing reads nothing.
     try std.testing.expectEqual(@as(?Ask, null), reads.ask("rev"));
     try std.testing.expectEqual(@as(?Ask, null), reads.ask("re"));
-    // A shorter name, or a page that left matches out, reads again.
     try std.testing.expectEqual(@as(u64, 2), reads.ask("r").?.read);
     const replaced = reads.answer(2, .{ .entries = entries[0..1], .total = 30 }, "r").?;
     try std.testing.expectEqual(@as(usize, 2), replaced.entries.len);
-    // Cut off at the Host's row limit, it still answers its own name: a
-    // caret resting on `/r` reads nothing more.
     try std.testing.expectEqual(@as(?Ask, null), reads.ask("r"));
-    // It may leave out skills a longer name matches: `/rev` reads again.
     try std.testing.expectEqual(@as(u64, 3), reads.ask("rev").?.read);
-    // A name longer than the Host reads asks nothing.
     var fresh: Reads = .{};
     try std.testing.expectEqual(@as(?Ask, null), fresh.ask(&@as([max_prefix_bytes + 1]u8, @splat('a'))));
     try std.testing.expect(fresh.ask(&@as([max_prefix_bytes]u8, @splat('a'))) != null);
@@ -614,16 +515,11 @@ test "skill reads drop an answer the word moved past, or one a reset left behind
     const entries = [_]skill_suggestions.Entry{.{ .name = "review", .description = "" }};
     var reads: Reads = .{};
     _ = reads.ask("re").?;
-    // The person typed another word while the read ran: its page answers
-    // nothing now, so it comes back to be freed and the new word reads.
     const moved = reads.answer(1, testPage(&entries), "x").?;
     try std.testing.expectEqual(@as(usize, 1), moved.entries.len);
     try std.testing.expectEqual(@as(?Reads.Held, null), reads.held);
     try std.testing.expectEqual(@as(u64, 2), reads.ask("x").?.read);
-    // The caret left every `/word`: nothing to answer.
     try std.testing.expect(reads.answer(2, testPage(&entries), null) != null);
-    // Another scope (a Session switched) resets; the earlier scope's
-    // answer, arriving while the new scope's read runs, is dropped.
     _ = reads.ask("re").?;
     try std.testing.expectEqual(@as(?skill_suggestions.Page, null), reads.reset());
     try std.testing.expectEqual(@as(u64, 4), reads.ask("re").?.read);
@@ -639,7 +535,6 @@ test "a failed skill read is not asked again for the same name" {
     reads.fail(1);
     try std.testing.expectEqual(@as(?Ask, null), reads.ask("re"));
     try std.testing.expectEqual(@as(u64, 2), reads.ask("rev").?.read);
-    // A failure of a read no longer asked for changes nothing.
     reads.fail(1);
     try std.testing.expectEqual(@as(?Ask, null), reads.ask("rev"));
 }
@@ -649,7 +544,6 @@ test "skill rows are the held page's, numbered by the read that made them" {
     var reads: Reads = .{};
     var rows: Rows = .{};
     const draft = "use /re";
-    // No page yet, and a word past the draft's start lists no commands.
     try std.testing.expectEqual(@as(?slash_commands.Shown, null), reads.shown(&rows, draft, draft.len, 1, .{}, null));
     _ = reads.ask("re").?;
     _ = reads.answer(1, testPage(&entries), "re");
@@ -658,8 +552,6 @@ test "skill rows are the held page's, numbered by the read that made them" {
     try std.testing.expect(shown.source != 0);
     try std.testing.expectEqual(.hidden, shown.seen);
     try std.testing.expectEqualStrings("/review", shown.list.entries[1].shown);
-    // The caret in no `/word` shows nothing; the draft's first word lists
-    // only its commands.
     try std.testing.expectEqual(@as(?slash_commands.Shown, null), reads.shown(&rows, "use it", 3, 2, .{}, null));
     const commands = slash_commands.conversation.suggest("/rel", .{}).?;
     const start = reads.shown(&rows, "/rel", 4, 3, .{}, null).?;
@@ -680,7 +572,7 @@ test "a transport-interrupted skills read is retryable without discarding the he
         if (stale) reads.retry(pending.read);
         const next = reads.ask("re").?;
         try std.testing.expect(next.read > pending.read);
-        reads.fail(next.read); // Local failure still suppresses the same prefix.
+        reads.fail(next.read);
         try std.testing.expect(reads.ask("re") == null);
     }
 }

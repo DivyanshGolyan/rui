@@ -1,13 +1,10 @@
-//! Start failures as owned values, independent of document intake and I/O.
 const std = @import("std");
 const bounded = @import("bounded.zig");
 
 pub const max_refusal_message_bytes = 256;
-/// Every diagnostic byte may need a six-byte JSON escape.
 pub const max_line_bytes = 6 * max_refusal_message_bytes + 128;
 pub const Store = enum { sqlite, mysql };
 
-/// A refusal at open, as `RuiStartError.code` names it (D136).
 pub const StartError = enum {
     settings_invalid,
     invalid_preset,
@@ -27,12 +24,10 @@ pub const StartError = enum {
     tool_name_collision,
 };
 
-/// Owns its message, including formatted startup scratch, across copies.
 pub const Failure = struct {
     code: StartError,
     message: bounded.Bounded(max_refusal_message_bytes),
 
-    /// Producers supply bounded UTF-8 diagnostics, never secrets or server text.
     pub fn init(code: StartError, message: []const u8) Failure {
         var failure: Failure = .{ .code = code, .message = .{ .len = 0 } };
         failure.message.set(message) catch unreachable;
@@ -40,9 +35,6 @@ pub const Failure = struct {
     }
 };
 
-/// Parse the same bounded line this owner writes. Unrelated startup output,
-/// partial lines and unknown future codes are not refusals. The result owns
-/// its bytes; neither the input nor the temporary parser arena escapes.
 pub fn parseLine(gpa: std.mem.Allocator, bytes: []const u8) error{OutOfMemory}!?Failure {
     if (bytes.len > max_line_bytes or !std.mem.endsWith(u8, bytes, "\n")) return null;
     const Envelope = struct { rui_start_error: struct { code: StartError, message: []const u8 } };
@@ -74,7 +66,6 @@ test "start report parser round trips every code and rejects incomplete or forei
     }) |bytes| try std.testing.expectEqual(null, try parseLine(std.testing.allocator, bytes));
 }
 
-/// Renders into caller-owned storage; the returned slice borrows that buffer.
 pub fn line(failure: *const Failure, buffer: *[max_line_bytes]u8) []const u8 {
     var out = std.Io.Writer.fixed(buffer);
     out.writeAll("{\"rui_start_error\":{\"code\":\"") catch unreachable;
@@ -85,7 +76,6 @@ pub fn line(failure: *const Failure, buffer: *[max_line_bytes]u8) []const u8 {
     return out.buffered();
 }
 
-/// Only static messages cross the refusal boundary: never server text or URL.
 pub fn classify(store: Store, err: anyerror) ?Failure {
     if (store == .mysql) if (mysqlRefusal(err)) |refusal| return refusal;
     return switch (err) {
@@ -234,7 +224,6 @@ test "start report preserves JSON escaping and the maximum message" {
     const escaped: Failure = .init(.invalid_preset, "preset \"x\"\\\n\t\r\x00: café");
     var buffer: [max_line_bytes]u8 = undefined;
     try std.testing.expectEqualStrings("{\"rui_start_error\":{\"code\":\"invalid_preset\",\"message\":\"preset \\\"x\\\"\\\\\\n\\t\\r\\u0000: café\"}}\n", line(&escaped, &buffer));
-    // Every byte needs the longest JSON escape, with the longest code.
     const full: Failure = .init(.durability_innodb_flush_log_at_trx_commit, &@as([max_refusal_message_bytes]u8, @splat(0)));
     const rendered = line(&full, &buffer);
     const prefix = "{\"rui_start_error\":{\"code\":\"durability_innodb_flush_log_at_trx_commit\",\"message\":\"";
@@ -243,7 +232,6 @@ test "start report preserves JSON escaping and the maximum message" {
     for (0..max_refusal_message_bytes) |i| try std.testing.expectEqualStrings("\\u0000", rendered[prefix.len + 6 * i ..][0..6]);
 }
 
-// Independent expectations from the original startup classifier at the merge.
 test "start report classifier preserves every refusal code and message byte" {
     const cases = .{
         .{ error.StoreAlreadyOwned, StartError.store_locked, "another Host owns this Store", false },

@@ -93,7 +93,6 @@ test "MCP ask approval uses the frozen server after its Session offer changes" {
     allow.session = session;
     try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
     try std.testing.expectEqual(action, (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.mcp.action_id);
-    // The dispatch loop's work read names the same call, as MCP work alone.
     const work = try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true });
     try std.testing.expect(work.mcp and !work.core);
 }

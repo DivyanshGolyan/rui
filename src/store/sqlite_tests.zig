@@ -1,8 +1,3 @@
-//! Shared fixtures for the SQLite mechanism tests under sqlite_tests/.
-//! Those tests observe VM steps, statement caches, engine passes, blob
-//! handles, PRAGMAs, the schema catalog or engine-specific raw SQL.
-//! tests.zig and tests/ hold the fixtures and tests every engine runs.
-
 const tests = @import("tests.zig");
 const std = @import("std");
 const named_scratch = @import("../named_scratch.zig");
@@ -147,7 +142,6 @@ const touchForTesting = tests.touchForTesting;
 const hostToolRecordsWith = store_testing.hostToolRecordsWith;
 const sortHostToolRecords = store_testing.sortHostToolRecords;
 
-/// A tool set with one tool beyond the built-ins, between them by name.
 const testing_record: tool_defs.Record = .{ .name = "test_tool", .owner = .rui, .description = "A tool only tests offer.", .input_schema = "{\"type\":\"object\"}" };
 const testing_records = hostToolRecordsWith(&.{testing_record});
 const testing_digests = blk: {
@@ -186,8 +180,6 @@ pub fn createMaximumCanonicalStore(tmp: *std.testing.TmpDir, path_buffer: []u8) 
     return path;
 }
 
-/// Test aid: statements left mid-step. Cached statements are reset and idle;
-/// read blobs must close before the Store entry point returns.
 pub fn busyStatements(database: *c.sqlite3) usize {
     var count: usize = 0;
     var statement = c.sqlite3_next_stmt(database, null);
@@ -197,9 +189,6 @@ pub fn busyStatements(database: *c.sqlite3) usize {
     return count;
 }
 
-/// Counts SQLite VM steps from `begin` to `end`. Preparing a statement also
-/// steps, so measure a call only after the same call prepared its
-/// statements.
 pub const TestingSteps = struct {
     steps: u64 = 0,
 
@@ -220,10 +209,7 @@ pub const TestingSteps = struct {
 
 pub const TestingStatementFault = store_testing.TestingStatementFault;
 
-/// Every claimed Session position is used exactly once: the claims, from
-/// every table that saves one, are exactly 1 through `next_position - 1`.
 pub fn expectDenseSessionPositions(storage: *Store, session: []const u8) !void {
-    // Each compound keeps within the Store's four-term limit.
     const statement = try sqlite.prepare(storage.sqliteDatabase(), "WITH messages(position) AS (" ++
         "SELECT admission_position FROM message_admission WHERE session_ref=?1 AND admission_position IS NOT NULL " ++
         "UNION ALL SELECT sender_position FROM message_admission WHERE sender_session_ref=?1 " ++
@@ -252,8 +238,6 @@ pub fn expectDenseSessionPositions(storage: *Store, session: []const u8) !void {
 
 pub const ConstraintProbe = enum { accepted, check_violation, other_failure };
 
-/// Runs one write inside a rolled-back savepoint and reports whether SQLite
-/// accepted it or rejected it on a CHECK rather than another constraint.
 pub fn probeConstraint(database: *c.sqlite3, sql: [:0]const u8) !ConstraintProbe {
     try sqlite.exec(database, "SAVEPOINT constraint_probe");
     defer sqlite.exec(database, "ROLLBACK TO constraint_probe; RELEASE constraint_probe") catch unreachable;
@@ -306,8 +290,6 @@ pub fn expectModelRevisions(storage: *Store, session: []const u8, phase: []const
     }
 }
 
-/// Gives `session` Bash, has its model propose two calls, and attempts
-/// the first; the second stays unattempted.
 pub fn attemptBashForTesting(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8) !ActionAttemptBinding {
     var tools: wire_request.ConfigureCommand = .{};
     try tools.key.set("bash-tools");
@@ -321,8 +303,6 @@ pub fn attemptBashForTesting(storage: *Store, tmp: *std.testing.TmpDir, session:
     return (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
 }
 
-/// Counts the statements the Store starts from `begin` to `end`: not a
-/// trigger's program, nor the test-only touch oracle's read.
 pub const TestingStatements = struct {
     count: u64 = 0,
 
@@ -342,7 +322,6 @@ pub const TestingStatements = struct {
     }
 };
 
-/// The Store id store_meta holds in the database at `path`.
 pub fn storeId(path: []const u8) ![2 * store_schema.store_id_bytes]u8 {
     const raw = try openRaw(path);
     defer _ = c.sqlite3_close(raw);
@@ -355,8 +334,6 @@ pub fn storeId(path: []const u8) ![2 * store_schema.store_id_bytes]u8 {
     return id[0 .. 2 * store_schema.store_id_bytes].*;
 }
 
-/// The statements and VM steps the Store's statements ran since the last
-/// call, without the test-only touch oracle's.
 pub fn statementWorkSince(database: *c.sqlite3) [2]i64 {
     var work: [2]i64 = .{ 0, 0 };
     var statement = c.sqlite3_next_stmt(database, null);
@@ -370,8 +347,6 @@ pub fn statementWorkSince(database: *c.sqlite3) [2]i64 {
     return work;
 }
 
-/// How many times the Store has run the cached statement whose text is
-/// `sql` on this connection.
 pub fn runsOf(database: *c.sqlite3, sql: []const u8) i64 {
     var statement = c.sqlite3_next_stmt(database, null);
     while (statement) |each| : (statement = c.sqlite3_next_stmt(database, each)) {
@@ -390,8 +365,6 @@ pub fn openRaw(path: []const u8) !*c.sqlite3 {
     return raw.?;
 }
 
-/// Every SQLite table's rows but store_meta's, in key order: a line per
-/// row, and each value as its type and its bytes.
 pub fn writeRows(database: *c.sqlite3, out: *std.Io.Writer) !void {
     inline for (store_schema.tables) |table| {
         if (comptime std.mem.eql(u8, table.name, "store_meta") or !table.engines.on(.sqlite)) continue;
@@ -432,8 +405,6 @@ pub fn writeRows(database: *c.sqlite3, out: *std.Io.Writer) !void {
     }
 }
 
-/// A fresh Store at `path` that then gets `expected_rows`, which must meet
-/// its foreign keys, and opens once more.
 pub fn freshStoreWithExpectedRows(path: []const u8, root: []const u8) !void {
     var storage: Store = undefined;
     try storage.open(std.testing.io, path, root);
@@ -442,7 +413,6 @@ pub fn freshStoreWithExpectedRows(path: []const u8, root: []const u8) !void {
         const raw = try openRaw(path);
         defer _ = c.sqlite3_close(raw);
         try sqlite.exec(raw, "PRAGMA foreign_keys=OFF");
-        // The rows hold the tool set the open saved, under their own ids.
         try sqlite.exec(raw, "DELETE FROM host_tool_set; DELETE FROM tool_set_member; DELETE FROM tool_set; DELETE FROM tool_record; DELETE FROM content");
         try sqlite.exec(raw, store_testing.expected_rows);
         const violations = try sqlite.prepare(raw, "PRAGMA foreign_key_check");
@@ -453,7 +423,6 @@ pub fn freshStoreWithExpectedRows(path: []const u8, root: []const u8) !void {
     try storage.close();
 }
 
-/// The testing tool set with an MCP server's tool beside it.
 pub const mcp_record: tool_defs.Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page from the docs server.", .input_schema = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}}}" };
 pub const mcp_records = hostToolRecordsWith(&.{ mcp_record, testing_record });
 const mcp_digests = blk: {

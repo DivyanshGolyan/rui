@@ -1,6 +1,10 @@
 const std = @import("std");
 const core_boundary = @import("core_boundary.zig");
 
+/// Functional cores: decisions over values that their shells interpret.
+/// `core_boundary.zig` defines what a core may name; the test below checks
+/// each one listed here and runs its tests, and selector tests require each
+/// to select test-logic. Add entries in alphabetical order by path, ignoring case.
 const cores = .{
     .{ "action_control.zig", @import("action_control.zig") },
     .{ "action_read.zig", @import("action_read.zig") },
@@ -10,7 +14,6 @@ const cores = .{
     .{ "activity_facts.zig", @import("activity_facts.zig") },
     .{ "activity_read.zig", @import("activity_read.zig") },
     .{ "activity_reply.zig", @import("activity_reply.zig") },
-    .{ "chat_info_focus.zig", @import("chat_info_focus.zig") },
     .{ "app_input.zig", @import("app_input.zig") },
     .{ "attempt.zig", @import("attempt.zig") },
     .{ "attention.zig", @import("attention.zig") },
@@ -22,6 +25,7 @@ const cores = .{
     .{ "caller_error.zig", @import("caller_error.zig") },
     .{ "caller_exit.zig", @import("caller_exit.zig") },
     .{ "change_ring.zig", @import("change_ring.zig") },
+    .{ "chat_info_focus.zig", @import("chat_info_focus.zig") },
     .{ "chatgpt_plan_wire.zig", @import("chatgpt_plan_wire.zig") },
     .{ "cli_args.zig", @import("cli_args.zig") },
     .{ "cli_grammar.zig", @import("cli_grammar.zig") },
@@ -43,6 +47,7 @@ const cores = .{
     .{ "deadline.zig", @import("deadline.zig") },
     .{ "descriptor_capacity.zig", @import("descriptor_capacity.zig") },
     .{ "display_text.zig", @import("display_text.zig") },
+    .{ "download_policy.zig", @import("download_policy.zig") },
     .{ "draft_layout.zig", @import("draft_layout.zig") },
     .{ "endpoint_value.zig", @import("endpoint_value.zig") },
     .{ "environment.zig", @import("environment.zig") },
@@ -75,10 +80,10 @@ const cores = .{
     .{ "mcp/reply.zig", @import("mcp/reply.zig") },
     .{ "mcp/result_text.zig", @import("mcp/result_text.zig") },
     .{ "mcp/shape.zig", @import("mcp/shape.zig") },
+    .{ "memory_text.zig", @import("memory_text.zig") },
     .{ "message_admission.zig", @import("message_admission.zig") },
     .{ "message_agent_arguments.zig", @import("message_agent_arguments.zig") },
     .{ "message_observation.zig", @import("message_observation.zig") },
-    .{ "memory_text.zig", @import("memory_text.zig") },
     .{ "model_capability.zig", @import("model_capability.zig") },
     .{ "model_catalog.zig", @import("model_catalog.zig") },
     .{ "model_catalog_snapshot.zig", @import("model_catalog_snapshot.zig") },
@@ -102,18 +107,17 @@ const cores = .{
     .{ "provider_route.zig", @import("provider_route.zig") },
     .{ "provider_selection.zig", @import("provider_selection.zig") },
     .{ "queued_line.zig", @import("queued_line.zig") },
+    .{ "replay_recipe.zig", @import("replay_recipe.zig") },
     .{ "request_wait.zig", @import("request_wait.zig") },
     .{ "retention_capacity.zig", @import("retention_capacity.zig") },
-    .{ "replay_recipe.zig", @import("replay_recipe.zig") },
     .{ "retry_policy.zig", @import("retry_policy.zig") },
+    .{ "schema_json.zig", @import("schema_json.zig") },
     .{ "secret_value.zig", @import("secret_value.zig") },
     .{ "serve_grammar.zig", @import("serve_grammar.zig") },
     .{ "session_archive.zig", @import("session_archive.zig") },
     .{ "session_chrome.zig", @import("session_chrome.zig") },
-    .{ "schema_json.zig", @import("schema_json.zig") },
     .{ "session_consent.zig", @import("session_consent.zig") },
     .{ "session_departure.zig", @import("session_departure.zig") },
-    .{ "session_settings.zig", @import("session_settings.zig") },
     .{ "session_id.zig", @import("session_id.zig") },
     .{ "session_keys.zig", @import("session_keys.zig") },
     .{ "session_line.zig", @import("session_line.zig") },
@@ -121,9 +125,8 @@ const cores = .{
     .{ "session_notice.zig", @import("session_notice.zig") },
     .{ "session_pin.zig", @import("session_pin.zig") },
     .{ "session_reading.zig", @import("session_reading.zig") },
+    .{ "session_settings.zig", @import("session_settings.zig") },
     .{ "session_upgrade.zig", @import("session_upgrade.zig") },
-    .{ "upgrade_status.zig", @import("upgrade_status.zig") },
-    .{ "download_policy.zig", @import("download_policy.zig") },
     .{ "session_work.zig", @import("session_work.zig") },
     .{ "sign_in.zig", @import("sign_in.zig") },
     .{ "skill_completion.zig", @import("skill_completion.zig") },
@@ -135,19 +138,20 @@ const cores = .{
     .{ "store/engine/mysql_refusal.zig", @import("store/engine/mysql_refusal.zig") },
     .{ "store/wire/mysql.zig", @import("store/wire/mysql.zig") },
     .{ "store_id.zig", @import("store_id.zig") },
-    .{ "store_target.zig", @import("store_target.zig") },
     .{ "store_path.zig", @import("store_path.zig") },
+    .{ "store_target.zig", @import("store_target.zig") },
     .{ "submission_state.zig", @import("submission_state.zig") },
     .{ "TerminalText.zig", @import("TerminalText.zig") },
     .{ "theme.zig", @import("theme.zig") },
-    .{ "tool_name.zig", @import("tool_name.zig") },
     .{ "tool_fold.zig", @import("tool_fold.zig") },
+    .{ "tool_name.zig", @import("tool_name.zig") },
     .{ "tool_presentation.zig", @import("tool_presentation.zig") },
     .{ "tool_proposal.zig", @import("tool_proposal.zig") },
     .{ "tool_record.zig", @import("tool_record.zig") },
     .{ "transport_policy.zig", @import("transport_policy.zig") },
     .{ "turn_ending.zig", @import("turn_ending.zig") },
     .{ "turn_policy.zig", @import("turn_policy.zig") },
+    .{ "upgrade_status.zig", @import("upgrade_status.zig") },
     .{ "url.zig", @import("url") },
     .{ "utf8_validation.zig", @import("utf8_validation.zig") },
     .{ "ViewportPosition.zig", @import("ViewportPosition.zig") },
@@ -187,7 +191,16 @@ test {
 }
 
 test "functional cores stay within the core boundary" {
+    var previous: ?[]const u8 = null;
     inline for (cores) |core| {
+        if (previous) |path| {
+            if (std.ascii.orderIgnoreCase(path, core[0]) == .gt) {
+                std.debug.print("functional cores out of order: {s} before {s}; move {s} before {s}\n", .{ path, core[0], core[0], path });
+                return error.CoreOrderViolation;
+            }
+        }
+        previous = core[0];
+        // The checked source is the imported one.
         const path = comptime blk: {
             var name = @typeName(core[1]).*;
             std.mem.replaceScalar(u8, &name, '.', '/');
@@ -203,6 +216,8 @@ test "functional cores stay within the core boundary" {
     }
 }
 
+/// Every core as `importer` spells its import: relative within its own
+/// directory, else up to `src/` and down.
 fn importNames(comptime importer: []const u8) [cores.len][]const u8 {
     @setEvalBranchQuota(100_000);
     const directory = importer[0..if (std.mem.lastIndexOfScalar(u8, importer, '/')) |slash| slash + 1 else 0];
@@ -217,6 +232,7 @@ fn importNames(comptime importer: []const u8) [cores.len][]const u8 {
 }
 
 test "the HTTP/2 client's proxy logic stays within the core boundary" {
+    // A core of the self-contained h2 module, as its policy is.
     if (core_boundary.check(@embedFile("h2/proxy.zig"), &.{})) |violation| {
         std.debug.print("h2/proxy.zig:{d}: `{s}` is outside the core boundary; see src/core_boundary.zig\n", .{ violation.line, violation.text });
         return error.CoreBoundaryViolation;
@@ -224,6 +240,8 @@ test "the HTTP/2 client's proxy logic stays within the core boundary" {
 }
 
 test "the HTTP/2 client's policy stays within the core boundary" {
+    // A core of the self-contained h2 module: test-h2 runs its tests, and it
+    // may import no Rui core.
     if (core_boundary.check(@embedFile("h2/policy.zig"), &.{})) |violation| {
         std.debug.print("h2/policy.zig:{d}: `{s}` is outside the core boundary; see src/core_boundary.zig\n", .{ violation.line, violation.text });
         return error.CoreBoundaryViolation;
@@ -272,6 +290,8 @@ test "the overview core reads session list pages as the client decodes them" {
     try std.testing.expectEqualStrings("k7m2qx", &delegated.first.?.sender.?);
     try std.testing.expectEqual(@as(?u64, null), delegated.from_person_at);
 
+    // A changed listing whose next page is full starts over as that full
+    // listing: the core keeps only the full listing's rows and token.
     var state: overview_view.State = undefined;
     try state.init(std.testing.allocator, .{ .cwd = "/home/d/code/rui", .home = "/home/d" });
     defer state.deinit();
@@ -295,6 +315,7 @@ test "the overview core reads session list pages as the client decodes them" {
     try std.testing.expectEqual(full.since, state.token.?);
 }
 
+/// Counts the allocations made through it.
 const CountingAllocator = struct {
     child: std.mem.Allocator,
     count: usize = 0,
@@ -326,6 +347,7 @@ const CountingAllocator = struct {
     }
 };
 
+/// 10,000 Sessions in every kind, across 20 Workspaces.
 fn benchmarkRows(rows: []overview_view.Listed, now_s: u64, shift: u64) void {
     const alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
     const workspaces = comptime blk: {
@@ -366,6 +388,8 @@ fn benchmarkRows(rows: []overview_view.Listed, now_s: u64, shift: u64) void {
     }
 }
 
+/// Feeds `rows` to `state` as one full listing, eight per page. Returns the
+/// nanoseconds its last page took, the step that merges the listing.
 fn listAll(state: *overview_view.State, rows: []const overview_view.Listed, generation: u64) !u64 {
     var at: usize = 0;
     while (true) {
@@ -409,6 +433,7 @@ test "overview benchmark: batched initial and refreshed listings at 1,000 and 10
             _ = try overview_view.step(&state, .{ .tick = now_s * 1000 });
             benchmarkRows(rows, now_s, 0);
             initial_ns[run] = try listAll(&state, rows, 1);
+            // A full refresh: every row again, many changed.
             _ = try overview_view.step(&state, .{ .tick = (now_s + 1) * 1000 });
             benchmarkRows(rows, now_s, run + 1);
             counting.count = 0;
@@ -421,6 +446,8 @@ test "overview benchmark: batched initial and refreshed listings at 1,000 and 10
             _ = try overview_view.step(&state, .{ .resized = .{ .width = 200, .height = 60 } });
             counting.count = 0;
             const render_start = nanosecondsNow();
+            // What App's overview builds each frame: the header, the list's
+            // two-line rows on screen through GroupedList, and one Footer.
             var frame: std.heap.ArenaAllocator = .init(counting.allocator());
             _ = try overview_view.headerSegments(frame.allocator(), &state, 200, .{});
             const Source = struct {
