@@ -7,11 +7,15 @@ const commands = @import("slash_commands.zig");
 const overview = @import("overview_view.zig");
 const Self = @This();
 const Hover = @import("widgets/Hover.zig");
+const widget_style = @import("widget_style.zig");
 
 shown: *commands.Shown,
 caps: overview.Caps = .{ .width = .unicode },
 style: vaxis.Style = .{},
 quiet: vaxis.Style = .{ .dim = true },
+/// The part of a row's name, and of its description, the typed word matched.
+matched: vaxis.Style = .{ .bold = true },
+quiet_matched: vaxis.Style = .{ .dim = true, .bold = true },
 /// The pointer's row: only its background, reverse and underline apply, and the highlighted
 /// row keeps its reverse under the pointer.
 hover_style: vaxis.Style = .{ .ul_style = .single },
@@ -24,6 +28,16 @@ hover: Hover = .{},
 first: usize = 0,
 /// The list identity the latest frame drew, which a press names.
 drawn: commands.Shown.Pick = .{ .index = 0, .revision = 0, .source = 0 },
+
+/// Every style the list draws with, from the screen's terminal.
+pub fn setCaps(self: *Self, caps: overview.Caps) void {
+    self.caps = caps;
+    self.style = widget_style.of(caps, .{});
+    self.quiet = widget_style.of(caps, .{ .colour = .quiet });
+    self.matched = widget_style.of(caps, .{ .bold = true });
+    self.quiet_matched = widget_style.of(caps, .{ .colour = .quiet, .bold = true });
+    self.hover_style = widget_style.of(caps, .{ .background = .hover });
+}
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
@@ -83,13 +97,24 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         if (hovered) hovering(&style, self.hover_style);
         if (style.reverse or hovered) @memset(surface.buffer[@as(usize, row) * width ..][0..width], .{ .style = style });
         const line = window.child(.{ .y_off = row, .height = 1 });
-        _ = line.printSegment(.{ .text = entry.shown, .style = style }, .{ .wrap = .none });
+        const bold = entry.bold orelse commands.Bold{ .in = .shown, .start = 0, .len = 0 };
+        var matched = self.matched;
+        matched.reverse = style.reverse;
+        if (hovered) hovering(&matched, self.hover_style);
+        printMarked(line, entry.shown, if (bold.in == .shown) bold else null, style, matched);
         if (column < width) {
             var description = self.quiet;
             description.reverse = style.reverse;
             if (hovered) hovering(&description, self.hover_style);
+            var quiet_matched = self.quiet_matched;
+            quiet_matched.reverse = style.reverse;
+            if (hovered) hovering(&quiet_matched, self.hover_style);
             const fitted = try overview.fitted(ctx.arena, self.caps, entry.description, width - column, .head);
-            _ = line.child(.{ .x_off = @intCast(column) }).printSegment(.{ .text = fitted.bytes, .style = description }, .{ .wrap = .none });
+            // Bold only what the fitted text keeps of the description's own bytes.
+            const kept = std.mem.indexOfDiff(u8, fitted.bytes, entry.description) orelse fitted.bytes.len;
+            var shown_bold: ?commands.Bold = if (bold.in == .description) bold else null;
+            if (shown_bold) |*span| span.len = @min(span.start + span.len, kept) -| span.start;
+            printMarked(line.child(.{ .x_off = @intCast(column) }), fitted.bytes, shown_bold, description, quiet_matched);
         }
     }
     if (count < list.count and count < height) {
@@ -99,6 +124,18 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     return surface;
 }
 
+/// `text` on one row, its `bold` bytes in `strong` and the rest in `plain`.
+fn printMarked(line: vaxis.Window, text: []const u8, bold: ?commands.Bold, plain: vaxis.Style, strong: vaxis.Style) void {
+    const span = bold orelse commands.Bold{ .in = .shown, .start = 0, .len = 0 };
+    const start = @min(span.start, text.len);
+    const end = @min(span.start + span.len, text.len);
+    _ = line.print(&.{
+        .{ .text = text[0..start], .style = plain },
+        .{ .text = text[start..end], .style = strong },
+        .{ .text = text[end..], .style = plain },
+    }, .{ .wrap = .none });
+}
+
 fn hovering(style: *vaxis.Style, hover: vaxis.Style) void {
     style.bg = hover.bg;
     style.reverse = hover.reverse;
@@ -106,7 +143,7 @@ fn hovering(style: *vaxis.Style, hover: vaxis.Style) void {
 }
 
 test "Palette keeps the selected command visible at one row and hides closed or clipped choices" {
-    var shown = commands.Shown.next(null, 7, commands.conversation.suggest("/", .{})).?;
+    var shown = commands.Shown.next(null, 7, commands.conversation.listed()).?;
     shown.highlight = shown.list.count - 1;
     var palette: Self = .{ .shown = &shown };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -144,7 +181,7 @@ test "Palette hover is transient and clicks activate only visible command rows" 
         }
     };
     var selected: Selected = .{};
-    var shown = commands.Shown.next(null, 7, commands.conversation.suggest("/", .{})).?;
+    var shown = commands.Shown.next(null, 7, commands.conversation.listed()).?;
     var palette: Self = .{ .shown = &shown, .userdata = &selected, .on_select = Selected.select, .style = .{ .fg = .{ .index = 3 } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -207,7 +244,7 @@ test "Palette renders every chat command with its quiet description" {
         .{ commands.conversation, &[_][]const u8{ "/archive", "/clear", "/copy", "/effort", "/model", "/new", "/reload-skills", "/rename", "/requests", "/result", "/setup", "/unarchive" } },
     };
     inline for (cases) |case| {
-        var shown = commands.Shown.next(null, 1, case[0].suggest("/", .{})).?;
+        var shown = commands.Shown.next(null, 1, case[0].listed()).?;
         var palette: Self = .{ .shown = &shown };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
@@ -238,7 +275,7 @@ test "Palette description clipping ends with the list row ellipsis at every widt
     for ([_]bool{ true, false }) |unicode| {
         for (0..2) |selected| {
             for (0..81) |width| {
-                var shown = commands.Shown.next(null, 1, commands.conversation.suggest("/", .{})).?;
+                var shown = commands.Shown.next(null, 1, commands.conversation.listed()).?;
                 shown.list.count = 2;
                 shown.highlight = selected;
                 for (shown.list.entries[0..2]) |*entry| entry.description = description;
@@ -285,7 +322,7 @@ test "Palette description fitting keeps whole wide and combining clusters" {
     };
     for (std.enums.values(vaxis.gwidth.Method)) |method| {
         for (cases) |case| {
-            var shown = commands.Shown.next(null, 1, commands.conversation.suggest("/", .{})).?;
+            var shown = commands.Shown.next(null, 1, commands.conversation.listed()).?;
             shown.list.count = 1;
             shown.list.entries[0].description = case.text;
             const column = shown.list.descriptionColumn();

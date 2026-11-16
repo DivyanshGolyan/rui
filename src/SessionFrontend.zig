@@ -1084,6 +1084,8 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_input.composer.setCaps(self.app_caps);
     self.app_input.composer.placeholder = if (self.line.read != null and self.line.folder != null) "Type a task" else "";
     self.app_input.composer.editor = &self.input.editors[self.input.active];
+    const typed = self.input.composition().bytes;
+    self.app_input.composer.command = if (slash_commands.commandWord(typed)) |word| word.len else 0;
     self.app_card.style = normal;
     self.app_card.quiet = quiet;
     self.app_card.hover_style = hover;
@@ -1107,10 +1109,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     var palette: ?vxfw.Widget = null;
     if (self.app_consent.request == null) if (screen.commands) |*shown| {
         self.app_palette.shown = shown;
-        self.app_palette.caps = self.app_caps;
-        self.app_palette.style = normal;
-        self.app_palette.quiet = quiet;
-        self.app_palette.hover_style = hover;
+        self.app_palette.setCaps(self.app_caps);
         self.app_palette.userdata = self;
         self.app_palette.on_select = appSelectCommand;
         palette = self.app_palette.widget();
@@ -2961,9 +2960,9 @@ fn shownRow(self: *Self) ?*slash_commands_shared.Shown {
 fn takeRow(self: *Self, shown: *slash_commands_shared.Shown) !void {
     const draft = self.input.composition();
     const refused = switch (skill_completion.enter(draft.bytes, draft.cursor, shown)) {
-        .run => |rest| {
+        .run => |change| {
             if (!self.input.admitsCommand()) return self.sayBusy(null, false);
-            switch (self.input.append(rest)) {
+            switch (self.input.replace(.{ .start = change.start, .end = change.end, .text = change.text })) {
                 .refused => |why| self.notice = refusedNotice(why),
                 else => try self.runLine(),
             }

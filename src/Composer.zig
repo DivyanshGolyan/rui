@@ -15,6 +15,10 @@ method: vaxis.gwidth.Method = .unicode,
 style: vaxis.Style = .{},
 quiet: vaxis.Style = .{ .dim = true },
 rule_style: vaxis.Style = .{ .dim = true },
+/// The draft's first bytes that name a command Rui knows, drawn in
+/// `command_style`; its owner sets it from the grammar for each frame.
+command: usize = 0,
+command_style: vaxis.Style = .{},
 placeholder: []const u8 = "",
 anchor: usize = 0,
 /// Draw rules, marks and the prompt in ASCII, for a terminal without
@@ -28,6 +32,7 @@ pub fn setCaps(self: *Self, caps: view.Caps) void {
     self.style = widget_style.of(caps, .{ .background = .input_surface });
     self.quiet = widget_style.of(caps, .{ .colour = .quiet, .background = .input_surface });
     self.rule_style = widget_style.of(caps, .{ .colour = .quiet });
+    self.command_style = widget_style.of(caps, .{ .colour = .ink, .background = .input_surface });
     self.method = caps.width;
     self.ascii = !caps.unicode;
 }
@@ -88,9 +93,15 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             .text = if (shown.first + index != 0) "   " else if (self.ascii) " > " else " › ",
             .style = if (self.caret) self.style else self.quiet,
         }, .{ .wrap = .none });
-        _ = window.child(.{ .x_off = prefix, .y_off = row, .height = 1 }).printSegment(.{
-            .text = if (draft.len == 0) self.placeholder else draft[line.start..line.end],
-            .style = if (draft.len == 0) self.quiet else self.style,
+        const text = window.child(.{ .x_off = prefix, .y_off = row, .height = 1 });
+        if (draft.len == 0) {
+            _ = text.printSegment(.{ .text = self.placeholder, .style = self.quiet }, .{ .wrap = .none });
+            continue;
+        }
+        const command = std.math.clamp(@min(self.command, draft.len), line.start, line.end);
+        _ = text.print(&.{
+            .{ .text = draft[line.start..command], .style = self.command_style },
+            .{ .text = draft[command..line.end], .style = self.style },
         }, .{ .wrap = .none });
     }
     if (self.caret) surface.cursor = .{ .row = @intCast(shape.caret_line - shown.first + rule), .col = shape.caret_column + prefix };
@@ -251,6 +262,34 @@ test "Composer surface role covers New Session and chat drafts in both themes an
                     try std.testing.expectEqual(caret, surface.cursor != null);
                 };
             };
+        }
+    }
+}
+
+test "Composer draws a command line's known command word in the command colour, day and night" {
+    const command_word = @import("slash_commands.zig").conversation.commandWord;
+    for ([_]?view.Rgb{ .{ 255, 255, 255 }, null }) |terminal| {
+        const caps: view.Caps = .{ .background = terminal };
+        const ink = widget_style.of(caps, .{ .colour = .ink, .background = .input_surface });
+        const body = widget_style.of(caps, .{ .background = .input_surface });
+        try std.testing.expect(!std.meta.eql(ink.fg, body.fg));
+        for ([_][]const u8{ "/new", "/copy code", "/help", "/review this", "use /new", "/models" }) |typed| {
+            var bytes: [32]u8 = undefined;
+            @memcpy(bytes[0..typed.len], typed);
+            var editor: Editor = .{ .buffer = &bytes, .length = typed.len, .cursor = typed.len };
+            var composer: Self = .{ .editor = &editor };
+            composer.setCaps(caps);
+            composer.command = if (command_word(typed)) |word| word.len else 0;
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 3 }, .cell_size = .{} };
+            const surface = try composer.widget().draw(ctx);
+            // Only `/new` and `/copy` are commands; the rest stay body text.
+            const known: usize = if (std.mem.eql(u8, typed, "/new")) 4 else if (std.mem.startsWith(u8, typed, "/copy")) 5 else 0;
+            for (typed, 0..) |_, index| {
+                const cell = surface.readCell(@intCast(3 + index), 1);
+                try std.testing.expectEqual(if (index < known) ink.fg else body.fg, cell.style.fg);
+            }
         }
     }
 }

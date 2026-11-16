@@ -2912,7 +2912,7 @@
     },
     {
       "name": "slash",
-      "note": "21-slash: names only, with quiet fixed-choice words",
+      "note": "21-slash: listed chat commands with their descriptions",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -2930,14 +2930,15 @@
       ],
       "expect": [
         "/copy",
-        "code \u00b7 file",
-        "/effort"
+        "copy the last answer",
+        "/effort",
+        "/model"
       ],
       "absent": [
         "/help",
         "/status",
         "/configure",
-        "/model"
+        "code \u00b7 file"
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
@@ -3031,6 +3032,285 @@
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
+    },
+    {
+      "name": "slashlist-help",
+      "note": "Slash list, night: /help ranks the exact skill first, then a name holding help, matched part bold",
+      "open": "Slash help",
+      "cast": [
+        {
+          "label": "Slash help",
+          "workspace": "code/slashlist-help",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "help",
+            "review-help"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/help"
+        },
+        {
+          "wait": "Verify the project"
+        }
+      ],
+      "expect": [
+        "/help",
+        "/review-help"
+      ],
+      "expect_style": [
+        {
+          "text": "help",
+          "within": "/review-help",
+          "bold": true
+        },
+        {
+          "text": "/review-",
+          "within": "/review-help",
+          "bold": false
+        }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "slashlist-description",
+      "note": "Slash list, night: a word only skill descriptions hold lists them, the description's match bold",
+      "open": "Slash description",
+      "cast": [
+        {
+          "label": "Slash description",
+          "workspace": "code/slashlist-description",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "help",
+            "review-help"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/verify"
+        },
+        {
+          "wait": "/review-help"
+        }
+      ],
+      "expect": [
+        "/help",
+        "/review-help",
+        "Verify the project"
+      ],
+      "expect_style": [
+        {
+          "text": "Verify",
+          "within": "Verify the project",
+          "bold": true
+        },
+        {
+          "text": "/help",
+          "bold": false
+        }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "slashlist-known",
+      "note": "Slash list, night: a command Rui knows is drawn in the command colour; descriptions holding new follow",
+      "open": "Slash known",
+      "cast": [
+        {
+          "label": "Slash known",
+          "workspace": "code/slashlist-known",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "help"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/new"
+        },
+        {
+          "wait": "start a new chat"
+        }
+      ],
+      "expect": [
+        "/new",
+        "/clear",
+        "/setup"
+      ],
+      "expect_style": [
+        {
+          "text": "/new",
+          "within": "\u203a /new",
+          "foreground": "#a9b6ec"
+        },
+        {
+          "text": "new",
+          "within": "/new",
+          "bold": true
+        }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "slashlist-help-day",
+      "note": "Slash list, day: /help ranks the exact skill first, then a name holding help, matched part bold",
+      "open": "Slash help day",
+      "cast": [
+        {
+          "label": "Slash help day",
+          "workspace": "code/slashlist-help-day",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "help",
+            "review-help"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/help"
+        },
+        {
+          "wait": "Verify the project"
+        }
+      ],
+      "expect": [
+        "/help",
+        "/review-help"
+      ],
+      "expect_style": [
+        {
+          "text": "help",
+          "within": "/review-help",
+          "bold": true
+        },
+        {
+          "text": "/review-",
+          "within": "/review-help",
+          "bold": false
+        }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "theme": "day"
+    },
+    {
+      "name": "slashlist-description-day",
+      "note": "Slash list, day: a word only skill descriptions hold lists them, the description's match bold",
+      "open": "Slash description day",
+      "cast": [
+        {
+          "label": "Slash description day",
+          "workspace": "code/slashlist-description-day",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "help",
+            "review-help"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/verify"
+        },
+        {
+          "wait": "/review-help"
+        }
+      ],
+      "expect": [
+        "/help",
+        "/review-help",
+        "Verify the project"
+      ],
+      "expect_style": [
+        {
+          "text": "Verify",
+          "within": "Verify the project",
+          "bold": true
+        },
+        {
+          "text": "/help",
+          "bold": false
+        }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "theme": "day"
+    },
+    {
+      "name": "slashlist-known-day",
+      "note": "Slash list, day: a command Rui knows is drawn in the command colour; descriptions holding new follow",
+      "open": "Slash known day",
+      "cast": [
+        {
+          "label": "Slash known day",
+          "workspace": "code/slashlist-known-day",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "help"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/new"
+        },
+        {
+          "wait": "start a new chat"
+        }
+      ],
+      "expect": [
+        "/new",
+        "/clear",
+        "/setup"
+      ],
+      "expect_style": [
+        {
+          "text": "/new",
+          "within": "\u203a /new",
+          "foreground": "#1f2d6b"
+        },
+        {
+          "text": "new",
+          "within": "/new",
+          "bold": true
+        }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "theme": "day"
     },
     {
       "name": "misused-command",

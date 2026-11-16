@@ -1572,6 +1572,35 @@ while True:
                             {"expect_background": {"missing": "#" + color}}, frame),
                             "missing background specimen 'missing'")
 
+    def test_style_expectations_validate_and_check_only_the_span_inside_its_row(self):
+        for value in ([], [{"text": "/new", "bold": True}], [{"text": "new", "within": "› /new", "foreground": "#ABCDEF"}]):
+            data = self.scenario()
+            data["states"][0]["expect_style"] = value
+            self.assertEqual(self.helper["validate_scenario"](data)["states"][0]["expect_style"], value)
+        for value in (None, {}, [{"text": "x"}], [{"text": "", "bold": True}], [{"text": "x", "bold": 1}],
+                      [{"text": "x", "within": "y", "bold": True}], [{"text": "x", "foreground": "#fff"}],
+                      [{"text": "x", "bold": True, "unknown": 1}], [{"text": "a\nb", "bold": True}]):
+            data = self.scenario()
+            data["states"][0]["expect_style"] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "expect_style"):
+                self.helper["validate_scenario"](data)
+        row_text, ink, body = " › /new", "1f2d6b", "2f2b25"
+        for bad in (None, 3, 4):
+            with self.subTest(bad=bad):
+                row = tuple(Cell(char, None, index == 5 or index == 4 and bad != 4,
+                                 fg_rgb=ink if index >= 3 and not (bad == 3 and index == 3) else body)
+                            for index, char in enumerate(row_text))
+                frame = Frame(46, 30, Cursor(0, 0), False, (row,), "f3eee2", body, body)
+                state = {"expect_style": [{"text": "/new", "within": "› /new", "foreground": "#" + ink},
+                                          {"text": "ne", "within": "› /new", "bold": True}]}
+                failure = self.helper["frame_style_failure"](state, frame)
+                self.assertEqual(failure, None if bad is None else
+                                 "'/new' in '› /new' must have foreground=#1f2d6b" if bad == 3 else
+                                 "'ne' in '› /new' must have bold=True")
+        # Only the span is checked: the prompt mark keeps the body colour.
+        self.assertEqual(self.helper["frame_style_failure"](
+            {"expect_style": [{"text": "missing", "bold": True}]}, committed("Row")), "missing style specimen 'missing'")
+
     def test_capture_expectations_over_sizes_and_state_transitions(self):
         capture = self.helper["frame_capture"]
         cases = [
