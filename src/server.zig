@@ -1644,6 +1644,45 @@ noinline fn configureCapturedSkills(host: *Host, command: *const wire_request.Co
     return host.store.configureWithCreationCommitted(command, preset, initial_skills, if (reload_capture) |*value| value else null, host.allocator, inheritance.creationCallback(), host.hooks.storeFaults(.command));
 }
 
+fn submitControl(host: *Host, comptime kind: command_spec.CommandKind, command: *const @FieldType(wire_request.Request, @tagName(kind)), faults: store_module.Faults) host_reply.MutationResult(kind) {
+    return switch (kind) {
+        .session_stop => host.store.stopSession(command, faults),
+        .session_archive => host.store.archiveSession(command, faults),
+        .session_pin => host.store.pinSession(command, faults),
+        .model_interruption => host.store.interruptModel(command, faults),
+        .permission_decision => host.store.decidePermission(command, faults),
+        .action_background => host.store.backgroundAction(.{ .command = command }, faults),
+        .configure, .message => @compileError("control admission requires a control kind"),
+    };
+}
+
+fn controlSubject(comptime kind: command_spec.CommandKind, command: *const @FieldType(wire_request.Request, @tagName(kind))) command_spec.spec(kind).Subject {
+    return switch (kind) {
+        .session_stop, .session_archive, .session_pin => command.session.slice(),
+        .model_interruption => .{ .session = command.session, .turn_id = command.turn_id, .operation_id = command.operation_id },
+        .permission_decision => .{ .session = command.session, .action_id = command.action_id, .decision = command.decision },
+        .action_background => .{ .session = command.session, .action_id = command.action_id },
+        .configure, .message => @compileError("control subject requires a control kind"),
+    };
+}
+
+// Returns false only for the deliberate post-commit drop, so controls keep the
+// original timing lifetime even when reply allocation itself cannot succeed.
+fn answerMutation(host: *Host, fd: *Reply, header: Header, comptime kind: command_spec.CommandKind, subject: command_spec.spec(kind).Subject, result: host_reply.MutationResult(kind)) !bool {
+    if (result == .infrastructure_failure) fenceDispatch(host, command_spec.spec(kind).fence_message, error.CanonicalStoreFailure);
+    if (header.drop == .after_commit and result != .infrastructure_failure) return false;
+    try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderMutationReply(kind), .{ subject, result });
+    return true;
+}
+
+fn answerControl(host: *Host, fd: *Reply, header: Header, comptime kind: command_spec.CommandKind, subject: command_spec.spec(kind).Subject, result: host_reply.MutationResult(kind), timing: ControlTiming) !void {
+    comptime std.debug.assert(command_spec.spec(kind).is_control);
+    // Acceptance and infrastructure failure are disjoint. The hint precedes
+    // every reply effect, including the deliberate post-commit drop.
+    if (result == .accepted) publishControlHint(host, timing.command_key.slice());
+    if (try answerMutation(host, fd, header, kind, subject, result)) fd.timing = timing;
+}
+
 fn matchesStore(kind: std.meta.Tag(wire_request.Request), supplied: []const u8, expected: []const u8) bool {
     return (kind == .host_info and supplied.len == 0) or std.mem.eql(u8, supplied, expected);
 }
@@ -1701,84 +1740,16 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             if (header.drop != .after_commit) try fd.json(200, protocol.host_stop_ack.len, protocol.JsonOut.append, .{protocol.host_stop_ack});
         },
         .configure => |*command| {
-            const result = try submitConfigure(host, command);
-            if (result == .infrastructure_failure) {
-                fenceDispatch(host, "configuration save", error.CanonicalStoreFailure);
-            }
-            if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderConfigureReply, .{ command.session.slice(), result });
+            _ = try answerMutation(host, fd, header, .configure, command.session.slice(), try submitConfigure(host, command));
         },
         .message => |*command| {
-            const result = try submitMessage(host, command, client_environment.?);
-            if (result == .infrastructure_failure) {
-                fenceDispatch(host, "message save", error.CanonicalStoreFailure);
-            }
-            if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderMessageReply, .{ command.session.slice(), result });
+            _ = try answerMutation(host, fd, header, .message, command.session.slice(), try submitMessage(host, command, client_environment.?));
         },
-        .session_stop => |*command| {
-            var timing = ControlTiming.init(host, command.key, "session_stop", accepted_at_ns);
-            const result = host.store.stopSession(command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
-            if (result == .infrastructure_failure) {
-                fenceDispatch(host, "Session stop save", error.CanonicalStoreFailure);
-            }
-            if (result == .accepted) publishControlHint(host, command.key.slice());
-            if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderSessionStopReply, .{ command.session.slice(), result });
-            fd.timing = timing;
-        },
-        .session_archive => |*command| {
-            var timing = ControlTiming.init(host, command.key, "session_archive", accepted_at_ns);
-            const result = host.store.archiveSession(command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
-            if (result == .infrastructure_failure) {
-                fenceDispatch(host, "Session archive save", error.CanonicalStoreFailure);
-            }
-            if (result == .accepted) publishControlHint(host, command.key.slice());
-            if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderSessionArchiveReply, .{ command.session.slice(), result });
-            fd.timing = timing;
-        },
-        .session_pin => |*command| {
-            var timing = ControlTiming.init(host, command.key, "session_pin", accepted_at_ns);
-            const result = host.store.pinSession(command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
-            if (result == .infrastructure_failure) {
-                fenceDispatch(host, "Session pin save", error.CanonicalStoreFailure);
-            }
-            if (result == .accepted) publishControlHint(host, command.key.slice());
-            if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderSessionPinReply, .{ command.session.slice(), result });
-            fd.timing = timing;
-        },
-        .model_interruption => |*command| {
-            var timing = ControlTiming.init(host, command.key, "model_interruption", accepted_at_ns);
-            const result = host.store.interruptModel(command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
-            if (result == .infrastructure_failure) {
-                fenceDispatch(host, "model interruption save", error.CanonicalStoreFailure);
-            }
-            if (result == .accepted) publishControlHint(host, command.key.slice());
-            if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderModelInterruptionReply, .{ store_module.ModelInterruptionTarget{ .session = command.session, .turn_id = command.turn_id, .operation_id = command.operation_id }, result });
-            fd.timing = timing;
-        },
-        .permission_decision => |*command| {
-            var timing = ControlTiming.init(host, command.key, "permission_decision", accepted_at_ns);
-            const result = host.store.decidePermission(command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
-            if (result == .infrastructure_failure) {
-                fenceDispatch(host, "permission decision save", error.CanonicalStoreFailure);
-            }
-            if (result == .accepted) publishControlHint(host, command.key.slice());
-            if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderPermissionDecisionReply, .{ host_reply.PermissionTarget{ .session = command.session, .action_id = command.action_id, .decision = command.decision }, result });
-            fd.timing = timing;
-        },
-        .action_background => |*command| {
-            var timing = ControlTiming.init(host, command.key, "action_background", accepted_at_ns);
-            const result = host.store.backgroundAction(.{ .command = command }, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
-            if (result == .infrastructure_failure) fenceDispatch(host, "Action background save", error.CanonicalStoreFailure);
-            if (result == .accepted) publishControlHint(host, command.key.slice());
-            if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderActionBackgroundReply, .{ host_reply.ActionBackgroundTarget{ .session = command.session, .action_id = command.action_id }, result });
-            fd.timing = timing;
+        inline .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background => |*command, tag| {
+            const kind = comptime @field(command_spec.CommandKind, @tagName(tag));
+            var timing = ControlTiming.init(host, command.key, @tagName(kind), accepted_at_ns);
+            const result = submitControl(host, kind, command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
+            try answerControl(host, fd, header, kind, controlSubject(kind, command), result, timing);
         },
         .observe_command => |*command| {
             var observation: store_module.Observed = undefined;
@@ -2167,150 +2138,13 @@ const HeaderReader = struct {
 
 test "canonical failure classifier accepts every production mutation failure envelope" {
     const protocol_reply = @import("protocol_reply.zig");
-    inline for (.{ host_reply.renderConfigureReply, host_reply.renderMessageReply, host_reply.renderSessionStopReply, host_reply.renderSessionArchiveReply, host_reply.renderModelInterruptionReply, host_reply.renderPermissionDecisionReply }) |render| {
+    inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
+        const render = host_reply.renderMutationReply(kind);
         const Subject = @typeInfo(@TypeOf(render)).@"fn".param_types[1].?;
         var response = protocol.ResponseBuffer{};
         try response.render(render, .{ std.mem.zeroes(Subject), .infrastructure_failure });
         try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}", response.slice());
         try std.testing.expectError(error.CanonicalStoreFailure, protocol_reply.checkCanonicalFailure(.{ .status = 500, .body = response.slice() }));
-    }
-}
-
-fn expectMutationFieldPresence(body: []const u8, status: u16, session: []const u8, target: @import("protocol_reply.zig").MutationTarget) !void {
-    const protocol_reply = @import("protocol_reply.zig");
-    const allocator = std.testing.allocator;
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
-    defer parsed.deinit();
-    const Section = struct { path: []const []const u8, fields: []const []const u8 };
-    const sections = [_]Section{
-        .{ .path = &.{}, .fields = &.{ "version", "type", "code", "answer", "input", "queue", "execution", "completion" } },
-        .{ .path = &.{"answer"}, .fields = &.{ "status", "replayed", "session", "code", "revision", "created", "admission", "archived", "action", "decision", "selection", "target" } },
-        .{ .path = &.{"input"}, .fields = &.{ "type", "bytes", "sha256" } },
-        .{ .path = &.{"queue"}, .fields = &.{ "status", "admission" } },
-        .{ .path = &.{"execution"}, .fields = &.{ "status", "reason" } },
-        .{ .path = &.{"completion"}, .fields = &.{"status"} },
-        .{ .path = &.{ "answer", "selection" }, .fields = &.{ "turn", "admission_cutoff" } },
-        .{ .path = &.{ "answer", "target" }, .fields = &.{ "session", "turn", "operation" } },
-    };
-    for (sections) |section| {
-        var object = &parsed.value;
-        for (section.path) |part| object = object.object.getPtr(part) orelse break else {
-            for (section.fields) |field| {
-                const original = object.object.get(field);
-                try object.object.put(parsed.arena.allocator(), field, .null);
-                const encoded = try std.json.Stringify.valueAlloc(allocator, parsed.value, .{});
-                defer allocator.free(encoded);
-                const decoded = protocol_reply.decodeMutationReply(.{ .status = status, .body = encoded }, session, target);
-                const nullable_turn = section.path.len == 2 and std.mem.eql(u8, section.path[1], "selection") and std.mem.eql(u8, field, "turn");
-                if (nullable_turn) {
-                    try std.testing.expectEqual(@as(?u64, null), (try decoded.answer).result.accepted.session_stop.turn);
-                } else {
-                    std.testing.expectError(error.InvalidResponse, decoded.answer) catch |err| {
-                        std.debug.print("null witness: operation={s}, HTTP={d}, path={any}, field={s}\n", .{ @tagName(target), status, section.path, field });
-                        return err;
-                    };
-                    try std.testing.expect(!decoded.isAccepted());
-                    try std.testing.expect(decoded.diagnostic == null);
-                    try std.testing.expectEqualStrings(session, decoded.context.session.slice());
-                }
-                _ = object.object.orderedRemove(field);
-                if (original) |value| {
-                    const omitted = try std.json.Stringify.valueAlloc(allocator, parsed.value, .{});
-                    defer allocator.free(omitted);
-                    try std.testing.expectError(error.InvalidResponse, protocol_reply.decodeMutationReply(.{ .status = status, .body = omitted }, session, target).answer);
-                    try object.object.put(parsed.arena.allocator(), field, value);
-                }
-            }
-        }
-    }
-}
-
-test "mutation decoder validates every actual producer and preserved domain answers" {
-    const protocol_reply = @import("protocol_reply.zig");
-    const session = "k7m2qx";
-    const content: store_module.ContentReference = .{ .length = 9, .digest = protocol.contentDigest("seven\nµ!") };
-    inline for (.{ host_reply.renderConfigureReply, host_reply.renderMessageReply, host_reply.renderSessionStopReply, host_reply.renderModelInterruptionReply, host_reply.renderPermissionDecisionReply, host_reply.renderSessionArchiveReply, host_reply.renderSessionPinReply }, 0..) |render, index| {
-        const MutationReply = @typeInfo(@TypeOf(render)).@"fn".param_types[2].?;
-        var named: protocol.Bounded(protocol.max_session_bytes) = .{};
-        try named.set(session);
-        const subject = switch (index) {
-            3 => store_module.ModelInterruptionTarget{ .session = named, .turn_id = 3, .operation_id = 11 },
-            4 => host_reply.PermissionTarget{ .session = named, .action_id = 7, .decision = .deny },
-            else => @as([]const u8, session),
-        };
-        const target: protocol_reply.MutationTarget = switch (index) {
-            0 => .configure,
-            1 => .{ .message = .{ .bytes = content.length, .digest = content.digest } },
-            2 => .session_stop,
-            3 => .{ .model_interruption = .{ .turn = 3, .operation = 11 } },
-            4 => .{ .permission_decision = .{ .action = 7, .decision = .deny } },
-            5 => .{ .session_archive = .{ .archived = true } },
-            6 => .{ .session_pin = .{ .pinned = false } },
-            else => unreachable,
-        };
-        const accepted: MutationReply = switch (index) {
-            0 => .{ .accepted = .{ .replayed = true, .revision = 13, .created = false, .session = named } },
-            1 => .{ .accepted = .{ .replayed = true, .admission_id = 17, .content = content, .session = named } },
-            2 => .{ .accepted = .{ .replayed = true, .selection = .{ .selected_turn_id = 19, .admission_cutoff = 23 }, .completion = .pending } },
-            3, 4 => .{ .accepted = .{ .replayed = true } },
-            5 => .{ .accepted = .{ .replayed = true, .archived = true, .completion = .pending } },
-            6 => .{ .accepted = .{ .replayed = true, .pinned = false } },
-            else => unreachable,
-        };
-        const rejected: MutationReply = if (index == 1)
-            .{ .rejected = .{ .replayed = true, .code = .unknown_session, .content = content } }
-        else
-            .{ .rejected = .{ .replayed = true, .code = .invalid_session_reference } };
-        for ([_]MutationReply{ accepted, rejected, .conflict, .infrastructure_failure }) |initial| {
-            for ([_]bool{ false, true }) |replayed| {
-                var result = initial;
-                switch (result) {
-                    .accepted => |*value| value.replayed = replayed,
-                    .rejected => |*value| value.replayed = replayed,
-                    else => {},
-                }
-                var response: protocol.ResponseBuffer = .{};
-                try response.render(render, .{ subject, result });
-                const status: u16 = if (result == .conflict) 409 else if (result == .infrastructure_failure) 500 else 200;
-                const decoded = protocol_reply.decodeMutationReply(.{ .status = status, .body = response.slice() }, session, target);
-                try std.testing.expectEqual(status, decoded.status);
-                try expectMutationFieldPresence(response.slice(), status, session, target);
-                if (result == .infrastructure_failure) {
-                    try std.testing.expectError(error.CanonicalStoreFailure, decoded.answer);
-                    continue;
-                }
-                const answer = try decoded.answer;
-                try std.testing.expectEqualStrings(@tagName(result), @tagName(answer.result));
-                try std.testing.expectEqual(result != .conflict and replayed, answer.replayed);
-                try std.testing.expectError(error.RequestBindingMismatch, protocol_reply.decodeMutationReply(.{ .status = status, .body = response.slice() }, "p9q8rs", target).answer);
-                if (result == .accepted) switch (answer.result.accepted) {
-                    .configure => |value| try std.testing.expectEqual(@as(u64, 13), value.revision),
-                    .message => |value| try std.testing.expectEqual(@as(u64, 17), value.admission),
-                    .session_stop => |value| {
-                        try std.testing.expectEqual(@as(?u64, 19), value.turn);
-                        try std.testing.expectEqual(@as(u64, 23), value.admission_cutoff);
-                        try std.testing.expectEqual(.pending, value.completion);
-                    },
-                    .session_archive => |value| {
-                        try std.testing.expect(value.archived);
-                        try std.testing.expectEqual(.pending, value.completion);
-                    },
-                    .session_pin => |value| try std.testing.expect(!value.pinned),
-                    .model_interruption, .permission_decision, .action_background => {},
-                };
-            }
-        }
-        if (index == 2) {
-            var idle = accepted;
-            idle.accepted.selection.selected_turn_id = null;
-            idle.accepted.completion = .completed;
-            var response: protocol.ResponseBuffer = .{};
-            try response.render(render, .{ subject, idle });
-            const answer = try protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, session, target).answer;
-            try std.testing.expectEqual(@as(?u64, null), answer.result.accepted.session_stop.turn);
-            try std.testing.expectEqual(.completed, answer.result.accepted.session_stop.completion);
-            try expectMutationFieldPresence(response.slice(), 200, session, target);
-        }
     }
 }
 
@@ -2330,7 +2164,6 @@ test "initial Message reply binds its allocated Session and original input befor
     const reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", target);
     try std.testing.expect(reply.isAccepted());
     try std.testing.expectEqualStrings("k7m2qx", reply.context.session.slice());
-    try expectMutationFieldPresence(response.slice(), 200, "", target);
     try std.testing.expectError(error.RequestBindingMismatch, protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "111111", target).answer);
     var changed = target;
     changed.message.digest[0] ^= 1;
@@ -2919,7 +2752,9 @@ test "reply delivery interrupted poll consumes the existing inactivity budget" {
 
 test "delayed control replies retain command identity after request storage reuse" {
     const native = @import("posix");
-    inline for (.{ "session_stop", "session_archive", "session_pin", "model_interruption", "permission_decision" }) |kind| {
+    inline for (comptime std.meta.tags(command_spec.CommandKind)) |control_kind| {
+        if (comptime !command_spec.spec(control_kind).is_control) continue;
+        const kind = @tagName(control_kind);
         var descriptors: [2]c_int = undefined;
         try std.testing.expectEqual(@as(c_int, 0), native.pipe(&descriptors));
         defer _ = native.close(descriptors[0]);
@@ -3179,7 +3014,7 @@ test "control response variants fit exact worst-case JSON bounds" {
             expected: usize,
         ) !void {
             var response: protocol.ResponseBuffer = .{};
-            try response.render(host_reply.renderSessionStopReply, .{ command.session.slice(), result });
+            try response.render(host_reply.renderMutationReply(.session_stop), .{ command.session.slice(), result });
             try std.testing.expectEqual(expected, response.len);
         }
 
@@ -3189,7 +3024,7 @@ test "control response variants fit exact worst-case JSON bounds" {
             expected: usize,
         ) !void {
             var response: protocol.ResponseBuffer = .{};
-            try response.render(host_reply.renderModelInterruptionReply, .{ store_module.ModelInterruptionTarget{ .session = command.session, .turn_id = command.turn_id, .operation_id = command.operation_id }, result });
+            try response.render(host_reply.renderMutationReply(.model_interruption), .{ store_module.ModelInterruptionTarget{ .session = command.session, .turn_id = command.turn_id, .operation_id = command.operation_id }, result });
             try std.testing.expectEqual(expected, response.len);
         }
 
@@ -3213,7 +3048,7 @@ test "control response variants fit exact worst-case JSON bounds" {
         .completion = .completed,
     } }, protocol.shapeBytes(protocol.session_stop_reply.accepted));
     var pending_response: protocol.ResponseBuffer = .{};
-    try pending_response.render(host_reply.renderSessionStopReply, .{ stop_command.session.slice(), store_module.SessionStopReply{ .accepted = .{
+    try pending_response.render(host_reply.renderMutationReply(.session_stop), .{ stop_command.session.slice(), store_module.SessionStopReply{ .accepted = .{
         .replayed = false,
         .selection = .{
             .selected_turn_id = std.math.maxInt(u64),
@@ -4515,7 +4350,7 @@ test "session archive renders accepted intent and completion for both archive an
         for (std.meta.tags(protocol.SessionStopCompletion)) |completion| {
             for ([_]bool{ false, true }) |replayed| {
                 var response: protocol.ResponseBuffer = .{};
-                try response.render(host_reply.renderSessionArchiveReply, .{ command.session.slice(), store_module.SessionArchiveReply{ .accepted = .{
+                try response.render(host_reply.renderMutationReply(.session_archive), .{ command.session.slice(), store_module.SessionArchiveReply{ .accepted = .{
                     .replayed = replayed,
                     .archived = archived,
                     .completion = completion,
@@ -4524,13 +4359,12 @@ test "session archive renders accepted intent and completion for both archive an
                 try std.testing.expectEqual(replayed, decoded.replayed);
                 try std.testing.expectEqual(archived, decoded.result.accepted.session_archive.archived);
                 try std.testing.expectEqual(completion, decoded.result.accepted.session_archive.completion);
-                try expectMutationFieldPresence(response.slice(), 200, "k7m2qx", .{ .session_archive = .{ .archived = archived } });
             }
         }
     }
     for (std.meta.tags(protocol.SessionArchiveRejection)) |code| {
         var response: protocol.ResponseBuffer = .{};
-        try response.render(host_reply.renderSessionArchiveReply, .{ command.session.slice(), store_module.SessionArchiveReply{ .rejected = .{ .replayed = true, .code = code } } });
+        try response.render(host_reply.renderMutationReply(.session_archive), .{ command.session.slice(), store_module.SessionArchiveReply{ .rejected = .{ .replayed = true, .code = code } } });
         const decoded = try protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "k7m2qx", .{ .session_archive = .{ .archived = true } }).answer;
         try std.testing.expectEqualStrings(@tagName(code), decoded.result.rejected.slice());
     }
@@ -4949,28 +4783,6 @@ test "a stop signal handler racing detach never writes to the closed or a reused
 // Captured against 8de679d8 before the answer-path refactor. The oracle includes
 // exact producer bytes and decoder outcomes; it deliberately preserves decoder
 // quirks for slice 3 rather than deriving expectations from command_spec.
-fn mutationWitnessRenderer(comptime kind: command_spec.CommandKind) @TypeOf(switch (kind) {
-    .configure => host_reply.renderConfigureReply,
-    .message => host_reply.renderMessageReply,
-    .session_stop => host_reply.renderSessionStopReply,
-    .session_archive => host_reply.renderSessionArchiveReply,
-    .session_pin => host_reply.renderSessionPinReply,
-    .model_interruption => host_reply.renderModelInterruptionReply,
-    .permission_decision => host_reply.renderPermissionDecisionReply,
-    .action_background => host_reply.renderActionBackgroundReply,
-}) {
-    return switch (kind) {
-        .configure => host_reply.renderConfigureReply,
-        .message => host_reply.renderMessageReply,
-        .session_stop => host_reply.renderSessionStopReply,
-        .session_archive => host_reply.renderSessionArchiveReply,
-        .session_pin => host_reply.renderSessionPinReply,
-        .model_interruption => host_reply.renderModelInterruptionReply,
-        .permission_decision => host_reply.renderPermissionDecisionReply,
-        .action_background => host_reply.renderActionBackgroundReply,
-    };
-}
-
 const MutationWitness = struct {
     const reply = @import("protocol_reply.zig");
     const session = "k7m2qx";
@@ -4983,7 +4795,7 @@ const MutationWitness = struct {
         return value;
     }
 
-    fn subject(comptime kind: command_spec.CommandKind) @typeInfo(@TypeOf(mutationWitnessRenderer(kind))).@"fn".param_types[1].? {
+    fn subject(comptime kind: command_spec.CommandKind) @typeInfo(@TypeOf(host_reply.renderMutationReply(kind))).@"fn".param_types[1].? {
         return switch (kind) {
             .model_interruption => .{ .session = named(), .turn_id = 3, .operation_id = 11 },
             .permission_decision => .{ .session = named(), .action_id = 7, .decision = .deny },
@@ -5005,7 +4817,7 @@ const MutationWitness = struct {
         };
     }
 
-    fn accepted(comptime kind: command_spec.CommandKind) @typeInfo(@TypeOf(mutationWitnessRenderer(kind))).@"fn".param_types[2].? {
+    fn accepted(comptime kind: command_spec.CommandKind) @typeInfo(@TypeOf(host_reply.renderMutationReply(kind))).@"fn".param_types[2].? {
         return .{ .accepted = switch (kind) {
             .configure => .{ .replayed = false, .revision = 13, .created = false, .session = named() },
             .message => .{ .replayed = false, .admission_id = 17, .content = content, .session = named() },
@@ -5123,7 +4935,7 @@ test "mutation decoder preserves base bytes and the entire command domain" {
     var covered: u16 = 0;
     inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
         covered |= @as(u16, 1) << @backingInt(kind);
-        const render = mutationWitnessRenderer(kind);
+        const render = host_reply.renderMutationReply(kind);
         const Result = @typeInfo(@TypeOf(render)).@"fn".param_types[2].?;
         const accepted = MutationWitness.accepted(kind);
         const rejected: Result = if (kind == .message)
@@ -5204,4 +5016,98 @@ test "mutation decoder preserves base bytes and the entire command domain" {
         };
     }
     try std.testing.expectEqual(@as(u16, 0xff), covered);
+}
+test "every accepted control publishes exactly one hint before reply handling" {
+    const native = @import("posix");
+    const Probe = struct {
+        host: *Host,
+        observation: *TestObservation,
+        accepted: bool,
+        allocations: usize = 0,
+        ordered: bool = true,
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+        }
+
+        fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.allocations += 1;
+            self.ordered = self.ordered and self.host.controls_changed.load(.acquire) == self.accepted and
+                self.observation.shared.state.load(.acquire) == @as(u64, if (self.accepted) 2 else 0);
+            return std.testing.allocator.rawAlloc(len, alignment, ret_addr);
+        }
+
+        fn resize(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+            return std.testing.allocator.rawResize(memory, alignment, new_len, ret_addr);
+        }
+
+        fn remap(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+            return std.testing.allocator.rawRemap(memory, alignment, new_len, ret_addr);
+        }
+
+        fn free(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+            std.testing.allocator.rawFree(memory, alignment, ret_addr);
+        }
+    };
+    var covered: u16 = 0;
+    inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
+        if (comptime !command_spec.spec(kind).is_control) continue;
+        covered |= @as(u16, 1) << @backingInt(kind);
+        const Result = host_reply.MutationResult(kind);
+        const rejected: Result = .{ .rejected = .{ .replayed = false, .code = .invalid_session_reference } };
+        for ([_]Result{ MutationWitness.accepted(kind), rejected, .conflict, .infrastructure_failure }) |initial| {
+            for ([_]bool{ false, true }) |replayed| {
+                for ([_]bool{ false, true }) |drop| {
+                    var descriptors: [2]c_int = undefined;
+                    try std.testing.expectEqual(@as(c_int, 0), native.pipe(&descriptors));
+                    defer _ = native.close(descriptors[0]);
+                    for (descriptors) |fd| try std.testing.expectEqual(@as(c_int, 0), native.fcntl(fd, native.F_SETFL, @as(c_int, native.O_NONBLOCK)));
+                    const backing = native.tmpfile() orelse return error.TestUnexpectedResult;
+                    defer _ = native.fclose(backing);
+                    try std.testing.expectEqual(@as(c_int, 0), native.ftruncate(native.fileno(backing), TestObservation.state_bytes));
+                    var observation = try TestObservation.init(descriptors[1], native.dup(native.fileno(backing)), .control, 37);
+                    defer observation.close();
+                    var host = Host{
+                        .io = std.testing.io,
+                        .allocator = std.testing.allocator,
+                        .lease = undefined,
+                        .store = undefined,
+                        .hooks = .{ .phase_trace = true },
+                        .test_observation = &observation,
+                    };
+                    var result = initial;
+                    switch (result) {
+                        .accepted => |*value| value.replayed = replayed,
+                        .rejected => |*value| value.replayed = replayed,
+                        else => {},
+                    }
+                    const accepted = result == .accepted;
+                    var probe: Probe = .{ .host = &host, .observation = &observation, .accepted = accepted };
+                    var reply = Reply{ .io = std.testing.io, .allocator = probe.allocator() };
+                    defer reply.deinit();
+                    const key = try protocol.Bounded(protocol.max_key_bytes).from("control-domain");
+                    const timing = ControlTiming.init(&host, key, @tagName(kind), 1);
+                    const header = Header{ .route = @field(Route, @tagName(kind)), .content_length = 0, .drop = if (drop) .after_commit else .none };
+                    try answerControl(&host, &reply, header, kind, MutationWitness.subject(kind), result, timing);
+                    try std.testing.expectEqual(accepted, host.controls_changed.load(.acquire));
+                    try std.testing.expectEqual(@as(u64, if (accepted) 2 else 0), observation.shared.state.load(.acquire));
+                    try std.testing.expect(probe.ordered);
+                    const dropped = drop and result != .infrastructure_failure;
+                    try std.testing.expectEqual(dropped, reply.body == .none);
+                    try std.testing.expectEqual(!dropped, reply.timing != null);
+                    try std.testing.expectEqual(!dropped, probe.allocations != 0);
+                    try std.testing.expectEqual(result != .infrastructure_failure, host.launchAllowed());
+                    var bytes: [TestObservation.record_bytes]u8 = undefined;
+                    const count = native.read(descriptors[0], &bytes, bytes.len);
+                    if (accepted) {
+                        try std.testing.expect(count > 0);
+                        try std.testing.expect(std.mem.indexOf(u8, bytes[0..@intCast(count)], "control_hint_published") != null);
+                        try std.testing.expect(std.mem.indexOf(u8, bytes[0..@intCast(count)], key.slice()) != null);
+                    } else try std.testing.expect(count < 0 and std.posix.errno(count) == .AGAIN);
+                }
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(u16, 0xfc), covered);
 }
