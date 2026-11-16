@@ -339,7 +339,9 @@ pub noinline fn mysqlClientPaths(io: std.Io, store: []const u8, runtime: []const
 /// Every explicit-interface lookup admits an existing directory before any
 /// connection. Saved placement may name a directory the starter has yet to
 /// create; the legacy opaque-id lookup still requires an existing runtime.
-fn validateInterfaceDirectory(io: std.Io, runtime: []const u8, missing: enum { allow, refuse }) !void {
+const MissingInterface = enum { allow, refuse };
+
+fn validateInterfaceDirectory(io: std.Io, runtime: []const u8, missing: MissingInterface) !void {
     var dir = std.Io.Dir.cwd().openDir(io, runtime, .{}) catch |err| {
         if (err == error.FileNotFound and missing == .allow) return;
         return err;
@@ -348,7 +350,7 @@ fn validateInterfaceDirectory(io: std.Io, runtime: []const u8, missing: enum { a
     try validatePrivateDirectory(dir, io);
 }
 
-fn privateInterfacePaths(io: std.Io, kind: Kind, store: []const u8, runtime: []const u8, missing: enum { allow, refuse }) !Paths {
+fn privateInterfacePaths(io: std.Io, kind: Kind, store: []const u8, runtime: []const u8, missing: MissingInterface) !Paths {
     try validateInterfaceDirectory(io, runtime, missing);
     var paths: Paths = .{ .kind = kind };
     try paths.store_identity.set(store);
