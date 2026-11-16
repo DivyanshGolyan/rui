@@ -287,6 +287,7 @@ CREATE TABLE session(session_ref TEXT PRIMARY KEY,tool_set_id INTEGER NOT NULL R
 INSERT INTO session VALUES('k7m2qx',7,%s,1);
 CREATE TABLE core_command(command_key TEXT PRIMARY KEY,kind INTEGER,target TEXT,input_digest BLOB,primary_content_id INTEGER,secondary_content_id INTEGER,accepted INTEGER,code TEXT,revision INTEGER,created INTEGER,command_seq INTEGER,input_part_count INTEGER,input_reference_length INTEGER,input_reference_digest BLOB);
 INSERT INTO core_command VALUES('template-configure',1,'k7m2qx',zeroblob(32),NULL,NULL,1,'',1,1,1,NULL,NULL,NULL);
+CREATE TABLE input_part(input_part_id INTEGER PRIMARY KEY,command_key TEXT NOT NULL REFERENCES core_command(command_key),command_kind INTEGER NOT NULL,part_count INTEGER NOT NULL,ordinal INTEGER NOT NULL,content_id INTEGER NOT NULL REFERENCES content(content_id),part_kind INTEGER NOT NULL,UNIQUE(command_key,ordinal));
 CREATE TABLE message_admission(admission_id INTEGER PRIMARY KEY,session_ref TEXT,command_key TEXT,content_id INTEGER,admission_position INTEGER,turn_id INTEGER,admitted_at INTEGER);
 CREATE TABLE turn(turn_id INTEGER PRIMARY KEY,session_ref TEXT,first_admission_id INTEGER,input_cutoff INTEGER,operation_id INTEGER,outcome_code TEXT,outcome_content_id INTEGER,outcome_position INTEGER,outcome_at INTEGER);
 CREATE TABLE model_operation(operation_id INTEGER PRIMARY KEY,turn_id INTEGER,session_ref TEXT,settings_revision INTEGER,input_cutoff INTEGER,admission_position INTEGER,attempt_ordinal INTEGER,retry_due_at_ms INTEGER,resolution_code TEXT,output_reservation INTEGER,resolved_at INTEGER,tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id),context_window INTEGER NOT NULL CHECK(context_window BETWEEN 0 AND 4294967295));
@@ -305,6 +306,13 @@ CREATE TABLE session_stop(command_key TEXT,session_ref TEXT,selected_turn_id INT
 			}
 			if want := test.want + "|0\n" + test.want + "|0"; rows != want {
 				t.Fatalf("offers and context windows = %q, want %q", rows, want)
+			}
+			parts, err := sql(deadline, sqliteBinary, store, "SELECT count(*) FROM core_command c JOIN input_part p ON p.command_key=c.command_key WHERE c.kind=2 AND c.primary_content_id IS NULL AND c.input_part_count=1 AND c.input_reference_length=1 AND c.input_reference_digest=zeroblob(32) AND p.command_kind=2 AND p.part_count=1 AND p.ordinal=0 AND p.content_id=1 AND p.part_kind=1;")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if parts != "2" {
+				t.Fatalf("canonical single-Text associations = %q, want 2", parts)
 			}
 		})
 	}
