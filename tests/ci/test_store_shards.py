@@ -489,18 +489,26 @@ class CompilerShardTest(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("RUI_TEST_STORE_BINARY"), "set RUI_TEST_STORE_BINARY for the complete compiled Store inventory")
 class StoreInventoryTest(unittest.TestCase):
-    def test_global_mutators_are_first_and_only_in_shard_zero(self):
+    def test_exclusive_prelude_contains_histories_and_handler_comparison_for_k_1_through_8(self):
         binary = os.environ["RUI_TEST_STORE_BINARY"]
         with patch.dict(os.environ, RUI_UNIT_EXCLUSIVE="1"):
             exclusive = inventories.query(binary)
-        self.assertEqual(len(exclusive), 7)
-        for index in range(shards.SHARD_COUNT):
-            with patch.dict(os.environ, RUI_UNIT_SHARD=f"{index}/{shards.SHARD_COUNT}"):
-                selected = inventories.query(binary)
-            if index == 0:
-                self.assertEqual(selected[:len(exclusive)], exclusive)
-            else:
-                self.assertFalse(set(exclusive).intersection(selected))
+        isolated = {
+            "store.tests.model_admission.test.model admission work excludes accepted compaction base history, in rounds",
+            "store.tests.model_admission.test.model admission work excludes usage-covered accepted tool and instruction history, in rounds",
+            "store.mysql_testing.test.store.mysql obligation reconciliation reads stay flat in completed Turn history",
+        }
+        self.assertTrue(isolated.issubset(exclusive))
+        self.assertEqual(len(exclusive), 7 + len(isolated))
+        self.assertEqual(len(exclusive), len(set(exclusive)))
+        for count in range(1, 9):
+            for index in range(count):
+                with self.subTest(count=count, index=index), patch.dict(os.environ, RUI_UNIT_SHARD=f"{index}/{count}"):
+                    selected = inventories.query(binary)
+                    if index == 0:
+                        self.assertEqual(selected[:len(exclusive)], exclusive)
+                    else:
+                        self.assertFalse(set(exclusive).intersection(selected))
 
     def test_runtime_invalid_selector_fails_closed(self):
         binary = os.environ["RUI_TEST_STORE_BINARY"]

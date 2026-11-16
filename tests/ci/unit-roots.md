@@ -44,21 +44,33 @@ The generated runner embeds the committed per-test seconds from
 [store_test_times.json](store_test_times.json). The partition owner in
 `src/unit_test_partition.zig` assigns the complete owned name list at runtime,
 using longest-processing-time-first greedy assignment with deterministic ties.
-Tests absent from the timing file use a stable hash shard and the median
+The exclusive prelude delays every shard equally, so its durations do not count
+against shard zero's ordinary-work load; all four processes share the work after
+that prefix. Tests absent from the timing file use a stable hash shard and the median
 recorded duration as their weight; removed tests contribute no work. Metadata
 and test execution use the same selection. Without `RUI_UNIT_SHARD=i/K`, the
 binary exposes its complete root, preserving unsharded measurements and
 inventory comparisons. Explicit `-Dtest-filter` runs retain one process.
 
 Seven MySQL tests change server-global admission settings or packet limits.
-The partition owner pins them to shard zero and places them first in that
-process. The launcher holds an exclusive lease on the shared MySQL socket
-until the stock runner starts shard zero's first ordinary test, after all seven
-have restored their settings. It then starts the other three shards and
+Two history-construction fixtures also need this window: their 190-second and
+134-second unsharded costs grow under concurrent MySQL service, and the longer
+one exceeded the unchanged 300-second test deadline in CI. The partition owner
+also isolates the exact native obligation Handler-read comparison: it already
+reads `SHOW SESSION STATUS` on the Store connection, but those counters include
+internal data-dictionary reads, which peer fixture DDL can induce through shared
+metadata-cache churn. It pins these ten tests to shard zero and places them first
+in that process. The launcher holds an exclusive lease on the shared MySQL socket
+until the stock runner starts shard zero's first ordinary test, after the settings
+are restored, both history fixtures finish, and the Handler comparison returns. It then starts the other three shards and
 downgrades to a shared lease. Native, the TypeScript settings process tests and the live settings/Host-status fixtures
 also hold that shared lease, so they can overlap all ordinary Store tests.
 A source-domain test checks that every server-global mutator belongs to this
-prelude. No extra Store test process or binary is needed.
+prelude; the compiled-inventory domain also checks both long histories and the
+Handler comparison belong to it exactly once, before ordinary work for K=1..8.
+Their assertions, history populations, replay coverage and timeout remain
+unchanged. The Handler test keeps its existing session-scoped counter, warm-up
+and strict equality; serialization removes peer DDL from its measurement window. No extra Store test process or binary is needed.
 
 The launcher's process-specific MySQL namespaces isolate dialect-check schemas
 between native and every Store shard. The fixed-name MySQL session tests stay together on Store shard zero; dialect and migration tests use the process namespace and participate in balancing;

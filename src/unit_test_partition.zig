@@ -24,6 +24,18 @@ pub const Shard = struct {
 const Weighted = struct { index: usize, name: []const u8, seconds: f64 };
 
 pub fn exclusive(name: []const u8) bool {
+    // These fixtures construct thousands of historical entries through public
+    // Store writes and MySQL replay. Four concurrent clients push a single
+    // fixture past the unchanged 300-second test deadline. Give both fixtures
+    // the existing exclusive window, before ordinary shard peers start.
+    const isolated = [_][]const u8{
+        "store.tests.model_admission.test.model admission work excludes accepted compaction base history, in rounds",
+        "store.tests.model_admission.test.model admission work excludes usage-covered accepted tool and instruction history, in rounds",
+        // SESSION Handler reads include internal dictionary reads. Peer fixture
+        // DDL must not churn shared metadata caches during this exact comparison.
+        "store.mysql_testing.test.store.mysql obligation reconciliation reads stay flat in completed Turn history",
+    };
+    for (isolated) |test_name| if (std.mem.eql(u8, name, test_name)) return true;
     const prefix = "store.mysql_testing.test.";
     const tests = [_][]const u8{
         "store.mysql live admission refuses read_only",
@@ -40,7 +52,9 @@ pub fn exclusive(name: []const u8) bool {
 
 fn fixedOwner(name: []const u8) bool {
     // Session tests still mutate one fixed schema. Dialect/migration schemas
-    // and shadow PREPARE schemas have a namespace per process instead.
+    // and shadow PREPARE schemas have a namespace per process instead. The
+    // exclusive prelude also owns the contention-sensitive history fixtures and
+    // the exact physical Handler-read comparison.
     return exclusive(name) or std.mem.startsWith(u8, name, "store.mysql_session_tests.");
 }
 
@@ -84,7 +98,9 @@ pub fn assign(allocator: std.mem.Allocator, names: []const []const u8, times: []
         if (fixedOwner(name) or duration == null) {
             const shard = if (fixedOwner(name)) 0 else stableShard(name, count);
             result[index] = shard;
-            loads[shard] += duration orelse median;
+            // Exclusive work delays every shard before the parallel phase;
+            // charge only ordinary work when balancing that phase.
+            if (!exclusive(name)) loads[shard] += duration orelse median;
         } else {
             known[known_count] = .{ .index = index, .name = name, .seconds = duration.? };
             known_count += 1;
@@ -154,4 +170,73 @@ test "unit shard LPT balances known tests and validates selectors" {
     for ([_][]const u8{ "", "0", "0/0", "4/4", "1/2/3", "-1/4", "1/-4" }) |text|
         try std.testing.expectError(error.InvalidUnitShard, Shard.parse(text));
     try std.testing.expectEqual(Shard{ .index = 3, .count = 4 }, try Shard.parse("3/4"));
+}
+
+test "history fixtures own a contention-free window for every shard count" {
+    const names = [_][]const u8{
+        "store.tests.model_admission.test.model admission work excludes accepted compaction base history, in rounds",
+        "store.tests.model_admission.test.model admission work excludes usage-covered accepted tool and instruction history, in rounds",
+        "store.test.ordinary a",
+        "store.test.ordinary b",
+        "store.test.ordinary c",
+        "store.test.ordinary d",
+    };
+    const times = [_]Timing{
+        .{ .name = names[0], .seconds = 190 },
+        .{ .name = names[1], .seconds = 134 },
+        .{ .name = names[2], .seconds = 100 },
+        .{ .name = names[3], .seconds = 100 },
+        .{ .name = names[4], .seconds = 100 },
+        .{ .name = names[5], .seconds = 100 },
+    };
+    try std.testing.expect(exclusive(names[0]));
+    try std.testing.expect(exclusive(names[1]));
+    try std.testing.expect(!exclusive(names[2]));
+    for (1..9) |count| {
+        const placement = try assign(std.testing.allocator, &names, &times, count);
+        defer std.testing.allocator.free(placement);
+        try std.testing.expectEqual(@as(usize, 0), placement[0]);
+        try std.testing.expectEqual(@as(usize, 0), placement[1]);
+        for (placement) |index| try std.testing.expect(index < count);
+        if (count == 4) {
+            // A shared prelude must not leave shard zero idle afterward.
+            for (0..count) |shard| {
+                var ordinary: usize = 0;
+                for (placement[2..]) |index| if (index == shard) {
+                    ordinary += 1;
+                };
+                try std.testing.expectEqual(@as(usize, 1), ordinary);
+            }
+        }
+    }
+    const without_histories = try assign(std.testing.allocator, &names, times[2..], 4);
+    defer std.testing.allocator.free(without_histories);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 0, 0, 1, 2, 3 }, without_histories);
+    const with_session = [_][]const u8{ names[0], names[1], "store.mysql_session_tests.test.fixed", "a", "b", "c" };
+    const session_times = [_]Timing{
+        .{ .name = with_session[2], .seconds = 100 }, .{ .name = "a", .seconds = 100 },
+        .{ .name = "b", .seconds = 100 },             .{ .name = "c", .seconds = 100 },
+    };
+    const ordinary_session = try assign(std.testing.allocator, &with_session, &session_times, 4);
+    defer std.testing.allocator.free(ordinary_session);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 0, 0, 1, 2, 3 }, ordinary_session);
+}
+
+test "session handler comparison has exclusive ownership for every shard count" {
+    const names = [_][]const u8{
+        "store.mysql_testing.test.store.mysql obligation reconciliation reads stay flat in completed Turn history",
+        "store.test.ordinary",
+    };
+    const times = [_]Timing{
+        .{ .name = names[0], .seconds = 6 }, .{ .name = names[1], .seconds = 1 },
+    };
+    try std.testing.expect(exclusive(names[0]));
+    try std.testing.expect(!exclusive(names[1]));
+    for (1..9) |count| {
+        const placement = try assign(std.testing.allocator, &names, &times, count);
+        defer std.testing.allocator.free(placement);
+        try std.testing.expectEqual(@as(usize, 0), placement[0]);
+        // Its shared-window cost must not displace ordinary work from zero.
+        try std.testing.expectEqual(@as(usize, 0), placement[1]);
+    }
 }

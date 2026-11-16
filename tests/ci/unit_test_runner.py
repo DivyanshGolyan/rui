@@ -53,7 +53,7 @@ fn unitTests() []const std.builtin.TestFn {
             const placement = partition.assign(std.heap.page_allocator, names, &store_test_times, shard.count) catch @panic("unit shard assignment failed");
             defer std.heap.page_allocator.free(placement);
             var shard_count: usize = 0;
-            // Server-global mutation tests finish before any parallel peer starts.
+            // Exclusive mutations, histories and Handler comparison finish before peers start.
             // Keep them in the same shard-zero process; the launcher observes the
             // first ordinary terminal marker to release the shared-engine gate.
             const ordered = std.heap.page_allocator.dupe(std.builtin.TestFn, selected[0..count]) catch @panic("OOM");
