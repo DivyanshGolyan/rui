@@ -1148,7 +1148,7 @@ const Ending = union(enum) { overview, conversation: Left };
 
 const Next = union(enum) { leave, open: view.Reference, open_settings, focus_chat, new_session };
 
-fn event(self: *Self, value: view.Event) !?Next {
+fn event(self: *Self, value: view.Event) error{OutOfMemory}!?Next {
     return (try self.eventResult(value)).next;
 }
 

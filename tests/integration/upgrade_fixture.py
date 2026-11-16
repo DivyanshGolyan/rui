@@ -111,4 +111,3 @@ class Releases:
         self.thread.join(timeout=5)
         assert not self.thread.is_alive(), "release server did not retire"
         assert not self.errors, self.errors
-
