@@ -195,6 +195,7 @@ This section owns the local feedback policy; [landing](docs/agents/landing.md#pu
 
 Use `python3 tests/ci/prepush.py` for cheap changed-file feedback before first publication and after changes invalidate that feedback.
 Its default and installed hook (`--quick`) check committed whitespace, changed Zig formatting and AST, changed Python undefined names, relevant generation and schema numbering, and focused owner-policy tests.
+When a changed path is a functional core registered in `src/logic_tests.zig`, default and `--quick` also run only the core-boundary test through `test-logic-only` with its name filter.
 Shared or unmapped policy inputs leave broad policy tests to CI.
 Use `--plan` to inspect commands; selection uses the committed diff against the merge base, while commands read working-tree contents.
 Commit corrected whitespace and generated artifacts before publishing.
