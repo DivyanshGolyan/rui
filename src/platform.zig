@@ -36,7 +36,7 @@ pub const Paths = struct {
         // A foreground unsaved placement need not be reachable through DIR.
         // Keep its legacy route rather than inventing a discoverable selector.
         const saved = resolveClientPaths(io, dir) catch return;
-        if (self.kind != saved.kind or !self.socket.eql(saved.socket.slice())) return;
+        if (self.kind != saved.kind or !std.mem.eql(u8, self.socket.slice(), saved.socket.slice())) return;
         if (self.kind == .sqlite and !self.store_identity.eql(saved.store_identity.slice())) return;
         self.host_directory = saved.host_directory;
     }
