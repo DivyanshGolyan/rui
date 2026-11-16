@@ -583,7 +583,8 @@ fn parseNode(comptime tree: anytype, comptime index: usize, comptime universe: a
         inline for (fields, 0..) |child, i| {
             if (std.mem.eql(u8, name, tree.nodes[child].name)) {
                 if (seen[i] and !ignored(Policy, tree.nodes[child].path)) return error.DuplicateField;
-                @field(value, tree.nodes[child].name) = try parseNode(tree, child, universe, JsonTypes, Policy, state, allocator, source, options);
+                const field_name = comptime tree.nodes[child].name;
+                @field(value, field_name) = try parseNode(tree, child, universe, JsonTypes, Policy, state, allocator, source, options);
                 seen[i] = true;
                 break;
             }
@@ -613,9 +614,10 @@ fn parseNode(comptime tree: anytype, comptime index: usize, comptime universe: a
         }
     }
     inline for (fields, 0..) |child, i| {
+        const field_name = comptime tree.nodes[child].name;
         if (!seen[i]) {
             if (comptime ignored(Policy, tree.nodes[child].path)) {
-                @field(value, tree.nodes[child].name) = null;
+                @field(value, field_name) = null;
             } else if (state.allow_missing and deferMissing(Policy, tree.nodes[child].path)) {
                 state.missing_fields = true;
             } else return error.MissingField;

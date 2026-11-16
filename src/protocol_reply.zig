@@ -2425,7 +2425,7 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
     const capacity = comptime std.ArrayList(u8).growCapacity((protocol.max_response_bytes + 7) / 8) + std.ArrayList(u8).growCapacity(protocol.max_response_bytes);
     var storage: [capacity]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&storage);
-    return mutation_answer.decode(fixed.allocator(), reply.body, reply.status, session, target, diagnostic, resolved_session);
+    return mutation_answer.decode(protocol, @import("command_reply.zig"), fixed.allocator(), reply.body, reply.status, session, target, diagnostic, resolved_session);
 }
 
 test "mutation decoder bounds reply bytes and rejects trailing input" {
