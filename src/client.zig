@@ -580,7 +580,9 @@ pub fn resolveClientPaths(io: std.Io, supplied: []const u8) !platform.Paths {
 
 /// Startup callers can bound the entire readiness loop, including each probe.
 pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) protocol_reply.HostStatus {
-    const paths = resolveClientPaths(io, store_path) catch |err| return switch (err) {
+    // Observation discovers identity in its one bounded Host-info exchange.
+    // Mutation resolution would do an eager, separately timed exchange here.
+    const paths = platform.resolveClientPaths(io, store_path) catch |err| return switch (err) {
         error.FileNotFound => .unavailable,
         else => .access_failure,
     };

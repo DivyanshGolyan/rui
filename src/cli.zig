@@ -1212,7 +1212,7 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
         return startHostForTerminal(init, selected, false, parsed.get("settings"), parsed.all("set"), null);
     }
     if (command == .host_pause) return pauseHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null);
-    const paths: ?platform.Paths = client.resolveClientPaths(init.io, selected) catch |err| switch (err) {
+    const paths: ?platform.Paths = platform.resolveClientPaths(init.io, selected) catch |err| switch (err) {
         error.FileNotFound => null,
         else => {
             try writeHostStatus(init.io, .access_failure, null);
@@ -2166,7 +2166,9 @@ fn startSelectedOverviewHost(init: std.process.Init, store: []const u8, binding:
 fn preflightNewSession(io: std.Io, destination: []const u8, saved: bool) !void {
     holdStore(destination);
     if (saved) {
-        _ = client.resolveClientPaths(io, destination) catch |err| return storeFailure(err);
+        // Admission proves saved placement, not that a MySQL Host is already
+        // running. The starter owns the first connection and automatic start.
+        _ = platform.resolveClientPaths(io, destination) catch |err| return storeFailure(err);
     } else platform.validateStoreDestination(io, destination) catch |err| return storeFailure(err);
     // Host observation and classification belong to the launch owner, so
     // callers retain the same structured outcome for terminal or screen.
@@ -5522,6 +5524,20 @@ test "Host launch guided activation requires frozen pair and exact fresh identit
         try std.testing.expect(!try api_key.present(try api_key.path(&environment, &key_path)));
         try std.testing.expectError(error.FileNotFound, tmp.dir.access(init.io, ".config/rui/preferences", .{}));
     }
+}
+
+test "Host launch saved MySQL preflight needs no running Host or login" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var host = try tmp.dir.createDirPathOpen(io, "host", .{ .permissions = .fromMode(0o700) });
+    defer host.close(io);
+    const file = try host.createFile(io, "host.json", .{ .permissions = .fromMode(0o600) });
+    defer file.close(io);
+    try file.writeStreamingAll(io, "{\"store\":{\"mysql\":{\"url\":\"env:PR5B_UNRESOLVED_LOGIN\"}}}");
+    var buffer: [protocol.max_store_bytes]u8 = undefined;
+    const dir = buffer[0..try host.realPath(io, &buffer)];
+    try preflightNewSession(io, dir, true);
 }
 
 test "Host launch chosen usable bindings attach before startup document admission" {
