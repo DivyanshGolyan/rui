@@ -1126,10 +1126,58 @@ while True:
         self.assertIn("ctrl+o   tool output", states["keys"]["expect"])
         self.assertIn("ctrl+c   leave", states["keys"]["expect"])
         self.assertEqual(len(states["keys"]["expect"]), 14)
-        for meaning in ("next panel/footer field", "previous panel/footer field", "list/chat · info actions"):
+        for meaning in ("next focus", "previous focus", "list/chat · info actions"):
             self.assertIn(meaning, states["keys"]["expect"])
         self.assertIn("/help", states["keys"]["absent"])
-        self.assertIn("× Fail with exit 127 · 127", states["chat"]["expect"])
+        self.assertIn("× Fail with exit 127", states["chat"]["expect"])
+        self.assertIn("exit 127", states["chat"]["expect"])
+
+    def test_tool_frames_require_adjacent_rows_and_explicit_exit_fields(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = {state["name"]: state for state in scenario["states"]}
+        for name in ("chat", "tool-open", "tool-open-two", "tool-open-nocolor"):
+            with self.subTest(state=name):
+                self.assertIn("exit 127", states[name]["expect"])
+                self.assertIn("exit 1", states[name]["expect"])
+                self.assertEqual(states[name]["expect_next"]["× Fail with exit 127"], "× Fail with an excerpt")
+                self.assertIn("Fail with exit 127 · 127", states[name]["absent"])
+
+    def test_slashlist_frames_cover_both_themes_sizes_and_matched_spans(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = {state["name"]: state for state in scenario["states"]}
+        self.assertEqual(scenario["sizes"], [(140, 40), (46, 30)])
+        self.assertIn("/model", states["slash"]["expect"])
+        self.assertIn("code · file", states["slash"]["absent"])
+        escape = states["draft-chat-choice-escape"]
+        self.assertNotIn("Draft lifecycle", escape["expect"])  # Sidebar is hidden at 46 columns.
+        self.assertIn("alt+i info", escape["expect"])
+        self.assertEqual(escape["steps"][-1], {"gone": "enter pick"})
+        for suffix, theme, ink in (("", "night", "#a9b6ec"), ("-day", "day", "#1f2d6b")):
+            with self.subTest(theme=theme):
+                help_state = states["slashlist-help" + suffix]
+                description = states["slashlist-description" + suffix]
+                known = states["slashlist-known" + suffix]
+                for state in (help_state, description, known):
+                    self.assertEqual(state.get("theme", "night"), theme)
+                    self.assertEqual(state.get("sizes", scenario["sizes"]), [(140, 40), (46, 30)])
+                self.assertIn({"text": "help", "within": "/help", "bold": True}, help_state["expect_style"])
+                self.assertIn({"text": "help", "within": "/review-help", "bold": True}, help_state["expect_style"])
+                self.assertIn({"text": "/review-", "within": "/review-help", "bold": False}, help_state["expect_style"])
+                self.assertIn({"text": "/verify"}, description["steps"])
+                self.assertIn({"text": "Verify", "within": "Verify the project", "bold": True}, description["expect_style"])
+                self.assertIn({"text": " the project", "within": "Verify the project", "bold": False}, description["expect_style"])
+                self.assertIn({"text": "/help", "bold": False}, description["expect_style"])
+                self.assertIn({"text": "/new", "within": "› /new", "foreground": ink}, known["expect_style"])
+                body = "#2f2b25" if theme == "day" else "#d4cebf"
+                wash = "#dedad5" if theme == "day" else "#2b2f45"
+                self.assertIn({"text": "/help", "within": "› /help", "foreground": ink}, help_state["expect_style"])
+                self.assertIn({"text": "/verify", "within": "› /verify", "foreground": body}, description["expect_style"])
+                for state, marker, word in ((help_state, "/help           Verify", "/help"),
+                                            (description, "/help           Verify", "/help"),
+                                            (known, "/new            start", "/new")):
+                    # Marker spans selected name, blank name-column padding and description.
+                    self.assertEqual(state["expect_background"], {marker: wash})
+                    self.assertIn({"text": word, "within": marker, "foreground": body}, state["expect_style"])
 
     def test_two_open_folds_select_list_before_resizing_to_the_split_layout(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
@@ -1151,7 +1199,7 @@ while True:
             {"keys": ["PgDn"] * 3},
         ])
         for text in ("✓ List project files", "    README.md", "    src",
-                     "× Fail with exit 127 · 127", "× Fail with an excerpt · 1",
+                     "× Fail with exit 127", "× Fail with an excerpt",
                      "    Bash succeeded. Exit code: 0.", "    stdout:", "    Bash failed. Exit code: 1.", "    stderr:",
                      "    usage: example", "    unknown option --help"):
             self.assertIn(text, state["expect"])
@@ -1160,9 +1208,9 @@ while True:
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}
         for name, wanted, old in (
-            ("tool-open-two", "× Fail with exit 127 · 127", " · exit 127"),
-            ("fold-hover", "× Fail with exit 127 · 127", " · exit 127"),
-            ("fold-hover", "× Fail with an excerpt · 1", " · exit 1"),
+            ("tool-open-two", "× Fail with exit 127", " · exit 127"),
+            ("fold-hover", "× Fail with exit 127", " · exit 127"),
+            ("fold-hover", "× Fail with an excerpt", " · exit 1"),
             ("chat-working", "Thinking", "Waiting"),
             ("copy-no-code", "No code block", "No code block in the last answer."),
         ):
@@ -1807,6 +1855,35 @@ while True:
                         self.assertEqual(self.helper["frame_background_failure"](
                             {"expect_background": {"missing": "#" + color}}, frame),
                             "missing background specimen 'missing'")
+
+    def test_style_expectations_validate_and_check_only_the_span_inside_its_row(self):
+        for value in ([], [{"text": "/new", "bold": True}], [{"text": "new", "within": "› /new", "foreground": "#ABCDEF"}]):
+            data = self.scenario()
+            data["states"][0]["expect_style"] = value
+            self.assertEqual(self.helper["validate_scenario"](data)["states"][0]["expect_style"], value)
+        for value in (None, {}, [{"text": "x"}], [{"text": "", "bold": True}], [{"text": "x", "bold": 1}],
+                      [{"text": "x", "within": "y", "bold": True}], [{"text": "x", "foreground": "#fff"}],
+                      [{"text": "x", "bold": True, "unknown": 1}], [{"text": "a\nb", "bold": True}]):
+            data = self.scenario()
+            data["states"][0]["expect_style"] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "expect_style"):
+                self.helper["validate_scenario"](data)
+        row_text, ink, body = " › /new", "1f2d6b", "2f2b25"
+        for bad in (None, 3, 4):
+            with self.subTest(bad=bad):
+                row = tuple(Cell(char, None, index == 5 or index == 4 and bad != 4,
+                                 fg_rgb=ink if index >= 3 and not (bad == 3 and index == 3) else body)
+                            for index, char in enumerate(row_text))
+                frame = Frame(46, 30, Cursor(0, 0), False, (row,), "f3eee2", body, body)
+                state = {"expect_style": [{"text": "/new", "within": "› /new", "foreground": "#" + ink},
+                                          {"text": "ne", "within": "› /new", "bold": True}]}
+                failure = self.helper["frame_style_failure"](state, frame)
+                self.assertEqual(failure, None if bad is None else
+                                 "'/new' in '› /new' must have foreground=#1f2d6b" if bad == 3 else
+                                 "'ne' in '› /new' must have bold=True")
+        # Only the span is checked: the prompt mark keeps the body colour.
+        self.assertEqual(self.helper["frame_style_failure"](
+            {"expect_style": [{"text": "missing", "bold": True}]}, committed("Row")), "missing style specimen 'missing'")
 
     def test_capture_expectations_over_sizes_and_state_transitions(self):
         capture = self.helper["frame_capture"]

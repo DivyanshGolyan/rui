@@ -7,6 +7,7 @@ from contextlib import redirect_stdout, redirect_stderr
 from unittest.mock import call, patch
 
 import open_pr
+from test_pr_shape import GOAL
 
 
 class OpenPrTest(unittest.TestCase):
@@ -28,13 +29,13 @@ class OpenPrTest(unittest.TestCase):
                      patch.object(open_pr, "origin_repo", return_value="example/rui"), \
                      patch.object(open_pr, "gh", return_value=created) as gh, \
                      patch.object(open_pr, "github", side_effect=[comment_error or None]) as github, \
-                     patch.object(open_pr.Path, "read_text", return_value="Description"), \
+                     patch.object(open_pr.Path, "read_text", return_value=GOAL + "Description"), \
                      patch.object(open_pr, "branch_changes", return_value=([], {})), \
                      patch.object(open_pr, "overlaps", return_value=[]), \
                      patch.object(open_pr, "report"), redirect_stdout(stdout), redirect_stderr(stderr):
                     result = open_pr.main()
                 self.assertEqual(gh.call_args_list, [
-                    call(*open_pr.create_args("example/rui", "Title", "Description", "main", "fix-x"))])
+                    call(*open_pr.create_args("example/rui", "Title", GOAL + "Description", "main", "fix-x"))])
                 self.assertEqual(github.call_args_list, [
                     call("POST", "repos/example/rui/issues/9/comments", [("body", "@codex review")])])
                 self.assertIn(url, stdout.getvalue())
@@ -55,6 +56,7 @@ class OpenPrTest(unittest.TestCase):
             ({"docs/guide.md"}, "Description", True),
         )
         for paths, body, accepted in cases:
+            body = GOAL + body
             with self.subTest(paths=paths, body=body), tempfile.TemporaryDirectory() as directory:
                 body_file = Path(directory) / "body.md"
                 body_file.write_text(body, encoding="utf-8")

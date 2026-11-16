@@ -324,18 +324,9 @@ test "MCP promotion keeps old frozen Operations eligible without hiding finite w
             var promote: @import("../../command_input.zig").ActionBackgroundCommand = .{ .action_id = old };
             try promote.key.set("promote-old");
             promote.session = sessions[0];
-            const free: usize = 2;
-            const capacity: @import("../domain/action_control.zig").CapacityView = .{
-                .total = 2,
-                .context = &free,
-                .freeFn = struct {
-                    fn read(context: *const anyopaque) usize {
-                        return @as(*const usize, @ptrCast(@alignCast(context))).*;
-                    }
-                }.read,
-            };
+
             phase = "promotion";
-            try std.testing.expect(storage.backgroundAction(&promote, capacity, .{}) == .accepted);
+            try std.testing.expect(storage.backgroundAction(.{ .command = &promote }, .{}) == .accepted);
             try std.testing.expectEqual(old, (try storage.nextAction(.mcp, .fromFree(2, true))).?.action_id);
             phase = "continuation";
             const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -349,7 +340,7 @@ test "MCP promotion keeps old frozen Operations eligible without hiding finite w
             try std.testing.expect(old < serialized and serialized < finite);
             try std.testing.expect((try storage.nextAction(.mcp, .fromFree(0, true))) == null);
             try std.testing.expect((try storage.nextAction(.mcp, .fromFree(2, false))) == null);
-            try std.testing.expectEqual(finite, (try storage.nextAction(.mcp, .fromFree(1, true))).?.action_id);
+            try std.testing.expectEqual(old, (try storage.nextAction(.mcp, .fromFree(1, true))).?.action_id);
             const selected_old = (try storage.nextAction(.mcp, .fromFree(2, true))).?;
             try std.testing.expectEqual(old, selected_old.action_id);
             phase = "old Attempt";

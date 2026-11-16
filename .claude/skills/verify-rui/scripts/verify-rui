@@ -2195,6 +2195,16 @@ def validate_scenario(data, sizes=None):
                 and type(rule.get("dim")) is bool
                 and type(rule.get("min_columns", 1)) is int and rule.get("min_columns", 1) > 0
                 for rule in styles), f"{name}: expect_dim requires text, dim and optional positive min_columns")
+        spans = state.get("expect_style", [])
+        require(isinstance(spans, list) and all(isinstance(rule, dict)
+                and set(rule) <= {"text", "within", "bold", "foreground"} and bool({"bold", "foreground"} & set(rule))
+                and isinstance(rule.get("text"), str) and rule["text"] and "\n" not in rule["text"]
+                and isinstance(rule.get("within", rule["text"]), str) and rule["text"] in rule.get("within", rule["text"])
+                and "\n" not in rule.get("within", "")
+                and type(rule.get("bold", False)) is bool
+                and ("foreground" not in rule or isinstance(rule["foreground"], str)
+                     and re.fullmatch(r"#[0-9a-fA-F]{6}", rule["foreground"]) is not None)
+                for rule in spans), f"{name}: expect_style requires text, optional within holding it, and bold or #rrggbb foreground")
         adjacent = state.get("expect_next", {})
         require(isinstance(adjacent, dict) and all(isinstance(row, str) and row and "\n" not in row
                 and isinstance(detail, str) and detail and "\n" not in detail for row, detail in adjacent.items()),
@@ -2680,6 +2690,28 @@ def frame_dim_failure(state, frame):
     return None
 
 
+def frame_style_failure(state, frame):
+    """Assert bold and foreground on `text` where it sits in the first row
+    holding `within` (default `text`), independent of the rest of that row."""
+    for rule in state.get("expect_style", []):
+        text, within = rule["text"], rule.get("within", rule["text"])
+        cells = frame_marker_cells(frame, within)
+        if cells is None:
+            return f"missing style specimen {within!r}"
+        start, offset, span = within.index(text), 0, []
+        for cell in cells:
+            end = offset + len(cell.data)
+            if end > start and offset < start + len(text):
+                span.append(cell)
+            offset = end
+        where = repr(text) if text == within else f"{text!r} in {within!r}"
+        if "bold" in rule and not all(cell.bold == rule["bold"] for cell in span):
+            return f"{where} must have bold={rule['bold']}"
+        if "foreground" in rule and not all(frame.colors(cell)[0] == rule["foreground"][1:].lower() for cell in span):
+            return f"{where} must have foreground={rule['foreground']}"
+    return None
+
+
 def frame_background_failure(state, frame):
     """Assert committed cell backgrounds under each marker, not output bytes."""
     for text, color in state.get("expect_background", {}).items():
@@ -2729,7 +2761,7 @@ def frame_capture(run, target, out, state, size, reason):
         reason = f"unexpected on screen: {unexpected}"
     if reason is None:
         reason = (frame_row_failure(state, plain) or frame_dim_failure(state, frame)
-                  or frame_background_failure(state, frame))
+                  or frame_background_failure(state, frame) or frame_style_failure(state, frame))
     (out / files["txt"]).write_text(plain)
     (out / files["ansi"]).write_text(ansi)
     (out / files["html"]).write_text(page)

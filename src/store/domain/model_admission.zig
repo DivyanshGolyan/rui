@@ -53,11 +53,10 @@ const continues_with_input_sql =
     "(" ++ store_schema.oneOf("current.resolution_code", &turn_policy.continues_with_input) ++ " OR (" ++ complete_tool_results_sql ++ "))";
 pub const continues_without_input_sql =
     "(" ++ store_schema.oneOf("current.resolution_code", &turn_policy.continues_without_input) ++ " OR (" ++ complete_tool_results_sql ++ "))";
-const queued_input_sql =
-    "m.turn_id IS NULL AND NOT EXISTS(" ++
-    " SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref " ++
-    " AND m.admission_id<=stopped.admission_cutoff" ++
-    ")";
+fn queuedInputSql(comptime message: []const u8) []const u8 {
+    return message ++ ".turn_id IS NULL AND NOT " ++ action_domain.stoppedSql(message ++ ".session_ref", message ++ ".admission_id<=source_stop.admission_cutoff");
+}
+const queued_input_sql = queuedInputSql("m");
 const open_turn_takes_input_sql =
     "EXISTS(" ++
     " SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id AND current.session_ref=active.session_ref " ++
@@ -108,6 +107,7 @@ pub const tool_continuation_selection = rsql.Read(.{
     .sql = "SELECT " ++ rsql.session_head_columns ++ ",active.first_admission_id AS first_admission,active.input_cutoff AS cutoff,0 AS selected,0 AS skills,active.turn_id " ++
         "FROM turn active @index(turn_tool_continuation) JOIN session s ON s.session_ref=active.session_ref " ++
         "WHERE active.outcome_code IS NULL AND active.continuation_operation_id=active.operation_id AND " ++ "@served(s.provider)" ++
+        " AND NOT " ++ action_domain.stoppedSql("active.session_ref", "source_stop.selected_turn_id=active.turn_id") ++
         " AND NOT EXISTS(SELECT 1 FROM message_admission m " ++
         "WHERE m.session_ref=active.session_ref AND " ++ queued_input_sql ++
         ") ORDER BY active.operation_id LIMIT 1",
@@ -519,9 +519,7 @@ const continue_turn = rsql.Write(.{
 });
 
 const bind_messages = rsql.Write(.{
-    .sql = "UPDATE message_admission SET turn_id=?1 WHERE session_ref=@session(?2) AND turn_id IS NULL AND admission_id<=?3 " ++
-        "AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=message_admission.session_ref " ++
-        "AND message_admission.admission_id<=stopped.admission_cutoff)",
+    .sql = "UPDATE message_admission SET turn_id=?1 WHERE session_ref=@session(?2) AND admission_id<=?3 AND " ++ queuedInputSql("message_admission"),
     .Args = struct { turn_id: u64, session: rsql.SessionHead, cutoff: u64 },
     .expect = .{ .counted = .{ .otherwise = error.SelectionChanged } },
 });

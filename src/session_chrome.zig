@@ -5,46 +5,21 @@ const TerminalText = @import("TerminalText.zig");
 
 pub const Method = session_line.Method;
 
-pub const FooterField = enum { model, effort };
-pub const FooterFocus = enum { input, model, effort };
-pub const FooterInput = union(enum) { tab: bool, enter, escape, text, click: ?FooterField, other };
-pub const FooterDecision = struct {
-    focus: FooterFocus,
-    open_choice: ?FooterField = null,
-    forward: bool = false,
-};
+pub const FooterField = @import("app_input.zig").FooterField;
+pub const FooterFocus = @import("app_input.zig").Field;
+pub const FooterInput = @import("app_input.zig").FooterInput;
+pub const FooterDecision = @import("app_input.zig").FooterDecision;
+pub const footerInput = @import("app_input.zig").footerInput;
 
-pub fn footerInput(focus: FooterFocus, has_effort: bool, input: FooterInput) FooterDecision {
-    return switch (input) {
-        .click => |field| .{ .focus = .input, .open_choice = field, .forward = field == null },
-        .tab => |reverse| .{ .focus = if (reverse) switch (focus) {
-            .input => if (has_effort) .effort else .model,
-            .model => .input,
-            .effort => .model,
-        } else switch (focus) {
-            .input => .model,
-            .model => if (has_effort) .effort else .input,
-            .effort => .input,
-        } },
-        .enter => switch (focus) {
-            .input => .{ .focus = .input, .forward = true },
-            .model => .{ .focus = .input, .open_choice = .model },
-            .effort => .{ .focus = .input, .open_choice = if (has_effort) .effort else null },
-        },
-        .escape => .{ .focus = .input, .forward = focus == .input },
-        .text => .{ .focus = .input, .forward = true },
-        .other => .{ .focus = focus, .forward = true },
-    };
-}
-
+/// Only the not-yet-applied open effect belongs to the chat's core.
+/// Focus belongs to app_input.State; only a visible choice
+/// is modal. Read completion itself never goes through this transition.
 pub const Footer = struct {
-    focus: FooterFocus = .input,
     pending: ?FooterField = null,
 
-    pub fn step(self: *Footer, has_effort: bool, input: FooterInput) FooterDecision {
+    pub fn step(self: *Footer, focus: *@import("app_input.zig").State, has_effort: bool, input: FooterInput) FooterDecision {
         const waiting = self.pending != null;
-        var decision = footerInput(self.focus, has_effort, input);
-        self.focus = decision.focus;
+        var decision = @import("app_input.zig").step(focus, .{}, .{ .footer = .{ .has_effort = has_effort, .input = input } }).footer.?;
         self.pending = decision.open_choice;
         if (waiting and input == .escape) decision.forward = false;
         return decision;
@@ -508,21 +483,11 @@ fn repeat(comptime text: []const u8, comptime count: usize) []const u8 {
     return joined;
 }
 
-test "footer focus domain routes navigation opening escape text and drawn click identity" {
+test "footer focus domain routes opening escape text and drawn click identity" {
     const Case = struct { input: FooterInput, want: FooterDecision };
     for ([_]bool{ false, true }) |effort| {
         for (std.enums.values(FooterFocus)) |focus| {
             const cases = [_]Case{
-                .{ .input = .{ .tab = false }, .want = .{ .focus = switch (focus) {
-                    .input => .model,
-                    .model => if (effort) .effort else .input,
-                    .effort => .input,
-                } } },
-                .{ .input = .{ .tab = true }, .want = .{ .focus = switch (focus) {
-                    .input => if (effort) .effort else .model,
-                    .model => .input,
-                    .effort => .model,
-                } } },
                 .{ .input = .escape, .want = .{ .focus = .input, .forward = focus == .input } },
                 .{ .input = .text, .want = .{ .focus = .input, .forward = true } },
                 .{ .input = .other, .want = .{ .focus = focus, .forward = true } },
@@ -536,15 +501,6 @@ test "footer focus domain routes navigation opening escape text and drawn click 
                 .{ .input = .{ .click = null }, .want = .{ .focus = .input, .forward = true } },
             };
             for (cases) |case| try std.testing.expectEqualDeep(case.want, footerInput(focus, effort, case.input));
-        }
-        var focus: FooterFocus = .input;
-        const cycle: []const FooterFocus = if (effort) &.{ .model, .effort, .input } else &.{ .model, .input };
-        for (cycle) |want| {
-            const next = footerInput(focus, effort, .{ .tab = false });
-            try std.testing.expectEqual(want, next.focus);
-            try std.testing.expectEqual(@as(?FooterField, null), next.open_choice);
-            try std.testing.expect(!next.forward);
-            focus = next.focus;
         }
     }
 }
@@ -591,16 +547,18 @@ test "footer spans identify only whole model and effort words across widths effo
 }
 
 test "deferred footer effect is superseded by interaction without making invisible content modal" {
-    const inputs: []const FooterInput = &.{ .escape, .text, .other, .{ .tab = false }, .{ .tab = true }, .{ .click = null }, .enter };
+    const inputs: []const FooterInput = &.{ .escape, .text, .other, .{ .click = null }, .enter };
     for (std.enums.values(FooterField)) |field| for (inputs) |input| {
+        var owner: @import("app_input.zig").State = .{};
         var footer: Footer = .{ .pending = field };
-        const decision = footer.step(true, input);
+        const decision = footer.step(&owner, true, input);
         try std.testing.expectEqual(@as(?FooterField, null), footer.pending);
         try std.testing.expectEqual(@as(?FooterField, null), decision.open_choice);
         try std.testing.expectEqual(input == .text or input == .other or input == .click or input == .enter, decision.forward);
     };
+    var owner: @import("app_input.zig").State = .{};
     var footer: Footer = .{ .pending = .model };
-    const decision = footer.step(true, .{ .click = .effort });
+    const decision = footer.step(&owner, true, .{ .click = .effort });
     try std.testing.expectEqual(@as(?FooterField, .effort), footer.pending);
     try std.testing.expectEqual(@as(?FooterField, .effort), decision.open_choice);
 }

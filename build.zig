@@ -108,8 +108,7 @@ pub fn build(b: *std.Build) void {
     product.configureTerminalEditor(b, terminal_notice);
 
     const production_safe = product.addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
-    const release_safe = if (pr_ci) product.addRui(b, target, .ReleaseSafe, "rui-pr-check", pinned_transport) else production_safe;
-    if (pr_ci) release_safe.use_llvm = false;
+    const release_safe = if (pr_ci) product.addIntegrationRui(b, target, "rui-pr-check", pinned_transport, pr_ci, product.buildIdentity(b)) else production_safe;
     const debug = product.addRui(b, target, .Debug, "rui-debug-check", pinned_transport);
     const screen_emulator = screen_module.addScreenEmulator(b, ci, ci_mode);
     const screen = screen_emulator.library;
@@ -318,10 +317,12 @@ pub fn build(b: *std.Build) void {
     const host_status_step = b.step("host-status-integration", "Run native Host information and lease observation cases");
     host_status_step.dependOn(&host_status_integration.step);
 
-    const upgrade_release = product.addRuiWithIdentity(b, target, .ReleaseSafe, "rui-upgrade-release-fixture", pinned_transport, .{
+    const upgrade_release = product.addIntegrationRui(b, target, "rui-upgrade-release-fixture", pinned_transport, pr_ci, .{
         .version = b.fmt("0.{d}.10000", .{@import("src/store/schema.zig").schema_version}),
         .revision = product.buildIdentity(b).revision,
     });
+    // Keep PR archive work representative of stripped Linux release payloads.
+    if (pr_ci) upgrade_release.root_module.strip = true;
     const upgrade_fixture_step = b.step("upgrade-fixture", "Build the same-source native actor with synthetic release identity for upgrade evidence");
     upgrade_fixture_step.dependOn(&b.addInstallArtifact(upgrade_release, .{}).step);
     const upgrade_integration = screen_module.screenCommand(b, screen, &.{"python3"});

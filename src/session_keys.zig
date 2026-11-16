@@ -39,6 +39,10 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .down = .next,
     .left = null,
     .right = null,
+    // Focus order's keys: `app_input.keys` takes them first, and an open
+    // panel moves its own rows with them.
+    .tab = null,
+    .shift_tab = null,
     .shift_up = .scroll_up,
     .shift_down = .scroll_down,
     .page_up = .page_up,
@@ -138,8 +142,7 @@ test "the conversation binds Ctrl-X to stop, Alt-A to archive and Esc and Ctrl-G
 pub const Key = union(enum) {
     named: keymap.Key,
     enter,
-    tab,
-    shift_tab,
+    /// `r`, which starts a stopped Host from an empty draft; else text.
     host_start,
     info,
     details,
@@ -179,6 +182,7 @@ pub const Facts = struct {
     details: bool = false,
     draft_empty: bool = true,
     host_startable: bool = false,
+    /// Whether slash_menu.Menu accepted this key's Enter or drawn-pick intent.
     shown_row: bool = false,
     send: Send = .{},
 
@@ -201,8 +205,11 @@ pub const Facts = struct {
     };
 };
 
+/// The state `step` routes: app-owned focus and the Action's choice,
+/// present only while an Action waits for a decision.
 pub const State = struct {
     footer: *session_chrome.Footer,
+    focus: *@import("app_input.zig").State,
     consent: ?*ActionConsent = null,
 };
 
@@ -235,8 +242,18 @@ pub fn step(state: State, facts: Facts, input: Input) Take {
         if (input.closes()) return if (facts.info_choice) .cancel_panel_choice else .close_info;
         return .panel;
     }
-    if (input.key == .tab and !input.pasted and facts.shown_row and !facts.draft_empty and state.footer.focus == .input and state.consent == null) return .take_row;
-    switch (footer(state.footer, .{ .has_effort = facts.has_effort, .opens = !facts.info_open and !facts.saving }, footerKey(input))) {
+    if (input.key == .named and input.key.named == .tab and !input.pasted and facts.shown_row and !facts.draft_empty and state.focus.field == .input and state.consent == null) return .take_row;
+    // Root normally takes traversal. With no drawn target, use that same
+    // order owner over the footer fields rather than a second cycle policy.
+    if (!input.pasted and input.key == .named) {
+        const focus = @import("app_input.zig");
+        if (focus.keys.get(input.key.named)) |move| {
+            _ = focus.step(state.focus, .{}, .{ .footer_tab = .{ .has_effort = facts.has_effort, .reverse = move == .previous } });
+            state.footer.pending = null;
+            return .taken;
+        }
+    }
+    switch (footer(state.footer, state.focus, .{ .has_effort = facts.has_effort, .opens = !facts.info_open and !facts.saving }, footerKey(input))) {
         .open_choice => return .open_choice,
         .taken => return .taken,
         .forward => {},
@@ -259,7 +276,7 @@ pub fn step(state: State, facts: Facts, input: Input) Take {
         .blocked => if (input.key == .enter) .needs_decision else .taken,
         .draft => .consent_draft,
     };
-    const draft_key: @import("app_input.zig").DraftKey = if (input.key == .named and input.key.named == .left and state.footer.focus == .input) .left else .other;
+    const draft_key: @import("app_input.zig").DraftKey = if (input.key == .named and input.key.named == .left and state.focus.field == .input) .left else .other;
     if (!input.pasted and @import("app_input.zig").draftKey(facts.draft_empty, draft_key) == .list) return .back_to_list;
     if (input.key == .enter and !input.pasted and facts.shown_row) return .take_row;
     return .{ .edit = .{ .send = facts.send.allowed() } };
@@ -273,7 +290,7 @@ pub fn rowKey(input: Input) ActionConsent.RowKey {
         .named => |name| if (name == .left or name == .right) .arrows else .other,
         .text, .host_start => .printable,
         .paste_start => .paste,
-        .tab, .shift_tab, .info, .details, .other, .paste_end => .other,
+        .info, .details, .other, .paste_end => .other,
     };
 }
 
@@ -288,8 +305,10 @@ pub const FooterFacts = struct {
     opens: bool,
 };
 
-pub fn footer(focus: *session_chrome.Footer, facts: FooterFacts, input: session_chrome.FooterInput) FooterTake {
-    const decision = focus.step(facts.has_effort, input);
+/// Steps footer focus, for a key or a click: a choice it opens while none
+/// may opens nothing.
+pub fn footer(focus: *session_chrome.Footer, owner: *@import("app_input.zig").State, facts: FooterFacts, input: session_chrome.FooterInput) FooterTake {
+    const decision = focus.step(owner, facts.has_effort, input);
     if (decision.open_choice != null) {
         if (facts.opens) return .open_choice;
         focus.pending = null;
@@ -302,8 +321,6 @@ fn footerKey(input: Input) session_chrome.FooterInput {
     if (input.pasted) return .other;
     if (input.closes()) return .escape;
     return switch (input.key) {
-        .tab => .{ .tab = false },
-        .shift_tab => .{ .tab = true },
         .enter => .enter,
         .text, .host_start => .text,
         else => .other,
@@ -346,14 +363,18 @@ test "every key Root hands the Session means one thing in each Session state" {
         .{ .setups = &.{.submitting}, .keys = &.{.details}, .take = .details },
         .{ .setups = &.{ .host_held, .opening, .preparing, .command_active }, .keys = &.{.details}, .take = hold },
         .{ .setups = &main, .keys = &.{.info}, .take = .open_info },
+
+        // Footer focus takes Tab outside the drawn list, and always Shift-Tab.
         .{ .setups = &.{ .plain, .choice_pending, .host_held, .opening, .preparing, .command_active, .submitting, .selector, .draft_row }, .keys = &.{.tab}, .take = .taken, .focus = .model },
         .{ .setups = &(main ++ [_]Setup{ .selector, .draft_row }), .keys = &.{.shift_tab}, .take = .taken, .focus = .effort },
+
+        .{ .setups = &.{.footer_focused}, .keys = &.{.tab}, .take = .taken, .focus = .effort },
+        .{ .setups = &.{.footer_focused}, .keys = &.{.shift_tab}, .take = .taken, .focus = .input },
+        // Focus on the footer's model.
         .{ .setups = &.{.footer_focused}, .keys = &.{ .printable, .host_start, .paste_start }, .take = send, .focus = .input },
         .{ .setups = &.{.footer_focused}, .keys = &.{ .pasted_printable, .pasted_enter, .ctrl_c, .ctrl_d, .left, .right, .details, .paste_end }, .take = send },
         .{ .setups = &.{.footer_focused}, .keys = &.{.enter}, .take = .open_choice, .focus = .input },
         .{ .setups = &.{.footer_focused}, .keys = &closing, .take = .taken, .focus = .input },
-        .{ .setups = &.{.footer_focused}, .keys = &.{.tab}, .take = .taken, .focus = .effort },
-        .{ .setups = &.{.footer_focused}, .keys = &.{.shift_tab}, .take = .taken, .focus = .input },
         .{ .setups = &.{.footer_focused}, .keys = &.{.info}, .take = .open_info },
         .{ .setups = &.{ .choice_shown, .info_open, .info_choice }, .keys = &leaving, .take = .{ .perform = .detach } },
         .{ .setups = &.{.choice_shown}, .keys = &closing, .take = .close_choice },
@@ -391,8 +412,8 @@ test "every key Root hands the Session means one thing in each Session state" {
                 .ctrl_d => .{ .key = .{ .named = .ctrl_d } },
                 .left => .{ .key = .{ .named = .left } },
                 .right => .{ .key = .{ .named = .right } },
-                .tab => .{ .key = .tab },
-                .shift_tab => .{ .key = .shift_tab },
+                .tab => .{ .key = .{ .named = .tab } },
+                .shift_tab => .{ .key = .{ .named = .shift_tab } },
                 .host_start => .{ .key = .host_start },
                 .info => .{ .key = .info },
                 .details => .{ .key = .details },
@@ -436,16 +457,17 @@ test "every key Root hands the Session means one thing in each Session state" {
         const row = rows[matched.?];
         used[matched.?] = true;
 
-        var footer_state: session_chrome.Footer = .{ .focus = if (setup == .footer_focused) .model else .input };
-        const focus = footer_state.focus;
+        var focus_owner: @import("app_input.zig").State = .{ .field = if (setup == .footer_focused) .model else .input };
+        var footer_state: session_chrome.Footer = .{};
+        const focus = focus_owner.field;
         var consent: ActionConsent = .{};
         consent.adopt(17);
         if (setup == .draft_row) consent.row = .draft;
         const before = consent.row;
         const waits = setup == .selector or setup == .draft_row;
-        const take = step(.{ .footer = &footer_state, .consent = if (waits) &consent else null }, Case.facts(setup), Case.input(pressed));
+        const take = step(.{ .footer = &footer_state, .focus = &focus_owner, .consent = if (waits) &consent else null }, Case.facts(setup), Case.input(pressed));
         try std.testing.expectEqual(row.take, take);
-        try std.testing.expectEqual(row.focus orelse focus, footer_state.focus);
+        try std.testing.expectEqual(row.focus orelse focus, focus_owner.field);
         try std.testing.expectEqual(row.row orelse before, consent.row);
         try std.testing.expectEqual(@as(?session_chrome.FooterField, if (take == .open_choice) .model else null), footer_state.pending);
     };
@@ -459,7 +481,7 @@ test "drawn slash Tab acceptance preserves modal consent paste and footer focus 
         empty: bool = false,
         choice: Facts.Choice = .closed,
         consent: ?ConsentPolicy.Row = null,
-        key: Key = .tab,
+        key: Key = .{ .named = .tab },
         pasted: bool = false,
         expected: Take,
         after: session_chrome.FooterFocus,
@@ -474,20 +496,21 @@ test "drawn slash Tab acceptance preserves modal consent paste and footer focus 
         .{ .choice = .shown, .expected = .panel, .after = .input },
         .{ .consent = .selector, .expected = .taken, .after = .model },
         .{ .consent = .draft, .expected = .taken, .after = .model },
-        .{ .key = .shift_tab, .expected = .taken, .after = .effort },
+        .{ .key = .{ .named = .shift_tab }, .expected = .taken, .after = .effort },
         .{ .pasted = true, .expected = .{ .edit = .{ .send = true } }, .after = .input },
     }) |case| {
-        var footer_state: session_chrome.Footer = .{ .focus = case.focus };
+        var focus_owner: @import("app_input.zig").State = .{ .field = case.focus };
+        var footer_state: session_chrome.Footer = .{};
         var consent: ActionConsent = .{};
         consent.adopt(17);
         consent.row = case.consent orelse .selector;
-        try std.testing.expectEqualDeep(case.expected, step(.{ .footer = &footer_state, .consent = if (case.consent != null) &consent else null }, .{
+        try std.testing.expectEqualDeep(case.expected, step(.{ .footer = &footer_state, .focus = &focus_owner, .consent = if (case.consent != null) &consent else null }, .{
             .info_open = case.info,
             .draft_empty = case.empty,
             .choice = case.choice,
             .has_effort = true,
             .shown_row = true,
         }, .{ .key = case.key, .pasted = case.pasted }));
-        try std.testing.expectEqual(case.after, footer_state.focus);
+        try std.testing.expectEqual(case.after, focus_owner.field);
     }
 }

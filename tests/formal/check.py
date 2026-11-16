@@ -43,10 +43,8 @@ CHECKS = (
     # does not: it reads commit_seq as final once it holds the lock.
     ("mysql ownership, advisory lock", OWNERSHIP, "AdvisoryLock.cfg",
      SAFETY, ("RerunOnlyUnsaved",)),
-    # #1550 admits a background result while the attached parent's stop is
-    # owed but unsettled, and the next input boundary takes it. Checking
-    # the owed stop at admission, as eligibleSql does, holds every rule.
-    ("background delivery, #1550", BACKGROUND, "Pr1550.cfg", DELIVERY, ("StopWins",)),
+    ("background delivery, #1550", BACKGROUND, "Pr1550.cfg",
+     DELIVERY + ("StopWins",), ()),
     ("background delivery, owed stop checked", BACKGROUND, "OwedStopChecked.cfg",
      DELIVERY + ("StopWins",), ()),
 )

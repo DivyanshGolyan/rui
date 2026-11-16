@@ -51,6 +51,12 @@ When the user drops a requirement, list every planned or merged piece that only 
 Keep independent concerns independent; familiarity and line/module counts do not establish simplicity.
 Obtain independent opinions on material design questions.
 
+### Goal
+
+Every PR body has a visible `Goal: #123 <how this change serves the issue>` line, using an issue number or full GitHub issue URL and at least three explanation words.
+For housekeeping, red-main reverts, model trials or similar work without an issue, use `No issue: <reason>` instead.
+The plan checks the text, not whether the issue exists.
+
 ### Shape before code
 
 Before writing code for a change to `src/`, show the changed structure in a fenced diagram, diff-sketch or tree in the PR's `## Summary`.
@@ -155,7 +161,7 @@ On Host threads:
 
 ## Review
 
-Codex is the code review; request `@codex review for duplicated authority and braided concerns, and against the PR's Summary shape; group symptoms by owner` when production or operational changes invalidate the previous review.
+Codex is the code review; request `@codex review for duplicated authority and braided concerns, and against the PR's Summary shape and against the linked issue's goal; group symptoms by owner` when production or operational changes invalidate the previous review.
 [Landing](docs/agents/landing.md#publish-and-merge) owns ready publication, clean review evidence and its reuse exceptions.
 The [Code Review Rules](AGENTS.md#code-review-rules) own how it groups and orders its findings; the rules it applies stay here.
 The author's own reviews are design reviews of the approved design, and a redesign when fixes keep producing new findings.
@@ -165,6 +171,7 @@ Review signoff does not gate landing a green change ([Landing](AGENTS.md#landing
 
 Review parity and failure paths as well as the diff:
 
+- **Intent.** Read the PR Goal and linked issue before the diff; identify drift from the issue, a wrong approach to its goal, and symptom patches where redesign of an earlier finding fits.
 - **Parity.** List what the change re-implements, replaces or drops: each sibling component, previous version and contract line it touches.
   Confirm each keeps its behavior.
   A second implementation of a behavior an existing component owns is a finding.

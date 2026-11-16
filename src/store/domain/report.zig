@@ -240,7 +240,7 @@ pub const FirstCandidates = struct {
 };
 
 pub const person_message_sql = "SELECT admitted_at FROM message_admission @index(message_admission_person) " ++
-    "WHERE session_ref=?1 AND sender_session_ref IS NULL ORDER BY admission_position DESC LIMIT 1";
+    "WHERE session_ref=?1 AND sender_session_ref IS NULL AND source_action_id IS NULL ORDER BY admission_position DESC LIMIT 1";
 
 pub const person_message = rsql.Read(.{
     .sql = person_message_sql,

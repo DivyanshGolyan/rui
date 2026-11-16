@@ -468,6 +468,46 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
     }
 }
 
+fn dropFinalInputUpgradeShape(storage: *Store) !void {
+    @setEvalBranchQuota(200_000);
+    const Native = struct {
+        fn exec(store: *Store, sql: [:0]const u8) !void {
+            if (store.engine == .mysql) return mysql_testing.rawExec(store, sql);
+            return sqlite.exec(store.sqliteDatabase(), sql);
+        }
+    };
+    if (storage.engine == .mysql) {
+        const checks = " FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='message_admission' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('source_action_id',cc.CHECK_CLAUSE)>0";
+        try Native.exec(storage, "SET @rui_final_ddl=(SELECT CONCAT('ALTER TABLE message_admission DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`')" ++ checks ++ ")");
+        try Native.exec(storage, "PREPARE rui_final FROM @rui_final_ddl");
+        try Native.exec(storage, "EXECUTE rui_final");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_final");
+        try Native.exec(storage, "SET @rui_final_ddl=(SELECT CONCAT('ALTER TABLE message_admission DROP FOREIGN KEY `',REPLACE(CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='message_admission' AND COLUMN_NAME='source_action_id' AND REFERENCED_TABLE_NAME='action_operation')");
+        try Native.exec(storage, "PREPARE rui_final FROM @rui_final_ddl");
+        try Native.exec(storage, "EXECUTE rui_final");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_final");
+        try Native.exec(storage, "SET @rui_final_ddl=NULL");
+        try Native.exec(storage, "ALTER TABLE message_admission MODIFY COLUMN message_admission_person_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN sender_session_ref IS NULL THEN session_ref END) STORED, DROP COLUMN source_action_id");
+    } else {
+        try Native.exec(storage, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        defer Native.exec(storage, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF") catch unreachable;
+        try Native.exec(storage, "ALTER TABLE message_admission RENAME TO upgrade_message_admission");
+        comptime var statements = std.mem.splitScalar(u8, baseline_sqlite_ddl, ';');
+        inline while (comptime statements.next()) |statement| {
+            const sql = comptime std.mem.trim(u8, statement, " \n\r\t");
+            if (comptime std.mem.startsWith(u8, sql, "CREATE TABLE message_admission(")) try Native.exec(storage, comptime std.fmt.comptimePrint("{s}", .{sql}));
+        }
+        try Native.exec(storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position) SELECT admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position FROM upgrade_message_admission");
+        try Native.exec(storage, "DROP TABLE upgrade_message_admission");
+        comptime var indexes = std.mem.splitScalar(u8, baseline_sqlite_ddl, ';');
+        inline while (comptime indexes.next()) |statement| {
+            const sql = comptime std.mem.trim(u8, statement, " \n\r\t");
+            if (comptime (std.mem.startsWith(u8, sql, "CREATE INDEX message_admission_") or std.mem.startsWith(u8, sql, "CREATE UNIQUE INDEX message_admission_"))) try Native.exec(storage, comptime std.fmt.comptimePrint("{s}", .{sql}));
+        }
+        try std.testing.expectEqual(@as(u64, 0), try sqliteQueryU64(storage.sqliteDatabase(), "SELECT count(*) FROM pragma_foreign_key_check", .{}));
+    }
+}
+
 fn dropBackgroundUpgradeShape(storage: *Store) !void {
     const schema = @import("schema.zig");
     const Native = struct {
@@ -482,6 +522,7 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_control_command", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_operation WHERE background_content_id IS NOT NULL OR background_position IS NOT NULL OR background_at IS NOT NULL", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_stop WHERE action_cutoff<>0", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM message_admission WHERE source_action_id IS NOT NULL", .{}));
     const catalog = " FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.CONSTRAINT_TYPE='CHECK' AND tc.TABLE_NAME=";
     const checks = .{
         .{ "action_operation", "LOCATE('background_',cc.CHECK_CLAUSE)>0", 2 },
@@ -506,6 +547,7 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
         try Native.exec(storage, "DEALLOCATE PREPARE rui_rewind");
         try Native.exec(storage, "SET @rui_rewind_ddl=NULL");
     }
+    try dropFinalInputUpgradeShape(storage);
     try Native.exec(storage, "DROP TABLE action_control_command");
     if (storage.engine == .mysql) {
         try Native.exec(storage, "ALTER TABLE action_operation DROP INDEX action_operation_background, DROP INDEX action_operation_background_results, DROP INDEX action_operation_background_ready, DROP INDEX action_operation_awaiting, DROP COLUMN action_operation_background_results_lead, DROP COLUMN action_operation_background_ready_lead, DROP COLUMN action_operation_awaiting_lead");

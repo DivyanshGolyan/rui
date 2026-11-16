@@ -163,6 +163,7 @@ pub const PublicConversationItem = struct {
     presentation: ?tool_presentation.ToolPresentation = null,
     admitted_at: ?u64 = null,
     sender: ?protocol.NamedPeer = null,
+    source_action: ?u64 = null,
 };
 
 pub const PublicConversationPage = struct {
