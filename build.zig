@@ -252,6 +252,7 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSafe,
     });
     product.configurePosix(b, preferences_module);
+    preferences_module.addImport("url", product.addUrl(b));
     preference_policy_actor.root_module.addImport("preferences", preferences_module);
     const preference_policy_integration = b.addSystemCommand(&.{"python3"});
     preference_policy_integration.addFileArg(b.path("tests/integration/preference_policy_integration.py"));
