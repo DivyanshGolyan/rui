@@ -287,7 +287,9 @@ def saved_capture_routes(state):
                 (home / ".config/rui").mkdir(mode=0o700)
                 (home / "capture-files").mkdir(mode=0o700)
                 (home / ".config/rui/requests").symlink_to(home / "capture-files", target_is_directory=True)
-            endpoint = fixture.SuccessEndpoint([(answer("capture route answer"), None)])
+            release = threading.Event()
+            release.set()
+            endpoint = fixture.SuccessEndpoint([(answer("capture route answer"), release)])
             thread = threading.Thread(target=endpoint.serve_forever)
             thread.start()
             host = None
