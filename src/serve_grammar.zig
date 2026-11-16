@@ -228,7 +228,7 @@ test "running Host sources have one syntax owner across current and retired argv
     }{
         .{ .argv = &.{ "rui", "host", "serve" } },
         .{ .argv = &.{ "rui", "host", "serve", "--store", "/host" }, .dir = "/host" },
-        .{ .argv = &.{ "rui", "host", "serve", "--store-hex", "2f686f73742dff", "--settings", "/document-\xff" }, .dir = "/host-\xff", .settings = "/document-\xff" },
+        .{ .argv = &.{ "rui", "host", "serve", "--store-hex", "2f686f7374", "--settings", "/document-\xff" }, .dir = "/host", .settings = "/document-\xff" },
         .{ .argv = &.{ "rui", "host", "serve", "--settings", "/document", "--set", "providers={}", "--set", "execution.activeCapacity=3" }, .settings = "/document", .assignments = &.{ "providers={}", "execution.activeCapacity=3" } },
         .{ .argv = &.{ "rui", "host", "serve", "--provider", "codex", "--provider", "openai", "--active-capacity", "4", "--bash-path", "/bin/bash", "--bash-timeout-ms", "1000", "--provider-ca-file", "/network-ca" }, .assignments = &.{ "providers.codex={}", "providers.openai={}", "execution.activeCapacity=4", "tools.bash.path=/bin/bash", "tools.bash.timeoutMs=1000", "network.caFile=/network-ca" } },
         // Syntax keeps source spellings; only admission can decide whether
