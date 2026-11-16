@@ -5379,12 +5379,17 @@ test "Host selection round trips every Store placement and interface through def
             .mysql => try host_start.savedEdit(init, dir, "store.mysql.url", "env:PR5B_NEVER_RESOLVE_LOGIN", &failure),
         }
         if (explicit) try host_start.savedEdit(init, dir, "interface.dir", interface, &failure);
-        try std.Io.Dir.cwd().createDirPath(io, home, .fromMode(0o700));
+        var home_dir = try std.Io.Dir.cwd().createDirPathOpen(io, home, .{ .permissions = .fromMode(0o700) });
+        home_dir.close(io);
         try environment.put("HOME", home);
         const paths = try platform.resolveClientPaths(io, dir);
         try std.testing.expectEqualStrings(dir, paths.host_directory.slice());
         try std.testing.expectEqualStrings(dir, paths.selector());
-        try std.testing.expectEqualStrings(switch (kind) { .sqlite => dir, .moved_sqlite => data, .mysql => "" }, paths.store_identity.slice());
+        try std.testing.expectEqualStrings(switch (kind) {
+            .sqlite => dir,
+            .moved_sqlite => data,
+            .mysql => "",
+        }, paths.store_identity.slice());
         const readiness: preferences.Readinesses = .initFill(.configured);
         _ = try preferences.update(home, .{ .store = .{ .set = dir } }, &readiness);
         const saved = try preferences.load(home);
