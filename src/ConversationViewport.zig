@@ -354,23 +354,23 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         /// fold and status text never grants body provenance by resemblance.
         pub fn quoteBounds(self: *const Self, kind: QuoteBody, start: usize, end: usize) ?struct { start: usize, end: usize } {
             if (kind == .none or self.summaryAt(start) != null) return null;
-            var first = start;
+            var body_start = start;
             switch (kind) {
                 .none => unreachable,
                 .answer => {},
                 .user => {
-                    while (first < end and self.styles[first] & (user_bit | summary_bit) != user_bit) : (first += 1) {}
-                    if (first == end) return null;
-                    if (first == start and std.mem.startsWith(u8, self.text()[first..end], "  ")) first += 2;
+                    while (body_start < end and self.styles[body_start] & (user_bit | summary_bit) != user_bit) : (body_start += 1) {}
+                    if (body_start == end) return null;
+                    if (body_start == start and std.mem.startsWith(u8, self.text()[body_start..end], "  ")) body_start += 2;
                 },
                 .tool => {
                     const marker = self.lineMarker(start) orelse return null;
                     if (!std.mem.eql(u8, marker.uri, tool_fold.output_uri)) return null;
-                    first = marker.end;
-                    if (std.mem.startsWith(u8, self.text()[first..end], "    ")) first += 4;
+                    body_start = marker.end;
+                    if (std.mem.startsWith(u8, self.text()[body_start..end], "    ")) body_start += 4;
                 },
             }
-            return .{ .start = first, .end = end };
+            return .{ .start = body_start, .end = end };
         }
 
         pub fn summaryByte(self: *const Self, position: usize) bool {

@@ -978,12 +978,12 @@ test "quote insertion refuses active paste partial input and rejected drafts wit
         const before = editor.edits;
         const caret = editor.cursor();
         const refusal = editor.rejected;
-        const paste = editor.pasting();
+        const was_pasting = editor.pasting();
         try std.testing.expect((try editor.insertMultiline(std.testing.allocator, "\n> quote\n")) == .refused);
         try std.testing.expectEqualStrings("leftRIGHT", editor.text());
         try std.testing.expectEqual(caret, editor.cursor());
         try std.testing.expectEqual(before, editor.edits);
         try std.testing.expectEqual(refusal, editor.rejected);
-        try std.testing.expectEqual(paste, editor.pasting());
+        try std.testing.expectEqual(was_pasting, editor.pasting());
     }
 }
