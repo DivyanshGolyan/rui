@@ -2485,7 +2485,7 @@ fn providerBand(built: *Spans, trouble: Band, now_ms: u64) error{OutOfMemory}![]
             try std.fmt.allocPrint(built.arena, "{s} API key rejected. Save a new key, then rui host pause.", .{trouble.provider.?.shown()}),
         .quota => quota: {
             const used = if (trouble.resets_at) |at|
-                try std.fmt.allocPrint(built.arena, "Quota used up. Resets in {s}.", .{ageText(&buffer, at -| now_ms / 1000)})
+                try std.fmt.allocPrint(built.arena, "Quota used up. Resets in {s}.", .{(Age{ .remaining = at }).text(&buffer, now_ms)})
             else
                 "Quota used up.";
             if (trouble.provider.?.usage()) |usage| {
@@ -2523,11 +2523,35 @@ pub fn itemHasAge(state: *const State, item: Item) bool {
     };
 }
 
-pub fn nextAgeAt(state: *const State, item: Item) ?u64 {
-    if (!itemHasAge(state, item)) return null;
-    const since = shownSince(state, &state.rows.items[state.order.items[item.row]]);
-    const minutes = ((state.now_ms / 1000) -| since) / 60;
-    return (since +| ((minutes +| 1) *| 60)) *| 1000;
+pub const Drawn = struct {
+    first: usize = 0,
+    end: usize = 0,
+    header: bool = false,
+};
+
+pub fn nextRedrawAt(state: *const State, drawn: Drawn, caps: Caps, awake_ms: u64) ?u64 {
+    var next: ?u64 = null;
+    for (drawn.first..drawn.end) |at| {
+        const item = listItem(state, at) orelse break;
+        if (markSpins(state, item, caps)) {
+            const deadline = awake_ms +| (spin_interval_ms - awake_ms % spin_interval_ms);
+            next = @min(next orelse deadline, deadline);
+        }
+        if (itemHasAge(state, item)) {
+            const row = &state.rows.items[state.order.items[item.row]];
+            if ((Age{ .elapsed = shownSince(state, row) }).nextAt(state.now_ms)) |epoch_ms| {
+                const deadline = awake_ms +| (epoch_ms -| state.now_ms);
+                next = @min(next orelse deadline, deadline);
+            }
+        }
+    }
+    if (drawn.header) if (band(state)) |trouble| if (trouble.trouble == .quota) {
+        if (trouble.resets_at) |at| if ((Age{ .remaining = at }).nextAt(state.now_ms)) |epoch_ms| {
+            const deadline = awake_ms +| (epoch_ms -| state.now_ms);
+            next = @min(next orelse deadline, deadline);
+        };
+    };
+    return next;
 }
 
 const new_session_name = "New Session";
@@ -2614,7 +2638,7 @@ pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16,
         .archiving => try std.fmt.allocPrint(arena, "[Archiving] {s}", .{named.text}),
     };
     var buffer: [8]u8 = undefined;
-    const age = if (!itemHasAge(state, .{ .row = at })) "" else listAgeText(&buffer, (state.now_ms / 1000) -| shownSince(state, row));
+    const age = if (!itemHasAge(state, .{ .row = at })) "" else (Age{ .elapsed = shownSince(state, row) }).text(&buffer, state.now_ms);
     const end = width -| 1;
     const age_cells = @min(built.measure(age), end -| text_column);
     const name_end = end -| age_cells -| @intFromBool(age_cells != 0);
@@ -2740,15 +2764,45 @@ fn title(state: *const State, row: *const Row) session_line.Name {
     return session_line.name(if (row.label) |*text| text.slice() else null, state.lineOf(row), &row.reference);
 }
 
-fn listAgeText(buffer: *[8]u8, seconds: u64) []const u8 {
-    return if (seconds < 60) "now" else ageText(buffer, seconds);
-}
+const Age = union(enum) {
+    elapsed: u64,
+    remaining: u64,
 
-fn ageText(buffer: *[8]u8, seconds: u64) []const u8 {
-    const units = [_]struct { u64, u8 }{ .{ 86400, 'd' }, .{ 3600, 'h' }, .{ 60, 'm' } };
-    for (units) |unit| if (seconds >= unit[0]) return std.fmt.bufPrint(buffer, "{d}{c}", .{ @min(seconds / unit[0], 999), unit[1] }) catch unreachable;
-    return std.fmt.bufPrint(buffer, "{d}s", .{seconds}) catch unreachable;
-}
+    const Unit = struct { seconds: u64, suffix: u8 };
+
+    fn unit(duration: u64) Unit {
+        for ([_]Unit{ .{ .seconds = 86400, .suffix = 'd' }, .{ .seconds = 3600, .suffix = 'h' } }) |value| {
+            if (duration >= value.seconds) return value;
+        }
+        return .{ .seconds = 60, .suffix = 'm' };
+    }
+
+    fn seconds(self: Age, now_ms: u64) u64 {
+        return switch (self) {
+            .elapsed => |since| now_ms / 1000 -| since,
+            .remaining => |until| until -| now_ms / 1000,
+        };
+    }
+
+    fn text(self: Age, buffer: *[8]u8, now_ms: u64) []const u8 {
+        const duration = self.seconds(now_ms);
+        if (duration < 60) return switch (self) {
+            .elapsed => "now",
+            .remaining => "under a minute",
+        };
+        const value = unit(duration);
+        return std.fmt.bufPrint(buffer, "{d}{c}", .{ @min(duration / value.seconds, 999), value.suffix }) catch unreachable;
+    }
+
+    fn nextAt(self: Age, now_ms: u64) ?u64 {
+        const duration = self.seconds(now_ms);
+        const value = unit(duration);
+        return switch (self) {
+            .elapsed => |since| if (duration / value.seconds >= 999) null else (since +| ((duration / value.seconds +| 1) *| value.seconds)) *| 1000,
+            .remaining => |until| if (duration < 60) until *| 1000 else (until -| (@min(duration / value.seconds, 999) * value.seconds - 1)) *| 1000,
+        };
+    }
+};
 
 const test_now_s = 1_792_937_000;
 
@@ -4270,7 +4324,7 @@ test "a quota band adds where its provider raises the limit only when the line h
         .{ .provider = .chatgpt, .width = 40, .shown = "Quota used up." },
         .{ .provider = .chatgpt, .resets_at = test_now_s + 1200, .width = 200, .shown = "Quota used up. Resets in 20m. " ++ usage },
         .{ .provider = .chatgpt, .resets_at = test_now_s + 1200, .width = 60, .shown = "Quota used up. Resets in 20m." },
-        .{ .provider = .openai, .resets_at = test_now_s + 59, .width = 200, .shown = "Quota used up. Resets in 59s." },
+        .{ .provider = .openai, .resets_at = test_now_s + 59, .width = 200, .shown = "Quota used up. Resets in under a minute." },
         .{ .provider = .codex, .width = 200, .shown = "Quota used up." },
         .{ .provider = .openai, .resets_at = test_now_s + 1200, .width = 200, .shown = "Quota used up. Resets in 20m." },
     }) |case| {
@@ -4896,7 +4950,7 @@ test "overview one-line rows at 40 and 140 columns cover every work state" {
         const first = try rowSegments(arena.allocator(), &state, 0, width, .{}, 0);
         const prefix = try std.fmt.allocPrint(arena.allocator(), "{s}A useful Session name", .{([_][]const u8{ "○ ", "◌ ", "⠹ ", "⠹ ", "⠹ ", "? ", "⠹ ", "", "× ", "■ " })[index]});
         var buffer: [8]u8 = undefined;
-        const expected = [_][]const u8{ prefix, listAgeText(&buffer, (state.now_ms / 1000) -| listed.state.since()) };
+        const expected = [_][]const u8{ prefix, (Age{ .elapsed = listed.state.since() }).text(&buffer, state.now_ms) };
         try expectLine(first, width, expected[0..if (rules.get(shownKind(&state, &state.rows.items[0])).mark == .active) @as(usize, 1) else 2]);
         try std.testing.expectEqual(Colour.strong, (try styleOf(first, "A useful Session name")).colour);
         try std.testing.expect((try styleOf(first, "A useful Session name")).bold);
@@ -6255,4 +6309,80 @@ test "list marks and ages domain covers every state age band width and list surf
         try std.testing.expect(std.mem.startsWith(u8, action, " + New Session"));
         try std.testing.expectEqual(@as(usize, text_column), std.mem.indexOf(u8, action, "New Session").?);
     };
+}
+
+test "redraw deadline domain includes quota bands visible ages and eligible spinners" {
+    const Case = struct { remaining: ?u64, text: []const u8, delay: ?u64 };
+    const cases = [_]Case{
+        .{ .remaining = null, .text = "Quota used up.", .delay = null },
+        .{ .remaining = 0, .text = "", .delay = null },
+        .{ .remaining = 1, .text = "Quota used up. Resets in under a minute.", .delay = 750 },
+        .{ .remaining = 59, .text = "Quota used up. Resets in under a minute.", .delay = 58_750 },
+        .{ .remaining = 60, .text = "Quota used up. Resets in 1m.", .delay = 750 },
+        .{ .remaining = 61, .text = "Quota used up. Resets in 1m.", .delay = 1_750 },
+        .{ .remaining = 119, .text = "Quota used up. Resets in 1m.", .delay = 59_750 },
+        .{ .remaining = 120, .text = "Quota used up. Resets in 2m.", .delay = 750 },
+        .{ .remaining = 180, .text = "Quota used up. Resets in 3m.", .delay = 750 },
+        .{ .remaining = 200, .text = "Quota used up. Resets in 3m.", .delay = 20_750 },
+        .{ .remaining = 3599, .text = "Quota used up. Resets in 59m.", .delay = 59_750 },
+        .{ .remaining = 3600, .text = "Quota used up. Resets in 1h.", .delay = 750 },
+        .{ .remaining = 86399, .text = "Quota used up. Resets in 23h.", .delay = 3_599_750 },
+        .{ .remaining = 86400, .text = "Quota used up. Resets in 1d.", .delay = 750 },
+    };
+    const Screen = enum { unicode, indexed, ascii, colourless, stale, peer };
+    for (cases) |case| for ([_]bool{ false, true }) |header| for ([_]bool{ false, true }) |ages| for ([_]bool{ false, true }) |working| for (std.enums.values(Screen)) |screen| for ([_]u64{ 1000, 1099 }) |awake_ms| for ([_]u16{ 46, 140 }) |width| {
+        var state = try opened(&.{
+            failedRow("quota0", 120, "provider_quota", if (case.remaining) |seconds| test_now_s + seconds else null),
+            session("age000", .{ .idle = ago(50) }, .{ .label = "Age row", .yours = true }),
+            session("work00", .{ .working = ago(10) }, .{ .label = "Working row", .yours = screen != .peer }),
+        });
+        defer state.deinit();
+        state.now_ms += 250;
+        state.list_stale = screen == .stale;
+        const caps: Caps = .{ .unicode = screen != .ascii, .depth = if (screen == .colourless) .none else if (screen == .indexed) .indexed else .direct };
+        const row_age = position(&state, "age000".*).?;
+        const row_work = position(&state, "work00".*).?;
+        const drawn: Drawn = .{
+            .first = if (working) row_work else if (ages) row_age else 0,
+            .end = if (ages) row_age + 1 else if (working) row_work + 1 else 0,
+            .header = header,
+        };
+        try std.testing.expect(position(&state, "quota0".*).? >= drawn.end);
+        var expected: ?u64 = if (header) case.delay else null;
+        if (ages) expected = @min(expected orelse 9_750, 9_750);
+        if (working and (screen == .unicode or screen == .indexed)) {
+            const delay: u64 = if (awake_ms == 1000) 100 else 1;
+            expected = @min(expected orelse delay, delay);
+        }
+        try std.testing.expectEqual(if (expected) |delay| @as(?u64, awake_ms + delay) else null, nextRedrawAt(&state, drawn, caps, awake_ms));
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const text = try segmentText(arena.allocator(), try headerSegments(arena.allocator(), &state, width, caps));
+        try std.testing.expectEqualStrings(case.text, std.mem.trim(u8, text, " "));
+        if (header and !ages and !working) if (case.delay) |delay| {
+            state.now_ms += delay;
+            const changed = try segmentText(arena.allocator(), try headerSegments(arena.allocator(), &state, width, caps));
+            try std.testing.expect(!std.mem.eql(u8, text, changed));
+        };
+    };
+}
+
+test "presentation age owner shares minute hour and day text boundaries without seconds" {
+    const cases = [_]struct { age: u64, text: []const u8, delay: ?u64 }{
+        .{ .age = 0, .text = "now", .delay = 59_750 },
+        .{ .age = 59, .text = "now", .delay = 750 },
+        .{ .age = 60, .text = "1m", .delay = 59_750 },
+        .{ .age = 3599, .text = "59m", .delay = 750 },
+        .{ .age = 3600, .text = "1h", .delay = 3_599_750 },
+        .{ .age = 86399, .text = "23h", .delay = 750 },
+        .{ .age = 86400, .text = "1d", .delay = 86_399_750 },
+        .{ .age = 999 * 86400, .text = "999d", .delay = null },
+    };
+    const now_ms = test_now_s * 1000 + 250;
+    for (cases) |case| {
+        const age: Age = .{ .elapsed = test_now_s - case.age };
+        var buffer: [8]u8 = undefined;
+        try std.testing.expectEqualStrings(case.text, age.text(&buffer, now_ms));
+        try std.testing.expectEqual(if (case.delay) |delay| @as(?u64, now_ms + delay) else null, age.nextAt(now_ms));
+    }
 }

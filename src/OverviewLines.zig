@@ -6,6 +6,7 @@ const widget_style = @import("widget_style.zig");
 const Hover = @import("widgets/Hover.zig");
 
 pub const Header = struct {
+    drawn: bool = false,
     state: *const overview_view.State,
     caps: overview_view.Caps = .{},
     pub fn widget(self: *Header) vxfw.Widget {
@@ -20,6 +21,7 @@ pub const Header = struct {
         for (lines, spans) |segment, *span| span.* = .{ .text = segment.text, .style = widget_style.of(self.caps, segment.style) };
         const text: vxfw.RichText = .{ .text = spans, .softwrap = false, .width_basis = .parent };
         var surface = try text.draw(ctx.withConstraints(.{ .width = width }, ctx.max));
+        self.drawn = width > 0 and surface.size.height > 0 and lines.len > 0;
         surface.widget = self.widget();
         return surface;
     }

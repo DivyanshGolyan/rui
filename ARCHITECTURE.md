@@ -133,7 +133,7 @@ This source map locates the existing owners; file boundaries are not part of the
 | Model capability | `src/model_catalog.zig`: identifier syntax, the reasoning-effort grammar and the shipped models.dev facts; the Store selects saved facts when a source exists, otherwise shipped facts. `src/model_capability.zig` derives capability from the operation's supplied facts (listed efforts and optional context window). |
 | Session work | `src/session_work.zig` derives each Session's work state, a functional core; `src/store/domain/report.zig` reads its inputs under one Store lock. |
 | Session change hint | `src/change_ring.zig`: the fixed in-memory ring of recent (Session, commit, Workspace key) entries behind Session listing's `since`. `src/store/Store.zig` records into it where its commit counter advances. |
-| Session overview | `src/Overview.zig` owns the terminal surface and its reader; `src/overview_view.zig` is the shared presentation core for full-list and sidebar row marks, state ages and aligned controls. |
+| Session overview | `src/Overview.zig` owns the terminal surface and its reader; `src/overview_view.zig` is the shared presentation core for full-list and sidebar row marks, state ages, aligned controls and the single earliest redraw deadline for visible row ages, spinners and quota countdowns. |
 | Desktop notifications | `src/attention.zig` decides what program status record (OSC 7501) each Session has; `src/TerminalApp.zig`'s `Attention` writes the records through vaxis. |
 | Functional cores | The `cores` list in `src/logic_tests.zig`; `src/core_boundary.zig` defines what a core may name. |
 

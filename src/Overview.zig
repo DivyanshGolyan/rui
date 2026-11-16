@@ -353,8 +353,7 @@ app_new_session: OverviewLines.SessionControls = undefined,
 session_drafts: @import("session_drafts.zig").Drafts = .{},
 app_settings_line: OverviewLines.Settings = undefined,
 app_header: OverviewLines.Header = undefined,
-app_frame: u64 = 0,
-app_age_at: ?u64 = null,
+app_redraw_at: ?u64 = null,
 app_host_hover: Hover = .{},
 session_screen: *SessionScreen = undefined,
 app_session: ?Left = null,
@@ -852,36 +851,17 @@ fn rich(ctx: vxfw.DrawContext, caps: view.Caps, segments: []const view.Segment) 
 }
 
 fn wantsFrame(self: *const Self) bool {
-    return self.wantsFrameAt(self.animationFrame());
+    return self.wantsFrameAt(self.animationMs());
 }
 
-fn wantsFrameAt(self: *const Self, frame: u64) bool {
+fn wantsFrameAt(self: *const Self, awake_ms: u64) bool {
     if (!self.root.listVisible()) return false;
-    if (frame != self.app_frame and self.listSpins()) return true;
-    return if (self.app_age_at) |at| self.state.now_ms >= at else false;
+    return if (self.app_redraw_at) |at| awake_ms >= at else false;
 }
 
-fn nextAgeAt(self: *const Self) ?u64 {
-    var next: ?u64 = null;
-    for (self.app_sessions.shown.first..self.app_sessions.shown.end) |at| {
-        const item = view.listItem(&self.state, at) orelse break;
-        const deadline = view.nextAgeAt(&self.state, item) orelse continue;
-        next = if (next) |held| @min(held, deadline) else deadline;
-    }
-    return next;
-}
-
-fn listSpins(self: *const Self) bool {
-    for (self.app_sessions.shown.first..self.app_sessions.shown.end) |at| {
-        const item = view.listItem(&self.state, at) orelse break;
-        if (view.markSpins(&self.state, item, self.caps)) return true;
-    }
-    return false;
-}
-
-fn animationFrame(self: *const Self) u64 {
+fn animationMs(self: *const Self) u64 {
     const now = std.Io.Clock.awake.now(self.init.io).nanoseconds;
-    return @intCast(@divFloor(@max(now, 0), std.time.ns_per_ms * view.spin_interval_ms));
+    return @intCast(@divFloor(@max(now, 0), std.time.ns_per_ms));
 }
 
 fn bottomWidget(self: *Self) vxfw.Widget {
@@ -937,8 +917,8 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     const host = if (part == .list) null else hostNotice(self);
     self.state.host_line = host != null;
     _ = try view.step(&self.state, .{ .resized = .{ .width = size.width, .height = size.height } });
-    const frame = self.animationFrame();
-    self.app_frame = frame;
+    const awake_ms = self.animationMs();
+    const frame = awake_ms / view.spin_interval_ms;
     const rows = try ctx.arena.create(SessionRows);
     rows.* = .{ .state = &self.state, .width = size.width, .caps = self.caps, .frame = frame };
     self.app_sessions.selected = if (view.focusedLine(&self.state, self.root.input.listFocused() or self.root.session == null)) |line| @intCast(line) else null;
@@ -966,8 +946,13 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
         self.app_screen.host = null;
     }
     self.app_screen.host = host;
+    self.app_header.drawn = false;
     var surface = try self.app_screen.drawPart(ctx, part);
-    self.app_age_at = self.nextAgeAt();
+    self.app_redraw_at = view.nextRedrawAt(&self.state, .{
+        .first = self.app_sessions.shown.first,
+        .end = self.app_sessions.shown.end,
+        .header = self.app_header.drawn,
+    }, self.caps, awake_ms);
     surface.widget = if (part == .list) self.listWidget() else self.widget();
     return surface;
 }
@@ -2522,7 +2507,7 @@ test "idle overview polls real Host reads without requesting unchanged frames" {
             ctx.redraw = false;
             try overview.root.widget().handleEvent(&ctx, .tick);
             try std.testing.expectEqual(revision, overview.state.presentation_revision);
-            try std.testing.expectEqual(overview.wantsFrameAt(overview.app_frame), ctx.redraw);
+            try std.testing.expectEqual(overview.wantsFrame(), ctx.redraw);
             if (ctx.redraw) {
                 var minute = try rig.shown(80, 24);
                 minute.deinit();
@@ -2558,22 +2543,17 @@ test "overview state ages request one minute frame only while visible" {
     try std.testing.expect(try rig.settle() == null);
     var shown = try rig.shown(80, 24);
     shown.deinit();
-    const frame = overview.app_frame;
-    try std.testing.expect(!overview.wantsFrameAt(frame));
-    const deadline = test_now_s * 1000 + 50_000;
-    try std.testing.expectEqual(@as(?u64, deadline), overview.app_age_at);
-    overview.state.now_ms = deadline - 1;
-    try std.testing.expect(!overview.wantsFrameAt(frame));
-    overview.state.now_ms = deadline;
-    try std.testing.expect(overview.wantsFrameAt(frame));
+    const deadline = overview.app_redraw_at.?;
+    try std.testing.expect(!overview.wantsFrameAt(deadline - 1));
+    try std.testing.expect(overview.wantsFrameAt(deadline));
+    overview.state.now_ms += 50_000;
     var minute = try rig.shown(80, 24);
     minute.deinit();
-    try std.testing.expect(!overview.wantsFrameAt(frame));
-    overview.state.now_ms += std.time.ms_per_min;
+    try std.testing.expect(!overview.wantsFrameAt(deadline));
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
     try overview.root.openSettings(&ctx);
-    try std.testing.expect(!overview.wantsFrameAt(frame));
+    try std.testing.expect(!overview.wantsFrameAt(std.math.maxInt(u64)));
 }
 
 test "the overview asks for frames only while a spinning mark is on screen" {
@@ -2588,9 +2568,10 @@ test "the overview asks for frames only while a spinning mark is on screen" {
         fn after(from: *Rig, height: u16) !bool {
             var shown = try from.shown(80, height);
             defer shown.deinit();
-            const drawn = from.overview.app_frame;
-            if (from.overview.wantsFrameAt(drawn)) return error.TestUnexpectedResult;
-            return from.overview.wantsFrameAt(drawn +% 1);
+            const deadline = from.overview.app_redraw_at orelse return false;
+            if (deadline > from.overview.animationMs() + view.spin_interval_ms) return false;
+            if (from.overview.wantsFrameAt(deadline - 1)) return error.TestUnexpectedResult;
+            return from.overview.wantsFrameAt(deadline);
         }
     };
     try std.testing.expect(try Frames.after(rig, 24));
@@ -4581,20 +4562,26 @@ test "App overview schedules spinning rows only while Root shows the list" {
             if (layout.open and overview.root.session == null) try overview.root.openSession(&ctx, session.widget(), null);
             if (!layout.open and overview.root.session != null) try overview.root.closeSession(&ctx);
             _ = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = layout.width, .height = 24 }, .cell_size = .{} });
-            try std.testing.expectEqual(spinning, overview.listSpins());
-            overview.app_frame = std.math.maxInt(u64);
+            const drawn: view.Drawn = .{ .first = overview.app_sessions.shown.first, .end = overview.app_sessions.shown.end };
+            const awake_ms = overview.animationMs();
+            const deadline = view.nextRedrawAt(&overview.state, drawn, overview.caps, awake_ms);
+            try std.testing.expectEqual(spinning, if (deadline) |at| at <= awake_ms + view.spin_interval_ms else false);
             const caps = overview.caps;
             overview.caps.depth = .none;
-            try std.testing.expectEqual(false, overview.wantsFrame());
+            const quiet = view.nextRedrawAt(&overview.state, drawn, overview.caps, awake_ms);
+            try std.testing.expect(if (quiet) |at| at > awake_ms + view.spin_interval_ms else true);
             overview.caps = caps;
             overview.state.list_stale = true;
-            try std.testing.expectEqual(false, overview.wantsFrame());
+            const stale = view.nextRedrawAt(&overview.state, drawn, overview.caps, awake_ms);
+            try std.testing.expect(if (stale) |at| at > awake_ms + view.spin_interval_ms else true);
             overview.state.list_stale = false;
             const row_state = overview.state.rows.items[0].state;
             overview.state.rows.items[0].state = .{ .idle = .{ .since = test_now_s } };
-            try std.testing.expectEqual(false, overview.wantsFrame());
+            const idle = view.nextRedrawAt(&overview.state, drawn, overview.caps, awake_ms);
+            try std.testing.expect(if (idle) |at| at > awake_ms + view.spin_interval_ms else true);
             overview.state.rows.items[0].state = row_state;
             for (0..2) |_| {
+                overview.app_redraw_at = if (spinning) awake_ms else deadline;
                 ctx.redraw = false;
                 try overview.root.widget().handleEvent(&ctx, .tick);
                 try std.testing.expectEqual(spinning and layout.visible, ctx.redraw);
@@ -7752,4 +7739,44 @@ test "Session pin drawn Root gestures preserve composer focus draft and caret ac
         try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
         try std.testing.expect(!ctx.quit);
     }
+}
+
+test "overview redraw deadline includes quota header with failed row off screen" {
+    const rig = try openOverview();
+    defer rig.close();
+    const overview = rig.overview;
+    Seen.now.listed = listed_references.len;
+    Seen.now.working = Seen.now.listed;
+    _ = try overview.event(.{ .tick = test_now_s * 1000 });
+    try std.testing.expect(try rig.settle() == null);
+    var failed_work: view.WorkState = .{ .failed = .{ .since = test_now_s, .code = .{}, .resets_at = test_now_s + 200 } };
+    try failed_work.failed.code.set("provider_quota");
+    const reference = listed_references[listed_references.len - 1][0..6].*;
+    _ = try overview.event(.{ .observed = .{
+        .reference = reference,
+        .read_version = .{ .instance = overview.state.token.?.instance, .generation = overview.state.token.?.generation + 1 },
+        .work = .{ .state = failed_work },
+        .opening = false,
+    } });
+    overview.caps.unicode = false;
+    overview.state.selected = .{ .session = listed_references[0][0..6].* };
+    const before = overview.animationMs();
+    var shown = try rig.shown(140, 10);
+    defer shown.deinit();
+    const after = overview.animationMs();
+    try std.testing.expect(overview.app_header.drawn);
+    try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Quota used up. Resets in 3m.") != null);
+    for (overview.app_sessions.shown.first..overview.app_sessions.shown.end) |at| {
+        const row = &overview.state.rows.items[overview.state.order.items[at]];
+        try std.testing.expect(!std.mem.eql(u8, &reference, &row.reference));
+        try std.testing.expectEqual(view.Kind.working, std.meta.activeTag(row.state));
+    }
+    const deadline = overview.app_redraw_at.?;
+    try std.testing.expect(deadline >= before + 21_000 and deadline <= after + 21_000);
+    try std.testing.expect(!overview.wantsFrameAt(deadline - 1));
+    try std.testing.expect(overview.wantsFrameAt(deadline));
+    overview.state.now_ms += 21_000;
+    var changed = try rig.shown(140, 10);
+    defer changed.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, try changed.text(), "Quota used up. Resets in 2m.") != null);
 }
