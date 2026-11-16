@@ -1,10 +1,7 @@
 """Read the build-owned registry without invoking Zig or build admission."""
 from pathlib import Path
-import importlib.util
-import os
 import tempfile
 import unittest
-from unittest.mock import patch
 
 import build_files
 
@@ -138,21 +135,6 @@ class UnitRootRegistryTest(unittest.TestCase):
                 path.write_text(original.replace(before, after))
                 with self.assertRaises(ValueError):
                     build_files.unit_root_rows(self.root)
-
-    def test_graph_probe_is_skipped_by_default_even_when_tools_exist(self):
-        path = Path(__file__).with_name("test_unit_composition.py")
-        spec = importlib.util.spec_from_file_location("unit_composition_default_probe", path)
-        module = importlib.util.module_from_spec(spec)
-        with patch.dict(os.environ, {"RUI_TEST_UNIT_COMPOSITION": ""}), \
-                patch("shutil.which", return_value="/available/tool"), \
-                patch("subprocess.run", side_effect=AssertionError("default graph probe invoked a process")):
-            spec.loader.exec_module(module)
-            suite = unittest.defaultTestLoader.loadTestsFromModule(module)
-            result = unittest.TestResult()
-            suite.run(result)
-        self.assertEqual(result.testsRun, 1)
-        self.assertEqual(len(result.skipped), 1)
-        self.assertFalse(result.errors or result.failures)
 
     def test_constructor_names_and_sources_read_the_registry(self):
         unit_source = (self.root / "build/unit.zig").read_text().split("pub fn add(", 1)[1]

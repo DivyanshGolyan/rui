@@ -96,11 +96,11 @@ pub fn attach(gate: []const u8, part: Part, destination: *std.Build.Step, runs: 
     }
 }
 
-pub const NativeGroup = struct { binaries: []*std.Build.Step.Compile, final: *std.Build.Step.Run };
+const NativeGroup = struct { binaries: []*std.Build.Step.Compile, final: *std.Build.Step.Run };
 
 /// Standalone roots never inherit siblings. The group's declaration alone
 /// determines its serial dependencies and the binary order handed to the shell.
-pub fn nativeGroup(b: *std.Build, ci: CiArtifacts, identities: []const UnitRoot.Id, tests: []const *std.Build.Step.Compile, filtered: bool) NativeGroup {
+fn nativeGroup(b: *std.Build, ci: CiArtifacts, identities: []const UnitRoot.Id, tests: []const *std.Build.Step.Compile, filtered: bool) NativeGroup {
     const definition = group(.native_pair);
     const grouped = if (!filtered) definition.roots else &.{definition.filtered};
     if (grouped.len == 0) @panic("Native group must contain a unit root");

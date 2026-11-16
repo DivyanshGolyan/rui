@@ -382,28 +382,7 @@ AssertionError
         self.assertNotIn("exit", results[1])
         self.assertIn("MySQL rounds", results[1]["name"])
 
-    def test_every_registered_root_uses_its_filtered_owner_standalone_and_packed(self):
-        registry = build_files.unit_roots()
-        graph = prepush.tree_graph()
-        self.assertTrue(registry)
-        # The build registry is the oracle. The mapper must cover its whole
-        # domain, including auxiliary roots whose filtered owner differs.
-        for root in registry:
-            binary = root["name"] + "-" + Path(root["source"]).stem
-            cause = report_issue.Cause("registered root", [root["source"]],
-                zig_test=Path(root["source"]).stem + ".test." + root.get("filter", "registry case"), zig_binary=binary)
-            for owner in root["owners"]:
-                for packed in (False, True):
-                    owners = [owner, ("test-h2", "all")] if packed else [owner]
-                    with self.subTest(binary=binary, owners=owners):
-                        self.assertEqual(prepush.unit_target(owners, cause, graph), root["target"])
-                        unknown = report_issue.Cause("unregistered root", cause.paths,
-                            zig_test=cause.zig_test, zig_binary="unregistered-binary")
-                        self.assertIsNone(prepush.unit_target(owners, unknown, graph),
-                                          "a known source or single matrix target cannot certify an unknown binary")
-            self.assertIsNone(prepush.unit_target([("check-full", "callers")], cause, graph))
-
-    def test_primary_and_auxiliary_membership_matches_the_build_contract(self):
+    def test_every_registered_root_matches_independent_membership_standalone_and_packed(self):
         # Independent expected membership: deriving the expected side from the
         # registry would miss a composition that stopped matching execution.
         units = {
@@ -419,15 +398,22 @@ AssertionError
             "rui-mysql-wire-test-mysql_wire_test": ("mysql-wire-integration", {"mysql-wire-integration"}),
         }
         graph = prepush.tree_graph()
+        registry = build_files.unit_roots()
+        self.assertEqual({root["name"] + "-" + Path(root["source"]).stem for root in registry}, units.keys())
         gates = sorted({gate for _, owners in units.values() for gate in owners} | {"full-callers", "unknown"})
-        for binary, (target, owners) in units.items():
-            cause = report_issue.Cause("membership", zig_test="test.registry case", zig_binary=binary)
+        for root in registry:
+            binary = root["name"] + "-" + Path(root["source"]).stem
+            target, owners = units[binary]
+            cause = report_issue.Cause("membership", [root["source"]], zig_test="test.registry case", zig_binary=binary)
             for gate in gates:
                 for packed in (False, True):
                     selected = [gate, "test-logic"] if packed else [gate]
                     with self.subTest(binary=binary, selected=selected):
                         expected = target if owners.intersection(selected) else None
-                        self.assertEqual(prepush.unit_target(prepush.matrix_targets("+".join(selected)), cause, graph), expected)
+                        identities = prepush.matrix_targets("+".join(selected))
+                        self.assertEqual(prepush.unit_target(identities, cause, graph), expected)
+                        unknown = report_issue.Cause("unknown binary", cause.paths, zig_test=cause.zig_test, zig_binary="unregistered-binary")
+                        self.assertIsNone(prepush.unit_target(identities, unknown, graph))
 
     def test_registered_source_identity_can_reproduce_numbered_historical_store_tests(self):
         graph = prepush.tree_graph()
