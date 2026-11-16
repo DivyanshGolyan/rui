@@ -93,3 +93,76 @@ test "the Palette bolds each row's match, in both its name and its description, 
         }
     }
 }
+
+test "the Palette maps description matches through normalization and clipping without styling the ellipsis" {
+    const view = @import("overview_view.zig");
+    const vaxis = @import("vaxis");
+    const Case = struct {
+        source: []const u8,
+        room: u16,
+        unicode_text: []const u8,
+        ascii_text: []const u8,
+        unicode_start: usize,
+        ascii_start: usize,
+        unicode_bold: usize,
+        ascii_bold: usize,
+    };
+    // Display strings and cell intervals are independent of the fitter's result.
+    const cases = [_]Case{
+        .{ .source = "界 Verify the project", .room = 40, .unicode_text = "界 Verify the project", .ascii_text = "? Verify the project", .unicode_start = 3, .ascii_start = 2, .unicode_bold = 6, .ascii_bold = 6 },
+        .{ .source = "界 Verify the project", .room = 12, .unicode_text = "界 Verify t…", .ascii_text = "? Verify th.", .unicode_start = 3, .ascii_start = 2, .unicode_bold = 6, .ascii_bold = 6 },
+        .{ .source = "界 Verify the project", .room = 7, .unicode_text = "界 Ver…", .ascii_text = "? Veri.", .unicode_start = 3, .ascii_start = 2, .unicode_bold = 3, .ascii_bold = 4 },
+        .{ .source = "界 Verify the project", .room = 2, .unicode_text = "…", .ascii_text = "?.", .unicode_start = 0, .ascii_start = 0, .unicode_bold = 0, .ascii_bold = 0 },
+        .{ .source = "\t\x01\tVerify the project", .room = 40, .unicode_text = " ? Verify the project", .ascii_text = " ? Verify the project", .unicode_start = 3, .ascii_start = 3, .unicode_bold = 6, .ascii_bold = 6 },
+        .{ .source = "\t\x01\tVerify the project", .room = 12, .unicode_text = " ? Verify t…", .ascii_text = " ? Verify t.", .unicode_start = 3, .ascii_start = 3, .unicode_bold = 6, .ascii_bold = 6 },
+        .{ .source = "\t\x01\tVerify the project", .room = 7, .unicode_text = " ? Ver…", .ascii_text = " ? Ver.", .unicode_start = 3, .ascii_start = 3, .unicode_bold = 3, .ascii_bold = 3 },
+        .{ .source = "\t\x01\tVerify the project", .room = 2, .unicode_text = " …", .ascii_text = " .", .unicode_start = 0, .ascii_start = 0, .unicode_bold = 0, .ascii_bold = 0 },
+    };
+    for ([_]?view.Rgb{ .{ 255, 255, 255 }, null }) |terminal| {
+        for ([_]view.Caps.Depth{ .direct, .indexed, .none }) |depth| {
+            for (std.enums.values(vaxis.gwidth.Method)) |method| for ([_]bool{ true, false }) |unicode| {
+                const caps: view.Caps = .{ .background = terminal, .depth = depth, .width = method, .unicode = unicode };
+                for (cases) |case| for (0..2) |selected| {
+                    const entries = [_]skill_suggestions.Entry{
+                        .{ .name = "alpha", .description = case.source },
+                        .{ .name = "beta", .description = case.source },
+                    };
+                    var reads: skill_completion.Reads = .{};
+                    _ = reads.answer(reads.ask("verify").?.read, .{ .entries = &entries, .total = entries.len }, "verify");
+                    var rows: skill_completion.Rows = .{};
+                    const draft = "use /verify";
+                    var shown = reads.shown(&rows, draft, draft.len, 1, .{}, null).?;
+                    shown.highlight = selected;
+                    var palette: Palette = .{ .shown = &shown };
+                    palette.setCaps(caps);
+                    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                    defer arena.deinit();
+                    const column = shown.list.descriptionColumn();
+                    const width: u16 = @intCast(column + case.room + 4);
+                    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 4 }, .cell_size = .{} };
+                    const surface = try palette.widget().draw(ctx);
+                    try std.testing.expectEqual(@as(u16, 4), surface.size.height);
+                    const mark_start = if (unicode) case.unicode_start else case.ascii_start;
+                    const mark_len = if (unicode) case.unicode_bold else case.ascii_bold;
+                    for (0..2) |row| {
+                        const background: view.Background = if (row == selected) .selection else .input_surface;
+                        const plain = widget_style.of(caps, .{ .background = background });
+                        const strong = widget_style.of(caps, .{ .background = background, .bold = true });
+                        for (2..width - 2) |col| {
+                            const inside = col >= column + 2 + mark_start and col < column + 2 + mark_start + mark_len;
+                            try std.testing.expectEqual(if (inside) strong else plain, surface.readCell(@intCast(col), @intCast(row + 1)).style);
+                        }
+                        var text: std.Io.Writer.Allocating = .init(arena.allocator());
+                        var col: usize = column + 2;
+                        while (col < width - 2) {
+                            const cell = surface.readCell(@intCast(col), @intCast(row + 1));
+                            try text.writer.writeAll(if (cell.char.grapheme.len == 0) " " else cell.char.grapheme);
+                            col += @max(1, cell.char.width);
+                        }
+                        try std.testing.expectEqualStrings(if (unicode) case.unicode_text else case.ascii_text, std.mem.trimEnd(u8, text.written(), " "));
+                    }
+                };
+            };
+        }
+    }
+}

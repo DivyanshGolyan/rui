@@ -315,6 +315,8 @@ test "Composer colours the list owner's exact word without taking TextArea's lay
             .{ .typed = "/unknown" },
             .{ .typed = "/discard" },
             .{ .typed = "/help /help on more long lines", .word = .{ .start = 0, .len = 5 } },
+            .{ .typed = "/help 界 e\u{301} /help", .word = .{ .start = 0, .len = 5 } },
+            .{ .typed = "/help first\t界 e\u{301} last", .word = .{ .start = 0, .len = 5 } },
         }) |case| {
             const typed = case.typed;
             for ([_]u16{ 4, 8, 40 }) |width| for ([_]usize{ 0, typed.len }) |caret| {
@@ -327,15 +329,16 @@ test "Composer colours the list owner's exact word without taking TextArea's lay
                 defer arena.deinit();
                 const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 5 }, .cell_size = .{} };
                 const surface = try composer.widget().draw(ctx);
-                // Compare each borrowed text glyph by its offset in the draft;
-                // prompts, rules and padding have no draft address.
-                for (surface.buffer) |cell| {
+                // TextArea's borrowed argument glyphs, tab stand-ins and blank
+                // cells stay plain; only the exact source word takes the ink.
+                for (1..surface.size.height - 1) |row| for (3..width) |col| {
+                    const cell = surface.readCell(@intCast(col), @intCast(row));
                     const at = @intFromPtr(cell.char.grapheme.ptr);
                     const start = @intFromPtr(editor.text().ptr);
-                    if (cell.char.grapheme.len == 0 or at < start or at - start >= typed.len) continue;
-                    const inside = if (case.word) |word| at - start >= word.start and at - start < word.start + word.len else false;
+                    const borrowed = cell.char.grapheme.len != 0 and at >= start and at - start < typed.len;
+                    const inside = if (case.word) |word| borrowed and at - start >= word.start and at - start < word.start + word.len else false;
                     try std.testing.expectEqual(if (inside) ink else body, cell.style);
-                }
+                };
                 try std.testing.expectEqualStrings(typed, editor.text());
                 try std.testing.expectEqual(caret, editor.area.cursor);
             };

@@ -142,12 +142,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         if (hovered) matched = Hover.look(matched, self.hover_style);
         printMarked(line, entry.shown, entry.matches.name, style, matched);
         if (column < rect.width) {
-            const fitted = try overview.fitted(ctx.arena, self.caps, entry.description, rect.width - column, .head);
-            // The fitted description stays on one line. Never bold its ellipsis.
-            const kept = std.mem.indexOfDiff(u8, fitted.bytes, entry.description) orelse fitted.bytes.len;
-            var span = entry.matches.description;
-            if (span) |*mark| mark.len = @min(mark.start + mark.len, kept) -| mark.start;
-            printMarked(line.child(.{ .x_off = @intCast(column) }), fitted.bytes, span, style, matched);
+            const source_span: ?overview.ByteSpan = if (entry.matches.description) |mark| .{ .start = mark.start, .len = mark.len } else null;
+            const fitted = try overview.fittedMarked(ctx.arena, self.caps, entry.description, rect.width - column, .head, source_span);
+            const span: ?commands.Span = if (fitted.span) |mark| .{ .start = mark.start, .len = mark.len } else null;
+            printMarked(line.child(.{ .x_off = @intCast(column) }), fitted.piece.bytes, span, style, matched);
         }
     }
     if (count < list.count and count < placed.content.height) {
