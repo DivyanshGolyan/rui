@@ -807,7 +807,7 @@ pub fn discoverUpgradeHosts(allocator: std.mem.Allocator, io: std.Io, cancellati
     defer allocator.free(processes.stdout);
     defer allocator.free(processes.stderr);
     if (!processes.term.success()) {
-        try candidates.append(allocator, .{ .result = .{ .failed = error.HostProcessEnumerationFailed } });
+        try candidates.append(allocator, .{ .result = .{ .failed = error.HostProcessSnapshotUnavailable } });
         return candidates.toOwnedSlice(allocator);
     }
     var pids = std.mem.tokenizeAny(u8, processes.stdout, " \t\r\n");
@@ -869,7 +869,7 @@ pub fn upgradeGenerationRetired(allocator: std.mem.Allocator, io: std.Io, pid: c
     });
     defer allocator.free(processes.stdout);
     defer allocator.free(processes.stderr);
-    if (!processes.term.success() or processes.stderr.len != 0) return error.HostProcessEnumerationFailed;
+    if (!processes.term.success() or processes.stderr.len != 0) return error.HostProcessSnapshotUnavailable;
     const after = identity.generation(pid) catch null;
     return retirementReading(processes.stdout, pid, started, before, after);
 }
@@ -881,16 +881,16 @@ fn retirementReading(bytes: []const u8, pid: c_int, started: u64, before: ?u64, 
     var state: ?[]const u8 = null;
     while (lines.next()) |line| {
         var fields = std.mem.tokenizeAny(u8, line, " \t\r");
-        const actual = std.fmt.parseInt(c_int, fields.next() orelse return error.HostProcessEnumerationFailed, 10) catch return error.HostProcessEnumerationFailed;
-        const status = fields.next() orelse return error.HostProcessEnumerationFailed;
-        if (actual <= 0 or status.len == 0 or fields.next() != null) return error.HostProcessEnumerationFailed;
+        const actual = std.fmt.parseInt(c_int, fields.next() orelse return error.HostProcessSnapshotUnavailable, 10) catch return error.HostProcessSnapshotUnavailable;
+        const status = fields.next() orelse return error.HostProcessSnapshotUnavailable;
+        if (actual <= 0 or status.len == 0 or fields.next() != null) return error.HostProcessSnapshotUnavailable;
         populated = true;
         if (actual == pid) {
-            if (state != null) return error.HostProcessEnumerationFailed;
+            if (state != null) return error.HostProcessSnapshotUnavailable;
             state = status;
         }
     }
-    if (!populated) return error.HostProcessEnumerationFailed;
+    if (!populated) return error.HostProcessSnapshotUnavailable;
     if (state) |status| return status[0] == 'Z' and before == started and after == started;
     return before != started and after != started;
 }
@@ -5858,7 +5858,7 @@ test "upgrade process retirement requires exact generation and complete census n
     try std.testing.expect(!try retirementReading("80 R\n", pid, generation, generation, generation));
     try std.testing.expect(!try retirementReading("80 R\n", pid, generation, generation, null));
     try std.testing.expect(!try retirementReading("80 R\n", pid, generation, null, generation));
-    for ([_][]const u8{ "", "42\n", "not-a-pid Z\n", "42 Z extra\n", "42 Z\n42 S\n" }) |malformed| try std.testing.expectError(error.HostProcessEnumerationFailed, retirementReading(malformed, pid, generation, generation, generation));
+    for ([_][]const u8{ "", "42\n", "not-a-pid Z\n", "42 Z extra\n", "42 Z\n42 S\n" }) |malformed| try std.testing.expectError(error.HostProcessSnapshotUnavailable, retirementReading(malformed, pid, generation, generation, generation));
 }
 
 test "client upgrade retirement observes a live tail then an unreaped exit" {
