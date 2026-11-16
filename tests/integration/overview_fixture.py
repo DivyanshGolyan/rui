@@ -122,8 +122,9 @@ class World:
                 if not keep_launch:
                     screen.keys(b"\x1b")
             if not keep_launch:
-                screen.wait(lambda frame: "+ New Session" in frame and "Settings" in frame and "enter open" in frame,
-                            "the overview's pinned rows and footer")
+                screen.wait(lambda frame: "+ New Session" in frame and "Settings" in frame
+                            and "Type a task" not in frame and "│" not in frame,
+                            "the full overview and its pinned rows")
             yield screen
             if process.poll() is None:
                 screen.keys(b"\x04")

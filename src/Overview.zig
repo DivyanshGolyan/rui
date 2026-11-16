@@ -3167,6 +3167,7 @@ test "Host line appears once in overview and chat at wide and narrow widths, nev
         var cancellation: client.Cancellation = .{};
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
         defer rig.close();
+        rig.overview.launch = .done;
         const overview = rig.overview;
         overview.hooks.scratch = HostRecovery.scratch;
         try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
@@ -3235,7 +3236,7 @@ test "Host line and Settings tail show together without overlap at wide and narr
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start), "─"));
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start + 1), "  Settings"));
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.host.start), "■ Host stopped ·"));
-        try std.testing.expect(std.mem.endsWith(u8, try shown.line(at.input), "enter open"));
+        try std.testing.expect(std.mem.indexOf(u8, try shown.line(at.input), "enter open") == null);
         for (at.list.start..at.list.end) |row| {
             const line = try shown.line(@intCast(row));
             try std.testing.expect(std.mem.indexOf(u8, line, "Host") == null);
@@ -4037,7 +4038,7 @@ test "Footer notices fit or truncate on the right without adding rows; persisten
                 const joined = try std.mem.join(shown.arena.allocator(), " ", rows);
                 try std.testing.expectEqualStrings(case.displayed, joined);
                 try std.testing.expect(rows.len >= 1);
-                try std.testing.expect(std.mem.endsWith(u8, footer, "enter open"));
+                try std.testing.expect(std.mem.indexOf(u8, footer, "enter open") == null);
             }
         }
     }
@@ -4487,6 +4488,7 @@ test "App overview schedules spinning rows only while Root shows the list" {
     for ([_]bool{ false, true }) |spinning| {
         const rig = try openOverview();
         defer rig.close();
+        rig.overview.launch = .done;
         const overview = rig.overview;
         overview.caps = .{};
         Seen.now.working = @intFromBool(spinning);
@@ -7320,6 +7322,7 @@ test "App overview Tab projection is list then Settings and Settings Enter uses 
     for ([_]u16{ 46, 140 }) |width| {
         const rig = try openListed();
         defer rig.close();
+        rig.overview.launch = .done;
         var shown = try rig.shown(width, 30);
         defer shown.deinit();
         try std.testing.expectEqualSlices(@import("app_input.zig").Target, &.{ .list, .settings_row }, rig.overview.root.focus_frame.slice());

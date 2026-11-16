@@ -18,9 +18,23 @@
         }
       ],
       "expect": [
-        "+ New Session",
-        "Settings"
+        "Type a task"
       ],
+      "absent": [
+        "enter open"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "narrow-launch",
+      "note": "Bare narrow launch opens the full overview without an open hint",
+      "open": "overview",
+      "sizes": ["46x30"],
+      "steps": [{"wait": "+ New Session"}],
+      "expect": ["+ New Session", "Settings"],
+      "absent": ["Type a task", "enter open"],
       "absent_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
@@ -33,7 +47,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "+ New Session"
         }
@@ -141,7 +155,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "Input tint chat"
         },
@@ -278,7 +292,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "Input tint chat"
         },
@@ -350,7 +364,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "You wrote"
         }
@@ -404,7 +418,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "Agent working"
         },
@@ -900,7 +914,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "Archived"
         }
@@ -925,7 +939,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "Archived"
         },
@@ -958,7 +972,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "Archived"
         },
@@ -995,7 +1009,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "Archived"
         },
@@ -1029,7 +1043,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "Archived"
         },
@@ -1055,10 +1069,10 @@
       ],
       "expect": [
         "+ New Session",
-        "Archived",
-        "enter open"
+        "Archived"
       ],
       "absent": [
+        "enter open",
         "Archive audit",
         "No archived Sessions"
       ],
@@ -1257,14 +1271,14 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"}
+        {"gone": "Type a task"}
       ],
       "expect": [
         "+ New Session",
-        "Settings",
-        "enter open"
+        "Settings"
       ],
       "absent": [
+        "enter open",
         "Type a task",
         "enter start",
         "gpt-6.1-sol \u00b7 low"
@@ -1281,7 +1295,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "keys": [
             "Home",
@@ -1361,7 +1375,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "keys": [
             "End",
@@ -1397,7 +1411,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "keys": [
             "End",
@@ -1445,7 +1459,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "keys": [
             "End",
@@ -1499,7 +1513,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "keys": [
             "End",
@@ -1540,7 +1554,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "keys": [
             "Home",
@@ -1590,7 +1604,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "keys": [
             "Home",
@@ -1644,7 +1658,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "keys": [
             "Home",
@@ -1711,7 +1725,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "Existing conversation"
         },
@@ -1730,16 +1744,16 @@
           ]
         },
         {
-          "wait": "enter open"
+          "gone": "Type a task"
         }
       ],
       "expect": [
         "+ New Session",
         "Settings",
-        "enter open",
         "Existing conversation"
       ],
       "absent": [
+        "enter open",
         "Type a task",
         "enter start"
       ],
@@ -1760,7 +1774,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "Existing conversation"
         },
@@ -1809,16 +1823,16 @@
           ]
         },
         {
-          "wait": "enter open"
+          "gone": "Type a task"
         }
       ],
       "expect": [
         "+ New Session",
         "Settings",
-        "enter open",
         "Existing conversation"
       ],
       "absent": [
+        "enter open",
         "Type a task",
         "enter start"
       ],
@@ -1849,7 +1863,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "Existing second conversation"
         },
@@ -1868,7 +1882,7 @@
           ]
         },
         {
-          "wait": "enter open"
+          "gone": "Type a task"
         },
         {
           "keys": [
@@ -1885,17 +1899,17 @@
           ]
         },
         {
-          "wait": "enter open"
+          "gone": "Type a task"
         }
       ],
       "expect": [
         "+ New Session",
         "Settings",
-        "enter open",
         "Existing conversation",
         "Existing second conversation"
       ],
       "absent": [
+        "enter open",
         "Type a task",
         "enter start"
       ],
@@ -1916,7 +1930,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "Settings"
         },
@@ -1957,7 +1971,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "Schema migration"
         },
@@ -2053,7 +2067,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "Schema migration"
         },
@@ -2088,7 +2102,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "Schema migration"
         },
@@ -2122,7 +2136,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "send": {
             "to": "Benchmark idle memory",
@@ -2607,7 +2621,7 @@
           ]
         },
         {
-          "wait": "enter open"
+          "gone": "Type a task"
         },
         {
           "keys": [
@@ -3208,7 +3222,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "keys": [
             "End",
@@ -3350,7 +3364,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "text": "/nope"
         },
@@ -3369,15 +3383,15 @@
           ]
         },
         {
-          "wait": "enter open"
+          "gone": "Type a task"
         }
       ],
       "expect": [
         "+ New Session",
-        "Settings",
-        "enter open"
+        "Settings"
       ],
       "absent": [
+        "enter open",
         "Type a task",
         "/nope",
         "Unknown command",
@@ -3918,7 +3932,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "keys": [
             "End",
@@ -3964,7 +3978,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "keys": [
             "End",
@@ -4016,7 +4030,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "keys": [
             "Home",
@@ -4052,7 +4066,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "Migrate the billing"
         }
@@ -4087,7 +4101,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "Batch job"
         }
@@ -4127,7 +4141,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "Batch job"
         },
@@ -4187,7 +4201,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "Batch job"
         },
@@ -4207,12 +4221,12 @@
       ],
       "expect": [
         "Settings",
-        "enter open",
         "\u2191",
         "more",
         "+ New Session"
       ],
       "absent": [
+        "enter open",
         "\u2193",
         "\u2191 0 more",
         "Type a task"
@@ -4229,7 +4243,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "wait": "Batch job"
         },
@@ -4338,15 +4352,15 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"}
+        {"gone": "Type a task"}
       ],
       "theme": "day",
       "expect": [
         "+ New Session",
-        "Settings",
-        "enter open"
+        "Settings"
       ],
       "absent": [
+        "enter open",
         "Type a task",
         "enter start",
         "gpt-6.1-sol \u00b7 low"
@@ -4429,7 +4443,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "host": "pause"
         },
@@ -4479,7 +4493,7 @@
         {"wait": "+ New Session"},
         {"wait": "Type a task", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"wait": "enter open"},
+        {"gone": "Type a task"},
         {
           "host": "start"
         },
@@ -4926,10 +4940,10 @@
       ],
       "expect": [
         "Alternate focus audit",
-        "Settings",
-        "enter open"
+        "Settings"
       ],
       "absent": [
+        "enter open",
         "Current focus task",
         "Alternate focus task",
         "The retry draft is ready."

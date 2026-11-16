@@ -64,7 +64,7 @@ def click_label(screen, frame, label):
 
 
 def is_overview(frame):
-    return "+ New Session" in frame and "Settings" in frame and "enter open" in frame and "Type a task" not in frame and not any(line.startswith(" ‹ ") for line in frame.split("\n"))
+    return "+ New Session" in frame and "Settings" in frame and "enter open" not in frame and "Type a task" not in frame and not any(line.startswith(" ‹ ") for line in frame.split("\n"))
 
 
 def conversation_of(label):
@@ -241,7 +241,7 @@ def narrow_launch_resize():
     with world("launch-resize") as w, w.overview(columns=46, rows=30) as screen:
         assert is_overview(screen.text), screen.text
         screen.resize(140, 30)
-        frame = screen.wait(lambda frame: is_overview(frame) and len(frame.split("\n")[0]) >= 140,
+        frame = screen.wait(lambda frame: is_overview(frame) and any(len(line) >= 140 for line in frame.split("\n")),
                             "widening retains the full overview")
         assert "Type a task" not in frame, frame
         rows = json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"]

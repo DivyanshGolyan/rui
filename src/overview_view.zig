@@ -2629,8 +2629,7 @@ pub fn newestEmpty(state: *const State) ?Reference {
 
 pub fn footerRight(state: *const State) []const u8 {
     if (state.upgrade.takesEscape()) return "esc cancels";
-    if (state.creating() or (state.holdsHost() and state.selected != .settings)) return "";
-    return "enter open";
+    return "";
 }
 
 pub fn footerNotice(state: *const State) ?[]const u8 {
@@ -4227,7 +4226,7 @@ test "the overview's rows draw an empty Store" {
         const text = try screenText(&state, width, 24, .{});
         defer std.testing.allocator.free(text);
         try std.testing.expect(std.mem.startsWith(u8, text, "  + New Session") and std.mem.indexOf(u8, text, "Archived\n") != null);
-        try std.testing.expectEqualStrings("enter open", footerRight(&state));
+        try std.testing.expectEqualStrings("", footerRight(&state));
         try std.testing.expect(std.mem.indexOf(u8, text, "new Session ·") == null);
     }
 }
@@ -4858,7 +4857,7 @@ test "overview Footer reserves the Upgrade cancellation key before clipping prog
         .{ .run = .{ .installing = .{ .found = found, .step = .publishing } }, .right = "" },
         .{ .run = .{ .installing = .{ .found = found, .step = .restarting } }, .right = "" },
         .{ .run = .cancelling, .right = "esc cancels" },
-        .{ .run = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } }, .right = "enter open" },
+        .{ .run = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } }, .right = "" },
     };
     for (cases) |case| {
         state.upgrade.run = case.run;
