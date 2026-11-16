@@ -53,10 +53,16 @@ pub const Spec = struct {
     route: []const u8,
     reply_type: []const u8,
     summary: []const u8,
+    subject_type: ?[]const u8 = null,
+    fence_message: []const u8,
     Request: type,
     Observation: type,
     observation_fields: ObservationFields = .{},
     is_control: bool = true,
+
+    pub fn Subject(comptime self: Spec, comptime Subjects: type) type {
+        return if (self.subject_type) |name| @field(Subjects, name) else []const u8;
+    }
 
     pub fn Reply(comptime self: Spec, comptime Wire: type) type {
         const name = self.reply_type;
@@ -172,6 +178,7 @@ const ArchiveRequest = struct {
 pub fn spec(comptime kind: CommandKind) Spec {
     return switch (kind) {
         .configure => .{
+            .fence_message = "configuration save",
             .route = "/v1/configure",
             .reply_type = "configuration_reply",
             .summary = "Creates or reconfigures a Session. Retried by its key.",
@@ -181,6 +188,7 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .is_control = false,
         },
         .message => .{
+            .fence_message = "message save",
             .route = "/v1/message",
             .reply_type = "message_reply",
             .summary = "Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. Each `/name` word in the text that names a skill in the recipient's catalog appends that skill to what the model reads; the text is saved as written. Only an empty `session` carries (and requires) `configuration`; `require_model` is allowed only with it. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON.",
@@ -193,6 +201,7 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .is_control = false,
         },
         .session_stop => .{
+            .fence_message = "Session stop save",
             .route = "/v1/control/session-stop",
             .reply_type = "session_stop_reply",
             .summary = "Stops a Session's current and queued work. Retried by its key.",
@@ -201,6 +210,7 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .observation_fields = .{ .accepted = &.{ .selection, .completion } },
         },
         .session_archive => .{
+            .fence_message = "Session archive save",
             .route = "/v1/control/session-archive",
             .reply_type = "session_archive_reply",
             .summary = "Archives or restores a Session. Archiving stops current and queued work. Retried by its key.",
@@ -209,6 +219,7 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .observation_fields = .{ .accepted = &.{ .archived, .completion } },
         },
         .session_pin => .{
+            .fence_message = "Session pin save",
             .route = "/v1/control/session-pin",
             .reply_type = "session_pin_reply",
             .summary = "Pins or unpins a Session without changing its work. Retried by its key.",
@@ -217,6 +228,8 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .observation_fields = .{ .accepted = &.{.pinned} },
         },
         .model_interruption => .{
+            .subject_type = "model_interruption",
+            .fence_message = "model interruption save",
             .route = "/v1/control/model-interruption",
             .reply_type = "model_interruption_reply",
             .summary = "Interrupts one model Operation. Retried by its key.",
@@ -225,6 +238,8 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .observation_fields = .{ .always = &.{.interruption_target} },
         },
         .permission_decision => .{
+            .subject_type = "permission_decision",
+            .fence_message = "permission decision save",
             .route = "/v1/control/permission-decision",
             .reply_type = "permission_decision_reply",
             .summary = "Allows or denies one Action that waits for permission. Retried by its key.",
@@ -233,6 +248,8 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .observation_fields = .{ .always = &.{.permission_target} },
         },
         .action_background => .{
+            .subject_type = "action_background",
+            .fence_message = "Action background save",
             .route = "/v1/control/action-background",
             .reply_type = "action_background_reply",
             .summary = "Promotes the same Action to Session-owned background work and returns its immutable call receipt selection. Completion is read explicitly with read-action; no final input or model wake is delivered. Retried by its key.",
@@ -246,23 +263,45 @@ pub fn spec(comptime kind: CommandKind) Spec {
 test "command_spec covers every kind and preserves routes and request limits" {
     const protocol = @import("protocol.zig");
     const expected = .{
-        .{ "/v1/configure", "configuration_reply", @as(?usize, null) },
-        .{ "/v1/message", "message_reply", @as(?usize, null) },
-        .{ "/v1/control/session-stop", "session_stop_reply", protocol.shapeBytes(protocol.session_stop_request) },
-        .{ "/v1/control/session-archive", "session_archive_reply", protocol.shapeBytes(protocol.session_archive_request.all) },
-        .{ "/v1/control/model-interruption", "model_interruption_reply", protocol.shapeBytes(protocol.model_interruption_request) },
-        .{ "/v1/control/permission-decision", "permission_decision_reply", protocol.shapeBytes(protocol.permission_decision_request) },
-        .{ "/v1/control/session-pin", "session_pin_reply", protocol.shapeBytes(protocol.session_pin_request.all) },
-        .{ "/v1/control/action-background", "action_background_reply", protocol.shapeBytes(protocol.action_background_request) },
+        .{ "/v1/configure", "configuration_reply", @as(?usize, null), "configuration save" },
+        .{ "/v1/message", "message_reply", @as(?usize, null), "message save" },
+        .{ "/v1/control/session-stop", "session_stop_reply", protocol.shapeBytes(protocol.session_stop_request), "Session stop save" },
+        .{ "/v1/control/session-archive", "session_archive_reply", protocol.shapeBytes(protocol.session_archive_request.all), "Session archive save" },
+        .{ "/v1/control/model-interruption", "model_interruption_reply", protocol.shapeBytes(protocol.model_interruption_request), "model interruption save" },
+        .{ "/v1/control/permission-decision", "permission_decision_reply", protocol.shapeBytes(protocol.permission_decision_request), "permission decision save" },
+        .{ "/v1/control/session-pin", "session_pin_reply", protocol.shapeBytes(protocol.session_pin_request.all), "Session pin save" },
+        .{ "/v1/control/action-background", "action_background_reply", protocol.shapeBytes(protocol.action_background_request), "Action background save" },
     };
     inline for (comptime std.meta.tags(CommandKind), expected, 0..) |kind, original, index| {
         const facts = comptime spec(kind);
         try std.testing.expectEqualStrings(original[0], facts.route);
         try std.testing.expectEqualStrings(original[1], facts.reply_type);
         try std.testing.expectEqual(@as(?usize, original[2]), facts.Request.maxBytes(protocol));
+        try std.testing.expectEqualStrings(original[3], facts.fence_message);
         try std.testing.expectEqual(index >= 2, facts.is_control);
         _ = facts.Reply(protocol).max_bytes;
         _ = facts.Observation.shapes(protocol).values;
         try std.testing.expect(facts.summary.len != 0);
+    }
+}
+
+test "command_spec resolves every subject from injected types" {
+    const Subjects = struct {
+        pub const model_interruption = struct { turn: u64 };
+        pub const permission_decision = struct { decision: bool };
+        pub const action_background = struct { action: u64 };
+    };
+    const expected = .{
+        []const u8,
+        []const u8,
+        []const u8,
+        []const u8,
+        Subjects.model_interruption,
+        Subjects.permission_decision,
+        []const u8,
+        Subjects.action_background,
+    };
+    inline for (comptime std.meta.tags(CommandKind), expected) |kind, Expected| {
+        try std.testing.expect(spec(kind).Subject(Subjects) == Expected);
     }
 }
