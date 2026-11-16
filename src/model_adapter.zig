@@ -5862,7 +5862,7 @@ const OrderedPreparationSource = struct {
     key: []const u8 = "ordered-preparation",
     sender: ?[]const u8 = null,
     handle: ?protocol.Bounded(32) = null,
-    captured: ?*const @import("store/domain/skills.zig").MessageCapture = null,
+    captured: ?*const store.CapturedMessageSkills = null,
 };
 
 fn submitOrderedPreparation(setup: *PreparationTestSetup, session: []const u8, parts: []const OrderedPreparationPart) !void {
@@ -6124,7 +6124,7 @@ test "canonical ordered Message preparation keeps whole inputs and skills across
     try submitOrderedPreparationFrom(&setup, session.slice(), &.{ .{ .bytes = "first-before" }, .{ .bytes = image_test_png, .image = true }, .{ .bytes = "first-after" } }, .{ .key = "ordered-first" });
     const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
     try store.settleAnswerItemsForTesting(&setup.storage, &setup.tmp, first, &.{"{\"type\":\"message\",\"id\":\"first-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}"}, "done");
-    const captured: @import("store/domain/skills.zig").MessageCapture = .{ .bound = &.{.{ .name = "demo", .bytes = "middle-skill-body" }} };
+    const captured: store.CapturedMessageSkills = .{ .bound = &.{.{ .name = "demo", .bytes = "middle-skill-body" }} };
     try submitOrderedPreparationFrom(&setup, session.slice(), &.{ .{ .bytes = "middle-before" }, .{ .bytes = image_test_png, .image = true }, .{ .bytes = "middle-after" } }, .{ .key = "ordered-middle", .captured = &captured });
     const rules = "ordered-floor-rules";
     var update: wire_request.ConfigureCommand = .{ .session = session };

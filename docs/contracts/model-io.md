@@ -269,9 +269,15 @@ Validate admitted original facts before applying history floors, so a floor cann
 Ordinary compaction preserves original Message references under the existing history policy.
 Explicit overflow floors may remove a whole Message with its parts and skills. They never strip an Image alone or replace it with Text.
 
-This stage retains Image inputs but does not lower compound input into a provider request.
-Preparation returns `local_ordered_input_not_supported` before transfer when the historical input needs unsupported representation, including multiple Text parts.
-Presentation states that no provider request was sent and offers no retry hint for this local failure.
+Request preparation lowers canonical Message parts in their original order: Text remains Text and PNG/JPEG Image bytes stream through the request encoder without transformation.
+This includes multiple Text parts and image-only Messages, with recorded peer sender facts preceding their parts.
+Preparation counts only images selected by the frozen cutoff and history floor, accepting at most 1,500 replayed images and 512,000,000 bytes in the complete encoded request, including framing and base64.
+Exceeding either limit saves `local_ordered_input_limit` before transfer; presentation states that no provider request was sent and offers no retry hint.
+Requests with ordered input rebuild under the existing prefix seal instead of copying a history memo; the single-Text memo path remains unchanged.
+
+This lowering does not add public attachment ingress or Image parts to Action results.
+Route and model acceptance remain request-preparation policy; core container validation alone does not establish remote support.
+Unsupported representation still saves `local_ordered_input_not_supported` before transfer without retry advice.
 Canonical corruption still fences the Store. Provider HTTP refusals retain their existing classification.
 
 #### Adapter historical reads
