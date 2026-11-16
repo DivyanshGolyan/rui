@@ -7777,20 +7777,20 @@ test "upgrade attempt presentation domain ends synthetic pause and publishing wi
     const rig = try openOverview();
     defer rig.close();
     const overview = rig.overview;
-    for (runs) |run| for (std.enums.values(session_upgrade.After)) |after| for ([_]bool{ false, true }) |observed_paused| {
-        overview.state.upgrade = .{ .run = run, .after = after };
+    for (runs) |attempt| for (std.enums.values(session_upgrade.After)) |after| for ([_]bool{ false, true }) |observed_paused| {
+        overview.state.upgrade = .{ .run = attempt, .after = after };
         overview.host_observation = .{ .ready = .{ .facts = .{ .started_at = 1, .slots = 4, .slots_in_use = 0 }, .paused = observed_paused } };
-        const paused = run.going() or observed_paused;
+        const paused = attempt.going() or observed_paused;
         try std.testing.expectEqual(paused, overview.hostState() == .paused);
-        try std.testing.expectEqual(run.going() or after != .open, overview.state.holdsHost());
+        try std.testing.expectEqual(attempt.going() or after != .open, overview.state.holdsHost());
         try std.testing.expectEqual(paused, hostNotice(overview) != null);
         for ([_]u16{ 140, 46 }) |width| {
             var shown = try rig.shown(width, 30);
             defer shown.deinit();
             const text = try shown.text();
             try std.testing.expectEqual(paused, std.mem.indexOf(u8, text, "■ Host paused") != null);
-            try std.testing.expectEqual(run == .installing and run.installing.step == .publishing, std.mem.indexOf(u8, text, "Publishing; cancelling no longer rolls back") != null);
-            if (run == .ended and run.ended.how == .incompatible) {
+            try std.testing.expectEqual(attempt == .installing and attempt.installing.step == .publishing, std.mem.indexOf(u8, text, "Publishing; cancelling no longer rolls back") != null);
+            if (attempt == .ended and attempt.ended.how == .incompatible) {
                 try std.testing.expect(std.mem.indexOf(u8, text, "restart rui") != null);
             }
         }
