@@ -424,7 +424,8 @@ class BuildModuleTest(unittest.TestCase):
 
     def test_every_build_module_is_mapped(self):
         modules = {path.relative_to(build_files.ROOT).as_posix()
-                   for path in [*build_files.files(), *build_files.ROOT.glob(SETUP_PARTS)]}
+                   for path in [*build_files.files(), *build_files.ROOT.glob(SETUP_PARTS),
+                                *build_files.ROOT.glob(".github/actions/setup/*/*.cjs")]}
         self.assertEqual(modules - {"build.zig"}, BUILD_MODULES.keys())
 
     def test_a_hub_module_edit_selects_what_a_build_zig_edit_does(self):
@@ -1748,20 +1749,20 @@ fi
                 self.assertNotIn('publish-caches', workflow, f'{path.name} native checks must keep publishing')
         self.assertNotIn('actions/cache', Path('.github/actions/setup/action.yml').read_text())
         setup = Path('.github/actions/setup/caches/action.yml').read_text()
-        self.assertNotIn('actions/cache/save@', setup)
-        steps = re.findall(r'(?m)^    - uses: actions/cache(/restore)?@.*\n((?:      .*\n)+)', setup)
-        def guard(body):
-            return re.search(r'(?m)^      if: \$\{\{ (.*) \}\}$', body).group(1)
-        def contents(body):
-            return re.sub(r'(?m)^      (?:if|id): .*\n', '', body)
-        saves = [body for restore, body in steps if not restore]
-        restores = [body for restore, body in steps if restore]
-        self.assertEqual(len(saves), setup.count('uses: actions/cache@'))
-        self.assertEqual(len(saves), len(restores))
-        for save, restore in zip(saves, restores):
-            self.assertRegex(guard(save), r"^inputs\.publish-caches == 'true'(?: && [^|]*)?$")
-            self.assertEqual(guard(restore), guard(save).replace("publish-caches == 'true'", "publish-caches != 'true'", 1))
-            self.assertEqual(contents(restore), contents(save))
+        self.assertNotIn('uses: actions/cache@', setup)
+        restores = re.findall(r'(?m)^    - uses: actions/cache/restore@.*\n((?:      .*\n)+)', setup)
+        saves = re.findall(r'(?m)^    - uses: actions/cache/save@.*\n((?:      .*\n)+)', setup)
+        self.assertEqual(len(restores), 4)
+        self.assertEqual(len(saves), 4)
+        for restore, save in zip(restores, saves):
+            name = re.search(r'id: ([a-z]+)-cache', restore).group(1).upper()
+            self.assertIn("inputs.save-only != 'true'", restore)
+            self.assertIn(("success()" if name == "PACKAGES" else "always()") + " && inputs.save-only == 'true'", save)
+            self.assertIn(f"steps.save-keys.outputs.{name.lower()}-key != ''", save)
+            self.assertIn(f'key: ${{{{ steps.save-keys.outputs.{name.lower()}-key }}}}', save)
+            path = lambda body: re.search(r'(?ms)^        path: (.*?)(?=^        key:)', body).group(1)
+            self.assertEqual(path(restore), path(save))
+        self.assertIn("node .github/actions/setup/caches/save-keys.cjs", setup)
 
     def test_ci_test_methods_cannot_silently_replace_another_check(self):
         for path in Path('tests/ci').glob('test_*.py'):
