@@ -31,7 +31,9 @@ COMMAND = re.compile(r"^error: process (?:exited with code \d+|terminated with s
                      r"failed command: (.+)$", re.M)
 SCRIPT = re.compile(r"tests/integration/[\w./-]+\.py")
 FAILED_COMMAND = re.compile(r"^failed command: (.+)$", re.M)
-ZIG_CRASH = re.compile(r"^error: '(.+?)' (terminated with signal \w+|failed)", re.M)
+# A terminal launcher emits the same envelope, retaining an assertion error
+# when its process supplies one instead of a signal.
+ZIG_CRASH = re.compile(r"^error: '(.+?)' (terminated with signal \w+|failed(?: \([\w.]+\))?)", re.M)
 # A failing assertion can print its diagnostics between the test's name and its
 # FAIL record; the record never lies past the next numbered test.
 ZIG_FAIL = re.compile(r"^\d+/\d+ (\S[^\n]*?)\.\.\.(?:(?!\n\d+/\d+ ).)*?FAIL \((\w+)\)$", re.M | re.S)

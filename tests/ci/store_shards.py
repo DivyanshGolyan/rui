@@ -12,7 +12,7 @@ owner; this script owns process lifetimes and the Store dialect record join.
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import fcntl
 import json
 import math
@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import re
 import selectors
+import shlex
 import signal
 import subprocess
 import sys
@@ -83,6 +84,9 @@ class Result:
     seconds: float
     tests: list
     diagnostic: str
+    command: list = field(default_factory=list)
+    failures: list = field(default_factory=list)
+    interrupted: bool = False
 
 
 def execute(binary, arguments, environ, timeout, label, stop=None, test_timeout=None, parallel_after=None, on_parallel=None):
@@ -98,7 +102,10 @@ def execute(binary, arguments, environ, timeout, label, stop=None, test_timeout=
     output = bytearray()
     status = None
     diagnostic = ""
-    process = subprocess.Popen([str(Path(binary).resolve()), *arguments], env=environ,
+    active_failure = "failed"
+    interrupted = False
+    command = [str(Path(binary).resolve()), *arguments]
+    process = subprocess.Popen(command, env=environ,
                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, start_new_session=True)
     try:
@@ -108,12 +115,15 @@ def execute(binary, arguments, environ, timeout, label, stop=None, test_timeout=
                 now = time.monotonic()
                 if stop is not None and stop.is_set():
                     status, diagnostic = 130, "unit root interrupted"
+                    interrupted = True
                     break
                 if now - start >= timeout:
                     status, diagnostic = 124, f"process deadline exceeded ({timeout:g}s)"
+                    active_failure = "failed (ProcessTimeout)"
                     break
                 if test_timeout and parser.active and now - parser.active[1] >= test_timeout:
                     status, diagnostic = 124, f"test timeout ({test_timeout:g}s): {parser.active[0]}"
+                    active_failure = "failed (TestTimeout)"
                     break
                 for key, _ in selector.select(min(0.1, max(0, timeout - (now - start)))):
                     data = os.read(key.fd, 65536)
@@ -145,9 +155,23 @@ def execute(binary, arguments, environ, timeout, label, stop=None, test_timeout=
             pass
         process.wait()
         process.stdout.close()
+    failures = [(name, "failed" + state.removeprefix("FAIL"))
+                for name, _, state in parser.results if state.startswith("FAIL")]
+    # A terminal runner can die without a FAIL record. Its last exact metadata
+    # marker identifies the interrupted test; peer cancellation does not make
+    # that innocent test a new failure.
+    if status and not interrupted and parser.active:
+        how = active_failure
+        if status < 0:
+            try:
+                signame = signal.Signals(-status).name
+            except ValueError:
+                signame = f"SIG{-status}"
+            how = f"terminated with signal {signame}"
+        failures.append((parser.active[0], how))
     if status:
         diagnostic = output.decode("utf-8", errors="replace") + "\n" + diagnostic
-    return Result(label, status, time.monotonic() - start, parser.results, diagnostic)
+    return Result(label, status, time.monotonic() - start, parser.results, diagnostic, command, failures, interrupted)
 
 
 def merge_records(paths, destination):
@@ -173,8 +197,24 @@ def report(result):
     passed = sum(state == "OK" for _, _, state in result.tests)
     skipped = sum(state == "SKIP" for _, _, state in result.tests)
     print(f"{result.label}: {passed} passed, {skipped} skipped, {result.seconds:.3f}s; exit {result.status}", flush=True)
-    if result.diagnostic:
-        print(result.diagnostic, file=sys.stderr, flush=True)
+    if not result.status:
+        return
+    # Emit the same per-test envelope as Zig's server runner. Each envelope owns
+    # its actual binary command, even inside check.sh or another Python process.
+    # Indent captured terminal output once: it stays readable without being
+    # parsed a second time as independent, unowned FAIL/crash records.
+    for index, (name, how) in enumerate(result.failures):
+        print(f"error: '{name}' {how}", file=sys.stderr)
+        if index == 0 and result.diagnostic:
+            print("\n".join("  " + line for line in result.diagnostic.splitlines()), file=sys.stderr)
+        print(f"failed command: {shlex.join(result.command)}", file=sys.stderr, flush=True)
+    if not result.failures:
+        if result.diagnostic:
+            print("\n".join("  " + line for line in result.diagnostic.splitlines()), file=sys.stderr)
+        if result.command:
+            if not result.interrupted:
+                print(f"unit root gate failed: {Path(result.command[0]).name}: exit {result.status}", file=sys.stderr)
+            print(f"failed command: {shlex.join(result.command)}", file=sys.stderr, flush=True)
 
 
 def duration(text):
@@ -303,7 +343,7 @@ def main(argv=None):
     try:
         return run(args.binary, arguments, args.timeout, args.mode, os.environ, args.output)
     except (OSError, ValueError) as error:
-        print(f"unit root launcher: {error}", file=sys.stderr)
+        print(f"unit root gate failed: {Path(args.binary).name}: {error}", file=sys.stderr)
         return 1
 
 

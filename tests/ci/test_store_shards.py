@@ -1,3 +1,5 @@
+from contextlib import redirect_stderr, redirect_stdout
+import io
 import json
 import os
 import re
@@ -160,6 +162,142 @@ class LauncherTest(unittest.TestCase):
             self.assertEqual(shards.run(self.binary, [], 5, 'run', os.environ), 0)
         thread.join(timeout=3)
         self.assertFalse(thread.is_alive())
+
+    def failure_log(self, result):
+        output = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(output):
+            shards.report(result)
+        return output.getvalue()
+
+    def test_failure_outcomes_reach_focused_rechecks_for_standalone_and_composed_launches(self):
+        import prepush
+        import report_issue
+        test = "store.tests.activity.test.queued input"
+        self.binary = self.directory / "unit-store-tests"
+        header = f"print({('1/1 ' + test + '...')!r}, end='', flush=True)\n"
+        cases = {
+            "assertion": ("print('expected ready, found held')\nprint('FAIL (TestUnexpectedResult)')\nraise SystemExit(1)\n",
+                          3, None, "failed (TestUnexpectedResult)", "expected ready, found held"),
+            "panic": ("import os, resource, signal\nresource.setrlimit(resource.RLIMIT_CORE, (0, 0))\n"
+                      "print('thread 1 panic: reached unreachable code', flush=True)\nos.kill(os.getpid(), signal.SIGABRT)\n",
+                      3, None, "terminated with signal SIGABRT", "panic: reached unreachable code"),
+            "panic exit": ("print('thread 1 panic: reached unreachable code', flush=True)\nraise SystemExit(2)\n",
+                           3, None, "failed", "panic: reached unreachable code"),
+            "signal": ("import os, signal\nos.kill(os.getpid(), signal.SIGTERM)\n",
+                       3, None, "terminated with signal SIGTERM", test),
+            "process timeout": ("import signal\nsignal.pause()\n", .2, None, "failed (ProcessTimeout)", "process deadline exceeded"),
+            "test timeout": ("import signal\nsignal.pause()\n", 3, .1, "failed (TestTimeout)", "test timeout"),
+        }
+        for kind, (body, timeout, test_timeout, how, detail) in cases.items():
+            with self.subTest(kind=kind):
+                self.script(header + body, names=[test])
+                result = shards.execute(self.binary, ["--seed=0"], os.environ, timeout, "Store shard 1/4",
+                                        test_timeout=test_timeout)
+                self.assertNotEqual(result.status, 0)
+                output = self.failure_log(result)
+                for target in ("test-store", "check"):
+                    with self.subTest(target=target):
+                        log = output
+                        if target == "check":
+                            log = "store failed: exit=1 elapsed=0.2s\n" + log + "native passed: exit=0 elapsed=0.1s\n"
+                            command = "sh tests/integration/check.sh safe debug parallel native store"
+                        else:
+                            command = f"python3 -B tests/ci/store_shards.py run '{self.binary}' --timeout 1200"
+                        log += f"error: process exited with code 1\nfailed command: {command}\n"
+                        # Hosted logs prefix every line with a timestamp.
+                        log = "\n".join("2026-11-16T20:00:00Z " + line for line in log.splitlines()) + "\n"
+                        [cause] = report_issue.failure_causes(log, report_issue.fixtures())
+                        self.assertEqual(cause.signature, f"zig test '{test}' {how}")
+                        self.assertEqual(cause.zig_test, test)
+                        self.assertEqual(cause.zig_binary, "unit-store-tests")
+                        self.assertIn(detail, cause.detail)
+                        rerun = prepush.red_command({"name": f"linux suites ({target})"}, cause, {target, "test-store"})
+                        self.assertNotIsInstance(rerun, prepush.Skipped)
+                        self.assertIn("test-store", rerun.command)
+                        self.assertIn(f"-Dtest-filter={test}", rerun.command)
+
+    def test_completed_failures_and_active_crash_keep_separate_binary_envelopes(self):
+        import report_issue
+        first = "store.tests.activity.test.first failure"
+        second = "store.tests.activity.test.second failure"
+        third = "store.tests.activity.test.active crash"
+        self.binary = self.directory / "unit-store-tests"
+        self.script(f"print({('1/3 ' + first + '...FAIL (TestUnexpectedResult)')!r}, flush=True)\n"
+                    f"print({('2/3 ' + second + '...FAIL (TestExpectedEqual)')!r}, flush=True)\n"
+                    f"print({('3/3 ' + third + '...')!r}, end='', flush=True)\n"
+                    "import os, signal\nos.kill(os.getpid(), signal.SIGTERM)\n", names=[first, second, third])
+        result = shards.execute(self.binary, [], os.environ, 3, "Store shard 1/4")
+        output = self.failure_log(result)
+        native = shards.Result("native", 1, 0, [], "native diagnostic", ["/tmp/unit-native-tests"],
+                               [("codex_auth.test.refresh", "failed (TestUnexpectedResult)")])
+        output += self.failure_log(native)
+        # A legacy server runner outside the launcher must retain its own cause.
+        output += "error: 'h2.test.settings ack' failed\nfailed command: /tmp/test-h2 --listen=-\n"
+        causes = report_issue.failure_causes(output, report_issue.fixtures())
+        self.assertEqual([(cause.zig_test, cause.zig_binary) for cause in causes],
+                         [(first, "unit-store-tests"), (second, "unit-store-tests"), (third, "unit-store-tests"),
+                          ("codex_auth.test.refresh", "unit-native-tests"), ("h2.test.settings ack", "test-h2")])
+        for line in result.diagnostic.splitlines():
+            self.assertIn("  " + line + "\n", output)
+
+    def test_cancelled_peer_does_not_blame_its_active_test(self):
+        import report_issue
+        import threading
+        stop = threading.Event()
+        # The start marker is a deterministic gate: cancellation follows parsing
+        # it, without depending on which thread the scheduler runs first.
+        original = shards.TerminalTimes.feed
+        def feed(parser, data, now):
+            original(parser, data, now)
+            if parser.active:
+                stop.set()
+        self.script("import signal\nprint('1/1 store.test.innocent...', end='', flush=True)\nsignal.pause()\n")
+        with patch.object(shards.TerminalTimes, "feed", feed):
+            result = shards.execute(self.binary, [], os.environ, 3, "cancelled peer", stop)
+        self.assertEqual(result.status, 130)
+        self.assertEqual(report_issue.failure_causes(self.failure_log(result), {}), [])
+        self.assertIn("unit root interrupted", result.diagnostic)
+
+    @unittest.skipUnless(hasattr(signal, "SIGRTMIN"), "realtime signal boundary is Linux-specific")
+    def test_signal_without_an_enum_name_retains_the_active_test(self):
+        import report_issue
+        signum = int(signal.SIGRTMIN) + 1
+        self.script("import os\nprint('1/1 store.test.failed...', end='', flush=True)\n"
+                    f"os.kill(os.getpid(), {signum})\n")
+        result = shards.execute(self.binary, [], os.environ, 3, "Store shard 1/4")
+        [cause] = report_issue.failure_causes(self.failure_log(result), {})
+        self.assertEqual(cause.zig_test, "store.test.failed")
+        self.assertEqual(cause.zig_binary, self.binary.name)
+        self.assertEqual(cause.signature, f"zig test 'store.test.failed' terminated with signal SIG{signum}")
+
+    def test_child_exit_codes_do_not_impersonate_launcher_cancellation_or_deadlines(self):
+        import report_issue
+        for status in (124, 130):
+            with self.subTest(status=status):
+                self.script(f"print('1/1 store.test.failed...', end='', flush=True)\nraise SystemExit({status})\n")
+                result = shards.execute(self.binary, [], os.environ, 3, "Store shard 1/4")
+                [cause] = report_issue.failure_causes(self.failure_log(result), {})
+                self.assertEqual(cause.signature, "zig test 'store.test.failed' failed")
+                self.assertFalse(result.interrupted)
+
+    def test_metadata_failure_reaches_the_root_gate_attribution_owner(self):
+        import report_issue
+        output = io.StringIO()
+        missing = self.directory / "missing-unit-store-tests"
+        with redirect_stdout(output), redirect_stderr(output):
+            self.assertEqual(shards.main(["run", str(missing)]), 1)
+        [cause] = report_issue.failure_causes(output.getvalue(), {})
+        self.assertEqual(cause.zig_test, "")
+        self.assertIn("unit root gate failed: missing-unit-store-tests", cause.signature)
+
+    def test_failure_before_first_test_is_a_root_failure_without_an_invented_test(self):
+        import report_issue
+        self.script("print('panic before main')\nraise SystemExit(1)\n", names=["store.test.never"])
+        result = shards.execute(self.binary, [], os.environ, 3, "Store shard 1/4")
+        [cause] = report_issue.failure_causes(self.failure_log(result), {})
+        self.assertEqual(cause.zig_test, "")
+        self.assertIn(self.binary.name, cause.signature)
+        self.assertIn("unit root gate failed", cause.signature)
 
     def test_failure_keeps_early_diagnostic_after_long_remaining_output(self):
         self.script("print('1/1 store.test.failed...FAIL (error.Witness)')\n"

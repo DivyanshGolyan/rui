@@ -32,6 +32,13 @@ four. `check` enters `host_process.py` before the launcher for each root. The
 launcher gives the native process and each Store shard its own **1200-second
 deadline**; `run_selected.py` retains its existing per-process `--test-timeout`.
 Each peer reports its result, and a failure still waits for the other peers.
+Failures use the stock Zig per-test envelope with the actual binary command,
+so `report_issue.py` remains the failure-attribution owner and prepush can rerun
+the named test in its registered root. Assertions retain their error, signals
+retain their signal, and test and process deadlines are distinct. Captured
+terminal diagnostics are indented once to prevent duplicate causes; cancelling
+a peer does not blame the test it happened to be running. A failure before any
+test starts is reported as a unit-root gate failure.
 
 The generated runner embeds the committed per-test seconds from
 [store_test_times.json](store_test_times.json). The partition owner in
