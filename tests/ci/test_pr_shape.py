@@ -33,6 +33,8 @@ class GoalTest(unittest.TestCase):
             ("```text\nGoal: #12 Support the workstream goal\n```", False),
             ("<!-- Goal: #12 Support the workstream goal -->", False),
             ("~~~\nNo issue: housekeeping\n~~~", False),
+            ("<!--\nGoal: #12 Support the workstream goal", False),
+            ("<!--\nNo issue: Routine housekeeping", False),
         )
         for paths in (["docs/guide.md"], ["src/cli.zig"]):
             for body, accepted in cases:
@@ -148,7 +150,8 @@ class ScreenEvidenceTest(unittest.TestCase):
                          "![Overview][screen]\n\n[screen]: https://github.com/user-attachments/assets/123",
                          "<!--\n![Overview](https://github.com/user-attachments/assets/123)\n-->",
                          "```md\n![Overview](https://github.com/user-attachments/assets/123)\n```",
-                         "```\nNo screen change: hidden reason\n```"):
+                         "```\nNo screen change: hidden reason\n```",
+                         "<!--\nNo screen change: hidden reason"):
             for path in ("src/overview_view.zig", ".claude/skills/verify-rui/scripts/frames.json"):
                 with self.subTest(evidence=evidence, path=path):
                     reason = refusal([path], "## Shape\n" + evidence)
