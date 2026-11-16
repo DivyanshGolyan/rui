@@ -1335,7 +1335,7 @@ test "saved and legacy explicit interfaces share private directory admission bef
     const settings = try std.testing.allocator.create(hs.Settings);
     defer std.testing.allocator.destroy(settings);
     const id = "0123456789abcdef0123456789abcdef";
-    for ([_]u32{ 0o700, 0o755, 0o777, 0o000 }) |mode| {
+    for ([_]u16{ 0o700, 0o755, 0o777, 0o000 }) |mode| {
         try runtime.dir.setPermissions(io, .fromMode(mode));
         defer runtime.dir.setPermissions(io, .fromMode(0o700)) catch @panic("restore interface privacy");
         for ([_]enum { legacy_mysql, saved_mysql, moved_sqlite }{ .legacy_mysql, .saved_mysql, .moved_sqlite }) |door| {
