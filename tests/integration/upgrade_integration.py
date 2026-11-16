@@ -970,8 +970,8 @@ def known_target_case(root, binary, releases, baseline, known_bad):
 
         previous = old_status()
         try:
-            for name, target, reason in (("known-bad-check", known_bad, "target build cannot safely check"),
-                                         ("no-settings-check", baseline, "launch configuration cannot be safely reconstructed")):
+            for name, target, reason in (("no-settings-check", baseline, "launch configuration cannot be safely reconstructed"),
+                                         ("known-bad-check", known_bad, "target build cannot safely check")):
                 build = c.build(name)
                 shutil.copy2(target, build / "bin/rui")
                 c.select(build)
