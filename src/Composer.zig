@@ -10,7 +10,7 @@ const layout = @import("draft_layout.zig");
 const Self = @This();
 const view = @import("overview_view.zig");
 const widget_style = @import("widget_style.zig");
-const commands = @import("slash_commands.zig").conversation;
+const commands = @import("slash_commands.zig");
 
 editor: *Editor,
 method: vaxis.gwidth.Method = .unicode,
@@ -18,6 +18,8 @@ style: vaxis.Style = .{},
 quiet: vaxis.Style = .{ .dim = true },
 rule_style: vaxis.Style = .{ .dim = true },
 command_style: vaxis.Style = .{},
+/// The exact-match row's source word, derived by the completion owner.
+known_word: ?commands.Span = null,
 placeholder: []const u8 = "",
 /// Draw rules, marks and the prompt in ASCII, for a terminal without
 /// Unicode.
@@ -59,7 +61,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     @memset(surface.buffer, .{ .style = self.style });
     // One surface for the whole input: the screen grounds rows, not columns
     // beside a child. The text's cells are borrowed glyphs, copied in place.
-    const command = commands.commandWord(self.editor.text());
+    const command = if (self.known_word) |span| self.editor.text()[span.start..][0..span.len] else null;
     for (0..text.size.height) |row| for (0..text.size.width) |col| {
         var cell = text.readCell(col, row);
         // TextArea lends grapheme slices from the draft. Style those bytes,
@@ -300,18 +302,27 @@ test "Composer surface role covers New Session and chat drafts in both themes an
     }
 }
 
-test "Composer colours only the grammar's known command bytes without taking TextArea's layout" {
+test "Composer colours the list owner's exact word without taking TextArea's layout" {
     for ([_]?view.Rgb{ .{ 255, 255, 255 }, null }) |terminal| for ([_]@TypeOf(@as(view.Caps, .{}).depth){ .direct, .none }) |depth| {
         const caps: view.Caps = .{ .background = terminal, .depth = depth };
         const ink = widget_style.of(caps, .{ .colour = .ink, .background = .input_surface });
         const body = widget_style.of(caps, .{ .background = .input_surface });
-        for ([_][]const u8{ "/new", "/copy code", "/help", "/discard", "/review this", "use /new", "/models", "/rename /rename more lines last" }) |typed| {
-            const known: usize = if (std.mem.eql(u8, typed, "/new")) 4 else if (std.mem.startsWith(u8, typed, "/copy")) 5 else if (std.mem.eql(u8, typed, "/discard")) 8 else if (std.mem.startsWith(u8, typed, "/rename")) 7 else 0;
+        const Case = struct { typed: []const u8, word: ?commands.Span = null };
+        for ([_]Case{
+            .{ .typed = "/new", .word = .{ .start = 0, .len = 4 } },
+            .{ .typed = "/help", .word = .{ .start = 0, .len = 5 } },
+            .{ .typed = "/hel" },
+            .{ .typed = "/unknown" },
+            .{ .typed = "/discard" },
+            .{ .typed = "/help /help on more long lines", .word = .{ .start = 0, .len = 5 } },
+        }) |case| {
+            const typed = case.typed;
             for ([_]u16{ 4, 8, 40 }) |width| for ([_]usize{ 0, typed.len }) |caret| {
                 var bytes: [128]u8 = undefined;
                 var editor: Editor = .initText(&bytes, typed, caret);
                 var composer: Self = .{ .editor = &editor };
                 composer.setCaps(caps);
+                composer.known_word = case.word;
                 var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
                 defer arena.deinit();
                 const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 5 }, .cell_size = .{} };
@@ -322,7 +333,8 @@ test "Composer colours only the grammar's known command bytes without taking Tex
                     const at = @intFromPtr(cell.char.grapheme.ptr);
                     const start = @intFromPtr(editor.text().ptr);
                     if (cell.char.grapheme.len == 0 or at < start or at - start >= typed.len) continue;
-                    try std.testing.expectEqual(if (at - start < known) ink else body, cell.style);
+                    const inside = if (case.word) |word| at - start >= word.start and at - start < word.start + word.len else false;
+                    try std.testing.expectEqual(if (inside) ink else body, cell.style);
                 }
                 try std.testing.expectEqualStrings(typed, editor.text());
                 try std.testing.expectEqual(caret, editor.area.cursor);

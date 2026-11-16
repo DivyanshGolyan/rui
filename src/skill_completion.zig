@@ -172,6 +172,22 @@ pub const Reads = struct {
         return if (held) |kept| kept.page else null;
     }
 
+    /// The first typed name's exact row, independent of the caret or which
+    /// argument list is open. Reuse its already-built list where possible;
+    /// otherwise ask the same list owner for the first word. Only the
+    /// applicable held preview can establish a skill's exact match.
+    pub fn knownWord(self: *const Reads, draft: []const u8, current: ?slash_commands.Shown) ?slash_commands.Span {
+        if (current) |built| if (built.list.source_word) |word| {
+            if (word.start == 0) return built.list.exactWord();
+        };
+        // The scratch owns any skill row strings only for this projection;
+        // the returned source coordinates borrow none of them.
+        var rows: Rows = .{};
+        const first = self.shown(&rows, draft, @min(1, draft.len), 0, .{}, null) orelse return null;
+        const word = first.list.exactWord() orelse return null;
+        return if (word.start == 0) word else null;
+    }
+
     /// The Palette's rows for the draft at `revision`, with the caret at
     /// `caret`, after `previous`. In the draft's first `/word`: the listed
     /// commands and the held page's skills its name matches (`match`). In
@@ -193,7 +209,9 @@ pub const Reads = struct {
         // 2^32 bytes.
         const source = ((if (held) |kept| kept.read else 0) << 32) | (@as(u32, @intCast(word.slash)) + 1);
         const commands = if (word.slash == 0) slash_commands.conversation.listed() else null;
-        return slash_commands.Shown.nextOf(previous, revision, source, rows.list(typed, commands, page));
+        var listed = rows.list(typed, commands, page) orelse return null;
+        listed.source_word = .{ .start = word.slash, .len = word.end - word.slash };
+        return slash_commands.Shown.nextOf(previous, revision, source, listed);
     }
 };
 
@@ -217,6 +235,7 @@ pub const Rows = struct {
                 const matched = match(typed, entry.shown[1..], entry.description) orelse continue;
                 if (matched.rank != rank) continue;
                 if (rows.count == slash_commands.List.capacity) return rows;
+                if (rank == .exact and rows.exact == null) rows.exact = rows.count;
                 rows.entries[rows.count] = entry;
                 rows.entries[rows.count].matches = matched.spans;
                 rows.count += 1;
@@ -230,6 +249,7 @@ pub const Rows = struct {
                 text[0] = '/';
                 @memcpy(text[1..][0..entry.name.len], entry.name);
                 text[1 + entry.name.len] = ' ';
+                if (rank == .exact and rows.exact == null) rows.exact = rows.count;
                 rows.entries[rows.count] = .{
                     .word = text[1 .. entry.name.len + 2],
                     .shown = text[0 .. entry.name.len + 1],
@@ -401,9 +421,9 @@ test "a /word's list ranks exact, prefix, inside and description matches, comman
         .{ .name = "deploy", .description = "Ship it" },
     };
     const Row = struct { shown: []const u8, bold: []const u8, in_description: bool = false };
-    const cases = [_]struct { draft: []const u8, rows: []const Row }{
+    const cases = [_]struct { draft: []const u8, rows: []const Row, known: ?[]const u8 = null }{
         // Exact, then prefix, then inside the name, then only the description.
-        .{ .draft = "/help", .rows = &.{
+        .{ .draft = "/help", .known = "/help", .rows = &.{
             .{ .shown = "/help", .bold = "help" },
             .{ .shown = "/help-me", .bold = "help" },
             .{ .shown = "/review-help", .bold = "help" },
@@ -411,7 +431,7 @@ test "a /word's list ranks exact, prefix, inside and description matches, comman
         } },
         // A command and a skill of one rank keep commands first; a
         // description-only command comes after a skill named inside.
-        .{ .draft = "/new", .rows = &.{
+        .{ .draft = "/new", .known = "/new", .rows = &.{
             .{ .shown = "/new", .bold = "new" },
             .{ .shown = "/news", .bold = "new" },
             .{ .shown = "/renew", .bold = "new" },
@@ -421,7 +441,7 @@ test "a /word's list ranks exact, prefix, inside and description matches, comman
         // Case is ignored in a description.
         .{ .draft = "/ship", .rows = &.{.{ .shown = "/deploy", .bold = "Ship", .in_description = true }} },
         // A command's name hides a same-named skill, which matched too.
-        .{ .draft = "/model", .rows = &.{.{ .shown = "/model", .bold = "model" }} },
+        .{ .draft = "/model", .known = "/model", .rows = &.{.{ .shown = "/model", .bold = "model" }} },
         // Later in a Message, the skill is the only owner of its name.
         .{ .draft = "use /model", .rows = &.{.{ .shown = "/model", .bold = "model" }} },
         .{ .draft = "use /hel", .rows = &.{
@@ -430,6 +450,13 @@ test "a /word's list ranks exact, prefix, inside and description matches, comman
             .{ .shown = "/review-help", .bold = "hel" },
             .{ .shown = "/triage", .bold = "hel", .in_description = true },
             .{ .shown = "/model", .bold = "hel", .in_description = true },
+        } },
+        // Prefix-only matches are not exact known names.
+        .{ .draft = "/hel", .rows = &.{
+            .{ .shown = "/help-me", .bold = "hel" },
+            .{ .shown = "/help", .bold = "hel" },
+            .{ .shown = "/review-help", .bold = "hel" },
+            .{ .shown = "/triage", .bold = "hel", .in_description = true },
         } },
         // Nothing holds the name.
         .{ .draft = "/zzz", .rows = &.{} },
@@ -442,8 +469,14 @@ test "a /word's list ranks exact, prefix, inside and description matches, comman
         errdefer std.debug.print("draft={s}\n", .{case.draft});
         const shown = reads.shown(&rows, case.draft, case.draft.len, 1, .{}, null) orelse {
             try std.testing.expectEqual(@as(usize, 0), case.rows.len);
+            try std.testing.expect(case.known == null);
             continue;
         };
+        if (case.known) |known| {
+            const span = reads.knownWord(case.draft, shown).?;
+            try std.testing.expectEqualStrings(known, case.draft[span.start..][0..span.len]);
+            try std.testing.expectEqualStrings(known, shown.list.entries[shown.list.exact.?].shown);
+        } else try std.testing.expectEqual(@as(?slash_commands.Span, null), reads.knownWord(case.draft, shown));
         try std.testing.expectEqual(case.rows.len, shown.list.count);
         for (case.rows, shown.list.shown()) |expected, entry| {
             try std.testing.expectEqualStrings(expected.shown, entry.shown);
@@ -452,6 +485,23 @@ test "a /word's list ranks exact, prefix, inside and description matches, comman
             try std.testing.expectEqualStrings(expected.bold, text[bold.start..][0..bold.len]);
         }
     }
+    // Name knowledge does not change when arguments or caret movement make
+    // the popup show another word. Inline references are not the first name.
+    const Colour = struct { draft: []const u8, known: ?[]const u8 = null };
+    for ([_]Colour{
+        .{ .draft = "/new notes", .known = "/new" },
+        .{ .draft = "/help notes", .known = "/help" },
+        .{ .draft = "/unknown notes" },
+        .{ .draft = "/hel notes" },
+        .{ .draft = "/discard" },
+        .{ .draft = "use /help" },
+    }) |case| for (0..case.draft.len + 1) |caret| {
+        const shown = reads.shown(&rows, case.draft, caret, 1, .{}, null);
+        if (case.known) |known| {
+            const span = reads.knownWord(case.draft, shown).?;
+            try std.testing.expectEqualStrings(known, case.draft[span.start..][0..span.len]);
+        } else try std.testing.expectEqual(@as(?slash_commands.Span, null), reads.knownWord(case.draft, shown));
+    };
 }
 
 test "skills do not replace a command argument or invent an argument list" {

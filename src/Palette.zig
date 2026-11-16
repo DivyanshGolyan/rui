@@ -17,7 +17,7 @@ matched: vaxis.Style = .{ .bold = true },
 /// Total panel budget, including chrome, supplied by the screen owner.
 max_height: u16 = std.math.maxInt(u16),
 /// The pointer's row: only its background, reverse and underline apply, and the highlighted
-/// row keeps its reverse under the pointer.
+/// row keeps its selection style under the pointer.
 hover_style: vaxis.Style = .{ .ul_style = .single },
 userdata: ?*anyopaque = null,
 /// Receives the pressed row as the latest frame drew it: its absolute entry
@@ -127,17 +127,18 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     for (targets, 0..) |*rect, index| rect.* = placed.row(index);
     self.hover.targets = targets;
     const column = list.descriptionColumn();
+    const selected_style = widget_style.of(self.caps, .{ .background = .selection });
+    const selected_matched = widget_style.of(self.caps, .{ .bold = true, .background = .selection });
     for (list.shown()[first..][0..count], first..) |entry, index| {
-        var style = self.style;
+        const selected = index == self.shown.highlight;
+        var style = if (selected) selected_style else self.style;
         const rect = placed.row(index - first);
-        const hovered = index != self.shown.highlight and self.on_select != null and self.hover.contains(rect);
-        style.reverse = index == self.shown.highlight;
+        const hovered = !selected and self.on_select != null and self.hover.contains(rect);
         if (hovered) style = Hover.look(style, self.hover_style);
         const start = @as(usize, @intCast(rect.row)) * width + @as(usize, @intCast(rect.col));
-        if (style.reverse or hovered) @memset(surface.buffer[start..][0..rect.width], .{ .style = style });
+        if (selected or hovered) @memset(surface.buffer[start..][0..rect.width], .{ .style = style });
         const line = body.child(.{ .y_off = @intCast(index - first), .height = 1 });
-        var matched = self.matched;
-        matched.reverse = style.reverse;
+        var matched = if (selected) selected_matched else self.matched;
         if (hovered) matched = Hover.look(matched, self.hover_style);
         printMarked(line, entry.shown, entry.matches.name, style, matched);
         if (column < rect.width) {
@@ -194,7 +195,7 @@ test "Palette keeps the selected command visible at one row and hides closed or 
     const surface = try palette.widget().draw(ctx);
     try std.testing.expectEqual(.drawn, shown.seen);
     try std.testing.expectEqual(@as(u16, 1), surface.size.height);
-    try std.testing.expect(surface.readCell(0, 0).style.reverse);
+    try std.testing.expectEqual(widget_style.of(palette.caps, .{ .background = .selection }), surface.readCell(0, 0).style);
     var text: [80]u8 = undefined;
     var used: usize = 0;
     for (surface.buffer) |cell| {
@@ -235,15 +236,15 @@ test "Palette hover is transient and clicks activate only visible command rows" 
     const motion: vaxis.Mouse = .{ .row = 2, .col = 2, .button = .none, .mods = .{}, .type = .motion };
     try palette.widget().handleEvent(&ctx, .{ .mouse = motion });
     const hovered = try palette.widget().draw(draw_ctx);
-    // Hover takes the quieter look; the keyboard's row keeps its reverse.
+    // Hover takes the quieter look; the keyboard's row keeps its selection.
     try std.testing.expect(!hovered.readCell(2, 2).style.reverse);
     try std.testing.expectEqual(vaxis.Style.Underline.single, hovered.readCell(2, 2).style.ul_style);
-    try std.testing.expect(hovered.readCell(2, 1).style.reverse);
+    try std.testing.expectEqual(widget_style.of(palette.caps, .{ .background = .selection }), hovered.readCell(2, 1).style);
     try std.testing.expectEqual(palette.style.fg, hovered.readCell(2, 2).style.fg);
     palette.hover_style = .{ .bg = .{ .index = 5 } };
     const coloured = try palette.widget().draw(draw_ctx);
     for (2..78) |col| try std.testing.expectEqual(vaxis.Color{ .index = 5 }, coloured.readCell(@intCast(col), 2).style.bg);
-    try std.testing.expect(coloured.readCell(2, 1).style.reverse);
+    try std.testing.expectEqual(widget_style.of(palette.caps, .{ .background = .selection }), coloured.readCell(2, 1).style);
     try std.testing.expectEqual(@as(usize, 0), shown.highlight);
     try std.testing.expect(selected.index == null);
     try std.testing.expectEqual(vaxis.Mouse.Shape.pointer, ctx.cmds.items[ctx.cmds.items.len - 1].set_mouse_shape);
@@ -279,6 +280,41 @@ test "Palette hover is transient and clicks activate only visible command rows" 
     _ = try palette.widget().draw(draw_ctx);
     try palette.widget().handleEvent(&ctx, .{ .mouse = press });
     try std.testing.expect(selected.index == null);
+}
+
+test "Palette selection uses the shared ink wash for plain and matching cells in every skin and depth" {
+    const Select = struct {
+        fn select(_: *anyopaque, _: *vxfw.EventContext, _: commands.Shown.Pick) !void {}
+    };
+    for ([_]?overview.Rgb{ .{ 255, 255, 255 }, null }) |terminal| {
+        for ([_]overview.Caps.Depth{ .direct, .indexed, .none }) |depth| for ([_]bool{ true, false }) |unicode| {
+            const caps: overview.Caps = .{ .background = terminal, .depth = depth, .unicode = unicode };
+            var shown = commands.Shown.next(null, 1, commands.conversation.listed()).?;
+            shown.list.count = 2;
+            shown.list.entries[0].matches = .{ .name = .{ .start = 1, .len = 3 }, .description = .{ .start = 0, .len = 2 } };
+            var palette: Self = .{ .shown = &shown, .on_select = Select.select };
+            palette.setCaps(caps);
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 4 }, .cell_size = .{} };
+            const plain = widget_style.of(caps, .{ .background = .selection });
+            const strong = widget_style.of(caps, .{ .bold = true, .background = .selection });
+            const column = shown.list.descriptionColumn();
+            // Moving onto the selected row never replaces its ink wash with hover.
+            for ([_]i17{ 1, 2 }) |pointed| {
+                palette.hover.point = .{ .col = 2, .row = pointed };
+                const surface = try palette.widget().draw(ctx);
+                for (2..78) |col| {
+                    const marked = (col >= 3 and col < 6) or (col >= column + 2 and col < column + 4);
+                    try std.testing.expectEqual(if (marked) strong else plain, surface.readCell(@intCast(col), 1).style);
+                }
+                try std.testing.expectEqual(depth == .none, surface.readCell(2, 1).style.reverse);
+                const other = if (pointed == 2) Hover.look(palette.style, palette.hover_style) else palette.style;
+                try std.testing.expectEqual(other, surface.readCell(2, 2).style);
+                for ([_]u16{ 0, 79 }) |col| try std.testing.expectEqual(palette.quiet, surface.readCell(col, 1).style);
+            }
+        };
+    }
 }
 
 test "Palette renders every chat command and description in the same normal style" {
@@ -337,13 +373,13 @@ test "Palette description clipping ends with the list row ellipsis at every widt
                         const cell = surface.readCell(@intCast(column + index), @intCast(row));
                         try std.testing.expectEqualStrings(&.{byte}, cell.char.grapheme);
                         try std.testing.expect(!cell.style.dim);
-                        try std.testing.expectEqual(row == selected, cell.style.reverse);
+                        try std.testing.expectEqual(if (row == selected) widget_style.of(palette.caps, .{ .background = .selection }) else palette.style, cell.style);
                     }
                     if (clipped) {
                         const cell = surface.readCell(@intCast(width - 1), @intCast(row));
                         try std.testing.expectEqualStrings(if (unicode) "…" else ".", cell.char.grapheme);
                         try std.testing.expect(!cell.style.dim);
-                        try std.testing.expectEqual(row == selected, cell.style.reverse);
+                        try std.testing.expectEqual(if (row == selected) widget_style.of(palette.caps, .{ .background = .selection }) else palette.style, cell.style);
                     }
                 }
             }

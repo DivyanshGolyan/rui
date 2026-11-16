@@ -3272,11 +3272,24 @@
           "text": "/review-",
           "within": "/review-help",
           "bold": false
+        },
+        {
+          "text": "/help",
+          "within": "\u203a /help",
+          "foreground": "#a9b6ec"
+        },
+        {
+          "text": "/help",
+          "within": "/help           Verify",
+          "foreground": "#d4cebf"
         }
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
-      ]
+      ],
+      "expect_background": {
+        "/help           Verify": "#2b2f45"
+      }
     },
     {
       "name": "slashlist-description",
@@ -3323,11 +3336,24 @@
           "text": " the project",
           "within": "Verify the project",
           "bold": false
+        },
+        {
+          "text": "/verify",
+          "within": "\u203a /verify",
+          "foreground": "#d4cebf"
+        },
+        {
+          "text": "/help",
+          "within": "/help           Verify",
+          "foreground": "#d4cebf"
         }
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
-      ]
+      ],
+      "expect_background": {
+        "/help           Verify": "#2b2f45"
+      }
     },
     {
       "name": "slashlist-known",
@@ -3369,11 +3395,19 @@
           "text": "new",
           "within": "/new",
           "bold": true
+        },
+        {
+          "text": "/new",
+          "within": "/new            start",
+          "foreground": "#d4cebf"
         }
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
-      ]
+      ],
+      "expect_background": {
+        "/new            start": "#2b2f45"
+      }
     },
     {
       "name": "slashlist-help-day",
@@ -3420,12 +3454,25 @@
           "text": "/review-",
           "within": "/review-help",
           "bold": false
+        },
+        {
+          "text": "/help",
+          "within": "\u203a /help",
+          "foreground": "#1f2d6b"
+        },
+        {
+          "text": "/help",
+          "within": "/help           Verify",
+          "foreground": "#2f2b25"
         }
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ],
-      "theme": "day"
+      "theme": "day",
+      "expect_background": {
+        "/help           Verify": "#dedad5"
+      }
     },
     {
       "name": "slashlist-description-day",
@@ -3472,12 +3519,25 @@
           "text": " the project",
           "within": "Verify the project",
           "bold": false
+        },
+        {
+          "text": "/verify",
+          "within": "\u203a /verify",
+          "foreground": "#2f2b25"
+        },
+        {
+          "text": "/help",
+          "within": "/help           Verify",
+          "foreground": "#2f2b25"
         }
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ],
-      "theme": "day"
+      "theme": "day",
+      "expect_background": {
+        "/help           Verify": "#dedad5"
+      }
     },
     {
       "name": "slashlist-known-day",
@@ -3519,12 +3579,20 @@
           "text": "new",
           "within": "/new",
           "bold": true
+        },
+        {
+          "text": "/new",
+          "within": "/new            start",
+          "foreground": "#2f2b25"
         }
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ],
-      "theme": "day"
+      "theme": "day",
+      "expect_background": {
+        "/new            start": "#dedad5"
+      }
     },
     {
       "name": "misused-command",

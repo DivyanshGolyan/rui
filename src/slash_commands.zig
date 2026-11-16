@@ -284,13 +284,6 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
             return if (std.mem.indexOfAny(u8, text, " \t\n") == null) .word else .message;
         }
 
-        /// The command word a command line starts with, `/name`: what the
-        /// composer draws in the command colour. Null for any other draft.
-        pub fn commandWord(text: []const u8) ?[]const u8 {
-            if (draftOf(text) != .command) return null;
-            return text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
-        }
-
         /// Every listed command's row, in list order. Which of them a typed
         /// first word shows, and in what order, is `skill_completion`'s.
         pub fn listed() List {
@@ -410,12 +403,23 @@ pub const List = struct {
     typed: []const u8,
     entries: [capacity]Entry = undefined,
     count: usize = 0,
+    /// The exact-name entry selected by the ranking owner, if one exists.
+    exact: ?usize = null,
+    /// The source `/word` in the draft, supplied by the word/list owner.
+    source_word: ?Span = null,
+
     /// Where descriptions start, when the list names one: the screen's
     /// commands keep theirs while typing narrows them.
     column: ?usize = null,
 
     /// All conversation commands and one complete skill preview.
     pub const capacity = conversation.listed_count + skill_suggestions.capacity;
+
+    /// A typed name is known only when this list contains its exact row.
+    pub fn exactWord(self: *const List) ?Span {
+        _ = self.exact orelse return null;
+        return self.source_word;
+    }
 
     fn add(self: *List, entry: Entry) void {
         std.debug.assert(std.mem.startsWith(u8, entry.word, self.typed));
@@ -808,7 +812,7 @@ test "a draft is a command line, one unfinished slash word, or a Message, by the
     for (cases) |case| try std.testing.expectEqual(case[1], conversation.draftOf(case[0]));
 }
 
-test "the grammar leaves a first word's rows to the caret's word and names each command line's word" {
+test "the grammar leaves a first word's rows to the caret's word" {
     // `skill_completion` matches a first word against commands and skills
     // alike; the grammar only says a list is for it.
     for ([_][]const u8{ "", "a", "re", "rel", "requests", "discard", "zz", "model" }) |typed| {
@@ -817,24 +821,6 @@ test "the grammar leaves a first word's rows to the caret's word and names each 
         const list = conversation.suggest(draft, .{}).?;
         try std.testing.expectEqual(@as(usize, 0), list.count);
         try std.testing.expectEqualStrings(typed, list.typed);
-    }
-    const cases = .{
-        .{ "/model", "/model" },
-        .{ "/copy code", "/copy" },
-        .{ "/discard", "/discard" },
-        .{ "/effort  high", "/effort" },
-        .{ "/mode", null },
-        .{ "/models", null },
-        .{ "/Model", null },
-        .{ "//model", null },
-        .{ "/review this", null },
-        .{ "use /model", null },
-        .{ "/archive\n", null },
-        .{ "", null },
-    };
-    inline for (cases) |case| {
-        const word: ?[]const u8 = case[1];
-        if (word) |expected| try std.testing.expectEqualStrings(expected, conversation.commandWord(case[0]).?) else try std.testing.expectEqual(@as(?[]const u8, null), conversation.commandWord(case[0]));
     }
 }
 

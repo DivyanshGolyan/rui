@@ -1161,6 +1161,16 @@ while True:
                 self.assertIn({"text": " the project", "within": "Verify the project", "bold": False}, description["expect_style"])
                 self.assertIn({"text": "/help", "bold": False}, description["expect_style"])
                 self.assertIn({"text": "/new", "within": "› /new", "foreground": ink}, known["expect_style"])
+                body = "#2f2b25" if theme == "day" else "#d4cebf"
+                wash = "#dedad5" if theme == "day" else "#2b2f45"
+                self.assertIn({"text": "/help", "within": "› /help", "foreground": ink}, help_state["expect_style"])
+                self.assertIn({"text": "/verify", "within": "› /verify", "foreground": body}, description["expect_style"])
+                for state, marker, word in ((help_state, "/help           Verify", "/help"),
+                                            (description, "/help           Verify", "/help"),
+                                            (known, "/new            start", "/new")):
+                    # Marker spans selected name, blank name-column padding and description.
+                    self.assertEqual(state["expect_background"], {marker: wash})
+                    self.assertIn({"text": word, "within": marker, "foreground": body}, state["expect_style"])
 
     def test_two_open_folds_select_list_before_resizing_to_the_split_layout(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))

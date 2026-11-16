@@ -1134,6 +1134,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_document.document = if (screen.view == .message) &screen.staging else &screen.browsing;
     self.app_body.shown = if (screen.view == .feed) self.app_content.widget() else self.app_document.widget();
     screen.commands = self.nextCommands(screen.commands);
+    self.app_input.composer.known_word = self.skills.knownWord(self.input.composition().bytes, screen.commands);
     var palette: ?vxfw.Widget = null;
     if (self.app_consent.request == null) if (screen.commands) |*shown| {
         self.app_palette.shown = shown;
