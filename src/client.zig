@@ -5955,7 +5955,7 @@ test "parent relation survives Configure and creating Message capture through na
                 .reasoning_effort = .{ .present = true, .value = "low" },
             };
             var captured = try (if (creating_message)
-                captureMessage(io, .{ .store = root, .session = "", .text = "task\x00\n", .configuration = input }, .{ .generated = root })
+                captureMessage(io, .{ .store = root, .session = "", .text_path = "", .text = "task\x00\n", .configuration = input }, .{ .generated = root })
             else
                 captureConfigure(io, input, .{ .generated = root })).get();
             defer captured.close(io);
