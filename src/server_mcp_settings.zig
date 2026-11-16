@@ -1,5 +1,3 @@
-//! The MCP connection values consumed by the Host's discovery/runtime owners.
-//! The Host projects Settings into this shared discovery/runtime value.
 const std = @import("std");
 const hs = @import("host_settings.zig");
 const protocol = @import("protocol.zig");
@@ -13,7 +11,6 @@ pub const Server = struct {
     call_timeout_ms: u32 = 0,
 };
 
-/// Owns one bounded projection, including token copies, until deinit.
 pub const Connections = struct {
     allocator: std.mem.Allocator,
     servers: []Server,

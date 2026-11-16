@@ -1,6 +1,4 @@
-//! Model facts only, not account availability or per-Adapter limits.
 const std = @import("std");
-/// Reviewed instruction bodies follow the running binary, not saved settings.
 pub const BuiltinInstructions = enum {
     generic,
     luna,
@@ -18,7 +16,6 @@ pub const BuiltinInstructions = enum {
     }
 };
 
-/// Exact requested identity, independent of provider or catalog availability.
 pub fn builtinInstructions(model: []const u8) BuiltinInstructions {
     const reviewed = .{
         .{ "gpt-6-luna", BuiltinInstructions.luna },
@@ -30,23 +27,16 @@ pub fn builtinInstructions(model: []const u8) BuiltinInstructions {
     return .generic;
 }
 
-/// Local identifier syntax admits 1 to this many printable ASCII bytes.
 pub const max_model_bytes = 256;
 
-/// Rui's closed effort grammar, ordered from lowest to highest.
 pub const ReasoningEffort = enum { none, low, medium, high, xhigh, max };
 
-/// Syntax only, not catalog membership or account entitlement.
 pub fn validModelSyntax(model: []const u8) bool {
     if (model.len == 0 or model.len > max_model_bytes) return false;
     for (model) |byte| if (byte < 0x21 or byte > 0x7e) return false;
     return true;
 }
 
-/// Six effort flags packed into one byte. No default effort is inferred.
-/// Their tag order (none, low, medium, high, xhigh, max) is part of the
-/// Store format: bits 0..5 are persisted in model_fact.efforts. Changing
-/// this order or set requires a new schema version and migration.
 pub const Efforts = std.enums.EnumSet(ReasoningEffort);
 
 pub const Entry = struct {
@@ -58,7 +48,6 @@ pub const Entry = struct {
 
 pub const shipped = @import("model_catalog_snapshot.zig").entries(Entry);
 
-/// OpenAI IDs in catalog order: the list of a provider without a live one.
 pub const openai_ids = blk: {
     @setEvalBranchQuota(20000);
     var count: usize = 0;
@@ -74,9 +63,6 @@ pub const openai_ids = blk: {
     break :blk ids;
 };
 
-/// The picker admits text conversations, not image, embedding, voice or
-/// realtime endpoints. This projection retains the type and text-modality
-/// decision the slim window/effort catalog otherwise drops.
 const chat_facts = @import("model_catalog_snapshot.zig");
 
 pub fn canChat(id: []const u8) bool {
@@ -94,22 +80,17 @@ pub fn canChat(id: []const u8) bool {
         break :blk false;
     };
     if (find(shipped, id) != null) return !excluded;
-    // D229: unknown IDs pass through, except a catalog-proven non-chat
-    // family. Require a whole family token, never a partial-name match.
     for (chat_facts.non_chat_families) |family| {
         if (inFamily(id, family)) return false;
     }
     return true;
 }
 
-/// Exact family name or a complete hyphen-delimited family prefix.
-/// Generation and picker admission use the same token boundary.
 pub fn inFamily(id: []const u8, family: []const u8) bool {
     return std.mem.eql(u8, id, family) or
         (std.mem.startsWith(u8, id, family) and id.len > family.len and id[family.len] == '-');
 }
 
-/// Exact, case-sensitive lookup in a bytewise-sorted catalog.
 pub fn find(entries: []const Entry, id: []const u8) ?*const Entry {
     var start: usize = 0;
     var end = entries.len;
@@ -172,8 +153,6 @@ test "model catalog chat facts cover exact types modalities and whole non-chat f
         if (at != 0) try std.testing.expect(std.mem.order(u8, chat_facts.non_chat_ids[at - 1], id) == .lt);
     }
     for ([_][]const u8{ "gpt-6.1-sol", "gpt-4.1", "future-chat", "gpt-imagery-next", "text-embeddingish-next" }) |id| try std.testing.expect(canChat(id));
-    // Image and embedding rows advertise text output too: modality alone
-    // cannot stand in for their explicit non-chat type.
     for ([_][]const u8{ "gpt-image-1-mini", "text-embedding-3-large", "gpt-realtime-2.1", "openai/whisper-1", "gpt-image-future", "text-embedding-future", "gpt-realtime-future" }) |id| try std.testing.expect(!canChat(id));
     for (chat_facts.non_chat_families) |family| {
         var represented = false;

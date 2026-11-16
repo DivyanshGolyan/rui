@@ -1,15 +1,3 @@
-//! One MCP `tools/call` on the wire, read to the outcome the model is told
-//! (D144 to D146). The owner polls `fd()` for `events()` and calls
-//! `advance()`, as with `Request`; closing it with `deinit` cancels the call
-//! (D65). Nothing here retries: Rui sends no call id (D61).
-//!
-//! The arguments are filtered first (`arguments.zig`), so the server gets
-//! only the fields its own schema lists, and `description` is the call's
-//! `rui_call_description` for the conversation line.
-//!
-//! Lifetime: a Call holds a Request, so it has one address; its owner
-//! initializes it in place. Everything it was given is borrowed until
-//! `deinit`; an outcome's slices point into the answer buffer.
 const std = @import("std");
 const Request = @import("Request.zig");
 const post = @import("post.zig");
@@ -19,27 +7,22 @@ const arguments = @import("arguments.zig");
 const Call = @This();
 
 pub const Error = Request.Error || post.Error || error{
-    /// The filtered request outgrew its buffer.
     NoRoom,
 };
 
 pub const Outcome = reply.CallOutcome;
 
 current: Request,
-/// The call's `rui_call_description`, as written.
 description: ?[]const u8,
 
 pub const Input = struct {
     server: post.Server,
     client: post.Client,
-    /// The tool's name, decoded, and its saved schema.
     name: []const u8,
     input_schema: []const u8,
-    /// The model's arguments, a checked JSON object.
     arguments: []const u8,
     caller: post.Caller,
     id: u64,
-    /// Room for the filtered arguments, then for the request.
     scratch: []u8,
     request: []u8,
     answer: []u8,
@@ -74,14 +57,10 @@ pub fn events(self: *const Call) i16 {
     return self.current.events();
 }
 
-/// Whether any request byte left this process: an error before this is
-/// "failed, not run", after it "outcome unknown" (D146).
 pub fn requestSent(self: *const Call) bool {
     return self.current.requestSent();
 }
 
-/// Borrow the JSON message prefix retained when a reply exceeded its buffer.
-/// It is valid until deinit, just like an outcome's slices.
 pub fn answerPrefix(self: *const Call) reply.Answer {
     return self.current.answerEvidence(.cut);
 }
@@ -99,7 +78,6 @@ const http1 = @import("../http1/request.zig");
 const caller: post.Caller = .{ .session_id = "s1", .parent_session_id = null, .root_session_id = "s1", .turn_id = "t1" };
 const saved_schema = "{\"properties\":{\"q\":{},\"rui_call_description\":{}}}";
 
-/// Sends a call to `script` and drives it to its outcome.
 fn run(script: *Script, call: *Call, sent: *bool) !Outcome {
     try script.start();
     defer script.stop();
@@ -122,8 +100,6 @@ fn run(script: *Script, call: *Call, sent: *bool) !Outcome {
     });
     defer call.deinit();
     while (true) {
-        // One advance can send the request and see the close, so `sent` is
-        // read on the error path too.
         const outcome = call.advance() catch |err| {
             sent.* = call.requestSent();
             return err;
@@ -137,8 +113,6 @@ fn run(script: *Script, call: *Call, sent: *bool) !Outcome {
 
 var kept: [1024]u8 = undefined;
 
-/// The tests read an outcome after `run` ended its buffers, so its text is
-/// copied out first.
 fn keep(outcome: Outcome) Outcome {
     switch (outcome) {
         .result => |found| {
@@ -205,7 +179,6 @@ test "a connection that dies after the request left is an unknown outcome" {
     var script: Script = .{ .reply = "" };
     var call: Call = undefined;
     var sent = false;
-    // The server reads the request and closes without answering.
     try std.testing.expectError(error.TruncatedResponse, run(&script, &call, &sent));
     try std.testing.expect(sent);
 }

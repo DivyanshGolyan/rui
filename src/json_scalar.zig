@@ -1,11 +1,5 @@
-//! JSON strings and integers that never reach std's float parser. std reads
-//! an integer through parseFloat unless it is spelled as one, and a
-//! `[]const u8` also accepts an array of byte numbers read that way, so every
-//! typed parse carried the 23 KB `convertSlow` frame onto Host stacks.
 const std = @import("std");
 
-/// A JSON string. It borrows the input, or the parse allocator for a string
-/// with escapes.
 pub const Text = struct {
     slice: []const u8,
 
@@ -17,8 +11,6 @@ pub const Text = struct {
     }
 };
 
-/// A JSON number whose value is an integer, as std accepts one: `17`, `1.7e1`
-/// and `17.0` parse; `1.75` is an error.
 pub fn Int(comptime T: type) type {
     return struct {
         value: T,
@@ -30,7 +22,6 @@ pub fn Int(comptime T: type) type {
                     defer allocator.free(slice);
                     return .{ .value = try integral(T, slice) };
                 },
-                // std reads an integer spelled as a JSON string too.
                 .string => |slice| .{ .value = try integral(T, slice) },
                 .allocated_string => |slice| {
                     defer allocator.free(slice);
@@ -42,8 +33,6 @@ pub fn Int(comptime T: type) type {
     };
 }
 
-/// Reads a JSON number spelling as an exact integer by shifting its decimal
-/// digits, so no binary float is ever formed.
 fn integral(comptime T: type, token: []const u8) !T {
     if (!numberSpelling(token)) return error.InvalidNumber;
     const e = std.mem.indexOfAny(u8, token, "eE") orelse token.len;
@@ -53,8 +42,6 @@ fn integral(comptime T: type, token: []const u8) !T {
     const exponent: i64 = if (e == token.len) 0 else try std.fmt.parseInt(i64, token[e + 1 ..], 10);
     const dot = std.mem.indexOfScalar(u8, mantissa, '.') orelse mantissa.len;
     const fraction = if (dot == mantissa.len) "" else mantissa[dot + 1 ..];
-    // Trailing zeros carry no value; after dropping them, any digit left
-    // right of the decimal point makes the number fractional.
     const whole_digits = std.mem.trimEnd(u8, mantissa[0..dot], "0");
     const fraction_digits = std.mem.trimEnd(u8, fraction, "0");
     const zeros: i64 = @intCast(if (fraction_digits.len == 0) dot - whole_digits.len else 0);
@@ -70,7 +57,6 @@ fn integral(comptime T: type, token: []const u8) !T {
     return value;
 }
 
-/// JSON's number grammar; a string value is not checked by the scanner.
 fn numberSpelling(token: []const u8) bool {
     var i: usize = @intFromBool(token.len != 0 and token[0] == '-');
     const whole = digitRun(token, i);

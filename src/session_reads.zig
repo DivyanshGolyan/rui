@@ -1,7 +1,3 @@
-//! The Session frontend's reads. Each worker borrows only its Job: inputs
-//! frozen at launch and a result the UI applies after join. This module does
-//! not import the frontend, so no worker can read or write it.
-
 const std = @import("std");
 const tool_fold = @import("tool_fold.zig");
 const socket_os = @import("os/socket.zig");
@@ -32,8 +28,6 @@ const Key = feed_window.Key;
 const FeedPolicy = feed_reads.Policy(Key);
 pub const LatestEnding = feed_reads.Ending(Key);
 
-/// Independent raw rendering in inspection. The shell prepares the text and
-/// pairs summary markers with the retained targets in emission order.
 pub const RenderedRow = struct {
     key: Key,
     offset: u64,
@@ -46,57 +40,31 @@ pub const RenderedRow = struct {
 
 pub const Configure = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, ChatInfo.Edit) anyerror!bool;
 pub const Command = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, []u8) anyerror!void;
-/// Writes /requests' recovery handles, and offers each saved Message among
-/// them to the page's list.
 pub const Requests = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, *std.Io.Writer, *SavedRequests) anyerror!void;
-/// The saved Messages a /requests page offers, under the Store's key bound.
 pub const SavedRequests = slash_commands.Requests(protocol.max_key_bytes);
-/// Local-only adapter: consumes an already-read Current and files, never
-/// Host transport. Takes the chat info inspection of the Session, whose
-/// attention rows are in the first file, into the Session given. True when
-/// it differs from the shown one (always without one): the second file then
-/// lists its Actions awaiting approval, as the page shows them.
 pub const Status = *const fn (std.Io, *const protocol_reply.Current, std.Io.File, *status_page.Session, ?*const status_page.Session, std.Io.File) anyerror!bool;
 
 pub const Inspection = union(enum) { requests, command, copy: Copy };
 
-/// What a /copy sends: the last answer or its last code block to the
-/// clipboard, or the last answer to a file.
 pub const Copy = slash_commands.Copy;
 
-/// What a /copy read found. The clipboard takes its range of the scratch
-/// file after the UI joins the read.
 pub const Copied = union(enum) { no_answer, no_code, too_large, clipboard: AnswerRenderer.LastCode.Range, saved };
 
 pub const copy_name_bytes = "rui--answer.md".len + protocol.session_id_bytes;
 
-/// The file /copy file writes, in the directory Rui runs in.
 pub fn copyName(buffer: *[copy_name_bytes]u8, session: []const u8) []const u8 {
     return std.fmt.bufPrint(buffer, "rui-{s}-answer.md", .{session}) catch unreachable;
 }
 
-/// One read. Inputs are frozen at launch; the worker writes only `result`,
-/// which the UI reads after join. No worker reads or writes the controller.
-/// Live output renders into the inspection scratch file and shows whole, with
-/// its footer, status and cursor, in one UI step after join.
-/// The frontend's private scratch files, which a read borrows whole.
-/// Inspection is worker-owned; details is UI-owned repair scratch.
-/// The paired captures alternate without borrowing live widget storage.
 pub const Files = struct { scratch: std.Io.File, action: std.Io.File, inspection: std.Io.File, details: std.Io.File, actions: [2]std.Io.File };
 
-/// The moment a Session line was read at. Every input of the context
-/// estimate takes a Session position and every settings change a revision,
-/// so a page with another moment may show other facts.
 pub const Moment = struct { revision: u64, end: u64 };
 
-/// What the Session line shows from Current, as the UI keeps it between
-/// reads. A scan reads Current again only when its page's moment differs.
 pub const Line = struct {
     comptime {
         std.debug.assert(@max(protocol.max_label_bytes, protocol.max_session_bytes) <= session_line.max_name_bytes);
     }
 
-    /// Null until the first read.
     read: ?Moment = null,
     label: ?Bounded(protocol.max_label_bytes) = null,
     first_position: ?u64 = null,
@@ -113,7 +81,6 @@ pub const Line = struct {
         return moment.revision != page.work.revision or moment.end != page.end;
     }
 
-    /// Fills `line` with the facts this read's Current capture holds.
     fn take(line: *?Line, current: *const protocol_reply.Current, moment: Moment) void {
         const settings = &current.settings;
         const first = (current.first_message.value orelse null) orelse null;
@@ -133,7 +100,6 @@ pub const Line = struct {
         };
     }
 
-    /// Null until the first read.
     pub fn facts(self: *const Line, hint: *const Hint, reference: []const u8) ?session_line.Facts {
         if (self.read == null) return null;
         const label: ?[]const u8 = if (self.label) |*text| text.slice() else null;
@@ -152,27 +118,17 @@ pub const Line = struct {
     }
 };
 
-/// An unlabelled Session's name: its first Message's first line, read once,
-/// since that Message never changes.
 pub const Hint = union(enum) {
     unread,
-    /// The lookup found no line to show; the reference names the Session.
     absent,
     line: Bounded(session_line.max_line_bytes),
 };
 
-/// Reads the hint from the first Message at `position`. The name is only a
-/// hint, so a Message the Host refuses or that is not text names the Session
-/// by its reference instead.
 fn readHint(requests: client.Requests, job: *const Job, position: u64) !Hint {
     const line = try readFirstLine(requests, job, position, .absent) orelse return .absent;
     return if (line.len == 0) .absent else .{ .line = line };
 }
 
-/// The first line of the Message at `position`, terminal-safe. A canonical
-/// Store, transport or cancellation failure fails the read, as the page's
-/// would; so does a refusal or bytes that are not text, unless `refused` is
-/// `.absent`, which returns null for them.
 fn readFirstLine(requests: client.Requests, job: *const Job, position: u64, refused: enum { absent, fails }) !?queued_line.Line {
     var buffer: [session_line.max_line_bytes + 1]u8 = undefined;
     const reply = requests.readActivityPrefix(job.store, job.session, position, &buffer) catch |err| switch (err) {
@@ -185,13 +141,9 @@ fn readFirstLine(requests: client.Requests, job: *const Job, position: u64, refu
     };
 }
 
-/// Text the Host holds, without terminal controls and with its tabs and line
-/// ends as spaces, within `limit` bytes: cut at a code point and ended with
-/// an ellipsis when longer. One pass, straight into the value.
 fn plain(comptime limit: usize, bytes: []const u8) Bounded(limit) {
     var value: Bounded(limit) = .{ .len = 0 };
     var text: TerminalText = .{ .mode = .multiline };
-    // The longest kept text an ellipsis can still follow.
     var room: usize = 0;
     for (bytes, 1..) |byte, count| {
         var storage: [32]u8 = undefined;
@@ -212,17 +164,13 @@ fn plain(comptime limit: usize, bytes: []const u8) Bounded(limit) {
     return value;
 }
 
-/// What a Ctrl-O read renders.
 pub const Target = union(enum) {
-    /// This collapsed block's Message, in full.
     message: View.Collapsed,
-    /// This tool row again, with its output shown or hidden.
     tool: struct { key: Key, open: bool },
 };
 
 pub const Job = struct {
     init: std.process.Init = undefined,
-    /// Borrowed from the frontend until this read joins.
     home: []const u8 = "",
     store: []const u8 = "",
     session: []const u8 = "",
@@ -239,88 +187,58 @@ pub const Job = struct {
     opening: bool = false,
     feed_page: ?FeedPolicy.Page = null,
     target: ?Target = null,
-    /// The tool rows the person left open, as of this read's start.
     opened: feed_window.Opened = .{},
     recall: ?Input.Step = null,
-    /// Frozen live fact for scans; fills neither read nor publish it.
     latest_ending: ?LatestEnding = null,
-    /// Retry request: newest person Message strictly before this ending.
     retry: ?Key = null,
     queued_line: u64 = 0,
     inspection_kind: Inspection = .requests,
-    // A command observes exit or a signal as an interruption.
     interrupted: *client.Cancellation = undefined,
     command_text: [@typeInfo(@FieldType(Input, "command_buffer")).array.len]u8 = undefined,
     command_text_length: usize = 0,
     inspection_submission: ?Submission.View = null,
 
-    // A scan takes chat info from its own Current capture: when the user
-
-    // asks for it, or while the page shows `status_shown`, into
-    // `status_taken`, listing its Actions in `status_actions`.
     open_status: bool = false,
     watch_status: bool = false,
     status_shown: ?*const status_page.Session = null,
     status_taken: *status_page.Session = undefined,
     status_actions: std.Io.File = undefined,
-    // The moment the UI's Session line was read at, and whether it still
-    // needs the unlabelled Session's name.
     line_read: ?Moment = null,
     hint_wanted: bool = false,
-    // The Session's provider as the UI's Session line holds it, null until
-    // that line is first read. A Session never changes provider.
     provider: ?protocol.Provider = null,
     result: struct {
-        // The work the page's own Store read saw: its history, footer and
-        // consent describe one moment.
         work: protocol.PageWork = .{},
-        // The Session line's facts, when this read took them.
         line: ?Line = null,
-        // The unlabelled Session's name, when this read looked it up.
         hint: ?Hint = null,
-        // `status_taken` holds chat info from one Current capture, which
-        // differs from the shown page.
         status: bool = false,
         rows: [16]RenderedRow = undefined,
         row_count: usize = 0,
-        /// Activity edges include hidden rows, so filtered fills make progress.
         low: ?Key = null,
         high: ?Key = null,
         at_start: bool = false,
         at_end: bool = false,
         new_rows: usize = 0,
-        // The Messages waiting at this read's cursor, and the newest one's
-        // first line when the row shows it and does not hold it yet.
         queued: protocol.Queued = .{},
         queued_line: ?queued_line.Shown = null,
         live: View.Live = .{},
         latest_ending: ?LatestEnding = null,
         cursor: protocol_reply.ActivityCursor = .{},
-        // Output custody began; a later failure is not a silent preparation one.
         rendering: bool = false,
-        // Only confirmed stderr restoration permits exit to replay this page.
         command_stderr_restored: bool = false,
         info_saved: bool = false,
         action: ?u64 = null,
-        // Bytes of live output staged in the inspection scratch file.
         output_length: u64 = 0,
         copied: Copied = .no_answer,
-        // What a /requests page offers to act on.
         requests: SavedRequests = .{},
-        // The sent Message a recall step found, its text staged in scratch.
         recalled: ?Input.Found = null,
-        // The step passed over a sent Message the draft cannot hold.
         recall_passed: bool = false,
         retry: ?Retry = null,
     } = .{},
 
-    /// The Session's provider: this read's own Session line once it took
-    /// one, else the UI's.
     fn sessionProvider(self: *const Job) ?protocol.Provider {
         return if (self.result.line) |line| line.provider else self.provider;
     }
 
-    /// The worker borrows only its Job, including string edit storage.
     pub fn setInfoEdit(self: *Job, edit: ChatInfo.Edit) !void {
         self.info_edit = edit;
         switch (edit) {
@@ -333,8 +251,6 @@ pub const Job = struct {
         }
     }
 
-    /// Call only after a successful reader join. Scratch is borrowed until the
-    /// next reader starts; consume/copy the exact range before reusing it.
     pub fn retryCompletion(self: *const Job, latest: ?LatestEnding) RetryCompletion {
         const key = self.retry.?;
         if (latest == null or !latest.?.matches(key)) return .stale;
@@ -351,17 +267,11 @@ pub const RetryMessage = struct { ending: Key, position: u64, length: usize };
 const Retry = union(enum) { stale, message: RetryMessage, failure: RetryFailure };
 pub const RetryCompletion = union(enum) { stale, message: RetryMessage, failure: RetryFailure };
 
-/// Runs on ClientTask, never on the key path. No fallback to an older Message:
-/// failure of the one newest admission fails the request. Transport, canonical
-/// Store, cancellation and local I/O failures retain ClientTask's error boundary.
 pub fn retry(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const key = job.retry.?;
     const requests = task.requests();
     try job.files.scratch.setLength(task.io, 0);
-    // Bind the backwards walk to Host truth, not the frontend's last scan.
-    // Any activity after this ending supersedes the retry, even if a stale
-    // observation still presents the ending as the latest one.
     const newest = switch (try requests.activityPage(job.store, job.session, .{
         .direction = .backward,
         .kinds = .full,
@@ -412,20 +322,11 @@ const RetryStaging = struct {
     }
 };
 
-/// One step over the Messages the person sent, from the one the draft
-/// shows or from the newest: a one-row activity page of `admission` rows,
-/// then that Message's content staged in scratch. One the draft cannot
-/// hold (over its capacity, or text its own check refuses, such as a
-/// control character or a leading standalone mark) is passed over, its
-/// content read at most once, and the result says so.
 pub fn recall(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const requests = task.requests();
     const step = job.recall.?;
     std.debug.assert(step.older or step.from != null);
-    // A person's Messages are the activity page's `admission` rows. A
-    // Message's position holds no other row, so the step from a shown one
-    // starts at its position's boundary and needs no row identity.
     var cursor: protocol_reply.ActivityCursor = .{
         .end = if (step.from) |from| from.end else null,
         .position = if (step.from) |from| from.position else 0,
@@ -453,8 +354,6 @@ pub fn recall(raw: *anyopaque, task: *Task) !void {
     }
 }
 
-/// Stages a sent Message's text in scratch; null when the draft cannot hold
-/// it as typed text.
 fn stageRecalled(requests: client.Requests, job: *const Job, io: std.Io, at: Input.Recalled, content: protocol.ActivityItem.Content) !?Input.Found {
     try job.files.scratch.setLength(io, 0);
     var staging: RecallStaging = .{ .io = io, .file = job.files.scratch, .check = DraftEditor.textCheck() };
@@ -466,8 +365,6 @@ fn stageRecalled(requests: client.Requests, job: *const Job, io: std.Io, at: Inp
     return .{ .at = at, .length = @intCast(staging.offset), .slash = slash };
 }
 
-/// A sent Message's text in scratch, checked as it arrives by the draft's
-/// own check, the one `SessionInput.fill` relies on.
 const RecallStaging = struct {
     io: std.Io,
     file: std.Io.File,
@@ -483,9 +380,6 @@ const RecallStaging = struct {
     }
 };
 
-/// Host commands keep their one-shot output owners. Their complete stdout and
-/// stderr become an inspection page while the Session screen keeps drawing
-/// through its own descriptor. No command reads terminal input.
 pub const runInfoConfigure = runCommand;
 
 pub fn runCommand(raw: *anyopaque, task: *Task) !void {
@@ -499,15 +393,12 @@ pub fn runCommand(raw: *anyopaque, task: *Task) !void {
     return ended.outcome;
 }
 
-/// One Host command line, run as a screen runs it: by `command`, for
-/// `session` when it names one.
 pub const CommandRun = struct {
     command: Command,
     init: std.process.Init,
     requests: client.ReadContext,
     store: []const u8,
     session: []const u8,
-    /// Decoded in place.
     line: []u8,
     configure: ?Configure = null,
     edit: ?ChatInfo.Edit = null,
@@ -520,35 +411,25 @@ pub const CommandRun = struct {
         } else try self.command(self.init, self.requests, self.store, self.session, self.line);
     }
 
-    /// How a run ended.
     pub const Ended = struct {
-        /// The output became the page's, after which any failure is the
-        /// caller's to end on.
         rendering: bool = false,
-        /// Stderr came back from the page. Only then may the caller write
-        /// the page to stderr: otherwise fd 2 may still be the page.
         stderr_restored: bool = false,
         outcome: anyerror!void = {},
     };
 
-    /// Runs the command with its complete stdout and stderr written to
-    /// `page` from its start.
     pub fn into(self: CommandRun, page: std.Io.File) Ended {
         const io = self.requests.io;
         page.setLength(io, 0) catch |err| return .{ .outcome = err };
         io.vtable.fileSeekTo(io.userdata, page, 0) catch |err| return .{ .outcome = err };
-        // Saved descriptors must not leak into anything the command executes.
         const saved = [2]c_int{ std.c.fcntl(1, std.posix.F.DUPFD_CLOEXEC, @as(c_int, 0)), std.c.fcntl(2, std.posix.F.DUPFD_CLOEXEC, @as(c_int, 0)) };
         defer for (saved) |fd| if (fd >= 0) {
             _ = std.c.close(fd);
         };
         if (saved[0] < 0 or saved[1] < 0) return .{ .outcome = error.TerminalCleanupFailed };
-        // Redirected descriptors are output custody: any failure now is fatal.
         const result = if (std.c.dup2(page.handle, 1) < 0 or std.c.dup2(page.handle, 2) < 0) error.TerminalCleanupFailed else self.execute();
         const stdout_restored = std.c.dup2(saved[0], 1) >= 0;
         const stderr_restored = std.c.dup2(saved[1], 2) >= 0;
         if (!stdout_restored or !stderr_restored) {
-            // Restoration replaced the command's outcome with a local failure.
             self.requests.origin.* = .local;
             return .{ .rendering = true, .stderr_restored = stderr_restored, .outcome = error.TerminalCleanupFailed };
         }
@@ -562,15 +443,11 @@ pub fn permission(raw: *anyopaque, task: *Task) !void {
     if (job.result.work.work.first_action) |action| {
         try job.files.action.setLength(task.io, 0);
         var output: DisplayCapture = .{ .task = task, .file = job.files.action };
-        // A target resolved between reads is the same as a scan with no
-        // pending Action: leave result.action empty and refresh, without consent.
         if (!try View.permission(task.requests(), job.store, job.session, action, job.files.scratch, &output, job.colour)) return;
         job.result.action = action;
     }
 }
 
-/// Activity cursors are exclusive. Inclusive replay names the preceding
-/// ordinal, or the preceding position boundary when ordinal is zero.
 fn pageCursor(job: *const Job, plan: FeedPolicy.Page) protocol_reply.ActivityCursor {
     var cursor: protocol_reply.ActivityCursor = .{
         .direction = if (plan.direction == .backward) .backward else .forward,
@@ -636,7 +513,6 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         }
     }
     try job.files.inspection.setLength(task.io, 0);
-    // One open row at a time uses this buffer; closed rows never touch it.
     const toggled: ?@FieldType(Target, "tool") = if (job.target) |target| if (target == .tool) target.tool else null else null;
     const output: ?*tool_fold.Output = if (job.opened.count != 0 or toggled != null) try job.init.gpa.create(tool_fold.Output) else null;
     defer if (output) |held| job.init.gpa.destroy(held);
@@ -646,8 +522,6 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         const key: Key = .{ .position = item.position, .ordinal = item.ordinal };
         if (job.result.low == null) job.result.low = key;
         job.result.high = key;
-        // Hidden pending rows need replay too: the next idle page can make
-        // an Admission visible without adding another Activity row.
         const pending = item.value == .admission and item.value.admission.state == .queued;
         var row: RenderedRow = .{ .key = key, .offset = offset, .length = 0, .tight = false, .provisional = pending };
         if (toggled != null and toggled.?.key.order(key) != .eq) continue;
@@ -675,8 +549,6 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     }
 }
 
-/// Forward scans can replay older provisional rows; only a newer own ending
-/// advances this fact. Child endings never grant retry authority for a parent.
 fn observeEnding(latest: *?LatestEnding, item: protocol.ActivityItem, session: []const u8, provider: ?protocol.Provider) void {
     const key: Key = .{ .position = item.position, .ordinal = item.ordinal };
     if (latest.*) |old| if (key.order(old.key) != .gt) return;
@@ -689,8 +561,6 @@ fn observeEnding(latest: *?LatestEnding, item: protocol.ActivityItem, session: [
     latest.* = .{ .key = key, .cause = cause };
 }
 
-/// Opening's row page need not contain an ending. Find it with a separate,
-/// snapshot-bound cursor, never by filling/rendering historical window rows.
 fn latestEnding(requests: client.Requests, job: *Job, end: u64) !void {
     var cursor: protocol_reply.ActivityCursor = .{ .end = end, .direction = .backward, .kinds = .initMany(&.{ .turn_ended, .stop }) };
     while (true) {
@@ -704,10 +574,6 @@ fn latestEnding(requests: client.Requests, job: *Job, end: u64) !void {
     }
 }
 
-/// Ctrl-O on a tool row: that one row again, with its output shown or hidden.
-/// A cursor's ordinal must name a row the Host holds, and the row before
-/// this one is not known here, so the read starts at the boundary before
-/// the row's position and pages forward to it. Only that row is rendered.
 pub fn tool(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const key = job.target.?.tool.key;
@@ -722,9 +588,6 @@ pub fn tool(raw: *anyopaque, task: *Task) !void {
     }
 }
 
-/// The submission the UI shows under a page.
-/// `failure` is what its last attempt's failure says the person must do,
-/// in place of the state's own words.
 pub fn writeSubmission(view: ?Submission.View, failure: ?[]const u8, out: *std.Io.Writer) !void {
     const submission = view orelse return;
     try out.print("Original reserved request: {s}\n{s}\n", .{ submission.key, failure orelse if (submission.state == .rejected) "Submission rejected; /discard releases only this original, retaining the next draft." else "Publication/admission may be incomplete; Ctrl-R retries this exact original." });
@@ -743,9 +606,6 @@ const DisplayCapture = struct {
     }
 };
 
-/// A bounded head, never an answer's tail. Rendering authenticates the whole
-/// source even when full. Cuts end outside UTF-8 scalars and controls; the
-/// marker closes any hyperlink and resets presentation before its notice.
 const RowCapture = struct {
     const more = TerminalText.body_off ++ TerminalText.link_close ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ More — Ctrl-O for whole message" ++ View.Mark.reset ++ "\n";
     const notice_capacity = 128;
@@ -825,7 +685,6 @@ const RowCapture = struct {
 
     pub fn excluding(_: *@This(), _: u64) void {}
 
-    /// One bounded admission for complete summary bytes and their target.
     fn retainSummary(self: *@This(), value: View.Collapsed, bytes: []const u8, limit: u64) !bool {
         if (self.task.cancellation.stopped.load(.acquire)) return error.Cancelled;
         if (self.row.collapsed_count == self.row.collapsed_targets.len or bytes.len > limit - self.length) return false;
@@ -849,8 +708,6 @@ const RowCapture = struct {
         var aggregate: [notice_capacity]u8 = undefined;
         if (!self.cut and self.omitted_summaries == 0) return;
         if (self.cut) self.length = self.boundary;
-        // Both cap and count notices use the same admission decision as every
-        // other summary. The final aggregate has no per-Message action.
         const notice = if (self.omitted_summaries != 0)
             try std.fmt.bufPrint(&aggregate, TerminalText.body_off ++ TerminalText.link_close ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ {d} more summar{s}{s}" ++ View.Mark.reset ++ "\n", .{ self.omitted_summaries, if (self.omitted_summaries == 1) "y" else "ies", if (self.cut) "; more content omitted" else "" })
         else if (self.cap_target) |target| keyed: {
@@ -866,8 +723,6 @@ const RowCapture = struct {
     }
 };
 
-/// The Ctrl-O page. The Message's length, digest and end are validated
-/// before anything shows; its full text then follows at column 0.
 pub fn fullMessage(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const requests = task.requests();
@@ -898,7 +753,6 @@ pub fn fullMessage(raw: *anyopaque, task: *Task) !void {
     try writeMessagePage(task.io, job.files.scratch, staging.offset, lines, staging.last, target, job.store, job.session, job.files.inspection);
 }
 
-/// Writes the Message page for the `length` validated bytes in `scratch`.
 fn writeMessagePage(io: std.Io, scratch: std.Io.File, length: u64, lines: u64, last: u8, target: View.Collapsed, store: []const u8, session: []const u8, file: std.Io.File) !void {
     try file.setLength(io, 0);
     var page: MessagePage = .{ .io = io, .file = file };
@@ -912,7 +766,6 @@ fn writeMessagePage(io: std.Io, scratch: std.Io.File, length: u64, lines: u64, l
         try page.feed("\n");
     }
     try page.feed("\n");
-    // Room for the heading again covers the notice and its command.
     page.limit = Viewport.capacity - 2 * page.offset - 128;
     page.heading_lines = page.lines;
     var escaped: View.Escaped(*MessagePage) = .{ .sink = &page, .text = .{ .mode = .multiline } };
@@ -926,9 +779,6 @@ fn writeMessagePage(io: std.Io, scratch: std.Io.File, length: u64, lines: u64, l
     }
     if (!page.full) try escaped.finish();
     if (!page.full) return if (last != '\n') page.feed("\n");
-    // Escaped controls and invalid bytes can outgrow the view: keep whole
-    // lines, or the first line's start when none fits whole, and say how
-    // many lines are not shown in full, never cut silently.
     const whole = page.lines - page.heading_lines;
     const end = if (whole != 0) page.line_end else page.boundary;
     try file.setLength(io, end);
@@ -955,8 +805,6 @@ test "session_reads a Message page past the display limit keeps what fits and sa
     const target: View.Collapsed = .{ .source = .conversation, .position = 7, .ordinal = 0, .content = .{ .length = 0, .digest = @splat(0) }, .row = true };
     const page = try std.testing.allocator.alloc(u8, Viewport.capacity + 4096);
     defer std.testing.allocator.free(page);
-    // One line wider than the view, ending in é so a cut could split it;
-    // then lines of controls that escaping grows fourfold.
     const Case = struct { body: []const u8, lines: u64, kept: []const u8, notice: []const u8 };
     const wide = try std.testing.allocator.alloc(u8, Viewport.capacity + 5);
     defer std.testing.allocator.free(wide);
@@ -978,24 +826,18 @@ test "session_reads a Message page past the display limit keeps what fits and sa
         try std.testing.expect(std.unicode.utf8ValidateSlice(text));
         try std.testing.expect(std.mem.indexOf(u8, text, case.kept) != null);
         const notice = std.mem.indexOf(u8, text, case.notice).?;
-        // The export command follows the notice, so the bytes stay reachable.
         try std.testing.expect(std.mem.indexOfPos(u8, text, notice, "--position 7 --ordinal 0") != null);
     }
 }
 
-/// A Message page's file. Body bytes stop at `limit`; `line_end` is where
-/// the last whole body line written ends.
 const MessagePage = struct {
     io: std.Io,
     file: std.Io.File,
     offset: u64 = 0,
     limit: u64 = std.math.maxInt(u64),
     line_end: u64 = 0,
-    // Whole lines written, and how many of them are the heading's.
     lines: u64 = 0,
     heading_lines: u64 = 0,
-    // Where the last character written that started before the limit ends:
-    // the page never cuts inside a UTF-8 sequence.
     boundary: u64 = 0,
     full: bool = false,
 
@@ -1010,18 +852,12 @@ const MessagePage = struct {
                 self.line_end = self.offset + index + 1;
             }
         }
-        // A sequence that ended within what fit ends the cut there too.
         if (fit.len == bytes.len) self.boundary = self.offset + fit.len;
         self.offset += fit.len;
         self.full = fit.len != bytes.len;
     }
 };
 
-/// /copy: the newest answer, bound to its length and digest before its last
-/// window arrives. A file takes it as it arrives; the clipboard's bytes wait
-/// in scratch, which only the UI may write to the terminal.
-/// The most bytes /copy sends: hterm's osc52.sh sends at most 100,000
-/// base64 bytes, the smallest limit a terminal's own tooling documents.
 pub const clipboard_limit = 100_000 / 4 * 3;
 
 pub fn copyAnswer(raw: *anyopaque, task: *Task) !void {
@@ -1048,9 +884,6 @@ pub fn copyAnswer(raw: *anyopaque, task: *Task) !void {
         try std.Io.randomSecure(task.io, &random);
         var temporary_name: [copy_name_bytes + 22]u8 = undefined;
         const temporary = std.fmt.bufPrint(&temporary_name, ".{s}.{s}.tmp", .{ path, std.fmt.bytesToHex(random, .lower) }) catch unreachable;
-        // Exclusive creation never follows a link planted at either name, and
-        // the rename replaces whatever sits at the export name, never its
-        // target.
         const file = try directory.createFile(task.io, temporary, .{ .exclusive = true, .permissions = .fromMode(0o600) });
         var published = false;
         defer if (!published) directory.deleteFile(task.io, temporary) catch {};
@@ -1083,7 +916,6 @@ pub fn copyAnswer(raw: *anyopaque, task: *Task) !void {
     job.result.copied = if (range.length > TerminalText.clipboard_limit) .too_large else .{ .clipboard = range };
 }
 
-/// The Conversation's newest assistant answer, or null before the first.
 fn lastAnswer(requests: client.Requests, store: []const u8, session: []const u8) !?protocol_reply.ConversationPage.Item {
     var cursor: protocol_reply.ConversationCursor = .{ .end = 0 };
     while (true) {
@@ -1180,7 +1012,6 @@ test "session_reads the Session line takes archive and other facts from Current 
             if (std.mem.eql(u8, case.first, "null")) {
                 try std.testing.expectEqualStrings("/w", facts.folder.?);
             } else try std.testing.expect(facts.folder == null);
-            // The model's control byte shows as text, not as a terminal control.
             try std.testing.expectEqualStrings("gpt\\x01x", facts.model);
             try std.testing.expectEqual(case.left, facts.left);
             try std.testing.expectEqual(std.mem.eql(u8, case.mode, "ask"), facts.asks);
@@ -1188,14 +1019,10 @@ test "session_reads the Session line takes archive and other facts from Current 
             try std.testing.expectEqual(!std.mem.eql(u8, case.first, "null"), line.?.first_position != null);
         }
     }
-    // The first line names an unlabelled Session once read; a blank one
-    // leaves the reference.
     const hint: Hint = .{ .line = plain(session_line.max_line_bytes, session_line.firstLine("  Summarize\tCI\r\nand more")) };
     try std.testing.expectEqualStrings("Summarize CI", line.?.facts(&hint, "k7m2qx").?.name);
     const absent: Hint = .absent;
     try std.testing.expectEqualStrings("k7m2qx", line.?.facts(&absent, "k7m2qx").?.name);
-    // Another revision or end position makes the facts stale; another page
-    // of the same moment does not.
     for ([_]Moment{ .{ .revision = 4, .end = 40 }, .{ .revision = 3, .end = 41 } }) |next| {
         page.work.revision = next.revision;
         page.end = next.end;
@@ -1210,9 +1037,6 @@ test "session_reads the Session line takes archive and other facts from Current 
 test "session_reads plain text keeps whole code points within its bound, escapes controls and cuts once" {
     try std.testing.expectEqualStrings("a b c", plain(16, "a\tb\nc").slice());
     try std.testing.expectEqualStrings("x\\x1b[31my", plain(16, "x\x1b[31my").slice());
-    // Every length around the bound, with two-byte code points and escapes:
-    // the value is the whole escaped text when it fits, else its longest
-    // whole-code-point start that leaves room for the ellipsis, then one.
     for ([_][]const u8{ "é", "a", "\x01", "中" }) |unit| for (0..12) |count| {
         var bytes: [64]u8 = undefined;
         for (0..count) |at| @memcpy(bytes[at * unit.len ..][0..unit.len], unit);
@@ -1233,27 +1057,21 @@ test "session_reads plain text keeps whole code points within its bound, escapes
             const kept = shown[0 .. shown.len - session_line.ellipsis.len];
             try std.testing.expect(std.mem.endsWith(u8, shown, session_line.ellipsis));
             try std.testing.expect(std.mem.startsWith(u8, whole, kept));
-            // One more escaped unit would not leave room for the ellipsis.
             const unit_len = whole.len / count;
             try std.testing.expect(kept.len % unit_len == 0 and kept.len + unit_len + session_line.ellipsis.len > 12);
         }
     };
 }
 
-/// Tests derive provisional ownership from the returned rows, as the feed does.
 fn firstProvisional(result: *const @FieldType(Job, "result")) ?Key {
     for (result.rows[0..result.row_count]) |row| if (row.provisional) return row.key;
     return null;
 }
 
-/// A Host for tests of what a Session read asks: it answers Activity pages
-/// and Message content from a history of `history` completed Turns'
-/// outcomes followed by `tail`, and counts the pages it served. The history
 const FakeHost = struct {
     history: u64,
     history_users: bool = false,
     tail: []const Tail,
-    /// The Store's end, which a page asked for at no end reads.
     end: u64,
     held: bool = false,
     refuse_content: bool = false,
@@ -1265,8 +1083,6 @@ const FakeHost = struct {
     output: [4096]u8 = undefined,
     shown: []const u8 = "",
 
-    /// A tail item; a Message a stop at `excluded_at` excludes reads as
-    /// excluded at that end and later.
     const Tail = struct { value: protocol.ActivityItem.Value, excluded_at: ?u64 = null, applied_at: ?u64 = null };
     const text = "please wait\nfor the build";
 
@@ -1351,7 +1167,6 @@ const FakeHost = struct {
     fn respond(fd: std.posix.fd_t, status: []const u8, kind: []const u8, extra: []const u8, body: []const u8) void {
         var header: [512]u8 = undefined;
         const head = std.fmt.bufPrint(&header, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n{s}\r\n", .{ status, kind, body.len, extra }) catch unreachable;
-        // The client may close once it has what it needs.
         for ([_][]const u8{ head, body }) |bytes| {
             var sent: usize = 0;
             while (sent < bytes.len) {
@@ -1442,7 +1257,6 @@ const FakeHost = struct {
         try action.run(self, tmp.dir, root);
     }
 
-    /// Runs `job` as a read against this Host; output is then in `shown`.
     fn read(self: *FakeHost, job: *Job) !void {
         try self.readWith(job, scan);
     }
@@ -1468,7 +1282,6 @@ const FakeHost = struct {
     }
 };
 
-// Row-local placement is independent of the feed reader and traversal order.
 test "session_view Message placement is identical in either direction at every page split" {
     const Domain = struct {
         const user = "› " ++ View.Mark.body ++ "please wait\n  for the build" ++ View.Mark.reset ++ "\n";
@@ -1487,8 +1300,6 @@ test "session_view Message placement is identical in either direction at every p
         };
         const Expected = struct { text: []const u8 = "", provisional: bool = false, lowest: ?u64 = null };
 
-        // Each possible boundary separates two reads; backward loads the newer
-        // part first. Each part may itself span multiple bounded Activity pages.
         fn check(root: []const u8, rows: []const protocol.ActivityItem, expected: []const Expected, queued: protocol.Queued, held: bool) !void {
             const requests: client.Requests = .{ .io = std.testing.io };
             for ([_]bool{ false, true }) |backward| for (0..rows.len + 1) |split| {
@@ -1523,8 +1334,6 @@ test "session_view Message placement is identical in either direction at every p
             var incoming = FakeHost.message(90).admission;
             incoming.sender = peer;
             incoming.admitted_at = std.math.maxInt(u64);
-            // People and scripts both have no Session sender; distinct keys do
-            // not change placement. Peer Messages show at received in all states.
             for ([_]enum { person, script, session }{ .person, .script, .session }) |source| {
                 for (std.enums.values(@FieldType(protocol.ActivityItem.Message, "state"))) |state| {
                     for ([_]bool{ false, true }) |oldest| for ([_]bool{ false, true }) |held| {
@@ -1553,8 +1362,6 @@ test "session_view Message placement is identical in either direction at every p
                 }
             }
 
-            // Two stops, a settled delimiter, and a newer Message beyond the
-            // cutoff. Exclusions cross at least three admission-only pages.
             const max = protocol.ActivityPage.items * 2 + 7;
             var tail: [max]FakeHost.Tail = undefined;
             var rows: [max]protocol.ActivityItem = undefined;
@@ -1579,8 +1386,6 @@ test "session_view Message placement is identical in either direction at every p
                     }
                     tail[0].excluded_at = 2;
                     tail[1].value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 1, .completion = .completed } };
-                    // A previous stop's exclusion OR an applied Admission ends
-                    // the search; neither may be attributed to the later stop.
                     if (applied_boundary) {
                         tail[2].value.admission.state = .applied;
                         tail[2].value.admission.turn = 1;
@@ -1608,8 +1413,6 @@ test "session_view Message placement is identical in either direction at every p
 }
 
 test "session_reads opening reads one Activity page whatever the history before it" {
-    // A Store with 10 or 10,000 earlier rows and the same newest page: the
-    // opening reads that page alone, not the rows before it.
     for ([_]u64{ 10, 10_000 }) |earlier| {
         var host: FakeHost = .{ .history = earlier, .tail = &.{}, .end = earlier };
         var job: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = earlier } };
@@ -1620,8 +1423,6 @@ test "session_reads opening reads one Activity page whatever the history before 
 }
 
 test "session_reads the queued row's line fails the read when the Host refuses it" {
-    // One Message waits behind work at the opening. The row would show it
-    // with no line; the read fails instead, as a refused page does.
     const tail = [_]FakeHost.Tail{.{ .value = FakeHost.message(1) }};
     var host: FakeHost = .{ .history = 20, .tail = &tail, .end = 21, .held = true, .refuse_content = true };
     var job: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 21 } };
@@ -1630,16 +1431,12 @@ test "session_reads the queued row's line fails the read when the Host refuses i
 }
 
 test "session_reads Messages waiting at an opening show in the queued row, unless one is taken next" {
-    // 20 shows nothing, and A and B wait at 21 and 22. Behind work, both
-    // wait in the queued row.
     const tail = [_]FakeHost.Tail{ .{ .value = FakeHost.message(1) }, .{ .value = FakeHost.message(2) } };
     var held: FakeHost = .{ .history = 20, .tail = &tail, .end = 22, .held = true };
     var behind: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 22 } };
     try held.read(&behind);
     try std.testing.expectEqualStrings("", held.shown);
     try std.testing.expectEqual(@as(u64, 2), behind.result.queued.count);
-    // Idle, A is taken next and shows at its Admission; B still waits in
-    // the row.
     var idle: FakeHost = .{ .history = 20, .tail = &tail, .end = 22 };
     var opening: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 22 } };
     try idle.read(&opening);
@@ -1647,8 +1444,6 @@ test "session_reads Messages waiting at an opening show in the queued row, unles
     try std.testing.expectEqual(@as(?Key, .{ .position = 21 }), firstProvisional(&opening.result));
 }
 
-// This golden exercises the public renderer, including reports that must never
-// be fetched, and stop/ending pairs split over live or historical pages.
 test "activity golden stop with interrupted ending draws one line across pages" {
     const Sink = struct {
         out: *std.Io.Writer,
@@ -1669,8 +1464,6 @@ test "activity golden stop with interrupted ending draws one line across pages" 
     var code: protocol.Bounded(protocol.max_code_bytes) = .{};
     try code.set("cancelled");
     const stop: protocol.ActivityItem = .{ .position = 1, .at = 1, .value = .{ .stop = .{ .key = .{}, .turn = 2, .cutoff = 0, .completion = .completed } } };
-    // A non-null report also proves the renderer does not request its content:
-    // the Requests value is undefined and must remain unused.
     const ended: protocol.ActivityItem = .{ .position = 2, .at = 2, .value = .{ .turn_ended = .{ .session = session, .turn = 2, .operation = 3, .ending = .stopped, .code = code, .content = .{ .length = 99, .digest = @splat(0) } } } };
     const page = try std.testing.allocator.create(protocol_reply.ActivityPage);
     defer std.testing.allocator.destroy(page);
@@ -1699,7 +1492,6 @@ test "activity golden stop with interrupted ending draws one line across pages" 
             }
         }
     }
-    // An idle stop has no terminal Turn to follow it and owns its own line.
     page.* = .{ .facts = .{ .end = 1, .count = 1 } };
     page.facts.items[0] = stop;
     page.facts.items[0].value.stop.turn = null;
@@ -1710,7 +1502,6 @@ test "activity golden stop with interrupted ending draws one line across pages" 
     try std.testing.expectEqualStrings("\x1b[39m■\x1b[39m Stopped\n", out.buffered());
 }
 
-// Rows render alone; feed_window draws the gap between them from `tight`.
 test "session_reads rendered row kinds keep their own text and feed_window draws the gap from adjacency in every order" {
     const vaxis = @import("vaxis");
     const Window = feed_window.Window;
@@ -1738,9 +1529,6 @@ test "session_reads rendered row kinds keep their own text and feed_window draws
     var find: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
     try find.set("Find");
     const content: protocol.ActivityItem.Content = .{ .length = 3, .digest = @splat(0xab) };
-    // Each kind with its line and whether it packed with a packing
-    // neighbour before rows left the blank line to the feed: a tool row or
-    // peer Message after another drew no blank line; anything else did.
     const Kind = struct { value: protocol.ActivityItem.Value, line: []const u8, packed_: bool };
     const kinds = [_]Kind{
         .{ .value = .{ .sent = .{ .admission = 4, .target = peer, .content = content, .admitted_at = std.math.maxInt(u64) } }, .line = "→ Messaged 9f8e7d", .packed_ = true },
@@ -1759,7 +1547,6 @@ test "session_reads rendered row kinds keep their own text and feed_window draws
         try testing.expect(!try View.render(undefined, "unused", "k7m2qx", null, item, .{}, false, &sink, false, "", .{ .viewport = .wcwidth }, .none));
         try document.prepare();
         text_.* = Text.fromDocument(document);
-        // Row text is the row's line alone: no blank line on either side.
         try testing.expect(text_.bytes[0] != '\n' and std.mem.count(u8, text_.bytes, "\n") == 1);
         try testing.expectEqual(kind.packed_, View.tight(kind.value));
     }
@@ -1782,7 +1569,6 @@ test "session_reads rendered row kinds keep their own text and feed_window draws
     };
     for (0..kinds.len) |a| for (0..kinds.len) |b| for (0..kinds.len) |c| {
         const order = [_]usize{ a, b, c };
-        // Append all, prepend one or two over a seam, or append one at a time.
         for (0..3) |shape| {
             var window: Window = .{};
             var entries: [3]Entry = undefined;
@@ -1799,7 +1585,6 @@ test "session_reads rendered row kinds keep their own text and feed_window draws
                     try window.prepend(entries[0..1]);
                 },
             }
-            // Neighbours never change a row's own bytes.
             for (entries) |entry| try testing.expectEqualStrings(entry.text.bytes, window.text(entry.key).bytes);
             _ = window.heights(.{ .width = 40, .method = .unicode });
             @memset(&cells, .{});
@@ -2037,7 +1822,6 @@ test "session_reads long Session opening and visible fill each cost one page of 
     try host.read(&job);
     try std.testing.expectEqual(@as(usize, 32), host.contents);
     try std.testing.expectEqual(@as(usize, 16), job.result.row_count);
-    // One metadata-only ending lookup on opening, plus two visible pages.
     try std.testing.expectEqual(@as(usize, 3), host.pages);
 }
 
@@ -2060,7 +1844,6 @@ test "session_reads row caps never split UTF-8 scalars or presentation controls"
             var capture: RowCapture = .{ .task = &task, .file = file, .start = 0, .row = &row };
             try file.setLength(io, 0);
             try capture.feed(bytes[0 .. feed_window.row_capacity - RowCapture.notice_capacity - remaining]);
-            // Presentation and Unicode sequences can straddle renderer chunks.
             for (piece) |byte| try capture.feed(&.{byte});
             try capture.feed("exceeds the cap");
             try capture.finish();
@@ -2162,7 +1945,6 @@ test "session_reads retry stages exact multi-window bytes before its ending and 
     const text = try std.testing.allocator.alloc(u8, 3 * protocol.content_window_bytes + 7);
     defer std.testing.allocator.free(text);
     @memset(text, 'a');
-    // A scalar crosses a content window; no escaping, normalization or trimming.
     @memcpy(text[protocol.content_window_bytes - 1 ..][0.."💚é\n\t /".len], "💚é\n\t /");
     text[0] = '/';
     var message = FakeHost.message(1).admission;
@@ -2174,8 +1956,6 @@ test "session_reads retry stages exact multi-window bytes before its ending and 
     };
     var host: FakeHost = .{ .history = 0, .tail = &tail, .end = tail.len, .content_texts = &.{ FakeHost.text, text, "" } };
     var job: Job = .{ .retry = .{ .position = 3 } };
-    // FakeHost's scan capture is bounded; the large scratch is checked within
-    // its lifetime instead, after the production Task's real join.
     const Read = struct {
         job: *Job,
         expected: []const u8,
@@ -2261,7 +2041,6 @@ test "session_reads retry rejects newer Host activity before reading any Message
         try std.testing.expectEqual(@as(usize, 1), host.pages);
         try std.testing.expectEqual(@as(usize, 0), host.contents);
     }
-    // Empty history and a different row at the same position are stale too.
     for ([_]u64{ 0, 1 }) |end| {
         const tail = [_]FakeHost.Tail{.{ .value = testEnding("provider_http_500", .failed, "k7m2qx") }};
         var host: FakeHost = .{ .history = 0, .tail = &tail, .end = end };
@@ -2403,8 +2182,6 @@ test "chat info worker owns typed model and label bytes until completion" {
 }
 
 test "session_reads recall passes over a Message the draft refuses in one step, whatever refuses it" {
-    // A control character fails the draft's scalar policy; a leading
-    // standalone mark fails its renderability. Both are passed over alike.
     for ([_][]const u8{ "\x01x", "\u{301}x" }) |refused| for (0..3) |bad| {
         errdefer std.debug.print("refused={any} bad position={d}\n", .{ refused, bad + 1 });
         var texts = [_][]const u8{ "older", "middle", "newer" };
@@ -2416,8 +2193,6 @@ test "session_reads recall passes over a Message the draft refuses in one step, 
             row.* = .{ .value = value };
         }
         var host: FakeHost = .{ .history = 0, .tail = &tail, .end = tail.len, .content_texts = &texts };
-        // Ctrl-P from an empty draft until nothing older is left: each press
-        // lands on the next Message the draft holds.
         var from: ?Input.Recalled = null;
         var shown: [3]?u64 = .{ null, null, null };
         var passed: [3]bool = .{ false, false, false };
@@ -2430,7 +2205,6 @@ test "session_reads recall passes over a Message the draft refuses in one step, 
             shown[press] = found.at.position;
             from = found.at;
         }
-        // `bad` 0 is the oldest Message, at position 1; 2 is the newest.
         const expected_shown: [3]?u64 = switch (bad) {
             0 => .{ 3, 2, null },
             1 => .{ 3, 1, null },
@@ -2443,7 +2217,6 @@ test "session_reads recall passes over a Message the draft refuses in one step, 
         };
         try std.testing.expectEqual(expected_shown, shown);
         try std.testing.expectEqual(expected_passed, passed);
-        // Every Message's content is read once, the refused one included.
         try std.testing.expectEqual(@as(usize, 3), host.contents);
     };
 }

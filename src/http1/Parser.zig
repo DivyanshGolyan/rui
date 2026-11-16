@@ -1,46 +1,24 @@
-//! An HTTP/1.1 response read as it arrives, as values: bytes in, one event
-//! out. It owns no buffer. The caller keeps unread bytes and passes them
-//! again with whatever arrived after them, so a response head is parsed
-//! once it is whole in the caller's buffer and every body slice it returns
-//! points into that buffer.
-//!
-//! It reads one response to a request that is not HEAD: interim 1xx heads
-//! are skipped, the body is framed by `Transfer-Encoding: chunked`, by
-//! `Content-Length`, or by the end of the connection, and 204 and 304 have
-//! none. A response whose framing is ambiguous is refused, as RFC 9112
-//! section 6.3 asks of a client that cannot trust it.
 const std = @import("std");
 
 const Parser = @This();
 
-/// The longest head, and the longest chunk-size or trailer line, the parser
-/// waits for. Node's own limit on a head it sends is 16 KiB.
 pub const max_head_bytes = 16 * 1024;
 pub const max_line_bytes = 4 * 1024;
 
 pub const Error = error{
-    /// The status line or a field line is not RFC 9112 syntax.
     InvalidHead,
     HeadTooLarge,
-    /// Content-Length and Transfer-Encoding disagree, a length is not
-    /// digits, or a coding other than a lone `chunked` is named.
     InvalidFraming,
     InvalidChunk,
     LineTooLarge,
-    /// A 101 Switching Protocols, which no request of this client asks for.
     UnexpectedUpgrade,
-    /// The connection ended before the framing said the body did.
     TruncatedResponse,
 };
 
 pub const Head = struct {
     status: u16,
-    /// The field lines, each ended by CRLF, without the status line and the
-    /// final empty line. Borrowed from the bytes passed to `next`.
     fields: []const u8,
 
-    /// The value of the first field named `name`, ignoring case, without
-    /// the whitespace around it.
     pub fn field(self: Head, name: []const u8) ?[]const u8 {
         var lines = FieldLines{ .rest = self.fields };
         while (lines.next()) |line| {
@@ -51,27 +29,21 @@ pub const Head = struct {
 };
 
 pub const Event = union(enum) {
-    /// The bytes passed hold no complete event; pass them again with more.
     more,
     head: Head,
-    /// Body bytes, borrowed from the bytes passed to `next`.
     body: []const u8,
-    /// The response is complete. Bytes after it are not read.
     end,
 };
 
 pub const Step = struct {
-    /// How many leading bytes of the input the caller may drop.
     used: usize,
     event: Event,
 };
 
 const State = union(enum) {
     head,
-    /// Body bytes left under Content-Length.
     length: u64,
     chunk_size,
-    /// Data bytes left in the current chunk.
     chunk_data: u64,
     chunk_end,
     trailers,
@@ -80,12 +52,8 @@ const State = union(enum) {
 };
 
 state: State = .head,
-/// How far into the pending head the search for its end has already
-/// looked, so a head that arrives a byte at a time is scanned once.
 scanned: usize = 0,
 
-/// Reads from `input`, which begins at the first byte this parser has not
-/// yet used.
 pub fn next(self: *Parser, input: []const u8) Error!Step {
     while (true) switch (self.state) {
         .head => {
@@ -101,7 +69,6 @@ pub fn next(self: *Parser, input: []const u8) Error!Step {
             const head = try parseHead(input[0..length]);
             if (head.status == 101) return error.UnexpectedUpgrade;
             if (head.status < 200) {
-                // An interim response; the final one follows it.
                 return .{ .used = length, .event = .more };
             }
             self.state = try framing(head);
@@ -141,8 +108,6 @@ pub fn next(self: *Parser, input: []const u8) Error!Step {
                 self.state = .done;
                 return .{ .used = line.used, .event = .end };
             }
-            // A trailer field carries nothing this client reads; it is
-            // still checked, since a malformed one means misframing.
             _ = try fieldLine(line.text);
             return .{ .used = line.used, .event = .more };
         },
@@ -154,8 +119,6 @@ pub fn next(self: *Parser, input: []const u8) Error!Step {
     };
 }
 
-/// The connection ended, after every byte it carried went through `next`.
-/// Returns `.end` when that is where the response ends.
 pub fn finish(self: *Parser) Error!Event {
     switch (self.state) {
         .until_close, .done => {
@@ -175,8 +138,6 @@ fn parseHead(bytes: []const u8) Error!Head {
     return .{ .status = status, .fields = fields };
 }
 
-/// `HTTP/1.1 SP 3DIGIT SP reason-phrase`, where the reason may be empty.
-/// A 1.0 server is refused: its framing rules differ.
 fn statusLine(line: []const u8) Error!u16 {
     const prefix = "HTTP/1.1 ";
     if (line.len < prefix.len + 4 or !std.mem.startsWith(u8, line, prefix)) return error.InvalidHead;
@@ -196,7 +157,6 @@ fn statusLine(line: []const u8) Error!u16 {
 
 const FieldLine = struct { name: []const u8, value: []const u8 };
 
-/// Walks field lines already checked by `parseHead`.
 const FieldLines = struct {
     rest: []const u8,
 
@@ -213,8 +173,6 @@ const FieldLines = struct {
     }
 };
 
-/// `field-name ":" OWS field-value OWS`. Obsolete line folding and bare CR
-/// or LF are refused (RFC 9112 section 5.2).
 fn fieldLine(line: []const u8) Error!FieldLine {
     const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidHead;
     const name = line[0..colon];
@@ -226,7 +184,6 @@ fn fieldLine(line: []const u8) Error!FieldLine {
     return .{ .name = name, .value = std.mem.trim(u8, raw, " \t") };
 }
 
-/// RFC 9110 `token`: one or more `tchar`.
 pub fn isToken(bytes: []const u8) bool {
     if (bytes.len == 0) return false;
     for (bytes) |byte| {
@@ -235,17 +192,12 @@ pub fn isToken(bytes: []const u8) bool {
     return true;
 }
 
-/// The body state a final response's head selects (RFC 9112 section 6.3).
 fn framing(head: Head) Error!State {
     var length: ?u64 = null;
     var chunked = false;
     var lines = FieldLines{ .rest = head.fields };
     while (lines.next()) |line| {
         if (std.ascii.eqlIgnoreCase(line.name, "Transfer-Encoding")) {
-            // Only a lone `chunked` is accepted: any other coding would
-            // need decoding this client does not do, and two
-            // Transfer-Encoding lines are a list whose last item must be
-            // chunked, which a lone `chunked` already is only once.
             if (chunked or !std.ascii.eqlIgnoreCase(line.value, "chunked")) return error.InvalidFraming;
             chunked = true;
         } else if (std.ascii.eqlIgnoreCase(line.name, "Content-Length")) {
@@ -279,8 +231,6 @@ fn contentLength(value: []const u8) Error!u64 {
 
 const Line = struct { text: []const u8, used: usize };
 
-/// The CRLF-ended line at the start of `input`, or null while it is still
-/// arriving.
 fn takeLine(input: []const u8) Error!?Line {
     const window = input[0..@min(input.len, max_line_bytes + 2)];
     const end = std.mem.indexOf(u8, window, "\r\n") orelse {
@@ -290,8 +240,6 @@ fn takeLine(input: []const u8) Error!?Line {
     return .{ .text = input[0..end], .used = end + 2 };
 }
 
-/// `chunk-size [ chunk-ext ]`: hex digits, then extensions this client
-/// ignores, each still required to be printable.
 fn chunkSize(line: []const u8) Error!u64 {
     var size: u64 = 0;
     var digits: usize = 0;
@@ -312,9 +260,6 @@ fn chunkSize(line: []const u8) Error!u64 {
     return size;
 }
 
-// Tests drive whole responses through every way of splitting them, so the
-// outcome cannot depend on where a read happened to end.
-
 const Collected = struct {
     status: u16 = 0,
     content_type: [64]u8 = undefined,
@@ -324,8 +269,6 @@ const Collected = struct {
     ended: bool = false,
 };
 
-/// Feeds `response` as two reads split at `split`, keeping unused bytes as
-/// a caller's buffer would, then ends the connection.
 fn collect(response: []const u8, split: usize, out: *Collected) Error!void {
     var parser: Parser = .{};
     var buffer: [2048]u8 = undefined;

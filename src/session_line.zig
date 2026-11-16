@@ -1,9 +1,3 @@
-//! The line under the conversation's input: the Session's name, model,
-//! effort, the context left before automatic compaction, when Bash or MCP asks
-//! first, that, and while Ctrl-X would stop work, the key. Narrow lines drop
-//! effort first, then shorten the name, then drop it, then the key. This
-//! core takes the facts its shell read and the terminal's width method, and
-//! returns text; it holds no terminal, clock or Store fact.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const utf8_validation = @import("utf8_validation.zig");
@@ -14,19 +8,14 @@ const gwidth = @import("terminal_width");
 pub const Method = gwidth.Method;
 pub const ReasoningEffort = model_capability.ReasoningEffort;
 
-/// The longest first line a name keeps, ellipsis included.
 pub const max_line_bytes = 256;
 
 pub const separator = " · ";
 pub const ellipsis = "…";
 pub const asks_text = "asks before Bash/MCP";
 pub const left_text = "100% left";
-/// The key that stops a Session, as both screens hint it.
 pub const stop_hint = "ctrl+x stop";
 
-/// A Session's name: its Label, else the first line of its first Message (a
-/// hint), else its reference (a hint). A blank first line is no first line.
-/// The overview's rows and the conversation's line both use it.
 pub const Name = struct { text: []const u8, hint: bool };
 
 pub fn name(label: ?[]const u8, line: ?[]const u8, reference: []const u8) Name {
@@ -35,14 +24,11 @@ pub fn name(label: ?[]const u8, line: ?[]const u8, reference: []const u8) Name {
     return .{ .text = reference, .hint = true };
 }
 
-/// `bytes` up to its first line end, without surrounding spaces and tabs.
 pub fn firstLine(bytes: []const u8) []const u8 {
     const end = std.mem.indexOfAny(u8, bytes, "\r\n") orelse bytes.len;
     return std.mem.trim(u8, bytes[0..end], " \t");
 }
 
-/// `bytes` within `limit`, cut at a code point and ended with an ellipsis
-/// when it is longer.
 pub fn cut(comptime limit: usize, bytes: []const u8) Bounded(limit) {
     var value: Bounded(limit) = .{};
     const kept = if (bytes.len <= limit) bytes.len else utf8_validation.scalarStart(bytes, limit - ellipsis.len);
@@ -55,8 +41,6 @@ pub fn cut(comptime limit: usize, bytes: []const u8) Bounded(limit) {
     return value;
 }
 
-/// The percentage of `trigger` still left before `pressure` reaches it,
-/// rounded up, so 0 means the pressure reached the trigger.
 pub fn left(trigger: u64, pressure: u64) u8 {
     std.debug.assert(trigger != 0);
     const remaining: u128 = trigger - @min(pressure, trigger);
@@ -66,20 +50,14 @@ pub fn left(trigger: u64, pressure: u64) u8 {
 pub const Facts = struct {
     name: []const u8,
     model: []const u8,
-    /// Present only before the first Message, from the current Session read.
     folder: ?[]const u8 = null,
     home: []const u8 = "",
     effort: ?ReasoningEffort = null,
-    /// Percent left before automatic compaction; null when no estimate
-    /// decides the next model call.
     left: ?u8 = null,
     asks: bool = false,
-    /// Ctrl-X would ask to stop the Session's work.
     stop: bool = false,
 };
 
-/// The longest name a shell passes: a first line, or a shorter Label or
-/// reference.
 pub const max_name_bytes = max_line_bytes;
 
 const max_effort_bytes = blk: {
@@ -88,12 +66,8 @@ const max_effort_bytes = blk: {
     break :blk longest;
 };
 
-/// Bytes the longest line takes: every part, the separators between them and
-/// the ellipsis that ends a shortened name.
 pub const capacity = max_name_bytes + ellipsis.len + model_capability.max_model_bytes + max_effort_bytes + left_text.len + asks_text.len + stop_hint.len + 5 * separator.len;
 
-/// The line for `width` cells as `method` measures them. It never takes more
-/// than `width` cells.
 pub fn write(buffer: *[capacity]u8, facts: Facts, width: usize, method: Method) []const u8 {
     std.debug.assert(facts.name.len <= max_name_bytes and facts.model.len <= model_capability.max_model_bytes);
     var percent: [left_text.len]u8 = undefined;
@@ -106,8 +80,6 @@ pub fn write(buffer: *[capacity]u8, facts: Facts, width: usize, method: Method) 
     if (cells(out, method) <= width) return out;
     out = join(buffer, &(.{facts.name} ++ tail), "");
     if (cells(out, method) <= width) return out;
-    // Joined text measures at most the sum of its parts, so a name cut to
-    // what `fixed` leaves keeps the line within `width`.
     const tail_cells = cells(out[facts.name.len + separator.len ..], method);
     const fixed = tail_cells + cells(separator, method) + cells(ellipsis, method);
     if (width > fixed) {
@@ -116,7 +88,6 @@ pub fn write(buffer: *[capacity]u8, facts: Facts, width: usize, method: Method) 
     }
     out = join(buffer, &tail, "");
     if (cells(out, method) <= width) return out;
-    // The key goes whole: a cut one names no key.
     if (facts.stop) {
         out = join(buffer, tail[0 .. tail.len - 1], "");
         if (cells(out, method) <= width) return out;
@@ -127,12 +98,7 @@ pub fn write(buffer: *[capacity]u8, facts: Facts, width: usize, method: Method) 
     return buffer[0 .. end + ellipsis.len];
 }
 
-/// The line as last written, kept until its facts, width or width method
-/// change, so a frame that changes none of them writes nothing.
 pub const Shown = struct {
-    /// What the line was written for; null until written. Its name and model
-    /// are the caller's, which may change in place, so only their lengths
-    /// are read: their bytes are copied to `held`.
     written: ?struct { facts: Facts, width: usize, method: Method } = null,
     held: [max_name_bytes + model_capability.max_model_bytes]u8 = undefined,
     len: usize = 0,
@@ -161,9 +127,6 @@ pub fn cells(bytes: []const u8, method: Method) usize {
     return gwidth.gwidth(bytes, method);
 }
 
-/// The longest run of whole clusters at the start of `bytes` within `limit`
-/// cells: its byte length and the cells it takes. The conversation's work
-/// line cuts its words with it too.
 pub fn fit(bytes: []const u8, limit: usize, method: Method) struct { len: usize, cells: usize } {
     var used: usize = 0;
     var end: usize = 0;
@@ -177,7 +140,6 @@ pub fn fit(bytes: []const u8, limit: usize, method: Method) struct { len: usize,
     return .{ .len = end, .cells = used };
 }
 
-/// The present parts joined by the separator; `mark` follows the first.
 fn join(buffer: *[capacity]u8, parts: []const ?[]const u8, mark: []const u8) []const u8 {
     var out = std.Io.Writer.fixed(buffer);
     var first = true;
@@ -219,12 +181,10 @@ test "context left is zero exactly when the pressure reaches the trigger" {
     try std.testing.expectEqual(@as(u8, 0), left(244_800, 244_800));
     try std.testing.expectEqual(@as(u8, 0), left(244_800, std.math.maxInt(u64)));
     try std.testing.expectEqual(@as(u8, 100), left(std.math.maxInt(u64), 1));
-    // Every trigger and pressure in a small domain against exact rationals.
     for (1..120) |trigger| for (0..trigger + 2) |pressure| {
         const value = left(trigger, pressure);
         const remaining = trigger -| pressure;
         try std.testing.expectEqual(remaining == 0, value == 0);
-        // value is the least whole percent at or above remaining / trigger.
         try std.testing.expect(@as(u64, value) * trigger >= remaining * 100);
         if (value != 0) try std.testing.expect(@as(u64, value - 1) * trigger < remaining * 100);
     };
@@ -256,10 +216,6 @@ test "the longest facts fit the buffer" {
     try std.testing.expectEqual(capacity - ellipsis.len, line.len);
 }
 
-/// Each line `write` prefers, in its order: the whole line, then without
-/// effort, then the name cut to fewer clusters one at a time, then without
-/// the name, then without the key. Built by formatting, not by `write`'s
-/// joins and room.
 fn candidates(storage: []u8, facts: Facts, method: Method, out: [][]const u8) usize {
     var used: usize = 0;
     var count: usize = 0;
@@ -285,7 +241,6 @@ fn candidates(storage: []u8, facts: Facts, method: Method, out: [][]const u8) us
     var keep = clusters;
     while (keep > 1) {
         keep -= 1;
-        // A name cut to clusters that show nothing is not a name.
         if (gwidth.gwidth(facts.name[0..ends[keep - 1]], method) == 0) break;
         out[count] = std.fmt.bufPrint(storage[used..], "{s}… · {s}{s}", .{ facts.name[0..ends[keep - 1]], facts.model, rest }) catch unreachable;
         used += out[count].len;
@@ -318,9 +273,6 @@ test "every width keeps the most a line can hold, in its order, and never more t
             if (preferred) |expected| {
                 try std.testing.expectEqualStrings(expected, line);
             } else {
-                // Nothing whole fits: the model and the rest but the key
-                // are cut at the edge, ending in an ellipsis, or nothing
-                // shows.
                 const whole = lines[count - 1];
                 if (width < 2) {
                     try std.testing.expectEqualStrings("", line);
@@ -340,14 +292,11 @@ test "a line is written again when its width or facts change" {
     try std.testing.expectEqualStrings("Fix flaky store tests · gpt-6.1-sol · low · 69% left", shown.text(facts, 80, .unicode));
     try std.testing.expectEqualStrings("Fix flaky store tests · gpt-6.1-sol · 69% left", shown.text(facts, 51, .unicode));
     try std.testing.expectEqualStrings("x · y", shown.text(.{ .name = "x", .model = "y" }, 51, .unicode));
-    // A name or model changed in its caller's storage is a change too.
     var model = "gpt-6.1-sol".*;
     _ = shown.text(.{ .name = "x", .model = &model }, 51, .unicode);
     model[4] = '7';
     try std.testing.expectEqualStrings("x · gpt-7.1-sol", shown.text(.{ .name = "x", .model = &model }, 51, .unicode));
-    // Work that Ctrl-X may stop starts and ends between reads.
     try std.testing.expectEqualStrings("x · y · ctrl+x stop", shown.text(.{ .name = "x", .model = "y", .stop = true }, 51, .unicode));
     try std.testing.expectEqualStrings("x · y", shown.text(.{ .name = "x", .model = "y" }, 51, .unicode));
-    // On a line too narrow for the key, it goes whole.
     try std.testing.expectEqualStrings("gpt-6.1-sol · 69% left", shown.text(.{ .name = "Fix flaky store tests", .model = "gpt-6.1-sol", .left = 69, .stop = true }, 30, .unicode));
 }

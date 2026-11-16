@@ -576,6 +576,7 @@ Model replacement follows the retry policy above and may incur duplicate cost.
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
 | Settlement scenarios in the composed gates | `check`, `check-full` | A fixture marker detects duplicate execution; Store facts remain recovery authority |
+| Background final delivery: delivered and resolved at most once across Host death, stop wins (including an attached parent's owed stop), promotion keeps its credit, a call waiting for a credit runs once deadlines end the holders | `python3 tests/formal/check.py`: TLC checks `tests/formal/background_delivery/BackgroundDelivery.tla`; each guard's mutation must break a named rule. The `verify-background-delivery` skill maps model steps to code | Bounded: one Session, two Actions, one credit, one Host death. #1550 as drafted breaks stop wins through an unsettled owed stop (expected violation until fixed) |
 | Owner invariants at stable checkpoints | `'custody sequences'`, `'slots agree with custody'` | Stable checkpoints only |
 | Shared settlement commit order | `'Action settlement'`, `'exact model interruption'` | None |
 | [Bash launched, result not committed](#commit-boundaries-and-crash-recovery) | `bash-recovery-integration` | Uncertain Bash is never replayed |

@@ -1,6 +1,3 @@
-//! One model field choice for chat info and application settings. The menu
-//! and row rendering belong to the picker. Live lists are version-validated
-//! for each event and frame; immutable lists may be borrowed until cancel.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -15,12 +12,9 @@ const Panel = @import("widgets/Panel.zig");
 const Hover = @import("widgets/Hover.zig");
 const Self = @This();
 
-/// The owner changes revision whenever it replaces or releases a list. A
-/// snapshot is borrowed for this synchronous operation only, never a lease.
 pub const Snapshot = struct {
     menu: ?*const picker.Menu = null,
     revision: u64 = 0,
-    /// Borrowed owner fact for admission; validation still uses revision identity.
     ready: bool = true,
 };
 pub const Source = struct {
@@ -37,7 +31,6 @@ const fallback_entries = blk: {
 const fallback: picker.Menu = .{ .entries = &fallback_entries };
 
 unicode: bool = true,
-/// Full page choices may report clipped rows; standalone choices show rows only.
 show_more: bool = true,
 active: bool = false,
 source: ?Source = null,
@@ -59,11 +52,9 @@ ground: vaxis.Style = .{},
 selection: vaxis.Style = .{ .reverse = true },
 hover_style: vaxis.Style = .{ .ul_style = .single },
 quiet: vaxis.Style = .{ .dim = true },
-/// The most recent frame's model indices, borrowed from its draw arena.
 hits: []const usize = &.{},
 hover: Hover = .{},
 
-/// The immutable menu must outlive this choice. Mutable owners use openSource.
 pub fn open(self: *Self, menu: ?*const picker.Menu, provider: picker.Provider, current: []const u8) void {
     self.source = null;
     self.menu = menu orelse &fallback;
@@ -88,8 +79,6 @@ pub fn openSource(self: *Self, source: Source, provider: picker.Provider, curren
     self.revision = snapshot.revision;
 }
 
-/// Validate before dereferencing the stored menu or an old frame's hit list.
-/// The source owns invalidation; no menu or selection identity is copied.
 pub fn validate(self: *Self) bool {
     if (!self.active) return false;
     if (self.source) |source| {
@@ -99,14 +88,12 @@ pub fn validate(self: *Self) bool {
     return self.active;
 }
 
-/// Named application actions remain the caller's; arrows and text filter.
 pub fn takesKey(key: vaxis.Key) bool {
     if (keypress.named(key)) |name| if (@import("app_input.zig").keys.get(name) != null) return true;
     return keypress.named(key) == null or key.matches(vaxis.Key.up, .{}) or key.matches(vaxis.Key.down, .{}) or key.matches(vaxis.Key.left, .{}) or key.matches(vaxis.Key.right, .{});
 }
 
 pub fn cancel(self: *Self) void {
-    // Cancel intentionally drops an unfinished search paste, not a save.
     _ = self.editor.blur();
     self.active = false;
     self.hits = &.{};
@@ -117,7 +104,6 @@ pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
 }
 
-/// Both Panel consumers use the same inline input and bounded match list.
 pub fn field(self: *Self, index: usize) Panel.CustomChoice {
     return .{ .field = index, .widget = self.widget(), .value_widget = .{ .userdata = self, .drawFn = drawInput }, .reset_draw = resetDraw };
 }
@@ -276,16 +262,12 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     if (selected_row >= self.scroll + capacity) self.scroll = selected_row - capacity + 1;
     self.scroll = @min(self.scroll, indices.items.len -| capacity);
     var end = @min(self.scroll + capacity, indices.items.len);
-    // The only prose row reports models below this viewport. At the end,
-    // reclaim that row for a model instead of adding an upward hint.
     if (end == indices.items.len and capacity < size.height) {
         capacity = size.height;
         self.scroll = @min(self.scroll, indices.items.len - capacity);
         end = indices.items.len;
     }
     const shown = indices.items[self.scroll..end];
-    // Context follows the longest name in this viewport, not hidden matches
-    // above/below it and never the terminal's right edge.
     var widest: usize = 0;
     for (shown) |at| widest = @max(widest, self.menu.entries[at].id.len);
     self.hits = shown;
@@ -384,7 +366,6 @@ test "Model choice keeps a chat on its own way into ChatGPT, and either ChatGPT 
         .{ .id = "device-only", .known = false, .catalogued = false, .providers = .initOne(.codex) },
         .{ .id = "key-only", .known = false, .catalogued = false, .providers = .initOne(.openai) },
     };
-    // Both ways into ChatGPT list models; each chat lists its own way's.
     const menu: picker.Menu = .{ .entries = &entries };
     const Case = struct { provider: picker.Provider, own: []const u8, found: [3]bool };
     const words = [3][]const u8{ "chatgpt", "codex", "api" };
@@ -427,7 +408,7 @@ test "Model choice bounds scrolling and mouse picking use the visible list" {
     try std.testing.expectEqual(@as(u16, 99), drawn.size.width);
     try std.testing.expect(choice.scroll > 0);
     try choice.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = 2, .col = 20 } });
-    try std.testing.expectEqual(@as(?[]const u8, null), fixture.picked); // Quiet overflow is not a model.
+    try std.testing.expectEqual(@as(?[]const u8, null), fixture.picked);
     try choice.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = @intCast(choice.hits.len - 1), .col = 20 } });
     try std.testing.expectEqualStrings(wanted, fixture.picked.?);
     for (0..9) |width| for (0..5) |height| {
@@ -442,9 +423,9 @@ test "Model choice invalidates every replaced or released source before keys mou
             .{ .id = "old-b", .known = false, .catalogued = false, .providers = .full },
         };
         const replacements = [_][]const picker.Entry{
-            &.{old[0]}, // shorter
-            &.{ old[1], old[0] }, // reordered
-            &.{}, // released/empty
+            &.{old[0]},
+            &.{ old[1], old[0] },
+            &.{},
             &.{ .{ .id = "new-a", .known = false, .catalogued = false, .providers = .full }, old[0] }, // same length
         };
         menu: picker.Menu = .{ .entries = &old },
@@ -494,7 +475,7 @@ fn expectFilterRecovery(failure: RejectedInput) !void {
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     try choice.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'a', .text = "alpha " } });
-    try press(&choice, &ctx, vaxis.Key.left); // Recovery must preserve a non-final caret too.
+    try press(&choice, &ctx, vaxis.Key.left);
     const spaces = @as([catalog.max_model_bytes + 1]u8, @splat(' '));
     switch (failure) {
         .typed_overflow => try choice.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = ' ', .text = &spaces } }),
@@ -511,7 +492,7 @@ fn expectFilterRecovery(failure: RejectedInput) !void {
     const cursor = choice.editor.cursor();
     if (failure != .paste_overflow) {
         try std.testing.expectEqual(@as(?keymap.Refusal, if (failure == .typed_overflow) .overflow else .invalid), choice.editor.rejected);
-        try press(&choice, &ctx, vaxis.Key.enter); // Report the rejected line, never pick it.
+        try press(&choice, &ctx, vaxis.Key.enter);
     }
     try std.testing.expectEqual(@as(?[]const u8, null), fixture.picked);
     try std.testing.expect(choice.active);
@@ -669,9 +650,7 @@ test "Model choice size column follows only the longest shown name across widths
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         if (filtered) try choice.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 's', .text = "sol" } });
         const drawn = try choice.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = height }, .cell_size = .{} });
-        // The hidden long names above/below never set this column. With sol,
-        // the two visible names are shorter again, at every terminal width.
-        const column: u16 = if (filtered) 18 else 20; // name starts at 5, then 11/13 cells and a two-cell gap.
+        const column: u16 = if (filtered) 18 else 20;
         try std.testing.expectEqual(@as(usize, if (height == 1 or (!filtered and height == 2)) 1 else 2), choice.hits.len);
         for (choice.hits, 0..) |index, y| {
             try std.testing.expect(entries[index].known);
@@ -736,8 +715,6 @@ test "Model choice ASCII cursor projection stays bounded across Unicode prefixes
         };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        // Includes total widths 0/1 and editable widths 0/1 after either
-        // failure or no-match feedback reserves the field's available room.
         for (0..40) |width| {
             errdefer std.debug.print("ASCII cursor query={s} caret={d} projected={d} state={s} width={d}\n", .{ case.query, case.caret, case.projected, @tagName(state), width });
             const drawn = try choice.field(0).value_widget.?.draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = 1 }, .cell_size = .{} });
@@ -800,7 +777,7 @@ test "Model choice hover and click follow full-width Panel matches without selec
         try std.testing.expect(!choice.hover.pointing);
         mouse.row = @intCast(panel.custom_origin + panel.custom_height - 1);
         try panel.widget().handleEvent(&events, .{ .mouse = mouse });
-        try std.testing.expect(!choice.hover.pointing); // Quiet overflow is not a model.
+        try std.testing.expect(!choice.hover.pointing);
         mouse.button = .left;
         mouse.type = .press;
         try panel.widget().handleEvent(&events, .{ .mouse = mouse });

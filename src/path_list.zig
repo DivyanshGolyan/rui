@@ -1,12 +1,5 @@
-//! A colon-separated search path as a value, built the way macOS's
-//! `path_helper` builds the system PATH.
-
 const std = @import("std");
 
-/// Appends `segment` to the list in `buffer[0..length]` and returns the new
-/// length. An empty segment, or one already in the list at entry boundaries
-/// (path_helper's `(^|:)segment(:|$)`), leaves it unchanged. Null when the
-/// segment does not fit.
 pub fn append(buffer: []u8, length: usize, segment: []const u8) ?usize {
     if (segment.len == 0 or contains(buffer[0..length], segment)) return length;
     const separator: usize = @intFromBool(length != 0);
@@ -66,7 +59,6 @@ test "append keeps order, skips empty and present entries, and refuses overflow"
     for ([_][]const u8{ "/usr/local/bin", "/usr/bin", "", "/bin", "/usr/bin", " /opt/homebrew/bin", "/usr", "/usr/local/bin" }) |segment|
         length = append(&buffer, length, segment).?;
     try std.testing.expectEqualStrings("/usr/local/bin:/usr/bin:/bin: /opt/homebrew/bin:/usr", buffer[0..length]);
-    // A segment holding ':' matches the same run of entries, as strstr does.
     try std.testing.expectEqual(length, append(&buffer, length, "/usr/bin:/bin").?);
     try std.testing.expectEqual(length, append(&buffer, length, "/usr/local/bin:/usr/bin").?);
     var exact: [5]u8 = undefined;

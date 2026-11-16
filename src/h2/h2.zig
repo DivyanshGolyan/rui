@@ -1,42 +1,3 @@
-//! Rui's HTTP/2 client on nghttp2 and OpenSSL (issue #556).
-//!
-//! A transport build module: it shares only the value-only URL module with
-//! Rui, which reaches this transport as `@import("h2")`. A file belongs to
-//! one module; the URL module is therefore supplied once by the build owner.
-//!
-//! Shape: a polled engine for one owner at a time. The owner calls `drive`
-//! to do all ready work and `wait` to block until there is some; nothing
-//! here runs on its own. Other threads may only call `Client.wake`, unless
-//! the owner shares the Client under its own lock (`Client.armWait`).
-//! `exchange` is one blocking request on a private Client, for callers that
-//! send one request at a time.
-//!
-//! What the engine owns, so its caller does not:
-//! - one connection pool per origin, opening another connection only when
-//!   the peer's SETTINGS_MAX_CONCURRENT_STREAMS is full, and draining a
-//!   connection after GOAWAY;
-//! - TLS with ALPN `h2` only, verified by the system's trust (the host's CA
-//!   bundle on Linux, SecTrust on macOS) or against one CA file, and h2c
-//!   by prior knowledge for loopback `http://`;
-//! - name lookup, and SecTrust's evaluation, on short-lived threads, and
-//!   the found addresses raced by family (Happy Eyeballs, RFC 8305);
-//! - `https://` through an `http://` proxy's CONNECT tunnel, when
-//!   `Options.proxy` names one;
-//! - request bodies read from the caller's file within the peer's window,
-//!   never copied into a buffer per request;
-//! - response bodies written from the one shared read buffer straight to
-//!   the caller's sink, one write per stream per socket read; a stream's
-//!   receive window reopens only after that write returned;
-//! - the one in-client resend: a stream the server proved it did not
-//!   process (REFUSED_STREAM, or above a GOAWAY's last stream id);
-//! - per-stream inactivity in one shared timer list, one PING per quiet
-//!   connection, and RST_STREAM(CANCEL) for a single-stream cancel;
-//! - positive evidence that no request byte was sent (`End.request_sent`).
-//!
-//! It does not do HTTP/1.1, redirects, proxies, cookies, decompression,
-//! server push, priorities, or resends for any other reason. Requests ask
-//! for `identity`, and a coded response ends `.encoded_response`. The caller's
-//! receiver decides what the response headers mean.
 const std = @import("std");
 const c = @import("h2_c");
 
@@ -46,35 +7,19 @@ const Engine = @import("Engine.zig");
 const tls_client = @import("tls_client");
 const url_value = @import("url");
 
-/// The library versions this client is written and tested against.
 pub const nghttp2_version = "1.70.0";
 pub const openssl_version = "3.6.3";
 
 pub const max_url_bytes = url_value.max_url_bytes;
-/// The longest DNS name; IP literals are shorter.
 pub const max_host_bytes = url_value.max_host_bytes;
-/// Distinct URL registrations per Client, including paths sharing an origin.
 pub const max_endpoints = 6;
-/// Request fields a caller may set; pseudo-headers, content-length and
-/// accept-encoding are the client's own.
 pub const max_fields = 16;
-/// Request field names the client writes itself or HTTP/2 forbids; a
-/// caller's field may not use one.
 pub const owned_fields = [_][]const u8{ "content-length", "accept-encoding", "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "te", "host" };
 pub const max_field_block_bytes = 64 * 1024;
-/// Receive credit granted to each stream: the most response bytes the peer
-/// can have outstanding on it.
 pub const stream_window_bytes: u31 = 16 * 1024;
-/// Every socket read lands in the Client's one buffer and is decoded there.
 pub const read_buffer_bytes = 16 * 1024;
-/// The most bytes one `drive` reads from one connection before moving on.
-/// Streams on a connection that hit it skip that drive's inactivity
-/// expiry, since their bytes may be waiting.
 pub const read_allowance_bytes = 64 * 1024;
 
-/// The linked nghttp2 and OpenSSL must be exactly the pinned versions. Its
-/// caller runs this at startup, so a build that picked up other headers or
-/// archives fails there instead of behaving differently.
 pub fn checkLibraries() error{UnexpectedLibraryVersion}!void {
     const nghttp2: *const c.nghttp2_info = c.nghttp2_version(0) orelse return error.UnexpectedLibraryVersion;
     if (!std.mem.eql(u8, std.mem.span(nghttp2.version_str), nghttp2_version)) return error.UnexpectedLibraryVersion;
@@ -82,71 +27,36 @@ pub fn checkLibraries() error{UnexpectedLibraryVersion}!void {
     if (!std.mem.eql(u8, std.mem.span(linked), openssl_version)) return error.UnexpectedLibraryVersion;
 }
 
-// ---------------------------------------------------------------- endpoints
-
 pub const UrlError = url_value.UrlError;
 pub const Scheme = url_value.Scheme;
 pub const Url = url_value.Url;
 pub const parseUrl = url_value.parseUrl;
 pub const parseHostPort = url_value.parseHostPort;
 
-/// A registered URL. Requests name one; the Client keeps the parsed origin
-/// and path once, not per stream.
 pub const Endpoint = enum(u8) { _ };
-
-// ------------------------------------------------------------------ options
 
 pub const Liveness = policy.Liveness;
 
-/// What verifies an `https://` peer. Verification is never off. `.system`
-/// is Apple SecTrust on macOS, and elsewhere what `tls_client.Trust`
-/// describes; `.ca_file` is only that file (`network.caFile`).
 pub const Trust = tls_client.Trust;
 
 pub const Options = struct {
-    /// Most streams alive at once. Sizes the connection table: one
-    /// connection per stream at worst, when the peer allows one stream.
     stream_capacity: u32,
-    /// One interval for every stream of this Client: armed at `launch`
-    /// (queue time counts) and renewed by response bytes on the stream.
-    /// Being uniform is what lets one list order every deadline.
     inactivity_ns: u64,
-    /// Lookup, connect, TLS and the peer's first SETTINGS, per connection.
     connect_timeout_ns: u64,
     liveness: Liveness = .{},
-    /// Loaded once, by the first `https://` `addEndpoint`, which fails when
-    /// the bundle or file cannot be loaded.
     trust: Trust = .system,
-    /// Read once, by `init`, which fails when the URL cannot be used.
     proxy: ?Proxy = null,
 };
 
-/// An `http://` proxy that `https://` origins tunnel through with CONNECT.
-/// Loopback hosts never use it.
 pub const Proxy = struct {
-    /// `[http://][user[:password]@]host[:port][/]`, the port 80 by
-    /// default; the user and password percent-encoded. Credentials go as
-    /// `Proxy-Authorization: Basic`. An `https://` or other scheme fails
-    /// `init` with `HttpsProxySchemeUnsupported`, any other unusable URL
-    /// with `HttpsProxyInvalid`.
     url: []const u8,
-    /// Hosts that connect directly, comma-separated: `*` for all, names
-    /// with the names below them (`example.com` or `.example.com`), IP
-    /// addresses and CIDR ranges. An entry with a port exempts nothing.
     no_proxy: []const u8 = "",
 };
 
-/// The proxy the environment names: `https_proxy` (or `HTTPS_PROXY`) and
-/// `no_proxy` (or `NO_PROXY`). A lowercase name that is set decides, even
-/// when empty, so `https_proxy=` turns a system-wide `HTTPS_PROXY` off for
-/// one command. Null when no proxy is set. The slices are the
-/// environment's.
 pub fn proxyFromEnvironment() ?Proxy {
     return proxyFrom(std.c.getenv);
 }
 
-/// Fails exactly as `Client.init` would on `proxy`, so a caller can refuse
-/// an unusable proxy before it reports readiness.
 pub fn checkProxy(allocator: std.mem.Allocator, proxy: Proxy) InitError!void {
     var route = try Engine.ProxyRoute.init(allocator, proxy);
     route.deinit(allocator);
@@ -190,112 +100,63 @@ test "a set lowercase proxy variable decides, even empty" {
     try std.testing.expectEqual(@as(?Proxy, null), proxyFrom(Environment.lookup));
 }
 
-// ----------------------------------------------------------------- requests
-
-/// A request header field. Names are lowercase tokens; values contain no
-/// NUL, CR or LF.
 pub const Field = struct {
     name: []const u8,
     value: []const u8,
-    /// Never enters the HPACK dynamic table (NGHTTP2_NV_FLAG_NO_INDEX).
     sensitive: bool = false,
-    /// `prepare` keeps the name's and value's addresses instead of a copy,
-    /// for bytes many streams share, such as a credential or a literal.
-    /// They must stay valid until the stream's first `.head` event or its
-    /// end (collected or cancelled): h2 never reads them after either.
     borrowed: bool = false,
 };
 
 pub const Body = union(enum) {
-    /// Positional reads of [0, length) from a file the caller owns and keeps
-    /// open until the `body_retired` event or `cancel`. A short read or a
-    /// read error ends the stream `.body_failed`.
     file: struct { handle: std.posix.fd_t, length: u64 },
-    /// Borrowed until the stream ends.
     bytes: []const u8,
 };
 
 pub const Sink = union(enum) {
-    /// Positional writes at the current response length. The caller owns
-    /// the descriptor; a write error ends the stream `.sink_failed`.
     file: std.posix.fd_t,
-    /// A fixed caller buffer. Bytes past its end end the stream `.sink_refused`.
     buffer: []u8,
 };
 
-/// GET sends no body, so `prepare` refuses one with a body.
 pub const Method = enum { post, get };
 
 pub const Request = struct {
     endpoint: Endpoint,
     method: Method = .post,
-    /// Copied by `prepare` into one owned block of exact length, so the
-    /// caller may wipe its own copies (credentials) once it returns; a
-    /// borrowed field leaves only its two addresses there. The block is
-    /// kept while a resend is possible, then zeroed and freed.
     fields: []const Field,
     body: Body,
     sink: Sink,
 };
 
-// ------------------------------------------------------------ receiver side
-
-/// What a receiver sees while `drive` decodes, on the driving thread.
 pub const Event = union(enum) {
-    /// One complete response header block, borrowed for the call.
-    /// `.refuse` resets the stream: it ends `.rejected_headers`.
     head: Head,
-    /// About to write this many body bytes to the sink in one write.
-    /// `.refuse` resets the stream before any of them is written: it ends
-    /// `.sink_refused`. This is where the caller charges its budget.
     body: usize,
-    /// The client will never read this stream's request body again. At most
-    /// once per stream, never for a stream the caller cancelled. The
-    /// verdict is ignored.
     body_retired,
 };
 
 pub const Head = struct {
     kind: enum(u8) {
-        /// `:status` 1xx.
         interim,
-        /// The first non-1xx block; `status` is the response status.
         final,
-        /// A block after the final one; `status` is 0.
         trailers,
     },
     status: u16,
-    /// Regular fields in arrival order, names lowercase. No pseudo-headers.
     fields: []const Field,
 };
 
 pub const Verdict = enum { accept, refuse };
 
-// ------------------------------------------------------------------ endings
-
 pub const Cause = policy.Cause;
 
 pub const End = struct {
     cause: Cause,
-    /// False only when this stream's HEADERS were never packed for sending
-    /// on any connection: positive evidence that no request byte left.
     request_sent: bool,
 };
 
-// ------------------------------------------------------------------- Stream
-
-/// One request and its response, stored in caller memory that must not
-/// move from `Client.prepare` until `deinit`. Opaque: the record type is
-/// not public, so no caller depends on its layout. All-zero bytes are the
-/// idle state.
 pub const Stream = extern struct {
     storage: [Record.size]u8 align(Record.alignment) = @splat(0),
 
     pub const idle: Stream = .{};
 
-    /// Collected, cancelled or idle -> idle. A prepared stream is cancelled
-    /// first, which frees its field block; a launched one comes back from
-    /// `Client.nextFinished` or goes through `Client.cancel`.
     pub fn deinit(self: *Stream) void {
         const record = Record.of(self);
         std.debug.assert(record.state == .idle or record.state == .collected or record.state == .cancelled);
@@ -303,25 +164,21 @@ pub const Stream = extern struct {
         self.* = .idle;
     }
 
-    /// The final response status, once a final header block arrived.
     pub fn status(self: *const Stream) ?u16 {
         const record = Record.ofConst(self);
         return if (record.flags.final_seen) record.status else null;
     }
 
-    /// Set exactly when the stream has ended.
     pub fn end(self: *const Stream) ?End {
         const record = Record.ofConst(self);
         if (record.state != .finished and record.state != .collected) return null;
         return .{ .cause = record.cause.?, .request_sent = record.flags.request_sent };
     }
 
-    /// Response body bytes accepted by `body` events and written to the sink.
     pub fn responseLength(self: *const Stream) u64 {
         return Record.ofConst(self).sink_written;
     }
 
-    /// This stream was the first carried by a connection opened for it.
     pub fn openedConnection(self: *const Stream) bool {
         return Record.ofConst(self).flags.opened_connection;
     }
@@ -331,15 +188,11 @@ pub const Stream = extern struct {
     }
 };
 
-// ------------------------------------------------------------------- Client
-
 pub const InitError = error{ OutOfMemory, SystemResources, HttpsProxyInvalid, HttpsProxySchemeUnsupported };
 pub const EndpointError = UrlError || tls_client.TrustError || error{ OutOfMemory, TooManyEndpoints };
 pub const PrepareError = error{ OutOfMemory, InvalidRequest };
 pub const DriveError = error{PollFailed};
 
-/// The engine for one owner thread. Opaque like `Stream`. Initialize it in
-/// its final storage: streams and connections hold its address.
 pub const Client = extern struct {
     storage: [Engine.size]u8 align(Engine.alignment),
 
@@ -347,43 +200,26 @@ pub const Client = extern struct {
         return Engine.of(self).init(allocator, io, options);
     }
 
-    /// Sends GOAWAY(NO_ERROR) without blocking and closes every connection.
-    /// Asserts no stream is launched or uncollected.
     pub fn deinit(self: *Client) void {
         Engine.of(self).deinit();
     }
 
-    /// Registers a URL. Endpoints with one origin share its pool.
-    /// The first `https://` one loads `Options.trust`.
     pub fn addEndpoint(self: *Client, url: []const u8) EndpointError!Endpoint {
         return Engine.of(self).addEndpoint(url);
     }
 
-    /// Idle -> prepared. Validates the request and copies its fields into
-    /// one owned block, the only allocation a stream makes. Touches no
-    /// connection or socket.
     pub fn prepare(self: *Client, stream: *Stream, request: Request) PrepareError!void {
         return Engine.of(self).prepare(Record.of(stream), request);
     }
 
-    /// Prepared -> pending, and its inactivity interval starts now.
-    /// Infallible and O(1) with no I/O: HEADERS are packed only by a later
-    /// `drive`, so no request byte exists before this returns.
     pub fn launch(self: *Client, stream: *Stream) void {
         Engine.of(self).launch(Record.of(stream));
     }
 
-    /// Any state after `prepare` -> cancelled. An open stream gets
-    /// RST_STREAM(CANCEL), sent by the next `drive`; its connection and
-    /// siblings are untouched. Nothing is written to the sink after this
-    /// returns. Idempotent.
     pub fn cancel(self: *Client, stream: *Stream) void {
         Engine.of(self).cancel(Record.of(stream));
     }
 
-    /// Does all ready work without blocking. `receiver.observe(*Stream,
-    /// Event) Verdict` sees the events; it must not call the Client. Every
-    /// connection or stream failure becomes some stream's `End`.
     pub fn drive(self: *Client, receiver: anytype) DriveError!void {
         const R = @typeInfo(@TypeOf(receiver)).pointer.child;
         if (!@hasDecl(R, "observe")) @compileError(@typeName(R) ++ " is not an h2 receiver");
@@ -398,31 +234,20 @@ pub const Client = extern struct {
         });
     }
 
-    /// Blocks until a socket is ready, the earliest timer is due, `wake` is
-    /// called, or `timeout_ms` passes. Processes nothing.
     pub fn wait(self: *Client, timeout_ms: u32) DriveError!void {
         return Engine.of(self).wait(timeout_ms);
     }
 
-    /// `wait` in two halves, for an owner that guards the Client with its
-    /// own lock so another thread can call it between drives. `armWait`
-    /// reads the Client, so it runs under that lock; the `Armed.block` it
-    /// returns reads only the poll set it filled, so the thread that armed
-    /// it may block with the lock released. Every other thread's call that
-    /// gives `drive` work (launch, cancel, retireConnections) is followed by
-    /// `wake`, so the block ends and the next arm sees it.
     pub fn armWait(self: *Client, timeout_ms: u32) Armed {
         return Engine.of(self).armWait(timeout_ms);
     }
 
     pub const Armed = Engine.Armed;
 
-    /// Ends the current or next `wait` early. The one call any thread may make.
     pub fn wake(self: *Client) void {
         Engine.of(self).waker.wake();
     }
 
-    /// Pops the oldest ended stream; its storage is the caller's again.
     pub fn nextFinished(self: *Client) ?*Stream {
         return Engine.of(self).nextFinished();
     }
@@ -431,62 +256,41 @@ pub const Client = extern struct {
         return Engine.ofConst(self).finished_count;
     }
 
-    /// Retire this endpoint's pooled connections. Idle ones close now; a
-    /// connection shared with other streams drains without interrupting them.
-    /// Later requests may establish a fresh connection to the same endpoint.
     pub fn retireConnections(self: *Client, endpoint: Endpoint) void {
         Engine.of(self).retireConnections(endpoint);
     }
 
-    /// True while any connection exists, open or opening, even with no
-    /// stream left. Keep driving until it is false: a cancel's RST_STREAM,
-    /// PING answers and the idle close all go out only from `drive`.
     pub fn hasConnections(self: *const Client) bool {
         return Engine.ofConst(self).connections_len > 0;
     }
 };
 
-// ----------------------------------------------------------------- exchange
-
 pub const Exchange = struct {
     url: []const u8,
     fields: []const Field,
     body: []const u8,
-    /// The response body lands here; a longer one ends `.sink_refused`.
     response: []u8,
     trust: Trust = .system,
     proxy: ?Proxy = null,
     connect_timeout_ns: u64,
-    /// From the call until the stream ends, whatever arrives meanwhile.
     total_timeout_ns: u64,
-    /// Polled at least every 100 ms; true cancels the request and returns
-    /// `error.Interrupted`.
     cancelled: ?*const fn () bool = null,
 };
 
 pub const ExchangeOutcome = union(enum) {
-    /// The whole response, its body a prefix of `Exchange.response`.
     answered: struct { status: u16, body: []const u8 },
-    /// Never `.complete`.
     failed: End,
-    /// `total_timeout_ns` passed first.
     timed_out: struct { request_sent: bool },
 };
 
 pub const ExchangeError = InitError || EndpointError || PrepareError || DriveError || error{Interrupted};
 
-/// One request on a private Client and connection, blocking the calling
-/// thread until it ends: no pool and no reuse.
-/// Allocates from the page allocator, since its callers (token refresh,
-/// device login) have none and run a few times an hour at most.
 pub fn exchange(io: std.Io, request: Exchange) ExchangeError!ExchangeOutcome {
     const started = std.Io.Clock.awake.now(io).nanoseconds;
     if (request.cancelled) |cancelled| if (cancelled()) return error.Interrupted;
     var client: Client = undefined;
     try client.init(std.heap.page_allocator, io, .{
         .stream_capacity = 1,
-        // The total deadline below is the one that matters; this only
-        // keeps the inactivity timer from ending the stream first.
         .inactivity_ns = request.total_timeout_ns +| std.time.ns_per_s,
         .connect_timeout_ns = request.connect_timeout_ns,
         .trust = request.trust,
@@ -528,8 +332,6 @@ const AcceptAll = struct {
         return .accept;
     }
 };
-
-// -------------------------------------------------------------------- tests
 
 test "the linked libraries are the pinned versions" {
     try checkLibraries();

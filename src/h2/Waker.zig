@@ -1,12 +1,8 @@
-//! Ends a `Client.wait` early from another thread: an eventfd on Linux, a
-//! nonblocking pipe elsewhere. Writes coalesce, and `wait` drains it.
 const std = @import("std");
 const builtin = @import("builtin");
 const Waker = @This();
 
-/// Polled for readability.
 read_fd: std.posix.fd_t,
-/// The same descriptor as `read_fd` for an eventfd.
 write_fd: std.posix.fd_t,
 
 pub fn init() error{SystemResources}!Waker {
@@ -29,21 +25,18 @@ pub fn init() error{SystemResources}!Waker {
     return .{ .read_fd = fds[0], .write_fd = fds[1] };
 }
 
-/// Close failures are ignored: the descriptors are released either way.
 pub fn deinit(self: *Waker) void {
     _ = std.c.close(self.read_fd);
     if (self.write_fd != self.read_fd) _ = std.c.close(self.write_fd);
     self.* = undefined;
 }
 
-/// Any thread. A full pipe or a saturated counter already means "woken".
 pub fn wake(self: *Waker) void {
     const one: u64 = 1;
     const bytes = std.mem.asBytes(&one);
     _ = std.c.write(self.write_fd, bytes, if (self.write_fd == self.read_fd) bytes.len else 1);
 }
 
-/// Owner thread, after `poll` reported it readable.
 pub fn drain(self: *Waker) void {
     var buffer: [64]u8 = undefined;
     while (std.c.read(self.read_fd, &buffer, buffer.len) > 0) {}

@@ -1,11 +1,3 @@
-//! The shell around a codec's reading of a sealed response. `classify`
-//! gives an HTTP error body, mapped read-only, to the codec's classifier and
-//! turns what it names into the error response the execution owner decides
-//! on. The shell keeps every status rule, maps provider codes through
-//! `transport_policy`'s closed sets, and bounds the report itself.
-//! `interpret` frames a response stream's events and gives each event's
-//! data whole to the codec's interpreter, then decodes, hashes and records
-//! what it names and keeps every rule across items.
 const std = @import("std");
 const codec_abi = @import("codec_abi.zig");
 const codecs = @import("codecs.zig");
@@ -19,8 +11,6 @@ const ScratchBudget = @import("ScratchBudget.zig");
 const transport_policy = @import("transport_policy.zig");
 const utf8_validation = @import("utf8_validation.zig");
 
-/// One response's decoding, in the execution Workspace; the Host decodes
-/// one response at a time.
 pub const Decode = struct {
     classify: codecs.ClassifyScratch,
     found: codec_abi.ErrorBody,
@@ -28,9 +18,6 @@ pub const Decode = struct {
     message: ReportPart,
 };
 
-/// The provider's own words for a failure it reported, `code: message`,
-/// for the person to read beside the saved failure code. It is display text
-/// only: classification and retries never read it.
 pub const Report = protocol.Bounded(protocol.max_report_bytes);
 pub const max_part_bytes = 256;
 const shortened_mark = "…";
@@ -38,9 +25,6 @@ comptime {
     std.debug.assert(protocol.max_report_bytes == 2 * max_part_bytes + ": ".len + 2 * shortened_mark.len);
 }
 
-/// What a provider said of a failure: the refusal its codec read in it, if
-/// any, and its report. Callers clear it with `clear`, which leaves the
-/// report's bytes unwritten.
 pub const ProviderFailure = struct {
     refusal: ?transport_policy.Refusal,
     report: Report,
@@ -51,22 +35,16 @@ pub const ProviderFailure = struct {
     }
 };
 
-/// A decoded value's first `max_part_bytes`, for one part of a report.
 pub const ReportPart = struct {
     text: protocol.Bounded(max_part_bytes),
     shortened: bool,
 
-    /// `text` holds the start of a longer value: keep its whole scalars and
-    /// mark it.
     pub fn shorten(self: *ReportPart) void {
         self.text.len = utf8_validation.validPrefix(self.text.slice()).len;
         self.shortened = true;
     }
 };
 
-/// Writes `code: message` into `report`, each part marked `…` when
-/// shortened; an empty part is left out with its separator. One line:
-/// line breaks, tabs and other controls read as spaces.
 pub fn writeReport(report: *Report, code: *const ReportPart, message: *const ReportPart) void {
     const mark = struct {
         fn of(part: *const ReportPart) []const u8 {
@@ -84,18 +62,9 @@ pub fn writeReport(report: *Report, code: *const ReportPart, message: *const Rep
     };
 }
 
-/// Classify the sealed HTTP error body, the first `length` bytes of `body`,
-/// with `codec`'s classifier, and fill `failure` with its refusal and
-/// report, for every answer. Only a 4xx or 5xx body is read. A codec can
-/// narrow the status rule only by what it names: a quota or plan refusal at
-/// HTTP 429, then context overflow, then a refusal at any status. A failed read is
-/// `.unreadable`. Never inlined: the codec's classifier, which inlines here,
-/// stays out of the engine's frames.
 pub noinline fn classify(decode: *Decode, codec: protocol.Codec, io: std.Io, body: std.Io.File, length: u64, status: u16, failure: *ProviderFailure) execution.ErrorResponse {
     failure.clear();
     if (status < 400 or status >= 600) return .ordinary;
-    // The capture is unlinked and its only writer closed at seal, so no Rui
-    // code can truncate it after the length check.
     const bytes = pages.mapReadOnly(io, body, length) catch |err| return .{ .unreadable = switch (err) {
         error.FileShorter => error.ShortSealedRead,
         else => err,
@@ -118,9 +87,6 @@ pub noinline fn classify(decode: *Decode, codec: protocol.Codec, io: std.Io, bod
     return if (failure.refusal) |refusal| .{ .refusal = refusal } else .ordinary;
 }
 
-/// Decode the first `max_part_bytes` of `bytes` into the empty `part`. A
-/// range that does not decode, which a codec that judged the body would not
-/// name, leaves the part empty.
 fn readPart(bytes: []const u8, escape: codec_abi.Escape, part: *ReportPart) void {
     var source: SliceSource = .{ .bytes = bytes };
     decodeInto(&source, escape, part) catch {
@@ -151,7 +117,6 @@ fn decodeInto(source: *SliceSource, escape: codec_abi.Escape, part: *ReportPart)
     if (!std.unicode.utf8ValidateSlice(text.slice())) text.len = 0;
 }
 
-/// A report range in memory.
 const SliceSource = struct {
     bytes: []const u8,
     position: usize = 0,
@@ -160,7 +125,6 @@ const SliceSource = struct {
         return self.position == self.bytes.len;
     }
 
-    /// One byte of JSON string contents, which holds no raw control.
     pub fn take(self: *SliceSource) !u8 {
         const byte = try self.next();
         return if (byte < 0x20) error.InvalidEncodedString else byte;
@@ -172,8 +136,6 @@ const SliceSource = struct {
         return self.bytes[self.position];
     }
 };
-
-// ------------------------------------------------------------- interpret
 
 pub const max_evidence_bytes = 256;
 
@@ -187,8 +149,6 @@ pub const Rejection = struct {
     byte_offset: u64 = 0,
     output_index: ?u64 = null,
 
-    // Only local error names and structural coordinates. Never copy provider
-    // strings, IDs, text, arguments or private continuation into this detail.
     pub fn format(self: Rejection, err: anyerror, buffer: *[512]u8) []const u8 {
         return std.fmt.bufPrint(
             buffer,
@@ -199,7 +159,6 @@ pub const Rejection = struct {
 };
 
 pub const Validated = struct {
-    /// Borrowed decoded SSE bytes, valid until EventData.deinit().
     source: std.Io.File,
     source_length: u64,
     item_count: u64,
@@ -210,9 +169,6 @@ pub const Validated = struct {
     evidence: Evidence,
 };
 
-/// One response's decoded event data, in an unlinked scratch file the
-/// shell reads through a map. Keep raw capture immutable for diagnostics;
-/// metadata addresses these bytes.
 pub const EventData = struct {
     io: std.Io,
     file: std.Io.File,
@@ -220,8 +176,6 @@ pub const EventData = struct {
     length: u64 = 0,
     charged: u64 = 0,
 
-    /// Fills `self` with an empty unlinked scratch file. On error `self`
-    /// owns nothing and `retained` holds any name left to reclaim.
     pub fn init(self: *EventData, io: std.Io, scratch_path: []const u8, name: []const u8, budget: ScratchBudget, fail_unlink: bool, retained: *?named_scratch.Owner) !void {
         retained.* = null;
         var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
@@ -238,12 +192,10 @@ pub const EventData = struct {
         self.* = .{ .io = io, .file = file, .budget = budget };
     }
 
-    /// Appends `bytes`, after a newline when `newline`, in one write.
     pub fn append(self: *EventData, newline: bool, bytes: []const u8) !void {
         const separator: []const u8 = if (newline) "\n" else "";
         const total = separator.len + bytes.len;
         if (!self.budget.allocate(total)) return error.EventDataScratchExhausted;
-        // A partial write remains charged until disposal, just like capture.
         self.charged += total;
         var written: usize = 0;
         while (written < total) {
@@ -266,14 +218,12 @@ pub const EventData = struct {
 };
 
 pub fn isWhitespace(scalar: u21) bool {
-    // Unicode White_Space, matching the provider client's empty-answer test.
     return switch (scalar) {
         0x09...0x0d, 0x20, 0x85, 0xa0, 0x1680, 0x2000...0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000 => true,
         else => false,
     };
 }
 
-/// Which message is the response's answer, as its messages are accepted.
 pub const AnswerSelection = struct {
     ordinal: ?u64 = null,
     length: u64 = 0,
@@ -281,11 +231,9 @@ pub const AnswerSelection = struct {
     phased: bool = false,
     finals: u64 = 0,
 
-    /// An accepted message, as answer selection reads it.
     pub const Message = struct {
         ordinal: u64,
         phase: codec_abi.Phase,
-        /// Its text's decoded length and digest.
         length: u64,
         digest: [32]u8,
         non_whitespace: bool,
@@ -300,8 +248,6 @@ pub const AnswerSelection = struct {
             self.length = if (message.non_whitespace) message.length else 0;
             self.digest = if (message.non_whitespace) message.digest else protocol.contentDigest("");
         } else if (self.phased and self.finals == 0) {
-            // Mixed phased/unphased text is visible, but only an explicit
-            // final can terminate a phased response without Tool Calls.
             self.ordinal = null;
             self.length = 0;
             self.digest = protocol.contentDigest("");
@@ -309,16 +255,11 @@ pub const AnswerSelection = struct {
     }
 };
 
-/// One response's interpretation, in its caller's storage: the codec's
-/// scratch and what the Host keeps of the stream.
 pub const Interpret = struct {
     scratch: codecs.InterpretScratch,
     grammar: Grammar,
 };
 
-/// An interpreted response: its accepted output with the model evidence
-/// certificate, or the local code and coordinates it was rejected with.
-/// It grants no settlement authority.
 pub const Interpretation = union(enum) {
     accepted: struct {
         output: Validated,
@@ -327,7 +268,6 @@ pub const Interpretation = union(enum) {
     rejected: Rejected,
 };
 
-/// Rejections contain only local codes and structural coordinates.
 pub const Rejected = struct {
     reason: anyerror,
     code: []const u8,
@@ -339,25 +279,11 @@ pub const Rejected = struct {
     }
 };
 
-/// Borrowed observations already bounded and UTF-8 validated by transport.
 pub const ModelObservations = struct {
     openai: []const u8 = "",
     alternate: []const u8 = "",
 };
 
-/// Interpret the sealed SSE capture, the first `source_length` bytes of
-/// `source_file`, with `codec`, and fill `out` with its acceptance or
-/// rejection. The Host frames the events: each event's data is written
-/// whole to `event_data`, then given to the codec as a slice of the event
-/// data's read-only map, so an event's data is charged to the scratch
-/// budget before anything its judgement writes. The codec judges the
-/// grammar and names ranges; the Host decodes and hashes them, writes
-/// `metadata` from them, and keeps every rule that compares items with each
-/// other, the answer selection and the completion gate. `provider_failure`
-/// keeps what a provider error event said. Neither the capture, the
-/// metadata nor the event data is closed or transferred. Never inlined: the
-/// codec's interpreter, which inlines here, stays out of the engine's
-/// frames.
 pub noinline fn interpret(
     storage: *Interpret,
     codec: protocol.Codec,
@@ -390,7 +316,6 @@ pub noinline fn interpret(
         out.* = .{
             .rejected = .{
                 .reason = err,
-                // A refusal saves the code it names, whatever carried it.
                 .code = if (provider_failure.refusal) |refusal| transport_policy.refusalCode(refusal) else failureCode(err),
                 .location = rejection,
                 .kind = switch (err) {
@@ -405,9 +330,6 @@ pub noinline fn interpret(
     @import("model_evidence.zig").encode(&accepted.model_evidence, accepted.output.evidence.served_model.slice(), models.openai, models.alternate);
 }
 
-/// Frames the capture's events and gives each to the grammar, then fills
-/// `validated`, whose evidence the grammar writes. A failure leaves
-/// `rejection` at its coordinates.
 fn read(
     storage: *Interpret,
     codec: protocol.Codec,
@@ -427,8 +349,6 @@ fn read(
         else => err,
     };
     defer pages.unmapReadOnly(capture);
-    // Decoded event data is never longer than the capture it comes from,
-    // and a write to it shows through a map made before it.
     const events = pages.mapReadOnlyAhead(event_data.file, source_length) catch return error.EventDataMapFailed;
     defer pages.unmapReadOnly(events);
     const grammar = &storage.grammar;
@@ -438,13 +358,10 @@ fn read(
         .compaction => .compaction,
     });
     var position: usize = if (std.mem.startsWith(u8, capture, "\xef\xbb\xbf")) 3 else 0;
-    // Where the open event's data begins in `event_data`, and its first
-    // byte in the capture.
     var data: ?u64 = null;
     var raw_start: u64 = 0;
     while (position < capture.len) {
         rejection.* = .{ .byte_offset = position };
-        // SSE has three line endings.
         const line_start = position;
         const line_end = std.mem.indexOfAnyPos(u8, capture, position, "\r\n") orelse capture.len;
         position = line_end;
@@ -471,8 +388,6 @@ fn read(
             }
             if (continued or line.len > skip) try event_data.append(continued, line[skip..]);
         }
-        // Comments and every other field, including colonless fields, carry
-        // no provider output authority. Field names are case-sensitive.
     }
     if (data != null) return error.IncompleteSseEvent;
     if (codecs.finish(&stream)) |reason| return reasonError(reason);
@@ -485,7 +400,6 @@ fn read(
     validated.answer_digest = grammar.answer.digest;
 }
 
-/// The saved failure code of a rejected response.
 pub fn failureCode(err: anyerror) []const u8 {
     return switch (err) {
         error.ContextOverflow => "provider_context_overflow",
@@ -518,8 +432,6 @@ pub fn failureCode(err: anyerror) []const u8 {
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
-/// One provider bag: its members' raw bytes joined by commas, `m1,m2,...`,
-/// hashed as they are added.
 const Bag = struct {
     scope: output_format.BagScope,
     hash: Sha256,
@@ -541,8 +453,6 @@ const Bag = struct {
         try metadata.append(&.{ .tag = .member, .kind = kind, .ordinal = ordinal, .start = base + member.start, .length = member.length, .scope = self.scope });
     }
 
-    /// Records the trailer, even for an empty bag: every item and part has
-    /// one, so a missing bag is damage rather than an absence.
     noinline fn close(self: *Bag, metadata: *output_format.OutputMetadataWriter, ordinal: u64, kind: output_format.OutputItemKind) !void {
         try metadata.append(&.{ .tag = .extras, .kind = kind, .ordinal = ordinal, .start = 0, .length = 0, .decoded_length = self.length, .content_digest = self.hash.finalResult(), .scope = self.scope });
     }
@@ -558,19 +468,14 @@ fn digestOf(data: []const u8, range: codec_abi.Range) [32]u8 {
     return hash.finalResult();
 }
 
-/// A JSON string's contents the codec named, decoded: its length, digest
-/// and whether it holds anything but whitespace.
 const Decoded = struct {
     length: u64,
     digest: [32]u8,
     non_whitespace: bool,
 
-    /// Decode the contents `range` of `data`, its bytes also hashed into
-    /// `also` and kept in `kept` when given.
     fn of(data: []const u8, range: codec_abi.Range, also: ?*Sha256, kept: ?*protocol.Bounded(max_evidence_bytes)) Decoded {
         var sink: Sink = .{ .hash = protocol.contentHasher(), .also = also, .kept = kept, .length = 0, .non_whitespace = false };
         if (kept) |bounded| bounded.len = 0;
-        // The codec's reader judged these bytes as this decoder does.
         json.decodeContents(bytesOf(data, range), &sink);
         return .{ .length = sink.length, .digest = sink.hash.finalResult(), .non_whitespace = sink.non_whitespace };
     }
@@ -582,7 +487,6 @@ const Decoded = struct {
         length: u64,
         non_whitespace: bool,
 
-        /// One decoded scalar, or a run of plain ASCII.
         pub fn append(self: *Sink, bytes: []const u8, scalar: ?u21) void {
             self.hash.update(bytes);
             if (self.also) |hash| hash.update(bytes);
@@ -596,7 +500,6 @@ const Decoded = struct {
                 };
             }
             if (self.kept) |bounded| {
-                // The codec bounds an identity to the evidence's size.
                 @memcpy(bounded.bytes[bounded.len..][0..bytes.len], bytes);
                 bounded.len += bytes.len;
             }
@@ -604,32 +507,23 @@ const Decoded = struct {
     };
 };
 
-/// What the Host keeps of the stream between the codec's answers.
 const Grammar = struct {
     codec: protocol.Codec,
     metadata: *output_format.OutputMetadataWriter,
     operation: output_format.ModelOperationKind,
     rejection: *Rejection,
     provider_failure: *ProviderFailure,
-    /// The items kept, which the Store imports, and the streamed items
-    /// before them that a later compaction item superseded.
     item_count: u64,
     superseded: u64,
     call_count: u64,
     compacted: bool,
     answer: AnswerSelection,
-    /// The caller's, which the completed response fills.
     evidence: *Evidence,
-    /// The announced item, until its done event.
     added: ?struct { kind: output_format.OutputItemKind, id_digest: [32]u8 },
-    /// Where the current event's data begins in the event data.
     base: u64,
-    /// The open item's bag, its open part's bag and a message's text: its
-    /// text parts back to back, hashed as they are walked.
     bag: Bag,
     part_bag: Bag,
     text_hash: Sha256,
-    /// A provider report's two parts.
     code: ReportPart,
     message: ReportPart,
 
@@ -649,9 +543,6 @@ const Grammar = struct {
         self.base = 0;
     }
 
-    /// The codec's answer to one event's data, `data`, which begins at
-    /// `base` in the event data and whose first byte is at `raw_start` in
-    /// the capture.
     fn event(self: *Grammar, stream: *codecs.Stream, scratch: *codecs.InterpretScratch, data: []const u8, base: u64, raw_start: u64) !void {
         self.base = base;
         const answer = codecs.interpretEvent(stream, scratch, data);
@@ -665,9 +556,6 @@ const Grammar = struct {
         }
     }
 
-    /// Drops every item kept so far, its records and its answer, before a
-    /// compaction item that supersedes them. A compaction Operation holds
-    /// no calls.
     fn supersede(self: *Grammar) !void {
         std.debug.assert(self.call_count == 0 and self.item_count != 0);
         try self.metadata.discard();
@@ -676,17 +564,9 @@ const Grammar = struct {
         self.answer = .{ .digest = protocol.contentDigest("") };
     }
 
-    /// The codec accepted an item: its parts and bags, then the Host's own
-    /// rules on it, in the order acceptance has always applied them, and
-    /// then its record.
     noinline fn closeItem(self: *Grammar, data: []const u8, item: *const codec_abi.OutputItem) !void {
         const metadata = self.metadata;
         const kind = outputKind(item.kind);
-        // In a compaction Operation the last compaction item is the new
-        // base: a later compaction item supersedes every item before it,
-        // the earlier compaction item included, so none is kept, replayed
-        // or selected as the answer. The first compaction item supersedes
-        // nothing, so a response with one is kept whole.
         if (kind == .compaction and self.operation == .compaction and self.compacted) try self.supersede();
         const ordinal = self.item_count;
         const bag = &self.bag;
@@ -741,7 +621,6 @@ const Grammar = struct {
                 try metadata.append(&record);
             },
             .web_search_call => {
-                // What the call did, which its description says.
                 const call = codecs.hostedCall(self.codec, data, item);
                 const target = call.target orelse codec_abi.Range{ .start = 0, .length = 0 };
                 const decoded = Decoded.of(data, target, null, null);
@@ -779,12 +658,7 @@ const Grammar = struct {
         self.item_count += 1;
     }
 
-    /// The completed response: the Host's gate, then the codec's check of
-    /// the response, then the output list against the streamed items, then
-    /// usage.
     noinline fn complete(self: *Grammar, data: []const u8, completed: *const codec_abi.Completed) !void {
-        // Each unmet completion requirement keeps its own reason so a saved
-        // rejection says which one failed; all share the malformed code.
         if (self.item_count == 0) return error.MissingProviderOutputItems;
         if (self.answer.finals > 1) return error.MultipleFinalAnswers;
         if (self.operation == .assistant_response and self.answer.ordinal == null and self.call_count == 0) return error.MissingAssistantAnswer;
@@ -799,11 +673,6 @@ const Grammar = struct {
         var cursor = completed.output;
         var index: u64 = 0;
         while (codecs.nextMember(self.codec, data, &cursor)) |member| switch (member) {
-            // One item of the output list must be the streamed item at its
-            // index: byte for byte, except an encrypted item, which the
-            // provider re-encrypts for the terminal copy.
-            // A superseded item was not kept, so nothing it could agree
-            // with remains.
             .terminal => |*terminal| {
                 if (index >= self.superseded and !try streamedAs(&records, data, terminal, index - self.superseded)) return error.ContradictoryProviderOutput;
                 index += 1;
@@ -811,9 +680,6 @@ const Grammar = struct {
             .terminal_failed => |reason| return reasonError(reason),
             .bag, .part, .part_end => unreachable,
         };
-        // The managed stream can omit the repeated items from
-        // response.completed. Any nonempty terminal list must still match
-        // every streamed done item.
         if (index != 0 and (index != self.superseded + self.item_count or try records.nextItem() != null)) return error.ContradictoryProviderOutput;
         switch (completed.usage) {
             .absent => {},
@@ -829,10 +695,6 @@ const Grammar = struct {
         try metadata.sealForRead();
     }
 
-    /// Whether the next streamed item is the output list's item at `index`.
-    /// Reasoning and compaction items carry provider-encrypted content that
-    /// is encrypted afresh for each copy, so they agree by position, kind and
-    /// ID; every other item agrees byte for byte. The streamed item is kept.
     fn streamedAs(records: *output_format.OutputMetadataRecords, data: []const u8, terminal: *const @FieldType(codec_abi.Member, "terminal"), index: u64) !bool {
         const record = try records.nextItem() orelse return false;
         const same_item = record.ordinal == index and record.kind == outputKind(terminal.kind) and
@@ -843,9 +705,6 @@ const Grammar = struct {
         };
     }
 
-    /// The codec's verdict on the event, with the provider's report when it
-    /// gave one. A reported failure is permanent when the codec names a
-    /// refusal in it.
     noinline fn fail(self: *Grammar, data: []const u8, failed: *const codec_abi.Failed) anyerror {
         if (failed.report.code != null or failed.report.message != null) {
             for ([_]*ReportPart{ &self.code, &self.message }, [_]?codec_abi.ReportRange{ failed.report.code, failed.report.message }) |part, report| {
@@ -865,7 +724,6 @@ const Grammar = struct {
     }
 };
 
-/// The error a reason names.
 fn reasonError(reason: codec_abi.Reason) anyerror {
     @setEvalBranchQuota(100_000);
     return switch (reason) {
@@ -879,7 +737,6 @@ var testing_decode: Decode = undefined;
 
 const Classified = struct { response: execution.ErrorResponse, failure: ProviderFailure };
 
-/// Classify `body` at `status`, written to a fresh file in `tmp`.
 fn classifyForTesting(tmp: *std.testing.TmpDir, codec: protocol.Codec, body: []const u8, length: u64, status: u16, out: *Classified) !void {
     const file = try tmp.dir.createFile(std.testing.io, "error-body", .{ .read = true, .truncate = true });
     defer file.close(std.testing.io);
@@ -899,14 +756,11 @@ test "an HTTP error body keeps its refusal and the provider's own words" {
     const cases = [_]struct { body: []const u8, status: u16, refusal: ?transport_policy.Refusal, report: []const u8 }{
         .{ .body = "{\"error\":{\"message\":\"The model `gpt-x` does not exist.\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"model_not_found\"}}", .status = 404, .refusal = .model_unavailable, .report = "model_not_found: The model `gpt-x` does not exist." },
         .{ .body = "{\"error\":{\"message\":\"Unsupported parameter.\",\"type\":\"invalid_request_error\",\"code\":null}}", .status = 400, .refusal = null, .report = "invalid_request_error: Unsupported parameter." },
-        // The managed route's bare detail.
         .{ .body = "{\"detail\":\"Unsupported model\"}", .status = 400, .refusal = null, .report = "Unsupported model" },
-        // A duplicate code names no refusal.
         .{ .body = "{\"error\":{\"code\":\"cyber_policy\",\"co\\u0064e\":\"x\"}}", .status = 403, .refusal = null, .report = "" },
         .{ .body = "{\"error\":{\"code\":\"cyber_policy\"},\"late\":[1,]}", .status = 403, .refusal = null, .report = "" },
         .{ .body = "not json", .status = 502, .refusal = null, .report = "" },
         .{ .body = "{\"error\":{\"code\":\"cyber_policy\"}}", .status = 200, .refusal = null, .report = "" },
-        // A code too long to be a refusal is shortened, not dropped.
         .{ .body = "{\"error\":{\"code\":\"" ++ comptime repeat("c", 300) ++ "\",\"message\":\"m\"}}", .status = 400, .refusal = null, .report = comptime repeat("c", 256) ++ "…: m" },
     };
     var classified: Classified = undefined;
@@ -916,7 +770,6 @@ test "an HTTP error body keeps its refusal and the provider's own words" {
         if (case.refusal) |refusal| try std.testing.expectEqual(execution.ErrorResponse{ .refusal = refusal }, classified.response);
         try std.testing.expectEqualStrings(case.report, classified.failure.report.slice());
     }
-    // Quota, then overflow, then a refusal decide; each keeps its words.
     const ordered = [_]struct { body: []const u8, status: u16, kind: std.meta.Tag(execution.ErrorResponse), report: []const u8 }{
         .{ .body = "{\"error\":{\"code\":\"insufficient_quota\",\"message\":\"Out.\"}}", .status = 429, .kind = .quota, .report = "insufficient_quota: Out." },
         .{ .body = "{\"error\":{\"code\":\"insufficient_quota\",\"message\":\"Out.\"}}", .status = 403, .kind = .refusal, .report = "insufficient_quota: Out." },
@@ -947,7 +800,6 @@ test "context overflow requires exact valid provider code over HTTP" {
         try classifyForTesting(&tmp, pinned, case[0], case[0].len, 200, &classified);
         try std.testing.expect(classified.response != .context_overflow);
     }
-    // A missing sealed byte is capture failure, not a malformed remote body.
     try classifyForTesting(&tmp, pinned, "{}", 3, 503, &classified);
     try std.testing.expectEqual(execution.ErrorResponse{ .unreadable = error.ShortSealedRead }, classified.response);
 }
@@ -979,8 +831,6 @@ test "a large error body classifies as its small twin does" {
     const small = "{\"error\":{\"code\":\"usage_limit_reached\",\"resets_at\":1800000123,\"message\":\"Out.\"}}";
     var expected: Classified = undefined;
     try classifyForTesting(&tmp, pinned, small, small.len, 429, &expected);
-    // The same envelope after some 850 KB of other members, with its message
-    // at the start and its code at the end.
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(std.testing.allocator);
     try body.appendSlice(std.testing.allocator, "{\"error\":{\"message\":\"Out.\",\"padding\":[");
@@ -994,12 +844,7 @@ test "a large error body classifies as its small twin does" {
     try std.testing.expectEqualStrings(expected.failure.report.slice(), large.failure.report.slice());
 }
 
-// ----------------------------------------------------------------- tests
-
-/// Tests' interpretation storage, off their stacks like the Host's. Tests
-/// run one at a time and each use finishes before the next starts.
 var testing_interpret: Interpret = undefined;
-/// Tests' provider failure, the last interpretation's.
 var testing_provider_failure: ProviderFailure = undefined;
 
 pub fn testingInterpret() *Interpret {
@@ -1012,14 +857,8 @@ pub fn testingProviderFailure() *ProviderFailure {
     return &testing_provider_failure;
 }
 
-/// The prefix of an item's event in `recordItemForTesting`.
 const testing_item_event = "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":";
 
-/// Record one complete item already in `source` at `start` the way
-/// acceptance records it: its parts and bags, its call fields or text and
-/// then the item record, whose ranges address `source`. Tests that save
-/// output without a provider stream use it so their metadata is what
-/// acceptance would write.
 pub fn recordItemForTesting(metadata: *output_format.OutputMetadataWriter, source: std.Io.File, start: u64, length: u64, ordinal: u64, operation: output_format.ModelOperationKind) !output_format.OutputMetadataRecord {
     comptime std.debug.assert(@import("builtin").is_test);
     const io = metadata.io;
@@ -1027,8 +866,6 @@ pub fn recordItemForTesting(metadata: *output_format.OutputMetadataWriter, sourc
     defer pages.unmapReadOnly(bytes);
     const data = try std.mem.concat(std.testing.allocator, u8, &.{ testing_item_event, bytes[@intCast(start)..], "}" });
     defer std.testing.allocator.free(data);
-    // The grammar writes ranges of `data`; they move to `source` as they
-    // are copied.
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "item-records", .{ .read = true });
@@ -1051,7 +888,6 @@ pub fn recordItemForTesting(metadata: *output_format.OutputMetadataWriter, sourc
         var moved = record;
         switch (record.tag) {
             .member, .part, .name, .call_id, .arguments, .item, .pattern => moved.start = record.start - testing_item_event.len + start,
-            // An action with no target names no range.
             .action => if (record.length != 0) {
                 moved.start = record.start - testing_item_event.len + start;
             },
@@ -1063,7 +899,6 @@ pub fn recordItemForTesting(metadata: *output_format.OutputMetadataWriter, sourc
     unreachable;
 }
 
-/// The counts acceptance takes from the usage report at `start` in `file`.
 pub fn readUsageForTesting(io: std.Io, file: std.Io.File, start: u64, length: u64) !?output_format.Usage {
     comptime std.debug.assert(@import("builtin").is_test);
     const bytes = try pages.mapReadOnly(io, file, start + length);
@@ -1083,11 +918,8 @@ pub fn readUsageForTesting(io: std.Io, file: std.Io.File, start: u64, length: u6
     };
 }
 
-/// Tests' interpretation, the last one's.
 var testing_interpretation: Interpretation = undefined;
 
-/// The accepted output, or the rejection's reason; `testing_interpretation`
-/// keeps its coordinates.
 fn validate(source: std.Io.File, source_length: u64, metadata: *output_format.OutputMetadataWriter, event_data: *EventData, operation: output_format.ModelOperationKind) anyerror!Validated {
     interpret(&testing_interpret, pinned, std.testing.io, source, source_length, metadata, event_data, operation, .{}, testingProviderFailure(), &testing_interpretation);
     return switch (testing_interpretation) {
@@ -1141,7 +973,6 @@ const replay_cases = [_]struct { item: []const u8, operation: output_format.Mode
     .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"async\":true}", .import = error.UnsupportedAsyncCall },
     .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"namespace\":\"program\"}", .import = error.UnsupportedCallControl },
     .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"encrypted_function_args\":\"opaque\"}", .import = error.UnsupportedCallControl },
-    // A duplicate the summary reading never consumes stays open.
     .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"}]}", .import = error.UnsupportedReasoningBlock },
 };
 
@@ -1172,14 +1003,9 @@ const replay_failure_cases = [_]struct { item: []const u8, operation: output_for
 test "the item grammar refuses consumed duplicates and syntax" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    // A consumed duplicate fails the item; an earlier broken rule may be the
-    // one named.
     for (replay_failure_cases) |case| try std.testing.expectError(case.import, importTestingItem(&tmp, case.item, case.operation));
 }
 
-/// Import one item inside a response that is otherwise acceptable: under
-/// compaction the item stands alone, and under assistant_response a trailing
-/// call means no answer rule applies.
 fn importTestingItem(tmp: *std.testing.TmpDir, item: []const u8, operation: output_format.ModelOperationKind) !TestingValidation {
     const trailer = "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"t\",\"name\":\"bash\",\"call_id\":\"t\",\"arguments\":\"{}\"}}\n\n";
     const sse = try std.testing.allocator.print(
@@ -1193,9 +1019,7 @@ fn importTestingItem(tmp: *std.testing.TmpDir, item: []const u8, operation: outp
 
 const long_type_item = "{\"type\":\"" ++ @as([max_evidence_bytes + 1]u8, @splat('m')) ++ "\",\"id\":\"m\"}";
 
-/// Shapes the replay table leaves out.
 const agreement_cases = [_]struct { item: []const u8, operation: output_format.ModelOperationKind = .assistant_response, omits_reasoning_text: bool = false, import: ?anyerror = null }{
-    // Another kind leaves `content` open, even duplicated.
     .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"content\":1,\"content\":2}" },
     .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\"}]}", .omits_reasoning_text = true },
     .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"caller\":\"direct\"}", .import = error.UnexpectedJsonDelimiter },
@@ -1228,17 +1052,12 @@ test "import names the first rule broken in lookup order" {
         operation: output_format.ModelOperationKind,
         import: anyerror,
     }{
-        // Status is looked up before content blocks.
         .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"status\":\"future\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"text\":\"other\"}]}", .operation = .assistant_response, .import = error.UnsupportedItemStatus },
         .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"status\":\"future\",\"encrypted_content\":\"a\",\"encrypted_content\":\"b\"}", .operation = .compaction, .import = error.UnsupportedItemStatus },
         .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"status\":\"future\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[],\"annotations\":false}]}", .operation = .assistant_response, .import = error.UnsupportedItemStatus },
-        // Blocks are judged in order.
         .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"}]}", .operation = .assistant_response, .import = error.UnsupportedContentBlock },
         .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"},{\"type\":\"future_text\"}]}", .operation = .assistant_response, .import = error.DuplicateJsonField },
-        // Type, ID and metadata come before every other rule.
         .{ .item = "{\"type\":\"message\",\"type\":\"message\",\"id\":\"m\",\"status\":\"future\"}", .operation = .assistant_response, .import = error.DuplicateJsonField },
-        // The Operation is checked after type, ID and metadata, before the
-        // kind's own rules.
         .{ .item = "{\"type\":\"compaction\",\"id\":\"c\"}", .operation = .assistant_response, .import = error.UnsupportedProviderOutput },
         .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"\",\"arguments\":\"{}\"}", .operation = .compaction, .import = error.UnsupportedProviderOutput },
         .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"caller\":{\"type\":null}}", .operation = .compaction, .import = error.UnsupportedProviderOutput },
@@ -1254,8 +1073,6 @@ test "import names the first rule broken in lookup order" {
 }
 
 test "long escaped strings decode and locate exactly" {
-    // Long plain runs broken by escapes, an escaped quote and multibyte text,
-    // in a key, in the call's own strings and in an open field.
     var encoded: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer encoded.deinit();
     var decoded: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -1303,7 +1120,6 @@ test "long escaped strings decode and locate exactly" {
         };
         try std.testing.expectEqual(value.len, record.decoded_length);
         try std.testing.expectEqualSlices(u8, &protocol.contentDigest(value), &record.content_digest);
-        // Each located value is exactly the encoded text after its key.
         if (record.tag != .name) try std.testing.expectEqualStrings(text, item[@intCast(record.start - prefix.len)..][0..@intCast(record.length)]);
         located += 1;
     }
@@ -1316,7 +1132,6 @@ const TestingValidation = struct {
     metadata_bytes: u64,
     first_item: output_format.OutputMetadataRecord,
     first_part: ?output_format.OutputMetadataRecord,
-    /// The first records, up to the end of the first item.
     records: [24]output_format.OutputMetadataRecord,
     record_count: usize,
 };
@@ -1343,8 +1158,6 @@ fn validateTestingOperation(tmp: *std.testing.TmpDir, bytes: []const u8, metadat
         &retained,
     );
     errdefer metadata.deinit();
-    // These existing cases vary metadata's ceiling independently of payload.
-    // Shared overlap and disposal are exercised with one budget below.
     var data_used: std.atomic.Value(u64) = .init(0);
     var event_data: EventData = undefined;
     try event_data.init(std.testing.io, root[0..root_length], "provider-test-data", .{ .used = &data_used, .limit = bytes.len }, false, &retained);
@@ -1375,21 +1188,14 @@ test "a provider error event keeps its refusal and the provider's own words" {
     defer tmp.cleanup();
     const long = comptime repeat("é", 200);
     const cases = [_]struct { event: []const u8, err: anyerror, refusal: ?transport_policy.Refusal, report: []const u8 }{
-        // The refusal that ended the bug-swarm Sessions, as a stream event.
         .{ .event = "{\"type\":\"error\",\"code\":\"cyber_policy\",\"message\":\"This request has been flagged for potentially high-risk cyber activity.\",\"param\":null}", .err = error.PermanentProviderFailure, .refusal = .policy, .report = "cyber_policy: This request has been flagged for potentially high-risk cyber activity." },
         .{ .event = "{\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"model_not_found\",\"message\":\"No such model.\"}}}", .err = error.PermanentProviderFailure, .refusal = .model_unavailable, .report = "model_not_found: No such model." },
-        // A retryable failure keeps its words too; an object's type stands in
-        // for a missing code, and line breaks read as spaces.
         .{ .event = "{\"type\":\"error\",\"error\":{\"type\":\"server_error\",\"message\":\"Overloaded,\\ntry\\tlater.\"}}", .err = error.TemporaryProviderFailure, .refusal = null, .report = "server_error: Overloaded, try later." },
-        // An event's own type is only its name.
         .{ .event = "{\"type\":\"error\",\"code\":null,\"message\":\"Something failed.\"}", .err = error.TemporaryProviderFailure, .refusal = null, .report = "Something failed." },
-        // A malformed message is left out; the code still decides.
         .{ .event = "{\"type\":\"error\",\"code\":\"insufficient_quota\",\"message\":7}", .err = error.PermanentProviderFailure, .refusal = .quota, .report = "insufficient_quota" },
-        // A long message keeps its first 256 bytes, cut at a whole scalar.
         .{ .event = "{\"type\":\"error\",\"code\":\"bio_policy\",\"message\":\"" ++ long ++ "\"}", .err = error.PermanentProviderFailure, .refusal = .policy, .report = "bio_policy: " ++ comptime repeat("é", 128) ++ "…" },
         .{ .event = "{\"type\":\"error\",\"code\":\"bio_policy\",\"message\":\"x" ++ long ++ "\"}", .err = error.PermanentProviderFailure, .refusal = .policy, .report = "bio_policy: x" ++ comptime repeat("é", 127) ++ "…" },
         .{ .event = "{\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":null}}", .err = error.TemporaryProviderFailure, .refusal = null, .report = "" },
-        // An overflow keeps its words too; DEL reads as a space.
         .{ .event = "{\"type\":\"error\",\"code\":\"context_length_exceeded\",\"message\":\"Too\\u007flong.\"}", .err = error.ContextOverflow, .refusal = null, .report = "context_length_exceeded: Too long." },
     };
     for (cases) |case| {
@@ -1505,8 +1311,6 @@ test "a later compaction item supersedes everything before it, and a first one n
     const after = "{\"type\":\"message\",\"id\":\"n\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"after\"}]}";
     const reasoning = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"thought\",\"summary\":[]}";
     const call = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\"}";
-    // The first kept item, how many are kept and the answer's length. A
-    // response with one compaction item keeps every item, as it always has.
     const Kept = struct { first: []const u8, items: u64, answer: u64 };
     const cases = [_]struct { items: []const []const u8, terminal: bool = false, kept: anyerror!Kept }{
         .{ .items = &.{last}, .kept = .{ .first = last, .items = 1, .answer = 0 } },
@@ -1545,8 +1349,6 @@ test "a later compaction item supersedes everything before it, and a first one n
         try std.testing.expectEqual(@as(u64, 0), result.first_item.ordinal);
         try std.testing.expectEqual(protocol.contentDigest(expected.first), result.first_item.content_digest);
         try std.testing.expectEqual(expected.answer, result.output.answer_length);
-        // A superseded item's records are gone with their charge: keeping
-        // the last item alone charges what that item alone does.
         if (expected.items == 1) {
             const alone = single orelse result.metadata_bytes;
             single = alone;
@@ -1565,7 +1367,6 @@ test "SSE line framing accepts spec fields and line endings without losing valid
         "data:" ++ done ++ "\n\ndata:" ++ completed ++ "\n\n",
         ": comment\nevent: x\nid: 1\nretry: 5\ndata: " ++ done ++ "\n\ndata: " ++ completed ++ "\n\ndata: [DONE]\n\n",
         "data: " ++ done ++ "\n\ndata: " ++ completed ++ "\r\n\r\ndata:[DONE]\r\n\r\n",
-        // A final carriage return without a newline still ends the line.
         "data: " ++ done ++ "\n\ndata: " ++ completed ++ "\n\r",
         "data: " ++ done ++ "\r\rdata: " ++ completed ++ "\r\r",
         "\xef\xbb\xbfdata: " ++ done ++ "\n\ndata: " ++ completed ++ "\n\n",
@@ -1668,8 +1469,6 @@ test "SSE decoded data shares scratch charges and retains failed unlink ownershi
 }
 
 test "an event's data is charged whole before its metadata from a shared budget" {
-    // A message the grammar writes records for, then a field it ignores:
-    // the event's data fits the shared budget, its metadata does not.
     const done = "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]},\"padding\":\"p\"}";
     const raw = "data: " ++ done ++ "\n\n";
     var tmp = std.testing.tmpDir(.{});
@@ -1717,7 +1516,6 @@ test "a 4 MiB reasoning item interprets whole as one event" {
 }
 
 test "synthetic gpt-6-luna shaped commentary interleaves calls and selects final answer" {
-    // Synthetic contract fixture, not a recovered live provider capture.
     const before = "{\"type\":\"message\",\"id\":\"before\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"Inspecting files\"}]}";
     const call = "{\"type\":\"function_call\",\"id\":\"call\",\"name\":\"bash\",\"call_id\":\"k\",\"arguments\":\"{}\"}";
     const between = "{\"type\":\"message\",\"id\":\"between\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking results\"}]}";
@@ -1771,11 +1569,6 @@ test "completed empty assistant answers are valid with or without a final phase"
 }
 
 test "partial answer fixture selects only the final answer" {
-    // Synthetic first-party fixture, not a live capture or executed upstream test:
-    // openai/codex 970111f6cb62cc02fe36a82ea7d71b37a2889c97,
-    // codex-rs/codex-api/src/sse/responses.rs:759-798.
-    // Keep its added/done message shape; Rui requires output_index and a
-    // completed envelope. No end_turn:false sampling behavior is inferred.
     const partial = "{\"id\":\"msg_partial\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"First result.\"}],\"phase\":\"partial_answer\"}";
     const final = "{\"id\":\"msg_final\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Final result.\"}],\"phase\":\"final_answer\"}";
     const stream = "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"msg_partial\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"phase\":\"partial_answer\"}}\n\n" ++
@@ -2010,8 +1803,6 @@ test "provider reasoning strings preserve raw items" {
         defer std.testing.allocator.free(retained_bytes);
         try std.testing.expectEqual(reasoning.len, try accepted.source.readPositionalAll(std.testing.io, retained_bytes, item.start));
         try std.testing.expectEqualStrings(reasoning, retained_bytes);
-        // Expected complete raw bytes include response-only and unknown fields,
-        // not a decoded or normalized spelling of the reasoning strings.
         try std.testing.expectEqualSlices(u8, &protocol.contentDigest(reasoning), &item.content_digest);
     }
 }
@@ -2052,8 +1843,6 @@ test "provider reasoning validation rejects wrong types duplicates and malformed
         try std.testing.expectError(case[1], validateTestingSse(&tmp, sse, 64 * 1024));
     }
 
-    // Nonempty means decoded bytes, not visible characters; summary/content
-    // text may be empty and escaped consequential keys keep their meaning.
     const valid = "{\"type\":\"reasoning\",\"id\":\"r1\",\"encr\\u0079pted_content\":\"\\u0000\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"\"}],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"\"}]}";
     const sse = try testingReasoningSse(valid, valid);
     defer std.testing.allocator.free(sse);
@@ -2088,9 +1877,6 @@ test "provider added identity permits incomplete content and terminal agreement 
         }
     }
 
-    // gpt-6.1-terra re-encrypts reasoning for response.completed, so the
-    // terminal copy's bytes differ from the streamed one. The streamed item
-    // is kept; only position, kind and ID must agree.
     const changed_terminal = .{
         "{\"type\":\"reasoning\",\"id\":\"r1\",\"status\":\"completed\",\"encrypted_content\":\"different\",\"future\":\"one\"}",
         "{\"type\":\"reasoning\",\"id\":\"r1\",\"status\":\"completed\",\"encrypted_content\":\"o\\u0070aque\",\"future\":\"one\"}",
@@ -2129,8 +1915,6 @@ test "provider preserves ordered trustworthy function call envelopes" {
     try std.testing.expectEqual(@as(u64, 2), accepted.output.item_count);
     try std.testing.expectEqual(@as(u64, 2), accepted.output.call_count);
     try std.testing.expectEqual(@as(u64, 0), accepted.output.answer_length);
-    // Per call: the item, three call fields, and an item bag of `id` and
-    // `status` with its trailer.
     try std.testing.expectEqual(@as(u64, 2 * 7 * 104), accepted.metadata_bytes);
 
     const invalid_second = "{\"type\":\"function_call\",\"id\":\"item-2\",\"status\":\"completed\",\"name\":\"edit\",\"call_id\":\"call-B\",\"arguments\":\"{}\"}";
@@ -2142,8 +1926,6 @@ test "provider preserves ordered trustworthy function call envelopes" {
     const mixed = try validateTestingSse(&invalid_tmp, late_invalid, 64 * 1024);
     try std.testing.expectEqual(@as(u64, 2), mixed.output.call_count);
 
-    // Only encrypted items may differ between copies: a call whose terminal
-    // copy changes its arguments under the same ID is a contradiction.
     const changed_arguments = "{\"type\":\"function_call\",\"id\":\"item-2\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"call-B\",\"arguments\":\"{\\\"cmd\\\":\\\"three\\\"}\"}";
     const contradicted = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ first ++ "}\n\n" ++
         "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":" ++ second ++ "}\n\n" ++
@@ -2238,8 +2020,6 @@ test "provider rejects unsupported consequential function call controls" {
 }
 
 test "metadata notification is not output or completion authority" {
-    // Minimized from the authorized 2026-10-17 Codex probe. Metadata arrived
-    // before the completed message; only the done item supplied its answer.
     const notification = "data: {\"type\":\"response.metadata\",\"sequence_number\":5,\"response_id\":\"synthetic\",\"metadata\":{\"openai_chatgpt_moderation_metadata\":{\"prompt\":{},\"generation\":{},\"tool_call\":{},\"tool_response\":{}}}}\n\n";
     const item = "{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK\",\"annotations\":[]}],\"phase\":\"final_answer\"}";
     const done = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ item ++ "}\n\n";
@@ -2290,10 +2070,7 @@ test "escaped envelope keys name their fields and repeated unknown keys stay unr
     try std.testing.expectEqual(@as(u64, 1), accepted.output.item_count);
     try std.testing.expectEqual(protocol.contentDigest("ok"), accepted.output.answer_digest);
     try std.testing.expectEqual(protocol.contentDigest(item), accepted.first_item.content_digest);
-    // Item, part text, part bag trailer, item bag `id` and its trailer,
-    // message text: the escaped role is Rui's, not the bag's.
     try std.testing.expectEqual(@as(u64, 6 * 104), accepted.metadata_bytes);
-    // An escaped spelling of a field the envelope reads is that field again.
     try std.testing.expectError(error.DuplicateJsonField, validateTestingSse(&tmp, done ++ "data: {\"type\":\"response.completed\",\"ty\\u0070e\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}\n\n", 4096));
 }
 
@@ -2380,8 +2157,6 @@ test "fuzz provider decoded answers and rejection" {
 fn fuzzAnswer(_: void, smith: *std.testing.Smith) !void {
     var text_buffer: [128]u8 = undefined;
     var text = std.Io.Writer.fixed(&text_buffer);
-    // Always exercise controls, multibyte UTF-8 and surrogate-pair escaping
-    // beside generated scalars.
     try text.writeAll("\x00\"\n\\€𐀀");
     const count = smith.valueRangeAtMost(u8, 0, 16);
     for (0..count) |_| {
@@ -2410,7 +2185,6 @@ fn fuzzAnswer(_: void, smith: *std.testing.Smith) !void {
         try std.testing.expectEqual(@as(u64, 0), accepted.output.call_count);
         try std.testing.expectEqual(@as(u64, text.buffered().len), accepted.output.answer_length);
         try std.testing.expectEqualSlices(u8, &expected_digest, &accepted.output.answer_digest);
-        // Syntax errors after valid content cannot become accepted prefixes.
         try std.testing.expectError(error.IncompleteSseEvent, validateTestingSse(&tmp, stream.buffered()[0 .. stream.buffered().len - 2], 4096));
         stream = .fixed(&stream_buffer);
         try stream.print("data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{s},\"late\":\"\xff\"}}\n\n", .{item.buffered()});

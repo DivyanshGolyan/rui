@@ -1,40 +1,21 @@
-//! The Session's prefix seal: what its history span last encoded to.
-//!
-//! A request's history span is a pure function of the Session's history
-//! below its Operation's admission position and the selected compaction
-//! anchor and requested model, and it only grows within that binding: the span for a later view begins with the span
-//! for an earlier one. The provider caches requests by that prefix, so a
-//! Host that encodes the same history differently, after an upgrade or a
-//! bug, silently loses the cache. The seal records the length and SHA-256 of
-//! the last fully rebuilt span; the next full rebuild with the same anchor
-//! must begin with exactly those bytes, or its Attempt fails before anything
-//! is sent.
 const std = @import("std");
 
 pub const Sha256 = std.crypto.hash.sha2.Sha256;
 
-/// Encoded size: anchor, admission position and span length as little-endian
-/// u64s, then the digest.
 pub const encoded_bytes = 56;
 
 pub const PrefixSeal = struct {
-    /// The compaction anchor the span was built under, if any.
     anchor: ?u64,
-    /// Admission position of the Operation whose view built the span.
     admission_position: u64,
     span_length: u64,
     digest: [Sha256.digest_length]u8,
 
-    /// Whether a span built under `anchor` for a view ending at `admission`
-    /// must begin with the sealed bytes: the same anchor, and a view that
-    /// contains the sealing view.
     pub fn binds(self: *const PrefixSeal, anchor: ?u64, admission: u64) bool {
         return self.anchor == anchor and self.admission_position <= admission;
     }
 
     pub fn encode(self: *const PrefixSeal) [encoded_bytes]u8 {
         var bytes: [encoded_bytes]u8 = undefined;
-        // Anchors are Session positions, which start at 1; 0 encodes none.
         std.debug.assert(self.anchor != 0 and self.admission_position != 0);
         std.mem.writeInt(u64, bytes[0..8], self.anchor orelse 0, .little);
         std.mem.writeInt(u64, bytes[8..16], self.admission_position, .little);

@@ -1,7 +1,3 @@
-//! The one classification of a terminal key, shared by the draft and every
-//! choice drawn in its place: the one place a vaxis key meets a `Key`, an
-//! edit, text or a refusal. `keymap.zig` owns the values, as a functional
-//! core; this shell owns their terminal encodings.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const keymap = @import("keymap.zig");
@@ -10,8 +6,6 @@ const Press = keymap.Press;
 const Selection = keymap.Selection;
 const textScalar = keymap.textScalar;
 
-/// Every encoding of every `Key`: the one place a key's name meets the
-/// terminal's report of it. Each matches exact modifiers.
 const chords = std.enums.EnumArray(Key, []const Chord).init(.{
     // A CSI-u report (Kitty or tmux extended keys) can name Alt-Escape;
     // it still means Esc. Legacy ESC ESC already decodes as Esc.
@@ -68,7 +62,6 @@ pub fn classify(value: vaxis.Key) Press {
     // Alt-Enter adds a line in every form: Ghostty and other terminals send
     // Shift-Enter as ESC CR, which decodes exactly as Kitty's Alt-Enter.
     if (value.matchExact(vaxis.Key.enter, .{ .shift = true }) or value.matchExact(vaxis.Key.enter, .{ .alt = true }) or value.matchExact('j', .{ .ctrl = true })) return .{ .edit = .newline };
-    // The bare arrows are named keys above; these are their Emacs aliases.
     if (value.matchExact('b', .{ .ctrl = true })) return .{ .edit = .left };
     if (value.matchExact('f', .{ .ctrl = true })) return .{ .edit = .right };
     if (value.matchExact('a', .{ .ctrl = true })) return .{ .edit = .line_start };
@@ -81,11 +74,6 @@ pub fn classify(value: vaxis.Key) Press {
     if (value.matchExact(vaxis.Key.backspace, .{ .alt = true }) or value.matchExact(127, .{ .alt = true })) return .{ .edit = .delete_word_part };
     if (value.matchExact('b', .{ .alt = true }) or value.matchExact(vaxis.Key.left, .{ .alt = true })) return .{ .edit = .word_left };
     if (value.matchExact('f', .{ .alt = true }) or value.matchExact(vaxis.Key.right, .{ .alt = true })) return .{ .edit = .word_right };
-    // Any Alt, Super, Hyper or Meta chord the bindings above do not consume,
-    // on a character, a control or a named key such as Enter, is dropped
-    // whole and reported. Its bare key (ESC . as ".", ESC ^A as Ctrl-A) was
-    // never typed, and the draft around it was: an Esc pressed just before
-    // a key arrives as one chord.
     if (value.mods.alt or value.mods.super or value.mods.hyper or value.mods.meta) return .chord;
     // An unbound Ctrl key is dropped and reported the same way, the draft
     // kept: vaxis represents C0 controls as Ctrl keys or textless Kitty
@@ -97,8 +85,6 @@ pub fn classify(value: vaxis.Key) Press {
     return .none;
 }
 
-/// What an App event does at a choice, with Root's paste flag: paste
-/// boundaries and pasted text go to the composer.
 pub fn selectEvent(comptime keys: anytype, event: vaxis.vxfw.Event, pasting: bool) Selection(@TypeOf(keys).Action) {
     return switch (event) {
         .paste_start => .text,
@@ -110,16 +96,12 @@ pub fn selectEvent(comptime keys: anytype, event: vaxis.vxfw.Event, pasting: boo
 
 pub fn selectKey(comptime keys: anytype, pressed: vaxis.Key) Selection(@TypeOf(keys).Action) {
     return switch (classify(pressed)) {
-        // The bare arrows the screen leaves unbound move the choice.
         .key => |key_name| if (keys.get(key_name)) |action| .{ .action = action } else switch (key_name) {
             .left => .left,
             .right => .right,
             else => .none,
         },
         .enter => .enter,
-        // Ctrl-B and Ctrl-F move the draft's caret alone. The draft's other
-        // edit keys have no use at a choice; a Ctrl or Alt chord among them
-        // is refused like any other.
         .edit => if (pressed.mods.ctrl or pressed.mods.alt or pressed.mods.super or pressed.mods.hyper or pressed.mods.meta) .refused else .none,
         .chord, .control => .refused,
         .text => |text| if (text.len != 0) .text else .none,
@@ -129,7 +111,6 @@ pub fn selectKey(comptime keys: anytype, pressed: vaxis.Key) Selection(@TypeOf(k
 
 test "a choice takes its arrows and Enter, the screen's keys and typing, and refuses chords" {
     const Name = Key;
-    // A screen that leaves the arrows unbound, as the conversation does.
     const keys = comptime blk: {
         var map = keymap.every;
         map.meanings.set(.left, null);
@@ -156,12 +137,8 @@ test "a choice takes its arrows and Enter, the screen's keys and typing, and ref
         .{ .bytes = "\x1bu", .expected = .refused },
         .{ .bytes = "\x1c", .expected = .refused },
         .{ .bytes = "\x1b[113;5u", .expected = .refused },
-        // The draft's other edit keys have no use at a choice; a chord
-        // among them is refused.
         .{ .bytes = "\x01", .expected = .refused },
         .{ .bytes = "\x1b[1;3D", .expected = .refused },
-        // Ctrl-B and Ctrl-F move the draft's caret, never the choice, in
-        // raw, Kitty and modifyOtherKeys form.
         .{ .bytes = "\x02", .expected = .refused },
         .{ .bytes = "\x06", .expected = .refused },
         .{ .bytes = "\x1b[98;5u", .expected = .refused },
@@ -181,7 +158,6 @@ test "a choice takes its arrows and Enter, the screen's keys and typing, and ref
         }
         try std.testing.expectEqual(case.expected, last);
     }
-    // An arrow the screen binds is the screen's action, as the list's Right is.
     try std.testing.expectEqual(Selection(Name){ .action = .right }, selectKey(keymap.every, .{ .codepoint = vaxis.Key.right }));
     try std.testing.expectEqual(Selection(Name){ .action = .left }, selectKey(keymap.every, .{ .codepoint = vaxis.Key.left }));
 }

@@ -1,10 +1,3 @@
-//! MCP 2026-07-28 requests as the bytes of one HTTP/1.1 POST, as values
-//! (D64). The protocol is stateless: there is no `initialize` and no
-//! session, and every request carries its version, capabilities and client
-//! in `_meta` and mirrors its method and name into header fields. A
-//! `tools/call` also carries the calling Session, its parent and root, and
-//! the Turn (D177, D195, D205); these are context for the server, not a
-//! call id, and no call id is sent (D61).
 const std = @import("std");
 const http1 = @import("../http1/request.zig");
 const document = @import("document.zig");
@@ -14,57 +7,42 @@ pub const protocol_version = "2026-07-28";
 
 pub const Error = headers.Error;
 
-/// The server one request goes to: its loopback target and the static
-/// token sent as `Authorization: Bearer` (D120).
 pub const Server = struct {
     target: http1.Target,
     bearer_token: []const u8,
 };
 
-/// `io.modelcontextprotocol/clientInfo`.
 pub const Client = struct {
     name: []const u8,
     version: []const u8,
 };
 
-/// Who is calling, as the client API shows these ids (D205).
 pub const Caller = struct {
     session_id: []const u8,
-    /// Null for a root Session, which then sends no parent key.
     parent_session_id: ?[]const u8,
     root_session_id: []const u8,
     turn_id: []const u8,
 };
 
 pub const Call = struct {
-    /// The tool's name, decoded.
     name: []const u8,
-    /// The tool's saved `inputSchema`, a checked JSON object: its
-    /// `x-mcp-header` annotations name the fields the call mirrors.
     input_schema: []const u8,
-    /// The arguments the server receives, a checked JSON object holding
-    /// only the fields its schema lists (D62).
     arguments: []const u8,
     caller: Caller,
 };
 
-/// Writes a `tools/list` request for the page after `cursor`, which is a
-/// `nextCursor` string's contents exactly as the server wrote them.
 pub fn writeList(writer: *std.Io.Writer, server: Server, client: Client, id: u64, cursor: ?[]const u8) Error!void {
     const body: ListBody = .{ .client = client, .id = id, .cursor = cursor };
     try writeHead(writer, server, "tools/list", null, null, body.length());
     try body.write(writer);
 }
 
-/// Writes a `tools/call` request.
 pub fn writeCall(writer: *std.Io.Writer, server: Server, client: Client, id: u64, call: Call) Error!void {
     const body: CallBody = .{ .client = client, .id = id, .call = call };
     try writeHead(writer, server, "tools/call", call.name, call, body.length());
     try body.write(writer);
 }
 
-/// How many bytes `writeList` or `writeCall` would write with these
-/// arguments, so the caller can size the request's buffer first.
 pub fn length(comptime write: anytype, args: anytype) Error!usize {
     var counter: std.Io.Writer.Discarding = .init(&.{});
     try @call(.auto, write, .{&counter.writer} ++ args);

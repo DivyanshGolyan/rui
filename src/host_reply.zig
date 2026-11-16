@@ -1,6 +1,3 @@
-//! The JSON a Host replies with: each reply's renderer, written from the
-//! shape protocol.zig declares for it, over the values the Store answered
-//! with. The server sends what these write.
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const change_ring = @import("change_ring.zig");
@@ -22,7 +19,6 @@ pub fn renderActivitySearch(out: protocol.JsonOut, page: *const protocol.Activit
     activity_reply.writeSearch(out.writer, page) catch return error.BufferTooLarge;
 }
 
-/// The HTTP status of a mutation reply: the same four outcomes for each.
 pub fn httpStatus(result: anytype) u16 {
     return switch (result) {
         .accepted, .rejected => 200,
@@ -31,7 +27,6 @@ pub fn httpStatus(result: anytype) u16 {
     };
 }
 
-/// `session` is the Session the request named.
 pub fn renderConfigureReply(
     response: protocol.JsonOut,
     session: []const u8,
@@ -46,7 +41,6 @@ pub fn renderConfigureReply(
     };
 }
 
-/// `session` is the Session the request named.
 pub fn renderMessageReply(
     response: protocol.JsonOut,
     session: []const u8,
@@ -61,7 +55,6 @@ pub fn renderMessageReply(
     };
 }
 
-// Rare diagnostic scratch stays off the engine and the ordinary reply frame.
 noinline fn renderToolRejection(response: protocol.JsonOut, session: []const u8, value: anytype, comptime shape: anytype) !void {
     var buffer: [@import("tool_record.zig").HostToolSet.max_refusal_message_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
@@ -153,7 +146,6 @@ pub fn renderModelInterruptionReply(
     };
 }
 
-/// The decision a permission reply answers, as the request named it.
 pub const PermissionTarget = struct {
     session: protocol.Bounded(protocol.max_session_bytes),
     action_id: u64,
@@ -278,7 +270,6 @@ pub fn renderFullCommandObservation(
     try response.appendShape(shapes.tail, .{});
 }
 
-/// What `host info` reports, named so no two counts can trade places.
 pub const HostInfo = struct {
     store: []const u8,
     instance: protocol.InstanceId,
@@ -306,7 +297,6 @@ pub fn renderHostPause(response: protocol.JsonOut, paused: bool) !void {
     try response.appendShape(protocol.host_pause_reply, .{paused});
 }
 
-/// Nothing changed since the token: it comes back, with no rows.
 pub fn renderSessionsNotModified(response: protocol.JsonOut, since: protocol.SinceToken) !void {
     var token: [protocol.SinceToken.max_bytes]u8 = undefined;
     try response.appendShape(protocol.session_list_reply.head ++ protocol.session_list_reply.last_tail, .{ protocol.ListDelta.not_modified, since.format(&token) });
@@ -333,9 +323,6 @@ test "a mutation's outcome decides its HTTP status" {
 }
 
 test "every reply renders its exact worst-case bound from the shape it writes" {
-    // Each bound comes from the shape its renderer writes, so the longest
-    // value of every variant must reach it exactly. Text a renderer wrote
-    // outside its shape, or a hole the bound missed, would fail here.
     const max = std.math.maxInt(u64);
     const escaped_session = @as([protocol.max_session_bytes]u8, @splat(1));
     const escaped_key = @as([protocol.max_key_bytes]u8, @splat(1));
@@ -347,7 +334,6 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     var code: protocol.Bounded(protocol.max_code_bytes) = .{};
     try code.set(&escaped_code);
     const Worst = struct {
-        /// The tag a bound must allow for: the longest name.
         fn tag(comptime E: type) E {
             var longest = std.meta.tags(E)[0];
             for (std.meta.tags(E)) |value| {
@@ -373,8 +359,6 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         }
     };
 
-    // The semantic diagnostic only contains valid names. Exercise the
-    // string hole's arbitrary-escaping bound separately from the other arms.
     const message_expansion = protocol.Hole.maxBytes(.{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }) - "null".len;
     try std.testing.expectEqual(protocol.configuration_reply.max_bytes, @max(
         try Worst.reply(renderConfigureReply, @as([]const u8, &escaped_session), .{
@@ -441,8 +425,6 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try std.testing.expectEqual(protocol.shapeBytes(shape.head) + protocol.shapeBytes(shape.tail), host_info.len);
     host_info.len = 0;
     var with_diagnostic = worst_info;
-    // The public shape permits the full selector bound and the optional
-    // diagnostic together, not just a MySQL id's narrower runtime bound.
     with_diagnostic.doublewrite = &@as([32]u8, @splat(0x01));
     try host_info.render(renderHostInfo, .{with_diagnostic});
     try std.testing.expectEqual(protocol.max_host_info_response_bytes, host_info.len);
@@ -452,8 +434,6 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try configured.target.set(&escaped_session);
     try std.testing.expectEqual(observations.maxBytes(.configure), try Worst.observation(&escaped_key, configured));
 
-    // Message's full live work plus four recovery descriptions is exercised
-    // separately above; each closed result shape is checked byte-exactly.
     var stopped = command_reply.CommandObservation{ .status = .accepted, .code = code, .kind = .{ .session_stop = .{
         .selection = .{ .selected_turn_id = max, .admission_cutoff = max },
         .completion = Worst.tag(protocol.SessionStopCompletion),
@@ -553,7 +533,6 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     facts.call_activity = .{ .total = max, .count = 3 };
     @memset(&facts.call_activity.entries, .{ .operation = max, .ordinal = max, .presentation = presentation });
     facts.queued = .{ .count = max, .oldest_position = max, .newest_admission = max, .newest_position = max };
-    // The work state's longest kind: every variant written, the longest kept.
     var longest_state: protocol.WorkState = undefined;
     var longest_state_bytes: usize = 0;
     for ([_]protocol.WorkState{
