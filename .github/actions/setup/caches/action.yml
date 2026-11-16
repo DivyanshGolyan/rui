@@ -16,6 +16,12 @@ inputs:
   save-only:
     description: Save the keys captured by setup; run with always() after compilation
     default: 'false'
+  setup-outcome:
+    description: Outcome of setup and any prerequisite fetch or artifact restore
+    default: ''
+  work-outcome:
+    description: Outcome of the bounded compile or configure step
+    default: ''
 outputs:
   build-hit:
     description: Whether the build cache restored an exact key
@@ -152,32 +158,41 @@ runs:
           if [ "$PUBLISH" != true ] || [ "${!hit_var}" = true ]; then key=; fi
           echo "RUI_CACHE_${cache}_KEY=$key" >> "$GITHUB_ENV"
         done
+    - name: Select publication keys from completed work
+      id: save-keys
+      if: ${{ always() && inputs.save-only == 'true' }}
+      shell: bash
+      env:
+        SETUP_OUTCOME: ${{ inputs.setup-outcome }}
+        WORK_OUTCOME: ${{ inputs.work-outcome }}
+        JOB_SUCCESS: ${{ job.status == 'success' }}
+      run: node .github/actions/setup/caches/save-keys.cjs
     # A composite has no post hook. Call this same owner with save-only: true
     # under always() after the bounded compile step, before slow diagnostics.
     - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      if: ${{ always() && inputs.save-only == 'true' && env.RUI_CACHE_COMPILER_READY == 'true' && env.RUI_CACHE_COMPILER_KEY != '' }}
+      if: ${{ always() && inputs.save-only == 'true' && steps.save-keys.outputs.compiler-key != '' }}
       with:
         path: ${{ runner.temp }}/rui-zig
-        key: ${{ env.RUI_CACHE_COMPILER_KEY }}
+        key: ${{ steps.save-keys.outputs.compiler-key }}
     - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      if: ${{ always() && inputs.save-only == 'true' && env.RUI_CACHE_BUILD_KEY != '' }}
+      if: ${{ always() && inputs.save-only == 'true' && steps.save-keys.outputs.build-key != '' }}
       with:
         path: |
           ~/.cache/zig
           .zig-cache
           zig-pkg
           screen-emulator/zig-pkg
-        key: ${{ env.RUI_CACHE_BUILD_KEY }}
+        key: ${{ steps.save-keys.outputs.build-key }}
     - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      if: ${{ always() && inputs.save-only == 'true' && env.RUI_CACHE_PACKAGES_KEY != '' }}
+      if: ${{ success() && inputs.save-only == 'true' && steps.save-keys.outputs.packages-key != '' }}
       with:
         path: zig-pkg
-        key: ${{ env.RUI_CACHE_PACKAGES_KEY }}
+        key: ${{ steps.save-keys.outputs.packages-key }}
     - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      if: ${{ always() && inputs.save-only == 'true' && env.RUI_CACHE_RUNNER_KEY != '' }}
+      if: ${{ always() && inputs.save-only == 'true' && steps.save-keys.outputs.runner-key != '' }}
       with:
         path: |
           ~/.cache/zig
           .zig-cache
           !.zig-cache/o/ci-compiled
-        key: ${{ env.RUI_CACHE_RUNNER_KEY }}
+        key: ${{ steps.save-keys.outputs.runner-key }}

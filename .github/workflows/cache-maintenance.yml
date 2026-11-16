@@ -58,18 +58,20 @@ jobs:
           - runner: macos-15
             arch: arm64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup
-        timeout-minutes: 15
+        id: setup
+        timeout-minutes: 5
         with:
           check-part: baseline
       - name: Warm production compilation, not test acceptance
-        timeout-minutes: 90
+        id: compile
+        timeout-minutes: 18
         env:
           EXPECTED_ARCH: ${{ matrix.arch }}
         run: |
@@ -79,10 +81,12 @@ jobs:
           echo "Compilation cache baseline for $(git rev-parse HEAD) on $(uname -s)/$(uname -m). No test acceptance or release qualification." >> "$GITHUB_STEP_SUMMARY"
       - name: Save reusable caches even after failure
         if: ${{ always() }}
-        timeout-minutes: 10
+        timeout-minutes: 3
         uses: ./.github/actions/setup/caches
         with:
           save-only: 'true'
+          setup-outcome: ${{ steps.setup.outcome }}
+          work-outcome: ${{ steps.compile.outcome }}
       # Selected checks' policy job restores this tarball from main.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: actionlint-cache
@@ -91,7 +95,8 @@ jobs:
           path: ${{ runner.temp }}/actionlint
           key: rui-actionlint-1.7.7-linux-amd64
       - name: Publish the pinned workflow linter
-        timeout-minutes: 3
+        id: actionlint-install
+        timeout-minutes: 2
         if: ${{ runner.os == 'Linux' }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -99,8 +104,9 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/actionlint"
           bash .github/scripts/install-actionlint.sh "$RUNNER_TEMP/actionlint"
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: ${{ always() && runner.os == 'Linux' && steps.actionlint-cache.outputs.cache-hit != 'true' && steps.actionlint-cache.outputs.cache-primary-key != '' }}
+      - timeout-minutes: 1
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ success() && steps.actionlint-install.outcome == 'success' && runner.os == 'Linux' && steps.actionlint-cache.outputs.cache-hit != 'true' && steps.actionlint-cache.outputs.cache-primary-key != '' }}
         with:
           path: ${{ runner.temp }}/actionlint
           key: ${{ steps.actionlint-cache.outputs.cache-primary-key }}
@@ -123,11 +129,13 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup
+        id: setup
         timeout-minutes: 15
         with:
           targets: ${{ matrix.part == 'compiled' && env.TARGETS || '[]' }}
           check-part: ${{ matrix.part }}
       - name: Compile the same gates as the split producers
+        id: compile
         timeout-minutes: 90
         env:
           PART: ${{ matrix.part == 'compiled-unit' && 'unit' || 'rest' }}
@@ -138,6 +146,8 @@ jobs:
         uses: ./.github/actions/setup/caches
         with:
           save-only: 'true'
+          setup-outcome: ${{ steps.setup.outcome }}
+          work-outcome: ${{ steps.compile.outcome }}
   runner:
     # Test shards restore the build runner compiled for their CPU model, which
     # saves them a median 89 s, and only main saves it. Each Linux slot lands
@@ -149,14 +159,15 @@ jobs:
       matrix:
         slot: [1, 2, 3, 4, 5, 6, mac]
     runs-on: ${{ matrix.slot == 'mac' && 'macos-15' || 'ubuntu-24.04' }}
-    timeout-minutes: 40
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup
-        timeout-minutes: 15
+        id: setup
+        timeout-minutes: 3
         with:
           compiled: 'true'
       # Shards get packages from the producer artifact; this has none.
@@ -165,17 +176,24 @@ jobs:
           path: zig-pkg
           key: rui-packages-v1-${{ hashFiles('build.zig.zon') }}
           restore-keys: rui-packages-v1-
-      - name: Compile and configure the build runner as a test shard does
-        timeout-minutes: 10
+      - name: Fetch the pinned graph before configuring the runner
+        id: fetch
+        timeout-minutes: 3
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash src/fetch_dependencies.sh
+      - name: Configure the fetched build runner
+        id: compile
+        timeout-minutes: 2
+        run: zig build --fetch=all
       - name: Save reusable caches even after failure
         if: ${{ always() }}
-        timeout-minutes: 10
+        timeout-minutes: 3
         uses: ./.github/actions/setup/caches
         with:
           save-only: 'true'
+          setup-outcome: ${{ steps.setup.outcome == 'success' && steps.fetch.outcome == 'success' && 'success' || 'failure' }}
+          work-outcome: ${{ steps.compile.outcome }}
   previous_release:
     # The upgrade check restores this; requested refs cannot publish caches.
     if: ${{ github.event_name != 'workflow_run' && !github.event.repository.private && github.ref == 'refs/heads/main' }}
@@ -184,14 +202,15 @@ jobs:
       matrix:
         runner: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 70
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup
-        timeout-minutes: 15
+        id: setup
+        timeout-minutes: 5
         with:
           check-part: previous-release
       - name: Check out the pinned previous release
@@ -211,21 +230,24 @@ jobs:
             ${{ runner.temp }}/previous-release/zig-pkg
           key: rui-previous-release-${{ runner.os }}-${{ runner.arch }}-0.17.1-0e4b2225d106dd63fa9c38801188facb5e9c6335
       - name: Build the previous release as its installer does
-        timeout-minutes: 35
+        id: compile
+        timeout-minutes: 30
         if: ${{ steps.restore.outputs.cache-hit != 'true' }}
         working-directory: ${{ runner.temp }}/previous-release
         run: |
           set -euo pipefail
           bash src/fetch_dependencies.sh
           zig build -Doptimize=ReleaseSafe --prefix "$RUNNER_TEMP/previous-install" --summary all
-      - name: Save reusable caches even after failure
-        if: ${{ always() }}
-        timeout-minutes: 10
+      - name: Save completed setup caches
+        if: ${{ success() }}
+        timeout-minutes: 3
         uses: ./.github/actions/setup/caches
         with:
           save-only: 'true'
+          setup-outcome: ${{ steps.setup.outcome }}
+          work-outcome: ${{ steps.compile.outcome }}
       - name: Publish the previous-release compilation
-        if: ${{ always() && steps.restore.outputs.cache-hit != 'true' && steps.restore.outputs.cache-primary-key != '' }}
+        if: ${{ success() && steps.compile.outcome == 'success' && steps.restore.outputs.cache-hit != 'true' && steps.restore.outputs.cache-primary-key != '' }}
         timeout-minutes: 5
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

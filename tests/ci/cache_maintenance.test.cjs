@@ -5,6 +5,7 @@ const {tmpdir} = require('node:os');
 const {join} = require('node:path');
 const {test} = require('node:test');
 const prune = require('../../.github/scripts/prune-caches.cjs');
+const {saveKey} = require('../../.github/actions/setup/caches/save-keys.cjs');
 
 function cache(id, ref, platform = 'Linux-X64', part = 'all') {
   return {
@@ -298,9 +299,9 @@ test('maintenance warms both producer parts on both platforms using the consumer
     assert.match(consumers[`${platform}_build_unit`], /build_artifact.py build "\$TARGETS" --part unit/);
     assert.match(consumers[`${platform}_build`], /check-part: compiled\s/);
     assert.match(consumers[`${platform}_build_unit`], /check-part: compiled-unit\s/);
-    // The existing cold-build safety nets remain; unit Linux gets one too.
+    // Keep the existing cold-build safety nets, without increasing Linux unit.
     assert.match(consumers[`${platform}_build`], /^    timeout-minutes: 60$/m);
-    assert.match(consumers[`${platform}_build_unit`], /^    timeout-minutes: 60$/m);
+    assert.match(consumers[`${platform}_build_unit`], new RegExp(`^    timeout-minutes: ${platform === 'linux' ? 15 : 60}$`, 'm'));
   }
   // These are compilation-only targets, not zig build check/test acceptance.
   assert.match(jobs.compiled, /\["check-full","test-logic","admission-debug-integration","stack-frames"\]/);
@@ -320,10 +321,15 @@ test('every setup publisher explicitly saves after bounded work and before failu
       const save = steps.findIndex(step => /save-only: 'true'/.test(step));
       const label = `${file}/${name}`;
       assert.ok(save > setup, `${label} must save after setup and work`);
-      assert.match(steps[save], /if: \$\{\{ always\(\) \}\}/, label);
+      assert.match(steps[save], name === 'previous_release' ? /if: \$\{\{ success\(\) \}\}/ : /if: \$\{\{ always\(\) \}\}/, label);
       assert.match(steps[save], /uses: \.\/\.github\/actions\/setup\/caches\n/, label);
       assert.match(steps[save], /timeout-minutes: \d+/, label);
       assert.match(steps[setup], /timeout-minutes: \d+/, `${label} bounds setup too`);
+      assert.match(steps[setup], /id: setup\n/, label);
+      assert.match(steps[save], /setup-outcome: .*steps\.setup\.outcome/, label);
+      assert.match(steps[save], /work-outcome: \$\{\{ steps\.compile\.outcome \}\}/, label);
+      const compile = steps.findIndex(step => /id: compile\n/.test(step));
+      assert.ok(setup < compile && compile < save, `${label} must name the actual work outcome`);
       const bisect = steps.findIndex(step => /name: Bisect/.test(step));
       if (bisect >= 0) assert.ok(save < bisect, `${label} saves before long bisect`);
       const work = steps.slice(setup + 1, save).filter(step => /^(?:        |      - )run:/m.test(step));
@@ -343,7 +349,7 @@ test('every setup publisher explicitly saves after bounded work and before failu
 
 test('capture only missing exact keys, preserving fallback and cold misses even after failure', () => {
   const action = readFileSync(`${__dirname}/../../.github/actions/setup/caches/action.yml`, 'utf8');
-  const capture = action.match(/- name: Capture missing exact keys for the later save\n[\s\S]*?(?=^    # A composite)/m)[0];
+  const capture = action.match(/- name: Capture missing exact keys for the later save\n[\s\S]*?(?=^    - name: Select publication)/m)[0];
   assert.match(capture, /always\(\) && inputs.save-only != 'true'/);
   const script = capture.match(/^      run: \|\n((?: {8}.*\n)+)/m)[1].replace(/^ {8}/gm, '');
   const caches = ['COMPILER', 'BUILD', 'PACKAGES', 'RUNNER'];
@@ -374,12 +380,166 @@ test('capture only missing exact keys, preserving fallback and cold misses even 
   assert.equal(saves.length, caches.length);
   for (const [index, step] of saves.entries()) {
     const cache = caches[index];
-    assert.ok(step.includes(`env.RUI_CACHE_${cache}_KEY != ''`));
-    assert.ok(step.includes(`key: \${{ env.RUI_CACHE_${cache}_KEY }}`));
-    assert.match(step, /always\(\) && inputs.save-only == 'true'/);
+    assert.ok(step.includes(`steps.save-keys.outputs.${cache.toLowerCase()}-key != ''`));
+    assert.ok(step.includes(`key: \${{ steps.save-keys.outputs.${cache.toLowerCase()}-key }}`));
+    assert.match(step, cache === 'PACKAGES' ? /success\(\) && inputs.save-only == 'true'/ : /always\(\) && inputs.save-only == 'true'/);
   }
-  assert.match(saves[0], /env.RUI_CACHE_COMPILER_READY == 'true'/,
-    'never publish an interrupted compiler extraction');
+  assert.match(action, /run: node \.github\/actions\/setup\/caches\/save-keys\.cjs/);
+  assert.match(action, /SETUP_OUTCOME: \$\{\{ inputs.setup-outcome \}\}/);
+  assert.match(action, /WORK_OUTCOME: \$\{\{ inputs.work-outcome \}\}/);
+  assert.match(action, /JOB_SUCCESS: \$\{\{ job.status == 'success' \}\}/);
   const setup = readFileSync(`${__dirname}/../../.github/actions/setup/action.yml`, 'utf8');
   assert.match(setup, /test "\$\("\$RUNNER_TEMP\/rui-zig\/zig" version\)" = 0\.17\.1\n        echo "RUI_CACHE_COMPILER_READY=true"/);
+});
+
+// Evaluate only the conjunction/equality subset used by the actual save guards.
+// Unsupported syntax fails the test instead of silently inventing Actions behavior.
+function saveGuard(step, values, successful) {
+  const expression = step.match(/^ {6,8}if: \$\{\{ (.*) \}\}$/m)[1];
+  return expression.split(' && ').every(term => {
+    if (term === 'always()') return true;
+    if (term === 'success()') return successful;
+    const match = term.match(/^([\w.-]+) (==|!=) '([^']*)'$/);
+    assert.ok(match, `unsupported save guard: ${term}`);
+    assert.ok(Object.hasOwn(values, match[1]), `missing guard input: ${match[1]}`);
+    return match[2] === '==' ? values[match[1]] === match[3] : values[match[1]] !== match[3];
+  });
+}
+
+test('every saved cache x work outcome x restore state chooses exact, partial, or none', () => {
+  const root = `${__dirname}/../..`;
+  const action = readFileSync(`${root}/.github/actions/setup/caches/action.yml`, 'utf8');
+  const saves = Object.fromEntries(action.split(/(?=^    - uses: actions\/cache\/save@)/m).slice(1)
+    .map(step => [step.match(/key: \$\{\{ steps.save-keys.outputs.([a-z]+)-key \}\}/)[1], step]));
+  const maintenance = workflowJobs(readFileSync(`${root}/.github/workflows/cache-maintenance.yml`, 'utf8'));
+  const external = {
+    'previous-release': workflowSteps(maintenance.previous_release).find(step => step.includes('name: Publish the previous-release compilation')),
+    actionlint: workflowSteps(maintenance.baseline).find(step => step.includes('uses: actions/cache/save@')),
+  };
+  for (const [kind, step] of Object.entries(external)) {
+    assert.doesNotMatch(step, /always\(\)/, `${kind} remains save-on-success`);
+    assert.match(step, /success\(\)/);
+    assert.match(step, /outcome == 'success'/, `${kind} must finish its own work`);
+    assert.match(step, /key: \$\{\{ steps\.(?:restore|actionlint-cache).outputs.cache-primary-key \}\}/);
+  }
+  const kinds = ['compiler', 'build', 'packages', 'runner', 'previous-release', 'actionlint'];
+  // Expected decisions come from the approved rule, not the policy under test.
+  const outcomes = [
+    {name: 'setup/install failed', setupOutcome: 'failure', workOutcome: 'skipped', compilerReady: false, successful: false,
+      expected: ['none', 'none', 'none', 'none', 'none', 'none']},
+    {name: 'fetch failed after verified compiler', setupOutcome: 'failure', workOutcome: 'skipped', compilerReady: true, successful: false,
+      expected: ['exact', 'none', 'none', 'none', 'none', 'none']},
+    {name: 'compile failed', setupOutcome: 'success', workOutcome: 'failure', compilerReady: true, successful: false,
+      expected: ['exact', 'partial', 'none', 'partial', 'none', 'none']},
+    {name: 'compile step timed out', setupOutcome: 'success', workOutcome: 'failure', compilerReady: true, successful: false,
+      expected: ['exact', 'partial', 'none', 'partial', 'none', 'none']},
+    {name: 'compile cancelled', setupOutcome: 'success', workOutcome: 'cancelled', compilerReady: true, successful: false,
+      expected: ['exact', 'partial', 'none', 'partial', 'none', 'none']},
+    {name: 'success', setupOutcome: 'success', workOutcome: 'success', compilerReady: true, successful: true,
+      expected: ['exact', 'exact', 'exact', 'exact', 'exact', 'exact']},
+    {name: 'later unrelated failure', setupOutcome: 'success', workOutcome: 'success', compilerReady: true, successful: false,
+      expected: ['exact', 'exact', 'none', 'exact', 'none', 'none']},
+    {name: 'compile skipped', setupOutcome: 'success', workOutcome: 'skipped', compilerReady: true, successful: true,
+      expected: ['exact', 'none', 'exact', 'none', 'none', 'none']},
+  ];
+  for (const outcome of outcomes) {
+    for (const restore of ['exact hit', 'prefix hit', 'miss']) {
+      const exactHit = restore === 'exact hit';
+      const directory = mkdtempSync(join(tmpdir(), 'rui-publication-domain-'));
+      try {
+        const output = join(directory, 'output');
+        // Exercise the production CLI handoff as well as its pure policy.
+        const keys = Object.fromEntries(kinds.map(kind => [kind, `key-${kind}`]));
+        const env = {
+          PATH: process.env.PATH, GITHUB_OUTPUT: output, GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '2',
+          SETUP_OUTCOME: outcome.setupOutcome, WORK_OUTCOME: outcome.workOutcome,
+          JOB_SUCCESS: String(outcome.successful), RUI_CACHE_COMPILER_READY: String(outcome.compilerReady),
+        };
+        for (const kind of Object.keys(saves)) env[`RUI_CACHE_${kind.toUpperCase()}_KEY`] = exactHit ? '' : keys[kind];
+        execFileSync(process.execPath, [`${root}/.github/actions/setup/caches/save-keys.cjs`], {env});
+        const selected = Object.fromEntries(readFileSync(output, 'utf8').trimEnd().split('\n').map(line => line.split('=')));
+        for (const [index, kind] of kinds.entries()) {
+          const label = `${kind}/${outcome.name}/${restore}`;
+          const choice = exactHit ? 'none' : outcome.expected[index];
+          const expected = choice === 'none' ? '' : choice === 'exact' ? keys[kind] : `${keys[kind]}-partial-123-2`;
+          let actual;
+          if (Object.hasOwn(saves, kind)) {
+            const value = selected[`${kind}-key`];
+            assert.equal(value, saveKey({...outcome, kind, key: exactHit ? '' : keys[kind], runId: '123', runAttempt: '2'}), label);
+            const values = {'inputs.save-only': 'true', [`steps.save-keys.outputs.${kind}-key`]: value};
+            actual = saveGuard(saves[kind], values, outcome.successful) ? value : '';
+          } else {
+            const prefix = kind === 'actionlint' ? 'actionlint-cache' : 'restore';
+            const values = {
+              'runner.os': 'Linux', 'steps.compile.outcome': outcome.workOutcome,
+              'steps.actionlint-install.outcome': outcome.workOutcome,
+              [`steps.${prefix}.outputs.cache-hit`]: exactHit ? 'true' : restore === 'prefix hit' ? 'false' : '',
+              [`steps.${prefix}.outputs.cache-primary-key`]: keys[kind],
+            };
+            actual = saveGuard(external[kind], values, outcome.successful) ? keys[kind] : '';
+          }
+          assert.equal(actual, expected, label);
+        }
+      } finally { rmSync(directory, {recursive: true, force: true}); }
+    }
+  }
+  for (const kind of Object.keys(saves)) {
+    assert.equal(saveKey({kind, key: '', setupOutcome: 'success', workOutcome: 'success', compilerReady: true, successful: true}), '', `${kind}/skipped restore or read-only publisher`);
+  }
+});
+
+test('partial compilation restores by existing prefixes without claiming an exact hit', () => {
+  const digest = 'a'.repeat(64);
+  for (const [kind, key, prefix] of [
+    ['build', `rui-build-v2-Linux-X64-0.17.1-${digest}-compiled.${digest}-${digest}`, `rui-build-v2-Linux-X64-0.17.1-${digest}-compiled.${digest}-`],
+    ['runner', `rui-runner-v2-Linux-X64-0.17.1-${digest}-${'b'.repeat(16)}-${digest}`, `rui-runner-v2-Linux-X64-0.17.1-${digest}-${'b'.repeat(16)}-`],
+  ]) {
+    const partial = saveKey({kind, key, setupOutcome: 'success', workOutcome: 'failure', runId: '123', runAttempt: '1'});
+    assert.ok(partial.startsWith(prefix));
+    assert.notEqual(partial, key, 'partial restore cannot set an exact cache-hit');
+    const resumed = saveKey({kind, key, setupOutcome: 'success', workOutcome: 'success'});
+    assert.equal(resumed, key, 'resuming must still be able to publish completed work');
+    assert.notEqual(saveKey({kind, key, setupOutcome: 'success', workOutcome: 'failure', runId: '123', runAttempt: '2'}), partial);
+  }
+  const setup = readFileSync(`${__dirname}/../../.github/actions/setup/action.yml`, 'utf8');
+  const fetches = setup.match(/if: .*steps.caches.outputs.build-hit != 'true'.*/g);
+  assert.equal(fetches.length, 2, 'both fetch paths still run on prefix/partial hits');
+});
+
+test('prune retains newest partial per build or CPU prefix independently of complete snapshots', async () => {
+  const main = 'refs/heads/main';
+  const build = (id, part = 'compiled', platform = 'Linux-X64') => ({
+    ...cache(id, main, platform, part),
+    key: `rui-build-v2-${platform}-0.17.1-${'a'.repeat(64)}-${part}.${id.toString(16).padStart(64, '0')}-${'b'.repeat(64)}`,
+  });
+  const runner = (id, cpu = 'c') => ({...cache(id, main), key: `rui-runner-v2-Linux-X64-0.17.1-${'a'.repeat(64)}-${cpu.repeat(16)}-${'b'.repeat(64)}`});
+  const partial = (entry, attempt = 1) => ({...entry, key: `${entry.key}-partial-123-${attempt}`});
+  const entries = [
+    cache(1, main, 'Linux-X64', 'compiled'),
+    partial(cache(2, main, 'Linux-X64', 'compiled')),
+    partial(build(3), 2), build(4), partial(build(5, 'compiled-unit')),
+    partial(build(6, 'compiled', 'macOS-ARM64')), runner(7),
+    partial(runner(8)), partial(runner(9), 2), partial(runner(10, 'd')),
+    {...partial(build(11)), ref: 'refs/pull/1/merge'},
+    {...build(12), key: `${build(12).key}-partial-invalid-1`},
+    {...cache(13, main), key: 'rui-compiler-Linux-X64-0.17.1-partial-123-1'},
+    partial(build(14), 3),
+  ];
+  const result = await run(entries);
+  assert.ifError(result.error);
+  assert.deepEqual(result.ids, [4, 5, 6, 7, 9, 10, 12, 13, 14]);
+});
+
+test('existing job timeout budgets are not increased to make space for saves', () => {
+  const directory = `${__dirname}/../../.github/workflows`;
+  for (const [file, expected] of [
+    ['cache-maintenance.yml', {baseline: '30', runner: '15', previous_release: '45'}],
+    ['check.yml', {linux_build: '60', linux_build_unit: '15', macos_build: '60', macos_build_unit: '60', macos_typecheck: '15', cache_execution: '20', linux_codegen: '20', linux_suites: '${{ inputs.promotion && 300 || 35 }}', macos_suites: '${{ inputs.promotion && 300 || 35 }}'}],
+    ['renderer-contracts.yml', {contracts: '${{ inputs.batch-base && 300 || 45 }}', mutations: '60'}],
+  ]) {
+    const jobs = workflowJobs(readFileSync(`${directory}/${file}`, 'utf8'));
+    for (const [name, budget] of Object.entries(expected)) {
+      assert.equal(jobs[name].match(/^    timeout-minutes: (.*)$/m)[1], budget, `${file}/${name}`);
+    }
+  }
 });

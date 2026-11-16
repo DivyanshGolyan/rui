@@ -180,12 +180,17 @@ The release publisher is serialized and never treats cancelled acceptance as a p
 Build caches hold compilation inputs and outputs, not acceptance.
 All Zig unit Run steps bypass Zig acceptance caching, and Go tests use `-count=1`.
 Cache-policy changes run [the fixed-seed execution regression](../../tests/ci/cache_execution.py) on Linux before main, and on macOS in promotion when the batch changed cache policy.
-Cache policy is the proof and the prune script themselves, and changed non-comment lines that name a Zig build cache or `has_side_effects` in the build, the workflows and the setup action, whose caches are all build caches; any change to the `cache_execution` job counts too.
+Cache policy is the proof, the prune script and the cache publication policy module themselves, and changed non-comment lines that name a Zig build cache or `has_side_effects` in the build, the workflows and the setup action, whose caches are all build caches; any change to the `cache_execution` job counts too.
 The required `admission` aggregate includes this job when selected.
 Build-cache keys separate native tools, Apple SDK, architecture, dependency pins, scripts, source inputs and shard.
 Only `main` saves caches; PR jobs restore main's snapshots and save none, so PR caches never feed a privileged workflow or evict main's.
 Setup restores caches and captures missing exact keys; an explicit `save-only` invocation of the same cache composite runs under `always()` after compilation, before long failure diagnostics.
-It saves compiler, build, package and build-runner caches even after failed or step-timed-out work, but never overwrites an exact hit; the compiler is published only after installation and version verification finish.
+The cache owner's `save-keys.cjs` derives publication keys from the setup and bounded work outcomes; it never overwrites an exact hit.
+Only completed work is published under an exact key. The compiler download may save after later failure, but only after installation and version verification finish.
+Build and build-runner compilation that fails or step-times-out after successful setup saves under `<exact>-partial-<run_id>-<run_attempt>`, never under the exact key; failed setup/fetch publishes no compilation snapshot.
+These partial keys match the existing prefix restore keys, report a non-exact hit, and therefore still run dependency fetch and the full build before publishing a complete exact key.
+Package, previous-release and actionlint caches remain save-on-success, with the previous-release build and linter install required to finish first.
+Shards configure and save the build runner after verified artifact restoration, before acceptance; tests still execute normally.
 Cold acceptance still bypasses build, package and build-runner caches.
 A [job timeout cancels the job](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idtimeout-minutes), and [cancellation forcibly terminates remaining work after five minutes](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation), so `always()` alone cannot guarantee an upload then.
 Setup and long compile/test steps have separate timeouts below the job budget, reserving time for saves; hard runner loss, forced cancellation or an upload failure can still prevent publication.
@@ -218,10 +223,10 @@ Native observation failure metadata is copied after reap and before temporary-ro
 
 [Cache maintenance](../../.github/workflows/cache-maintenance.yml) warms production compilation (`baseline`) and both split producer partitions (`compiled` and `compiled-unit`) on Linux and macOS after trusted main pushes that change build, dependency or maintenance inputs.
 The producer warmers run the same `build_artifact.py build` command as Selected checks and Promote, using `rest` and `unit` respectively with the full promotion core (`check-full`, `test-logic`, `admission-debug-integration`, plus Linux `stack-frames`).
-Each has a 120-minute job budget and a 90-minute compile step, leaving time to save even partial progress. The existing 60-minute producer safety nets remain; Linux unit compilation now has that budget too.
+The new split warmers have a 120-minute job budget and a 90-minute compile step. No existing job budget increases: baseline stays at 30 minutes, runner maintenance at 15, previous release at 45, Linux unit/typecheck at 15, cache proof/codegen at 20, ordinary shards at 35 and Renderer contracts at 45. The existing 60-minute Linux and Mac producer safety nets remain. Shorter step-level deadlines reserve save time within those budgets.
 A build partition restores its own newest snapshot, for the current dependencies first and then across a dependency repin; a partition with neither, such as one only pull requests run, starts from that baseline for the current dependencies, and no partition restores another's snapshot.
 It also compiles the build runner on six Linux slots and one Mac, so test shards on the CPU models those slots drew restore it from main.
-Cleanup keeps main's newest snapshot per platform and partition, per build-runner CPU model, of each platform's compiler and of the package set, and removes every PR cache; these are targets, not a quota.
+Cleanup keeps main's newest complete snapshot per platform and partition, per build-runner CPU model, of each platform's compiler and of the package set, and removes every PR cache; these are targets, not a quota. It separately keeps at most the newest partial compilation snapshot per platform/partition or runner CPU prefix, so a partial cannot evict the retained complete snapshot.
 Warm compilation snapshots are not test acceptance. Cleanup waits for all maintenance publishers, including the previous-release warmer.
 Maintenance also builds the pinned previous release per platform for the read-only upgrade check.
 The API-only cleanup job runs trusted main code with cache-deletion permission and consumes no producer code, caches or artifacts.

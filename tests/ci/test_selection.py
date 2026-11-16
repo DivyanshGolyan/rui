@@ -424,7 +424,8 @@ class BuildModuleTest(unittest.TestCase):
 
     def test_every_build_module_is_mapped(self):
         modules = {path.relative_to(build_files.ROOT).as_posix()
-                   for path in [*build_files.files(), *build_files.ROOT.glob(SETUP_PARTS)]}
+                   for path in [*build_files.files(), *build_files.ROOT.glob(SETUP_PARTS),
+                                *build_files.ROOT.glob(".github/actions/setup/*/*.cjs")]}
         self.assertEqual(modules - {"build.zig"}, BUILD_MODULES.keys())
 
     def test_a_hub_module_edit_selects_what_a_build_zig_edit_does(self):
@@ -1756,12 +1757,12 @@ fi
         for restore, save in zip(restores, saves):
             name = re.search(r'id: ([a-z]+)-cache', restore).group(1).upper()
             self.assertIn("inputs.save-only != 'true'", restore)
-            self.assertIn("always() && inputs.save-only == 'true'", save)
-            self.assertIn(f"env.RUI_CACHE_{name}_KEY != ''", save)
-            self.assertIn(f'key: ${{{{ env.RUI_CACHE_{name}_KEY }}}}', save)
+            self.assertIn(("success()" if name == "PACKAGES" else "always()") + " && inputs.save-only == 'true'", save)
+            self.assertIn(f"steps.save-keys.outputs.{name.lower()}-key != ''", save)
+            self.assertIn(f'key: ${{{{ steps.save-keys.outputs.{name.lower()}-key }}}}', save)
             path = lambda body: re.search(r'(?ms)^        path: (.*?)(?=^        key:)', body).group(1)
             self.assertEqual(path(restore), path(save))
-        self.assertIn("env.RUI_CACHE_COMPILER_READY == 'true'", saves[0])
+        self.assertIn("node .github/actions/setup/caches/save-keys.cjs", setup)
 
     def test_ci_test_methods_cannot_silently_replace_another_check(self):
         for path in Path('tests/ci').glob('test_*.py'):

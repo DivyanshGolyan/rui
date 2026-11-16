@@ -57,19 +57,21 @@ jobs:
   contracts:
     if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ inputs.batch-base && 300 || 60 }}
+    timeout-minutes: ${{ inputs.batch-base && 300 || 45 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup
-        timeout-minutes: 10
+        id: setup
+        timeout-minutes: 5
         with:
           targets: '["terminal-restoration-integration"]'
           check-part: renderer-contracts
       - name: Self-tests, direct-PTY, Ghostty, controls and recovery encodings
-        timeout-minutes: 35
+        id: compile
+        timeout-minutes: 30
         # Each contract's only copy. Every one runs even after another fails;
         # steps.py records the failed ones for a promotion to replay.
         run: |
@@ -81,10 +83,12 @@ jobs:
             'recovery=zig build input-equivalence -j2 --summary all -- --output "$STEP_OUTPUT"'
       - name: Save reusable caches even after failure
         if: ${{ always() }}
-        timeout-minutes: 10
+        timeout-minutes: 5
         uses: ./.github/actions/setup/caches
         with:
           save-only: 'true'
+          setup-outcome: ${{ steps.setup.outcome }}
+          work-outcome: ${{ steps.compile.outcome }}
       - name: Bisect the promotion batch with each failed step
         if: ${{ failure() && inputs.batch-base }}
         timeout-minutes: 240
@@ -122,11 +126,13 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
+        id: setup
         timeout-minutes: 10
         with:
           targets: '["test", "test-logic", "terminal-restoration-integration"]'
           check-part: renderer-mutations
       - name: Require behavioral kills in isolated source copies
+        id: compile
         timeout-minutes: 35
         env:
           TARGET: ${{ matrix.target }}
@@ -137,6 +143,8 @@ jobs:
         uses: ./.github/actions/setup/caches
         with:
           save-only: 'true'
+          setup-outcome: ${{ steps.setup.outcome }}
+          work-outcome: ${{ steps.compile.outcome }}
       - name: Retain counterexamples, patches and command logs
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
