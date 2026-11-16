@@ -197,7 +197,7 @@ pub fn discover(init: std.process.Init, allocator: std.mem.Allocator, home: []co
         const store = try allocator.dupe(u8, facts.facts.store.slice());
         errdefer allocator.free(store);
         const state: @FieldType(Entry, "state") = state: {
-            var observation = HostLifecycle.observe(allocator, init.io, home, store, cancellation) catch |err| break :state .{ .failed = try .of(allocator, .observation, err) };
+            var observation = HostLifecycle.observe(allocator, init.io, home, facts.directory(), cancellation) catch |err| break :state .{ .failed = try .of(allocator, .observation, err) };
             defer observation.deinit(allocator);
             break :state switch (observation) {
                 .absent => .{ .outcome = .not_needed },
@@ -228,7 +228,7 @@ pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: Op
         const facts = entry.state.observed;
         entry.state = .{ .outcome = outcome: {
             process.check(options.cancellation) catch break :outcome .cancelled;
-            var observation = HostLifecycle.observe(allocator, init.io, options.home, entry.store.?, options.cancellation) catch |err| {
+            var observation = HostLifecycle.observe(allocator, init.io, options.home, facts.directory(), options.cancellation) catch |err| {
                 entry.state = .{ .failed = try .of(allocator, .observation, err) };
                 continue;
             };

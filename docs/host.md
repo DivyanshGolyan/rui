@@ -70,6 +70,7 @@ Unknown managed builds, foreign executables, application-owned `--settings -`, h
 This does not make a selected source installation eligible for `rui upgrade`; Upgrade still requires a selected managed release.
 When that selection is released but its running Host came from a managed source build, the usual version comparison applies: a newer Host stays running without a downgrade; an equal or older Host can restart on the pinned release.
 Private launch environment is observed only in memory and wiped after the operation.
+Until upgrade uses the shared starter, moved SQLite storage and explicit interfaces are left running with the configuration-unavailable refusal; this replay path can preserve only default SQLite placement. Automatic startup and directory-based clients still support saved placement.
 Upgrade waits for the observed Host's lease to retire and checks the pinned target's readiness before reporting activation.
 
 Updates keep saved work and sign-in.
@@ -137,6 +138,7 @@ Changes apply to the next Host; they do not reconfigure a running one.
 `rui host start` takes `--settings FILE` but not `-`, because a started Host has no stdin; pass a document on stdin with `rui host serve --settings -`.
 Clients given `--store PATH` read that directory's saved placement, including MySQL, a moved `interface.dir`, or a different `store.sqlite.dir`.
 Pause the Host before changing placement: directory-based clients immediately use the saved location, while a running Host keeps its original settings.
+Directory-based lookup checks an existing explicit interface directory with the same private-directory admission as legacy MySQL lookup before connecting; missing saved interface directories remain startable.
 Save Store and interface placement with `rui host set`; a differing placement supplied only through `host start --settings` or `--set` is refused because a later client cannot see it.
 Other one-off settings still apply to a new Host. Foreground `host serve` permits unsaved placement, but directory-based clients need the same placement saved.
 Request captures still record Store identity, not a Host-directory locator. With custom placement, use `request inspect|wait --store DIR --key KEY`, or `request recover --store DIR --record FILE --kind KIND`; a handle alone still relies on the Store identity's default socket or the legacy MySQL runtime hint.
