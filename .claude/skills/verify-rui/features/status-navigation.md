@@ -8,6 +8,7 @@ Alt-I or the clickable **alt+i info** hint opens Chat info above the input. Rece
 - **Rename**, **Archive** and **Copy last answer** follow a blank separator. Left/Right move between actions when they fit on one row; Up/Down follow them when stacked. Copy feedback reads **Copied**.
 - Folder uses `~` for HOME. A long folder keeps its right end, with an ellipsis on the left; whole trailing folders are kept when they fit.
 - Opening Model adds its matches above the input. Filtering shrinks that list and gives space back to the feed. One info footer sits on the last screen row, below the input and its lower divider.
+- Consecutive tool calls are adjacent for every outcome. Failed Bash calls show quiet `exit 127` at the right edge; labels yield with an ellipsis first. An opened result keeps its output below its heading and the next tool immediately after its output. NO_COLOR preserves alignment.
 - Ctrl-O or a click on a tool heading opens its saved output, up to 20 rows followed by **… N more lines**. Several tools can stay open. The same key or heading click folds the selected output.
 - Ctrl-O on a collapsed message opens its full text. Ctrl-O or Esc returns to the previous view.
 - PgUp/PgDn, arrows and the wheel scroll. New replies keep the scrolled position and show **new** beside **↓**. Click **↓**, or use Esc, End with an empty draft, or Ctrl-G to return to the latest messages.

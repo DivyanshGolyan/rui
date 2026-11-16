@@ -1125,7 +1125,18 @@ while True:
         for meaning in ("next panel/footer field", "previous panel/footer field", "list/chat · info actions"):
             self.assertIn(meaning, states["keys"]["expect"])
         self.assertIn("/help", states["keys"]["absent"])
-        self.assertIn("× Fail with exit 127 · 127", states["chat"]["expect"])
+        self.assertIn("× Fail with exit 127", states["chat"]["expect"])
+        self.assertIn("exit 127", states["chat"]["expect"])
+
+    def test_tool_frames_require_adjacent_rows_and_explicit_exit_fields(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = {state["name"]: state for state in scenario["states"]}
+        for name in ("chat", "tool-open", "tool-open-two", "tool-open-nocolor"):
+            with self.subTest(state=name):
+                self.assertIn("exit 127", states[name]["expect"])
+                self.assertIn("exit 1", states[name]["expect"])
+                self.assertEqual(states[name]["expect_next"]["× Fail with exit 127"], "× Fail with an excerpt")
+                self.assertIn("Fail with exit 127 · 127", states[name]["absent"])
 
     def test_slashlist_frames_cover_both_themes_sizes_and_matched_spans(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
@@ -1184,7 +1195,7 @@ while True:
             {"keys": ["PgDn"] * 3},
         ])
         for text in ("✓ List project files", "    README.md", "    src",
-                     "× Fail with exit 127 · 127", "× Fail with an excerpt · 1",
+                     "× Fail with exit 127", "× Fail with an excerpt",
                      "    Bash succeeded. Exit code: 0.", "    stdout:", "    Bash failed. Exit code: 1.", "    stderr:",
                      "    usage: example", "    unknown option --help"):
             self.assertIn(text, state["expect"])
@@ -1193,9 +1204,9 @@ while True:
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}
         for name, wanted, old in (
-            ("tool-open-two", "× Fail with exit 127 · 127", " · exit 127"),
-            ("fold-hover", "× Fail with exit 127 · 127", " · exit 127"),
-            ("fold-hover", "× Fail with an excerpt · 1", " · exit 1"),
+            ("tool-open-two", "× Fail with exit 127", " · exit 127"),
+            ("fold-hover", "× Fail with exit 127", " · exit 127"),
+            ("fold-hover", "× Fail with an excerpt", " · exit 1"),
             ("chat-working", "Thinking", "Waiting"),
             ("copy-no-code", "No code block", "No code block in the last answer."),
         ):
