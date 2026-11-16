@@ -33,7 +33,7 @@ The subsystem references keep accepted behavior and required evidence together. 
 - [Store transactions and representation](docs/contracts/store.md#required-evidence).
 - [Session stops and outcomes](docs/contracts/sessions.md#required-evidence).
 - [CLI operations and configuration](docs/contracts/cli.md#required-evidence).
-- [Session UI and terminal lifetime](docs/contracts/session-ui.md#required-evidence).
+- [Session UI and terminal lifetime](docs/contracts/session-ui.md#required-evidence). Input and User-message appearance evidence includes both widths and themes, preserved input/rule positions, the shared timestamp domain and indexed before/after frames; see the owning evidence table.
 - [Reports, Activity, and local protocol](docs/contracts/inspection.md#required-evidence).
 - [Host ownership and lifetime](docs/contracts/host.md#required-evidence).
 - [Resources and selection progress](docs/contracts/resources.md#required-evidence).

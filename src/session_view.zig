@@ -59,7 +59,7 @@ pub fn clock(second: u64, buffer: *[5]u8) ?[]const u8 {
 }
 
 pub fn userPrefix(sink: anytype, colour: bool, admitted_at: u64) !void {
-    try sink.feed(Style.user.code(colour));
+    try sink.feed(Style.quiet.code(colour));
     try sink.feed("›");
     try sink.feed(Style.normal.code(colour));
     try sink.feed(" ");
@@ -1150,6 +1150,8 @@ pub fn message(requests: client.Requests, store: []const u8, session: []const u8
         try print(sink, "{s}{s}{s}\n", .{ Style.quiet.code(colour), text, Style.normal.code(colour) });
     }
     if (value.sender) |sender| return peerLine(sink, .inbound, sender, value.admitted_at);
+    const personal = value.source_action == null;
+    if (comptime std.meta.hasMethod(@TypeOf(sink), "userMessage")) try sink.userMessage(personal);
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
     try inputPrefix(sink, colour, value.admitted_at, value.source_action);
     var body: UserBody(@TypeOf(sink)) = undefined;
@@ -1158,6 +1160,7 @@ pub fn message(requests: client.Requests, store: []const u8, session: []const u8
     if (try body.finishMessage(block)) {
         try sink.feed("\n");
     } else try Text.writeBody(sink, "\n");
+    if (comptime std.meta.hasMethod(@TypeOf(sink), "userMessage")) try sink.userMessage(false);
 }
 
 fn content(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, reference: protocol.ActivityItem.Content, target: anytype) !void {

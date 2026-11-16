@@ -683,6 +683,10 @@ const RowCapture = struct {
         try self.write(bytes);
     }
 
+    pub fn userMessage(self: *@This(), active: bool) !void {
+        try self.feed(if (active) TerminalText.user_message_on else TerminalText.user_message_off);
+    }
+
     pub fn excluding(_: *@This(), _: u64) void {}
 
     fn retainSummary(self: *@This(), value: View.Collapsed, bytes: []const u8, limit: u64) !bool {

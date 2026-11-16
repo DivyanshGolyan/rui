@@ -974,6 +974,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .attention = attention.fg,
         .failure = failure.fg,
         .band = style.of(self.app_caps, .{ .background = .bar }).bg,
+        .user_band = style.of(self.app_caps, .{ .background = .user_message }).bg,
         .selection = style.of(self.app_caps, .{ .background = .selection }).bg,
     };
     const facts_style = quiet;
@@ -8852,7 +8853,7 @@ test "chat info repair details never overwrite the active reader staging file" {
     try std.testing.expect(self.reader.thread != null and !self.reader.completed());
 }
 
-test "chat input surface grows with draft while rules and footer stay plain in both themes" {
+test "chat input stays untinted and bottom anchored with fixed rules at 140 and 46 columns" {
     for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 } }) |size| {
         for ([_]?overview_view.Rgb{ null, .{ 255, 255, 255 } }) |background| {
             for ([_]overview_view.Caps.Depth{ .direct, .indexed, .none }) |depth| {
@@ -8871,11 +8872,17 @@ test "chat input surface grows with draft while rules and footer stay plain in b
                         const surface = try held.draw();
                         var rendered: vaxis.Screen = try .init(held.arena.allocator(), .{ .rows = size.height, .cols = size.width, .x_pixel = 0, .y_pixel = 0 });
                         try surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = size.width, .height = size.height, .screen = &rendered }, held.self.app_input.composer.widget());
-                        const input_style = style.of(held.self.app_caps, .{ .background = .input_surface });
-                        const quiet_input = style.of(held.self.app_caps, .{ .colour = .quiet, .background = .input_surface });
+                        const input_style = style.of(held.self.app_caps, .{});
+                        const quiet_input = style.of(held.self.app_caps, .{ .colour = .quiet });
                         const plain = style.of(held.self.app_caps, .{ .colour = .quiet });
                         const rows: u16 = if (draft.len == 0) 1 else 3;
                         const first = size.height - rows - 2;
+                        try std.testing.expectEqualStrings("─", rendered.readCell(0, first - 1).?.char.grapheme);
+                        try std.testing.expectEqualStrings("─", rendered.readCell(0, size.height - 2).?.char.grapheme);
+                        if (!list_focused) {
+                            try std.testing.expectEqual(@as(u16, size.height - 3), rendered.cursor.row);
+                            try std.testing.expectEqual(vaxis.Cell.CursorShape.block_blink, rendered.cursor_shape);
+                        }
                         for (0..size.width) |col| {
                             for (first..first + rows) |row| {
                                 const actual = rendered.readCell(@intCast(col), @intCast(row)).?.style.bg;

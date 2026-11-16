@@ -4,9 +4,9 @@ Rui follows the terminal's colors. Night, day and mist captures show the same ch
 
 ## Sub-features
 
-- Empty and multiline inputs use the shared input background in night and day themes.
+- Empty and multiline inputs use the untinted chat ground in night and day themes. The focused input has a blinking block caret; its bottom anchor and surrounding divider rows do not move.
 - Tab visits only drawn controls without changing the draft or feed. In a wide chat, the order from the list is Settings, input, then Model; in a narrow chat, the order from the input is back, then Model. Focusing a control does not activate it.
-- New Session's selected input and a selected existing chat use the same input and selection colors.
+- New Session and existing chats share the untinted input; list selection remains a separate ink-wash surface.
 - Day shows Overview and formatted answers. Mist shows a scrolled chat. No-color keeps headings, code, tables and links readable without color.
 
 ## How to get to it (user POV)
@@ -24,6 +24,14 @@ The scenario configures real terminal color-query replies for each theme. Inspec
 Run `$V frames FULLSHA --only focus-tab-list,focus-tab-settings,focus-tab-input,focus-tab-model,focus-tab-narrow-input,focus-tab-narrow-back,focus-tab-narrow-model` for the wide and narrow focus traversal comparisons. Wide list focus has a selected row, quiet prompt and no caret; input focus restores the bright prompt and caret. Settings and Model receive focus without opening their pages or pickers. Narrow captures omit the hidden list from the order and visit the visible back button instead. Inspect PNG or HTML: these states deliberately retain the same feed text, so text matches alone do not prove the focus target.
 
 Frame states: `focus-tab-list`, `focus-tab-settings`, `focus-tab-input`, `focus-tab-model`, `focus-tab-narrow-input`, `focus-tab-narrow-back`, `focus-tab-narrow-model`
+
+### Chatfeed appearance
+
+Frame states: `chatfeed-night-empty`, `chatfeed-night-draft`, `chatfeed-day-empty`, `chatfeed-day-draft`
+
+Run these states at 140x40 and 46x30. Their shared Session contains several real user Messages, a Bash tool demonstration and a recorded 61-second hold before the next Message. This crosses a minute boundary without modifying the transcript or clock. The first two Messages normally share a minute; the timestamp owner’s domain tests prove exact same-minute cases independently of wall-clock capture timing. Empty and retained-draft variants show the input anchor in both themes.
+
+Inspect committed cells and PNG/HTML for faint user-message tint, upright text, quiet prompt marks, non-repeated adjacent minute stamps, and an untinted input. Compare input and surrounding divider row coordinates before and after at each width. PTY captures demonstrate layout and emitted cursor mode, not physical-terminal blinking.
 
 ## Gotchas
 

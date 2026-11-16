@@ -53,7 +53,7 @@ Read the owning contract and its required evidence for the subsystem you change:
 - For canonical transactions, Store formats, durability, or content representation, read [Store](docs/contracts/store.md).
 - For stop, archive, interruption, or Turn outcomes, read [Session stops and outcomes](docs/contracts/sessions.md).
 - For CLI grammar, defaults, capture, or command output, read [CLI operations](docs/contracts/cli.md).
-- For sign-in screens, Session overview, composition, choices, or terminal cleanup, read [Session UI](docs/contracts/session-ui.md).
+- For sign-in screens, Session overview, composition, choices, or terminal cleanup, read [Session UI](docs/contracts/session-ui.md). Its [chat input and User message bands](docs/contracts/session-ui.md#chat-input-and-user-message-bands) section owns bottom-anchored plain input, themed submitted-message bands and shared timestamp presentation.
 - For reports, pages, Activity, waits, or local transport, read [Inspection and local protocol](docs/contracts/inspection.md).
 - For platforms, exclusive Host ownership, or shutdown, read [Host lifetime](docs/contracts/host.md).
 - For capacity, memory, scratch, or selection progress, read [Resources](docs/contracts/resources.md).

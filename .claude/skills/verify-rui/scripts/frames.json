@@ -5,6 +5,118 @@
   ],
   "states": [
     {
+      "name": "chatfeed-night-empty",
+      "note": "Real user messages across a recorded minute boundary, a Bash tool row and a bottom-anchored input",
+      "theme": "night",
+      "open": "Chatfeed witness",
+      "steps": [
+        {
+          "sleep": 61
+        },
+        {
+          "send": {
+            "to": "Chatfeed witness",
+            "text": "Next minute witness"
+          }
+        },
+        {
+          "wait": "Next minute witness"
+        }
+      ],
+      "expect": [
+        "Next minute witness",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing · Esc returns",
+        "enter retry"
+      ],
+      "cast": [
+        {
+          "label": "Chatfeed witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "First minute witness",
+            "tool demonstration"
+          ]
+        }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "chatfeed-night-draft",
+      "note": "Real user messages across a recorded minute boundary, a Bash tool row and a bottom-anchored input",
+      "theme": "night",
+      "open": "Chatfeed witness",
+      "steps": [
+        {
+          "text": "Retained chatfeed draft"
+        },
+        {
+          "wait": "Retained chatfeed draft"
+        }
+      ],
+      "expect": [
+        "Next minute witness",
+        "alt+i info",
+        "Retained chatfeed draft"
+      ],
+      "absent": [
+        "Browsing · Esc returns",
+        "enter retry"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "chatfeed-day-empty",
+      "note": "Real user messages across a recorded minute boundary, a Bash tool row and a bottom-anchored input",
+      "theme": "day",
+      "open": "Chatfeed witness",
+      "steps": [],
+      "expect": [
+        "Next minute witness",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing · Esc returns",
+        "enter retry"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "chatfeed-day-draft",
+      "note": "Real user messages across a recorded minute boundary, a Bash tool row and a bottom-anchored input",
+      "theme": "day",
+      "open": "Chatfeed witness",
+      "steps": [
+        {
+          "text": "Retained chatfeed draft"
+        },
+        {
+          "wait": "Retained chatfeed draft"
+        }
+      ],
+      "expect": [
+        "Next minute witness",
+        "alt+i info",
+        "Retained chatfeed draft"
+      ],
+      "absent": [
+        "Browsing · Esc returns",
+        "enter retry"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
       "name": "archived-row-none",
       "note": "Archived stays available with nothing archived",
       "open": "overview",
@@ -25,7 +137,7 @@
     },
     {
       "name": "inputtint-night-empty",
-      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "note": "Untinted input, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
       "theme": "night",
       "open": "Input tint chat",
       "steps": [],
@@ -53,7 +165,7 @@
     },
     {
       "name": "inputtint-night-draft",
-      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "note": "Untinted input, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
       "theme": "night",
       "open": "Input tint chat",
       "steps": [
@@ -136,7 +248,7 @@
         "enter start"
       ],
       "expect_background": {
-        "› Type a task": "#1a2246"
+        "› Type a task": "#121933"
       },
       "absent_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
@@ -144,7 +256,7 @@
     },
     {
       "name": "inputtint-night-chat-selected",
-      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "note": "Untinted input, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
       "theme": "night",
       "open": "Input tint chat",
       "steps": [
@@ -168,7 +280,7 @@
     },
     {
       "name": "inputtint-day-empty",
-      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "note": "Untinted input, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
       "theme": "day",
       "open": "Input tint chat",
       "steps": [],
@@ -186,7 +298,7 @@
     },
     {
       "name": "inputtint-day-draft",
-      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "note": "Untinted input, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
       "theme": "day",
       "open": "Input tint chat",
       "steps": [
@@ -269,7 +381,7 @@
         "enter start"
       ],
       "expect_background": {
-        "› Type a task": "#e6ddc8"
+        "› Type a task": "#f3eee2"
       },
       "absent_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
@@ -277,7 +389,7 @@
     },
     {
       "name": "inputtint-day-chat-selected",
-      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "note": "Untinted input, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
       "theme": "day",
       "open": "Input tint chat",
       "steps": [
