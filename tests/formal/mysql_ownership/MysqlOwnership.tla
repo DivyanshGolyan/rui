@@ -29,8 +29,9 @@ CONSTANTS
     MaxLosses,    \* bound on lost connections in one behaviour
     LockMayVanish,\* GET_LOCK can stop excluding a live session: a proxy or
                   \* cluster route reaches a server that does not hold it.
-                  \* The contract says GET_LOCK "only refuses early", so the
-                  \* rules must hold with this TRUE.
+                  \* Multi-primary is unsupported, but the contract says
+                  \* GET_LOCK "only refuses early", so the safety rules must
+                  \* hold with this TRUE.
     \* Switches that break one guard each, so the checks can be seen failing.
     \* All FALSE describes the code.
     BreakFenceEpoch,    \* the fence compares commit_seq only
