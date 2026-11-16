@@ -7,15 +7,24 @@ pub fn check(cancellation: ?*const client.Cancellation) error{Cancelled}!void {
 
 pub const Result = std.process.RunResult;
 
+/// Per-invocation context, never a mutation of the coordinator process. The
+/// caller owns the map through completion (including cancellation/reaping).
+pub const Context = struct {
+    environ_map: ?*const std.process.Environ.Map = null,
+    cwd: std.process.Child.Cwd = .inherit,
+};
+
 pub fn dispose(allocator: std.mem.Allocator, result: Result) void {
     allocator.free(result.stdout);
     allocator.free(result.stderr);
 }
 
-fn capture(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, limit: usize, deadline: std.Io.Clock.Timestamp, done: *std.atomic.Value(bool)) std.process.RunError!Result {
+fn capture(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, limit: usize, deadline: std.Io.Clock.Timestamp, context: Context, done: *std.atomic.Value(bool)) std.process.RunError!Result {
     defer done.store(true, .release);
     return std.process.run(allocator, io, .{
         .argv = argv,
+        .environ_map = context.environ_map,
+        .cwd = context.cwd,
         .stdout_limit = .limited(limit),
         .stderr_limit = .limited(4096),
         .timeout = .{ .deadline = deadline },
@@ -27,10 +36,14 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, c
 }
 
 pub fn runWithTimeout(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, cancellation: ?*const client.Cancellation, limit: usize, timeout: std.Io.Duration) !Result {
+    return runIn(allocator, io, argv, cancellation, limit, timeout, .{});
+}
+
+pub fn runIn(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, cancellation: ?*const client.Cancellation, limit: usize, timeout: std.Io.Duration, context: Context) !Result {
     try check(cancellation);
     const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = timeout, .clock = .awake });
     var done: std.atomic.Value(bool) = .init(false);
-    var future = try io.concurrent(capture, .{ allocator, io, argv, limit, deadline, &done });
+    var future = try io.concurrent(capture, .{ allocator, io, argv, limit, deadline, context, &done });
     while (!done.load(.acquire)) {
         if (deadline.durationFromNow(io).raw.nanoseconds <= 0) {
             if (future.cancel(io)) |result| dispose(allocator, result) else |_| {}
@@ -188,4 +201,16 @@ test "upgrade process deadline covers wait after child closes its output pipes" 
     defer allocator.free(marker);
     try std.testing.expectError(error.Timeout, runWithTimeout(allocator, io, &.{ "sh", "-c", ": > \"$1\"; exec 1>&- 2>&-; exec sleep 300", "upgrade-child", marker }, null, 1024, .fromSeconds(1)));
     _ = try std.Io.Dir.cwd().statFile(io, marker, .{});
+}
+
+
+test "upgrade process context is scoped to one invocation and closes stdin" {
+    const gpa = std.testing.allocator;
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+    try env.put("RUI_CONTEXT_TEST", "captured\xff");
+    const result = try runIn(gpa, std.testing.io, &.{ "/bin/sh", "-c", "printf '%s:' \"$RUI_CONTEXT_TEST\"; pwd; if read line; then exit 9; fi" }, null, 1024, .fromSeconds(5), .{ .environ_map = &env, .cwd = .{ .path = "/" } });
+    defer dispose(gpa, result);
+    try std.testing.expect(result.term.success());
+    try std.testing.expectEqualStrings("captured\xff:/\n", result.stdout);
 }

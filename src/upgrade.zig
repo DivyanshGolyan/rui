@@ -212,7 +212,7 @@ fn waitAfterPublication(init: std.process.Init, cancellation: ?*const client.Can
 
 pub fn compatible(result: *const Result) bool {
     return switch (result.selectedActivation()) {
-        .client_incompatible, .unconfirmed, .failed, .replacement_observed => false,
+        .client_incompatible, .unconfirmed, .failed, .replacement_observed, .refused => false,
         else => true,
     };
 }
@@ -315,10 +315,10 @@ test "upgrade restart results cover every activation for selected and other Stor
                 };
                 const guided = switch (activation) {
                     .not_needed, .superseded, .already_ready, .ready, .client_incompatible => false,
-                    .unsupported, .replacement_observed, .cancelled, .failed, .unconfirmed => true,
+                    .unsupported, .replacement_observed, .cancelled, .failed, .unconfirmed, .refused => true,
                 };
                 const safe = !selected or switch (activation) {
-                    .client_incompatible, .unconfirmed, .failed, .replacement_observed => false,
+                    .client_incompatible, .unconfirmed, .failed, .replacement_observed, .refused => false,
                     else => true,
                 };
                 try std.testing.expectEqual(safe, compatible(&result));

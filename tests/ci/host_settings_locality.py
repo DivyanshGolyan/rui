@@ -408,11 +408,43 @@ def running_source_violations(root=ROOT):
     return found
 
 
+def host_child_violations(root=ROOT):
+    """Only spawn composes Host-child argv, including array and slot forms.
+
+    Syntax readers compare strings; they don't assign a serve slot or construct
+    the adjacent command pair. A source gate (not a whole-program alias proof).
+    """
+    found = []
+    for path in sorted((root / "src").rglob("*.zig")):
+        tokens = production(lex(path.read_text()))
+        names = [t.text for t in tokens]
+        functions = []
+        for i, name in enumerate(names[:-2]):
+            if name != "fn" or names[i + 2] != "(":
+                continue
+            # Function bodies follow parameter/result syntax; no declaration in
+            # this gate's domain has a struct-literal result type.
+            brace = next((j for j in range(i + 3, len(names)) if names[j] in ("{", ";")), None)
+            if brace is not None and names[brace] == "{":
+                functions.append((brace, close_brace(tokens, brace), names[i + 1]))
+        for i, token in enumerate(tokens):
+            if unquote(token.text) != "serve":
+                continue
+            pair = i >= 2 and unquote(names[i - 2]) == "host" and names[i - 1] == ","
+            slot = i >= 1 and names[i - 1] == "="
+            if not (pair or slot):
+                continue
+            owner = next((name for start, end, name in functions if start < i < end), None)
+            if path.relative_to(root).as_posix() != "src/host_start.zig" or owner != "spawn":
+                found.append(f"{path.relative_to(root).as_posix()}:{token.line}: Host child argv must be built only by host_start.spawn")
+    return found
+
+
 def violations(root=ROOT):
     derived = facts(root)
     return ([hit for path in surfaces(root)
              for hit in scan(path.read_text(), path.relative_to(root).as_posix(), derived)]
-            + running_source_violations(root))
+            + running_source_violations(root) + host_child_violations(root))
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from host_settings_locality import ROOT, declaration_members, facts, scan, surfaces, violations, vocabulary, running_source_violations
+from host_settings_locality import ROOT, declaration_members, facts, scan, surfaces, violations, vocabulary, running_source_violations, host_child_violations
 
 
 class HostSettingsLocalityTest(unittest.TestCase):
@@ -190,3 +190,27 @@ class RunningSourceLocalityTest(unittest.TestCase):
             found = running_source_violations(root)
             self.assertEqual(len(found), 1, found)
             self.assertIn("previousProviders must have one production caller", found[0])
+
+
+class HostChildLocalityTest(unittest.TestCase):
+    def test_duplicate_child_builder_mutation_turns_gate_red(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "src").mkdir()
+            owner = root / "src/host_start.zig"
+            owner.write_text('pub fn spawn() void { argv[1] = "host"; argv[2] = "serve"; }\n')
+            other = root / "src/HostLifecycle.zig"
+            clean = 'fn read() void { _ = eql(argv[1], "host"); _ = eql(argv[2], "serve"); }\n'
+            other.write_text(clean)
+            self.assertEqual(host_child_violations(root), [])
+            for mutation in (
+                'fn duplicate() void { const argv = &.{"rui", "host", "serve"}; }\n',
+                'fn duplicate() void { argv[1] = "host"; argv[2] = "serve"; }\n',
+            ):
+                other.write_text(clean + mutation)
+                found = host_child_violations(root)
+                self.assertEqual(len(found), 1, found)
+                self.assertIn("Host child argv must be built only by host_start.spawn", found[0])
+            other.write_text(clean)
+            owner.write_text(owner.read_text() + 'fn second() void { const args = &.{"host", "serve"}; }\n')
+            self.assertEqual(len(host_child_violations(root)), 1)

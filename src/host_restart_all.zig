@@ -2,7 +2,6 @@
 //! lifecycle. No registry, launch policy or activation state is kept here.
 const std = @import("std");
 const client = @import("client.zig");
-const platform = @import("platform.zig");
 const HostLifecycle = @import("HostLifecycle.zig");
 const Installation = @import("Installation.zig");
 const release = @import("release_candidate.zig");
@@ -74,7 +73,11 @@ pub const Failure = struct {
     }
 };
 pub const Entry = struct {
-    socket: []const u8,
+    socket: ?[]const u8 = null,
+    /// Persistent local routing selector; never replace it with wire Store identity.
+    directory: ?[]const u8 = null,
+    /// Explains a positively identified Host whose sources could not be read.
+    pid: ?c_int = null,
     store: ?[]const u8 = null,
     state: union(enum) {
         /// Read-only census, never an activation plan. Reobserve before acting.
@@ -85,7 +88,8 @@ pub const Entry = struct {
 
     /// The one release of an entry's owned strings, for every Batch builder.
     pub fn deinit(self: Entry, allocator: std.mem.Allocator) void {
-        allocator.free(self.socket);
+        if (self.socket) |socket| allocator.free(socket);
+        if (self.directory) |directory| allocator.free(directory);
         if (self.store) |store| allocator.free(store);
         if (self.state == .failed) allocator.free(self.state.failed.cause);
     }
@@ -107,7 +111,7 @@ pub const Batch = struct {
     pub fn selectedOutcome(self: *const Batch, store: []const u8) HostLifecycle.ActivationOutcome {
         var unknown = self.failure != null;
         for (self.entries) |entry| {
-            const path = entry.store orelse {
+            const path = entry.directory orelse entry.store orelse {
                 unknown = true;
                 continue;
             };
@@ -127,7 +131,7 @@ pub const Batch = struct {
             .failed => return true,
             .observed => unreachable,
             .outcome => |outcome| switch (outcome) {
-                .unsupported, .replacement_observed, .cancelled, .failed, .unconfirmed => return true,
+                .unsupported, .replacement_observed, .cancelled, .failed, .unconfirmed, .refused => return true,
                 .not_needed, .superseded, .already_ready, .ready, .client_incompatible => {},
             },
         };
@@ -150,7 +154,7 @@ pub const Batch = struct {
         for (self.entries) |entry| switch (entry.state) {
             .observed => unreachable,
             .failed => |failure| try writeEntryFailure(writer, &entry, failure),
-            .outcome => |outcome| _ = try writeOutcome(writer, entry.store.?, outcome, self.version),
+            .outcome => |outcome| _ = try writeOutcome(writer, entry.directory orelse entry.store.?, outcome, self.version),
         };
         try self.totals().write(writer);
     }
@@ -160,10 +164,10 @@ pub const Batch = struct {
         try writer.print("Upgrade restarts every running Host it can safely activate, interrupting work across ALL Sessions in those Stores. Discovered {d} Hosts:\n", .{self.entries.len});
         for (self.entries) |entry| switch (entry.state) {
             .observed => {
-                try field(writer, entry.store.?);
+                try field(writer, entry.directory orelse entry.store.?);
                 try writer.writeAll(": running; will restart on the selected installed build\n");
             },
-            .outcome => |outcome| _ = try writeOutcome(writer, entry.store.?, outcome, self.version),
+            .outcome => |outcome| _ = try writeOutcome(writer, entry.directory orelse entry.store.?, outcome, self.version),
             .failed => |failure| try writeEntryFailure(writer, &entry, failure),
         };
     }
@@ -172,40 +176,44 @@ pub const Batch = struct {
 /// One discovery owner for the pre-install warning and post-publication run.
 /// Eligibility is read-only here; no launch snapshot survives the census.
 pub fn discover(init: std.process.Init, allocator: std.mem.Allocator, home: []const u8, cancellation: ?*const client.Cancellation) !Batch {
-    const sockets = try platform.listHostSockets(allocator, init.io);
+    const candidates = try client.discoverUpgradeHosts(allocator, init.io, cancellation);
     defer {
-        for (sockets) |socket| allocator.free(socket);
-        allocator.free(sockets);
+        for (candidates) |candidate| candidate.deinit(allocator);
+        allocator.free(candidates);
     }
     var entries: std.ArrayList(Entry) = .empty;
     errdefer {
         for (entries.items) |entry| entry.deinit(allocator);
         entries.deinit(allocator);
     }
-    for (sockets) |socket| {
+    for (candidates) |candidate| {
         try process.check(cancellation);
-        // Reserve first: once an entry owns its strings, adding it cannot fail.
         try entries.ensureUnusedCapacity(allocator, 1);
-        const facts = client.observeHostForUpgradeAtSocket(allocator, init.io, socket, null) catch |err| {
-            const path = try allocator.dupe(u8, socket);
-            errdefer allocator.free(path);
-            entries.appendAssumeCapacity(.{ .socket = path, .state = .{ .failed = try .of(allocator, .discovery, err) } });
-            continue;
-        } orelse continue;
-        const path = try allocator.dupe(u8, socket);
-        errdefer allocator.free(path);
-        const store = try allocator.dupe(u8, facts.facts.store.slice());
-        errdefer allocator.free(store);
-        const state: @FieldType(Entry, "state") = state: {
-            var observation = HostLifecycle.observe(allocator, init.io, home, facts.directory(), cancellation) catch |err| break :state .{ .failed = try .of(allocator, .observation, err) };
-            defer observation.deinit(allocator);
-            break :state switch (observation) {
-                .absent => .{ .outcome = .not_needed },
-                .unsupported => |reason| .{ .outcome = .{ .unsupported = reason } },
-                .managed => .{ .observed = facts },
-            };
+        var entry: Entry = .{
+            .socket = if (candidate.socket) |path| try allocator.dupe(u8, path) else null,
+            .pid = candidate.pid,
+            .state = undefined,
         };
-        entries.appendAssumeCapacity(.{ .socket = path, .store = store, .state = state });
+        errdefer {
+            if (entry.socket) |path| allocator.free(path);
+            if (entry.directory) |path| allocator.free(path);
+            if (entry.store) |path| allocator.free(path);
+        }
+        entry.directory = if (candidate.directory) |path| try allocator.dupe(u8, path) else null;
+        entry.state = switch (candidate.result) {
+            .failed => |err| .{ .failed = try .of(allocator, .discovery, err) },
+            .observed => |facts| state: {
+                entry.store = try allocator.dupe(u8, facts.facts.store.slice());
+                var observation = HostLifecycle.observe(allocator, init.io, home, facts.directory(), cancellation) catch |err| break :state .{ .failed = try .of(allocator, .observation, err) };
+                defer observation.deinit(allocator);
+                break :state switch (observation) {
+                    .absent => .{ .outcome = .not_needed },
+                    .unsupported => |reason| .{ .outcome = .{ .unsupported = reason } },
+                    .managed => .{ .observed = facts },
+                };
+            },
+        };
+        entries.appendAssumeCapacity(entry);
     }
     return .{ .entries = try entries.toOwnedSlice(allocator) };
 }
@@ -267,17 +275,22 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
 }
 
 fn writeEntryFailure(writer: *std.Io.Writer, entry: *const Entry, failure: Failure) !void {
-    if (entry.store) |store| {
+    if (entry.directory orelse entry.store) |store| {
         try field(writer, store);
         return writer.print(": failed at {s} ({s}): {s}\n", .{ @tagName(failure.stage), failure.cause, switch (failure.stage) {
-            .discovery => unreachable,
+            .discovery => "could not read this Host's sources; inspect with its owning client, then retry.",
             .observation => "could not confirm this Host; inspect with its owning client, then retry.",
             .selection => "selected installed build has no verified release version; install a managed release and retry.",
         } });
     }
-    try writer.writeAll("Store unknown (socket ");
-    try field(writer, entry.socket);
-    try writer.print("): failed at discovery: Host state is unconfirmed ({s}); inspect this socket and its Store with the owning client, then retry. A refused or missing socket alone does not prove the Host stopped.\n", .{failure.cause});
+    try writer.writeAll("Store unknown (");
+    if (entry.socket) |socket| {
+        try writer.writeAll("socket ");
+        try field(writer, socket);
+    } else if (entry.pid) |pid| {
+        try writer.print("Host process {d}", .{pid});
+    } else try writer.writeAll("Host sources unavailable");
+    try writer.print("): failed at discovery: Host state is unconfirmed ({s}); inspect this {s} with the owning client, then retry. A refused or missing socket alone does not prove the Host stopped.\n", .{ failure.cause, if (entry.socket != null) "socket and its Store" else "Host process" });
 }
 
 /// Reports are not custody: a departed tool closes stdout, but all remaining
@@ -325,7 +338,7 @@ fn category(outcome: HostLifecycle.ActivationOutcome) Result {
         .ready, .client_incompatible => .restarted,
         .already_ready => .current,
         .superseded, .not_needed, .unsupported => .skipped,
-        .replacement_observed, .cancelled, .failed, .unconfirmed => .failed,
+        .replacement_observed, .cancelled, .failed, .unconfirmed, .refused => .failed,
     };
 }
 
@@ -337,8 +350,8 @@ fn writeOutcome(writer: *std.Io.Writer, store: []const u8, outcome: HostLifecycl
             try writer.print("restarted on 0.{d}.{d}", .{ version.?.schema, version.?.patch });
         },
         .client_incompatible => {
-            // The lifecycle verified the exact pinned launch and version, not
-            // ordinary readiness. Preserve that certainty and name the limit.
+            // The lifecycle verified a new instance and answering target
+            // release, but this client's protocol cannot read ordinary replies.
             try writer.print("restarted on 0.{d}.{d}; different Host protocol; inspect with the selected Rui client", .{ version.?.schema, version.?.patch });
         },
         .already_ready => {
@@ -357,6 +370,7 @@ fn writeOutcome(writer: *std.Io.Writer, store: []const u8, outcome: HostLifecycl
                 .ownership_unconfirmed => "ownership is unconfirmed; do not stop a guessed Host",
                 .application_owned => "application-owned Host (including MySQL); restart through its application",
                 .configuration_unavailable => "launch configuration cannot be safely reconstructed; restart through its owner",
+                .target_capability => "target build cannot safely check a detached restart; Host left running",
             }});
         },
         .replacement_observed => {
@@ -364,6 +378,12 @@ fn writeOutcome(writer: *std.Io.Writer, store: []const u8, outcome: HostLifecycl
         },
         .cancelled => {
             try writer.writeAll("failed at activation: cancelled; inspect Host status, then retry");
+        },
+        .refused => |refusal| {
+            try writer.print("refused at {s}\n", .{@tagName(refusal.stage)});
+            var line: [@import("start_report.zig").max_line_bytes]u8 = undefined;
+            try writer.writeAll(@import("start_report.zig").line(&refusal.failure, &line));
+            return category(outcome);
         },
         .failed, .unconfirmed => |stage| {
             try writer.print("failed at {s}: {s}; inspect Host status with its owning client, then retry", .{ @tagName(stage), if (outcome == .failed) "restart failed" else "restart is unconfirmed" });
@@ -400,6 +420,7 @@ test "restart all reports every activation outcome and limitation with exit trut
         "ownership is unconfirmed; do not stop a guessed Host",
         "application-owned Host (including MySQL); restart through its application",
         "launch configuration cannot be safely reconstructed; restart through its owner",
+        "target build cannot safely check a detached restart; Host left running",
     };
     inline for (std.meta.tags(HostLifecycle.Limitation), limitations) |limitation, text| {
         var bytes: [1024]u8 = undefined;
@@ -408,6 +429,15 @@ test "restart all reports every activation outcome and limitation with exit trut
         try std.testing.expectEqualStrings("/store: left running: " ++ text ++ "\n", writer.buffered());
     }
     covered.insert(.unsupported);
+    inline for (.{ .checking, .starting }) |stage| {
+        const refusal: HostLifecycle.ActivationOutcome = .{ .refused = .{ .stage = stage, .failure = @import("start_report.zig").Failure.init(.settings_invalid, "typed refusal") } };
+        var bytes: [2048]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&bytes);
+        try std.testing.expectEqual(Result.failed, try writeOutcome(&writer, "/store", refusal, null));
+        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "rui_start_error") != null);
+        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "typed refusal") != null);
+    }
+    covered.insert(.refused);
     inline for (.{ .failed, .unconfirmed }) |tag| {
         inline for (std.meta.tags(HostLifecycle.Stage)) |stage| {
             var bytes: [1024]u8 = undefined;
@@ -465,4 +495,30 @@ test "every failed stage names its cause" {
         try std.testing.expect(std.mem.indexOf(u8, text, "(ConnectionRefused)") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, @tagName(stage)) != null);
     }
+}
+
+test "restart batch retains DIR selection independently of wire identity and outcomes" {
+    var entries = [_]Entry{.{
+        .directory = "/host-directory",
+        .store = "mysql-opaque-identity",
+        .state = .{ .outcome = .{ .refused = .{ .stage = .checking, .failure = @import("start_report.zig").Failure.init(.settings_invalid, "cannot start") } } },
+    }};
+    const batch: Batch = .{ .entries = &entries };
+    try std.testing.expect(batch.selectedOutcome("/host-directory") == .refused);
+    try std.testing.expect(batch.selectedOutcome("mysql-opaque-identity") == .not_needed);
+    try std.testing.expect(batch.hasGuidance());
+    try std.testing.expectEqual(@as(usize, 1), batch.totals().failed);
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try batch.write(&writer);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "/host-directory: refused at checking") != null);
+}
+
+test "restart reports a positively identified Host without a socket or directory" {
+    const entry: Entry = .{ .pid = 42, .state = .{ .failed = .{ .stage = .discovery, .cause = "HostServeStoreMissing" } } };
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeEntryFailure(&writer, &entry, entry.state.failed);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Host process 42") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "HostServeStoreMissing") != null);
 }

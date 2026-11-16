@@ -203,15 +203,15 @@ class Case:
     def old_selection(self):
         self.select(self.build("synthetic-selected-old", "0.1.0"))
 
-    def start_host(self, name="retained-real-host", *, managed=True, store_hex=False, extra=(), source=False):
+    def start_host(self, name="retained-real-host", *, managed=True, store_hex=False, extra=(), sources_only=False, source=False):
         build = self.build(name, managed=managed)
         if source:
             (build / "revision").write_text("synthetic-source-revision-marker\n")
         destination = ["--store-hex", os.fsencode(self.store).hex()] if store_hex else ["--store", self.store]
         provider = [] if any(str(value).startswith("providers.") or str(value).startswith("providers=") for value in extra) else ["--set", 'providers={"codex":{}}']
+        defaults = [] if sources_only else ["--set", 'execution.activeCapacity=2', *provider]
         process, ready = start_ready_process(
-            [build / "bin/rui", "host", "serve", *destination,
-             "--set", 'execution.activeCapacity=2', *provider, *extra], env=self.env)
+            [build / "bin/rui", "host", "serve", *destination, *defaults, *extra], env=self.env)
         self.hosts.append(process)
         self.ready = ready
         status = self.status()
@@ -501,7 +501,7 @@ def lifecycle_cases(root, binary, releases):
         relative_bash = os.path.relpath("/bin/bash", pathlib.Path.cwd())
         old_host, previous = c.start_host(extra=("--set", "tools.bash.path=" + str(relative_bash)))
         output = c.finish_upgrade(c.spawn_upgrade())
-        assert "Installed Rui" in output and "left running: launch configuration cannot be safely reconstructed" in output, output
+        assert "Installed Rui" in output and "failed at checking" in output and '"code":"settings_invalid"' in output, output
         assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
         assert os_semantics.process_executable(old_host.pid) != c.link.resolve()
 
@@ -781,6 +781,29 @@ class TerminalScreen:
 
 
 def restart_all_cases(root, binary, releases):
+    for source in ("bare", "saved", "file", "set"):
+        with case(root, binary, releases, f"restart-sources-{source}") as c:
+            extra = ()
+            if source in ("saved", "file"):
+                document = {"providers": {}, "execution": {"paused": True, "activeCapacity": 3},
+                            "tools": {"bash": {"path": "/bin/bash", "timeoutMs": 1500}}}
+                path = c.store / "host.json" if source == "saved" else c.root / "settings.json"
+                path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                path.write_text(json.dumps(document))
+                path.chmod(0o600)
+                if source == "file":
+                    extra = ("--settings", path)
+            elif source == "set":
+                extra = ("--set", "providers={}", "--set", "execution.paused=true", "--set", "execution.activeCapacity=3")
+            old, previous = c.start_host(f"retained-{source}", sources_only=True, extra=extra)
+            c.select(c.build(f"selected-{source}"))
+            c.binary = c.link
+            output = c.run("host", "restart", "--all", timeout=60)
+            assert "1 restarted" in output, output
+            current = proof_ready(c, previous, old)
+            for field in ("active_capacity", "paused", "capabilities"):
+                assert current[field] == previous[field], (source, field, previous, current)
+
     # This suite runs under an isolated non-root fixture user: --all intentionally
     # discovers every Host of that uid, not just the defaults-selected Store.
     # Earlier lifecycle cases intentionally crash Hosts. Leave one explicitly
@@ -802,16 +825,17 @@ def restart_all_cases(root, binary, releases):
         rejected = c.run("host", "restart", "--all", "--store", c.store, expect=2)
         assert "[option_unknown]" in rejected, rejected
 
-    # PR5b's private replay is safe only while Host directory and wire Store
-    # identity have default placement. Refusal must preserve the live Host,
-    # including when its socket remains discoverable in the UID directory.
-    for explicit in (False, True):
+    # The selector is DIR, not the moved SQLite wire Store. Public starter
+    # admission reloads its saved document; census also finds saved interfaces
+    # outside the shallow uid socket directory, without a registry.
+    for explicit in ("default", "uid", "external"):
         with case(root, binary, releases, f"restart-all-moved-storage-{explicit}") as c:
             c.store.mkdir(mode=0o700)
             document = {"store": {"sqlite": {"dir": str(c.root / "data")}},
                         "execution": {"paused": True}, "providers": {}}
-            if explicit:
-                runtime = pathlib.Path(f"/tmp/rui-{os.geteuid()}")
+            if explicit != "default":
+                runtime = pathlib.Path(f"/tmp/rui-{os.geteuid()}") if explicit == "uid" else c.root / "nested" / "private-interface"
+                runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
                 document["interface"] = {"dir": str(runtime)}
             saved = c.store / "host.json"
             saved.write_text(json.dumps(document))
@@ -821,9 +845,10 @@ def restart_all_cases(root, binary, releases):
             c.select(c.build("moved-storage-selected"))
             c.binary = c.link
             output = c.run("host", "restart", "--all", timeout=60)
-            assert "left running" in output and "launch configuration cannot be safely reconstructed" in output, output
-            assert "0 restarted" in output and "1 left unchanged" in output, output
-            assert old.poll() is None and c.status()["instance"] == previous["instance"], output
+            assert f"{c.store}: restarted on {releases.version}" in output, output
+            assert "1 restarted" in output, output
+            current = proof_ready(c, previous, old)
+            assert current["paused"] is True and current["store"] == previous["store"], current
             assert saved.read_bytes() == original, output
 
     with case(root, binary, releases, "restart-all-first") as first, \

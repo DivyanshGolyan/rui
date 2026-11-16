@@ -728,9 +728,179 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
     const paths = try resolveClientPaths(io, supplied);
     if (!std.mem.eql(u8, paths.socket.slice(), socket_path)) return error.HostSocketStoreMismatch;
     var observed = try observeHostForUpgradeAt(io, &paths, until);
-    if (observed.pid != pid) return error.HostPeerPidMismatch;
+    if (observed.pid != pid or (identity.generation(pid) catch 0) != snapshot.started) return error.HostPeerPidMismatch;
     try observed.host_directory.set(supplied);
     return observed;
+}
+
+/// Authenticate the process at the saved DIR socket without decoding its wire
+/// or resolving MySQL identity. The caller owns (and must wipe) the snapshot.
+pub fn observeUpgradePeer(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, deadline: ?i128) !@import("host_identity.zig").Snapshot {
+    const paths = try platform.resolveClientPaths(io, directory);
+    const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
+    const fd = try connectRequest(.{ .io = io }, address, hostObservationDeadline(io, deadline));
+    defer closeSocket(io, fd);
+    const identity = @import("host_identity.zig");
+    return identity.snapshot(allocator, try identity.peer(fd));
+}
+
+pub const ReplacementFacts = struct {
+    instance: protocol.InstanceId,
+    store: @import("host_settings.zig").OsBytes(protocol.max_store_bytes) = .{},
+    active_capacity: usize,
+};
+
+/// The public status envelope, not a foreign Host wire decoder. Additive fields
+/// are harmless; the envelope's version is a wire version, not a build identity.
+pub fn parseUpgradeStatus(allocator: std.mem.Allocator, bytes: []const u8) !?ReplacementFacts {
+    if (bytes.len > 64 * 1024) return null;
+    const Envelope = struct {
+        type: []const u8,
+        status: []const u8,
+        instance: ?[]const u8 = null,
+        store: ?[]const u8 = null,
+        active_capacity: ?[]const u8 = null,
+    };
+    const parsed = std.json.parseFromSlice(Envelope, allocator, bytes, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    defer parsed.deinit();
+    const value = parsed.value;
+    if (!std.mem.eql(u8, value.type, "host_status") or !std.mem.eql(u8, value.status, "ready")) return null;
+    var facts: ReplacementFacts = .{
+        .instance = protocol.parseInstanceId(value.instance orelse return null) catch return null,
+        .active_capacity = std.fmt.parseInt(usize, value.active_capacity orelse return null, 10) catch return null,
+    };
+    facts.store.set(value.store orelse return null) catch return null;
+    return facts;
+}
+
+/// Read-only census results. A process-table PID is only a hint; observations
+/// below authenticate the resolved socket and confirm the hinted generation.
+/// Paths are OS bytes and are owned independently of the temporary snapshots.
+pub const UpgradeCandidate = struct {
+    socket: ?[]const u8 = null,
+    directory: ?[]const u8 = null,
+    pid: ?c_int = null,
+    generation: ?u64 = null,
+    result: union(enum) { observed: HostControlObservation, failed: anyerror },
+
+    pub fn deinit(self: UpgradeCandidate, allocator: std.mem.Allocator) void {
+        if (self.socket) |path| allocator.free(path);
+        if (self.directory) |path| allocator.free(path);
+    }
+};
+
+fn knownUpgradeSocket(candidates: []const UpgradeCandidate, socket: []const u8) bool {
+    for (candidates) |candidate| if (candidate.socket) |path| {
+        if (std.mem.eql(u8, path, socket) and candidate.result == .observed) return true;
+    };
+    return false;
+}
+
+/// Takes ownership on success. Keep one result for a socket found by both
+/// census routes, preferring authenticated facts over an earlier failed hint.
+fn appendUpgradeCandidate(allocator: std.mem.Allocator, candidates: *std.ArrayList(UpgradeCandidate), candidate: UpgradeCandidate) !void {
+    if (candidate.socket) |socket| {
+        for (candidates.items) |*existing| {
+            const other = existing.socket orelse continue;
+            if (!std.mem.eql(u8, socket, other)) continue;
+            if (existing.result == .observed) {
+                candidate.deinit(allocator);
+            } else {
+                existing.deinit(allocator);
+                existing.* = candidate;
+            }
+            return;
+        }
+    }
+    try candidates.append(allocator, candidate);
+}
+
+/// Union shallow private sockets with same-user process hints. A vanished or
+/// unreadable unrelated process is not a Host failure. Once argv identifies a
+/// Host, unreadable required sources are an explained per-Host failure instead.
+pub fn discoverUpgradeHosts(allocator: std.mem.Allocator, io: std.Io, cancellation: ?*const Cancellation) ![]UpgradeCandidate {
+    const requests: Requests = .{ .io = io, .cancellation = cancellation };
+    try requests.check();
+    var candidates: std.ArrayList(UpgradeCandidate) = .empty;
+    errdefer {
+        for (candidates.items) |candidate| candidate.deinit(allocator);
+        candidates.deinit(allocator);
+    }
+    const sockets = try platform.listHostSockets(allocator, io);
+    defer {
+        for (sockets) |socket| allocator.free(socket);
+        allocator.free(sockets);
+    }
+    for (sockets) |socket| {
+        try requests.check();
+        try candidates.ensureUnusedCapacity(allocator, 1);
+        const observed = observeHostForUpgradeAtSocket(allocator, io, socket, null);
+        const result: @FieldType(UpgradeCandidate, "result") = if (observed) |facts| .{ .observed = facts orelse continue } else |err| .{ .failed = err };
+        const owned_socket = try allocator.dupe(u8, socket);
+        errdefer allocator.free(owned_socket);
+        const directory = if (result == .observed) try allocator.dupe(u8, result.observed.directory()) else null;
+        candidates.appendAssumeCapacity(.{ .socket = owned_socket, .directory = directory, .generation = if (result == .observed) @import("host_identity.zig").generation(result.observed.pid) catch null else null, .result = result });
+    }
+    var uid: [32]u8 = undefined;
+    const uid_text = try std.fmt.bufPrint(&uid, "{d}", .{std.c.geteuid()});
+    const processes = std.process.run(allocator, io, .{
+        .argv = &.{ "/bin/ps", "-u", uid_text, "-o", "pid=" },
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(4096),
+        .timeout = .{ .deadline = .fromNow(io, .{ .raw = .fromSeconds(10), .clock = .awake }) },
+    }) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        try candidates.append(allocator, .{ .result = .{ .failed = err } });
+        return candidates.toOwnedSlice(allocator);
+    };
+    defer allocator.free(processes.stdout);
+    defer allocator.free(processes.stderr);
+    if (!processes.term.success()) {
+        try candidates.append(allocator, .{ .result = .{ .failed = error.HostProcessEnumerationFailed } });
+        return candidates.toOwnedSlice(allocator);
+    }
+    var pids = std.mem.tokenizeAny(u8, processes.stdout, " \t\r\n");
+    const identity = @import("host_identity.zig");
+    while (pids.next()) |text| {
+        try requests.check();
+        const pid = std.fmt.parseInt(c_int, text, 10) catch continue;
+        var snapshot = identity.snapshot(allocator, pid) catch continue;
+        defer snapshot.deinit(allocator);
+        if (snapshot.argv.len < 3 or !std.mem.eql(u8, snapshot.argv[1], "host") or !std.mem.eql(u8, snapshot.argv[2], "serve")) continue;
+        // A socket census may have already authenticated this same Host.
+        var known = false;
+        for (candidates.items) |candidate| if (candidate.result == .observed and candidate.result.observed.pid == pid and candidate.generation == snapshot.started) {
+            known = true;
+            break;
+        };
+        if (known) continue;
+        var wiping: @import("secret_value.zig").WipingAllocator = .{ .backing = allocator };
+        var arena = std.heap.ArenaAllocator.init(wiping.allocator());
+        defer arena.deinit();
+        var candidate: UpgradeCandidate = .{ .pid = pid, .generation = snapshot.started, .result = .{ .failed = error.HostServeArgumentsUnreadable } };
+        errdefer candidate.deinit(allocator);
+        candidate.result = result: {
+            const sources = @import("serve_grammar.zig").runningSources(arena.allocator(), snapshot.argv) catch |err| break :result .{ .failed = err };
+            const directory = sources.dir orelse break :result .{ .failed = error.HostServeStoreMissing };
+            candidate.directory = try allocator.dupe(u8, directory);
+            if (!std.fs.path.isAbsolute(directory)) break :result .{ .failed = error.HostServeStoreRelative };
+            const paths = platform.resolveClientPaths(io, directory) catch |err| break :result .{ .failed = err };
+            candidate.socket = try allocator.dupe(u8, paths.socket.slice());
+            if (knownUpgradeSocket(candidates.items, paths.socket.slice())) break :result .{ .failed = error.HostPeerPidMismatch };
+            var peer = observeUpgradePeer(allocator, io, directory, null) catch |err| break :result .{ .failed = err };
+            defer peer.deinit(allocator);
+            if (peer.pid != pid or peer.started != snapshot.started) break :result .{ .failed = error.HostPeerPidMismatch };
+            var observed = observeHostForUpgrade(io, directory, null) catch |err| break :result .{ .failed = err };
+            if (observed.pid != pid or (identity.generation(pid) catch 0) != snapshot.started) break :result .{ .failed = error.HostPeerPidMismatch };
+            observed.host_directory.set(directory) catch |err| break :result .{ .failed = err };
+            break :result .{ .observed = observed };
+        };
+        try appendUpgradeCandidate(allocator, &candidates, candidate);
+    }
+    return candidates.toOwnedSlice(allocator);
 }
 
 /// How long socket discovery retries a refused connect to a Store whose lease
@@ -5642,4 +5812,51 @@ test "pin captures preserve pin and unpin intent through generated and explicit 
         try std.testing.expectEqual(protocol.CommandKind.session_pin, (try inspectCaptured(io, root, identity.key.slice())).kind);
         try std.testing.expectError(error.RequestBindingMismatch, openCaptured(io, .{ .explicit = .{ .store = root, .record = path, .kind = .session_stop } }));
     }
+}
+
+test "upgrade public status decodes readiness without assuming the target wire" {
+    const allocator = std.testing.allocator;
+    const bytes = "{\"version\":\"future\",\"type\":\"host_status\",\"status\":\"ready\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"store\":\"/host\",\"active_capacity\":\"3\",\"future_field\":true}";
+    const facts = (try parseUpgradeStatus(allocator, bytes)).?;
+    try std.testing.expectEqual(@as(usize, 3), facts.active_capacity);
+    try std.testing.expectEqualStrings("/host", facts.store.slice());
+    try std.testing.expectEqual(@as(u8, 15), facts.instance[15]);
+    for ([_][]const u8{
+        "{}",
+        "{\"type\":\"host_status\",\"status\":\"incompatible\"}",
+        "{\"type\":\"host_status\",\"status\":\"ready\",\"instance\":\"invalid\",\"store\":\"/host\",\"active_capacity\":\"3\"}",
+        "{\"type\":\"host_status\",\"status\":\"ready\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"store\":\"/host\",\"active_capacity\":\"overflow\"}",
+    }) |invalid| try std.testing.expect(try parseUpgradeStatus(allocator, invalid) == null);
+}
+
+test "upgrade census merges socket hints and retains pathless identified failures" {
+    const allocator = std.testing.allocator;
+    var candidates: std.ArrayList(UpgradeCandidate) = .empty;
+    defer {
+        for (candidates.items) |candidate| candidate.deinit(allocator);
+        candidates.deinit(allocator);
+    }
+    try appendUpgradeCandidate(allocator, &candidates, .{
+        .socket = try allocator.dupe(u8, "/socket"),
+        .result = .{ .failed = error.ConnectionRefused },
+    });
+    var observation: HostControlObservation = .{ .profile = .current, .facts = std.mem.zeroes(protocol_reply.HostInfoFacts), .pid = 42 };
+    try observation.host_directory.set("/host/\xff");
+    try appendUpgradeCandidate(allocator, &candidates, .{
+        .socket = try allocator.dupe(u8, "/socket"),
+        .directory = try allocator.dupe(u8, "/host/\xff"),
+        .pid = 42,
+        .generation = 7,
+        .result = .{ .observed = observation },
+    });
+    try appendUpgradeCandidate(allocator, &candidates, .{
+        .socket = try allocator.dupe(u8, "/socket"),
+        .result = .{ .failed = error.HostPeerPidMismatch },
+    });
+    try appendUpgradeCandidate(allocator, &candidates, .{ .pid = 43, .result = .{ .failed = error.HostServeStoreMissing } });
+    try std.testing.expectEqual(@as(usize, 2), candidates.items.len);
+    try std.testing.expectEqualStrings("/host/\xff", candidates.items[0].directory.?);
+    try std.testing.expectEqual(@as(c_int, 42), candidates.items[0].result.observed.pid);
+    try std.testing.expectEqual(@as(?c_int, 43), candidates.items[1].pid);
+    try std.testing.expect(candidates.items[1].socket == null);
 }
