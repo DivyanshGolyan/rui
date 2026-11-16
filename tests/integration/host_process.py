@@ -844,7 +844,7 @@ class _H2Connection:
         else:
             if handler.wfile.head_sent:
                 self.end(stream)
-            else:
+            elif not stream.reset:
                 # As an HTTP/1.1 handler that returns without answering.
                 self.close()
         finally:

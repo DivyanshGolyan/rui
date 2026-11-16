@@ -43,21 +43,20 @@ class StreamingHandler(http.server.BaseHTTPRequestHandler):
         with self.server.condition:
             self.server.requests += 1
             self.server.condition.notify_all()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Connection", "close")
-        self.end_headers()
-        while not self.server.release.wait(0.025):
-            try:
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            while not self.server.release.wait(0.025):
                 self.wfile.write(b": keepalive\n\n")
                 self.wfile.flush()
-            except OSError as error:
-                if not is_peer_disconnect(error):
-                    raise
-                with self.server.condition:
-                    self.server.disconnects += 1
-                    self.server.condition.notify_all()
-                return
+        except OSError as error:
+            if not is_peer_disconnect(error):
+                raise
+            with self.server.condition:
+                self.server.disconnects += 1
+                self.server.condition.notify_all()
 
     def log_message(self, _format, *_args):
         pass
