@@ -62,6 +62,10 @@ class DocumentationTest(unittest.TestCase):
                      '.claude/hooks/block_full_runs.py', '.claude/settings.json',
                      '.claude/skills/example/scripts/run', '.agents/setup', '.agents/notes.md',
                      '.claude/skills/example/.hidden.md',
+                     '.claude/skills/verify-rui/features/README.md',
+                     '.claude/skills/verify-rui/features/frames.md',
+                     '.claude/skills/verify-rui/features/chat.md',
+                     '.claude/skills/verify-rui/scripts/frames.json',
                      'research/.gitignore', 'research/.probe/notes.md', 'researcher/notes.txt'):
             with self.subTest(path=path):
                 self.git('reset', '--hard', self.base)

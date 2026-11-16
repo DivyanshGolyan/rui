@@ -49,6 +49,8 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 SOURCE_POLICY = (
+    ((".claude/skills/verify-rui/scripts/frames.json", ".claude/skills/verify-rui/features/*.md"),
+     (("test_verify_rui_map.py", "*"),)),
     (("tests/integration/settings_fixture.py",), (("test_settings_fixture.py", "*"),)),
     (("src/*.zig", "tests/*.zig"), (("test_import_architecture.py", "*"),)),
     (("src/*.zig",), (("test_provider_locality.py", "*"), ("test_wire_version.py", "*"))),
