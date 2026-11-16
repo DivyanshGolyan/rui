@@ -676,9 +676,8 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
     if (!std.fs.path.isAbsolute(supplied)) return error.HostServeStoreRelative;
     const paths = try resolveClientPaths(io, supplied);
     if (!std.mem.eql(u8, paths.socket.slice(), socket_path)) return error.HostSocketStoreMismatch;
-    var observed = try observeHostForUpgradeAt(io, &paths, until);
+    const observed = try observeHostForUpgradeAt(io, &paths, until);
     if (observed.pid != pid or (identity.generation(pid) catch 0) != snapshot.started) return error.HostPeerPidMismatch;
-    try observed.host_directory.set(supplied);
     return observed;
 }
 
