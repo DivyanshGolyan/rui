@@ -2309,7 +2309,7 @@ fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed:
     const reply = blk: {
         defer captured.close(io);
         if (!interactive) try announceCapture(io, &captured);
-        break :blk takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), captured.identity().*, captured.replay);
+        break :blk takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), captured.identity().*, captured.replay, captured.selector());
     } catch |err| {
         if (human and interactive and err != error.CallerFailure) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
@@ -2386,7 +2386,7 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     defer captured.close(io);
     try announceCapture(io, &captured);
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), captured.identity().*, captured.replay);
+    const reply = try takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), captured.identity().*, captured.replay, captured.selector());
     if (!reply.isAccepted()) return writeMutationReply(io, reply, .json, captured.replay);
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
@@ -2408,8 +2408,8 @@ fn takeCapture(step: *?client.Step, stepped: anytype) !client.CapturedRecord {
     return captured;
 }
 
-fn takeReply(step: *?client.Step, stepped: anytype, context: protocol_reply.MutationIdentity, replay: client.Replay) !protocol_reply.MutationReply {
-    holdStore(context.store.slice());
+fn takeReply(step: *?client.Step, stepped: anytype, context: protocol_reply.MutationIdentity, replay: client.Replay, selector: []const u8) !protocol_reply.MutationReply {
+    holdStore(selector);
     const reply = takeStep(step, stepped) catch |err| {
         if (step.*) |failed| {
             if (failed.mayHaveReachedHost()) {
@@ -2419,7 +2419,7 @@ fn takeReply(step: *?client.Step, stepped: anytype, context: protocol_reply.Muta
                 return error.CallerFailure;
             }
             if (failed == .connect or failed == .endpoint) {
-                return hostTransportFailure(std.Io.Threaded.global_single_threaded.io(), context.store.slice(), err);
+                return hostTransportFailure(std.Io.Threaded.global_single_threaded.io(), selector, err);
             }
             if (failed == .store) return storeFailure(err);
         }
@@ -3070,7 +3070,7 @@ fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecor
     const reply = blk: {
         defer captured.close(io);
         try announceCapture(io, captured);
-        break :blk try takeReply(step, sender.sendCaptured(captured, environment, &reply_buffer), captured.identity().*, captured.replay);
+        break :blk try takeReply(step, sender.sendCaptured(captured, environment, &reply_buffer), captured.identity().*, captured.replay, captured.selector());
     };
     try writeMutationReply(io, reply, presentation, replay);
 }
@@ -3510,9 +3510,9 @@ fn writeUnconfirmed(notice: *std.Io.Writer, context: protocol_reply.MutationIden
         .generated => try notice.writeAll(context.key.slice()),
         .explicit => |record| {
             try notice.writeAll("--store ");
-            try TerminalText.writeShellWord(notice, context.store.slice());
+            try TerminalText.writeShellWord(notice, if (record.host_directory.len != 0) record.host_directory.slice() else context.store.slice());
             try notice.writeAll(" --record ");
-            try TerminalText.writeShellWord(notice, record);
+            try TerminalText.writeShellWord(notice, record.record);
             switch (context.kind) {
                 inline else => |kind| try notice.print(" --kind {s}", .{comptime retryName(kind)}),
             }
@@ -3835,7 +3835,7 @@ test "unconfirmed guidance names the generated handle or the quoted explicit rec
     try writeUnconfirmed(&generated, context, .generated, error.TruncatedResponse);
     try std.testing.expectEqualStrings(prefix ++ "0f8fad5b-d9cb-469f-a165-70867728950e" ++ suffix, generated.buffered());
     var explicit = std.Io.Writer.fixed(&buffer);
-    try writeUnconfirmed(&explicit, context, .{ .explicit = "stop\x1b.json" }, error.TruncatedResponse);
+    try writeUnconfirmed(&explicit, context, .{ .explicit = .{ .record = "stop\x1b.json" } }, error.TruncatedResponse);
     try std.testing.expectEqualStrings(prefix ++ "--store $'/it\\'s \\\\store' --record $'stop\\033.json' --kind session-stop" ++ suffix, explicit.buffered());
 }
 
@@ -3976,7 +3976,7 @@ fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const reply = blk: {
         defer captured.close(init.io);
         var step: ?client.Step = null;
-        break :blk try takeReply(&step, (client.Requests{ .io = init.io }).sendCaptured(&captured, .{ .map = init.environ_map }, &buffer), captured.identity().*, replay);
+        break :blk try takeReply(&step, (client.Requests{ .io = init.io }).sendCaptured(&captured, .{ .map = init.environ_map }, &buffer), captured.identity().*, replay, captured.selector());
     };
     try writeMutationReply(init.io, reply, .json, replay);
 }

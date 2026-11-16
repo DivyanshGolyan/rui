@@ -1533,7 +1533,7 @@ pub const CaptureTarget = union(enum) {
 
     pub fn resolve(self: CaptureTarget, io: std.Io, path: []u8, key: *[36]u8) !Location {
         return switch (self) {
-            .explicit => |value| .{ .record = value.record, .key = value.key, .replay = .{ .explicit = value.record } },
+            .explicit => |value| .{ .record = value.record, .key = value.key, .replay = .{ .explicit = .{ .record = value.record } } },
             .reserved => |location| location,
             .generated => |directory| blk: {
                 var bytes: [16]u8 = undefined;
@@ -1555,7 +1555,10 @@ pub const CaptureTarget = union(enum) {
 
 pub const Replay = union(enum) {
     generated,
-    explicit: []const u8,
+    explicit: struct {
+        record: []const u8,
+        host_directory: @import("host_settings.zig").OsBytes(protocol.max_store_bytes) = .{},
+    },
 };
 
 // Local routing is deliberately outside the immutable wire request. Both
@@ -1578,7 +1581,7 @@ const CaptureRouting = struct {
     fn resolve(self: *const CaptureRouting, io: std.Io, store_identity: []const u8) !platform.Paths {
         if (self.host_directory.len != 0) return resolveClientPaths(io, self.host_directory.slice());
         if (self.runtime_hint.len != 0) return platform.mysqlClientPaths(io, store_identity, self.runtime_hint.slice());
-        return error.InvalidRequestRouting;
+        return error.InvalidRequestRecord;
     }
 
     fn name(record_name: []const u8, buffer: []u8) ![]const u8 {
@@ -1604,12 +1607,12 @@ const CaptureRouting = struct {
         var storage: [2048]u8 = undefined;
         defer std.crypto.secureZero(u8, &storage);
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
-        const value = std.json.parseFromSliceLeaky(Fields, fixed.allocator(), text, .{}) catch return error.InvalidRequestRouting;
-        if (value.format != format or (value.host_directory.len == 0) == (value.runtime_hint.len == 0)) return error.InvalidRequestRouting;
-        if (!std.fs.path.isAbsolute(if (value.host_directory.len != 0) value.host_directory else value.runtime_hint)) return error.InvalidRequestRouting;
+        const value = std.json.parseFromSliceLeaky(Fields, fixed.allocator(), text, .{}) catch return error.InvalidRequestRecord;
+        if (value.format != format or (value.host_directory.len == 0) == (value.runtime_hint.len == 0)) return error.InvalidRequestRecord;
+        if (!std.fs.path.isAbsolute(if (value.host_directory.len != 0) value.host_directory else value.runtime_hint)) return error.InvalidRequestRecord;
         var result: CaptureRouting = .{};
-        result.host_directory.set(value.host_directory) catch return error.InvalidRequestRouting;
-        result.runtime_hint.set(value.runtime_hint) catch return error.InvalidRequestRouting;
+        result.host_directory.set(value.host_directory) catch return error.InvalidRequestRecord;
+        result.runtime_hint.set(value.runtime_hint) catch return error.InvalidRequestRecord;
         return result;
     }
 };
@@ -1630,6 +1633,12 @@ pub const CapturedRecord = struct {
             try resolveClientPaths(io, self.saved.store.slice());
         if (!paths.store_identity.eql(self.saved.store.slice())) return error.RequestBindingMismatch;
         return paths;
+    }
+
+    pub fn selector(self: *const CapturedRecord) []const u8 {
+        if (self.paths) |*paths| return paths.selector();
+        if (self.routing) |*route| if (route.host_directory.len != 0) return route.host_directory.slice();
+        return self.saved.store.slice();
     }
 
     pub fn identity(self: *const CapturedRecord) *const protocol_reply.MutationIdentity {
@@ -1672,8 +1681,6 @@ pub fn openCaptured(io: std.Io, saved: SavedRecord) !CapturedRecord {
             break :blk try requestPath(generated.directory, generated.handle, &path_buffer);
         },
         .explicit => |explicit| blk: {
-            paths = try resolveClientPaths(io, explicit.store);
-            expected.store = paths.store_identity.slice();
             expected.kind = explicit.kind;
             break :blk explicit.record;
         },
@@ -1682,13 +1689,21 @@ pub fn openCaptured(io: std.Io, saved: SavedRecord) !CapturedRecord {
     errdefer file.close(io);
     const binding = try readCapturedBinding(io, &file);
     const routing = try CaptureRouting.read(io, path);
+    if (saved == .explicit) {
+        const supplied = saved.explicit.store;
+        paths = if (routing != null and routing.?.runtime_hint.len != 0 and @import("store_id.zig").valid(supplied))
+            try platform.mysqlClientPaths(io, supplied, routing.?.runtime_hint.slice())
+        else
+            try resolveClientPaths(io, supplied);
+        expected.store = paths.store_identity.slice();
+    }
     if (!expected.matches(&binding.saved, binding.target)) return switch (saved) {
         .generated => error.InvalidRequestRecord,
         .explicit => error.RequestBindingMismatch,
     };
     const replay: Replay = switch (saved) {
         .generated => .generated,
-        .explicit => |explicit| .{ .explicit = explicit.record },
+        .explicit => |explicit| .{ .explicit = .{ .record = explicit.record, .host_directory = if (routing) |route| route.host_directory else paths.host_directory } },
     };
     return .{ .file = file, .length = try file.length(io), .saved = binding.saved, .target = binding.target, .replay = replay, .paths = if (saved == .explicit and routing == null) paths else null, .routing = routing };
 }
@@ -1901,6 +1916,7 @@ fn runCapture(
     try capture.writeRouting(paths);
     var record = try finishCapture(io, &capture, location, paths.store_identity.slice(), session, kind);
     record.paths = paths.*;
+    if (record.replay == .explicit) record.replay.explicit.host_directory = paths.host_directory;
     return record;
 }
 
@@ -4378,7 +4394,7 @@ test "control captures attain escaped key and canonical Session request bounds" 
     var stop_capture = try writeSessionStopCapture(std.testing.io, &paths, .{
         .store = "unused",
         .session = session,
-    }, .{ .record = stop_path, .key = &escaped_key, .replay = .{ .explicit = stop_path } });
+    }, .{ .record = stop_path, .key = &escaped_key, .replay = .{ .explicit = .{ .record = stop_path } } });
     defer stop_capture.close(std.testing.io);
     const stop_file = try std.Io.Dir.cwd().openFile(std.testing.io, stop_path, .{});
     defer stop_file.close(std.testing.io);
@@ -4398,7 +4414,7 @@ test "control captures attain escaped key and canonical Session request bounds" 
         .session = session,
         .turn_id = std.math.maxInt(u64),
         .operation_id = std.math.maxInt(u64),
-    }, .{ .record = interruption_path, .key = &escaped_key, .replay = .{ .explicit = interruption_path } });
+    }, .{ .record = interruption_path, .key = &escaped_key, .replay = .{ .explicit = .{ .record = interruption_path } } });
     defer interruption_capture.close(std.testing.io);
     const interruption_file = try std.Io.Dir.cwd().openFile(std.testing.io, interruption_path, .{});
     defer interruption_file.close(std.testing.io);
@@ -5680,7 +5696,7 @@ test "capture routing metadata rejects invalid private sources and keeps legacy 
         "{\"format\":1,\"host_directory\":\"/host\\u0000\",\"runtime_hint\":\"\"}",
     }) |text| {
         try tmp.dir.writeFile(io, .{ .sub_path = name, .data = text, .flags = .{ .permissions = .fromMode(0o600) } });
-        try std.testing.expectError(error.InvalidRequestRouting, openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } }));
+        try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } }));
     }
     try tmp.dir.setFilePermissions(io, name, .fromMode(0o644), .{});
     try std.testing.expectError(error.InsecureCredentialFile, openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } }));

@@ -194,7 +194,9 @@ def main():
         # client. Neither the CLI environment nor argv contains the URL.
         for explicit_interface in (False, True):
             directory = root / ("saved-explicit" if explicit_interface else "saved-default")
-            client_env = dict(os.environ, RUI_SETTINGS_MYSQL_URL=url)
+            client_home = root / ("client-explicit" if explicit_interface else "client-default")
+            client_home.mkdir(mode=0o700)
+            client_env = dict(os.environ, RUI_SETTINGS_MYSQL_URL=url, HOME=str(client_home))
             client_env.pop("RUI_RUNTIME_DIR", None)
 
             def command(*args, message=None):
