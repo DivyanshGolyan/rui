@@ -1695,9 +1695,9 @@ pub fn replayable(init: std.process.Init, request: Spawn) error{OutOfMemory}!boo
     return true;
 }
 
-/// The starter's admission before any effect: readDetached, then refuse a
-/// Host whose settings would listen away from `request.dir`, which bare rui
-/// and rui host start could never reach.
+/// Admission before any effect: detached-safe sources and saved placement.
+/// Non-placement overrides are replayable; placement must also be visible to
+/// a later client given only the Host directory.
 pub fn checkStart(init: std.process.Init, request: Spawn, failure: *start_report.Failure) !void {
     const settings = try init.gpa.create(hs.Settings);
     defer init.gpa.destroy(settings);
@@ -1731,7 +1731,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
     const io = init.io;
     const selection = platform.resolveClientSelection(selected);
     const resolved: ?platform.Paths = (if (selection == .mysql) selection.paths(io) else existingPlacement(io, selected)) catch |err| switch (err) {
-        error.FileNotFound => null,
+        error.FileNotFound, error.SettingsInvalid => null,
         else => return launchFailure(result, .store_access, error.StoreAccessFailed, null),
     };
     switch (if (resolved) |*paths| ops.observe(ops.context, io, paths, null) else @as(@import("protocol_reply.zig").HostStatus, .unavailable)) {

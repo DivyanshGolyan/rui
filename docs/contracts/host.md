@@ -37,7 +37,7 @@ Reclaim only the expected stale socket after ownership.
 Unavailable/inaccessible/competing owners reject.
 Clients never auto-start or access SQLite; disconnects/timeouts do not cancel work.
 
-A MySQL Host starts only from a settings document, `rui host serve --settings -` or `--settings FILE`.
+A MySQL Host starts from saved `DIR/host.json` settings with `rui --store DIR` or `rui host start --store DIR`, or from a foreground settings document with `rui host serve --settings -` or `--settings FILE`.
 The
 document's `store.mysql.url` is `mysql://USER:PASSWORD@HOST[:PORT]/DATABASE`; TCP verifies
 TLS with system trust unless its sole query option is `ssl-ca=<path>`, a nonempty absolute PEM CA-bundle path (percent escapes allowed, at most `PATH_MAX - 1` decoded bytes) trusted exclusively; unknown or repeated keys, fragments, relative or empty paths, `ssl-ca` on a Unix socket and any verification-disabling option are refused (D224).
@@ -45,8 +45,10 @@ A Unix socket is an absolute path in place of HOST,
 usually percent-encoded (`%2Fvar%2Frun%2Fmysqld.sock`).
 User, password and
 database components accept percent escapes.
-The document requires a private
-`interface.dir`; every launched Host binds `interface.dir/rui.sock` (D211).
+An explicit private `interface.dir` selects `interface.dir/rui.sock` (D211).
+Without it, MySQL uses a short private per-user interface directory derived from the canonical Host directory, so long Host directory names do not lengthen the socket path.
+Host admission, the starter and directory-based clients share that placement derivation; clients read saved sources without resolving the MySQL login.
+Unsaved Store/interface placement on a detached start is refused when it differs from the saved placement; save it with `rui host set` so subsequent clients can find it.
 The URL travels as a literal only in stdin; a document file names a secret source for it (an environment variable or a private file), and it never appears in argv or
 refusal messages.
 Parsing wipes all JSON allocations, including failed

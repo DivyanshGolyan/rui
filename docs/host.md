@@ -134,10 +134,32 @@ Use `rui host set --store PATH SETTING @FILE` to read a JSON value from a file.
 `unset` removes the saved assignment, restoring its default when no later source overrides it.
 Changes apply to the next Host; they do not reconfigure a running one.
 `rui host start` takes `--settings FILE` but not `-`, because a started Host has no stdin; pass a document on stdin with `rui host serve --settings -`.
-Bare `rui` and `rui host start` reach a Host only in `PATH`, so they refuse settings that move it elsewhere: a MySQL Store, `interface.dir`, or a `store.sqlite.dir` other than `PATH`.
+Clients given `--store PATH` read that directory's saved placement, including MySQL, a moved `interface.dir`, or a different `store.sqlite.dir`.
+Save Store and interface placement with `rui host set`; a differing placement supplied only through `host start --settings` or `--set` is refused because a later client cannot see it.
+Other one-off settings still apply to a new Host. Foreground `host serve` permits unsaved placement, but directory-based clients need the same placement saved.
 A started Host runs in `/` without stdin. Relative paths you type on the command line (`--settings FILE`, `@FILE`, and `--set` paths or `file:` sources) are taken from the directory you run the command in.
 A relative path saved in `host.json` or written inside a document has no such directory, so bare `rui` and `rui host start` refuse it, as they refuse `interface.lifetime` `stdin`; give an absolute path.
 Run such a Host with `rui host serve --store PATH`.
+
+## MySQL
+
+After an operator creates the database and applies `rui store schema --engine mysql`, save a login source and open the TUI:
+
+```sh
+export DATABASE_URL='mysql://USER:PASSWORD@HOST:3306/DATABASE'
+rui host set --store /absolute/host-dir store.mysql.url env:DATABASE_URL
+rui --store /absolute/host-dir
+```
+
+The Host resolves `DATABASE_URL`; clients do not read the login bytes.
+`rui host start --store /absolute/host-dir` starts it without opening the TUI; Session, request and Host commands use the same `--store /absolute/host-dir`.
+Without an explicit interface, MySQL uses a short private per-user directory derived from the canonical Host directory; SQLite keeps its existing short hashed default socket.
+Long Host directory names therefore do not hit the explicit interface directory's 94-byte limit.
+To choose another interface, save `rui host set --store /absolute/host-dir interface.dir /absolute/private-interface` before starting.
+Upgrade restart still leaves MySQL Hosts running: interface lease retirement does not establish database `GET_LOCK` retirement; this remains work for the upgrade lifecycle.
+
+The existing foreground and opaque-id form remains supported: start `rui host serve --store /absolute/host-dir` with its settings, then use `RUI_RUNTIME_DIR=/absolute/interface rui --store STOREID`, where `STOREID` comes from Host readiness and the interface is the Host's actual interface directory.
+Do not put the login URL in argv. Literal secrets are accepted only in a foreground stdin document.
 
 ## Run in the foreground
 

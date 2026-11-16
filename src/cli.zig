@@ -1109,7 +1109,13 @@ fn rememberStore(init: std.process.Init, path: []const u8, require_existing: boo
     // for an unusable Store. host() classifies only after writing that value.
     if (!require_existing and std.mem.eql(u8, failure_held.resource orelse "", "host") and std.mem.eql(u8, failure_held.operation orelse "", "status")) return path;
     try validateStoreSpelling(path);
-    _ = platform.resolveClientPaths(init.io, path) catch |err| {
+    const selection = platform.resolveClientSelection(path);
+    _ = (switch (selection) {
+        .sqlite => platform.sqliteClientPaths(init.io, path),
+        .mysql => selection.paths(init.io),
+    }) catch |err| {
+        // Selector admission checks directories, not a running Host or its
+        // saved startup settings. Those belong to the operation that needs them.
         // Explicit/HOME Host administration may name an absent destination.
         // Saved and inherited Stores must still exist; never recreate them.
         if (err != error.FileNotFound or require_existing or !std.mem.eql(u8, failure_held.resource orelse "", "host")) return storeFailure(err);
