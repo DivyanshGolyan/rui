@@ -940,14 +940,20 @@ const mcp_facts_sql = "SELECT action.action_id,action.parent_operation_id,operat
     "WHERE " ++ mcp_ready_sql ++ " AND " ++ mcpCallSql("action", "operation");
 const ReadyFacts = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: rsql.SessionHead, background: bool, timeout_override_ms: ?rsql.Positive };
 const next_mcp_action = rsql.Read(.{
-    .sql = "SELECT action.action_id,tool.server,action.background_position IS NOT NULL AS background " ++
-        "FROM action_operation action @index(action_operation_executable) " ++
-        "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
-        "JOIN turn active ON active.turn_id=operation.turn_id " ++
-        "JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
-        "JOIN content name ON name.content_id=tool_call.name_content_id " ++
-        "JOIN tool_set_member member ON member.tool_set_id=operation.tool_set_id " ++
-        "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id AND tool.owner='mcp' AND @bytes(tool.name)=@payload(name) " ++
+    .compound = true,
+    .sql = "WITH mcp_operations(operation_id) AS (" ++
+        "SELECT active.operation_id FROM turn active @index(turn_one_active_per_session) WHERE active.outcome_code IS NULL " ++
+        "UNION SELECT background.parent_operation_id FROM action_operation background @index(action_operation_background_ready) " ++
+        "WHERE ?2=1 AND background.background_position IS NOT NULL AND background.authorized=1 AND background.resolution_code IS NULL AND background.attempt_ordinal=0) " ++
+        "SELECT action.action_id,tool.server,action.background_position IS NOT NULL AS background " ++
+        "FROM mcp_operations candidate " ++
+        "CROSS JOIN model_operation operation ON operation.operation_id=candidate.operation_id " ++
+        "CROSS JOIN turn active ON active.turn_id=operation.turn_id " ++
+        "CROSS JOIN tool_set_member member ON member.tool_set_id=operation.tool_set_id " ++
+        "CROSS JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id AND tool.owner='mcp' " ++
+        "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
+        "CROSS JOIN content name ON name.content_id=tool_call.name_content_id AND @payload(name)=@bytes(tool.name) " ++
+        "CROSS JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
         "JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE " ++ mcp_ready_sql ++ " AND " ++ capacity_sql ++ " ORDER BY action.action_id LIMIT 1",
     .Args = struct { foreground: bool, background: bool },

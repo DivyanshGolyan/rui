@@ -62,7 +62,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 73, .digest = 0x515b60c7f5df332d },
     .{ .schema_version = 74, .digest = 0xda8e267adbfcef45 },
     .{ .schema_version = 75, .digest = 0xcea5bf4db0d3978d },
-    .{ .schema_version = 76, .digest = 0x615843e237481307 },
+    .{ .schema_version = 76, .digest = 0x3f383106b7b83edd },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -737,6 +737,7 @@ pub const migrations = [_]Migration{
             "CREATE INDEX action_operation_session_results ON action_operation(session_ref,parent_operation_id,acceptance_position) WHERE acceptance_position IS NOT NULL AND background_position IS NULL",
             "CREATE INDEX action_operation_background ON action_operation(session_ref,background_position)",
             "CREATE INDEX action_operation_background_results ON action_operation(session_ref,parent_operation_id,background_position) WHERE background_position IS NOT NULL",
+            "CREATE INDEX action_operation_background_ready ON action_operation(parent_operation_id,action_id) WHERE background_position IS NOT NULL AND authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0",
             "ALTER TABLE session_stop RENAME TO session_stop_before_76",
             "CREATE TABLE session_stop(\n command_key TEXT PRIMARY KEY NOT NULL REFERENCES core_command(command_key),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n selected_turn_id INTEGER REFERENCES turn(turn_id),\n position INTEGER CHECK(position>0),\n admission_cutoff INTEGER NOT NULL CHECK(admission_cutoff>=0),\n stopped_at INTEGER NOT NULL CHECK(stopped_at>0),\n parent_caused INTEGER NOT NULL DEFAULT 0 CHECK(parent_caused IN (0,1)), action_cutoff INTEGER NOT NULL DEFAULT 0 CHECK(action_cutoff>=0)\n) STRICT, WITHOUT ROWID",
             "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused,action_cutoff) SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused,0 FROM session_stop_before_76",
@@ -758,6 +759,7 @@ pub const migrations = [_]Migration{
             "ALTER TABLE action_operation DROP INDEX action_operation_session_results, MODIFY action_operation_session_results_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN acceptance_position IS NOT NULL AND background_position IS NULL THEN session_ref END) STORED, ADD INDEX action_operation_session_results(action_operation_session_results_lead,parent_operation_id,acceptance_position)",
             "CREATE INDEX action_operation_background ON action_operation(session_ref,background_position)",
             "ALTER TABLE action_operation ADD COLUMN action_operation_background_results_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN background_position IS NOT NULL THEN session_ref END) STORED, ADD INDEX action_operation_background_results(action_operation_background_results_lead,parent_operation_id,background_position)",
+            "ALTER TABLE action_operation ADD COLUMN action_operation_background_ready_lead BIGINT GENERATED ALWAYS AS (CASE WHEN background_position IS NOT NULL AND authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0 THEN parent_operation_id END) STORED, ADD INDEX action_operation_background_ready(action_operation_background_ready_lead,action_id)",
             "ALTER TABLE session_stop ADD COLUMN action_cutoff BIGINT NOT NULL DEFAULT 0 CHECK(action_cutoff>=0) AFTER parent_caused",
             "CREATE TABLE action_control_command(\n command_key VARCHAR(128) NOT NULL,\n action_id TEXT NOT NULL,\n selected_action_id BIGINT,\n selection VARCHAR(10),\n selection_position BIGINT,\n PRIMARY KEY(command_key),\n FOREIGN KEY(command_key) REFERENCES core_command(command_key),\n FOREIGN KEY(selected_action_id) REFERENCES action_operation(action_id),\n CHECK(OCTET_LENGTH(action_id) BETWEEN 1 AND 20 AND (NOT REGEXP_LIKE(action_id,'[^0-9]','c'))),\n CHECK(selection IS NULL OR selection IN ('background','final')),\n CHECK(selection_position>0),\n CHECK((selected_action_id IS NULL AND selection IS NULL AND selection_position IS NULL) OR (selected_action_id IS NOT NULL AND selection IS NOT NULL AND selection_position IS NOT NULL))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
         },
@@ -1903,6 +1905,7 @@ pub const indexes = [_]Index{
     .{ .name = "model_operation_session_history", .table = "model_operation", .columns = &.{ "session_ref", "operation_id" } },
     .{ .name = "action_operation_background", .table = "action_operation", .columns = &.{ "session_ref", "background_position" } },
     .{ .name = "action_operation_background_results", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "background_position" }, .where = "background_position IS NOT NULL" },
+    .{ .name = "action_operation_background_ready", .table = "action_operation", .columns = &.{ "parent_operation_id", "action_id" }, .where = "background_position IS NOT NULL AND authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0" },
     .{ .name = "model_operation_turn_history", .table = "model_operation", .columns = &.{ "turn_id", "operation_id" } },
     // Every Operation by admission, whatever its outcome: request history
     // places each earlier Operation's effort boundary (codec /2).
@@ -3098,7 +3101,7 @@ test "schema 76 migration creates canonical promotion objects on SQLite and MySQ
                 return error.NoncanonicalMigrationObject;
             }
         }
-        try std.testing.expectEqual(@as(usize, if (dialect == .sqlite) 11 else 2), matched);
+        try std.testing.expectEqual(@as(usize, if (dialect == .sqlite) 12 else 2), matched);
     }
 }
 
