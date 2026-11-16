@@ -116,6 +116,9 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           BASE=$(python3 -c 'import json; print(json.load(open("selection.json"))["base"])')
           python3 tests/ci/pr_shape.py "$BASE"
