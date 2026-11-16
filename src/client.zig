@@ -1918,6 +1918,7 @@ fn writeConfigureRequest(capture: *Capture, store: []const u8, key: []const u8, 
     try capture.writeConfiguration(input);
     if (input.reload_skills) try capture.writeRequest(protocol.configure_request.reload_skills, .{});
     if (input.require_model) try capture.writeRequest(protocol.configure_request.require_model, .{});
+    if (input.preset.present) try capture.writeRequest(protocol.configure_request.preset, .{input.preset.value});
     try capture.writeRequest(protocol.configure_request.tail, .{});
 }
 
