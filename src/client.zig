@@ -1594,10 +1594,7 @@ const CaptureRouting = struct {
     }
 
     fn read(io: std.Io, record_path: []const u8) !?CaptureRouting {
-        var parent = std.Io.Dir.cwd().openDir(io, std.fs.path.dirname(record_path) orelse ".", .{ .iterate = true, .follow_symlinks = false }) catch |err| switch (err) {
-            error.FileNotFound => return null,
-            else => return err,
-        };
+        var parent = std.Io.Dir.cwd().openDir(io, std.fs.path.dirname(record_path) orelse ".", .{ .iterate = true }) catch return error.InvalidRequestRecord;
         defer parent.close(io);
         var name_buffer: [std.Io.Dir.max_name_bytes]u8 = undefined;
         const route_name = try name(std.fs.path.basename(record_path), &name_buffer);
@@ -1605,9 +1602,9 @@ const CaptureRouting = struct {
         defer std.crypto.secureZero(u8, &bytes);
         const text = @import("private_file.zig").readAt(io, parent, route_name, &bytes) catch |err| switch (err) {
             error.FileNotFound => return null, // old raw-request records
-            else => return err,
+            else => return error.InvalidRequestRecord,
         };
-        try @import("private_file.zig").validateDirectory(io, parent);
+        @import("private_file.zig").validateDirectory(io, parent) catch return error.InvalidRequestRecord;
         const Fields = struct { format: u8, host_directory: []const u8, runtime_hint: []const u8 };
         var storage: [2048]u8 = undefined;
         defer std.crypto.secureZero(u8, &storage);
@@ -1632,12 +1629,7 @@ pub const CapturedRecord = struct {
     routing: ?CaptureRouting = null,
 
     pub fn resolvePaths(self: *const CapturedRecord, io: std.Io) !platform.Paths {
-        const paths = self.paths orelse if (self.routing) |route|
-            try route.resolve(io, self.saved.store.slice())
-        else
-            try resolveClientPaths(io, self.saved.store.slice());
-        if (!paths.store_identity.eql(self.saved.store.slice())) return error.RequestBindingMismatch;
-        return paths;
+        return resolveCapturedPaths(io, self.saved.store.slice(), self.paths, self.routing);
     }
 
     pub fn selector(self: *const CapturedRecord) []const u8 {
@@ -1655,6 +1647,27 @@ pub const CapturedRecord = struct {
         self.* = undefined;
     }
 };
+
+// Both retransmission and bounded read-only inspection use this route owner.
+// Identity is a binding assertion, never a substitute for a present selector.
+fn resolveCapturedPaths(io: std.Io, store_identity: []const u8, retained: ?platform.Paths, routing: ?CaptureRouting) !platform.Paths {
+    const paths = retained orelse if (routing) |route|
+        try route.resolve(io, store_identity)
+    else
+        try resolveClientPaths(io, store_identity);
+    if (!paths.store_identity.eql(store_identity)) return error.RequestBindingMismatch;
+    return paths;
+}
+
+pub fn inspectCapturedRequest(io: std.Io, directory: []const u8, handle: []const u8) !struct { identity: protocol_reply.MutationIdentity, paths: platform.Paths } {
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try requestPath(directory, handle, &path_buffer);
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const identity = try readCapturedIdentity(io, &file, handle);
+    const routing = try CaptureRouting.read(io, path);
+    return .{ .identity = identity, .paths = try resolveCapturedPaths(io, identity.store.slice(), null, routing) };
+}
 
 pub fn validRequestHandle(handle: []const u8) bool {
     if (handle.len != 36) return false;
@@ -5570,7 +5583,7 @@ test "capture routing round trips six placements without conflating selector and
     const gpa = std.testing.allocator;
     const Peer = struct {
         fn serve(listener: *std.Io.net.Server, expected_store: []const u8) anyerror!void {
-            for (0..3) |index| {
+            for (0..4) |index| {
                 const connection = try listener.accept(std.testing.io);
                 defer connection.close(std.testing.io);
                 const deadline = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 5 * std.time.ns_per_s;
@@ -5591,7 +5604,7 @@ test "capture routing round trips six placements without conflating selector and
                 }
                 try std.testing.expectEqualStrings(expected, request[0..body_used]);
                 var body: protocol.ResponseBuffer = .{};
-                const info: @import("host_reply.zig").HostInfo = .{ .store = if (index == 2) "fedcba9876543210fedcba9876543210" else expected_store, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .routes = protocol.routesAll(.unserved), .doublewrite = null };
+                const info: @import("host_reply.zig").HostInfo = .{ .store = if (index == 3) "fedcba9876543210fedcba9876543210" else expected_store, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .routes = protocol.routesAll(.unserved), .doublewrite = null };
                 try body.render(@import("host_reply.zig").renderHostInfo, .{info});
                 var head_buffer: [512]u8 = undefined;
                 const head = try std.fmt.bufPrint(&head_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\nConnection: close\r\n\r\n", .{body.len});
@@ -5663,6 +5676,9 @@ test "capture routing round trips six placements without conflating selector and
         try std.testing.expectEqualStrings(directory, rediscovered.selector());
         try std.testing.expectEqualStrings(paths.socket.slice(), rediscovered.socket.slice());
         try std.testing.expectEqualStrings(saved.store.slice(), rediscovered.store_identity.slice());
+        const inspection = try inspectCapturedRequest(io, root, saved.key.slice());
+        try std.testing.expectEqualStrings(directory, inspection.paths.selector());
+        try std.testing.expectEqualStrings(saved.store.slice(), inspection.identity.store.slice());
         var explicit = try openCaptured(io, .{ .explicit = .{ .store = directory, .record = location.record, .kind = .session_stop } });
         defer explicit.close(io);
         const explicit_paths = try explicit.resolvePaths(io);
@@ -5706,7 +5722,7 @@ test "capture routing metadata rejects invalid private sources and keeps legacy 
         try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } }));
     }
     try tmp.dir.setFilePermissions(io, name, .fromMode(0o644), .{});
-    try std.testing.expectError(error.InsecureCredentialFile, openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } }));
+    try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } }));
     try tmp.dir.deleteFile(io, name);
     try tmp.dir.symLink(io, "missing-route", name, .{});
     if (openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } })) |value| {
@@ -5853,4 +5869,55 @@ test "capture routing retains OS bytes and legacy opaque runtime without storing
     var explicit = try openCaptured(io, .{ .explicit = .{ .store = legacy.store_identity.slice(), .record = legacy_location.record, .kind = .session_stop } });
     defer explicit.close(io);
     try std.testing.expectEqualStrings(legacy.socket.slice(), (try explicit.resolvePaths(io)).socket.slice());
+}
+
+test "capture routing writer and readers share private parent aliases" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const root = tmp.root[0..tmp.root_len];
+    var actual = try tmp.dir.createDirPathOpen(io, "actual", .{ .permissions = .fromMode(0o700) });
+    actual.close(io);
+    try tmp.dir.symLink(io, "actual", "alias", .{ .is_directory = true });
+    const alias = try std.fs.path.join(gpa, &.{ root, "alias" });
+    defer gpa.free(alias);
+    for ([_]bool{ false, true }) |explicit| {
+        const path = try std.fs.path.join(gpa, &.{ alias, "explicit.json" });
+        defer gpa.free(path);
+        const target: CaptureTarget = if (explicit) .{ .explicit = .{ .record = path, .key = "explicit-key" } } else .{ .generated = alias };
+        var captured = try captureSessionStop(io, .{ .store = root, .session = "k7m2qx" }, target);
+        const saved = captured.saved;
+        captured.close(io);
+        var recovered = try openCaptured(io, if (explicit) .{ .explicit = .{ .store = root, .record = path, .kind = .session_stop } } else .{ .generated = .{ .directory = alias, .handle = saved.key.slice() } });
+        defer recovered.close(io);
+        try std.testing.expectEqualStrings(root, (try recovered.resolvePaths(io)).selector());
+        if (!explicit) {
+            const inspected = try inspectCapturedRequest(io, alias, saved.key.slice());
+            try std.testing.expectEqualStrings(root, inspected.paths.selector());
+        }
+    }
+}
+
+test "read-only capture routing does not eagerly validate a replay body" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const root = tmp.root[0..tmp.root_len];
+    var captured = try captureConfigure(io, .{ .store = root, .session = .{ .named = "k7m2qx" } }, .{ .generated = root }).get();
+    const key = captured.saved.key;
+    captured.close(io);
+    const filename = try std.fmt.allocPrint(gpa, "{s}.json", .{key.slice()});
+    defer gpa.free(filename);
+    const file = try tmp.dir.openFile(io, filename, .{ .mode = .write_only });
+    {
+        defer file.close(io);
+        try file.seekTo(io, try file.length(io));
+        try file.writeStreamingAll(io, "not another immutable request");
+    }
+    try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } }));
+    const observed = try inspectCapturedRequest(io, root, key.slice());
+    try std.testing.expectEqualStrings(root, observed.paths.selector());
+    try std.testing.expectEqualStrings(key.slice(), observed.identity.key.slice());
 }

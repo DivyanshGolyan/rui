@@ -3854,9 +3854,8 @@ const RequestIdentity = struct {
 fn requestIdentity(init: std.process.Init, parsed: *const cli_args.Parsed) !RequestIdentity {
     if (parsed.positional) |handle| {
         var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        var captured = try client.openCaptured(init.io, .{ .generated = .{ .directory = try requestDirectory(init, &directory_buffer), .handle = handle } });
-        defer captured.close(init.io);
-        return .{ .paths = try captured.resolvePaths(init.io), .key = captured.saved.key };
+        const captured = try client.inspectCapturedRequest(init.io, try requestDirectory(init, &directory_buffer), handle);
+        return .{ .paths = captured.paths, .key = captured.identity.key };
     }
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var identity: RequestIdentity = .{ .paths = try client.resolveClientPaths(init.io, try selectedStore(init, parsed.get("store"), &selected_buffer)) };

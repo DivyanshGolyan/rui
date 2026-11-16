@@ -280,6 +280,13 @@ def saved_capture_routes(state):
                 setting("store.sqlite.dir", home / "data")
             if explicit_interface:
                 setting("interface.dir", home / "iface")
+            if explicit_interface:
+                # Capture admission already supports a private parent alias;
+                # reopening its companion must admit that same pinned directory.
+                (home / ".config").mkdir(mode=0o700)
+                (home / ".config/rui").mkdir(mode=0o700)
+                (home / "capture-files").mkdir(mode=0o700)
+                (home / ".config/rui/requests").symlink_to(home / "capture-files", target_is_directory=True)
             endpoint = fixture.SuccessEndpoint([(answer("capture route answer"), None)])
             thread = threading.Thread(target=endpoint.serve_forever)
             thread.start()
