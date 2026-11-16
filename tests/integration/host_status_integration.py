@@ -433,12 +433,56 @@ def resolved_sqlite_routing(root):
         frame_host.output(launched)
 
 
+def private_saved_interfaces(root):
+    """Untrusted saved interfaces receive neither discovery nor request bytes."""
+    home = pathlib.Path(root) / "private-interface-home"
+    home.mkdir(mode=0o700)
+    for engine in ("sqlite", "mysql"):
+        with host_process.short_interface_directory() as runtime:
+            directory = pathlib.Path(root) / f"private-{engine}"
+            directory.mkdir(mode=0o700)
+            store = ({"sqlite": {"dir": str(directory)}} if engine == "sqlite"
+                     else {"mysql": {"url": {"env": "MUST_NOT_RESOLVE_INTERFACE_TEST_URL"}}})
+            document = directory / "host.json"
+            document.write_text(json.dumps({"store": store, "interface": {"dir": str(runtime)}}))
+            document.chmod(0o600)
+            with os_semantics.unix_stream() as listener:
+                listener.bind(str(runtime / "rui.sock"))
+                listener.listen(2)
+                listener.setblocking(False)
+                runtime.chmod(0o777)
+                try:
+                    value = cli_status(home, "--store", directory)
+                    assert value["status"] == "access_failure", value
+                    request = subprocess.run([RUI, "session", "start", "--store", directory],
+                        input="private request must not reach this listener", text=True,
+                        capture_output=True, env={**os.environ, "HOME": str(home)}, timeout=15)
+                    assert request.returncode != 0, request
+                    if engine == "mysql":
+                        # The pre-existing opaque-id door enforces the same rule.
+                        legacy = subprocess.run([RUI, "host", "status", "--store", "0123456789abcdef0123456789abcdef"],
+                            text=True, capture_output=True,
+                            env={**os.environ, "HOME": str(home), "RUI_RUNTIME_DIR": str(runtime)}, timeout=15)
+                        assert legacy.returncode != 0 and json.loads(legacy.stdout)["status"] == "access_failure", legacy
+                    try:
+                        connection, _ = listener.accept()
+                    except BlockingIOError:
+                        pass
+                    else:
+                        connection.close()
+                        raise AssertionError(f"{engine} lookup connected to an untrusted interface")
+                finally:
+                    runtime.chmod(0o700)
+    print("saved-interface admission: SQLite, MySQL and legacy lookup refuse before discovery/mutation connect", flush=True)
+
+
 def main():
     prove_fragmented_request()
     mysql_host_info()
     with tempfile.TemporaryDirectory(prefix="rui-host-info-") as root:
         root = canonical_fixture_root(root)
         resolved_sqlite_routing(root)
+        private_saved_interfaces(root)
         protected_saturation(root)
         hostile_discovery(root)
         discovery_body_deadline(root)

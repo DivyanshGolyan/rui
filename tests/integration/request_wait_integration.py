@@ -15,6 +15,7 @@ import bash_fixture as recovery
 import canonical_fixture as canonical
 import host_process
 import model_fixture as fixture
+from request_routing_cases import capture_routing
 from host_process import HostDiagnostics, canonical_fixture_root, dispose_all
 
 
@@ -262,10 +263,53 @@ def restarted_bash(state):
         recovery.finish_case(original, recovered, keeper, endpoint, thread)
 
 
+def saved_capture_routes(state):
+    for moved in (False, True):
+        for explicit_interface in (False, True):
+            with contextlib.ExitStack() as interfaces:
+                home = state / f"capture-routing-{moved}-{explicit_interface}"
+                home.mkdir(mode=0o700)
+                directory = home / "host"
+                env = dict(os.environ, HOME=str(home))
+                for name in ("RUI_STORE", "RUI_RUNTIME_DIR"):
+                    env.pop(name, None)
+                def setting(leaf, value):
+                    result = subprocess.run([str(RUI), "host", "set", "--store", str(directory), leaf, str(value)],
+                                            env=env, capture_output=True, text=True, timeout=20)
+                    assert result.returncode == 0, result
+                if moved:
+                    setting("store.sqlite.dir", home / "data")
+                if explicit_interface:
+                    setting("interface.dir", interfaces.enter_context(host_process.short_interface_directory()))
+                if explicit_interface:
+                    # Capture admission already supports a private parent alias;
+                    # reopening its companion must admit that same pinned directory.
+                    (home / ".config").mkdir(mode=0o700)
+                    (home / ".config/rui").mkdir(mode=0o700)
+                    (home / "capture-files").mkdir(mode=0o700)
+                    (home / ".config/rui/requests").symlink_to(home / "capture-files", target_is_directory=True)
+                release = threading.Event()
+                release.set()
+                endpoint = fixture.SuccessEndpoint([(answer("capture route answer"), release)])
+                thread = threading.Thread(target=endpoint.serve_forever)
+                thread.start()
+                host = None
+                try:
+                    host = fixture.start_host(directory, f"http://127.0.0.1:{endpoint.server_port}/responses")
+                    capture_routing(RUI, directory, home, env)
+                    capture_routing(RUI, directory, home, env, message="capture route original input")
+                    assert len(endpoint.requests) == 1, endpoint.requests
+                finally:
+                    dispose_all(lambda: fixture.stop_host(host) if host is not None else None,
+                                endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5))
+                    assert not thread.is_alive(), "capture route peer did not retire"
+    print("capture routing: fresh-process recover, inspect, wait and result on four SQLite placements passed", flush=True)
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="rui-request-wait.") as temporary:
         state = canonical_fixture_root(temporary)
-        for scenario in (completion, permission, timeout_and_absent, stopped_host,
+        for scenario in (saved_capture_routes, completion, permission, timeout_and_absent, stopped_host,
                          lambda root: interrupted(root, signal.SIGINT),
                          lambda root: interrupted(root, signal.SIGTERM), tier_two, restarted_bash):
             scenario(state)

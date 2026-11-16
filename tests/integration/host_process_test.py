@@ -11,6 +11,7 @@ import os
 import pathlib
 import select
 import socket
+import stat
 import os_semantics
 import struct
 import subprocess
@@ -127,7 +128,27 @@ def prove_wait_hooks():
                 other.assert_not_called()
 
 
+def prove_short_interface_directory():
+    paths = []
+    for abort in (False, True):
+        try:
+            with host_process.short_interface_directory() as runtime:
+                paths.append(runtime)
+                assert runtime.parent == pathlib.Path("/tmp").resolve(strict=True), runtime
+                info = runtime.stat()
+                assert info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o700, info
+                with os_semantics.unix_stream() as listener:
+                    listener.bind(str(runtime / "rui.sock"))
+                if abort:
+                    raise RuntimeError("injected interface owner exit")
+        except RuntimeError as error:
+            assert abort and str(error) == "injected interface owner exit", error
+        assert not paths[-1].exists(), paths
+    print("Host explicit interface fixture: canonical short private directory and both cleanup exits passed")
+
+
 def main():
+    prove_short_interface_directory()
     prove_wait_hooks()
     prove_dispose_all()
     prove_peer_disconnects()
