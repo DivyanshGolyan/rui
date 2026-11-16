@@ -65,7 +65,10 @@ pub const StoreLease = struct {
     /// owned canonical paths by value; every probe descriptor closes here.
     pub fn observe(io: std.Io, supplied_path: []const u8) Observation {
         const selection = resolveClientSelection(supplied_path);
-        const paths = selection.paths(io) catch return .access_failure;
+        const paths = selection.paths(io) catch |err| return switch (err) {
+            error.FileNotFound => .unowned,
+            else => .access_failure,
+        };
         const mysql = paths.kind == .mysql;
         var store_dir = std.Io.Dir.cwd().openDir(io, if (mysql) paths.runtimeHint().? else paths.store.slice(), .{}) catch |err| return switch (err) {
             error.FileNotFound => .unowned,
