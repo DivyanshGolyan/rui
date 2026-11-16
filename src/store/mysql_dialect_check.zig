@@ -1074,17 +1074,16 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
     defer restore("USE " ++ database);
     inline for (.{ false, true }) |historical| {
         try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
-        if (historical) {
-            try load(migrated_database, store_testing.baseline_mysql_ddl, false);
-            try load(migrated_database, store_testing.baseline_rows, true);
-            inline for (schema.migrations) |step| {
-                if (step.from < 74) try load(migrated_database, schema.mysqlMigration(step.from), false);
-            }
-        } else {
-            const objects = comptime schema.objects(.mysql);
-            for (objects) |object| {
-                if (std.mem.eql(u8, object.name, "session_pin") or std.mem.eql(u8, object.name, "session_pin_command")) continue;
-                const text = try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 7", "kind BETWEEN 1 AND 6");
+        try load(migrated_database, store_testing.baseline_mysql_ddl, false);
+        if (historical) try load(migrated_database, store_testing.baseline_rows, true);
+        inline for (schema.migrations) |step| {
+            if (step.from < 74) try load(migrated_database, schema.mysqlMigration(step.from), false);
+        }
+        if (!historical) {
+            try load(migrated_database, "DROP TABLE core_command", true);
+            for (comptime schema.objects(.mysql)) |object| {
+                if (!std.mem.eql(u8, object.name, "core_command") and !std.mem.eql(u8, object.name, "core_command_target_order")) continue;
+                const text = try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 8", "kind BETWEEN 1 AND 6");
                 defer std.testing.allocator.free(text);
                 try load(migrated_database, text, false);
             }
@@ -1094,19 +1093,22 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
         defer restore("DROP TEMPORARY TABLE " ++ migrated_database ++ ".original_pin_commands");
         try load(migrated_database, "CREATE TEMPORARY TABLE original_pin_stops AS SELECT * FROM session_stop", false);
         defer restore("DROP TEMPORARY TABLE " ++ migrated_database ++ ".original_pin_stops");
-        try load(migrated_database, schema.mysqlMigration(74), false);
+        inline for (schema.migrations) |step| {
+            if (step.from >= 74) try load(migrated_database, schema.mysqlMigration(step.from), false);
+        }
         try expectCatalog(migrated_database);
         try expectSameResults(&.{
             "SELECT * FROM core_command ORDER BY command_seq",
-            "SELECT * FROM session_stop ORDER BY command_key",
+            "SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused FROM session_stop ORDER BY command_key",
             "SELECT count(*) FROM session_pin",
             "SELECT count(*) FROM session_pin_command",
         }, &.{
             "SELECT * FROM original_pin_commands ORDER BY command_seq",
-            "SELECT * FROM original_pin_stops ORDER BY command_key",
+            "SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused FROM original_pin_stops ORDER BY command_key",
             "SELECT 0",
             "SELECT 0",
         });
+        try expectSameResults(&.{"SELECT count(*) FROM session_stop WHERE action_cutoff<>0"}, &.{"SELECT 0"});
         try load(migrated_database, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('pin-upgrade',7,'d8mv7p',UNHEX(REPEAT('00',32)),1,'',0,0,100);INSERT INTO session_pin_command(command_key,pinned) VALUES('pin-upgrade',1);INSERT INTO session_pin(session_ref,command_key) VALUES('d8mv7p','pin-upgrade');UPDATE session_pin SET command_key=NULL WHERE session_ref='d8mv7p'", false);
         try expectSameResults(&.{
             "SELECT count(*) FROM session_pin WHERE command_key IS NULL",
