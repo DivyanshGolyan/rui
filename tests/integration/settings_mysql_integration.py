@@ -16,6 +16,7 @@ import live_engines
 import os_semantics
 import settings_fixture as frame_host
 import store_rounds_cases
+from request_routing_cases import capture_routing
 
 
 def main():
@@ -189,6 +190,48 @@ def main():
         private(host)
         close(host)
         released()
+        # A saved Host directory is sufficient for the starter and every
+        # client. Neither the CLI environment nor argv contains the URL.
+        for explicit_interface in (False, True):
+            directory = root / ("saved-explicit" if explicit_interface else "saved-default")
+            client_home = root / ("client-explicit" if explicit_interface else "client-default")
+            client_home.mkdir(mode=0o700)
+            client_env = dict(os.environ, RUI_SETTINGS_MYSQL_URL=url, HOME=str(client_home))
+            client_env.pop("RUI_RUNTIME_DIR", None)
+
+            def command(*args, message=None):
+                result = subprocess.run([rui, *map(str, args)], env=client_env, cwd=root, input=message,
+                                        text=True, capture_output=True, timeout=40)
+                assert result.returncode == 0, result
+                assert url not in result.stdout + result.stderr
+                return result
+
+            command("host", "set", "--store", directory, "store.mysql.url", "env:RUI_SETTINGS_MYSQL_URL")
+            command("host", "set", "--store", directory, "providers.codex.unauthenticated", "true")
+            command("host", "set", "--store", directory, "execution.paused", "true")
+            if explicit_interface:
+                command("host", "set", "--store", directory, "interface.dir", runtime)
+            started = None
+            try:
+                command("host", "start", "--store", directory)
+                started = json.loads(command("host", "status", "--store", directory).stdout)
+                assert started["status"] == "ready" and started["store"] == store_id, started
+                record = directory / "request.json"
+                receipt = json.loads(command("session", "start", "--store", directory,
+                                             "--record", record, "--key", "directory-start",
+                                             "--provider", "codex", "--model", "gpt-5.5", "--workspace", root,
+                                             message="Saved MySQL placement evidence").stdout)
+                assert receipt["context"]["store"] == store_id, receipt
+                command("request", "inspect", "--store", directory, "--key", "directory-start")
+                command("request", "recover", "--store", directory, "--record", record, "--kind", "message")
+                capture_routing(rui, directory, root, client_env)
+            finally:
+                if started is not None:
+                    command("host", "pause", "--store", directory, "--instance", started["instance"])
+                    released()
+
+        # Post-login access checks cover both ownership writes: SELECT-only
+        # cannot INSERT, and SELECT+INSERT still cannot advance the epoch.
         for user, privileges in limited_logins:
             limited_password = secrets.token_hex(24)
             sql(f"CREATE USER '{user}'@'localhost' IDENTIFIED BY '{limited_password}';"

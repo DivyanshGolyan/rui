@@ -115,7 +115,7 @@ pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []cons
     const owned_home = try allocator.dupe(u8, home);
     errdefer allocator.free(owned_home);
     const paths = platform.resolveClientPaths(init.io, store) catch null;
-    const owned_store = try allocator.dupe(u8, if (paths) |value| value.store.slice() else store);
+    const owned_store = try allocator.dupe(u8, if (paths) |value| value.selector() else store);
     errdefer allocator.free(owned_store);
     const executable = try std.process.executablePathAlloc(init.io, allocator);
     errdefer allocator.free(executable);
@@ -352,4 +352,17 @@ test "upgrade restart results retain unknown failures and other Store guidance w
     var out = std.Io.Writer.fixed(&bytes);
     try result.hosts.write(&out);
     try std.testing.expectEqualStrings("No running Hosts.\n", out.buffered());
+}
+
+test "upgrade selected activation routes by Host directory not SQLite data or MySQL identity" {
+    const receipt: Installation.Receipt = .{ .operation_build = "/prepared", .selected_after = "/selected" };
+    for ([_][]const u8{ "/data", "0123456789abcdef0123456789abcdef" }) |identity| {
+        var entries = [_]restart_all.Entry{
+            .{ .socket = "/first.sock", .directory = "/first-host", .store = "/selected-host", .state = .{ .outcome = .not_needed } },
+            .{ .socket = "/selected.sock", .directory = "/selected-host", .store = identity, .state = .{ .outcome = .{ .unsupported = .configuration_unavailable } } },
+        };
+        const result: Result = .{ .installation = .{ .installed = receipt }, .store = "/selected-host", .hosts = .{ .entries = &entries } };
+        try std.testing.expectEqual(HostLifecycle.Limitation.configuration_unavailable, result.selectedActivation().unsupported);
+        try std.testing.expect(result.hosts.selectedOutcome(identity) == .not_needed);
+    }
 }
