@@ -1,5 +1,3 @@
-//! Obligation Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -48,8 +46,6 @@ test "obligation projection recomputes a dirty forest together in either head or
                 try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=?1 WHERE session_ref=?2", .{ @as(u64, 100), left.slice() });
                 try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=?1 WHERE session_ref=?2", .{ @as(u64, 50), right.slice() });
                 try refreshFrontiersForTesting(&storage, &.{ left.slice(), right.slice() });
-                // Both dirty descendants retain older saved keys. Reusing either
-                // key while projecting their common ancestor gives the wrong min.
                 try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=?1 WHERE session_ref=?2", .{ @as(u64, 300), left.slice() });
                 try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=?1 WHERE session_ref=?2", .{ @as(u64, 200), right.slice() });
                 const before = storage.testing_content_work.rounds;
@@ -162,8 +158,6 @@ test "descendant changes invalidate ancestor tokens without invalidating standal
                 create.configuration.tools = try .of(&.{"start_agent"});
                 const root = (try storage.configure(&create, .{})).accepted.session;
                 const child = if (shape == .standalone) standalone: {
-                    // A real standalone start retains its starter in the first
-                    // Message, but deliberately saves no parent attachment.
                     try submitTestMessage(&storage, &tmp, "starter-file", "starter-message", root.slice(), "start independently");
                     const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                     try settleCallsForTesting(&storage, &tmp, model, "starter-call", &.{.{
@@ -212,9 +206,6 @@ test "descendant changes invalidate ancestor tokens without invalidating standal
                 unrelated_request.since = unrelated_page.token.?;
                 unrelated_request.position = unrelated_page.end;
 
-                // Admission/stop only: no ending or forwarded event can touch
-                // root incidentally. A second admission leaves the earliest
-                // frontier time unchanged but still invalidates every ancestor.
                 for (0..3) |phase| {
                     const queued = phase != 2;
                     request.position = page.end;
@@ -251,8 +242,6 @@ test "descendant changes invalidate ancestor tokens without invalidating standal
                     std.mem.sort(change_ring.Id, expected[0..count], {}, testingIdLess);
                     try changed.expectReferences(expected[0..count]);
                     listing = changed;
-                    // Current never short-circuits, and must agree with the
-                    // refreshed Activity footer even when no own row changed.
                     _ = try expectOneWork(&storage, &tmp, root.slice(), kind);
                     var row = try testingListRow(&storage, &tmp, root.slice());
                     defer row.deinit();
@@ -284,8 +273,6 @@ test "obligation frontier spans ending feed and Message transfers in either orde
                         const parent = if (multi_hop) middle: {
                             const middle = try configureTestSession(&storage, "owed-middle");
                             try answerTestTurn(&storage, &tmp, middle.slice(), "owed-middle-answer", &.{.{ .encoded = "middle done", .decoded = "middle done" }});
-                            // Seed topology, not owed rows: all obligations below
-                            // are driven by production admission and delivery.
                             try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ root.slice(), middle.slice() });
                             break :middle middle;
                         } else root;
@@ -307,8 +294,6 @@ test "obligation frontier spans ending feed and Message transfers in either orde
                                 try std.testing.expect(storage.stopOwedSession(&child_stop, .{}) == .accepted);
                             }
                         }
-                        // The exact missed observation: no child rows have landed,
-                        // its own Turn is finished, yet the server owns owed work.
                         const between = try store_core.activityPageForTesting(&storage, .{ .session = root, .position = baseline.end, .kinds = if (ending == .quiet) .initOne(.turn_ended) else .full });
                         try std.testing.expectEqual(@as(usize, 0), between.count);
                         try std.testing.expect(between.work.work.state == .working);
@@ -334,11 +319,7 @@ test "obligation frontier spans ending feed and Message transfers in either orde
                         try std.testing.expectEqual(@as(usize, 1), landed.count);
                         try std.testing.expectEqualStrings(child.slice(), landed.items[0].value.turn_ended.session.slice());
                         if (!message_first) {
-                            // A positioned ending is not completion of its owed
-                            // Message, including when the Message will be quiet.
                             _ = try expectOneWork(&storage, &tmp, root.slice(), "working");
-                            // Backfill must also retain a Message-only duty after
-                            // every forwarded ending has already been positioned.
                             try store_testing.stageObligationUpgrade(&storage);
                             try storage.close();
                             opened = false;
@@ -443,8 +424,6 @@ test "new attachments invalidate saved ancestors and deep trees forget ring cove
                     try std.testing.expectEqual(depth + 2, changed.count);
                     for (changed.references[0..changed.count]) |ref| try std.testing.expect(!std.mem.eql(u8, &ref, unrelated.slice()));
                 } else {
-                    // Five distinct Sessions cannot fit Touched: forget, do
-                    // not silently truncate the chain before its root.
                     try std.testing.expectEqual(protocol.ListDelta.full, changed.delta);
                 }
                 try std.testing.expect(!storage.isFenced());
@@ -465,13 +444,10 @@ test "a stop that selected no Turn decides work only through the input it exclud
             const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
             try answerTestTurn(&storage, &tmp, session.slice(), "no-turn-stop-answer", &answer);
 
-            // A stop with nothing to stop leaves the Session finished.
             var idle_stop = try completeSessionStop("no-turn-stop-idle", session.slice());
             try std.testing.expect(storage.stopSession(&idle_stop, .{}) == .accepted);
             _ = try expectOneWork(&storage, &tmp, session.slice(), "finished");
 
-            // A stop that excluded queued input stops the Session from that stop,
-            // and later no-op stops change nothing.
             try submitTestMessage(&storage, &tmp, "no-turn-stop-file", "no-turn-stop-queued", session.slice(), "queued");
             var effective = try completeSessionStop("no-turn-stop-effective", session.slice());
             try std.testing.expect(storage.stopSession(&effective, .{}) == .accepted);
@@ -481,7 +457,6 @@ test "a stop that selected no Turn decides work only through the input it exclud
             try std.testing.expect(storage.stopSession(&later, .{}) == .accepted);
             try std.testing.expectEqual(stopped_at, try expectOneWork(&storage, &tmp, session.slice(), "stopped"));
 
-            // New input after the stop starts a Turn whose state is the Session's.
             try submitTestMessage(&storage, &tmp, "no-turn-stop-next-file", "no-turn-stop-next", session.slice(), "next");
             _ = try expectOneWork(&storage, &tmp, session.slice(), "pending");
             _ = (try storage.admitNextModelAttempt(.{})).?;

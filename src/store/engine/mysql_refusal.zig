@@ -1,4 +1,3 @@
-//! Pure admission policy. Doublewrite is diagnostic, not an admission gate.
 const std = @import("std");
 
 pub const Facts = struct {
@@ -18,7 +17,6 @@ pub const StartError = VersionError || error{ MysqlReadOnly, MysqlFlushLogUnsafe
 
 pub fn refusal(facts: Facts) ?StartError {
     if (version_policy.versionRefusal(facts.server_version, facts.version_comment)) |err| return err;
-    // D222: version/MariaDB, replica, flush_log, sync_binlog, then format.
     if (facts.read_only or facts.super_read_only) return error.MysqlReadOnly;
     if (facts.innodb_flush_log_at_trx_commit != 1) return error.MysqlFlushLogUnsafe;
     if (facts.log_bin and facts.sync_binlog != 1) return error.MysqlSyncBinlogUnsafe;

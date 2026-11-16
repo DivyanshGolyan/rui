@@ -1,5 +1,3 @@
-//! Tool set migration SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const std = @import("std");
 const platform = @import("../../store_path.zig");
@@ -37,7 +35,6 @@ test "schema 65 migration freezes each Operation offer and conservatively adopts
         try sqlite.bindText(meta, 2, root);
         try sqlite.expectDone(meta);
     }
-    // Reopening must neither reproject old Operations nor widen current intent.
     for (0..2) |_| {
         var storage: Store = undefined;
         try storage.open(std.testing.io, path, root);

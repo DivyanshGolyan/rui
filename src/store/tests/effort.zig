@@ -1,4 +1,3 @@
-//! Effort Store conformance tests.
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
 const wire_request = @import("../../wire_request.zig");
@@ -114,7 +113,6 @@ test "unlisted effort passes configure preset Message creation and update unchan
                     },
                 };
                 try std.testing.expectEqual(@as(?protocol.ReasoningEffort, effort), (try storage.inspectSessionForTesting(session.slice())).reasoning_effort);
-                // Start unspecified, then select this same word through update.
                 var empty = try completeConfiguration("unlisted-empty", "", workspace, "unlisted-effort-model");
                 empty.configuration.reasoning_effort.state = .explicit_null;
                 const target = (try storage.configure(&empty, .{})).accepted.session;
@@ -132,20 +130,16 @@ test "unlisted effort passes configure preset Message creation and update unchan
 test "configuration validates effective effort across retained requested and target model states" {
     const catalog = @import("../../model_catalog.zig");
     const efforts = std.enums.values(protocol.ReasoningEffort);
-    // Required reasoning, no reasoning levels, and an unlisted binding.
     for ([_][]const u8{ "gpt-5.5", "openai/whisper-1", "unlisted-target" }) |target| {
         const known = catalog.find(catalog.shipped, target);
         for (0..efforts.len + 1) |retained_index| {
             const retained: ?protocol.ReasoningEffort = if (retained_index == 0) null else efforts[retained_index - 1];
-            // The retained value may be explicit or carried from a legacy
-            // null spec's latest Operation. Both must validate identically.
             for ([_]bool{ false, true }) |legacy| {
                 for ([_]bool{ true, false }) |model_supplied| {
                     var current: CurrentConfiguration = .{ .provider = .codex };
                     try current.model.set(if (model_supplied) "unlisted-source" else target);
                     current.reasoning_effort = if (legacy) null else retained;
                     current.previous_reasoning_effort = if (legacy) retained else null;
-                    // Omitted, supplied null, and every closed-grammar value.
                     for (0..efforts.len + 2) |request_index| {
                         var requested: wire_request.Configuration = .{};
                         if (model_supplied) {
@@ -158,8 +152,6 @@ test "configuration validates effective effort across retained requested and tar
                             try requested.reasoning_effort.value.set(@tagName(efforts[request_index - 2]));
                         }
                         const selected = if (request_index == 0) retained else if (request_index == 1) null else efforts[request_index - 2];
-                        // The independent oracle uses catalog facts, not the
-                        // configuration owner's capability or resolution code.
                         const supported = if (known) |row|
                             (if (selected) |value| row.efforts.contains(value) else row.efforts.count() == 0)
                         else
@@ -230,8 +222,6 @@ test "effort refusal requires an emitted Operation update across configure cycle
                 try std.testing.expectEqual(@intFromBool(emitted), try store_testing.queryU64(&storage, "SELECT effort_update FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
                 try storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: reasoning.effort" } }, .effort_change_refused, .{});
                 try std.testing.expectEqual(@intFromBool(emitted), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE session_ref=?1 AND field='reasoning_effort_refused'", .{session.slice()}));
-                // A skipped high Configure is not an admitted fallback. A
-                // refused xhigh returns to the Operation's low/null, not high.
                 const expected = if (emitted) initial else selected;
                 try std.testing.expectEqual(expected, (try storage.inspectSessionForTesting(session.slice())).reasoning_effort);
                 try std.testing.expectEqual(@intFromBool(!emitted), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND resolution_code='provider_http_400'", .{binding.operation_id}));
@@ -246,8 +236,6 @@ test "effort refusal requires an emitted Operation update across configure cycle
                     try view.settings(&settings);
                     try std.testing.expectEqual(initial, settings.reasoning_effort);
                     try std.testing.expect(!settings.effort_update);
-                    // The refused source is excluded on a replacement Attempt,
-                    // not interpreted again as a fresh configuration choice.
                     try storage.settleModelAttemptFailure(retried, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: reasoning.effort" } }, .effort_change_refused, .{});
                     try std.testing.expect(try storage.tryAdmitNextModelRetry(.empty(), .{}, null) == null);
                     try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE refused_operation_id=?1", .{binding.operation_id}));
@@ -287,7 +275,6 @@ test "effort provenance excludes refused Operations across unrelated revisions" 
                 } else create.configuration.reasoning_effort.state = .explicit_null;
                 const session = (try storage.configure(&create, .{})).accepted.session;
                 try answerTestTurn(&storage, &tmp, session.slice(), "provenance-first", &.{.{ .encoded = "ok", .decoded = "ok" }});
-                // A migrated null spec retains the earlier frozen effort.
                 if (legacy) try store_testing.setLegacyNullEffortForTesting(&storage, session.slice());
                 const override = if (legacy) null else effort;
                 const rejected: protocol.ReasoningEffort = if (effort == .high) .max else .high;
@@ -310,7 +297,6 @@ test "effort provenance excludes refused Operations across unrelated revisions" 
                 if (before == .after_admission) try std.testing.expect(try storage.configure(&unrelated, .{}) == .accepted);
                 try expectEffort(&storage, binding, rejected);
                 try store_testing.settleModelFailureWithTimings(&storage, binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: effort update" } }, .effort_change_refused, .{ .latency_ms = 999, .first_event_ms = 111 }, .{});
-                // Backoff retains the refused Attempt's pair without resolving a model_call.
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_at IS NULL AND retry_scheduled_at IS NOT NULL AND latency_ms=999 AND first_event_ms=111", .{binding.operation_id}));
                 const refused = try storage.inspectSessionForTesting(session.slice());
                 try std.testing.expectEqual(effort, refused.reasoning_effort);
@@ -325,7 +311,6 @@ test "effort provenance excludes refused Operations across unrelated revisions" 
                     try std.testing.expect(try storage.configure(&unrelated, .{}) == .accepted);
                 }
                 const observed = try storage.inspectSessionForTesting(session.slice());
-                // The P2 counterexample must fail here, not during setup.
                 try std.testing.expectEqual(effort, observed.reasoning_effort);
                 try std.testing.expectEqual(override, observed.reasoning_effort_override);
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE session_ref=?1 AND revision=?2 AND field='reasoning_effort_refused'", .{ session.slice(), revision }));
@@ -333,14 +318,11 @@ test "effort provenance excludes refused Operations across unrelated revisions" 
                 const retried = try retry.permit.consume();
                 try expectEffort(&storage, retried, effort);
                 try settleItemsForTesting(&storage, &tmp, retried, &.{"{\"type\":\"message\",\"id\":\"provenance-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}"}, "ok");
-                // The untimed final Attempt must not inherit the refused Attempt's durations.
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND resolution_code='answer' AND attempt_ordinal=2 AND latency_ms IS NULL AND first_event_ms IS NULL", .{binding.operation_id}));
                 try submitTestMessage(&storage, &tmp, "provenance-next", "provenance-next-message", session.slice(), "next Operation");
                 const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try expectEffort(&storage, next, effort);
                 try std.testing.expectEqual(effort, (try storage.inspectSessionForTesting(session.slice())).reasoning_effort);
-                // Re-selecting the refused value is a new choice, not a
-                // permanent blacklist of that effort word.
                 try change.key.set("provenance-new-choice");
                 const chosen = (try storage.configure(&change, .{})).accepted;
                 try std.testing.expectEqual(@as(?protocol.ReasoningEffort, rejected), (try storage.inspectSessionForTesting(session.slice())).reasoning_effort);
@@ -364,7 +346,6 @@ test "effective effort carries legacy history without inferring a fresh default"
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), configuration_domain.effectiveReasoningEffort(&current));
 }
 
-/// Calls the admission owner's SQL, rather than duplicating it in a fixture.
 const EffortCarryRead = struct {
     const query = rsql.Read(.{
         .sql = "SELECT " ++ historical_domain.effortBeforeSql("?1", "?2", "?3", "?4", "?5") ++ " AS effort",
@@ -429,8 +410,6 @@ test "admitted effort carry agrees with replay recipe across the owner domain" {
                 change.configuration.model.state = .value;
                 try change.configuration.model.value.set("unlisted-B");
                 try std.testing.expect(try storage.configure(&change, .{}) == .accepted);
-                // Closed fixture includes NULL boundaries. The codec declines
-                // a concrete-to-NULL transition; compare only encodable folds.
                 try store_testing.exec(&storage, "UPDATE model_operation SET admission_position=2 WHERE session_ref=?1", .{session.slice()});
                 try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,history_floor,context_window) SELECT 90,turn_id,session_ref,1,input_cutoff,10,1,0,'high',1,'failed',1,tool_set_id,10,context_window FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
                 try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,history_floor,context_window) SELECT 91,turn_id,session_ref,2,input_cutoff,20,1,0,'xhigh',1,'failed',1,tool_set_id,20,context_window FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
@@ -460,8 +439,6 @@ test "admitted effort carry agrees with replay recipe across the owner domain" {
                             }
                             expected = item.effort;
                         };
-                        // Concrete->NULL has no successfully encoded carry;
-                        // responses' boundary test separately pins Declined.
                         if (declined) continue;
                         try std.testing.expectEqual(expected, try EffortCarryRead.read(&storage, .{ .session = session.slice(), .boundary = boundary, .model = model, .floor = own_floor, .first = .medium }));
                     };
@@ -494,8 +471,6 @@ test "effort refusal eligibility excludes a source refused by any Operation" {
             _ = (try storage.configure(&change, .{})).accepted;
             try submitTestMessage(&storage, &tmp, "eligible-input", "eligible-message", session.slice(), "change");
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            // A second snapshot sharing the source isolates the source's
-            // immutable refusal fact from the exact refusing Operation.
             try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override,context_window) SELECT 999,turn_id,session_ref,settings_revision,input_cutoff,999,0,reasoning_effort,1,'failed',1,tool_set_id,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override,context_window FROM model_operation WHERE operation_id=?1", .{binding.operation_id});
             try std.testing.expect(try EffortCarryRead.refusalEligible(&storage, binding.operation_id));
             try std.testing.expect(try EffortCarryRead.refusalEligible(&storage, 999));

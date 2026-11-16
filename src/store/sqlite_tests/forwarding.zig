@@ -1,5 +1,3 @@
-//! Forwarding SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
@@ -203,9 +201,6 @@ test "K4 forwarded approval hydration steps exclude prior forward history" {
             const start = try store_testing.sqlite_only.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{parent.slice()});
             const child_start = try store_testing.sqlite_only.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{child.slice()});
             const sequence = "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<?1) ";
-            // Copy a complete canonical call group, retaining its content and
-            // permission revision but assigning distinct operation identities
-            // and child positions. Every forward has a genuine ask Action.
             try store_testing.sqlite_only.exec(&storage, sequence ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,output_item_count,tool_set_id,context_window) " ++
                 "SELECT value+1000000,turn_id,session_ref,settings_revision,input_cutoff,?3+3*(value-1),output_reservation,attempt_ordinal,resolution_code,resolved_at,1,tool_set_id,context_window FROM model_operation CROSS JOIN sequence WHERE operation_id=?2", .{ history, model.operation_id, child_start });
@@ -223,8 +218,6 @@ test "K4 forwarded approval hydration steps exclude prior forward history" {
             try store_testing.sqlite_only.exec(&storage, "INSERT INTO session_forward(forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at) SELECT ?1+call_ordinal+1,?2,session_ref,1,action_id,?3+?1+call_ordinal,0,1 FROM action_operation WHERE parent_operation_id=?4", .{ history, parent.slice(), start, model.operation_id });
             try store_testing.sqlite_only.exec(&storage, "UPDATE session SET next_position=next_position+?1+2 WHERE session_ref=?2", .{ history, parent.slice() });
             try store_testing.sqlite_only.exec(&storage, "UPDATE session SET next_position=next_position+3*?1 WHERE session_ref=?2", .{ history, child.slice() });
-            // Observe all synthesized forwards through the production feed
-            // before measuring a bounded one-row tail page.
             var verify: protocol.ActivityPage = .{ .session = parent, .kinds = .initOne(.approval_requested) };
             var seen: usize = 0;
             while (true) {
@@ -249,14 +242,12 @@ test "K4 forwarded approval hydration steps exclude prior forward history" {
             return counter.steps;
         }
     };
-    // Both populations fill the source query's fixed 17-candidate window.
     const small = try Measure.run(32);
     const large = try Measure.run(10_000);
     try std.testing.expect(large <= small + 100);
 }
 
 test "K4 malformed delivered approval forwards fence page cursor and direct hydration" {
-    // Every route starts with a fresh Store: fencing is sticky by design.
     for (0..3) |route| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -275,8 +266,6 @@ test "K4 malformed delivered approval forwards fence page cursor and direct hydr
         const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try tests.settleTwoActionsForTesting(&storage, &tmp, model, "k4-corrupt-calls");
         const action = try store_testing.sqlite_only.queryU64(&storage, "SELECT min(action_id) FROM action_operation WHERE session_ref=?1", .{child.slice()});
-        // An auto-authorized call never requested approval. A forged delivered
-        // forward cannot turn it into an approval fact on any read route.
         try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND authorized=1 AND approval_position IS NULL", .{action}));
         const position = try store_testing.sqlite_only.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{parent.slice()});
         try store_testing.sqlite_only.exec(&storage, "INSERT INTO session_forward(forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at) VALUES(1,?1,?2,1,?3,?4,0,1)", .{ parent.slice(), child.slice(), action, position });

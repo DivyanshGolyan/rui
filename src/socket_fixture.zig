@@ -1,4 +1,3 @@
-//! Test-only ownership of a private directory for real pathname Unix sockets.
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -38,7 +37,6 @@ pub const Directory = struct {
         var random: [12]u8 = undefined;
         io.random(&random);
         const name = "rui-test-".* ++ std.fmt.bytesToHex(random, .lower);
-        // Exclusive creation: an existing name is never adopted or removed.
         try parent.createDir(io, &name, .fromMode(0o700));
         errdefer parent.deleteTree(io, &name) catch @panic("socket fixture setup cleanup failed");
         const dir = try parent.openDir(io, &name, .{ .iterate = true });
@@ -52,8 +50,6 @@ pub const Directory = struct {
         return .{ .dir = dir, .parent = parent, .name = name, .root = root, .root_len = root_len };
     }
 
-    /// The returned address borrows buffer until its last use. Keep this owner
-    /// alive and do not overwrite buffer while using the address.
     pub fn address(self: *const Directory, name: []const u8, buffer: []u8) !std.Io.net.UnixAddress {
         if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..") or
             std.mem.indexOfAny(u8, name, "/\x00") != null) return error.InvalidSocketFixtureName;
@@ -62,8 +58,6 @@ pub const Directory = struct {
         return std.Io.net.UnixAddress.init(path);
     }
 
-    /// Close sockets and borrowed directory handles before cleanup. A teardown
-    /// failure is a test failure, not a silently leaked temporary directory.
     pub fn cleanup(self: *Directory) void {
         self.dir.close(std.testing.io);
         self.parent.deleteTree(std.testing.io, &self.name) catch @panic("socket fixture cleanup failed");
@@ -76,8 +70,6 @@ test "socket fixture survives the historical deep checkout and owns cleanup" {
     const io = std.testing.io;
     var checkout = try Directory.init();
     defer checkout.cleanup();
-    // Construct a canonical cwd of 84 bytes: tmpDir adds 32 bytes, producing
-    // the recorded 133-byte response and 127-byte stale socket paths.
     var padding: [84]u8 = @splat('d');
     const nested_name = padding[0 .. 84 - checkout.root_len - 1];
     try checkout.dir.createDir(io, nested_name, .fromMode(0o700));
@@ -130,7 +122,6 @@ test "socket fixture validates complete native byte paths without truncation" {
     try std.testing.expectError(error.NoSpaceLeft, fixture.address("stale.sock", buffer[0..1]));
     var name: [max_path_bytes]u8 = @splat('a');
     const available = max_path_bytes - fixture.root_len - 1;
-    // Include a multibyte scalar: the boundary counts bytes, not characters.
     @memcpy(name[0..2], "é");
     const address = try fixture.address(name[0..available], &buffer);
     try std.testing.expectEqual(max_path_bytes, address.path.len);
@@ -139,9 +130,6 @@ test "socket fixture validates complete native byte paths without truncation" {
     try std.testing.expectError(error.SocketFixturePathTooLong, fixture.address(name[0 .. available + 1], &buffer));
 }
 
-// Deliberately narrow: catch the demonstrated direct tmpDir -> dir.realPath ->
-// UnixAddress.init pattern in the native fixture owners, not arbitrary aliases
-// or delegated path computation. AST tokens exclude comments and string text.
 fn unsafeSocketTest(source: [:0]const u8) !?[]const u8 {
     var tree = try std.zig.Ast.parse(std.testing.allocator, source, .{ .mode = .zig });
     defer tree.deinit(std.testing.allocator);
@@ -177,8 +165,6 @@ fn hasUnmanagedAddress(tree: std.zig.Ast, first: u32, last: u32) bool {
     while (start + length <= last + 1) : (start += 1) {
         if (!hasTokens(tree, start, start + length - 1, constructor)) continue;
         const argument = start + length;
-        // StoreLease's production-derived paths.socket.slice() is already
-        // checkout-independent; a Store tmpDir is not its socket directory.
         if (argument + 7 <= last and std.mem.eql(u8, tree.tokenSlice(argument), "paths") and
             hasTokens(tree, argument + 1, argument + 7, &.{ ".", "socket", ".", "slice", "(", ")", ")" })) continue;
         return true;

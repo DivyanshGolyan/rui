@@ -1,5 +1,3 @@
-//! Model settlement SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
@@ -213,8 +211,6 @@ test "an item id repeated in a later batch or the same batch fails the settlemen
         const session = try configureTestSession(&storage, "repeat-item-config");
         try submitTestMessage(&storage, &tmp, "repeat-item-input", "repeat-item-key", session.slice(), "repeat");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        // Item 65 is in the second batch: a check over one batch's ids
-        // alone passes it, and only the read of the saved items finds it.
         try std.testing.expectError(error.InvalidProviderEnvelope, settleMessagesForTesting(&storage, &tmp, binding, 66, false, repeat_at));
         try std.testing.expect(!storage.isFenced());
         try std.testing.expectEqual(0, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_output_item", .{}));
@@ -224,9 +220,6 @@ test "an item id repeated in a later batch or the same batch fails the settlemen
     }
 }
 
-/// How many times a settlement read its saved item ids, then its content
-/// identities, each in a narrow (sixteen digests) and a wide (64)
-/// statement.
 fn digestReadsForTesting(storage: *Store) [4]i64 {
     var reads: [4]i64 = @splat(0);
     for (storage.engine.sqlite.statements.slots) |slot| if (slot.statement) |statement| {
@@ -244,12 +237,6 @@ fn digestReadsForTesting(storage: *Store) [4]i64 {
 }
 
 test "a settlement batch holds 64 items, read narrow up to sixteen" {
-    // One batch per 64 items, so a reply of 64 settles in two rounds; a
-    // batch of at most sixteen ids binds main's narrow statement. Each
-    // message imports its text and its bag, and the usage record one
-    // more, so 64 items look up 129 identities: two wide statements of 64
-    // while more than 48 are left, then one narrow; 16 items' 33 take
-    // main's three narrow ones.
     inline for (.{
         .{ 1, .{ 1, 0, 1, 0 } },
         .{ 16, .{ 1, 0, 3, 0 } },
@@ -281,9 +268,6 @@ test "a full item batch followed by calls keeps every queued row's bound bytes" 
     const session = try configureTestSession(&storage, "full-batch-calls-config");
     try submitTestMessage(&storage, &tmp, "full-batch-calls-input", "full-batch-calls-key", session.slice(), "full");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    // 64 function_call items fill the first item batch and no usage
-    // record follows, so the next item batch is empty and the call batch
-    // is collected before any round steps the last item's queued row.
     var item_ids: [64][16]u8 = undefined;
     var call_ids: [64][16]u8 = undefined;
     var calls: [64]TestingCall = undefined;
@@ -326,9 +310,6 @@ test "a success settlement keeps main's answers for a missing Session or revisio
         try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
         try sqlite.exec(storage.sqliteDatabase(), case[0]);
         try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
-        // A missing revision row is a stale binding, as on main; a missing
-        // Session row fences, as main's session facts read did, where an
-        // inner join reported a stale binding that does not fence.
         try std.testing.expectError(case[1], settleMessagesForTesting(&storage, &tmp, binding, 1, false, null));
         try std.testing.expectEqual(case[2], storage.isFenced());
     }
@@ -343,14 +324,11 @@ test "a success settlement whose pending Messages read fails reports main's Sess
     const session = try configureTestSession(&storage, "stop-read-config");
     try submitTestMessage(&storage, &tmp, "stop-read-input", "stop-read-key", session.slice(), "first");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    // A pending Message makes the count read the stop cutoff.
     try submitTestMessage(&storage, &tmp, "stop-read-second", "stop-read-second-key", session.slice(), "second");
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
     try store_testing.sqlite_only.exec(&storage, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) VALUES('stop-read-stop',?1,NULL,0,1)", .{session.slice()});
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
     try store_testing.failReadsOf(&storage, "session_stop");
-    // Round 1 reads it with the Attempt; a step failure there was
-    // `OperationReadFailed` before each read kept main's name.
     try std.testing.expectError(error.SessionStopReadFailed, settleMessagesForTesting(&storage, &tmp, binding, 1, false, null));
     try std.testing.expect(storage.isFenced());
 }
@@ -364,9 +342,6 @@ test "64 calls with distinct unknown names fit one call batch's identities" {
     const session = try configureTestSession(&storage, "unknown-calls-config");
     try submitTestMessage(&storage, &tmp, "unknown-calls-input", "unknown-calls-key", session.slice(), "unknown");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    // Each call imports four identities: its name, call_id, arguments and
-    // rejection text, 256 in all. The shared removed-result prelookup adds
-    // one more identity, exercising the final lookup's padded window.
     var item_ids: [64][16]u8 = undefined;
     var call_ids: [64][16]u8 = undefined;
     var names: [64][16]u8 = undefined;
@@ -400,7 +375,6 @@ test "equal texts in many batches share one row, and entries keep item order" {
     const session = try configureTestSession(&storage, "same-text-config");
     try submitTestMessage(&storage, &tmp, "same-text-input", "same-text-key", session.slice(), "same");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    // A later batch's lookup runs after the earlier batch's inserts.
     try settleMessagesForTesting(&storage, &tmp, binding, 140, true, null);
     try std.testing.expectEqual(1, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(DISTINCT message_content_id) FROM model_output_item", .{}));
     try std.testing.expectEqual(140, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE entry_kind=3", .{}));
@@ -418,7 +392,6 @@ test "an item with more content than a batch holds settles through its own looku
     const session = try configureTestSession(&storage, "wide-item-config");
     try submitTestMessage(&storage, &tmp, "wide-item-input", "wide-item-key", session.slice(), "wide");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    // 300 distinct summary texts: more identities than one batch's 256.
     var reasoning_buffer: [16384]u8 = undefined;
     var writer = std.Io.Writer.fixed(&reasoning_buffer);
     try writer.writeAll("{\"type\":\"reasoning\",\"id\":\"wide\",\"summary\":[");

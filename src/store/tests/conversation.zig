@@ -1,5 +1,3 @@
-//! Conversation Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const named_scratch = @import("../../named_scratch.zig");
@@ -33,7 +31,6 @@ test "public conversation owner fixes end, filters settings and bounds content" 
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var configuration = try completeConfiguration("public-config", "", workspace, "model-a");
-            // The 1 MiB Message must not start a compaction: this test reads pages.
             configuration.configuration.compaction_trigger.state = .value;
             try configuration.configuration.compaction_trigger.value.set("1000000000");
             const created_session_0_reply = try storage.configure(&configuration, .{});
@@ -43,8 +40,6 @@ test "public conversation owner fixes end, filters settings and bounds content" 
             try request.session.set(created_session_0.slice());
             try std.testing.expectEqual(@as(usize, 0), (try store_core.publicConversationPageForTesting(&storage, request)).count);
 
-            // A large first input and nineteen small ones expose both the item and
-            // content bound; no answer is invented for queued, unapplied input.
             for (0..20) |index| {
                 var name_buffer: [32]u8 = undefined;
                 const name = try std.fmt.bufPrint(&name_buffer, "public-{d}", .{index});
@@ -125,7 +120,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
             try std.testing.expectEqual(@as(usize, 2), try reader.read(read.start, &tail));
             try std.testing.expectEqualStrings("xx", &tail);
             reader.close();
-            read.position = 42; // the applied instruction is not public content
+            read.position = 42;
             try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&read));
             try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = .{}, .position = 1 }));
             try std.testing.expectError(error.RangeOutOfBounds, storage.openPublicConversationContent(&.{ .session = request.session, .position = 22, .start = 1024 * 1024 + 1 }));
@@ -146,8 +141,6 @@ test "private-only model output never becomes public conversation" {
             const session = try configureTestSession(&storage, "private-config");
             try submitTestMessage(&storage, &tmp, "private-input", "private-message", session.slice(), "hi");
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            // Keep a successor queued: a terminal text Turn requires an answer, while
-            // this intermediate accepted output contains only opaque continuation.
             try submitTestMessage(&storage, &tmp, "private-next", "private-next-message", session.slice(), "later");
             const bytes = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"private continuation\"}";
             const source = try tmp.dir.createFile(std.testing.io, "private-output", .{ .read = true });
@@ -221,7 +214,7 @@ test "public tool-result cursor crosses a completed group boundary" {
             }
             cursor.end = newest.end;
             cursor.before_position = newest.items[15].position;
-            cursor.before_ordinal = 18; // No such completed call in this group.
+            cursor.before_ordinal = 18;
             try std.testing.expectError(error.InvalidCursor, store_core.publicConversationPageForTesting(&storage, cursor));
             try std.testing.expect(!storage.isFenced());
             cursor.before_ordinal = newest.items[15].ordinal;

@@ -1,5 +1,3 @@
-//! Model settlement Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const named_scratch = @import("../../named_scratch.zig");
@@ -36,8 +34,6 @@ const testingSessionReport = shared_fixtures.testingSessionReport;
 const testingSessionReportWithProfile = shared_fixtures.testingSessionReportWithProfile;
 
 test "response-stage model failures require their provenance" {
-    // #511 lost request correlation and classification through defaulted
-    // fields; a response-stage settlement must name every fact explicitly.
     inline for (.{ ModelFailure.Correlated, ModelFailure.Rejected }) |Stage| {
         inline for (@typeInfo(Stage).@"struct".field_attrs) |attrs| {
             try std.testing.expect(attrs.default_value_ptr == null);
@@ -227,37 +223,20 @@ test "a call id repeated in a later call batch fails the settlement" {
     }.run);
 }
 
-/// A success output whose items can hold more content identities than a
-/// settlement batch (`batch_identities`, 257), so the settlement cuts
-/// them across batches, and what each item saves when settled whole, as
-/// main's settlement saved it. The default is one reasoning item of 300
-/// summary texts and the answer "done". In a reasoning item part 280
-/// repeats part 3's text, one the first batch collected, and part 290
-/// repeats part 285's, which it did not.
 const OversizedItem = struct {
     const Item = union(enum) {
-        /// Summary texts, `text(index)` each, every part's bag empty.
         reasoning: usize,
-        /// output_text parts, each with a bag of its own (`"n":index`)
-        /// and the text `messageText(index, blank)`.
         message: struct { parts: usize, blank: bool = false },
-        /// A web search call that finds "Io" in ziglang.org: an action
-        /// and a pattern record.
         find_in_page,
-        /// A failed web search call: an action record alone.
         failed_search,
-        /// The message "done", one part with an empty bag.
         done,
     };
     const parts = 300;
     const usage_json = "{\"input_tokens\":400,\"output_tokens\":7,\"input_tokens_details\":{\"cached_tokens\":100}}";
 
     items: []const Item = &.{ .{ .reasoning = parts }, .done },
-    /// The answer message's ordinal; its text is the answer unless
-    /// `empty_answer`.
     answer: u64 = 1,
     empty_answer: bool = false,
-    /// A usage record follows the items.
     usage: bool = false,
     bytes: [8][]u8 = undefined,
     built: usize = 0,
@@ -313,7 +292,6 @@ const OversizedItem = struct {
         output.built = 0;
     }
 
-    /// A message item's whole text: its parts' texts back to back.
     fn wholeText(item: Item, writer: *std.Io.Writer) !void {
         switch (item) {
             .message => |message| for (0..message.parts) |index| {
@@ -325,9 +303,6 @@ const OversizedItem = struct {
         }
     }
 
-    /// Settles the output, as `settleItemsForTesting` does, but first
-    /// makes the source's copy of the first item's part `changed` differ
-    /// from what its metadata recorded, when given.
     fn settle(output: *const OversizedItem, storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, changed: ?usize) !void {
         const source = try tmp.dir.createFile(std.testing.io, "oversized-output", .{ .read = true, .truncate = true });
         defer source.close(std.testing.io);
@@ -362,7 +337,6 @@ const OversizedItem = struct {
             var needle: [24]u8 = undefined;
             const quoted = try std.fmt.bufPrint(&needle, "\"{s}\"", .{text(index, &buffer)});
             const at = std.mem.find(u8, output.bytes[0], quoted).?;
-            // Same length, other bytes: only the digest check sees it.
             try source.writePositionalAll(std.testing.io, "#", at + 1);
             try source.sync(std.testing.io);
         }
@@ -384,10 +358,6 @@ const OversizedItem = struct {
         }, .{});
     }
 
-    /// Checks every row the settlement saved for operation `operation`
-    /// against what each item holds: each part's own text or text length
-    /// and bag, each item's part count, text and description, the
-    /// Conversation entries, the answer and the usage.
     fn expectSaved(output: *const OversizedItem, storage: *Store, operation: u64) !void {
         var part_rows: usize = 0;
         var messages: usize = 0;
@@ -435,7 +405,6 @@ const OversizedItem = struct {
                     const digest = protocol.contentDigest(whole.written());
                     try std.testing.expectEqual(1, try store_testing.queryU64(storage, "SELECT count(*) FROM model_output_item i JOIN content c ON c.content_id=i.message_content_id JOIN content b ON b.content_id=i.extras_content_id " ++
                         "WHERE i.operation_id=?1 AND i.item_ordinal=?2 AND i.part_count=?3 AND c.digest=?4 AND c.byte_length=?5 AND c.private=0 AND b.private=1", .{ operation, ordinal, part_count, store_testing.Blob{ .bytes = &digest }, whole.written().len }));
-                    // The text streamed across the item's batches reads back whole.
                     var reader: ContentReader = undefined;
                     reader.open(try content_domain.openContentIdentity(storage, .{ .digest = digest, .length = whole.written().len }, false));
                     defer reader.close();
@@ -451,11 +420,9 @@ const OversizedItem = struct {
             }
         }
         try std.testing.expectEqual(part_rows, try store_testing.queryU64(storage, "SELECT count(*) FROM model_output_part WHERE operation_id=?1", .{operation}));
-        // Every item, at dense positions in output order.
         try std.testing.expectEqual(output.items.len, try store_testing.queryU64(storage, "SELECT count(*) FROM model_output_item WHERE operation_id=?1 AND " ++
             "session_position-item_ordinal=(SELECT min(session_position) FROM model_output_item WHERE operation_id=?1)", .{operation}));
         try std.testing.expectEqual(output.items.len, try store_testing.queryU64(storage, "SELECT count(*) FROM model_output_item WHERE operation_id=?1", .{operation}));
-        // Each message is an entry of its own text at its own position.
         try std.testing.expectEqual(messages, try store_testing.queryU64(storage, "SELECT count(*) FROM conversation_entry e JOIN model_output_item i ON i.operation_id=e.source_operation_id AND i.item_ordinal=e.source_item_ordinal " ++
             "WHERE e.source_operation_id=?1 AND e.content_id=i.message_content_id AND e.session_position=i.session_position", .{operation}));
         try std.testing.expectEqual(messages, try store_testing.queryU64(storage, "SELECT count(*) FROM conversation_entry WHERE source_operation_id=?1", .{operation}));
@@ -488,15 +455,12 @@ test "an item with more content than a batch holds saves each part's own text, a
             const contents = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
             const rounds = storage.testing_content_work.rounds;
             try item.settle(&storage, &tmp, binding, null);
-            // The item's lookups ride its batches' rounds, not one round
-            // per part.
             if (!case.rerun) try std.testing.expectEqual(4, storage.testing_content_work.rounds - rounds);
             const operation = binding.operation_id;
             for (0..OversizedItem.parts) |index| {
                 var buffer: [16]u8 = undefined;
                 const text = OversizedItem.text(index, &buffer);
                 const digest = protocol.contentDigest(text);
-                // Each part, in order, names a private row of its own text.
                 try std.testing.expectEqual(1, try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_part p JOIN content c ON c.content_id=p.text_content_id " ++
                     "WHERE p.operation_id=?1 AND p.item_ordinal=0 AND p.part_ordinal=?2 AND p.part_kind=3 AND p.text_length IS NULL AND c.digest=?3 AND c.byte_length=?4 AND c.private=1", .{ operation, index, store_testing.Blob{ .bytes = &digest }, text.len }));
                 var reader: ContentReader = undefined;
@@ -505,7 +469,6 @@ test "an item with more content than a batch holds saves each part's own text, a
                 var bytes: [16]u8 = undefined;
                 try std.testing.expectEqualStrings(text, bytes[0..try reader.read(0, &bytes)]);
             }
-            // Repeated texts share a row; every part's bag is one row.
             try std.testing.expectEqual(OversizedItem.parts - 2, try store_testing.queryU64(&storage, "SELECT count(DISTINCT text_content_id) FROM model_output_part WHERE operation_id=?1 AND item_ordinal=0", .{operation}));
             try std.testing.expectEqual(1, try store_testing.queryU64(&storage, "SELECT count(DISTINCT extras_content_id) FROM model_output_part WHERE operation_id=?1 AND item_ordinal=0", .{operation}));
             try std.testing.expectEqual(OversizedItem.parts + 1, try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_part WHERE operation_id=?1", .{operation}));
@@ -515,8 +478,6 @@ test "an item with more content than a batch holds saves each part's own text, a
             try std.testing.expectEqual(1, try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry e JOIN model_output_item i ON i.operation_id=e.source_operation_id AND i.item_ordinal=e.source_item_ordinal " ++
                 "WHERE e.source_operation_id=?1 AND e.source_item_ordinal=1 AND i.session_position=e.session_position", .{operation}));
             try std.testing.expectEqual(1, try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND resolution_code IS NOT NULL AND output_item_count=2", .{operation}));
-            // 298 texts, the shared part bag, the item's bag, and the
-            // answer's text and bags, as the settlement saved them on main.
             try std.testing.expectEqual(contents + 302, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
             try std.testing.expect(!storage.isFenced());
         }
@@ -538,7 +499,6 @@ test "an item with more content than a batch holds saves nothing when a part aft
             try item.build();
             defer item.deinit();
             const contents = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
-            // Part 295's text is past the 257 identities the first batch holds.
             try std.testing.expectError(error.OutputSourceChanged, item.settle(&storage, &tmp, binding, 295));
             try std.testing.expect(storage.isFenced());
             try std.testing.expectEqual(contents, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
@@ -550,25 +510,12 @@ test "an item with more content than a batch holds saves nothing when a part aft
 }
 
 test "an item cut across settlement batches saves what the same output saves whole" {
-    // Each output's rounds are the facts round, then one per batch after
-    // the first, then the commit. A batch holds 257 identities: a part's
-    // bag or summary text, an item's bag, a message's text, an empty
-    // answer.
     const Case = struct { name: []const u8, output: OversizedItem, rounds: u16 };
     const cases = [_]Case{
-        // 600 part bags, the item's bag and its text: cut after part 256,
-        // then after part 513, then the rest to the item. Its text length
-        // spans three batches.
         .{ .name = "an answer cut twice", .output = .{ .items = &.{.{ .message = .{ .parts = 600 } }}, .answer = 0 }, .rounds = 4 },
         .{ .name = "an empty answer cut twice", .output = .{ .items = &.{.{ .message = .{ .parts = 600, .blank = true } }}, .answer = 0, .empty_answer = true }, .rounds = 4 },
-        // 255 part bags, the item's bag and its text fill the batch: only
-        // the empty answer's identity does not fit, so the item is cut
-        // after its last part.
         .{ .name = "an empty answer cut only for its empty text", .output = .{ .items = &.{.{ .message = .{ .parts = 255, .blank = true } }}, .answer = 0, .empty_answer = true }, .rounds = 3 },
-        // A web search call alone, the reasoning item cut once, then a
-        // failed search, the answer and the usage record.
         .{ .name = "web search calls around a later reasoning item, then usage", .output = .{ .items = &.{ .find_in_page, .{ .reasoning = OversizedItem.parts }, .failed_search, .done }, .answer = 3, .usage = true }, .rounds = 5 },
-        // The empty part bag and 256 texts, twice, then the rest.
         .{ .name = "reasoning cut twice", .output = .{ .items = &.{ .{ .reasoning = 600 }, .done }, .answer = 1 }, .rounds = 5 },
         .{ .name = "a later answer cut once, then a web search call and usage", .output = .{ .items = &.{ .{ .reasoning = 5 }, .{ .message = .{ .parts = OversizedItem.parts } }, .find_in_page }, .answer = 1, .usage = true }, .rounds = 5 },
     };
@@ -599,7 +546,6 @@ test "an item cut across settlement batches saves what the same output saves who
 test "a success settlement sends its rows twenty statements a pass" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            // Only a batching engine sends passes, and a rerun repeats them.
             if (case.engine != .mysql or case.rerun) return;
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
@@ -611,14 +557,9 @@ test "a success settlement sends its rows twenty statements a pass" {
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const rounds = storage.testing_content_work.rounds;
             const before = RoundMeter.QueryShape.snapshot(&storage);
-            // Sixteen messages: the facts round, then one round that writes
-            // each message's text and bag rows, their bytes, its item and its
-            // entry, resolves the Operation, closes its Turn and commits.
             try settleMessagesForTesting(&storage, &tmp, binding, 16, false, null);
             const shape = RoundMeter.QueryShape.snapshot(&storage).since(before);
             try std.testing.expectEqual(@as(u16, 2), storage.testing_content_work.rounds - rounds);
-            // A settlement's queue holds twenty statements a pass, where a
-            // write's holds twelve: the passes main sent for these rows.
             try std.testing.expectEqual(@as(u64, 7), shape.access_passes);
             try std.testing.expectEqual(shape.expected(), shape.queries);
             try std.testing.expect(!storage.isFenced());
@@ -833,7 +774,6 @@ test "a failed Turn's activity outcome references the provider's report" {
                 try request.session.set(session.slice());
                 const outcome = (try store_core.activityPageForTesting(&storage, request)).items[0].value.turn_ended;
                 if (words.len == 0) {
-                    // No words, no report: never an empty one.
                     try std.testing.expect(outcome.content == null);
                 } else {
                     try std.testing.expectEqual(@as(u64, words.len), outcome.content.?.length);
@@ -909,7 +849,6 @@ test "retryable stream rejections retain only the settling Attempt diagnostic th
             const resolution = operation.get("resolution").?.object;
             try std.testing.expectEqualStrings("retry_exhausted", resolution.get("code").?.string);
             try std.testing.expectEqualStrings(diagnostic, resolution.get("content").?.object.get("text").?.string);
-            // The Turn keeps the settling Attempt's report, the provider's own words.
             const outcome = parsed.value.object.get("full").?.object.get("turns").?.array.items[0].object.get("outcome").?.object;
             try std.testing.expectEqualStrings("retry_exhausted", outcome.get("code").?.string);
             const words = "server_is_overloaded: Try again later.";

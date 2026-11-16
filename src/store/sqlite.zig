@@ -1,6 +1,3 @@
-//! The SQLite C binding and the statement-level helpers every Store file uses:
-//! preparing, caching and stepping statements, binding parameters and reading columns.
-
 const std = @import("std");
 const provider_route = @import("../provider_route.zig");
 const Bounded = @import("../bounded.zig").Bounded;
@@ -51,31 +48,20 @@ pub fn pragmaInt(database: *c.sqlite3, sql: [:0]const u8) !u32 {
 
 pub fn prepare(database: *c.sqlite3, sql: [:0]const u8) !*c.sqlite3_stmt {
     var statement: ?*c.sqlite3_stmt = null;
-    // Callers finalize these short-lived statements; allow SQLite lookaside.
     if (c.sqlite3_prepare_v3(database, sql, -1, 0, &statement, null) != c.SQLITE_OK) {
         return error.StatementPrepareFailed;
     }
     return statement orelse error.StatementPrepareFailed;
 }
 
-/// Tests only: the next `StatementCache.insert` fails as a failed `grow`
-/// does. Read only when `builtin.is_test`.
 pub var testing_fail_next_insert = false;
 
-/// Every statement a Store entry point runs, prepared on first use and kept
-/// until `close`. Comptime SQL has static storage, so its address is the key.
-/// Bound: one per SQL text in this file, about 175. The Store tests reach 99,
-/// holding 600 KB of SQLite heap, so all of them stay near 1 MB of the 16 MB
-/// limit, once per Host and independent of Sessions. Open addressing, at
-/// most half full, with slots in the SQLite heap.
 pub const StatementCache = struct {
     slots: []Slot = &.{},
     count: usize = 0,
 
     const Slot = struct { sql: ?[*:0]const u8 = null, statement: ?*c.sqlite3_stmt = null };
 
-    /// A cached statement never allocates, so a warm ROLLBACK cannot fail
-    /// for memory.
     pub fn find(self: *const StatementCache, sql: [*:0]const u8) ?*c.sqlite3_stmt {
         if (self.slots.len == 0) return null;
         return probe(self.slots, sql).statement;
@@ -114,8 +100,6 @@ pub const StatementCache = struct {
         self.slots = slots;
     }
 
-    /// Evict one idle prepared form without breaking an open-addressed
-    /// probe chain. Reinsert the following cluster in place; no allocation.
     pub fn remove(self: *StatementCache, sql: [*:0]const u8) void {
         if (self.slots.len == 0) return;
         const slot = probe(self.slots, sql);
@@ -135,7 +119,6 @@ pub const StatementCache = struct {
         }
     }
 
-    /// Test aid: every entry point reset each statement it stepped.
     pub fn assertIdle(self: *const StatementCache) void {
         for (self.slots) |slot| {
             if (slot.statement) |statement| std.debug.assert(c.sqlite3_stmt_busy(statement) == 0);
@@ -152,22 +135,12 @@ pub const StatementCache = struct {
 pub fn resetCached(statement: *c.sqlite3_stmt) void {
     _ = c.sqlite3_reset(statement);
     _ = c.sqlite3_clear_bindings(statement);
-    // Clearing bindings expires a statement whose plan read a bound value (a
-    // bound LIMIT, or a bind compared with a partial index's WHERE), so every
-    // later use would re-prepare it. Debug covers the Host binaries that
-    // integration tests drive.
     const builtin = @import("builtin");
     if ((builtin.is_test or builtin.mode == .debug) and c.sqlite3_expired(statement) != 0) {
         std.debug.panic("cached statement plan depends on a bound value: {s}", .{c.sqlite3_sql(statement)});
     }
 }
 
-/// Resets a cached statement that was bound but not stepped since its
-/// last `resetCached`, such as one queued after a failed step. Its plan
-/// read no bound value: SQLite re-prepares with bound values only inside a
-/// step, and the `resetCached` after that step would have panicked. So an
-/// expiry it carries came from a schema change, which its next step
-/// re-prepares for, and the check does not apply.
 pub fn resetUnstepped(statement: *c.sqlite3_stmt) void {
     _ = c.sqlite3_reset(statement);
     _ = c.sqlite3_clear_bindings(statement);
@@ -188,11 +161,6 @@ pub fn dbConfig(database: *c.sqlite3, operation: c_int, value: c_int) !void {
     }
 }
 
-/// The tests' touch oracle watches each table that carries a Session.
-/// An inserted or deleted row changes every Session it names
-/// (`schema.sessionColumns`); an updated row changes its first Session,
-/// and its second too when the update sets a column that Session reads
-/// (`schema.readByBoth`).
 pub const touch_oracle_tables = .{
     "session",         "session_revision", "message_admission",     "sent_rejection",
     "turn",            "session_stop",     "session_archive",       "session_pin",
@@ -200,9 +168,6 @@ pub const touch_oracle_tables = .{
     "model_tool_call", "session_change",   "session_skill_catalog",
 };
 
-/// Test builds: a temporary trigger on each table that carries a Session
-/// notes every Session whose rows change, for `untouchedForTesting`.
-/// It precedes every cached statement, so none re-prepares.
 pub fn createTouchOracleForTesting(database: *c.sqlite3) !void {
     if (!@import("builtin").is_test) @compileError("test-only oracle");
     try setLimit(database, c.SQLITE_LIMIT_TRIGGER_DEPTH, 1);
@@ -210,15 +175,6 @@ pub fn createTouchOracleForTesting(database: *c.sqlite3) !void {
     inline for (comptime touchOracleTriggers(.sqlite, "touched_oracle")) |text| try exec(database, text);
 }
 
-/// The touch oracle's triggers in `dialect`, one statement each, writing
-/// each Session they note into the table `oracle`. On each table of
-/// `touch_oracle_tables`: INSERT and DELETE note every Session column,
-/// UPDATE notes the first, and where the table has columns both Sessions
-/// read (`readByBoth`), a further UPDATE trigger notes the other Session
-/// columns when one of those columns changes. SQLite fires that one on
-/// any assignment to those columns (`UPDATE OF`); MySQL has no `UPDATE OF`,
-/// so its trigger compares OLD and NEW with `<=>` and notes only a change.
-/// SQLite's are TEMP triggers on `main`.
 pub fn touchOracleTriggers(comptime dialect: rsql.Dialect, comptime oracle: []const u8) []const [:0]const u8 {
     comptime {
         var result: []const [:0]const u8 = &.{};
@@ -245,7 +201,6 @@ pub fn touchOracleTriggers(comptime dialect: rsql.Dialect, comptime oracle: []co
     }
 }
 
-/// `columns` joined by `separator`.
 fn joined(comptime columns: []const []const u8, comptime separator: []const u8) []const u8 {
     comptime {
         var text: []const u8 = "";
@@ -254,7 +209,6 @@ fn joined(comptime columns: []const []const u8, comptime separator: []const u8) 
     }
 }
 
-/// A MySQL trigger condition: some column of `columns` changed.
 fn changed(comptime columns: []const []const u8) []const u8 {
     comptime {
         var tests: []const []const u8 = &.{};
@@ -263,7 +217,6 @@ fn changed(comptime columns: []const []const u8) []const u8 {
     }
 }
 
-/// A trigger body that notes each of `columns`' Sessions, new and old.
 fn oracleBody(comptime event: []const u8, comptime columns: []const []const u8, comptime oracle: []const u8) []const u8 {
     var text: []const u8 = "";
     for (columns) |column| {
@@ -278,7 +231,6 @@ pub fn setLimit(database: *c.sqlite3, category: c_int, value: c_int) !void {
     if (c.sqlite3_limit(database, category, -1) != value) return error.SqliteLimitConfigurationFailed;
 }
 
-/// `rui_served(provider)`: 1 when the opening's served set has the label.
 pub fn servedFunction(context: ?*c.sqlite3_context, argc: c_int, argv: [*c]?*c.sqlite3_value) callconv(.c) void {
     std.debug.assert(argc == 1);
     const routes: *const provider_route.Routes = @ptrCast(@alignCast(c.sqlite3_user_data(context)));
@@ -324,8 +276,6 @@ pub fn readText(statement: *c.sqlite3_stmt, index: c_int, destination: anytype) 
     try destination.set(try columnText(statement, index));
 }
 
-/// The column's text as SQLite holds it, valid until the statement next
-/// steps or resets.
 fn columnText(statement: *c.sqlite3_stmt, index: c_int) ![]const u8 {
     const length = c.sqlite3_column_bytes(statement, index);
     if (length < 0) return error.CorruptStore;
@@ -341,7 +291,6 @@ pub fn maxEnumTagBytes(comptime Enum: type) usize {
     return maximum;
 }
 
-/// A required positive integer column; anything else is a contradiction.
 pub fn readPositive(statement: *c.sqlite3_stmt, index: c_int) !u64 {
     return try readOptionalPositive(statement, index) orelse error.CorruptStore;
 }
@@ -361,15 +310,12 @@ pub fn readCount(statement: *c.sqlite3_stmt, index: c_int) !u64 {
     return @intCast(value);
 }
 
-/// A BLOB column's bytes, borrowed until the statement steps or resets.
 pub fn columnBytes(statement: *c.sqlite3_stmt, index: c_int) []const u8 {
     const length: usize = @intCast(c.sqlite3_column_bytes(statement, index));
     const pointer = c.sqlite3_column_blob(statement, index) orelse return "";
     return @as([*]const u8, @ptrCast(pointer))[0..length];
 }
 
-/// The persisted closed grammar is the corruption boundary; a saved effort is
-/// trusted after it parses and is never checked against the catalog again.
 pub fn readNullableEffort(statement: *c.sqlite3_stmt, index: c_int) !?model_capability.ReasoningEffort {
     if (c.sqlite3_column_type(statement, index) == c.SQLITE_NULL) return null;
     if (c.sqlite3_column_type(statement, index) != c.SQLITE_TEXT) return error.CorruptStore;
@@ -378,26 +324,10 @@ pub fn readNullableEffort(statement: *c.sqlite3_stmt, index: c_int) !?model_capa
     return std.meta.stringToEnum(model_capability.ReasoningEffort, value.slice()) orelse error.CorruptStore;
 }
 
-/// The longest fixed value a statement binds by value: an `[n]u8` Args
-/// field, such as a 32-byte digest or a call's 120-byte field
-/// certificate, and a `Bounded` text.
 pub const max_copied_bytes = 256;
 
-/// SQLITE_TRANSIENT, the destructor -1: SQLite copies a value bound with
-/// it before the bind returns, so the caller's bytes may change at once.
-/// Read through an extern union, since -1 is no aligned function address
-/// and `@ptrFromInt` refuses it on targets that align functions.
 var transient: extern union { bits: usize, destructor: c.sqlite3_destructor_type } = .{ .bits = std.math.maxInt(usize) };
 
-/// Binds a typed statement's `Args` as ?1..?N, then `now` as ?(N+1) when
-/// the text uses @now. Integers, `[n]u8` arrays, `Bounded` texts
-/// and a SessionHead's reference are copied into the
-/// statement when it is bound: SQLite holds the copy, in its own heap,
-/// until the statement is rebound or reset, so a caller may reuse their
-/// memory at once. Only a `[]const u8` text and an `rsql.Bytes` blob are
-/// read in place when a pass steps the statement, so their bytes must not
-/// change before then (`Access` checks this in Debug and test builds).
-/// Enum tag names are static.
 pub fn bindArgs(statement: *c.sqlite3_stmt, comptime S: type, args: *const S.Args, now: i64) !void {
     const info = @typeInfo(S.Args).@"struct";
     inline for (info.field_names, info.field_types, 1..) |name, Field, index| {
@@ -406,8 +336,6 @@ pub fn bindArgs(statement: *c.sqlite3_stmt, comptime S: type, args: *const S.Arg
     if (S.uses_now) try bindI64(statement, info.field_names.len + 1, now);
 }
 
-/// Whether binding a `T` reads the caller's bytes in place when its pass
-/// steps it, rather than copying them when it is bound.
 pub fn borrows(comptime T: type) bool {
     if (T == []const u8 or T == rsql.Bytes) return true;
     return switch (@typeInfo(T)) {
@@ -416,7 +344,6 @@ pub fn borrows(comptime T: type) bool {
     };
 }
 
-/// The bytes a borrowed argument binds in place (`borrows`), or null.
 pub fn borrowed(comptime T: type, value: T) ?[]const u8 {
     if (T == []const u8) return value;
     if (T == rsql.Bytes) return value.bytes;
@@ -435,7 +362,6 @@ fn bindCopied(statement: *c.sqlite3_stmt, index: c_int, bytes: []const u8, compt
 }
 
 fn bindValue(statement: *c.sqlite3_stmt, index: c_int, comptime T: type, value: T) !void {
-    // An empty slice may carry any address; "" is a real one, so it binds '' and not NULL.
     if (T == []const u8) return bindText(statement, index, if (value.len == 0) "" else value);
     if (T == rsql.Positive) return bindU64(statement, index, value.get());
     if (T == rsql.Bytes) return bindBlob(statement, index, value.bytes);
@@ -450,7 +376,6 @@ fn bindValue(statement: *c.sqlite3_stmt, index: c_int, comptime T: type, value: 
         },
         .bool => try bindI64(statement, index, @as(i64, @intFromBool(value))),
         .int => try bindU64(statement, index, value),
-        // Tag names are static.
         .@"enum" => try bindText(statement, index, @tagName(value)),
         .array => |array| {
             if (array.child != u8 or array.len > max_copied_bytes) @compileError("rsql: an Args array is [n]u8 of at most max_copied_bytes, bound by value");
@@ -461,10 +386,6 @@ fn bindValue(statement: *c.sqlite3_stmt, index: c_int, comptime T: type, value: 
     }
 }
 
-/// Fills `row` from the current row, field by field in place, so a Row
-/// over 1 KiB is never copied. A pointer field fills what it points to
-/// (`rsql.fillsInPlace`). Every value that breaks its type is
-/// `CorruptStore`, here and nowhere else.
 pub fn decodeRow(comptime Row: type, statement: *c.sqlite3_stmt, row: *Row) error{CorruptStore}!void {
     comptime var column: c_int = 0;
     const info = @typeInfo(Row).@"struct";
@@ -489,10 +410,8 @@ fn decodeValue(comptime T: type, statement: *c.sqlite3_stmt, column: c_int, out:
         out.* = .of(try readPositive(statement, column));
         return;
     }
-    // Text goes straight into the Row's own bytes.
     if (comptime isBounded(T)) return out.set(try columnText(statement, column));
     if (comptime isBlob(T)) {
-        // The type first: reading the bytes may convert the value.
         if (c.sqlite3_column_type(statement, column) != c.SQLITE_BLOB) return error.CorruptStore;
         const bytes = columnBytes(statement, column);
         if (bytes.len > T.blob_capacity) return error.CorruptStore;
@@ -509,7 +428,6 @@ fn decodeValue(comptime T: type, statement: *c.sqlite3_stmt, column: c_int, out:
             if (c.sqlite3_column_type(statement, column) == c.SQLITE_NULL) {
                 out.* = null;
             } else if (comptime isBounded(optional.child) or isBlob(optional.child)) {
-                // Naming only `len` leaves the bytes unwritten until `set` fills them.
                 out.* = optional.child{ .len = 0 };
                 try decodeValue(optional.child, statement, column, &out.*.?);
             } else {
@@ -525,10 +443,8 @@ fn decodeValue(comptime T: type, statement: *c.sqlite3_stmt, column: c_int, out:
         },
         .int => out.* = std.math.cast(T, try readCount(statement, column)) orelse return error.CorruptStore,
         .@"enum" => out.* = std.meta.stringToEnum(T, try columnText(statement, column)) orelse return error.CorruptStore,
-        // A blob of exactly the array's length, such as a digest.
         .array => |array| {
             comptime std.debug.assert(array.child == u8);
-            // The type first: reading the bytes may convert the value.
             if (c.sqlite3_column_type(statement, column) != c.SQLITE_BLOB) return error.CorruptStore;
             const bytes = columnBytes(statement, column);
             if (bytes.len != array.len) return error.CorruptStore;
