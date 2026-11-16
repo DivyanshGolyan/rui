@@ -468,7 +468,27 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
     }
 }
 
+fn dropCompoundContentUpgradeShape(storage: *Store) !void {
+    const Native = struct {
+        fn exec(store: *Store, sql: [:0]const u8) !void {
+            if (store.engine == .mysql) return mysql_testing.rawExec(store, sql);
+            return sqlite.exec(store.sqliteDatabase(), sql);
+        }
+    };
+    try Native.exec(storage, "UPDATE core_command SET primary_content_id=secondary_content_id,secondary_content_id=NULL WHERE kind=2 AND accepted=0");
+    try Native.exec(storage, "DROP TABLE content_part");
+    if (storage.engine == .mysql) {
+        try Native.exec(storage, "SET @rui_parts_ddl=(SELECT CONCAT('ALTER TABLE content DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='content' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('form',cc.CHECK_CLAUSE)>0)");
+        try Native.exec(storage, "PREPARE rui_parts FROM @rui_parts_ddl");
+        try Native.exec(storage, "EXECUTE rui_parts");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_parts");
+        try Native.exec(storage, "SET @rui_parts_ddl=NULL");
+    }
+    try Native.exec(storage, "ALTER TABLE content DROP COLUMN form");
+}
+
 fn dropFinalInputUpgradeShape(storage: *Store) !void {
+    try dropCompoundContentUpgradeShape(storage);
     @setEvalBranchQuota(200_000);
     const Native = struct {
         fn exec(store: *Store, sql: [:0]const u8) !void {

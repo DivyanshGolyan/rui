@@ -143,7 +143,7 @@ const publications_sql = "WITH publications AS (SELECT operation.operation_id," 
 
 const resolved_actions = rsql.Read(.{
     .sql = publications_sql ++ "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.resolution_code,a.acceptance_position," ++
-        "result.byte_length AS result_length,result.digest AS result_digest,tool_call.description," ++ tool_fulfillment.resolutionPublicationSql("a", "publications.publication") ++ " AS publication " ++
+        "result.byte_length AS result_length,result.digest AS result_digest,result.content_id AS result_id,result.private AS result_private,result.form AS result_form,tool_call.description," ++ tool_fulfillment.resolutionPublicationSql("a", "publications.publication") ++ " AS publication " ++
         "FROM turn active @index(turn_one_active_per_session) " ++
         "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
         "CROSS JOIN action_operation a ON a.parent_operation_id=operation.operation_id " ++
@@ -160,6 +160,9 @@ const resolved_actions = rsql.Read(.{
         acceptance_position: rsql.Positive,
         result_length: u64,
         result_digest: [32]u8,
+        result_id: rsql.Positive,
+        result_private: bool,
+        result_form: u8,
         description: ?Description,
         publication: ?rsql.Positive,
     },
@@ -255,13 +258,17 @@ const set_names = rsql.Read(.{
     .cardinality = .optional,
 });
 
+const CurrentScratch = struct { facts: CurrentFacts, tools: ToolNames };
+
 noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_value.ReportProfile, current: *const CurrentConfiguration, watched: anytype) !void {
     const policy = model_capability.compactionPolicy(current.model.slice(), current.compaction_trigger, current.output_reservation);
-    var facts: CurrentFacts = .{
+    const scratch = a.store.reportScratch(CurrentScratch);
+    const facts = &scratch.facts;
+    facts.* = .{
         .counts = .{ .session = session_ref },
         .compaction = .init(session_ref, current.next_position, current.provider, current.model.slice(), policy),
         .work = .{ .session = session_ref },
-        .tools = a.store.reportScratch(ToolNames),
+        .tools = &scratch.tools,
     };
     const instructions_id = current.instructions_id.?;
     if (instructions_id < 0 or (current.output_schema_id orelse 1) < 0) return error.CorruptStore;
@@ -306,7 +313,10 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
     const permission_mode = try configuration_domain.permissionMode(current.permission_mode);
     const now_ms = std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange;
     const work = try facts.work.work(current.created_at, now_ms);
-    const first_message = if (facts.first_row) |*found| try report_domain.firstMessage(found, admission) else null;
+    const first_message = if (facts.first_row) |*found| report_domain.firstMessage(found, admission) catch |err| {
+        if (err == error.InputPartsNotSupported) try report_domain.verifyFirstMessage(a, found);
+        return err;
+    } else null;
     const selected = if (facts.active.row) |*row| row else if (facts.queued.row) |*row| row else null;
     const values: session_report.Current = .{
         .reference = session_ref,
@@ -369,6 +379,10 @@ fn readList(
     const ran = runCurrent(a);
     if (rows.failure) |err| return err;
     try ran;
+    if (rows.unsupported) |value| {
+        try @import("content_parts.zig").verify(a, value);
+        return error.InputPartsNotSupported;
+    }
 }
 
 const ValuesError = error{CorruptStore};
@@ -378,8 +392,22 @@ fn ListRead(comptime Row: type, comptime values: anytype, comptime Watcher: type
     return struct {
         watched: Watcher,
         failure: ?(ValuesError || VisitError) = null,
+        unsupported: ?content_domain.Value = null,
 
         pub fn visit(read: *@This(), row: *const Row) bool {
+            if (comptime Row == resolved_actions.Row) {
+                if (row.result_private or row.result_form > 1) {
+                    read.failure = error.CorruptStore;
+                    return false;
+                }
+                if (row.result_form == 1) {
+                    read.unsupported = content_domain.Value.of(row.result_id.get(), row.result_form, row.result_length, row.result_digest) catch {
+                        read.failure = error.CorruptStore;
+                        return false;
+                    };
+                    return false;
+                }
+            }
             read.visitOne(row) catch |err| {
                 read.failure = err;
                 return false;

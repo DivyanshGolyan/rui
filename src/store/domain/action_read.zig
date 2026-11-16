@@ -7,7 +7,7 @@ const content = @import("content.zig");
 const utf8 = @import("../../utf8_validation.zig");
 
 const metadata = rsql.Read(.{
-    .sql = "SELECT action.authorized,action.attempt_ordinal,action.acceptance_position,action.resolution_code,action.resolution_content_id,final_content.byte_length AS length,final_content.digest FROM action_operation action LEFT JOIN content final_content ON final_content.content_id=action.resolution_content_id WHERE action.session_ref=?1 AND action.action_id=?2",
+    .sql = "SELECT action.authorized,action.attempt_ordinal,action.acceptance_position,action.resolution_code,action.resolution_content_id,final_content.byte_length AS length,final_content.digest,final_content.private,final_content.form FROM action_operation action LEFT JOIN content final_content ON final_content.content_id=action.resolution_content_id WHERE action.session_ref=?1 AND action.action_id=?2",
     .Args = struct { session: []const u8, action_id: u64 },
     .Row = struct {
         authorized: bool,
@@ -17,6 +17,8 @@ const metadata = rsql.Read(.{
         resolution_content_id: ?rsql.Positive,
         length: ?u64,
         digest: ?[32]u8,
+        private: ?bool,
+        form: ?u8,
     },
     .cardinality = .optional,
 });
@@ -75,7 +77,10 @@ fn resolution(a: anytype, row: metadata.Row) !?SavedResolution {
         if (row.resolution_code != null or row.resolution_content_id != null or row.length != null or row.digest != null) return error.CorruptStore;
         return null;
     };
-    const reference: content.ContentReference = .{ .length = row.length orelse return error.CorruptStore, .digest = row.digest orelse return error.CorruptStore };
+    const content_id = (row.resolution_content_id orelse return error.CorruptStore).get();
+    const info: content.content_metadata.Row = .{ .byte_length = row.length orelse return error.CorruptStore, .digest = row.digest orelse return error.CorruptStore, .private = row.private orelse return error.CorruptStore, .form = row.form orelse return error.CorruptStore };
+    _ = try @import("content_parts.zig").publicMetadata(a, content_id, &info);
+    const reference: content.ContentReference = .{ .length = info.byte_length, .digest = info.digest };
     return .{
         .resolution = .{ .position = position.get(), .code = row.resolution_code orelse return error.CorruptStore, .content = .{ .length = reference.length, .digest = reference.digest } },
         .location = .{ .store = a.store, .content_id = @intCast((row.resolution_content_id orelse return error.CorruptStore).get()), .reference = reference },

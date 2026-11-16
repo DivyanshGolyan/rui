@@ -14,10 +14,7 @@ const session_work = @import("session_work.zig");
 const change_ring = @import("change_ring.zig");
 const AttemptBinding = @import("attempt.zig").AttemptBinding;
 
-pub const ContentReference = struct {
-    length: u64,
-    digest: [32]u8,
-};
+pub const ContentReference = @import("input_parts.zig").ContentReference;
 
 pub const AcceptedConfiguration = struct {
     replayed: bool,

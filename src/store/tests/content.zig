@@ -553,3 +553,111 @@ test "sequential Content ranges exceed the small import memo and deduplicate wit
         }
     }.run);
 }
+
+const CompoundSave = struct {
+    const transition = @import("../transition.zig");
+    const compound = @import("../domain/content_parts.zig");
+    pub const rounds = transition.rounds(.{ .input = .{.paged} });
+    pub const round_budget = 1;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .input;
+    pub const Input = struct { source: compound.Source, saving: *compound.Saving };
+    pub const Result = compound.Saved;
+    pub const Ordinary = error{};
+    pub const Declined = error{};
+    pub const Guards = error{};
+    input: Input,
+    saved: Result = undefined,
+
+    pub fn step(self: *CompoundSave, r: *transition.Round(CompoundSave), ran: ?rounds.At) !transition.Next(CompoundSave) {
+        if (ran == null) self.input.saving.* = try .init(self.input.source);
+        return switch (try self.input.saving.step(r, std.testing.io, r.faults())) {
+            .round => .{ .round = .input },
+            .saved => |saved| result: {
+                self.saved = saved;
+                break :result .commit;
+            },
+        };
+    }
+
+    pub fn committed(self: *const CompoundSave) Result {
+        return self.saved;
+    }
+};
+
+fn checkCompoundCorruption(case: *store_testing.Case, wrong_form: bool) !void {
+    const capture_type = @import("../../InputCapture.zig");
+    const compound = @import("../domain/content_parts.zig");
+    const transition = @import("../transition.zig");
+    const store_access = @import("../access.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var used: std.atomic.Value(u64) = .init(0);
+    var captured: capture_type = undefined;
+    const spool = try tmp.dir.createFile(std.testing.io, "compound-spool", .{ .read = true });
+    const index = try tmp.dir.createFile(std.testing.io, "compound-index", .{ .read = true });
+    try tmp.dir.deleteFile(std.testing.io, "compound-spool");
+    try tmp.dir.deleteFile(std.testing.io, "compound-index");
+    captured.init(std.testing.io, spool, index, .{ .used = &used, .limit = 8192 });
+    defer captured.close();
+    for ([_][]const u8{ "one", "two" }) |bytes| {
+        try captured.begin(.text, bytes.len);
+        var allowance = bytes.len;
+        _ = try captured.append(bytes, &allowance, false);
+        try captured.end();
+    }
+    const loan = try captured.seal();
+    var saving: compound.Saving = undefined;
+    const saved = try transition.apply(&storage, CompoundSave, .{ .source = .{ .captured = loan }, .saving = &saving }, .{});
+    try std.testing.expect(saved.reference == .parts);
+    const again = try transition.apply(&storage, CompoundSave, .{ .source = .{ .captured = loan }, .saving = &saving }, .{});
+    try std.testing.expectEqual(saved.content_id, again.content_id);
+    {
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var a: store_access.Access(.read, error{}) = .open(&entry);
+        defer a.deinit();
+        var cursor: compound.Cursor = undefined;
+        cursor.init(.{ .content_id = saved.content_id, .reference = saved.reference });
+        try std.testing.expectEqual(@as(u32, 0), (try entry.finish(error{}, cursor.next(&a))).?.ordinal);
+        try std.testing.expectEqual(@as(u32, 1), (try entry.finish(error{}, cursor.next(&a))).?.ordinal);
+        try std.testing.expect((try entry.finish(error{}, cursor.next(&a))) == null);
+    }
+    if (wrong_form) {
+        try store_testing.exec(&storage, "UPDATE content SET form=0 WHERE content_id=?1", .{saved.content_id});
+        var reader: ContentReader = undefined;
+        reader.open(try storage.openContent(saved.reference.parts));
+        defer reader.close();
+        var buffer: [128]u8 = undefined;
+        try std.testing.expectError(error.CorruptStore, reader.read(0, &buffer));
+    } else {
+        try store_testing.exec(&storage, "DELETE FROM content_part WHERE content_id=?1 AND ordinal=1", .{saved.content_id});
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var a: store_access.Access(.read, error{}) = .open(&entry);
+        defer a.deinit();
+        var cursor: compound.Cursor = undefined;
+        cursor.init(.{ .content_id = saved.content_id, .reference = saved.reference });
+        try std.testing.expectError(error.CorruptStore, entry.finish(error{}, cursor.next(&a)));
+    }
+    try std.testing.expect(storage.isFenced());
+}
+
+test "compound Content saves once and fences a deleted index row" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            try checkCompoundCorruption(case, false);
+        }
+    }.run);
+}
+
+test "reading a manifest under bytes form fences" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            try checkCompoundCorruption(case, true);
+        }
+    }.run);
+}

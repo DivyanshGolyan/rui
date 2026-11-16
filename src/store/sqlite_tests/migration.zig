@@ -70,6 +70,40 @@ test "a Store at the migration baseline with its rows takes every migration at o
     try std.testing.expectEqualStrings(fresh_rows.written(), migrated_rows.written());
 }
 
+test "schema 78 preserves legacy refusal diagnostics without inventing input" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/format-77.sqlite3", .{root});
+    {
+        const raw = try openRaw(path);
+        defer _ = c.sqlite3_close(raw);
+        try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+        try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        try sqlite.exec(raw, store_testing.baseline_rows);
+        for (store_schema.migrations) |step| {
+            if (step.from >= 77) break;
+            for (step.sqlite) |statement| try sqlite.exec(raw, statement);
+        }
+        try store_testing.sqliteExec(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_selector',?1),('format','77')", .{root});
+        try sqlite.exec(raw, "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) " ++
+            "SELECT 'legacy-refusal-diagnostic',2,'absent',zeroblob(32),content_id,NULL,0,'skill_file_unavailable',0,0,1000 FROM content WHERE private=0 ORDER BY content_id LIMIT 1");
+        try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version=77;PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF", .{store_schema.application_id}));
+    }
+    for (0..2) |_| {
+        var storage: Store = undefined;
+        try storage.open(std.testing.io, path, root);
+        defer storage.close() catch unreachable;
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key='legacy-refusal-diagnostic' AND primary_content_id IS NULL AND secondary_content_id IS NOT NULL", .{}));
+        const diagnostic = try storage.commandResult("legacy-refusal-diagnostic");
+        try std.testing.expectEqual(diagnostic.length, try store_testing.queryU64(&storage, "SELECT c.byte_length FROM content c JOIN core_command cmd ON cmd.secondary_content_id=c.content_id WHERE cmd.command_key='legacy-refusal-diagnostic'", .{}));
+        const observed = try store_testing.observeCommandForTesting(&storage, "legacy-refusal-diagnostic");
+        try std.testing.expect(observed.status == .rejected and observed.kind.message == null);
+    }
+}
+
 test "schema 74 migration deletes a populated Store's wire label, whatever it reads, and preserves its rows" {
     for ([_][]const u8{ "16", "unknown-label" }) |label| {
         var tmp = std.testing.tmpDir(.{});
