@@ -3179,13 +3179,13 @@ def publish_over_ssh(host, files, job):
                 target = stage / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, target)
-            shutil.copyfile(HERE, stage / "__verify_rui_publish__.py")
+            shutil.copyfile(HERE, stage / "__verify_publish_helper__.py")
             (stage / "__publish_job__.json").write_text(json.dumps(job))
             result = subprocess.run(["scp", "-oBatchMode=yes", "-r", str(stage) + "/.", f"{host}:{directory}/"],
                                     capture_output=True, text=True)
             if result.returncode:
                 raise ValueError("cannot copy selected captures over SSH: " + result.stderr.strip())
-            output = remote(["python3", directory + "/__verify_rui_publish__.py", "_publish", directory + "/__publish_job__.json"])
+            output = remote(["python3", directory + "/__verify_publish_helper__.py", "_publish", directory + "/__publish_job__.json"])
     finally:
         remote(["rm", "-rf", "--", directory])
     return output.strip()

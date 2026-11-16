@@ -2364,7 +2364,7 @@ else:
             self.assertEqual(result.returncode, 0, result.stderr)
             copies = [c for c in calls if c.get("transport") == "scp"]
             self.assertEqual(len(copies), 1)
-            self.assertEqual(set(copies[0]["files"]), {"__verify_rui_publish__.py", "__publish_job__.json",
+            self.assertEqual(set(copies[0]["files"]), {"__verify_publish_helper__.py", "__publish_job__.json",
                 *(f"{side}/changed@140x40.{ext}" for side in ("before", "after") for ext in ("png", "gif"))})
             edits = [c for c in calls if "--body-file" in c["argv"]]
             self.assertEqual(len(edits), 1)
