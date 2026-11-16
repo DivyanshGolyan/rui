@@ -1050,7 +1050,7 @@ class SelectionTest(unittest.TestCase):
             job = jobs[name]
             self.assertIn('needs: plan', job)
             self.assertIn('runs-on: macos-15', job)
-            self.assertIn('timeout-minutes: ' + ('60' if name == 'macos_build' else '15'), job)
+            self.assertIn('timeout-minutes: 60', job)
             self.assertIn('check-part: ' + part + '\n', job)
             self.assertIn('TARGETS: ${{ needs.plan.outputs.native_targets }}', job)
             self.assertIn('artifact: ${{ steps.publish.outputs.artifact-id }}', job)
