@@ -29,6 +29,7 @@ const Store = store_core.Store;
 const action_domain = @import("action.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
+const sourced_input = @import("sourced_input.zig");
 const reads_domain = @import("reads.zig");
 const report_domain = @import("report.zig");
 const store_schema = @import("../schema.zig");
@@ -120,27 +121,7 @@ const message_replay = rsql.Read(.{
     .cardinality = .one,
 });
 
-/// A person's Message.
-const admit_message = rsql.Write(.{
-    .sql = "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) VALUES(?1,@session(?2),?3,?4,?5,@now)",
-    .Args = struct { admission_id: u64, session: rsql.SessionHead, key: []const u8, content_id: u64, position: u64 },
-    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
-});
-pub const admit_message_sql = admit_message.sql;
-
-/// A peer's Message: the sender's own position orders the send among its
-/// other facts.
-const admit_sent_message = rsql.Write(.{
-    .sql = "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position) " ++
-        "VALUES(?1,@session(?2),?3,?4,?5,@now,@session(?6),?7)",
-    .Args = struct { admission_id: u64, session: rsql.SessionHead, key: []const u8, content_id: u64, position: u64, sender: rsql.SessionHead, sender_position: u64 },
-    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
-});
-
-/// The one writer of a Message from another Session. Heads were read (or
-/// created) by the caller in this transaction; admission never adds a round.
-/// The caller then saves the skills its text bound
-/// (`skills_domain.SavingBound`), a round each.
+/// Queue the peer command before admitting its Message. The caller saves bound skills.
 fn admitFromSession(
     a: anytype,
     sender: *const rsql.SessionHead,
@@ -152,17 +133,7 @@ fn admitFromSession(
     answer: *const StoredAnswer,
 ) !u64 {
     try queueMessageCommand(a, target, key, content_id, digest, configured, answer);
-    const admission_id = try a.identity(.admission_id);
-    a.write(admit_sent_message, .{
-        .admission_id = admission_id,
-        .session = target.*,
-        .key = key,
-        .content_id = content_id,
-        .position = try (try a.positions(target.*)).take(1),
-        .sender = sender.*,
-        .sender_position = try (try a.positions(sender.*)).take(1),
-    });
-    return admission_id;
+    return sourced_input.admit(a, target.*, .{ .peer = .{ .key = key, .sender = sender.* } }, content_id);
 }
 
 fn queueMessageCommand(a: anytype, target: *const rsql.SessionHead, key: []const u8, content_id: u64, digest: *const [32]u8, configured: ?*const configuration_domain.Applied, answer: *const StoredAnswer) !void {
@@ -536,9 +507,7 @@ pub const SubmitMessage = struct {
             try admitFromSession(r, &message.sender.?.session, &t.head, command.key.slice(), text_id, &message.digest, configured, &t.answer)
         else person: {
             try queueMessageCommand(r, &t.head, command.key.slice(), text_id, &message.digest, configured, &t.answer);
-            const admission_id = try r.identity(.admission_id);
-            r.write(admit_message, .{ .admission_id = admission_id, .session = t.head, .key = command.key.slice(), .content_id = text_id, .position = try (try r.positions(t.head)).take(1) });
-            break :person admission_id;
+            break :person try sourced_input.admit(r, t.head, .{ .person = command.key.slice() }, text_id);
         };
         t.later = .{ .skills = .{ .admission_id = admission_id, .bound = message.bound } };
         t.admission_id = admission_id;
