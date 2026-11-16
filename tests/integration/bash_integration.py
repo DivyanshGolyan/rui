@@ -1037,7 +1037,7 @@ def prove_model_action_read(state, *, deadline=None):
             "sole target Resolution",
         )
         assert final["final"]["code"] == "succeeded", final
-        assert final["final"]["window"]["text"].encode() == (workspace / "expected-final").read_bytes()
+        assert final["final"]["window"]["text"].encode() == b"Bash succeeded. Exit code: 0.\nstdout:\n" + (workspace / "expected-final").read_bytes()
         model_read("final-read", final)
         assert len(endpoint.requests) == 6
         assert (workspace / "launches").read_text() == f"{pid}\n"
