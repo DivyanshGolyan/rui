@@ -1042,8 +1042,13 @@ fn readTransportFailure(io: std.Io, store: []const u8, err: anyerror) anyerror {
     holdStore(store);
     if (!client.hostUnreachable(err)) return err;
     const paths = platform.resolveClientPaths(io, store) catch |store_err| return storeFailure(store_err);
+    return readTransportFailureAt(io, &paths, err);
+}
+
+fn readTransportFailureAt(io: std.Io, paths: *const platform.Paths, err: anyerror) anyerror {
     holdStore(paths.selector());
-    return hostTransportFailure(io, paths.selector(), err);
+    if (!client.hostUnreachable(err)) return err;
+    return classifyHostTransportFailure(err, client.hostLockStateAt(io, paths));
 }
 
 fn hostTransportFailure(io: std.Io, store: []const u8, err: anyerror) anyerror {
@@ -2309,7 +2314,7 @@ fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed:
     const reply = blk: {
         defer captured.close(io);
         if (!interactive) try announceCapture(io, &captured);
-        break :blk takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), captured.identity().*, captured.replay, captured.selector());
+        break :blk takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), &captured);
     } catch |err| {
         if (human and interactive and err != error.CallerFailure) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
@@ -2386,7 +2391,7 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     defer captured.close(io);
     try announceCapture(io, &captured);
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), captured.identity().*, captured.replay, captured.selector());
+    const reply = try takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), &captured);
     if (!reply.isAccepted()) return writeMutationReply(io, reply, .json, captured.replay);
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
@@ -2408,18 +2413,19 @@ fn takeCapture(step: *?client.Step, stepped: anytype) !client.CapturedRecord {
     return captured;
 }
 
-fn takeReply(step: *?client.Step, stepped: anytype, context: protocol_reply.MutationIdentity, replay: client.Replay, selector: []const u8) !protocol_reply.MutationReply {
-    holdStore(selector);
+fn takeReply(step: *?client.Step, stepped: anytype, captured: *const client.CapturedRecord) !protocol_reply.MutationReply {
+    holdStore(captured.selector());
     const reply = takeStep(step, stepped) catch |err| {
         if (step.*) |failed| {
             if (failed.mayHaveReachedHost()) {
                 recordExit(caller_exit.forCode(.unconfirmed, .reply_unconfirmed));
-                reportUnconfirmed(context, replay, err);
+                reportUnconfirmed(captured.identity().*, captured.replay, err);
                 if (err == error.Cancelled or err == error.Canceled) return err;
                 return error.CallerFailure;
             }
             if (failed == .connect or failed == .endpoint) {
-                return hostTransportFailure(std.Io.Threaded.global_single_threaded.io(), selector, err);
+                if (captured.paths) |*paths| return readTransportFailureAt(std.Io.Threaded.global_single_threaded.io(), paths, err);
+                return hostTransportFailure(std.Io.Threaded.global_single_threaded.io(), captured.selector(), err);
             }
             if (failed == .store) return storeFailure(err);
         }
@@ -3070,7 +3076,7 @@ fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecor
     const reply = blk: {
         defer captured.close(io);
         try announceCapture(io, captured);
-        break :blk try takeReply(step, sender.sendCaptured(captured, environment, &reply_buffer), captured.identity().*, captured.replay, captured.selector());
+        break :blk try takeReply(step, sender.sendCaptured(captured, environment, &reply_buffer), captured);
     };
     try writeMutationReply(io, reply, presentation, replay);
 }
@@ -3129,7 +3135,7 @@ fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const identity = try requestIdentity(init, parsed);
     const target = identity.key.slice();
     var reply_buffer: client.ObservationBuffer = .{};
-    const reply = (client.Requests{ .io = io }).observeCommandAt(&identity.paths, target, null, &reply_buffer, null) catch |err| return readTransportFailure(io, identity.paths.selector(), err);
+    const reply = (client.Requests{ .io = io }).observeCommandAt(&identity.paths, target, null, &reply_buffer, null) catch |err| return readTransportFailureAt(io, &identity.paths, err);
     const observation = try checkedObservation(io, reply, target);
     try writeObservation(io, &observation, observationTime(io));
 }
@@ -3182,7 +3188,7 @@ fn waitRequest(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var interrupt = WaitInterrupt.init();
     defer interrupt.deinit();
     const result = client.waitCommandAt(init.io, &identity.paths, identity.key.slice(), (try parsed.number(u32, "timeout-seconds")) orelse @import("request_wait.zig").default_timeout_seconds, &wait_cancellation) catch |err| {
-        const failure = readTransportFailure(init.io, identity.paths.selector(), err);
+        const failure = readTransportFailureAt(init.io, &identity.paths, err);
         if (client.hostUnreachable(err)) {
             var read_failure: protocol_reply.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
             try read_failure.diagnostic.type.set("invocation_error");
@@ -3301,7 +3307,7 @@ fn readResult(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         target,
         std.Io.File.stdout(),
         &reply_buffer,
-    ) catch |err| return readTransportFailure(io, identity.paths.selector(), err);
+    ) catch |err| return readTransportFailureAt(io, &identity.paths, err);
     switch (reply) {
         .answer => {},
         .failure => |failure| {
@@ -3975,7 +3981,7 @@ fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const reply = blk: {
         defer captured.close(init.io);
         var step: ?client.Step = null;
-        break :blk try takeReply(&step, (client.Requests{ .io = init.io }).sendCaptured(&captured, .{ .map = init.environ_map }, &buffer), captured.identity().*, replay, captured.selector());
+        break :blk try takeReply(&step, (client.Requests{ .io = init.io }).sendCaptured(&captured, .{ .map = init.environ_map }, &buffer), &captured);
     };
     try writeMutationReply(init.io, reply, .json, replay);
 }

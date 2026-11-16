@@ -110,6 +110,7 @@ pub const Requests = struct {
         const carried: ?Environment = if (captured.target == .message) environment else null;
         if (carried) |value| if (value.bytes() > protocol.max_environment_bytes) return .fail(null, error.EnvironmentTooLarge);
         const paths = captured.resolvePaths(self.io) catch |err| return .fail(.store, err);
+        captured.paths = paths; // retain the invocation's route for failure reporting
         const reply = switch (sendSource(self, &paths, std.meta.activeTag(captured.target).route(), self.mutation_timing, captured.length, &captured.file, null, null, carried, reply_buffer, null)) {
             .done => |reply| reply,
             .failed => |failure| return .fail(failure.step, failure.err),
@@ -1115,8 +1116,12 @@ pub fn hostLockState(io: std.Io, store_path: []const u8) HostLockState {
     const selected = platform.resolveClientSelection(store_path);
     if (selected == .mysql) return .failure;
     const paths = selected.paths(io) catch |err| return if (err == error.FileNotFound) .free else .failure;
+    return hostLockStateAt(io, &paths);
+}
+
+pub fn hostLockStateAt(io: std.Io, paths: *const platform.Paths) HostLockState {
     if (paths.kind == .mysql) return .failure;
-    return lockState(io, &paths);
+    return lockState(io, paths);
 }
 
 fn lockState(io: std.Io, paths: *const platform.Paths) HostLockState {
