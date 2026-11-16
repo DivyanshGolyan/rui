@@ -224,7 +224,7 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
     };
     const on = Kinds.on;
     return .{
-        "SELECT admission_position AS position,0 AS ordinal,1 AS kind,admission_id AS id FROM message_admission @index(message_admission_position) " ++
+        "SELECT admission_position AS position,0 AS ordinal,1 AS kind,admission_id AS id FROM message_admission @index(message_admission_person) " ++
             "WHERE session_ref=?1 AND sender_session_ref IS NULL AND " ++ on(1) ++ " AND " ++ Kinds.off(11) ++ " AND " ++ range("admission_position", "0") ++
             " UNION ALL SELECT admission_position,0,CASE WHEN sender_session_ref IS NULL THEN 1 ELSE 11 END,admission_id FROM message_admission @index(message_admission_position) " ++
             "WHERE session_ref=?1 AND " ++ on(11) ++ " AND (sender_session_ref IS NOT NULL OR " ++ on(1) ++ ") AND " ++ range("admission_position", "0") ++

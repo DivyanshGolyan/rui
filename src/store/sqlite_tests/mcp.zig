@@ -98,6 +98,12 @@ test "MCP and Bash admission seek each Action's call without scanning calls" {
     inline for ([_][:0]const u8{ next_action_attempt_sql, action_domain.next_mcp_action_sql }, 0..) |sql, index| {
         const statement = try sqlite.prepare(storage.sqliteDatabase(), "EXPLAIN QUERY PLAN " ++ sql);
         defer _ = c.sqlite3_finalize(statement);
+        try sqlite.bindI64(statement, 1, 1);
+        try sqlite.bindI64(statement, 2, 0);
+        const names: action_domain.CoreNames = .of();
+        if (index == 0) {
+            inline for (&names.digests, 3..) |*digest, parameter| try sqlite.bindBlob(statement, parameter, digest);
+        }
         var seeks_call = false;
         var executable_index = false;
         var seeks_action = false;
@@ -314,6 +320,8 @@ test "an empty MCP selection does not visit queued Bash Actions from a Bash-only
         try std.testing.expectEqual(count, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1 AND resolution_code IS NULL", .{}));
         const statement = try sqlite.prepare(storage.sqliteDatabase(), action_domain.next_mcp_action_sql);
         defer _ = c.sqlite3_finalize(statement);
+        try sqlite.bindI64(statement, 1, 1);
+        try sqlite.bindI64(statement, 2, 0);
         try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(statement));
         cost.* = c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 0);
     }
@@ -362,6 +370,8 @@ test "MCP selection cost does not grow with earlier Operations of an open Turn" 
         try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0", .{}));
         const statement = try sqlite.prepare(storage.sqliteDatabase(), action_domain.next_mcp_action_sql);
         defer _ = c.sqlite3_finalize(statement);
+        try sqlite.bindI64(statement, 1, 1);
+        try sqlite.bindI64(statement, 2, 0);
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
         try std.testing.expectEqual(selected.action_id, @as(u64, @intCast(c.sqlite3_column_int64(statement, 0))));
         try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(statement));
