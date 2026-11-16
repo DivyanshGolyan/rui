@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Save a model for each sign-in through the app settings Model field."""
 import json
 import os
 import shutil
@@ -52,8 +51,6 @@ def main():
             value = json.loads(result.stdout)
             return value["provider"] == provider and value["model"] == "gpt-6-luna"
 
-        # Isolate provider-fixed Model persistence from the Sign-in journey,
-        # whose first-run choices are covered by human_cli_integration.
         for sign_in, provider in (("API key", "openai"), ("ChatGPT", "codex")):
             changed = subprocess.run(
                 [str(fixture.RUI), "defaults", "configure", "--store", str(store),
@@ -62,8 +59,6 @@ def main():
             assert changed.returncode == 0, changed.stderr
             master, slave = open_pty(columns=80, rows=24)
             catalog = AppModelCatalog(host)
-            # This fixture tests Model persistence, not API model admission.
-            # Name the known initial model; keep the saved provider authoritative.
             caller = spawn([str(fixture.RUI), "--store", str(store), "--model", "gpt-5.5"], cwd=state,
                            env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             overview_frame(master, overview_title)

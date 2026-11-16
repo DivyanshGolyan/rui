@@ -40,7 +40,6 @@ class FailureArtifactsTest(unittest.TestCase):
             self.assertEqual(sorted(path.relative_to(copied).as_posix() for path in copied.rglob("*") if path.is_file()),
                              ["case/observation-failure-17.json", "case/probe.log", "case/pty-failure.json"])
             self.assertTrue(all(path.read_text() == "fixture evidence" for path in copied.rglob("*") if path.is_file()))
-            # Each retention gets its own directory; an earlier copy is never replaced.
             (state / "case" / "probe.log").write_text("changed")
             self.retain(state, destination)
             self.assertEqual(len(list(destination.iterdir())), 2)
@@ -51,7 +50,6 @@ class FailureArtifactsTest(unittest.TestCase):
             root = Path(directory)
             state = root / "state"
             state.mkdir()
-            # Each lacks the prefix, the suffix, or a canonical positive number.
             for name in ("17.json", "observation-failure-18", "observation-failure-07.json",
                          "observation-failure-.json", "observation-failure-٣.json", "xprobe.log"):
                 (state / name).write_text("private")
@@ -71,7 +69,6 @@ class FailureArtifactsTest(unittest.TestCase):
                 (state / name / "probe.log").write_bytes(data)
             destination = root / "artifacts"
             destination.mkdir()
-            # Seventeen fixtures pass any budget check before any of them writes.
             barrier, walk = threading.Barrier(17), os.walk
             def gated_walk(*args, **kwargs):
                 barrier.wait(timeout=10)
@@ -89,7 +86,6 @@ class FailureArtifactsTest(unittest.TestCase):
             self.assertEqual(len(copied), 16 * 4)
             self.assertLessEqual(len(copied), 128)
             self.assertLessEqual(sum(path.stat().st_size for path in copied), 16 * 1024 * 1024)
-            # Per-root file and byte bounds, without the global defaults.
             with patch.multiple(host_process, MAX_RETAINED_BYTES_PER_ROOT=8, MAX_RETAINED_FILES_PER_ROOT=2):
                 bounded = root / "bounded"
                 bounded.mkdir()
@@ -123,10 +119,7 @@ class FailureArtifactsTest(unittest.TestCase):
         for name, parts in (("check.yml", 2), ("previous-release-upgrade.yml", 1)):
             with self.subTest(workflow=name):
                 workflow = Path(".github/workflows", name).read_text()
-                # As step env or set inline on the one check that retains them.
                 self.assertEqual(len(re.findall(r"RUI_FAILURE_ARTIFACTS[:=]", workflow)), parts)
-                # Acceptance receipts and synthetic upgrade Stores are separate
-                # artifacts. Check the bounded failure upload contract itself.
                 blocks = workflow.split("      - name: Retain bounded failed-fixture diagnostics\n")[1:]
                 self.assertEqual(len(blocks), parts)
                 for block in blocks:

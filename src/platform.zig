@@ -2,7 +2,6 @@ const std = @import("std");
 const protocol = @import("protocol.zig");
 const named_scratch = @import("named_scratch.zig");
 const store_path = @import("store_path.zig");
-/// Store ids are distinct from SQLite's canonical absolute paths.
 const validStoreId = @import("store_id.zig").valid;
 const c = @import("posix");
 const hs = @import("host_settings.zig");
@@ -17,36 +16,43 @@ const max_uid_bytes = "4294967295".len;
 const socket_suffix = ".sock";
 pub const max_runtime_directory_bytes = runtime_prefix.len + max_uid_bytes;
 pub const max_socket_path_bytes = max_runtime_directory_bytes + "/".len + 32 + socket_suffix.len;
-/// A launched Host binds its socket in the caller's runtime directory
-/// (host_settings.zig); macOS binds at most this many path bytes.
 pub const max_launch_socket_path_bytes = @import("host_settings.zig").max_launch_socket_path_bytes;
 
 pub const Kind = @import("store_target.zig").Kind;
 
 pub const Paths = struct {
     kind: Kind = .sqlite,
-    /// A directory lookup retains the Host selector until client resolution
-    /// replaces it with MySQL's opaque wire identity. Never send it unresolved.
-    store: protocol.Bounded(protocol.max_store_bytes) = .{},
+    host_directory: hs.OsBytes(protocol.max_store_bytes) = .{},
+    store_identity: protocol.Bounded(protocol.max_store_bytes) = .{},
     database: protocol.Bounded(max_database_path_bytes) = .{},
     scratch: protocol.Bounded(max_scratch_path_bytes) = .{},
     socket: @import("host_settings.zig").OsBytes(@max(max_socket_path_bytes, max_launch_socket_path_bytes)) = .{},
 
-    /// The socket's spelling may be a short alias for a long canonical path.
-    /// Only MySQL children need this non-secret client routing hint.
+    pub fn selector(self: *const Paths) []const u8 {
+        return if (self.host_directory.len != 0) self.host_directory.slice() else self.store_identity.slice();
+    }
+
+    pub noinline fn retainReachableDirectory(self: *Paths, io: std.Io, dir: []const u8) void {
+        // A foreground unsaved placement need not be reachable through DIR.
+        // Keep its legacy route rather than inventing a discoverable selector.
+        const saved = resolveClientPaths(io, dir) catch return;
+        if (self.kind != saved.kind or !std.mem.eql(u8, self.socket.slice(), saved.socket.slice())) return;
+        if (self.kind == .sqlite and !self.store_identity.eql(saved.store_identity.slice())) return;
+        self.host_directory = saved.host_directory;
+    }
+
     pub fn runtimeHint(self: *const Paths) ?[]const u8 {
         return if (self.kind == .mysql) std.fs.path.dirname(self.socket.slice()) else null;
     }
 
     pub fn diagnosticsDirectory(self: *const Paths) []const u8 {
         return switch (self.kind) {
-            .sqlite => self.store.slice(),
+            .sqlite => self.store_identity.slice(),
             .mysql => self.runtimeHint().?,
         };
     }
 };
 
-/// The stop record's name, in the directory that holds the lease.
 const stop_record_name = "host.stopped";
 
 pub const StoreLease = struct {
@@ -54,15 +60,11 @@ pub const StoreLease = struct {
     paths: Paths,
     store_dir: std.Io.Dir,
     lock_file: std.Io.File,
-    /// A launched Host's own runtime directory and the lock that makes it
-    /// the only owner of the socket inside (`useRuntimeDirectory`).
     runtime_dir: ?std.Io.Dir = null,
     runtime_lock: ?std.Io.File = null,
 
     pub const Observation = union(enum) { owned: Paths, unowned, access_failure };
 
-    /// Read-only observation, not lease acquisition or readiness. Returns
-    /// owned canonical paths by value; every probe descriptor closes here.
     pub fn observe(io: std.Io, supplied_path: []const u8) Observation {
         const selection = resolveClientSelection(supplied_path);
         const paths = selection.paths(io) catch |err| return switch (err) {
@@ -70,7 +72,7 @@ pub const StoreLease = struct {
             else => .access_failure,
         };
         const mysql = paths.kind == .mysql;
-        var store_dir = std.Io.Dir.cwd().openDir(io, if (mysql) paths.runtimeHint().? else paths.store.slice(), .{}) catch |err| return switch (err) {
+        var store_dir = std.Io.Dir.cwd().openDir(io, if (mysql) paths.runtimeHint().? else paths.store_identity.slice(), .{}) catch |err| return switch (err) {
             error.FileNotFound => .unowned,
             else => .access_failure,
         };
@@ -98,8 +100,6 @@ pub const StoreLease = struct {
         };
     }
 
-    /// Runs once per process; noinline keeps its path scratch off the
-    /// caller's frame, which lives as long as the Host.
     pub noinline fn acquire(io: std.Io, supplied_path: []const u8) !StoreLease {
         var store_dir = try std.Io.Dir.cwd().createDirPathOpen(io, supplied_path, .{
             .permissions = .fromMode(0o700),
@@ -129,8 +129,6 @@ pub const StoreLease = struct {
         };
     }
 
-    /// MySQL owns its Store through GET_LOCK. This filesystem lease reserves
-    /// only the private runtime socket, never a Store's host.lock file.
     pub noinline fn acquireMysql(self: *StoreLease, io: std.Io, runtime_path: []const u8, socket_path: []const u8) !void {
         self.acquireMysqlDirectory(io, runtime_path, socket_path) catch |err| switch (err) {
             error.WouldBlock => return error.RuntimeDirectoryInUse,
@@ -159,8 +157,6 @@ pub const StoreLease = struct {
         try self.paths.socket.set(socket_path);
     }
 
-    /// Called once at Host startup; noinline keeps its directory listing and
-    /// path buffer off the caller's frame, which lives as long as the Host.
     pub noinline fn prepareForServing(self: *StoreLease, fault_cleanup: bool) !void {
         var scratch = try self.store_dir.createDirPathOpen(self.io, "scratch", .{
             .permissions = .fromMode(0o700),
@@ -180,7 +176,6 @@ pub const StoreLease = struct {
             try validatePrivateDirectory(runtime_dir, self.io);
         }
 
-        // A record an earlier Host left describes that Host, not this one.
         self.store_dir.deleteFile(self.io, stop_record_name) catch |err| switch (err) {
             error.FileNotFound => {},
             else => return err,
@@ -188,8 +183,6 @@ pub const StoreLease = struct {
         try reclaimStaleSocket(self.io, self.paths.socket.slice());
     }
 
-    /// Publish the Store routing hint under its lease before binding: a crash
-    /// after bind must leave enough information to observe that same lease.
     pub fn listen(self: *StoreLease, options: std.Io.net.UnixAddress.ListenOptions) !std.Io.net.Server {
         const address = try std.Io.net.UnixAddress.init(self.paths.socket.slice());
         if (self.hasStoreHint()) try self.publishStoreHint();
@@ -199,8 +192,6 @@ pub const StoreLease = struct {
         return address.listen(self.io, options);
     }
 
-    /// Retire the routing hint only after the socket is gone. Failed cleanup
-    /// retains both so discovery can prove staleness after the lease retires.
     pub fn retireSocket(self: *StoreLease) !void {
         std.Io.Dir.deleteFileAbsolute(self.io, self.paths.socket.slice()) catch |err| switch (err) {
             error.FileNotFound => {},
@@ -224,7 +215,7 @@ pub const StoreLease = struct {
             .replace = true,
         });
         defer atomic.deinit(self.io);
-        try atomic.file.writeStreamingAll(self.io, self.paths.store.slice());
+        try atomic.file.writeStreamingAll(self.io, self.paths.store_identity.slice());
         try atomic.replace(self.io);
     }
 
@@ -236,10 +227,6 @@ pub const StoreLease = struct {
         };
     }
 
-    /// Records that someone asked this Host to stop, beside its lease, so a
-    /// client that finds the lease free can tell that stop from a crash
-    /// (`lastStop`). No fsync: a record lost to power loss reads as a crash,
-    /// which costs one extra automatic start at most.
     pub fn recordStopAsked(self: *StoreLease) !void {
         const record = try self.store_dir.createFile(self.io, stop_record_name, .{ .permissions = .fromMode(0o600) });
         record.close(self.io);
@@ -247,14 +234,10 @@ pub const StoreLease = struct {
 
     pub const LastStop = @import("host_restart.zig").LastStop;
 
-    /// How the last Host of the Store at `supplied_path` ended, read from
-    /// the record `recordStopAsked` leaves and every Host start removes.
-    /// Only meaningful while the lease is free. The record's presence is
-    /// its whole content; nothing else reads it.
     pub fn lastStop(io: std.Io, supplied_path: []const u8) LastStop {
         const selected = resolveClientSelection(supplied_path);
         const paths = selected.paths(io) catch return .unknown;
-        const directory = if (paths.kind == .mysql) paths.runtimeHint().? else paths.store.slice();
+        const directory = if (paths.kind == .mysql) paths.runtimeHint().? else paths.store_identity.slice();
         var dir = std.Io.Dir.cwd().openDir(io, directory, .{}) catch return .unknown;
         defer dir.close(io);
         const stat = dir.statFile(io, stop_record_name, .{ .follow_symlinks = false }) catch |err| return switch (err) {
@@ -264,10 +247,6 @@ pub const StoreLease = struct {
         return if (stat.kind == .file) .asked else .unknown;
     }
 
-    /// A launched Host binds in the caller's directory instead of the
-    /// default one. The directory must be private, and an exclusive lock in
-    /// it makes this Host the only owner of the socket there: reclaiming a
-    /// stale socket is safe only while that lock is held.
     pub fn useRuntimeDirectory(self: *StoreLease, runtime_path: []const u8, socket_path: []const u8) error{ RuntimeDirectoryInUse, RuntimeDirectoryUnusable }!void {
         return self.openRuntimeDirectory(runtime_path, socket_path) catch |err| switch (err) {
             error.RuntimeDirectoryInUse => error.RuntimeDirectoryInUse,
@@ -305,31 +284,24 @@ pub const StoreLease = struct {
     }
 };
 
-/// Selection syntax is interpreted once, before filesystem or socket work.
-/// A missing MySQL runtime still names a network Store, never a SQLite path.
-/// The slices borrow CLI/environment storage for this selection's lifetime.
-pub const ClientSelection = union(Kind) {
-    sqlite: []const u8,
-    mysql: struct { store: []const u8, runtime: []const u8 },
+pub const ClientSelection = union(enum) {
+    directory: []const u8,
+    mysql: struct { store_identity: []const u8, runtime: []const u8 },
 
     pub fn paths(self: ClientSelection, io: std.Io) !Paths {
         switch (self) {
-            .mysql => |value| return mysqlClientPaths(io, value.store, value.runtime),
-            .sqlite => |path| {
+            .mysql => |value| return mysqlClientPaths(io, value.store_identity, value.runtime),
+            .directory => |path| {
                 // Preserve the directory's admission before reading its saved placement.
                 var canonical: [protocol.max_store_bytes]u8 = undefined;
                 const host = try existingStoreDestination(io, path, &canonical);
-                var result = savedPlacement(io, host) catch |err| switch (err) {
+                return savedPlacement(io, host) catch |err| switch (err) {
                     // A ready default Host remains attachable if its saved
                     // startup document was edited to an invalid value. Only a
                     // new start admits that document; never guess moved paths.
                     error.SettingsInvalid => return pathsForCanonicalStore(host),
                     else => return err,
                 };
-                // Until client lookup learns MySQL's opaque identity, retain
-                // its directory selector for consumers saving a selection.
-                if (result.kind == .mysql) try result.store.set(host);
-                return result;
             },
         }
     }
@@ -342,8 +314,8 @@ pub fn resolveClientSelection(supplied_path: []const u8) ClientSelection {
 
 fn clientSelection(supplied_path: []const u8, runtime_hint: ?[]const u8) ClientSelection {
     return switch (@import("store_target.zig").resolveKind(supplied_path, runtime_hint)) {
-        .mysql => .{ .mysql = .{ .store = supplied_path, .runtime = runtime_hint.? } },
-        .sqlite => .{ .sqlite = supplied_path },
+        .mysql => .{ .mysql = .{ .store_identity = supplied_path, .runtime = runtime_hint.? } },
+        .sqlite => .{ .directory = supplied_path },
     };
 }
 
@@ -351,11 +323,9 @@ pub fn resolveClientPaths(io: std.Io, supplied_path: []const u8) !Paths {
     return resolveClientSelection(supplied_path).paths(io);
 }
 
-/// Without this explicit non-secret hint, a relative SQLite directory whose
-/// name happens to be 32 hex characters keeps its existing path semantics.
 pub fn mysqlRuntimeDirectory(store: []const u8) ?[]const u8 {
     return switch (resolveClientSelection(store)) {
-        .sqlite => null,
+        .directory => null,
         .mysql => |value| value.runtime,
     };
 }
@@ -369,23 +339,28 @@ pub noinline fn mysqlClientPaths(io: std.Io, store: []const u8, runtime: []const
 /// Every explicit-interface lookup admits an existing directory before any
 /// connection. Saved placement may name a directory the starter has yet to
 /// create; the legacy opaque-id lookup still requires an existing runtime.
-fn privateInterfacePaths(io: std.Io, kind: Kind, store: []const u8, runtime: []const u8, missing: enum { allow, refuse }) !Paths {
+const MissingInterface = enum { allow, refuse };
+
+fn validateInterfaceDirectory(io: std.Io, runtime: []const u8, missing: MissingInterface) !void {
     var dir = std.Io.Dir.cwd().openDir(io, runtime, .{}) catch |err| {
-        if (err == error.FileNotFound and missing == .allow) return interfacePaths(kind, store, runtime);
+        if (err == error.FileNotFound and missing == .allow) return;
         return err;
     };
     defer dir.close(io);
     try validatePrivateDirectory(dir, io);
-    return interfacePaths(kind, store, runtime);
 }
 
-/// The single Paths construction for both saved placement and legacy MySQL hints.
-fn interfacePaths(kind: Kind, store: []const u8, runtime: []const u8) !Paths {
+fn privateInterfacePaths(io: std.Io, kind: Kind, store: []const u8, runtime: []const u8, missing: MissingInterface) !Paths {
+    try validateInterfaceDirectory(io, runtime, missing);
     var paths: Paths = .{ .kind = kind };
-    try paths.store.set(store);
+    try paths.store_identity.set(store);
+    try setInterfacePaths(&paths, runtime);
+    return paths;
+}
+
+fn setInterfacePaths(paths: *Paths, runtime: []const u8) !void {
     paths.socket.len = (try std.fmt.bufPrint(&paths.socket.bytes, "{s}/rui.sock", .{runtime})).len;
     paths.scratch.len = (try std.fmt.bufPrint(&paths.scratch.bytes, "{s}/scratch", .{runtime})).len;
-    return paths;
 }
 
 pub fn anchorPlacement(io: std.Io, settings: *hs.Settings, dir: []const u8, failure: *start_report.Failure) !void {
@@ -421,7 +396,9 @@ pub noinline fn savedPlacement(io: std.Io, dir: []const u8) !Paths {
     var failure: start_report.Failure = undefined;
     _ = try @import("host_settings_file.zig").read(io, arena.allocator(), arena.allocator(), host, settings, &failure);
     try anchorPlacement(io, settings, host, &failure);
-    return placementPaths(io, settings);
+    var paths = try placementPaths(io, settings);
+    try paths.host_directory.set(host);
+    return paths;
 }
 
 pub noinline fn placementPaths(io: std.Io, settings: *const @import("host_settings.zig").Settings) !Paths {
@@ -429,9 +406,8 @@ pub noinline fn placementPaths(io: std.Io, settings: *const @import("host_settin
     var canonical: [protocol.max_store_bytes]u8 = undefined;
     var paths = try pathsForCanonicalStore(try canonicalStoreDestination(io, settings.store.sqlite.dir.slice(), &canonical));
     if (!settings.interface.dir.anchored) {
-        const interface = try privateInterfacePaths(io, .sqlite, paths.store.slice(), settings.interface.dir.slice(), .allow);
-        paths.socket = interface.socket;
-        paths.scratch = interface.scratch;
+        try validateInterfaceDirectory(io, settings.interface.dir.slice(), .allow);
+        try setInterfacePaths(&paths, settings.interface.dir.slice());
     }
     return paths;
 }
@@ -452,8 +428,6 @@ pub fn validateStoreDestination(io: std.Io, supplied_path: []const u8) !void {
     _ = try canonicalStoreDestination(io, supplied_path, &buffer);
 }
 
-/// Return the same read-only destination proof to callers that retain its
-/// canonical value. Creation/lease acquisition still rechecks against races.
 pub noinline fn canonicalStoreDestination(io: std.Io, supplied_path: []const u8, buffer: *[protocol.max_store_bytes]u8) ![]const u8 {
     if (supplied_path.len == 0 or !std.unicode.utf8ValidateSlice(supplied_path)) return error.InvalidStorePath;
     for (supplied_path) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidStorePath;
@@ -463,12 +437,10 @@ pub noinline fn canonicalStoreDestination(io: std.Io, supplied_path: []const u8,
     };
 }
 
-// These workspaces are sequential, not resident together. Keep the existing
-// Paths result out of the missing-parent walk's canonicalization workspace.
 noinline fn existingStoreDestination(io: std.Io, supplied_path: []const u8, buffer: *[protocol.max_store_bytes]u8) ![]const u8 {
     const paths = try sqliteClientPaths(io, supplied_path);
-    @memcpy(buffer[0..paths.store.len], paths.store.slice());
-    return buffer[0..paths.store.len];
+    @memcpy(buffer[0..paths.store_identity.len], paths.store_identity.slice());
+    return buffer[0..paths.store_identity.len];
 }
 noinline fn missingStoreDestination(io: std.Io, supplied_path: []const u8, buffer: *[protocol.max_store_bytes]u8) ![]const u8 {
     var parent = supplied_path;
@@ -483,9 +455,6 @@ noinline fn missingStoreDestination(io: std.Io, supplied_path: []const u8, buffe
         var length = try directory.?.realPath(io, &canonical);
         var name_max = c.fpathconf(directory.?.handle, c._PC_NAME_MAX);
         if (name_max <= 0) return error.StoreComponentLimitUnavailable;
-        // The handle anchors the existing prefix. Missing depth tracks
-        // virtual directories only; canceling them resumes real checks.
-        // Creation traverses even components later canceled by '..'.
         var missing_depth: usize = 0;
         const suffix = if (std.mem.eql(u8, parent, ".")) supplied_path else supplied_path[parent.len..];
         var components = std.mem.tokenizeScalar(u8, suffix, '/');
@@ -517,8 +486,6 @@ noinline fn missingStoreDestination(io: std.Io, supplied_path: []const u8, buffe
                     },
                     else => return stat_err,
                 };
-                // Recursive creation rejects an existing symlink at a
-                // prefix it visits, unlike opening the initial ancestor.
                 if (stat.kind != .directory) return error.NotDir;
             }
             directory.?.close(io);
@@ -550,7 +517,8 @@ fn pathsFromOpenStore(store_dir: std.Io.Dir, io: std.Io) !Paths {
 noinline fn pathsForCanonicalStore(canonical: []const u8) !Paths {
     try validateCanonicalPath(canonical);
     var paths: Paths = .{};
-    try paths.store.set(canonical);
+    try paths.host_directory.set(canonical);
+    try paths.store_identity.set(canonical);
     var database_buffer: [max_database_path_bytes]u8 = undefined;
     try paths.database.set(try std.fmt.bufPrint(&database_buffer, "{s}{s}", .{ canonical, database_suffix }));
     var scratch_buffer: [max_scratch_path_bytes]u8 = undefined;
@@ -567,8 +535,6 @@ fn validateCanonicalPath(canonical: []const u8) !void {
     if (!std.unicode.utf8ValidateSlice(canonical)) return error.InvalidStorePath;
 }
 
-/// Caller owns every path and the returned slice. Discovery never creates the
-/// runtime directory, follows directory-entry symlinks or reclaims stale sockets.
 pub fn listHostSockets(allocator: std.mem.Allocator, io: std.Io) ![][]u8 {
     var buffer: [max_runtime_directory_bytes]u8 = undefined;
     return listHostSocketsIn(allocator, io, try runtimeDirectory(&buffer));
@@ -593,7 +559,6 @@ fn listHostSocketsIn(allocator: std.mem.Allocator, io: std.Io, runtime: []const 
         errdefer allocator.free(path);
         try paths.append(path);
     }
-    // Stable receipts without changing the sequential activation semantics.
     std.mem.sort([]u8, paths.items, {}, struct {
         fn less(_: void, a: []u8, b: []u8) bool {
             return std.mem.lessThan(u8, a, b);
@@ -602,10 +567,6 @@ fn listHostSocketsIn(allocator: std.mem.Allocator, io: std.Io, runtime: []const 
     return paths.toOwnedSlice();
 }
 
-/// Read-only absence proof for an unreachable standard SQLite socket. A hint
-/// names the lease to observe; it never records or substitutes for ownership.
-/// Missing, foreign, malformed or inaccessible hints grant no authority.
-/// Call only after connection failed, never for a connected unreadable peer.
 pub fn socketStoreIsUnowned(io: std.Io, socket_path: []const u8) bool {
     return socketStoreIsUnownedChecked(io, socket_path) catch false;
 }
@@ -753,7 +714,7 @@ test "Store paths canonicalize aliases to one socket" {
     var second = try tmp.dir.openDir(std.testing.io, "./store", .{});
     defer second.close(std.testing.io);
     const two = try pathsFromOpenStore(second, std.testing.io);
-    try std.testing.expectEqualStrings(one.store.slice(), two.store.slice());
+    try std.testing.expectEqualStrings(one.store_identity.slice(), two.store_identity.slice());
     try std.testing.expectEqualStrings(one.socket.slice(), two.socket.slice());
 }
 
@@ -784,7 +745,7 @@ test "Store lease observation owns probe mechanics and releases every descriptor
         for (0..16) |_| {
             const observation = StoreLease.observe(io, alias);
             try std.testing.expect(observation == .owned);
-            try std.testing.expectEqualStrings(lease.paths.store.slice(), observation.owned.store.slice());
+            try std.testing.expectEqualStrings(lease.paths.store_identity.slice(), observation.owned.store_identity.slice());
             try std.testing.expectEqualStrings(lease.paths.socket.slice(), observation.owned.socket.slice());
         }
         try std.testing.expectEqual(leased, (try descriptors.observe(io)).open_descriptors);
@@ -819,20 +780,17 @@ test "the stop record reads asked only when present as a file, and unknown when 
     const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buffer, "{s}/store", .{root});
-    // No Store directory to read: nothing says how a Host ended.
     try std.testing.expectEqual(StoreLease.LastStop.unknown, StoreLease.lastStop(io, path));
     {
         var lease = try StoreLease.acquire(io, path);
         defer lease.release();
         try std.testing.expectEqual(StoreLease.LastStop.unasked, StoreLease.lastStop(io, path));
         try lease.recordStopAsked();
-        try lease.recordStopAsked(); // Idempotent.
+        try lease.recordStopAsked();
     }
     try std.testing.expectEqual(StoreLease.LastStop.asked, StoreLease.lastStop(io, path));
-    // The lease's release keeps the record; only a start removes it.
     try tmp.dir.deleteFile(io, "store/" ++ stop_record_name);
     try std.testing.expectEqual(StoreLease.LastStop.unasked, StoreLease.lastStop(io, path));
-    // Neither a directory nor a symlink in its place is a record.
     try tmp.dir.createDir(io, "store/" ++ stop_record_name, .default_dir);
     try std.testing.expectEqual(StoreLease.LastStop.unknown, StoreLease.lastStop(io, path));
     try tmp.dir.deleteDir(io, "store/" ++ stop_record_name);
@@ -866,7 +824,7 @@ test "absent destination preflight checks components but bounds canonical aliase
     defer lease.release();
     var expected_buffer: [protocol.max_store_bytes]u8 = undefined;
     const expected = try std.fmt.bufPrint(&expected_buffer, "{s}/new/store", .{root});
-    try std.testing.expectEqualStrings(expected, lease.paths.store.slice());
+    try std.testing.expectEqualStrings(expected, lease.paths.store_identity.slice());
 }
 
 test "absent destination preflight resumes filesystem checks after missing components cancel" {
@@ -957,7 +915,7 @@ test "canonical Store boundary rejects before ownership or endpoint effects" {
         &accepted_buffer,
     );
     const accepted = try resolveClientPaths(std.testing.io, accepted_path);
-    try std.testing.expectEqual(@as(usize, protocol.max_store_bytes), accepted.store.len);
+    try std.testing.expectEqual(@as(usize, protocol.max_store_bytes), accepted.store_identity.len);
     try std.testing.expectEqual(@as(usize, max_database_path_bytes), accepted.database.len);
     try std.testing.expectEqual(@as(usize, max_scratch_path_bytes), accepted.scratch.len);
 
@@ -1009,7 +967,7 @@ test "long raw Store aliases remain usable when their canonical path fits" {
     var lease = try StoreLease.acquire(std.testing.io, alias);
     var expected_buffer: [protocol.max_store_bytes]u8 = undefined;
     const expected = try std.fmt.bufPrint(&expected_buffer, "{s}/store", .{root});
-    try std.testing.expectEqualStrings(expected, lease.paths.store.slice());
+    try std.testing.expectEqualStrings(expected, lease.paths.store_identity.slice());
     lease.release();
 }
 
@@ -1190,7 +1148,7 @@ test "MySQL runtime lease owns no host.lock and routes an opaque Store id" {
     try std.testing.expectEqual(.mysql, lease.paths.kind);
     try std.testing.expectEqualStrings(runtime, paths.runtimeHint().?);
     try std.testing.expectEqualStrings(runtime, paths.diagnosticsDirectory());
-    try std.testing.expectEqualStrings(id, paths.store.slice());
+    try std.testing.expectEqualStrings(id, paths.store_identity.slice());
     try std.testing.expectEqualStrings(address.path, paths.socket.slice());
     try std.testing.expectEqualStrings(lease.paths.scratch.slice(), paths.scratch.slice());
     try std.testing.expect(!validStoreId("/sqlite/store"));
@@ -1212,7 +1170,7 @@ test "Store target paths keep SQLite routing with a separately launched runtime"
     try lease.prepareForServing(false);
     try std.testing.expectEqual(.sqlite, lease.paths.kind);
     try std.testing.expectEqual(@as(?[]const u8, null), lease.paths.runtimeHint());
-    try std.testing.expectEqualStrings(lease.paths.store.slice(), lease.paths.diagnosticsDirectory());
+    try std.testing.expectEqualStrings(lease.paths.store_identity.slice(), lease.paths.diagnosticsDirectory());
     try std.testing.expectEqualStrings(socket, lease.paths.socket.slice());
 }
 
@@ -1273,7 +1231,7 @@ test "Host socket Store hint proves absence only with trusted mapping and free l
     const hint_path = try storeHintPath(socket.slice(), &hint_buffer);
     defer std.Io.Dir.deleteFileAbsolute(io, hint_path) catch {};
     var listener = try lease.listen(.{});
-    listener.deinit(io); // Refused socket, but the Store lock is still held.
+    listener.deinit(io);
     try std.testing.expect(!socketStoreIsUnowned(io, socket.slice()));
     const hint = try std.Io.Dir.openFileAbsolute(io, hint_path, .{});
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), (try hint.stat(io)).permissions.toMode() & 0o777);
@@ -1281,8 +1239,6 @@ test "Host socket Store hint proves absence only with trusted mapping and free l
     lease.release();
     held = false;
     try std.testing.expect(socketStoreIsUnowned(io, socket.slice()));
-    // A readable-by-others hint, symlink, oversized, empty or mismatched
-    // Store cannot vouch for this socket, even with a free lock.
     const writable = try std.Io.Dir.openFileAbsolute(io, hint_path, .{ .mode = .read_write });
     try writable.setPermissions(io, .fromMode(0o644));
     try std.testing.expect(!socketStoreIsUnowned(io, socket.slice()));
@@ -1300,7 +1256,6 @@ test "Host socket Store hint proves absence only with trusted mapping and free l
         changed.close(io);
         try std.testing.expect(!socketStoreIsUnowned(io, socket.slice()));
     }
-    // Republish from the real owner and prove clean retirement removes both.
     lease = try StoreLease.acquire(io, root);
     held = true;
     try lease.prepareForServing(false);

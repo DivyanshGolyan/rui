@@ -1,17 +1,13 @@
-//! Streaming message_agent argument validation.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const session_id = @import("session_id.zig");
 const message_agent_max_text_bytes = @import("tool_record.zig").message_agent_max_text_bytes;
 
-/// A `message_agent` call's checked arguments, without its text.
 pub const MessageAgentArguments = struct {
     id: Bounded(session_id.bytes) = .{},
     text_bytes: u64 = 0,
 };
 
-/// Why a `message_agent` call's arguments were rejected. Its text goes back
-/// to the model as the call's result.
 pub const MessageAgentProblem = enum {
     malformed_json,
     unknown_field,
@@ -39,11 +35,6 @@ pub const MessageAgentCheck = union(enum) {
     rejected: MessageAgentProblem,
 };
 
-/// Checks a `message_agent` call's decoded arguments from `source` (with
-/// `peek` and `take`, as Bash's parser reads them) and writes the text's
-/// decoded bytes to `text` (with `writeAll`) as they are read. The writer
-/// sees text from arguments that may yet be rejected, so a caller keeps it
-/// only on `.accepted`.
 pub fn checkMessageAgent(source: anytype, text: anytype) !MessageAgentCheck {
     return checkObject(source, text) catch |err| switch (err) {
         error.Malformed => .{ .rejected = .malformed_json },
@@ -52,8 +43,6 @@ pub fn checkMessageAgent(source: anytype, text: anytype) !MessageAgentCheck {
 }
 
 fn checkObject(source: anytype, text: anytype) !MessageAgentCheck {
-    // A flat object needs one level of the scanner's stack, which grows
-    // its list by more than one byte at a time.
     var stack: [256]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&stack);
     var reader: Reader(@TypeOf(source)) = .{ .source = source, .scanner = .initStreaming(fixed.allocator()) };
@@ -64,7 +53,6 @@ fn checkObject(source: anytype, text: anytype) !MessageAgentCheck {
     while (true) {
         var token = try reader.next();
         if (token == .object_end) break;
-        // The key, piece by piece; one longer than every field's is unknown.
         var key: Bounded(8) = .{ .len = 0 };
         var key_fits = true;
         while (true) {
@@ -114,7 +102,6 @@ fn checkObject(source: anytype, text: anytype) !MessageAgentCheck {
     return .{ .accepted = out };
 }
 
-/// The bytes a string token carries, or null for any other token.
 fn stringPiece(token: *const std.json.Token) ?[]const u8 {
     return switch (token.*) {
         .partial_string, .string => |bytes| bytes,
@@ -126,14 +113,10 @@ fn stringPiece(token: *const std.json.Token) ?[]const u8 {
     };
 }
 
-/// Feeds the scanner from `source` a chunk at a time. A token's bytes
-/// point into `chunk`, which is refilled only once they are used.
 fn Reader(comptime Source: type) type {
     return struct {
         source: Source,
         scanner: std.json.Scanner,
-        /// Small: the source buffers its own reads, and this lives in the
-        /// settlement scan's and the engine's frames.
         chunk: [256]u8 = undefined,
         ended: bool = false,
 

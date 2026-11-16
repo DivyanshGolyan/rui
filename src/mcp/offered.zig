@@ -1,12 +1,3 @@
-//! The tools a Host offers at start: the built-ins and every `tools.mcp`
-//! entry's tools (M3a, D110). A server that cannot be listed keeps the
-//! records the Host saved last, so a restart while a server is down does
-//! not change what a Session can be configured with (D147). A name two
-//! sources share refuses the start (D142).
-//!
-//! `merge` is a value transition over lists already read; `collect` is the
-//! shell that lists each server, one at a time with a deadline, before the
-//! Host serves anyone.
 const std = @import("std");
 const protocol = @import("../protocol.zig");
 const tools = @import("../tools.zig");
@@ -19,11 +10,8 @@ const Listing = @import("Listing.zig");
 const post = @import("post.zig");
 const pages = @import("../os/pages.zig");
 
-/// How long one server has to list its tools.
 pub const list_timeout_ms = 10_000;
 
-/// Room for one server's listing: entries from the scratch allocator, the
-/// rest in fresh pages so only what the listing writes becomes resident.
 const entries_per_server = tools.max_host_tool_records;
 const arena_bytes = 4 * 1024 * 1024;
 const answer_bytes = 512 * 1024;
@@ -31,14 +19,11 @@ const request_bytes = 8 * 1024;
 
 pub const client: post.Client = .{ .name = "rui", .version = protocol.wire_version };
 
-/// One server's tools as listed, or null when it could not be.
 pub const Source = struct {
     server: []const u8,
     listed: ?[]const Listing.Entry,
 };
 
-/// The two sources of a name they both offer. A built-in's source is
-/// `built_in_source`.
 pub const Collision = struct {
     name: []const u8 = "",
     first: []const u8 = "",
@@ -47,7 +32,6 @@ pub const Collision = struct {
 
 pub const built_in_source = "Rui";
 
-/// `Stopped`: the launcher's stdin ended while a server was being listed.
 pub const Error = error{ OutOfMemory, ToolNameCollision, TooManyTools, Stopped };
 
 const Item = struct { record: tools.Record, source: []const u8 };
@@ -56,9 +40,6 @@ fn before(_: void, a: Item, b: Item) bool {
     return std.mem.order(u8, a.record.name, b.record.name) == .lt;
 }
 
-/// The built-ins plus each source's tools, sorted by name. A listed source
-/// contributes what it listed; an unlisted one, its records in `saved`.
-/// Everything the result points to is `listed`'s, `saved`'s or `arena`'s.
 pub noinline fn merge(arena: std.mem.Allocator, saved: ?*const tools.HostToolSet, sources: []const Source, collision: *Collision) Error!tools.HostToolSet {
     var items: std.ArrayList(Item) = .empty;
     for (tools.built_in_tool_set.records) |record| try items.append(arena, .{ .record = record, .source = built_in_source });
@@ -80,8 +61,6 @@ pub noinline fn merge(arena: std.mem.Allocator, saved: ?*const tools.HostToolSet
         }
     }
     if (items.items.len > tools.max_host_tool_records) return error.TooManyTools;
-    // Insertion sort: stable (so a collision names its sources in order), and
-    // std's block sort puts a 45 KiB frame on the Host's main thread.
     for (1..items.items.len) |at| {
         var low = at;
         while (low > 0 and before({}, items.items[low], items.items[low - 1])) : (low -= 1)
@@ -107,13 +86,9 @@ pub noinline fn merge(arena: std.mem.Allocator, saved: ?*const tools.HostToolSet
 pub const Fetched = union(enum) {
     listed: []const Listing.Entry,
     unreachable_,
-    /// Two of the server's own tools share a name, or one has a schema that
-    /// already names `rui_call_description`.
     collision: []const u8,
 };
 
-/// Lists one server's tools within `list_timeout_ms`, copying them into
-/// `arena`. Anything but a complete listing leaves the server unreachable.
 pub noinline fn fetch(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, server: *const Connection, stop: ?std.posix.fd_t) Error!Fetched {
     const target = http1.parseTarget(server.url.slice()) catch return .unreachable_;
     const entries = try scratch.alloc(Listing.Entry, entries_per_server);
@@ -150,8 +125,6 @@ pub noinline fn fetch(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.All
             .{ .fd = stop orelse -1, .events = std.posix.POLL.IN, .revents = 0 },
         };
         _ = std.posix.poll(&fds, 100) catch return .unreachable_;
-        // When lifetime is stdin, any event after document intake means
-        // its owner is going away.
         if (fds[1].revents != 0) return error.Stopped;
     }
     const copies = try arena.alloc(Listing.Entry, listing.entries().len);
@@ -165,10 +138,6 @@ pub noinline fn fetch(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.All
     return .{ .listed = copies };
 }
 
-/// Lists every server and merges the result with `saved`. `stop` is a
-/// descriptor that becomes readable or hung up when the Host should stop
-/// listing (the launcher's stdin). On a collision
-/// the error is `ToolNameCollision` and `collision` says between which.
 pub noinline fn collect(
     io: std.Io,
     arena: std.mem.Allocator,

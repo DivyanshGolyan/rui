@@ -1,5 +1,3 @@
-//! Sparse saved settings and ordered document/assignment intake. The Host
-//! receives only the prepared value; process environment and secret I/O end here.
 const std = @import("std");
 const hs = @import("host_settings.zig");
 const cli_args = @import("cli_args.zig");
@@ -22,7 +20,6 @@ fn assign(settings: *hs.Settings, gpa: std.mem.Allocator, path: []const u8, valu
     try hs.assign(settings, gpa, path, value, checkPreset, failure);
 }
 
-// Path argv is OS bytes, not JSON, including a leading quote or brace.
 fn text(settings: *hs.Settings, gpa: std.mem.Allocator, path: []const u8, value: []const u8, failure: *start_report.Failure) !void {
     for (hs.leaves) |leaf| if (std.mem.eql(u8, leaf.pattern, path) and std.mem.eql(u8, leaf.kind, "path")) return assign(settings, gpa, path, value, failure);
     var wiping: secret_value.WipingAllocator = .{ .backing = gpa };
@@ -57,7 +54,6 @@ fn lookup(root: std.json.Value, path: []const u8) ?std.json.Value {
     return if (dot) |at| lookup(child, path[at + 1 ..]) else child;
 }
 
-// This edits syntax only. All path/name/value admission belongs to hs.assign.
 fn put(gpa: std.mem.Allocator, root: *std.json.Value, path: []const u8, value: std.json.Value) !void {
     if (root.* != .object) root.* = .{ .object = .{} };
     const dot = std.mem.indexOfScalar(u8, path, '.');
@@ -88,7 +84,6 @@ fn matches(pattern: []const u8, path: []const u8) bool {
     return b.next() == null;
 }
 
-/// @FILE always supplies JSON, even for a Path whose ordinary argv is raw OS bytes.
 fn input(init: std.process.Init, settings: *hs.Settings, path: []const u8, value: []const u8, failure: *start_report.Failure) !void {
     if (!std.mem.startsWith(u8, value, "@")) return assign(settings, init.gpa, path, value, failure);
     var wiping: secret_value.WipingAllocator = .{ .backing = init.gpa };
@@ -103,8 +98,6 @@ fn input(init: std.process.Init, settings: *hs.Settings, path: []const u8, value
     const json = try parse(gpa, bytes, failure);
     for (hs.leaves) |leaf| {
         if (std.mem.eql(u8, leaf.kind, "path") and matches(leaf.pattern, path)) {
-            // Have assign validate the concrete path and dynamic names. Its raw
-            // Path syntax cannot carry JSON, so apply the JSON through its parent.
             try assign(settings, init.gpa, path, leaf.sample_text, failure);
             const dot = std.mem.lastIndexOfScalar(u8, path, '.').?;
             var child: std.json.Value = .{ .object = .{} };
@@ -127,8 +120,6 @@ fn saved(init: std.process.Init, gpa: std.mem.Allocator, dir: []const u8, settin
     return @import("host_settings_file.zig").read(init.io, init.gpa, gpa, host, settings, failure);
 }
 
-/// Edit the sparse document, never a materialized defaults snapshot. Temporary
-/// JSON, including refused literal secrets, lives only in a wiping arena.
 pub fn savedEdit(init: std.process.Init, dir: []const u8, path: []const u8, value: ?[]const u8, failure: *start_report.Failure) !void {
     var wiping: secret_value.WipingAllocator = .{ .backing = init.gpa };
     var memory: std.heap.ArenaAllocator = .init(wiping.allocator());
@@ -169,7 +160,6 @@ fn editSaved(init: std.process.Init, gpa: std.mem.Allocator, path: []const u8, v
         try input(init, settings, path, given, failure);
         const all = try complete(gpa, settings, failure);
         const admitted = lookup(all, path) orelse return invalid(failure, "settings", "assignment did not produce a setting");
-        // A Store is one Adapter; selecting another replaces the old arm.
         if (std.mem.startsWith(u8, path, "store.")) {
             const selected_store = lookup(all, "store").?;
             if (document.object.getPtr("store")) |old| {
@@ -186,8 +176,6 @@ fn editSaved(init: std.process.Init, gpa: std.mem.Allocator, path: []const u8, v
     } else {
         const all = try complete(gpa, settings, failure);
         if (lookup(all, path)) |existing| {
-            // assign also diagnoses invalid punctuation and unknown paths with
-            // the nearest generated leaf, rather than a shell-owned path table.
             var sample = try encoded(gpa, existing);
             for (hs.leaves) |leaf| if (std.mem.eql(u8, leaf.kind, "path") and matches(leaf.pattern, path)) {
                 sample = try gpa.dupe(u8, leaf.sample_text);
@@ -224,10 +212,6 @@ pub const ConnectionSave = union(enum) {
     failed: struct { cause: anyerror, cleanup: ?struct { cause: anyerror, key_file: protocol.Bounded(hs.max_path_bytes) } = null },
 };
 
-/// One immutable key and one paired sparse document per save. Old managed keys
-/// remain because lockless startup readers may still hold an older document.
-/// Each attempt retains at most max_key_bytes+1 bytes and its private lock file.
-/// Uncertain publication retains the key, never a dangling settings reference.
 pub fn saveConnection(init: std.process.Init, dir: []const u8, endpoint_edit: EndpointEdit, key: ConnectionKey, model: []const u8, publish: *const fn () bool) !ConnectionSave {
     return saveConnectionWithFault(init, dir, endpoint_edit, key, model, publish, .{});
 }
@@ -278,7 +262,6 @@ fn saveConnectionWithFault(init: std.process.Init, dir: []const u8, endpoint_edi
                 try hs.apply(settings, ctx.init.gpa, bytes, .file, checkPreset, &failure);
                 document = try parse(ctx.gpa, bytes, &failure);
             }
-            // Reuse the starter's own reachability admission before publishing.
             try checkStart(ctx.init, .{ .dir = ctx.dir }, &failure);
             const automatic = !document.object.contains("providers");
             if (ctx.key == .existing) {
@@ -298,7 +281,6 @@ fn saveConnectionWithFault(init: std.process.Init, dir: []const u8, endpoint_edi
                     try resolveProviders(ctx.init, settings, .{}, &failure);
                     const entry = settings.providers.entries.openai orelse return error.ApiKeyMissing;
                     if (!api_key.valid(entry.key.value())) return error.ApiKeyMissing;
-                    // The following source edit wipes the resolved value.
                     break :existing try ctx.gpa.dupe(u8, entry.key.value());
                 },
             };
@@ -306,7 +288,6 @@ fn saveConnectionWithFault(init: std.process.Init, dir: []const u8, endpoint_edi
             try assign(settings, ctx.init.gpa, "providers.openai.key", try std.fmt.allocPrint(ctx.gpa, "file:{s}", .{ctx.key_file}), &failure);
             try assign(settings, ctx.init.gpa, "providers.openai.unauthenticated", "false", &failure);
             const all = try complete(ctx.gpa, settings, &failure);
-            // Automatic routes become explicit together, never just OpenAI.
             if (!document.object.contains("providers")) {
                 try put(ctx.gpa, &document, "providers", lookup(all, "providers").?);
             } else try put(ctx.gpa, &document, "providers.openai", lookup(all, "providers.openai").?);
@@ -314,13 +295,11 @@ fn saveConnectionWithFault(init: std.process.Init, dir: []const u8, endpoint_edi
             if (bytes.len > hs.max_document_bytes) return error.SettingsInvalid;
             settings.deinit();
             try hs.apply(settings, ctx.init.gpa, bytes, .file, checkPreset, &failure);
-            // A random generated name is never permission to replace a file.
             if (std.Io.Dir.cwd().statFile(ctx.init.io, ctx.key_file, .{ .follow_symlinks = false })) |_| return error.PathAlreadyExists else |err| switch (err) {
                 error.FileNotFound => {},
                 else => return err,
             }
             if (!ctx.publish()) return error.LoginInterrupted;
-            // No startup reader can reference this new name before document rename.
             if (!try api_key.create(ctx.key_file, key_bytes, &ctx.staged, ctx.key_fault)) {
                 return error.PathAlreadyExists;
             }
@@ -351,8 +330,6 @@ fn saveConnectionWithFault(init: std.process.Init, dir: []const u8, endpoint_edi
     };
 }
 
-/// The frozen pair travels through the starter's existing assignment intake.
-/// Only a private file path, never key bytes, is placed in argv.
 pub fn connectionAssignment(init: std.process.Init, gpa: std.mem.Allocator, connection: *const Connection) ![]const u8 {
     const settings = try init.gpa.create(hs.Settings);
     defer init.gpa.destroy(settings);
@@ -366,9 +343,6 @@ pub fn connectionAssignment(init: std.process.Init, gpa: std.mem.Allocator, conn
     return std.fmt.allocPrint(gpa, "providers.openai={s}", .{try encoded(gpa, lookup(all, "providers.openai").?)});
 }
 
-/// Confirms the retained pair through the same saved-document owner. A later
-/// writer wins: recheck never overwrites a different connection. Re-publication
-/// confirms durability after an uncertain rename without another key install.
 pub fn confirmConnection(init: std.process.Init, dir: []const u8, connection: *const Connection) !ConnectionSave {
     return confirmConnectionWithFault(init, dir, connection, null);
 }
@@ -441,8 +415,6 @@ fn defaultKeySource(init: std.process.Init, key: *hs.Secret(.provider_saved)) !v
     try key.source.file.text.set(path);
 }
 
-/// The TUI reads the same effective provider sources as the next bare starter.
-/// This resolves local sources only and never authenticates over the network.
 pub fn inspectConnection(init: std.process.Init, dir: []const u8) !ConnectionInfo {
     const settings = try init.gpa.create(hs.Settings);
     defer init.gpa.destroy(settings);
@@ -488,9 +460,6 @@ pub fn listPaths(out: *std.Io.Writer) !void {
     for (hs.leaves) |leaf| try out.print("{s}\t{s}\t{s}\t{s}\n", .{ leaf.pattern, leaf.kind, leaf.default, leaf.doc });
 }
 
-/// Defaults are product policy, derived from provider-owned credential and
-/// model-list facts: catalog sign-ins serve signed out, live providers need a
-/// usable local credential. An invalid API base URL warns and omits that route.
 fn defaultProviders(init: std.process.Init, settings: *hs.Settings, failure: *start_report.Failure) !void {
     try assign(settings, init.gpa, "providers", "{}", failure);
     inline for (std.enums.values(protocol.Provider)) |provider| {
@@ -532,9 +501,6 @@ fn defaultApiEntry(init: std.process.Init) !?hs.ProviderEntry(.api_key) {
     return entry;
 }
 
-/// RUI_OPENAI_BASE_URL moves an explicitly served `openai` that names no
-/// endpoint, as it moved `--provider openai`. An explicit provider cannot be
-/// silently dropped, so an invalid base stops the Host.
 fn explicitBaseUrl(init: std.process.Init, settings: *hs.Settings, failure: *start_report.Failure) !void {
     const entry = settings.providers.entries.openai orelse return;
     if (entry.endpoint != null) return;
@@ -563,7 +529,7 @@ pub fn anchorPlacement(init: std.process.Init, settings: *hs.Settings, dir: []co
 }
 
 fn existingPlacement(io: std.Io, dir: []const u8) !platform.Paths {
-    return (platform.ClientSelection{ .sqlite = dir }).paths(io);
+    return (platform.ClientSelection{ .directory = dir }).paths(io);
 }
 
 pub const savedPlacement = platform.savedPlacement;
@@ -600,8 +566,6 @@ fn invalid(failure: *start_report.Failure, comptime path: []const u8, comptime r
     return error.SettingsInvalid;
 }
 
-/// A pipe carries a four-byte big-endian length followed by exactly one JSON
-/// document. Reading it never chooses the Host's lifetime.
 pub noinline fn readDocument(init: std.process.Init, source: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !void {
     _ = try readDocumentAt(init, source, settings, failure);
 }
@@ -622,7 +586,6 @@ fn readDocumentAt(init: std.process.Init, source: []const u8, settings: *hs.Sett
     return json.object.contains("providers");
 }
 
-/// Whether the --settings document at absolute `source` names `providers`.
 pub fn documentNamesProviders(init: std.process.Init, source: []const u8) !bool {
     const settings = try init.gpa.create(hs.Settings);
     defer init.gpa.destroy(settings);
@@ -660,8 +623,6 @@ fn readExact(io: std.Io, file: std.Io.File, buffer: []u8) !void {
     }
 }
 
-/// Only the CLI calls this publisher. Both reports are attempted even if the
-/// other stream is closed; messages are the bounded, redacted owner values.
 pub noinline fn report(io: std.Io, failure: *const start_report.Failure) void {
     var buffer: [start_report.max_line_bytes]u8 = undefined;
     std.Io.File.stdout().writeStreamingAll(io, start_report.line(failure, &buffer)) catch {};
@@ -669,8 +630,6 @@ pub noinline fn report(io: std.Io, failure: *const start_report.Failure) void {
     std.Io.File.stderr().writeStreamingAll(io, sentence) catch {};
 }
 
-/// Anchor, resolve each served secret, then issue the proof. No environment map
-/// reaches server. Saved sign-ins stay file sources: their Adapter owns leasing.
 pub fn prepare(init: std.process.Init, settings: *hs.Settings, fixtures: providers.Fixtures, failure: *start_report.Failure) !hs.Prepared {
     var cwd: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (settings.store == .mysql and settings.interface.dir.anchored)
@@ -687,16 +646,11 @@ pub fn prepare(init: std.process.Init, settings: *hs.Settings, fixtures: provide
     return hs.seal(settings, failure);
 }
 
-/// Provider/proxy preflight precedes Store selection just as today's CLI does.
-/// prepare reuses this owner after anchoring; resolved bytes/paths are not read twice.
 pub fn resolveProviders(init: std.process.Init, settings: *hs.Settings, fixtures: providers.Fixtures, failure: *start_report.Failure) !void {
     inline for (std.enums.values(protocol.Provider)) |provider| {
         if (@field(settings.providers.entries, @tagName(provider))) |*entry| {
             switch (comptime provider.facts().credential) {
                 .api_key => if (!entry.unauthenticated.value or fixtures.openai) {
-                    // A source the document names is a document refusal. The
-                    // saved default is the flag Host's environment, so it keeps
-                    // that Host's existing diagnostics, causes and exits.
                     if (entry.key.source == .default) {
                         try defaultKeySource(init, &entry.key);
                         resolve(init, &entry.key) catch |err| {
@@ -705,7 +659,6 @@ pub fn resolveProviders(init: std.process.Init, settings: *hs.Settings, fixtures
                         };
                     } else resolve(init, &entry.key) catch |err| return resolutionFailure(failure, "providers." ++ @tagName(provider) ++ ".key", err);
                 },
-                // Only the saved default is resolved here, as before documents.
                 .sign_in => if (!entry.unauthenticated.value or (provider == .codex and fixtures.codex) or (provider == .chatgpt and fixtures.chatgpt_token_endpoint != null)) {
                     if (entry.credential_file == null) {
                         var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -754,7 +707,6 @@ fn resolve(init: std.process.Init, secret: anytype) !void {
     }
 }
 
-/// The Host directory anchors MySQL's interface without changing its Adapter.
 pub noinline fn selectStore(init: std.process.Init, settings: *hs.Settings, selected: []const u8, from_document: bool, failure: *start_report.Failure) !void {
     _ = from_document;
     var canonical: [protocol.max_store_bytes]u8 = undefined;
@@ -793,8 +745,6 @@ pub fn intake(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []con
     try resolveProviders(init, settings, fixtures.*, failure);
 }
 
-/// The caller selects the Host directory using platform policy; an explicit
-/// document Adapter keeps its own Store location.
 pub fn admitSelected(init: std.process.Init, dir: []const u8, settings: *hs.Settings, fixtures: providers.Fixtures, failure: *start_report.Failure) !hs.Prepared {
     try anchorPlacement(init, settings, dir, failure);
     return prepare(init, settings, fixtures, failure);
@@ -846,8 +796,6 @@ test "Host start resolves environment private file and saved credential sources"
     try std.testing.expectEqualStrings("/tmp/./codex-\xff.json", settings.providers.entries.codex.?.credential_file.?.slice());
     try std.testing.expectEqualStrings("/tmp/./chatgpt-\xff.json", settings.providers.entries.chatgpt.?.credential_file.?.slice());
     try private.setFilePermissions(std.testing.io, "openai.key", .fromMode(0o644), .{});
-    // The saved default keeps the flag Host's own cause; only a source the
-    // document names is a leaf-scoped document refusal.
     try assign(settings, arena.allocator(), "providers.openai.key", "null", &failure);
     try std.testing.expectError(error.InsecureCredentialFile, prepare(init, settings, .{}, &failure));
     try assign(settings, arena.allocator(), "providers.openai.key", try std.fmt.allocPrint(arena.allocator(), "file:{s}", .{path}), &failure);
@@ -935,7 +883,6 @@ test "Host start pipe reads one bounded document without implying lifetime" {
         std.mem.writeInt(u32, &prefix, length, .big);
         try writer.writeStreamingAll(init.io, &prefix);
         var failure: start_report.Failure = undefined;
-        // The writer remains open: an invalid length must not read a body.
         try std.testing.expectError(error.SettingsInvalid, readPipe(init, reader, settings, &failure));
     }
 }
@@ -1024,8 +971,6 @@ test "Host start pipe file and assignment admissions report every code on both s
     const path = try std.fmt.allocPrint(arena.allocator(), "{s}/host.json", .{root[0..try private.realPath(init.io, &root)]});
     const settings = try gpa.create(hs.Settings);
     defer gpa.destroy(settings);
-    // The publisher has no source discriminator. Exercise each actual intake
-    // before the exhaustive failure matrix, rather than a second reporting path.
     for ([_]enum { pipe, file, assignments }{ .pipe, .file, .assignments }) |source| {
         settings.* = .{};
         defer settings.deinit();
@@ -1075,8 +1020,6 @@ test "Host start pipe file and assignment admissions report every code on both s
                 }
             }
         }
-        // Unknown keys are diagnostic paths, not trusted terminal text. The
-        // JSON line retains the message while stderr remains one safe sentence.
         try std.testing.expectError(error.SettingsInvalid, hs.apply(settings, gpa, "{\"bad\\n\\u001b\":\"never-print-this-value\"}", .pipe, checkPreset, &admission_failure));
         Probe.used = .{ 0, 0 };
         Probe.attempted = .{ false, false };
@@ -1185,7 +1128,6 @@ test "Host start saved input is sparse ordered private and JSON files carry OS p
     try fillAt(init, &parsed, dir, settings, &fixtures, &failure);
     try std.testing.expectEqual(@as(u64, 20), settings.tools.bash.timeout_ms.value);
     try std.testing.expectEqualStrings("/tmp/\xff", settings.tools.bash.path.slice());
-    // Ordinary argv paths are never guessed to be JSON.
     try savedEdit(init, dir, "tools.bash.path", "{raw-path", &failure);
     try private.writeFile(init.io, .{ .sub_path = "input.json", .data = "\"{json-path\"" });
     try savedEdit(init, dir, "tools.bash.path", at_file, &failure);
@@ -1224,8 +1166,6 @@ test "Host start explicit providers replace automatic defaults and MySQL keeps i
     const settings = try gpa.create(hs.Settings);
     defer gpa.destroy(settings);
     var failure: start_report.Failure = undefined;
-    // Index 3 is the retired repeated --provider spelled as its replacement:
-    // each providers.LABEL assignment adds to the set, never replaces it.
     for ([_][]const []const u8{ &.{}, &.{ "--set", "providers={}" }, &.{ "--set", "providers.openai.unauthenticated=true" }, &.{ "--set", "providers.codex={}", "--set", "providers.openai={}" } }, 0..) |args, index| {
         settings.* = .{};
         defer settings.deinit();
@@ -1243,8 +1183,6 @@ test "Host start explicit providers replace automatic defaults and MySQL keeps i
             try std.testing.expectEqual(wanted, served);
         }
     }
-    // RUI_OPENAI_BASE_URL moves an explicit openai that names no endpoint,
-    // as it moved --provider openai; a named endpoint wins.
     try environment.put(providers.openai_base_url_variable, "https://example.test/custom/v1/");
     for ([_][]const u8{ "providers.openai={}", "providers.openai.endpoint=https://named.test/responses" }, [_][]const u8{ "https://example.test/custom/v1/responses", "https://named.test/responses" }) |assignment, endpoint| {
         settings.* = .{};
@@ -1282,8 +1220,6 @@ test "Host start reads a previous release's retired flags as the settings those 
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const dir = try testHostDir(&tmp, &root);
     var failure: start_report.Failure = undefined;
-    // Each expected document is what the release's flag-only fill produced:
-    // no providers but the ones named, then each flag's leaf.
     const Case = struct { args: []const []const u8, expected: []const u8 };
     for ([_]Case{
         .{ .args = &.{ "--active-capacity", "7" }, .expected = "{\"providers\":{},\"execution\":{\"activeCapacity\":7}}" },
@@ -1293,7 +1229,6 @@ test "Host start reads a previous release's retired flags as the settings those 
         .{ .args = &.{ "--provider-ca-file", "/private/ca.pem" }, .expected = "{\"providers\":{},\"network\":{\"caFile\":\"/private/ca.pem\"}}" },
         .{ .args = &.{ "--bash-path", "/bin/bash" }, .expected = "{\"providers\":{},\"tools\":{\"bash\":{\"path\":\"/bin/bash\"}}}" },
         .{ .args = &.{ "--bash-timeout-ms", "1500" }, .expected = "{\"providers\":{},\"tools\":{\"bash\":{\"timeoutMs\":1500}}}" },
-        // The starter's own argv, and every flag together, with --store.
         .{ .args = &.{ "--store", dir, "--provider", "codex", "--provider", "openai", "--active-capacity", "4" }, .expected = "{\"providers\":{\"codex\":{},\"openai\":{}},\"execution\":{\"activeCapacity\":4}}" },
         .{
             .args = &.{ "--store", dir, "--active-capacity", "3", "--provider-endpoint", "http://127.0.0.1:9/responses", "--provider-ca-file", "/private/ca.pem", "--bash-path", "/bin/bash", "--bash-timeout-ms", "1500" },
@@ -1317,7 +1252,6 @@ test "Host start reads a previous release's retired flags as the settings those 
         try hs.apply(expected, gpa, case.expected, .file, checkPreset, &failure);
         try expectJsonEqual(try complete(arena.allocator(), expected, &failure), try complete(arena.allocator(), replayed, &failure));
     }
-    // An argv in this grammar is read as it is; a retired flag needs its value.
     const current: []const []const u8 = &.{ "--store", dir, "--set", "providers.codex={}" };
     try std.testing.expectEqual(current.ptr, (try serve_grammar.currentArguments(arena.allocator(), current)).ptr);
     try std.testing.expectError(error.InvalidArguments, serve_grammar.currentArguments(arena.allocator(), &.{ "--store", dir, "--provider" }));
@@ -1364,7 +1298,6 @@ test "Host start refused JSON input allocations erase secret bytes before releas
     try std.testing.expect(!observer.stale);
 }
 
-/// Restart callers replay generic assignments without owning setting names.
 pub fn capacityAssignment(value: usize, buffer: []u8) ![]const u8 {
     return std.fmt.bufPrint(buffer, hs.path("execution.activeCapacity") ++ "={d}", .{value});
 }
@@ -1406,11 +1339,9 @@ test "Host start unset retains exact provider sets and selected Store arms" {
     try std.testing.expect(lookup(json, "store.sqlite") == null);
 }
 
-// ---- One detached starter ----------------------------------------------------
 const HostLaunchResult = @import("host_launch.zig").Result;
 extern "c" fn rui_launch_detached_reported(executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, startup_read: *c_int, report_read: *c_int, launched_pid: *c_int, launched_started: *c_ulonglong) c_int;
 pub const Progress = struct { context: *anyopaque, report: *const fn (*anyopaque, []const u8) void };
-/// `settings_file` is an absolute FILE; a pipe document cannot reach a detached child.
 pub const Spawn = struct { dir: []const u8, settings_file: ?[]const u8 = null, assignments: []const []const u8 = &.{} };
 
 /// Finish a running Host's semantic sources, not a child launch plan. Older
@@ -1478,20 +1409,17 @@ pub const Ops = struct {
 
 pub fn launchFailure(result: *HostLaunchResult, kind: HostLaunchResult.Cause.Kind, err: anyerror, store: ?[]const u8) void {
     result.outcome = .{ .failed = .{ .cause = .{ .kind = kind, .err = err }, .store = .{ .len = 0 } } };
-    // A non-null path came from validated platform.Paths, not user bytes.
     if (store) |canonical| result.outcome.failed.store.set(canonical) catch unreachable;
 }
 
 pub fn launchReady(result: *HostLaunchResult, ready: @import("protocol_reply.zig").HostInfoFacts, paths: *const platform.Paths, adopted: bool) void {
-    result.outcome = .{ .ready = .{ .facts = ready, .diagnostics_directory = .{ .len = 0 }, .adopted = adopted } };
+    result.outcome = .{ .ready = .{ .facts = ready, .selector = .{ .len = 0 }, .diagnostics_directory = .{ .len = 0 }, .adopted = adopted } };
+    result.outcome.ready.selector.set(paths.selector()) catch unreachable;
     result.outcome.ready.diagnostics_directory.set(paths.diagnosticsDirectory()) catch unreachable;
 }
 
 pub const ProviderIntent = enum { automatic, explicit };
 
-/// Read saved host.json, the optional document, then ordered assignments into
-/// caller-owned settings. Source admission never resolves a secret or login.
-/// Provider intent cannot be inferred from Settings' implicit provider entries.
 pub fn readSources(init: std.process.Init, request: Spawn, settings: *hs.Settings, failure: *start_report.Failure) !ProviderIntent {
     var wiping: secret_value.WipingAllocator = .{ .backing = init.gpa };
     var memory: std.heap.ArenaAllocator = .init(wiping.allocator());
@@ -1512,8 +1440,6 @@ pub fn readSources(init: std.process.Init, request: Spawn, settings: *hs.Setting
     return intent;
 }
 
-/// Finish provider selection without rereading sources, resolving credentials,
-/// anchoring paths or sealing settings. Detached admission only reads sources.
 pub fn finishSources(init: std.process.Init, settings: *hs.Settings, intent: ProviderIntent, failure: *start_report.Failure) !void {
     switch (intent) {
         .automatic => try defaultProviders(init, settings, failure),
@@ -1521,18 +1447,6 @@ pub fn finishSources(init: std.process.Init, settings: *hs.Settings, intent: Pro
     }
 }
 
-// ---- A Host started in `/` ---------------------------------------------------
-// host_launch starts every detached Host (bare rui, rui host start, the TUI
-// supervisor and upgrade replay) in `/` with stdin on /dev/null. This section
-// is the one rule for what such a launch can run.
-
-/// Rebase what a person typed on this command line onto `cwd`, the directory
-/// they typed it in: the --settings FILE, each @FILE, and each --set path leaf
-/// or `file:` secret source. A path read from saved host.json or from inside a
-/// document has no such base; detachedRefusal refuses it instead.
-/// The caller's directory, looked up only when a typed value is relative: a
-/// start whose values are all absolute must not depend on it (it may have
-/// been deleted). Tests fix `path`.
 pub const Cwd = struct {
     io: std.Io,
     path: ?[]const u8 = null,
@@ -1624,7 +1538,6 @@ const LeafName = struct {
     }
 };
 
-/// True when a path below `value` is relative; `name` then holds its leaf.
 fn relativeLeaf(comptime T: type, value: *const T, name: *LeafName) bool {
     const at = name.len;
     if (relativeBelow(T, value, name)) return true;
@@ -1670,9 +1583,6 @@ fn relativeBelow(comptime T: type, value: *const T, name: *LeafName) bool {
     return false;
 }
 
-/// Upgrade replay relaunches an observed `host serve` argv as typed, in `/`,
-/// from another directory: nothing can be rebased, so it admits only what
-/// readDetached admits.
 pub fn replayable(init: std.process.Init, request: Spawn) error{OutOfMemory}!bool {
     const settings = try init.gpa.create(hs.Settings);
     defer init.gpa.destroy(settings);
@@ -1742,15 +1652,11 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
         .access_failure => return launchFailure(result, .store_access, error.StoreAccessFailed, null),
         .unavailable, .owned_unavailable => {},
     }
-    // Opaque MySQL selections can only attach; they carry no launch login.
     if (selection == .mysql) return launchFailure(result, .mysql_unavailable, error.MysqlHostUnavailable, null);
-    // Typed relative values mean where the person stands, not `/`.
-    // Anchored copies of typed values may name secret sources; wipe them.
     var wiping: secret_value.WipingAllocator = .{ .backing = std.heap.c_allocator };
     var anchoring: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer anchoring.deinit();
     var cwd: Cwd = .{ .io = io };
-    // Refuse before any effect: an invalid or unreachable start creates no Store.
     var reach_failure: start_report.Failure = .init(.settings_invalid, "settings: could not be read");
     const admitted: anyerror!Spawn = admit: {
         const anchored = anchorTyped(anchoring.allocator(), &cwd, typed, &reach_failure) catch |err| break :admit err;
@@ -1768,13 +1674,13 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
     dir.close(io);
     const paths = resolved orelse (savedPlacement(io, selected) catch |err| return launchFailure(result, .store_access, err, null));
     var executable_buffer: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
-    const length = std.process.executablePath(io, &executable_buffer) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
-    if (length == executable_buffer.len) return launchFailure(result, .setup, error.ExecutablePathTooLong, paths.store.slice());
+    const length = std.process.executablePath(io, &executable_buffer) catch |err| return launchFailure(result, .setup, err, paths.selector());
+    if (length == executable_buffer.len) return launchFailure(result, .setup, error.ExecutablePathTooLong, paths.selector());
     executable_buffer[length] = 0;
     const gpa = std.heap.c_allocator;
     const first: usize = if (request.settings_file == null) 5 else 7;
     const argc = first + 2 * request.assignments.len;
-    const argv = gpa.allocSentinel(?[*:0]const u8, argc, null) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
+    const argv = gpa.allocSentinel(?[*:0]const u8, argc, null) catch |err| return launchFailure(result, .setup, err, paths.selector());
     defer gpa.free(argv);
     argv[0] = @ptrCast(&executable_buffer);
     argv[1] = "host";
@@ -1782,10 +1688,10 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
     argv[3] = "--store";
     var host_buffer: [protocol.max_store_bytes]u8 = undefined;
     const host_dir = platform.canonicalStoreDestination(io, selected, &host_buffer) catch |err| return launchFailure(result, .setup, err, null);
-    const directory = gpa.dupeSentinel(u8, host_dir, 0) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
+    const directory = gpa.dupeSentinel(u8, host_dir, 0) catch |err| return launchFailure(result, .setup, err, paths.selector());
     defer gpa.free(directory);
     argv[4] = directory.ptr;
-    const settings_file = if (request.settings_file) |file| gpa.dupeSentinel(u8, file, 0) catch |err| return launchFailure(result, .setup, err, paths.store.slice()) else null;
+    const settings_file = if (request.settings_file) |file| gpa.dupeSentinel(u8, file, 0) catch |err| return launchFailure(result, .setup, err, paths.selector()) else null;
     defer if (settings_file) |file| gpa.free(file);
     if (settings_file) |file| {
         argv[5] = "--settings";
@@ -1799,7 +1705,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
     };
     for (request.assignments, 0..) |assignment, index| {
         argv[first + index * 2] = "--set";
-        const value = gpa.dupeSentinel(u8, assignment, 0) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
+        const value = gpa.dupeSentinel(u8, assignment, 0) catch |err| return launchFailure(result, .setup, err, paths.selector());
         argv[first + 1 + index * 2] = value.ptr;
         owned += 1;
     }
@@ -1818,7 +1724,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
         _ = std.c.close(startup_read);
     };
     if (launched != 0) {
-        launchFailure(result, .os_launch, error.HostLaunchFailed, paths.store.slice());
+        launchFailure(result, .os_launch, error.HostLaunchFailed, paths.selector());
         result.outcome.failed.os_error = launched;
         return;
     }
@@ -1832,7 +1738,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
             while (lines.next()) |line_bytes| {
                 const end = offset + line_bytes.len + 1;
                 if (end > report_len) break;
-                if (start_report.parseLine(gpa, report_bytes[offset..end]) catch |err| return launchFailure(result, .setup, err, paths.store.slice())) |failure| {
+                if (start_report.parseLine(gpa, report_bytes[offset..end]) catch |err| return launchFailure(result, .setup, err, paths.selector())) |failure| {
                     refusal = failure;
                     break;
                 }
@@ -1846,30 +1752,24 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
         const until: i128 = result.wait.?.until(now);
         if (progress) |hook| hook.report(hook.context, result.startup());
         if ((refusal != null and refusal.?.code != .store_locked) or count == 0 or result.startup_len == HostLaunchResult.max_startup_bytes or report_len == report_bytes.len) {
-            // A candidate's refusal cannot hide another ready owner.
             if (ops.observe(ops.context, io, &paths, until) != .ready) {
                 if (refusal) |failure| {
-                    launchFailure(result, if (failure.code == .store_schema_behind) .store_format else if (failure.code == .store_fenced) .store_identity else .child_refused, if (failure.code == .store_fenced) error.StoreIdentityMismatch else error.HostStartupFailed, paths.store.slice());
+                    launchFailure(result, if (failure.code == .store_schema_behind) .store_format else if (failure.code == .store_fenced) .store_identity else .child_refused, if (failure.code == .store_fenced) error.StoreIdentityMismatch else error.HostStartupFailed, paths.selector());
                     result.outcome.failed.refusal = failure;
                     result.outcome.failed.cause.refusal_code = failure.code;
                     return;
                 }
-                if (result.startup_len == HostLaunchResult.max_startup_bytes or report_len == report_bytes.len) return launchFailure(result, .startup_full, error.HostReadinessUnconfirmed, paths.store.slice());
-                // SQLite Store refusals are caller errors, not start-report
-                // lines; their stable code ends the child's stderr.
-                if (std.mem.endsWith(u8, result.startup(), "[store_identity_mismatch]\n")) return launchFailure(result, .store_identity, error.StoreIdentityMismatch, paths.store.slice());
-                if (std.mem.endsWith(u8, result.startup(), "[store_format_unsupported]\n")) return launchFailure(result, .store_format, error.HostStartupFailed, paths.store.slice());
-                return launchFailure(result, if (result.startup_len == 0) .child_closed else .child_refused, error.HostStartupFailed, paths.store.slice());
+                if (result.startup_len == HostLaunchResult.max_startup_bytes or report_len == report_bytes.len) return launchFailure(result, .startup_full, error.HostReadinessUnconfirmed, paths.selector());
+                if (std.mem.endsWith(u8, result.startup(), "[store_identity_mismatch]\n")) return launchFailure(result, .store_identity, error.StoreIdentityMismatch, paths.selector());
+                if (std.mem.endsWith(u8, result.startup(), "[store_format_unsupported]\n")) return launchFailure(result, .store_format, error.HostStartupFailed, paths.selector());
+                return launchFailure(result, if (result.startup_len == 0) .child_closed else .child_refused, error.HostStartupFailed, paths.selector());
             }
         }
         switch (ops.observe(ops.context, io, &paths, until)) {
             .ready => |ready| {
-                // Collect any write racing readiness, without waiting for it.
                 const final_count = ops.read(ops.context, startup_read, result.startup_bytes[result.startup_len..]);
                 if (final_count > 0) result.startup_len += @intCast(final_count);
                 result.wait.?.observe(result.startup(), ops.now(ops.context, io));
-                // A child refused for the lock lost the race: the Host serving
-                // now started with another command's settings.
                 const lost = refusal != null and refusal.?.code == .store_locked;
                 if (lost) result.startup_len = 0;
                 if (std.mem.indexOf(u8, result.startup(), @import("host_launch.zig").invalid_base_url) != null) result.warning = .invalid_openai_base_url;
@@ -1877,14 +1777,14 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
                 const exact = !lost and ops.verify(ops.context, io, &paths, launched_pid, launched_started, executable_buffer[0..length], until, &facts);
                 return launchReady(result, facts, &paths, !exact);
             },
-            .incompatible => return launchFailure(result, .incompatible, error.IncompatibleHost, paths.store.slice()),
-            .access_failure => return launchFailure(result, .store_access, error.StoreAccessFailed, paths.store.slice()),
+            .incompatible => return launchFailure(result, .incompatible, error.IncompatibleHost, paths.selector()),
+            .access_failure => return launchFailure(result, .store_access, error.StoreAccessFailed, paths.selector()),
             .unavailable, .owned_unavailable => {},
         }
         const remaining = until - ops.now(ops.context, io);
-        if (remaining > 0) ops.pause(ops.context, io, @intCast(@min(remaining, 100 * std.time.ns_per_ms))) catch |err| return launchFailure(result, .interrupted, err, paths.store.slice());
+        if (remaining > 0) ops.pause(ops.context, io, @intCast(@min(remaining, 100 * std.time.ns_per_ms))) catch |err| return launchFailure(result, .interrupted, err, paths.selector());
     }
-    return launchFailure(result, .readiness_timeout, error.HostReadinessUnconfirmed, paths.store.slice());
+    return launchFailure(result, .readiness_timeout, error.HostReadinessUnconfirmed, paths.selector());
 }
 
 test "Host start source provider intent distinguishes omission empty and exact sets in every layer" {
@@ -2010,13 +1910,6 @@ test "Host start detached first provider assignment selects an exact ordered set
 }
 
 test "Host start detached launches rebase typed paths and refuse paths with no base over every layer and door" {
-    // Domain: layer (saved host.json, --settings document, --set, @FILE) x
-    // leaf kind (path leaf, file: credential source, lifetime) x door (the
-    // starter that bare rui, rui host start and the TUI share through spawn,
-    // and upgrade replay). A value typed relative on this command line is
-    // rebased for the starter; nothing is rebased for replay; a relative
-    // value inside saved host.json, a document or @FILE content, and the
-    // stdin lifetime, are refused by both.
     const gpa = std.testing.allocator;
     var environment: std.process.Environ.Map = .init(gpa);
     defer environment.deinit();
@@ -2057,7 +1950,6 @@ test "Host start detached launches rebase typed paths and refuse paths with no b
             },
             .set => request.assignments = try a.dupe([]const u8, &.{try std.fmt.allocPrint(a, "{s}={s}", .{ kind.leaf, kind.text })}),
             .file => {
-                // @FILE content is JSON with no base of its own.
                 const parent = kind.leaf[0..std.mem.lastIndexOfScalar(u8, kind.leaf, '.').?];
                 const member = kind.leaf[parent.len + 1 ..];
                 const json = if (std.mem.eql(u8, member, "key")) "{\"key\":{\"file\":\"key.txt\"}}" else if (std.mem.eql(u8, member, "path")) "{\"path\":\"bin/bash\"}" else "{\"lifetime\":\"stdin\"}";
@@ -2067,7 +1959,6 @@ test "Host start detached launches rebase typed paths and refuse paths with no b
         }
         const typed = layer == .set and kind.anchored != null;
         var failure: start_report.Failure = undefined;
-        // Starter door.
         var cwd: Cwd = .{ .io = init.io, .path = here };
         const started = try anchorTyped(a, &cwd, request, &failure);
         const start_result = checkStart(init, started, &failure);
@@ -2079,16 +1970,12 @@ test "Host start detached launches rebase typed paths and refuse paths with no b
         } else {
             try std.testing.expectError(error.SettingsInvalid, start_result);
             try std.testing.expectEqual(start_report.StartError.settings_invalid, failure.code);
-            // The refusal names the leaf, then why.
             try std.testing.expect(std.mem.startsWith(u8, failure.message.slice(), kind.leaf));
             try std.testing.expectEqual(@as(u8, ':'), failure.message.slice()[kind.leaf.len]);
             try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), if (kind.anchored == null) "no stdin" else "absolute path") != null);
         }
-        // Replay door: the same argv as typed, never rebased.
         try std.testing.expect(!try replayable(init, request));
     };
-    // Typed references themselves: a relative --settings and @FILE are
-    // rebased for the starter and refused for replay.
     var host = try here_dir.createDirPathOpen(init.io, "host-references", .{ .permissions = .fromMode(0o700) });
     defer host.close(init.io);
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -2159,14 +2046,14 @@ test "Host start placement agrees across Store interface and every door without 
             };
             if (expected) |first| {
                 try std.testing.expectEqual(first.kind, paths.kind);
-                try std.testing.expectEqualStrings(first.store.slice(), paths.store.slice());
+                try std.testing.expectEqualStrings(first.store_identity.slice(), paths.store_identity.slice());
                 try std.testing.expectEqualStrings(first.socket.slice(), paths.socket.slice());
             } else expected = paths;
             if (explicit) try std.testing.expectEqualStrings(try std.fs.path.join(arena.allocator(), &.{ interface, "rui.sock" }), paths.socket.slice());
             if (store == .mysql) {
                 try std.testing.expectEqual(platform.Kind.mysql, paths.kind);
-                try std.testing.expectEqual(@as(usize, 0), paths.store.len);
-            } else try std.testing.expectEqualStrings(if (store == .here) dir else elsewhere, paths.store.slice());
+                try std.testing.expectEqual(@as(usize, 0), paths.store_identity.len);
+            } else try std.testing.expectEqualStrings(if (store == .here) dir else elsewhere, paths.store_identity.slice());
         }
     };
     // Long default placement remains short, unlike an explicit interface.
@@ -2322,8 +2209,6 @@ test "Host start guided connection materializes automatic routes and reuses the 
     defer key.wipe();
     try std.testing.expect(try api_key.read(second.saved.key_file.slice(), &key));
     try std.testing.expectEqualStrings("from-environment", key.slice());
-    // Automatic browser routing is conditional on a usable local credential.
-    // A fresh HOME above has none; this second independent Host does.
     var browser_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const browser = try provider_login.credentialPath(init, .chatgpt, &browser_path, true);
     const record = try init.gpa.create(credentials.Record);
@@ -2425,7 +2310,6 @@ test "Host start guided connection distinguishes key sync settings sync and reta
                 while (try entries.next(init.io)) |entry| try std.testing.expect(!std.mem.endsWith(u8, entry.name, ".key"));
             }
         }
-        // Neither phase ever touches the global credential owner.
         var key_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
         try std.testing.expect(!try api_key.present(try api_key.path(&environment, &key_path)));
     }
@@ -2464,8 +2348,6 @@ test "Host start guided reuse refuses source-only and auth-only supersession bef
             try savedEdit(init, dir, "providers.openai.unauthenticated", "true", &failure);
         } else {
             const second = try saveConnection(init, dir, .{ .base = "https://first.example/v1" }, .{ .provided = "second-key" }, "custom-model", Gate.yes);
-            // An attempted resolution of the superseding source would fail.
-            // Supersession must win before even asking that source for bytes.
             try std.Io.Dir.cwd().deleteFile(init.io, second.saved.key_file.slice());
         }
         const target = try savedPath(init, arena.allocator(), dir);
@@ -2530,7 +2412,6 @@ test "Host start guided reuse refuses endpoint-only supersession with unchanged 
         const admitted = try inspectConnection(init, dir);
         try std.testing.expect(admitted.reusable());
         try std.testing.expect(!admitted.unauthenticated);
-        // Only the endpoint changes. Source kind, value and auth stay fixed.
         try savedEdit(init, dir, "providers.openai.endpoint", "https://second.example/v2/responses", &failure);
         const superseding = try inspectConnection(init, dir);
         try std.testing.expect(superseding.reusable() and !superseding.unauthenticated);
@@ -2548,8 +2429,6 @@ test "Host start guided reuse refuses endpoint-only supersession with unchanged 
         const target = try savedPath(init, arena.allocator(), dir);
         var before: [hs.max_document_bytes + 1]u8 = undefined;
         const bytes = try arena.allocator().dupe(u8, (try credentials.readPrivate(target, &before)).?);
-        // A bypass of just the endpoint comparison must reach a different
-        // source failure, not be masked by a second authority mismatch.
         if (source == .env) try env.put("GUIDED_ENDPOINT_KEY", "invalid key bytes") else try std.Io.Dir.cwd().deleteFile(init.io, key_path);
         Gate.calls = 0;
         try std.testing.expectError(error.ConnectionSuperseded, saveConnection(init, dir, .{ .unchanged = admitted.endpoint.slice() }, .{ .existing = &admitted }, "custom-model", Gate.publish));

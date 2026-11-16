@@ -1,4 +1,3 @@
-//! Cache SQLite mechanism tests.
 const std = @import("std");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
@@ -69,7 +68,7 @@ test "prepared cache eviction keeps colliding probe chains reachable" {
             cache.remove(first);
             try std.testing.expect(cache.find(first) == null);
             try std.testing.expectEqual(survivor, cache.find(key).?);
-            cache.remove(first); // An already-evicted form is a no-op.
+            cache.remove(first);
             try std.testing.expectEqual(@as(usize, 1), cache.count);
             cache.remove(key);
             try std.testing.expectEqual(@as(usize, 0), cache.count);
@@ -77,5 +76,5 @@ test "prepared cache eviction keeps colliding probe chains reachable" {
         }
         buckets[bucket] = key;
     }
-    unreachable; // 65 static keys in 64 initial buckets must collide.
+    unreachable;
 }

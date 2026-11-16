@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Synthetic bounded wire/storage model, never a production adapter or live test."""
 import copy
 import hashlib
 import json
@@ -73,7 +72,6 @@ def validate_shape(response):
                 raise Rejected("unsupported_provider_output")
 
 def replay(items):
-    # Raw provider JSON: exclude documented response-only authorship; preserve open fields.
     result = copy.deepcopy(items)
     for item in result:
         for key in ("created_by",):

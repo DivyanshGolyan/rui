@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Synthetic managed transfer through native TLS/HTTP2 with observed reuse."""
 
 import os
 import pathlib
@@ -21,7 +20,6 @@ REQUIRED_PROXY_FAILURE = "rui: https_proxy/HTTPS_PROXY names a scheme other than
 
 
 def catalog_unusable_proxy_run():
-    """Catalog-only Client initialization is optional; provider setup is not."""
     root = pathlib.Path(tempfile.mkdtemp(prefix="rui-catalog-proxy.")).resolve()
     home = root / "home"
     home.mkdir()
@@ -48,12 +46,8 @@ def catalog_unusable_proxy_run():
             finally:
                 if host is not None:
                     fixture.stop_host(host)
-            # Optional output can be absent; validate all bytes after writer retirement.
             stderr = log.read_bytes()
             assert stderr in (b"", diagnostic), stderr
-        # Even an HTTP provider shares Engine.init's proxy validation. Startup
-        # refuses it before readiness: no swallowing, no retry without the
-        # inherited network policy, and no cause raced against stderr custody.
         required = subprocess.run([
             *fixture.host_arguments(root / "required-provider", "http://127.0.0.1:1/responses"),
             "--test-models-dev-url", "https://127.0.0.1:1/api.json",
@@ -72,7 +66,6 @@ def catalog_unusable_proxy_run():
 
 
 def catalog_unusable_trust_run():
-    """Optional HTTPS discovery cannot fence a cleartext provider's Reactor."""
     root = pathlib.Path(tempfile.mkdtemp(prefix="rui-catalog-trust.")).resolve()
     payload, _, _ = fixture.sse_answer("http-response", "reasoning", "message", "HTTP still works")
     endpoint = fixture.SuccessEndpoint([payload])
@@ -83,9 +76,6 @@ def catalog_unusable_trust_run():
     host = None
     complete = False
     try:
-        # The shared boundary disables discovery for every descendant, not
-        # just start_ready_process callers. Bad HTTPS trust must be irrelevant
-        # to an ordinary HTTP fixture unless the catalog case opts in below.
         host, ready = start_ready_process([
             "sh", "-c", 'log=$1; shift; exec "$@" 2>"$log"', "rui-catalog-offline", log,
             *fixture.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
@@ -96,7 +86,6 @@ def catalog_unusable_trust_run():
         fixture.stop_host(host)
         host = None
         assert log.read_bytes() == b"", log.read_bytes()
-        # Retain all stderr, including a diagnostic emitted before readiness.
         host, ready = start_ready_process([
             "sh", "-c", 'log=$1; shift; exec "$@" 2>"$log"', "rui-catalog-trust", log,
             *fixture.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
@@ -121,7 +110,6 @@ def catalog_unusable_trust_run():
         assert host.poll() is None, host.returncode
         fixture.stop_host(host)
         host = None
-        # Retirement closes the writer before checking optional asynchronous output.
         stderr = log.read_bytes()
         assert stderr in (b"", diagnostic), stderr
         print("catalog trust failure passed: Host serves model lists and an HTTP model request; no fence")

@@ -31,11 +31,10 @@ class ProxyConfigTest(unittest.TestCase):
 
 class LauncherTest(unittest.TestCase):
     def test_check_launches_the_unit_binary_through_the_fixture_boundary(self):
-        # `check` runs the unit binary here, so what enter() keeps is what
-        # the live dialect check sees (Codex P1 on #873).
         launch = [line for line in (ROOT / "tests/integration/check.sh").read_text().splitlines()
-                  if '"$test_binary"' in line]
+                  if 'run_case execution native ' in line]
         self.assertEqual(len(launch), 1, launch)
+        self.assertIn('--unit-roots "$test_binary" "$@"', launch[0])
         self.assertIn('"$directory/host_process.py" exec', launch[0])
 
     def test_the_fixture_boundary_keeps_every_live_engine_variable(self):

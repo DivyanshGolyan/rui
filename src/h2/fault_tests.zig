@@ -1,23 +1,3 @@
-//! The client under seeded faults: short reads and writes, EAGAIN and a
-//! cut at a random byte on its socket (`testing/Faults.zig`), and GOAWAY,
-//! RST_STREAM and REFUSED_STREAM from the peer at random points. One seed
-//! decides everything, so a failure replays from the seed it prints.
-//!
-//! The checks take their facts from the peer, not from the client's own
-//! flags:
-//! - each stream settles exactly once, its body retired once;
-//! - a request the peer saw ends with `request_sent`;
-//! - only an attempt the peer proved unprocessed (REFUSED_STREAM, or above
-//!   its GOAWAY's last stream id) is ever followed by another;
-//! - a complete stream carries the peer's whole answer to that request;
-//! - a cancelled stream sees no event after its cancel and never finishes;
-//! - no stream or connection window opens past what the client grants;
-//! - nothing spins: a ready socket is used within a few drives, and every
-//!   stream settles within the round limit once the chaos stops.
-//!
-//! `RUI_H2_FAULT_SEED=<n>` runs one seed; `RUI_H2_FAULT_SEEDS=<count>` runs
-//! that many from 1; `RUI_H2_FAULT_TRACE=1` names each seed as it starts,
-//! for a crash, which prints none.
 const std = @import("std");
 const h2 = @import("h2.zig");
 const c = @import("h2_c");
@@ -30,12 +10,8 @@ const Record = @import("Stream.zig");
 const default_seeds = 300;
 const max_requests = 12;
 const capacity = 16;
-/// Peer closes, GOAWAYs, refusals mid-upload, outages, cancels and drains
-/// happen only in these first rounds. After them nothing ends a stream
-/// that stopped making progress, so a stall fails at `max_rounds`.
 const chaos_rounds = 150;
 const max_rounds = 3000;
-/// Drives in a row that find a socket ready and move nothing.
 const max_idle_ready_drives = 40;
 
 const Request = struct {
@@ -45,7 +21,6 @@ const Request = struct {
     body: []u8 = &.{},
     response: []u8 = &.{},
     sink: []u8 = &.{},
-    /// The receiver refuses the body event that would pass this many bytes.
     refuse_body_past: ?u64 = null,
     body_seen: u64 = 0,
     cancelled: bool = false,
@@ -63,18 +38,12 @@ const Request = struct {
     }
 };
 
-/// What the peer did with one stream it saw.
 const Fate = enum {
-    /// Seen, no answer yet.
     open,
-    /// Complete, answer held back for a later round.
     deferred,
     answered,
-    /// The head went out; a reset follows in a later round.
     head_only,
-    /// Reset with a code other than REFUSED_STREAM: processed.
     reset,
-    /// REFUSED_STREAM before any answer: proven unprocessed.
     refused,
 };
 
@@ -84,11 +53,9 @@ const Run = struct {
     random: std.Random.DefaultPrng,
     requests: []Request,
     max_streams: u32,
-    /// Parallel to `peer.streams`.
     fates: std.ArrayList(Fate) = .empty,
     goaways: std.ArrayList(Goaway) = .empty,
     round: u32 = 0,
-    /// The peer refuses connections until this round.
     down_until: u32 = 0,
     counts: struct { goaway: u32 = 0, refused: u32 = 0, reset: u32 = 0, peer_close: u32 = 0, outage: u32 = 0 } = .{},
 
@@ -102,9 +69,6 @@ const Run = struct {
         return &self.fates.items[stream.index];
     }
 
-    /// REFUSED_STREAM, or a stream id above its connection's GOAWAY. Taken
-    /// from the GOAWAY itself, since the peer may read a stream's HEADERS
-    /// after it queued the GOAWAY and before it sent it.
     fn provenUnprocessed(self: *Run, stream: *const Peer.Stream) bool {
         if (self.fate(stream).* == .refused) return true;
         const last = self.goawayLast(stream.connection) orelse return false;
@@ -128,12 +92,10 @@ const Run = struct {
         return self.round < chaos_rounds and self.chance(percent);
     }
 
-    /// The peer's `on_request`: the request arrived whole.
     fn onRequest(peer: *Peer, stream: *Peer.Stream) void {
         const self: *Run = @ptrCast(@alignCast(peer.options.context.?));
         const state = self.fate(stream);
         if (state.* != .open) return;
-        // Above a GOAWAY's last stream id: never processed.
         if (self.goawayLast(stream.connection)) |last| if (stream.id > last) return;
         const roll = self.random.random().uintLessThan(u8, 100);
         if (roll < 55) {
@@ -155,8 +117,6 @@ const Run = struct {
         }
     }
 
-    /// Between pumps: held answers go out, mid-upload refusals, GOAWAYs,
-    /// abrupt closes and outages.
     fn act(self: *Run, peer: *Peer) void {
         if (self.chaos(1)) {
             self.down_until = self.round + self.random.random().intRangeAtMost(u32, 1, 30);
@@ -194,8 +154,6 @@ const Run = struct {
         }
     }
 
-    /// GOAWAY whose last stream id covers every stream this connection
-    /// processed, so each stream above it is one the peer never processes.
     fn goaway(self: *Run, peer: *Peer, connection: *Peer.Connection) void {
         var last: i32 = 0;
         for (peer.streams.items) |stream| {
@@ -205,7 +163,6 @@ const Run = struct {
                 .open, .refused => {},
             }
         }
-        // Sometimes also keep an unanswered stream below it, to be answered.
         if (self.chance(30)) for (peer.streams.items) |stream| {
             if (stream.connection == connection and stream.id > last and self.fate(stream).* == .open) {
                 last = stream.id;
@@ -253,7 +210,6 @@ fn fill(bytes: []u8, salt: usize) void {
     for (bytes, 0..) |*byte, index| byte.* = @truncate((salt *% 131 +% index *% 7) % 251);
 }
 
-/// One seed: a peer, a client with faults, and requests run to settlement.
 fn runSeed(seed: u64, totals: *Totals) !void {
     const allocator = std.testing.allocator;
     var setup = std.Random.DefaultPrng.init(seed);
@@ -274,8 +230,6 @@ fn runSeed(seed: u64, totals: *Totals) !void {
         fill(request.body, index);
         request.response = try allocator.alloc(u8, response_sizes[random.uintLessThan(usize, response_sizes.len)]);
         fill(request.response, index + 1000);
-        // Some answers do not fit, or are refused partway: the stream ends
-        // early and its credit must still return to the connection.
         const shrink = request.response.len > 0 and random.uintLessThan(u8, 100) < 10;
         request.sink = try allocator.alloc(u8, if (shrink) random.uintLessThan(usize, request.response.len) else request.response.len + 1);
         if (request.response.len > 0 and random.uintLessThan(u8, 100) < 10)
@@ -302,13 +256,11 @@ fn runSeed(seed: u64, totals: *Totals) !void {
     var client: h2.Client = undefined;
     try client.init(allocator, std.testing.io, .{
         .stream_capacity = capacity,
-        // Far past the round limit: a stream that ends inactive stalled.
         .inactivity_ns = 60 * std.time.ns_per_s,
         .connect_timeout_ns = 30 * std.time.ns_per_s,
         .trust = if (tls) .{ .ca_file = peer.caPath() } else .system,
     });
     defer client.deinit();
-    // Each seed draws its own rates, so some cut early and often.
     const percents = [_]u8{ 0, 10, 30, 60 };
     const spans = [_]u32{ 200, 4_000, 64_000 };
     var faults: Faults = .init(seed, .{
@@ -318,7 +270,6 @@ fn runSeed(seed: u64, totals: *Totals) !void {
         .cut_span = spans[random.uintLessThan(usize, spans.len)],
     });
     Engine.of(&client).faults = &faults;
-    // A failed check leaves streams unsettled; Client.deinit asserts none are.
     defer for (requests[0..count]) |*request| {
         if (Record.of(&request.stream).state != .idle) client.cancel(&request.stream);
         request.stream.deinit();
@@ -366,7 +317,6 @@ fn runSeed(seed: u64, totals: *Totals) !void {
             settled += 1;
             totals.cancelled += 1;
         }
-        // Draining with streams in flight, as a caller retiring an endpoint does.
         if (run.chaos(1)) {
             client.retireConnections(endpoint);
             totals.retired += 1;
@@ -374,7 +324,6 @@ fn runSeed(seed: u64, totals: *Totals) !void {
         try client.wait(1);
     }
 
-    // Exactly once: nothing more ever finishes.
     for (0..3) |_| {
         try client.drive(&run);
         try peer.pump();
@@ -406,22 +355,16 @@ fn attemptsBefore(peer: *const Peer, stream: *const Peer.Stream) usize {
     return count;
 }
 
-/// Grows whenever the client moves a byte, ends a stream or starts a
-/// connection. A new connection is work, not a spin: retrying an origin
-/// whose setups fail is `policy.connectionsToOpen`'s decision.
 fn progress(client: *h2.Client, faults: *const Faults) u64 {
     return faults.counts.moved +% client.finishedCount() +% Engine.of(client).connection_serial;
 }
 
-/// Whether the client's next wait would return at once.
 fn readyNow(client: *h2.Client) bool {
     const armed = client.armWait(1);
     if (armed.timeout_ms == 0) return true;
     return std.c.poll(armed.pollfds.ptr, @intCast(armed.pollfds.len), 0) > 0;
 }
 
-/// The first attempt of request `id` that was followed by another though
-/// the peer never proved it unprocessed.
 fn unprovenResend(run: *Run, peer: *const Peer, id: []const u8) ?*Peer.Stream {
     var last: ?*Peer.Stream = null;
     for (peer.streams.items) |stream| {
@@ -477,8 +420,6 @@ fn check(seed: u64, run: *Run, peer: *Peer) !void {
     }
     if (peer.seen.max_stream_window > h2.stream_window_bytes)
         return fail(seed, "a stream window opened to {d}", .{peer.seen.max_stream_window});
-    // The connection window is sized for every stream the peer allows, up
-    // to the client's capacity; it never starts below RFC 9113's 65,535.
     const carried: i32 = @intCast(@max(@min(run.max_streams, capacity), 1));
     const connection_limit = @max(65_535, h2.stream_window_bytes * carried);
     if (peer.seen.max_connection_window > connection_limit)
@@ -499,23 +440,17 @@ test "seeded faults: every stream settles once, with true send evidence and no r
     var totals: Totals = .{};
     if (environmentNumber("RUI_H2_FAULT_SEED")) |seed| return runSeed(seed, &totals);
     const seeds = environmentNumber("RUI_H2_FAULT_SEEDS") orelse default_seeds;
-    // A crash prints no seed; RUI_H2_FAULT_TRACE=1 names each as it starts.
     const trace = environmentNumber("RUI_H2_FAULT_TRACE") != null;
     for (1..seeds + 1) |seed| {
         if (trace) std.debug.print("seed {d}\n", .{seed});
         try runSeed(seed, &totals);
     }
-    // The faults ran, and the outcomes they force happened.
     const ran = [_]u64{ totals.faults.short, totals.faults.again, totals.faults.cut, totals.goaway, totals.refused, totals.reset, totals.peer_close, totals.outage, totals.resent, totals.cancelled, totals.retired };
     for (ran) |value| try std.testing.expect(value > 0);
     for ([_]policy.Cause{ .complete, .connection_lost, .reset_by_peer, .connect_failed, .sink_refused }) |cause| try std.testing.expect(totals.causes.get(cause) > 0);
 }
 
 test "seeded faults: a stream the peer reads after queueing GOAWAY above its last id counts as unprocessed" {
-    // macOS delivers loopback segments late, so a pump after `act` queued a
-    // GOAWAY can read a new stream's HEADERS before the GOAWAY goes out.
-    // Scripted here in that order, with a body larger than the stream
-    // window so the request never completes at the peer.
     const allocator = std.testing.allocator;
     var requests: [1]Request = .{.{}};
     requests[0].id_len = 1;
@@ -545,7 +480,6 @@ test "seeded faults: a stream the peer reads after queueing GOAWAY above its las
     });
     client.launch(&requests[0].stream);
 
-    // Until the client is ready and has sent HEADERS the peer has not read.
     var steps: u32 = 0;
     while (Engine.of(&client).connections_len == 0 or Engine.of(&client).connections[0].streams == 0) : (steps += 1) {
         if (steps > 2000) return error.Timeout;
@@ -554,18 +488,13 @@ test "seeded faults: a stream the peer reads after queueing GOAWAY above its las
         try peer.pump();
         try client.wait(1);
     }
-    // Every byte the client sent, its HEADERS included, waits unread in
-    // the peer's socket before the GOAWAY is queued. Readability alone is
-    // not enough: on Darwin an earlier segment can make it readable first.
     try Peer.awaitSocketDelivery(Engine.of(&client).connections[0].socket);
     try std.testing.expectEqual(@as(usize, 0), peer.streams.items.len);
     run.goaway(peer, peer.connections.items[0]);
     try std.testing.expectEqual(@as(i32, 0), run.goaways.items[0].last);
-    // Reads stream 1's HEADERS, then sends the GOAWAY.
     try peer.pump();
     try std.testing.expectEqual(@as(usize, 1), peer.streams.items.len);
 
-    // The client replays stream 1 on a new connection, as GOAWAY proves it may.
     steps = 0;
     while (peer.streams.items.len < 2) : (steps += 1) {
         if (steps > 2000) return error.Timeout;

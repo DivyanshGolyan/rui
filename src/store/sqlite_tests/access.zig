@@ -1,5 +1,3 @@
-//! Access SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
@@ -51,9 +49,6 @@ test "a statement that fails after an entry point touched its Session fails and 
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "key-fault-config");
-        // Each route faults a write that follows its touch: a configure
-        // reads the Workspace key in its first round, before it touches
-        // anything, and a Message reads its Session's head there too.
         var fault: TestingStatementFault = .{ .sql = switch (route) {
             .configure => configuration_domain.update_session_sql,
             .message => sourced_input.person_sql,
@@ -81,14 +76,10 @@ test "a statement that fails after an entry point touched its Session fails and 
         }
         try std.testing.expect(fault.failed > 0);
         try std.testing.expect(storage.isFenced());
-        // Nothing of the failed command committed.
         try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key IN ('key-fault-relabel','key-fault-message')", .{}));
     }
 }
 
-/// Takes one value of every Identity in a transaction it rolls back,
-/// checking that each is one past the largest committed value of a
-/// column that has rows, and returns them.
 fn takeEveryIdentityForTesting(storage: *Store) ![std.enums.values(store_core.Identity).len]u64 {
     const maxima = [_][:0]const u8{
         "SELECT max(turn_id) FROM turn",
@@ -123,9 +114,7 @@ test "a rolled-back transaction's identities are handed out again, a committed o
     const before = blk: {
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
-        // Attached ask Sessions commit forward identities too.
         const parent = try configureTestSession(&storage, "identity-parent");
-        // Entry points commit rows in every column.
         const first_session = try configureTestSessionAsk(&storage, "identity-config");
         try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), first_session.slice() });
         try submitTestMessage(&storage, &tmp, "identity-message", "identity-message", first_session.slice(), "propose");
@@ -136,16 +125,12 @@ test "a rolled-back transaction's identities are handed out again, a committed o
         break :blk .{ .parent = parent, .identities = rolled_back };
     };
 
-    // Committing the given-back values in every column: none is handed out
-    // again. A Host offering one more tool saves its record at open.
     try testingStoreToolSet(&storage, &tmp, std.testing.io, &testing_tool_set);
     defer storage.close() catch unreachable;
     const second_session = try configureTestSessionAsk(&storage, "identity-later");
     try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ before.parent.slice(), second_session.slice() });
-    // New text, so content commits a new row too.
     try submitTestMessage(&storage, &tmp, "identity-later-message", "identity-later-message", second_session.slice(), "propose again");
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "identity-second");
-    // A new tool set commits.
     var tools: wire_request.ConfigureCommand = .{};
     try tools.key.set("identity-later-tools");
     tools.session = second_session;
@@ -169,7 +154,6 @@ test "a round queues one statement any number of times, an engine pass before ea
 
         pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
             if (ran == 0) {
-                // Before engine passes the second queuing was StatementQueuedTwice.
                 for (&b.ids, 0..) |*id, index| {
                     id.* = try r.identity(.content_id);
                     r.write(TestingRound.insert_content, .{ .content_id = id.*, .digest = protocol.contentDigest(&.{@intCast(index)}), .length = index + 1 });
@@ -178,7 +162,6 @@ test "a round queues one statement any number of times, an engine pass before ea
                 return .round;
             }
             try std.testing.expectEqual(1, b.storage.testing_content_work.rounds - b.rounds);
-            // Each binding stepped before the next replaced it: nine rows, in order.
             for (b.ids, 0..) |id, index| {
                 var lengths: [64]u8 = undefined;
                 const sql = try std.fmt.bufPrintSentinel(&lengths, "SELECT byte_length FROM content WHERE content_id={d}", .{id}, 0);
@@ -214,8 +197,6 @@ test "a guard that fails in an engine pass fails the next run, and nothing after
                 return .round;
             }
             b.before = try b.dated();
-            // Revision 99 matches no row, so the guard fails when the pass
-            // that rebinding the statement takes steps it, before any run.
             r.write(TestingRound.date_session, .{ .session = b.loaded.head, .revision = 99 });
             try std.testing.expect(r.transactionOpen());
             r.write(TestingRound.date_session, .{ .session = b.loaded.head, .revision = 1 });
@@ -223,7 +204,6 @@ test "a guard that fails in an engine pass fails the next run, and nothing after
             return .round;
         }
 
-        /// Before the rollback: the second write never stepped.
         pub fn failed(b: *@This()) void {
             b.unchanged = if (b.dated()) |now| now == b.before else |_| false;
         }
@@ -268,7 +248,7 @@ test "every transition dates its fact from the Host clock" {
     try allow.key.set("dated-allow");
     try allow.session.set(session.slice());
     try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-    const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
     var stop = try completeSessionStop("dated-stop", session.slice());
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
     try std.testing.expectEqual(ActionSettlement.session_stop, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{}));
@@ -324,7 +304,6 @@ test "SQLite single commit keeps autocommit on success guard failure and abandon
         storage: *Store,
         outcome: Outcome,
         row: read.Result = undefined,
-        /// Whether a transaction was open once the read ran.
         read_open: bool = true,
 
         pub fn step(t: *@This(), r: *transition.Round(@This()), ran: ?rounds.At) !transition.Next(@This()) {
@@ -346,8 +325,6 @@ test "SQLite single commit keeps autocommit on success guard failure and abandon
         statements.begin(storage.sqliteDatabase());
         defer statements.end(storage.sqliteDatabase());
         var single: Single = .{ .storage = &storage, .outcome = outcome };
-        // Even a rollback fault is irrelevant: no transaction opens, and a
-        // queued, unstepped autocommit write is simply discarded.
         const faults: store_core.Faults = .{ .rollback_failure = outcome != .success };
         const result = entry.finishTransaction(error{TestingGuard}, .{}, transition.run(&entry, Single, &single, faults));
         if (outcome == .guard) try std.testing.expectError(error.TestingGuard, result) else try result;
@@ -463,8 +440,6 @@ test "rollback failure fences mutation until fresh reopen restores committed fac
 }
 
 test "a round's failed step is named by the statement that failed" {
-    // `failedOn` records the failed runner's text; each pair of a round
-    // names its own failure, and a statement that did not fail names none.
     const Pair = struct {
         const first = rsql.Read(.{
             .sql = "SELECT count(*) AS sessions FROM session WHERE session_ref<>?1",

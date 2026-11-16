@@ -59,6 +59,7 @@ The connection loads TLS trust at open and retains it across reconnects without 
 
 On MySQL the `store_owner` row owns the Store: open raises its `epoch`, and every write transaction first advances `commit_seq` only where both match what this Host last saw, so a Host that lost the Store fails its next write.
 `GET_LOCK` only refuses early a second Host on the same database.
+One MySQL server is the one writer: multi-primary topologies, where `GET_LOCK` is local to one member, are not supported. Reclaim after a lost COMMIT reads `commit_seq` as final once it holds the lock, so on such a topology it may rerun a batch an old session still commits; the fence then stops the duplicate and the Host fences.
 Every message the Host sends starts with its session settings, so no message relies on settings an earlier one left on the server connection.
 There is no `host.lock`: the runtime's
 `rui.lock` reserves only its socket, preventing two different Stores from
@@ -78,11 +79,14 @@ validates its saved id and canonical directory selector.
 An initial MySQL
 `host_info` probe may send an empty `store` to discover that id; every other
 request must match it.
-Bash gets `RUI_STORE` as this id and the non-secret
-`RUI_RUNTIME_DIR` as a socket-routing hint.
-CLI peers use the same hint;
-an opaque id cannot launch a replacement Host without the stdin login.
-SQLite keeps its canonical directory selector and existing filesystem layout.
+Bash gets `RUI_STORE` as the selected Host directory when its saved placement
+reaches this endpoint. CLI peers resolve that local route separately from the
+wire Store identity used in sender Addresses and captures. Saved placement is
+read again by later clients; pause the Host before changing Store or interface
+placement. An unsaved foreground placement retains its legacy Store-identity
+route and, for MySQL, the non-secret `RUI_RUNTIME_DIR` socket hint. An opaque id
+alone cannot launch a replacement Host; a saved Host directory can.
+SQLite's database layout and wire identity remain unchanged.
 
 MySQL readiness and `host_status` also report `innodb_doublewrite`, including
 `OFF` (D200).

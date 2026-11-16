@@ -161,8 +161,6 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 	defer ep.close()
 	store := filepath.Join(dir, "store")
 	stderrPath := filepath.Join(dir, "host-stderr.log")
-	// Stderr traces drop records under contention; the observation channel
-	// accounts for every selected record or fails the run.
 	host, observations, err := measurement.StartHostWith(
 		measurement.Launch{ObservationPlan: "execution"},
 		binary, store, ep.URL(), s.Capacity, stderrPath, d,

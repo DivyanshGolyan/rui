@@ -1,5 +1,3 @@
-//! Standalone chat facts and edits. The host supplies inspection and typed
-//! effects; this widget neither owns a Session nor imports its frontend.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -23,8 +21,6 @@ const Self = @This();
 const focus = @import("chat_info_focus.zig");
 
 pub const SaveState = enum { idle, pending, saved, failed };
-/// Configure's semantic values, not command-line fragments. String payloads
-/// are borrowed until configure returns; the backend copies them for its job.
 pub const Edit = union(enum) {
     effort: ?catalog.ReasoningEffort,
     permission: @FieldType(status.Session, "permission"),
@@ -33,13 +29,6 @@ pub const Edit = union(enum) {
     label: []const u8,
 };
 
-/// Borrowed for the widget's lifetime. read fills the same inspection facts as
-/// /status. configure submits the existing Session configure request; archive
-/// and copy_last_answer delegate to the existing archive and /copy owners.
-/// Only admitted effects remain pending until state supplies a definite answer.
-/// Archive refusals are values; unexpected archive-owner errors must propagate.
-/// models supplies a revisioned source: replacement or release changes its
-/// revision before retiring storage, including while the panel is hidden.
 pub const Backend = struct {
     context: *anyopaque,
     read: *const fn (*anyopaque, *status.Session) anyerror!void,
@@ -49,19 +38,16 @@ pub const Backend = struct {
     state: *const fn (*anyopaque) SaveState,
     models: *const fn (*anyopaque) ModelChoice.Snapshot,
     caps: *const fn (*anyopaque) view.Caps,
-    /// The existing short-reply owner decides replacement, dismissal and expiry.
     copied: *const fn (*anyopaque) bool,
 };
 
 pub const Row = enum { model, effort };
 
 const Phase = enum { open, pending, failed };
-// Context remains the existing Session inspection, never a second facts cache.
 const Standalone = struct { row: Row, phase: Phase = .open };
 
 standalone: ?Standalone = null,
 backend: Backend,
-/// The process's HOME, borrowed; only the workspace is shortened with it.
 home: []const u8 = "",
 narrow: bool = false,
 session: status.Session = undefined,
@@ -82,22 +68,18 @@ rename_bytes: [status.max_label_bytes]u8 = undefined,
 rename_editor: Editor = .init(&.{}),
 pasting: bool = false,
 
-/// Standalone composition for callers that want a body and its footer together.
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
 }
 
-/// The panel's own ground above the chat input, with no embedded footer.
 pub fn bodyWidget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = drawBody };
 }
 
-/// The chat's facts row while this panel is open; never more than one row.
 pub fn footerWidget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .drawFn = drawFooter };
 }
 
-/// Open the existing field choice without its enclosing settings page.
 pub fn openStandaloneChoice(self: *Self, ctx: *vxfw.EventContext, row: Row) !void {
     if (self.pending != null) return;
     self.closeStandaloneChoice();
@@ -112,7 +94,6 @@ pub fn standaloneOpen(self: *const Self) bool {
     return if (self.standalone) |shown| shown.phase != .pending else false;
 }
 
-/// The presentation intent, including an admitted save hidden while pending.
 pub fn standaloneField(self: *const Self) ?Row {
     return if (self.standalone) |shown| shown.row else null;
 }
@@ -139,15 +120,12 @@ pub fn hasChoice(self: *const Self) bool {
     return self.renaming or self.panel.choice != null or self.model_choice.active;
 }
 
-/// Cancel the current edit. A standalone edit ends its whole presentation;
-/// an ordinary Chat page retains the enclosing page beneath its topmost edit.
 pub fn cancelChoice(self: *Self) void {
     if (self.standalone != null) {
         self.closeStandaloneChoice();
         return;
     }
     if (self.renaming) {
-        // Cancel deliberately discards an unfinished paste or refused edit.
         _ = self.rename_editor.blur();
         self.renaming = false;
     } else if (self.model_choice.active) {
@@ -159,7 +137,6 @@ pub fn cancelChoice(self: *Self) void {
     self.panel.custom_choice = null;
 }
 
-/// End all transient editing without changing admitted backend work.
 fn cancelEdit(self: *Self) void {
     if (self.renaming) _ = self.rename_editor.blur();
     self.renaming = false;
@@ -175,7 +152,6 @@ pub fn refresh(self: *Self) void {
     self.readSession();
 }
 
-/// Read the same Session without discarding a standalone retry's field.
 fn readSession(self: *Self) void {
     self.cancelEdit();
     self.backend.read(self.backend.context, &self.session) catch {
@@ -297,7 +273,6 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
 }
 
 fn openModel(self: *Self) void {
-    // The model choice owns its catalog fallback when the backend has no list.
     self.model_choice.openSource(.{ .context = self.backend.context, .read = self.backend.models }, self.session.provider, self.session.model.slice());
     self.model_choice.userdata = self;
     self.model_choice.on_pick = pickModel;
@@ -387,7 +362,6 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         return;
     }
     if (self.pasting and !self.renaming and !self.model_choice.active) {
-        // A paste is text, never approval of a field choice or action.
         ctx.consume_event = true;
         return;
     }
@@ -400,7 +374,6 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                     self.failures[6] = " · name must be one line";
                 } else {
                     try self.save(ctx, 6, .{ .label = text });
-                    // A rejected publication retains the editable name.
                     if (self.pending != null or self.failures[6] == null) self.renaming = false;
                 }
             },
@@ -476,16 +449,11 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
 
 fn drawBody(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     return drawBodyContents(raw, ctx) catch |err| switch (err) {
-        // Draw-arena writers cannot fail except allocation. TerminalText's
-        // bounded escaping scratch fits every scalar it accepts.
         error.OutOfMemory, error.WriteFailed => error.OutOfMemory,
         error.NoSpaceLeft => unreachable,
     };
 }
 
-/// HOME shortening precedes fitting. Prefer the longest whole-component
-/// suffix; if none fits, retain a grapheme-aligned basename suffix instead.
-/// Only the left edge is elided, so the true end of the name remains visible.
 fn folderValue(self: *const Self, ctx: vxfw.DrawContext, room: u16) ![]const u8 {
     const path = shortPath(self.home, self.session.workspace.slice());
     const shortened = try std.fmt.allocPrint(ctx.arena, "{s}{s}", .{ path.prefix, path.rest });
@@ -499,8 +467,6 @@ fn folderValue(self: *const Self, ctx: vxfw.DrawContext, room: u16) ![]const u8 
         const tail = text[at..];
         if (mark_width + ctx.stringWidth(tail) <= room) return std.fmt.allocPrint(ctx.arena, "{s}{s}", .{ ellipsis, tail });
     }
-    // No complete component fits. Keep the basename's true right edge, never
-    // cutting a grapheme (including combining marks and wide characters).
     const basename = text[if (std.mem.lastIndexOfScalar(u8, text, '/')) |at| at + 1 else 0..];
     var start: usize = 0;
     var cells = ctx.stringWidth(basename);
@@ -531,7 +497,6 @@ fn drawBodyContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
     }
     self.fields[2].value = if (!self.ready) "unavailable" else if (tool_text.written().len == 0) "none" else tool_text.written();
     if (self.ready) {
-        // Fit before Panel paints so it cannot right-clip the final component.
         self.fields[3].value = try self.folderValue(ctx, size.width -| Panel.value_column);
         self.fields[4].value = try safe(ctx.arena, self.session.model.slice());
         if (self.session.context_estimate) |tokens| {
@@ -577,7 +542,6 @@ fn drawFooterContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
         .style = widget_style.of(caps, .{ .colour = .quiet }),
     };
     var surface = try footer.widget().draw(ctx);
-    // Footer is a stack-local rendering value; expose only the persistent owner.
     surface.widget = self.footerWidget();
     return surface;
 }
@@ -632,7 +596,6 @@ const Fixture = struct {
         self.session.label.set("Fix retry deadline") catch unreachable;
         self.session.effort_override = true;
         self.session.tools = .initMany(&.{ .bash, .skill, .web_search });
-        // Approved mock inputs, not a pin of the catalog's current defaults.
         self.session.model.set("gpt-6.1-sol") catch unreachable;
         self.session.compaction_trigger = 244_800;
         self.session.context_estimate = 18;
@@ -760,7 +723,6 @@ test "Chat info effort permissions and tools choices pick and cancel typed edits
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    // Every ordinary field opens and cancels without publishing an edit.
     for ([_]usize{ 0, 1, 2, 4 }) |row| {
         page.panel.selected = row;
         try press(&page, &ctx, vaxis.Key.enter);
@@ -770,7 +732,6 @@ test "Chat info effort permissions and tools choices pick and cancel typed edits
         try std.testing.expect(!page.hasChoice());
         try std.testing.expectEqual(@as(?Edit, null), fixture.edit);
     }
-    // Effort choices admit exactly this model's efforts, plus model default.
     page.panel.selected = 0;
     try press(&page, &ctx, vaxis.Key.enter);
     for (std.enums.values(catalog.ReasoningEffort)) |effort| {
@@ -890,7 +851,6 @@ test "Chat info failures remain on their row and recover from backend answers" {
         page.cancelChoice();
         fixture.fail_submit = false;
     }
-    // Late rejection comes from the backend result, not an optimistic value.
     page.panel.selected = 1;
     try press(&page, &ctx, vaxis.Key.enter);
     try press(&page, &ctx, vaxis.Key.enter);
@@ -937,7 +897,6 @@ test "Chat info completion reports every backend outcome and read failure on edi
             try press(&page, &ctx, vaxis.Key.enter);
             try press(&page, &ctx, vaxis.Key.enter);
             try std.testing.expectEqual(@as(?usize, 1), page.pending);
-            // No second operation can overwrite the pending row association.
             page.panel.selected = 7;
             try press(&page, &ctx, vaxis.Key.enter);
             try std.testing.expectEqual(@as(usize, 0), fixture.archives);
@@ -1290,7 +1249,6 @@ test "Chat info hidden Context preserves action IDs failures and the blank actio
             try std.testing.expect(page.panel.stacked_actions);
             try std.testing.expect(std.mem.indexOf(u8, text, "\n   Archive: couldn't archive\n   Copy: saving\n") != null);
         }
-        // Completing action 8 stays on action 8 even if Context visibility changes.
         fixture.session.context_estimate = if (estimate == null) 18 else null;
         fixture.state_value = .failed;
         try page.widget().handleEvent(&ctx, .tick);
@@ -1547,7 +1505,6 @@ test "Chat info hover follows editable fields and action click regions without c
         try page.widget().handleEvent(&events, .mouse_leave);
         try std.testing.expect(!page.panel.hover.pointing);
         for (events.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
-        // The same Permissions region opens the same inline choices as Enter.
         try page.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(width - 1), .row = 3, .button = .left, .type = .press, .mods = .{} } });
         try std.testing.expectEqual(@as(usize, 1), page.panel.choice.?.field);
         _ = try page.widget().draw(draw_ctx);
@@ -1853,7 +1810,6 @@ test "Chat info copy label follows successful short reply dismissal replacement 
         try std.testing.expect(std.mem.indexOf(u8, copied, "Copy last answer") == null);
         try std.testing.expect(!page.panel.stacked_actions);
         try std.testing.expectEqual(@as(usize, "Copy last answer".len), page.panel.actions[2].len);
-        // The shell dismisses the existing notice before delivering the next key.
         fixture.copy_notice.dismiss();
         try press(&page, &ctx, vaxis.Key.left);
         try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 15), "Copy last answer") != null);

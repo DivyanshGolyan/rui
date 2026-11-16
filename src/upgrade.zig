@@ -64,7 +64,7 @@ pub const CleanupReceipts = struct {
     }
 };
 
-pub const DownloadDiagnostic = process.DownloadDiagnostic;
+pub const Download = process.Download;
 
 pub const Check = struct {
     candidate: release.ReleaseCandidate,
@@ -72,7 +72,6 @@ pub const Check = struct {
     hosts: restart_all.Batch = .{},
     home: []const u8,
     store: []const u8,
-    /// As `executablePathAlloc` allocates it, so `deinit` frees all of it.
     running_executable: [:0]const u8,
     path: installation_path.Observation = .{ .state = .unavailable },
 
@@ -103,7 +102,7 @@ pub const Result = struct {
     }
 };
 
-pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []const u8, cancellation: ?*client.Cancellation, diagnostic: *DownloadDiagnostic) !Check {
+pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []const u8, cancellation: ?*client.Cancellation, diagnostic: *Download) !Check {
     const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
     const endpoint = if (init.environ_map.get("RUI_TEST_UPGRADE_RELEASES_URL")) |base| try std.fmt.allocPrint(allocator, "{s}/latest", .{base}) else null;
     defer if (endpoint) |url| allocator.free(url);
@@ -116,7 +115,7 @@ pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []cons
     const owned_home = try allocator.dupe(u8, home);
     errdefer allocator.free(owned_home);
     const paths = platform.resolveClientPaths(init.io, store) catch null;
-    const owned_store = try allocator.dupe(u8, if (paths) |value| value.store.slice() else store);
+    const owned_store = try allocator.dupe(u8, if (paths) |value| value.selector() else store);
     errdefer allocator.free(owned_store);
     const executable = try std.process.executablePathAlloc(init.io, allocator);
     errdefer allocator.free(executable);
@@ -128,8 +127,6 @@ pub fn canInstall(checked: *const Check) bool {
     return checked.selected == .released;
 }
 
-/// The selected build already is the release, or newer: an install
-/// reselects it and prepares nothing.
 pub fn holdsRelease(checked: *const Check) bool {
     return checked.selected == .released and checked.selected.released.version.order(checked.candidate.version) != .lt;
 }
@@ -148,7 +145,7 @@ const ActivationProgress = struct {
     }
 };
 
-pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *const Check, cancellation: ?*client.Cancellation, progress: ?Progress, cleanup: *CleanupReceipts, diagnostic: *DownloadDiagnostic) !Result {
+pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *const Check, cancellation: ?*client.Cancellation, progress: ?Progress, cleanup: *CleanupReceipts, diagnostic: *Download) !Result {
     try process.check(cancellation);
     if (!canInstall(checked)) return error.UpgradeIneligible;
     const store = try allocator.dupe(u8, checked.store);
@@ -156,7 +153,6 @@ pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *c
     var installation: Installation.InstallationOutcome = undefined;
     const selected = checked.selected.released;
     if (holdsRelease(checked)) {
-        // Reselecting the installed build publishes too.
         Progress.send(progress, .publishing);
         try process.check(cancellation);
         installation = try Installation.publishExistingWithReporter(allocator, init.io, checked.home, selected.build, .released_upgrade, cancellation, cleanup.reporter(.publication));
@@ -171,15 +167,8 @@ pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *c
     errdefer installation.deinit(allocator);
     var activation_progress: ActivationProgress = .{ .progress = progress };
     const receipt = installation.receipt();
-    // Once publication succeeds, every restart failure belongs to the receipt,
-    // never the pre-publication error path. Discover again to include Hosts
-    // started during preparation, and pin the receipt rather than following PATH.
-    // Publication owns both the selected path and its validated identity.
-    // Do not inspect PATH or invent a version from the discovered candidate.
     var hosts: restart_all.Batch = hosts: {
         waitAfterPublication(init, cancellation) catch |err| break :hosts .{ .failure = err };
-        // Revalidate availability/identity, not a second selection or forecast.
-        // A vanished target is a restart failure, not an unsupported Host skip.
         var target = restart_all.Target.init(init, allocator, checked.home, receipt.selected_after, cancellation) catch |err| break :hosts .{ .failure = err };
         defer target.deinit(allocator);
         if (target.version.order(receipt.selected_version.?) != .eq) break :hosts .{ .failure = error.ReleaseExecutableVersionMismatch };
@@ -190,7 +179,6 @@ pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *c
             .progress = .{ .context = &activation_progress, .report = ActivationProgress.report },
         }) catch |err| .{ .failure = err };
     };
-    // Even cancellation or a failed coordinator handoff retains the target.
     hosts.version = receipt.selected_version;
     Progress.send(progress, .finished);
     return .{ .installation = installation, .hosts = hosts, .store = store };
@@ -245,9 +233,6 @@ pub fn writeCheck(writer: *std.Io.Writer, checked: *const Check) !void {
     if (!canInstall(checked)) try writer.writeAll("Upgrade cannot replace this destination. Use the existing manual release installer or application owner.\n");
 }
 
-/// Whether the result receipt contains instructions that a TUI relaunch must
-/// not swallow. Installation and activation are independent: a published Rui
-/// can still leave an unresolved or application-owned Host behind.
 pub fn hasGuidance(result: *const Result) bool {
     return result.hosts.hasGuidance();
 }
@@ -351,8 +336,6 @@ test "upgrade restart results retain unknown failures and other Store guidance w
     try std.testing.expect(compatible(&result));
     try std.testing.expect(hasGuidance(&result));
     try std.testing.expectEqual(@as(usize, 1), result.hosts.totals().failed);
-    // An unidentified socket may belong to this Store; known selected facts
-    // remain usable, but its missing identity can never become an absence.
     entries[0].store = null;
     entries[0].state = .{ .failed = .{ .stage = .discovery, .cause = "ConnectionRefused" } };
     try std.testing.expect(compatible(&result));
@@ -369,4 +352,17 @@ test "upgrade restart results retain unknown failures and other Store guidance w
     var out = std.Io.Writer.fixed(&bytes);
     try result.hosts.write(&out);
     try std.testing.expectEqualStrings("No running Hosts.\n", out.buffered());
+}
+
+test "upgrade selected activation routes by Host directory not SQLite data or MySQL identity" {
+    const receipt: Installation.Receipt = .{ .operation_build = "/prepared", .selected_after = "/selected" };
+    for ([_][]const u8{ "/data", "0123456789abcdef0123456789abcdef" }) |identity| {
+        var entries = [_]restart_all.Entry{
+            .{ .socket = "/first.sock", .directory = "/first-host", .store = "/selected-host", .state = .{ .outcome = .not_needed } },
+            .{ .socket = "/selected.sock", .directory = "/selected-host", .store = identity, .state = .{ .outcome = .{ .unsupported = .configuration_unavailable } } },
+        };
+        const result: Result = .{ .installation = .{ .installed = receipt }, .store = "/selected-host", .hosts = .{ .entries = &entries } };
+        try std.testing.expectEqual(HostLifecycle.Limitation.configuration_unavailable, result.selectedActivation().unsupported);
+        try std.testing.expect(result.hosts.selectedOutcome(identity) == .not_needed);
+    }
 }

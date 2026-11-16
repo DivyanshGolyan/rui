@@ -1,12 +1,9 @@
-//! Detached custody for the shared restart-all owner. Task input contains only
-//! routing and a pinned target; private launch state never crosses this boundary.
 const std = @import("std");
 const HostLifecycle = @import("HostLifecycle.zig");
 const restart_all = @import("host_restart_all.zig");
 const release = @import("release_candidate.zig");
 const stderr = @import("stderr.zig");
 
-// Two filesystem paths, including worst-case JSON escaping, plus framing.
 const input_limit = 12 * std.fs.max_path_bytes + 1024;
 const event_limit = input_limit;
 const Task = struct {
@@ -43,7 +40,6 @@ fn submit(init: std.process.Init, allocator: std.mem.Allocator, task: Task, stdo
         .stdin = .pipe,
         .stdout = stdout,
     });
-    // Before EOF there is no stop authority. Failed submission can be reaped.
     errdefer child.kill(init.io);
     var buffer: [2048]u8 = undefined;
     var input = child.stdin.?.writerStreaming(init.io, &buffer);
@@ -60,8 +56,6 @@ pub fn restartAll(init: std.process.Init, allocator: std.mem.Allocator) !void {
     if (!term.success()) return error.HostRestartFailed;
 }
 
-/// Cancellation owns preparation up to EOF. After handoff, the worker retains
-/// custody of the entire batch even if the caller (or its Host) disappears.
 pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: restart_all.Options) !restart_all.Batch {
     try @import("upgrade_process.zig").check(options.cancellation);
     var child = try submit(init, allocator, .{
@@ -70,8 +64,6 @@ pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: re
         .report = .events,
     }, .pipe);
     const received = readEvents(init.io, allocator, child.stdout.?, options.progress);
-    // A failed reader must close before waiting: never strand the worker on a
-    // full report pipe. Report loss is diagnostic, not loss of stop custody.
     child.stdout.?.close(init.io);
     child.stdout = null;
     var batch = received catch |err| {
@@ -168,7 +160,6 @@ fn event(init: std.process.Init, value: Event) void {
     writeEvent(value, &writer) catch unreachable;
     writer.writeByte('\n') catch unreachable;
     std.Io.File.stdout().writeStreamingAll(init.io, writer.buffered()) catch {
-        // Neither a closed report pipe nor closed stderr abandons later Hosts.
         stderr.diagnosticBytes(writer.buffered());
     };
 }
@@ -178,10 +169,7 @@ fn progressEvent(raw: *anyopaque, stage: HostLifecycle.Stage) void {
     event(init.*, .{ .progress = stage });
 }
 
-/// Private CLI entry. No Host is stopped until the complete task is accepted.
 pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
-    // A fresh PID cannot lead the inherited group. Leave both session and group
-    // before accepting stop authority, including when Bash exec'd the caller.
     if (std.c.setsid() < 0) return error.HostRestartFailed;
     var buffer: [2048]u8 = undefined;
     var input = std.Io.File.stdin().readerStreaming(init.io, &buffer);
@@ -216,7 +204,7 @@ fn expectRoundTrip(value: anytype) !void {
 }
 
 fn outcomeEvent(outcome: HostLifecycle.ActivationOutcome) Event {
-    return .{ .entry = .{ .socket = "/socket", .store = "/store/雪\n", .state = .{ .outcome = outcome } } };
+    return .{ .entry = .{ .socket = "/socket", .directory = "/host/\xff", .store = "/store/雪\n", .state = .{ .outcome = outcome } } };
 }
 
 test "coordinator transfers every batch outcome and progress without reduction" {
@@ -259,7 +247,7 @@ test "coordinator events keep each failed Host's cause after the line is freed" 
     defer lines.deinit();
     for ([_]Event{
         .{ .entry = .{ .socket = "/discovery.sock", .state = .{ .failed = .{ .stage = .discovery, .cause = "HostPeerPidMismatch" } } } },
-        .{ .entry = .{ .socket = "/observed.sock", .store = "/store", .state = .{ .failed = .{ .stage = .observation, .cause = "ConnectionRefused" } } } },
+        .{ .entry = .{ .socket = "/observed.sock", .directory = "/selected-host", .store = "/store", .state = .{ .failed = .{ .stage = .observation, .cause = "ConnectionRefused" } } } },
         .done,
     }) |value| {
         try writeEvent(value, &lines.writer);
@@ -272,6 +260,8 @@ test "coordinator events keep each failed Host's cause after the line is freed" 
     defer batch.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("HostPeerPidMismatch", batch.entries[0].state.failed.cause);
     try std.testing.expectEqualStrings("ConnectionRefused", batch.entries[1].state.failed.cause);
+    try std.testing.expectEqualStrings("/selected-host", batch.entries[1].directory.?);
+    try std.testing.expectEqualStrings("/store", batch.entries[1].store.?);
     var buffer: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     try batch.write(&writer);

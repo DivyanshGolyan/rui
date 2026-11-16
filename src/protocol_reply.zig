@@ -1,6 +1,3 @@
-//! The Host's reply grammar: the typed facts each reply carries and the
-//! decoders that accept or reject its bytes. Requests are in protocol.zig;
-//! client.zig owns transport and request capture.
 const std = @import("std");
 const model_catalog = @import("model_catalog.zig");
 const protocol = @import("protocol.zig");
@@ -37,11 +34,10 @@ pub const ConversationPage = struct {
         position: u64,
         ordinal: u64,
         kind: protocol.ConversationItemKind,
-        /// Empty for a Hosted Call, which has none.
         content: CommandObservation.ContentReference,
         presentation: ?protocol.ToolPresentation = null,
-        admitted_at: ?u64 = null, // Host wall-clock second; User items only.
-        sender: ?protocol.NamedPeer = null, // A User item's peer sender.
+        admitted_at: ?u64 = null,
+        sender: ?protocol.NamedPeer = null,
     };
     end: u64,
     items: [protocol.public_conversation_page_items]Item = undefined,
@@ -61,7 +57,7 @@ pub const ConversationPage = struct {
             content: ?struct { bytes: JsonString(20), sha256: JsonString(64), display: JsonString(16) } = null,
             presentation: ?JsonToolPresentation = null,
             admitted_at: ?JsonString(20) = null,
-            sender: ?JsonNamedPeer = null, // User items only.
+            sender: ?JsonNamedPeer = null,
         };
         const Rows = JsonArray(Row, protocol.public_conversation_page_items);
         const Wire = struct {
@@ -124,14 +120,12 @@ pub const ActivityCursor = struct {
     }
 };
 pub const ActivityPageReply = union(enum) { page: ActivityPage, failure: ReadFailure };
-/// `line` borrows the caller's buffer, without its line break.
 pub const ActivityPrefixReply = union(enum) { line: []const u8, failure: ReadFailure };
 pub const ActivityPage = struct {
     facts: protocol.ActivityFacts,
     kinds: protocol.ActivityPage.Kinds = .full,
     limit: u8 = protocol.ActivityPage.items,
 
-    /// The next page of the same kinds and size.
     pub fn continuation(self: *const ActivityPage) ?ActivityCursor {
         const facts = &self.facts;
         if (!facts.more) return null;
@@ -189,11 +183,8 @@ pub const ActivityPage = struct {
             const after = fact.position > position or (ordinal != null and fact.position == position and fact.ordinal > ordinal.?);
             const before = fact.position < position or (ordinal != null and fact.position == position and fact.ordinal < ordinal.?);
             if (fact.position > page.facts.end or (position != 0 and !(if (cursor.direction == .forward) after else before)) or
-                // Tool Results have call ordinals; an own approval follows
-                // its call at ordinal 1, while a forwarded approval uses 0.
                 (switch (item.value) {
                     .approval_requested => fact.ordinal > 1,
-                    // A revision's changes share its position, one ordinal each.
                     .session_changed => false,
                     else => (item.value == .tool_result) != (fact.ordinal != 0),
                 }) or !cursor.kinds.contains(std.meta.stringToEnum(protocol.ActivityItem.Kind, @tagName(item.value)).?)) return error.InvalidActivityPage;
@@ -201,8 +192,6 @@ pub const ActivityPage = struct {
                 inline .admission, .user, .received => |message, kind| {
                     const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = try content(message.content), .admitted_at = try id(message.admitted_at, false), .sender = if (message.sender) |sender| try sender.peer() else null };
                     if ((value.state == .applied) != (value.turn != null) or (kind == .user and value.state != .applied)) return error.InvalidActivityPage;
-                    // An admission row is dated by the admission itself, and
-                    // names its sender exactly when another Session sent it.
                     if (kind != .user and (fact.at != value.admitted_at or (kind == .received) != (value.sender != null))) return error.InvalidActivityPage;
                     fact.value = @unionInit(Fact.Value, @tagName(kind), value);
                 },
@@ -258,9 +247,6 @@ pub const ActivityPage = struct {
                 },
                 .turn_ended => |ended| {
                     if (!protocol.validSessionId(ended.session.slice())) return error.InvalidActivityPage;
-                    // A done Turn has its answer and a failed one may have
-                    // its report; a stopped or interrupted one has neither,
-                    // and each was judged from its own saved code.
                     const ending = ended.ending.value;
                     const done = ending == .done;
                     const cancelled = ending == .stopped or ending == .interrupted;
@@ -269,7 +255,6 @@ pub const ActivityPage = struct {
                     fact.value = .{ .turn_ended = .{ .session = ended.session.value, .turn = try id(ended.turn, false), .operation = try id(ended.operation, false), .ending = ending, .code = ended.code.value, .content = if (ended.content) |reference| try content(reference) else null } };
                 },
                 .stop => |stop| {
-                    if (stop.turn == null and stop.completion.value == .pending) return error.InvalidActivityPage;
                     fact.value = .{ .stop = .{ .key = stop.key.value, .turn = if (stop.turn) |turn| try id(turn, false) else null, .cutoff = try id(stop.cutoff, true), .completion = stop.completion.value } };
                 },
             }
@@ -293,7 +278,6 @@ pub const ActivityPage = struct {
             previous = fact.*;
         }
         const queued: protocol.Queued = .{ .count = try id(wire.queued.count, true), .oldest_position = try id(wire.queued.oldest_position, true), .newest_admission = try id(wire.queued.newest_admission, true), .newest_position = try id(wire.queued.newest_position, true) };
-        // None, or a span of Admissions at or before the boundary.
         if (if (queued.count == 0)
             !std.meta.eql(queued, protocol.Queued{})
         else
@@ -306,12 +290,10 @@ pub const ActivityPage = struct {
         inline for (.{ &work.turn, &work.operation, &work.first_action }, .{ wire.work.turn, wire.work.operation, wire.work.first_action }) |fact, value| {
             fact.* = if (value) |text| try id(text, false) else null;
         }
-        // An operation belongs to its Turn; an Action to the active one.
-        if ((work.turn == null) != (work.operation == null) or (work.first_action != null and work.turn == null)) return error.InvalidActivityPage;
+        if ((work.turn == null) != (work.operation == null)) return error.InvalidActivityPage;
         if (wire.work.last_line) |line| facts.last_line = .{ .position = try id(line.position, false), .text = if (line.text) |text| text.value else null };
         facts.read_version = protocol.SinceToken.parse(wire.work.read_version.slice()) catch return error.InvalidActivityPage;
         facts.revision = try id(wire.work.revision, false);
-        // The permission prompt shows this Workspace, so it keeps Current's rule.
         if (!std.fs.path.isAbsolute(wire.work.workspace.slice())) return error.InvalidActivityPage;
         facts.workspace.set(wire.work.workspace.slice()) catch return error.InvalidActivityPage;
         return page;
@@ -366,8 +348,6 @@ pub fn validHostUnavailable(body: []const u8) bool {
         std.mem.eql(u8, reply.code, "discovery_capacity_exhausted");
 }
 
-/// The `providers` array of a `model_list` reply, which `model_picker.read`
-/// reads. The Host writes the reply's head and tail as they are.
 pub fn modelListProviders(body: []const u8) error{InvalidModelList}![]const u8 {
     const reply = protocol.model_list_reply;
     if (!std.mem.startsWith(u8, body, reply.head) or !std.mem.endsWith(u8, body, reply.tail) or body.len < reply.head.len + reply.tail.len)
@@ -394,7 +374,6 @@ test "a model list reply reads as what the Host writes" {
         try std.testing.expectError(error.InvalidModelList, modelListProviders(body));
 }
 
-/// Read-only Host information profiles; historical profiles grant no ordinary requests.
 pub const HostInfoProfile = enum {
     current,
     released_18,
@@ -405,7 +384,6 @@ pub const HostInfoProfile = enum {
     released_13,
     released_9,
 
-    /// Historical facts permit control through the observed executable, not ordinary readiness.
     pub fn historical(self: HostInfoProfile) bool {
         return self != .current;
     }
@@ -423,8 +401,6 @@ pub const HostInfoProfile = enum {
         };
     }
 
-    /// Providers are decoded at this boundary, not inferred by consumers.
-    /// Current wire requires every route; wire 13 spans both released shapes.
     fn Providers(comptime self: HostInfoProfile) type {
         return switch (self) {
             .current => protocol.Routes,
@@ -433,7 +409,6 @@ pub const HostInfoProfile = enum {
             .released_16 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
             .released_15 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
             .released_14 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
-            // Freeze released shapes independently of future current-provider additions.
             .released_13 => struct {
                 codex: protocol.Route,
                 openai: protocol.Route,
@@ -450,7 +425,6 @@ pub fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
     return .{ .ready = try parseHostInfoForProfile(body, store, .current) };
 }
 
-/// Validates the complete known shape, not a compatible ordinary-client reply.
 pub fn parseHostInfoForProfile(body: []const u8, store: []const u8, profile: HostInfoProfile) !HostInfoFacts {
     return switch (profile) {
         inline else => |known| parseHostInfoShape(protocol.HostInfoWith(known.Providers()), body, store, known),
@@ -482,7 +456,6 @@ fn parseHostInfoShape(comptime Info: type, body: []const u8, store: []const u8, 
     const descriptor_limit = if (finite_limit) |text| std.fmt.parseInt(usize, text, 10) catch return error.InvalidHostInfo else null;
     const started_at = std.fmt.parseInt(u64, info.started_at, 10) catch return error.InvalidHostInfo;
     if (started_at == 0 or started_at > std.math.maxInt(i64)) return error.InvalidHostInfo;
-    // A slot in use is one of the Host's Active Capacity records.
     const custody_occupied = std.fmt.parseInt(usize, info.custody_occupied, 10) catch return error.InvalidHostInfo;
     if (custody_occupied > capacity) return error.InvalidHostInfo;
     var identity: protocol.Bounded(protocol.max_store_bytes) = .{};
@@ -505,7 +478,6 @@ fn parseHostInfoShape(comptime Info: type, body: []const u8, store: []const u8, 
         .capabilities = .{
             .bash = info.capabilities.bash,
             .providers = routes: {
-                // A provider the reply does not name is one its Host does not serve.
                 var routes = protocol.routesAll(.unserved);
                 inline for (@typeInfo(@TypeOf(info.capabilities.providers)).@"struct".field_names) |name|
                     @field(routes, name) = @field(info.capabilities.providers, name);
@@ -535,7 +507,6 @@ test "Host information parses omitted and bounded string diagnostics with one se
         const omitted = try parseHostInfo(response.slice(), selector);
         try std.testing.expect(omitted.ready.innodb_doublewrite == null);
         try std.testing.expect(std.mem.indexOf(u8, response.slice(), "innodb_doublewrite") == null);
-        // Exercise every admitted width, including JSON escaping at the bound.
         const escaped = @as([32]u8, @splat(1));
         for (0..escaped.len + 1) |len| {
             response.len = 0;
@@ -561,7 +532,6 @@ test "Host information is bounded and rejects ambiguous identities and capacity"
     try std.testing.expectEqualSlices(u8, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, &result.ready.instance);
     try std.testing.expect(result.ready.capabilities.bash);
     try std.testing.expectEqual(protocol.Route.unserved, result.ready.capabilities.providers.codex);
-    // The Host's start time and slots in use, which never exceed its capacity.
     try std.testing.expectEqual(@as(u64, 1792918800), result.ready.started_at);
     try std.testing.expectEqual(@as(usize, 17), result.ready.custody_occupied);
     try std.testing.expect(result.ready.paused);
@@ -578,7 +548,6 @@ test "Host information is bounded and rejects ambiguous identities and capacity"
         defer std.testing.allocator.free(malformed);
         try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(malformed, "/one"));
     }
-    // Each is required: a reply without one is from an incompatible Host.
     inline for (.{ "\"started_at\":\"1792918800\",", "\"custody_occupied\":\"17\",", "\"paused\":true," }) |field| {
         const missing = try std.mem.replaceOwned(u8, std.testing.allocator, golden, field, "");
         defer std.testing.allocator.free(missing);
@@ -624,7 +593,6 @@ test "Host information is bounded and rejects ambiguous identities and capacity"
 }
 
 test "Host information accepts both wire-13 shapes and requires complete current facts" {
-    // Both released wire-13 shapes are complete historical control facts.
     const historical_wire = comptime HostInfoProfile.released_13.wire();
     const previous = "{\"version\":\"" ++ historical_wire ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"endpoint\",\"openai\":\"unserved\"}}}";
     const historical_full = try std.mem.replaceOwned(u8, std.testing.allocator, previous, "\"openai\":\"unserved\"", "\"openai\":\"unserved\",\"chatgpt\":\"unserved\"");
@@ -643,7 +611,6 @@ test "Host information accepts both wire-13 shapes and requires complete current
     defer std.testing.allocator.free(missing);
     try std.testing.expectError(error.MissingField, parseHostInfo(missing, "/one"));
 
-    // Every explicit current or historical route is retained; only wire 13 defaults ChatGPT.
     inline for (@typeInfo(protocol.Routes).@"struct".field_names) |provider| {
         for (std.meta.tags(protocol.Route)) |route| {
             const before = try std.fmt.allocPrint(std.testing.allocator, "\"{s}\":\"{s}\"", .{ provider, @tagName(@field(facts.capabilities.providers, provider)) });
@@ -711,8 +678,6 @@ test "upgrade Host information profiles retain the entire strict shape" {
     try std.testing.expectEqualStrings("17", HostInfoProfile.released_17.wire());
     try std.testing.expectEqualStrings("16", HostInfoProfile.released_16.wire());
     try std.testing.expectEqualStrings("15", HostInfoProfile.released_15.wire());
-    // Provider additions do not relax wire identity: neither profile reads
-    // the other's reply, even when the provider fields happen to match.
     try std.testing.expectError(error.MissingField, parseHostInfo(old, "/one"));
     const versioned = try std.mem.replaceOwned(u8, std.testing.allocator, old, legacy_field, "\"version\":\"" ++ protocol.wire_version ++ "\"");
     defer std.testing.allocator.free(versioned);
@@ -832,7 +797,6 @@ test "Host unavailable replies require a known complete error" {
         "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_unavailable\",\"code\":\"unknown\"}",
         "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\",\"code\":\"ordinary_capacity_exhausted\"}",
         "{\"version\":\"" ++ protocol.next_wire_version ++ "\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\"}",
-        // The previous wire version, as an older Host would answer.
         "{\"version\":\"" ++ protocol.previous_wire_version ++ "\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\"}",
         "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_unavailable\",\"code\":\"discovery_capacity_exhausted\"}",
         "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted_other\"}",
@@ -844,7 +808,6 @@ test "Host unavailable replies require a known complete error" {
 
 pub const CommandReply = struct {
     status: u16,
-    // Borrowed from the caller's ReplyBuffer until that buffer is reused.
     body: []const u8,
 };
 
@@ -877,7 +840,6 @@ pub const ResultReadReply = union(enum) {
     failure: ReadFailure,
 };
 
-/// Owned diagnostic; an unsuccessful read says nothing about prior admission.
 pub const ReadFailure = struct {
     status: u16,
     diagnostic: InvocationDiagnostic,
@@ -897,7 +859,6 @@ pub const CurrentReply = union(enum) {
     current: Current,
     failure: ReadFailure,
 
-    /// The caller retains immutable, offset-zero scratch through any traversal.
     pub fn decode(io: std.Io, file: std.Io.File, session: []const u8, reply: ReportReply) !CurrentReply {
         return switch (reply) {
             .command => |command| .{ .failure = try decodeReadFailure(command, false) },
@@ -914,7 +875,6 @@ pub const CurrentReply = union(enum) {
     }
 };
 
-/// Fixed owned facts; the variable attention population stays in borrowed scratch.
 pub const Current = struct {
     pub const Id = ReportNumber(false);
     pub const Count = ReportNumber(true);
@@ -949,10 +909,6 @@ pub const Current = struct {
         instructions: Reference,
         output_schema: ?Reference,
         compaction_trigger: ?Id,
-        /// The estimated tokens the next model call starts from, when
-        /// automatic compaction decides that call by comparing them with
-        /// `compaction_trigger`; null without a trigger or when the call's
-        /// purpose does not depend on them. Omitted by Hosts that predate it.
         context_estimate: OmittableJson(?Count) = .{},
         output_reservation: Count,
         compaction_trigger_override: ?Id,
@@ -977,7 +933,6 @@ pub const Current = struct {
             try writeObject(self, jw);
         }
     };
-    /// The same peer fact a list row carries.
     pub const Peers = struct {
         from_person_at: ?Id,
 
@@ -1018,8 +973,6 @@ pub const Current = struct {
             tool: JsonString(protocol.max_tool_name_bytes),
             server: OmittableJson(JsonString(64)) = .{},
             permission_revision: Id,
-            /// `core`: a core tool's call, which settlement authorizes at
-            /// once with no permission decision.
             authorization: JsonEnum(enum { pending, bypass, allow_once, core }),
             call_id: Reference,
             arguments: Reference,
@@ -1056,7 +1009,6 @@ pub const Current = struct {
     pending_messages: u64,
     work: Work,
     peers: Peers,
-    /// Omitted by Hosts that predate it.
     first_message: OmittableJson(?JsonFirstMessage) = .{},
     selected_message: ?JsonString(protocol.max_key_bytes),
     recent: [10]Recent,
@@ -1083,9 +1035,6 @@ pub const Current = struct {
         try jw.endObject();
     }
 
-    /// Effectful traversal requires the same immutable offset-zero capture
-    /// successfully decoded into these facts. Row slices expire at visit return.
-    /// The caller owns the file through all synchronous callbacks and return.
     pub fn traverse(self: *const Current, io: std.Io, file: std.Io.File, sink: anytype) !void {
         _ = try read(io, file, self.bytes, self.settings.reference.slice(), sink);
     }
@@ -1181,8 +1130,6 @@ pub const Current = struct {
         var input: [protocol.content_window_bytes]u8 = undefined;
         var file_reader = file.reader(io, &.{});
         var body = file_reader.interface.limited(.limited64(bytes), &input);
-        // Nesting storage survives rows; leaf tokens are separately freed after
-        // copying into owned fields, never underneath a live scanner stack.
         var scanner_storage: [protocol.content_window_bytes]u8 = undefined;
         var scanner_allocator = std.heap.FixedBufferAllocator.init(&scanner_storage);
         var token_storage: [2 * protocol.max_workspace_bytes]u8 = undefined;
@@ -1209,8 +1156,7 @@ pub const Current = struct {
             execution.custody_occupied.value == null or execution.scratch_used_bytes.value == null or execution.unavailable.value == null) return error.InvalidObservation;
         const work = wire.work.value orelse return error.InvalidObservation;
         const peers = wire.peers.value orelse return error.InvalidObservation;
-        if ((work.turn == null) != (work.operation == null) or (work.latest_outcome != null and work.turn == null) or
-            (work.first_action != null and work.turn == null)) return error.InvalidObservation;
+        if ((work.turn == null) != (work.operation == null) or (work.latest_outcome != null and work.turn == null)) return error.InvalidObservation;
         if (work.latest_outcome) |outcome| {
             if (outcome.code.slice().len == 0 or (if (outcome.content) |content| content.type.value != null else false)) return error.InvalidObservation;
         }
@@ -1262,11 +1208,8 @@ fn ReportNumber(comptime allow_zero: bool) type {
     };
 }
 
-/// A report's `tools`: any valid names, sorted with none repeated, as the
-/// Host lists them, MCP servers' tools included.
 const ReportTools = struct {
     names: protocol.ToolsField = .{ .state = .value },
-    /// The built-ins among `names`.
     set: protocol.ToolSelection = .empty,
 
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !ReportTools {
@@ -1358,8 +1301,6 @@ fn AttentionRows(comptime tag: std.meta.Tag(Current.Attention)) type {
     };
 }
 
-/// The next `list-sessions` request: a full traversal's keyset, or a token
-/// and, for a changed continuation, where that answer resumes.
 pub const SessionListCursor = struct {
     after: u64 = 0,
     ceiling: u64 = 0,
@@ -1372,30 +1313,19 @@ pub const SessionListCursor = struct {
     }
 };
 
-/// One `session list` traversal: which request comes next, and what the
-/// pages read so far answer together relative to the traversal's `since`.
-/// A changed traversal that turns `full` restarts as that full traversal,
-/// which supersedes the rows it already gave.
 pub const SessionTraversal = struct {
     cursor: SessionListCursor,
     delta: protocol.ListDelta = .full,
-    /// The token to keep: the first page's, or the first `full` page's
-    /// after a restart. Each later page is read after it, so a commit it
-    /// misses can only reappear, never be lost.
     since: ?protocol.SinceToken = null,
 
     pub fn init(since: ?protocol.SinceToken) SessionTraversal {
         return .{ .cursor = .{ .since = since } };
     }
 
-    /// Whether `page`, which the current cursor returned, starts the
-    /// traversal over, so the rows of earlier pages no longer belong to it.
     pub fn restarts(self: *const SessionTraversal, page: *const SessionListPage) bool {
         return self.since != null and self.delta != .full and page.delta == .full;
     }
 
-    /// Takes the page the current cursor returned. Returns whether another
-    /// page follows; `cursor` is then its request.
     pub fn advance(self: *SessionTraversal, page: *const SessionListPage) bool {
         if (self.since == null or self.restarts(page)) {
             self.delta = page.delta;
@@ -1410,9 +1340,6 @@ pub const SessionListReply = union(enum) {
     page: SessionListPage,
     failure: ReadFailure,
 
-    /// Borrowed scratch/reply bytes are consumed here; returned facts own their
-    /// strings. The report body must start at file offset zero; bytes beyond its
-    /// advertised length are not part of this exchange. The file is not changed.
     pub fn decode(io: std.Io, file: std.Io.File, workspace: ?[]const u8, cursor: SessionListCursor, reply: ReportReply) !SessionListReply {
         return switch (reply) {
             .report => |report| .{ .page = try SessionListPage.read(io, file, report.bytes, workspace, cursor) },
@@ -1421,14 +1348,9 @@ pub const SessionListReply = union(enum) {
     }
 };
 
-/// Owned list rows; string slices borrow this value, not report scratch.
-/// Store remains the authority for ordering and every row fact.
 pub const SessionListPage = struct {
     pub const Row = protocol.SessionRow;
 
-    /// A row as the Host writes it, checked before it is kept: canonical
-    /// identities, positive times and IDs, and peer facts that agree with
-    /// the first Message.
     const JsonRow = struct {
         value: Row,
 
@@ -1490,9 +1412,7 @@ pub const SessionListPage = struct {
                 if (row.last_line.?.position > row.end) return error.InvalidCharacter;
             }
             const work = row.work;
-            if ((work.turn == null) != (work.operation == null) or (work.first_action != null and work.turn == null)) return error.InvalidCharacter;
-            // A person's Message is a Message, and the first one is either a
-            // person's or a peer's.
+            if ((work.turn == null) != (work.operation == null)) return error.InvalidCharacter;
             if (row.first_message) |first| {
                 if (first.position > row.end) return error.InvalidCharacter;
                 if (first.sender == null and row.peers.from_person_at == null) return error.InvalidCharacter;
@@ -1507,8 +1427,6 @@ pub const SessionListPage = struct {
     since: protocol.SinceToken = .{ .instance = @splat(0), .generation = 0 },
     next: ?SessionListCursor = null,
 
-    /// Reads exactly [0, bytes) from caller-owned scratch, not its physical EOF.
-    /// No file/resource escapes; malformed input never yields a partial page.
     pub fn read(io: std.Io, file: std.Io.File, bytes: u64, workspace: ?[]const u8, cursor: SessionListCursor) !SessionListPage {
         if (bytes == 0 or bytes > protocol.session_list_reply.max_bytes) return error.InvalidSessionPage;
         cursor.validate() catch return error.InvalidSessionPage;
@@ -1529,14 +1447,11 @@ pub const SessionListPage = struct {
         var input_buffer: [protocol.content_window_bytes]u8 = undefined;
         var file_reader = file.reader(io, &.{});
         var body = file_reader.interface.limited(.limited64(bytes), &input_buffer);
-        // One decoded maximum Workspace token, field names and scanner stack;
-        // rows are fixed values, not allocator-backed collections or a DOM.
         var storage: [2 * protocol.max_workspace_bytes + protocol.content_window_bytes]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         var reader = std.json.Reader.init(fixed.allocator(), &body.interface);
         defer reader.deinit();
         const wire = std.json.parseFromTokenSourceLeaky(Wire, fixed.allocator(), &reader, .{ .ignore_unknown_fields = true }) catch return error.InvalidSessionPage;
-        // Underlying physical EOF can precede the limit even after valid JSON.
         if (body.remaining != .nothing) return error.InvalidSessionPage;
         if (!wire.version.eql(protocol.wire_version) or !wire.type.eql("session_list")) return error.InvalidSessionPage;
         var result: SessionListPage = .{
@@ -1550,15 +1465,11 @@ pub const SessionListPage = struct {
             for (result.rows[0..index]) |*previous| if (previous.reference.eql(row.reference.slice())) return error.InvalidSessionPage;
         }
         switch (result.delta) {
-            // Only a token's own first page, echoing it, with nothing to read.
             .not_modified => {
                 const since = cursor.since orelse return error.InvalidSessionPage;
                 if (cursor.changed != null or result.count != 0 or wire.next != null or
                     !std.meta.eql(since, result.since)) return error.InvalidSessionPage;
             },
-            // Rows after the cursor's reference in ID order, from this
-            // token's Host instance, answered through the first page's
-            // generation.
             .changed => {
                 const since = cursor.since orelse return error.InvalidSessionPage;
                 if (!std.mem.eql(u8, &since.instance, &result.since.instance) or result.since.generation < since.generation) return error.InvalidSessionPage;
@@ -1575,8 +1486,6 @@ pub const SessionListPage = struct {
                     result.next = .{ .since = since, .changed = .{ .through = through, .after_reference = reference.value.bytes[0..protocol.session_id_bytes].* } };
                 }
             },
-            // The ordinary traversal; a token-bearing request that gets it
-            // starts over at its first page.
             .full => {
                 const keyset: SessionListCursor = if (cursor.since == null) cursor else .{};
                 if (keyset.after != 0 and keyset.after == keyset.ceiling and result.count != 0) return error.InvalidSessionPage;
@@ -1606,8 +1515,6 @@ pub const SessionListPage = struct {
         } else try writer.writeAll("null}");
     }
 
-    /// Rows borrow this validated page. A caller may stream many bounded pages
-    /// into one list without retaining the Session population or raw wire text.
     pub fn writeRowsJson(self: *const SessionListPage, writer: *std.Io.Writer) !void {
         for (self.rows[0..self.count], 0..) |*row, index| {
             if (index != 0) try writer.writeAll(",");
@@ -1616,13 +1523,11 @@ pub const SessionListPage = struct {
     }
 };
 
-/// A request key and canonical Session reference, before any path or socket access.
 pub fn validateIdentityInputs(key: []const u8, session: []const u8) !void {
     if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
     if (!protocol.validSessionId(session)) return error.InvalidSession;
 }
 
-/// An owned selected address, independent of any local request capture.
 pub const MessageAddress = struct {
     store: protocol.Bounded(protocol.max_store_bytes) = .{},
     session: protocol.Bounded(protocol.max_session_bytes) = .{},
@@ -1638,8 +1543,6 @@ pub const MessageAddress = struct {
     }
 };
 
-/// Owned scalar facts survive reply-buffer reuse. No DOM, payload or allocator
-/// lifetime is retained. Admission status is distinct from the Message result.
 pub const CommandObservation = struct {
     key: protocol.Bounded(protocol.max_key_bytes),
     status: enum { absent, accepted, rejected },
@@ -1661,6 +1564,8 @@ pub const CommandObservation = struct {
     completion: ?protocol.SessionStopCompletion = null,
     interruption_target: ?struct { session: protocol.Bounded(protocol.max_session_bytes), turn: u64, operation: u64 } = null,
     permission_target: ?struct { action: u64, decision: protocol.PermissionDecision } = null,
+    action_target: ?u64 = null,
+    action_selection: ?@import("action_control.zig").Selection = null,
 
     pub const ContentReference = mutation_answer.ContentReference;
 
@@ -1670,7 +1575,6 @@ pub const CommandObservation = struct {
         more: bool,
     };
 
-    /// Borrowed from this owned value, not from the receive buffer.
     pub fn failureCode(self: *const CommandObservation) ?[]const u8 {
         if (self.code) |*code| return code.slice();
         if (self.result) |*result| if (result.code) |*code| return code.slice();
@@ -1684,7 +1588,6 @@ pub const CommandObservation = struct {
         return self;
     }
 
-    /// Semantic output of supported facts only, with decimal identity strings.
     pub fn writeJson(self: *const CommandObservation, writer: *std.Io.Writer) !void {
         try writer.print("{{\"status\":\"{s}\"", .{@tagName(self.status)});
         if (self.kind) |kind| try writer.print(",\"kind\":\"{s}\",\"target\":", .{@tagName(kind)});
@@ -1739,6 +1642,8 @@ pub const CommandObservation = struct {
             try writer.print(",\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{ target.turn, target.operation });
         }
         if (self.permission_target) |target| try writer.print(",\"permission_target\":{{\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{ target.action, @tagName(target.decision) });
+        if (self.action_target) |action| try writer.print(",\"action_target\":{{\"action\":\"{d}\"}}", .{action});
+        if (self.action_selection) |selection| try writer.print(",\"action_selection\":{{\"kind\":\"{s}\",\"position\":\"{d}\"}}", .{ @tagName(selection.kind), selection.position });
         try writer.writeByte('}');
     }
 
@@ -1780,6 +1685,8 @@ pub const CommandObservation = struct {
             completion: OmittableJson(struct { status: JsonEnum(@typeInfo(@FieldType(CommandObservation, "completion")).optional.child) }) = .{},
             interruption_target: OmittableJson(struct { session: JsonString(protocol.max_session_bytes), turn: JsonString(20), operation: JsonString(20) }) = .{},
             permission_target: OmittableJson(struct { action: JsonString(20), decision: JsonEnum(protocol.PermissionDecision) }) = .{},
+            action_target: OmittableJson(struct { action: JsonString(20) }) = .{},
+            action_selection: OmittableJson(struct { kind: JsonEnum(@FieldType(@import("action_control.zig").Selection, "kind")), position: JsonString(20) }) = .{},
         };
         const Since = struct {
             value: ?JsonString(SessionToken.max_bytes),
@@ -1833,6 +1740,8 @@ pub const CommandObservation = struct {
         if (facts.completion.value) |value| observed.completion = value.status.value;
         if (facts.interruption_target.value) |value| observed.interruption_target = .{ .session = value.session.value, .turn = try decimalId(value.turn, true), .operation = try decimalId(value.operation, true) };
         if (facts.permission_target.value) |value| observed.permission_target = .{ .action = try decimalId(value.action, true), .decision = value.decision.value };
+        if (facts.action_target.value) |value| observed.action_target = try decimalId(value.action, true);
+        if (facts.action_selection.value) |value| observed.action_selection = .{ .kind = value.kind.value, .position = try decimalId(value.position, false) };
         try observed.validate();
         if (since) |token| {
             const target = observed.target orelse return error.InvalidObservation;
@@ -1850,7 +1759,7 @@ pub const CommandObservation = struct {
 
     fn validate(self: *const CommandObservation) !void {
         if (self.status == .absent) {
-            inline for (.{ "kind", "target", "code", "revision", "created", "input", "state", "queue", "binding", "result", "work", "recovery", "selection", "archived", "pinned", "completion", "interruption_target", "permission_target" }) |name| if (@field(self, name) != null) return error.InvalidObservation;
+            inline for (.{ "kind", "target", "code", "revision", "created", "input", "state", "queue", "binding", "result", "work", "recovery", "selection", "archived", "pinned", "completion", "interruption_target", "permission_target", "action_target", "action_selection" }) |name| if (@field(self, name) != null) return error.InvalidObservation;
             return;
         }
         const kind = self.kind orelse return error.InvalidObservation;
@@ -1866,6 +1775,8 @@ pub const CommandObservation = struct {
             (self.pinned != null) != (accepted and kind == .session_pin) or
             (self.completion != null) != (accepted and (kind == .session_stop or kind == .session_archive))) return error.InvalidObservation;
         if ((self.interruption_target != null) != (kind == .model_interruption) or (self.permission_target != null) != (kind == .permission_decision)) return error.InvalidObservation;
+        if ((self.action_target != null) != (kind == .action_background) or
+            (self.action_selection != null) != (accepted and kind == .action_background)) return error.InvalidObservation;
         if (self.interruption_target) |target| if (!target.session.eql(self.target.?.slice())) return error.RequestBindingMismatch;
         if (kind != .message) {
             if (self.state != null or self.input != null or self.queue != null or self.binding != null or self.result != null or self.work != null or self.recovery != null) return error.InvalidObservation;
@@ -1885,8 +1796,6 @@ pub const CommandObservation = struct {
             } else if (result.text != null or result.code == null or result.code.?.len == 0) return error.InvalidObservation;
         } else {
             if (self.work == null) return error.InvalidObservation;
-            // Permission readiness owns the approval work variant. The Host's
-            // state remains authoritative; this only checks wire applicability.
             if ((state == .waiting_for_permission) != (self.work.?.state == .approval)) return error.InvalidObservation;
             switch (state) {
                 .queued => if (self.binding != null) return error.InvalidObservation,
@@ -1908,13 +1817,10 @@ pub const MutationTarget = mutation_answer.Target;
 pub const MutationAnswer = mutation_answer.Answer;
 pub const InvocationDiagnostic = mutation_answer.InvocationDiagnostic;
 
-/// The shared authority rule, against this protocol's wire version.
 pub fn validateInvocationDiagnostic(status: u16, version: []const u8, diagnostic: InvocationDiagnostic) error{InvalidResponse}!void {
     return mutation_answer.validateInvocationDiagnostic(protocol.wire_version, status, version, diagnostic);
 }
 
-/// Owned facts and original request context survive buffer reuse and capture
-/// closure. An answer error is unconfirmed, never rejection or noncommit.
 pub const MutationReply = struct {
     status: u16,
     diagnostic: ?InvocationDiagnostic = null,
@@ -1922,8 +1828,6 @@ pub const MutationReply = struct {
     target: MutationTarget,
     answer: mutation_answer.Error!MutationAnswer,
 
-    /// Preserve the existing machine-readable unconfirmed reason vocabulary.
-    /// Human presentation classifies these failures separately as caller codes.
     pub fn failureReason(err: @typeInfo(@FieldType(MutationReply, "answer")).error_union.error_set) []const u8 {
         return switch (err) {
             error.CanonicalStoreFailure => "CanonicalStoreFailure",
@@ -1950,9 +1854,6 @@ pub const JsonAddress = struct {
     }
 };
 
-/// Pages expose only canonical Session IDs as peer labels.
-/// A Session's first Message as list rows and Current reports write it
-/// (`protocol.FirstMessage`).
 pub const JsonFirstMessage = struct {
     value: protocol.FirstMessage,
 
@@ -1998,8 +1899,6 @@ pub const JsonNamedPeer = struct {
     }
 };
 
-/// A Session's work state as every reader writes it (`protocol.WorkStateJson`):
-/// `kind`, `since`, and exactly the facts that kind owns.
 pub const JsonWorkState = struct {
     value: protocol.WorkState,
 
@@ -2029,7 +1928,6 @@ pub const JsonWorkState = struct {
             .idle, .pending, .working, .approval, .stopping, .finished => @splat(false),
         };
         if (!std.mem.eql(bool, &present, &owned)) return error.InvalidCharacter;
-        // Only `bash` owns `call`, which a Host that predates it omits.
         if (wire.call.isPresent() and kind != .bash) return error.InvalidCharacter;
         const since = number(wire.since, false) catch return error.InvalidCharacter;
         const value: protocol.WorkState = switch (kind) {
@@ -2056,7 +1954,6 @@ pub const JsonWorkState = struct {
             .failed => failed: {
                 const saved = try code(wire.code.value.?);
                 const resets_at = if (wire.resets_at.value.?) |text| number(text, false) catch return error.InvalidCharacter else null;
-                // Only a quota refusal saves a reset time.
                 if (resets_at != null and transport_policy.Quota.ofFailureCode(saved.slice()) == null) return error.InvalidCharacter;
                 break :failed .{ .failed = .{ .since = since, .code = saved, .resets_at = resets_at } };
             },
@@ -2149,7 +2046,6 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
             return error.AcceptedInvalidPresentation;
         } else |_| {}
     }
-    // Worst JSON escaping is six bytes per decoded byte, not the token bound.
     const escaped = "{\"description\":\"" ++ @as([200 * 6]u8, @bitCast(@as([200][6]u8, @splat("\\u0001".*)))) ++ "\",\"code\":\"succeeded\",\"publication_position\":\"9223372036854775807\"}";
     const maximum = try std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, escaped, .{});
     defer maximum.deinit();
@@ -2160,7 +2056,6 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
     const roundtrip = try std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, writer.buffered(), .{});
     defer roundtrip.deinit();
     try std.testing.expectEqualDeep(maximum.value.value, roundtrip.value.value);
-    // The widest boundary a call published after it still follows.
     var facts: protocol.ActivityFacts = .{ .end = std.math.maxInt(i64) - 1, .count = 16 };
     facts.queued = .{ .count = std.math.maxInt(i64) - 1_000_000_000_000_000_000, .oldest_position = 1_000_000_000_000_000_000, .newest_admission = std.math.maxInt(i64), .newest_position = std.math.maxInt(i64) - 1 };
     for (&facts.items, 0..) |*item, index| item.* = .{
@@ -2176,7 +2071,6 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
         .presentation = .{ .description = maximum.value.value.description, .code = .infrastructure_shutdown, .publication_position = std.math.maxInt(i64) },
     };
     facts.work = .{ .read_version = .{ .instance = @splat(0xab), .generation = std.math.maxInt(u64) }, .work = .{ .state = .{ .approval = .{ .since = std.math.maxInt(i64) } }, .turn = std.math.maxInt(i64), .operation = std.math.maxInt(i64) - 1, .first_action = std.math.maxInt(i64) - 2 }, .revision = std.math.maxInt(i64) };
-    // An absolute Workspace whose other bytes escape to their widest JSON form.
     @memset(facts.work.workspace.bytes[0..protocol.max_workspace_bytes], 0x01);
     facts.work.workspace.bytes[0] = '/';
     facts.work.workspace.len = protocol.max_workspace_bytes;
@@ -2213,7 +2107,6 @@ test "activity page preserves the canonical row preview with its work" {
         const malformed = try std.mem.replaceOwned(u8, std.testing.allocator, out.buffered(), "\"position\":\"4\"", "\"position\":\"0\"");
         defer std.testing.allocator.free(malformed);
         try std.testing.expectError(error.InvalidResponse, ActivityPage.parse(malformed, .{}));
-        // Like work, the preview is live, not bounded by historical end.
         facts.end = 1;
     }
 }
@@ -2287,9 +2180,7 @@ test "an activity page's queued Messages are none or a span at its boundary" {
         .{ .queued = .{}, .valid = true },
         .{ .queued = .{ .count = 2, .oldest_position = 31, .newest_admission = 9, .newest_position = 40 }, .valid = true },
         .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 9, .newest_position = 40 }, .valid = true },
-        // None waits, yet a Message is named.
         .{ .queued = .{ .newest_admission = 9 }, .valid = false },
-        // After the boundary, before the oldest, or more than fit the span.
         .{ .queued = .{ .count = 1, .oldest_position = 41, .newest_admission = 9, .newest_position = 41 }, .valid = false },
         .{ .queued = .{ .count = 2, .oldest_position = 32, .newest_admission = 9, .newest_position = 31 }, .valid = false },
         .{ .queued = .{ .count = 3, .oldest_position = 39, .newest_admission = 9, .newest_position = 40 }, .valid = false },
@@ -2349,7 +2240,6 @@ test "an activity row carries its time, and a Message's rows carry its admission
         .{ .value = .{ .admission = message }, .at = 1792925001, .failure = error.InvalidActivityPage },
         .{ .value = .{ .sent = sent }, .at = 1792925000 },
         .{ .value = .{ .sent = sent }, .at = 1, .failure = error.InvalidActivityPage },
-        // Like every ID and time on a page, zero is no time.
         .{ .value = .{ .assistant = .{ .content = content } }, .at = 0, .failure = error.InvalidResponse },
     }) |case| {
         var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
@@ -2362,7 +2252,6 @@ test "an activity row carries its time, and a Message's rows carry its admission
             try std.testing.expectError(failure, ActivityPage.parse(writer.buffered(), .{}));
         } else try std.testing.expectEqual(case.at, (try ActivityPage.parse(writer.buffered(), .{})).facts.items[0].at);
     }
-    // A peer's label crosses with it, and an unnamed peer stays unnamed.
     for ([_][]const u8{ "Review the WAL", "" }) |label| {
         var named = sent;
         try named.target.label.set(label);
@@ -2376,7 +2265,6 @@ test "an activity row carries its time, and a Message's rows carry its admission
         try std.testing.expectEqualStrings(label, target.label.slice());
         try std.testing.expectEqualStrings(if (label.len == 0) "k7m2qx" else label, target.name());
     }
-    // A row without its time is refused.
     var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
     facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .assistant = .{ .content = content } } };
     try facts.work.workspace.set("/w");
@@ -2441,14 +2329,11 @@ test "a work state reads back exactly the facts its kind owns" {
         try (protocol.WorkStateJson{ .state = state }).writeJson(&writer);
         const parsed = try std.json.parseFromSlice(JsonWorkState, std.testing.allocator, writer.buffered(), .{});
         defer parsed.deinit();
-        // The client re-emits the bytes the Host wrote.
         var again: [protocol.WorkStateJson.max_json_bytes]u8 = undefined;
         var again_writer = std.Io.Writer.fixed(&again);
         try std.json.Stringify.value(parsed.value, .{}, &again_writer);
         try std.testing.expectEqualStrings(writer.buffered(), again_writer.buffered());
     }
-    // A running Host survives a Rui upgrade: a Host that predates `call`
-    // still reads, as a running call no row is known to carry.
     for ([_][]const u8{
         "{\"kind\":\"bash\",\"since\":\"5\",\"description\":null,\"running\":\"1\",\"approvals\":\"0\"}",
         "{\"kind\":\"bash\",\"since\":\"5\",\"call\":\"3\",\"description\":null,\"running\":\"1\",\"approvals\":\"0\"}",
@@ -2458,13 +2343,11 @@ test "a work state reads back exactly the facts its kind owns" {
         try std.testing.expectEqual(call, parsed.value.value.bash.call);
     }
     for ([_][]const u8{
-        // A fact the kind does not own, or one it is missing.
         "{\"kind\":\"idle\",\"since\":\"1\",\"cause\":\"stop\"}",
         "{\"kind\":\"retrying\",\"since\":\"4\",\"due_at_ms\":\"4500\",\"cause\":\"c\"}",
         "{\"kind\":\"bash\",\"since\":\"5\",\"running\":\"1\",\"approvals\":\"0\"}",
         "{\"kind\":\"working\",\"since\":\"3\",\"call\":\"0\"}",
         "{\"kind\":\"failed\",\"since\":\"9\",\"code\":\"c\"}",
-        // Values outside each fact's grammar.
         "{\"kind\":\"pending\",\"since\":\"0\"}",
         "{\"kind\":\"pending\",\"since\":2}",
         "{\"kind\":\"later\",\"since\":\"2\"}",
@@ -2490,7 +2373,6 @@ test "canonical presentation releases allocations on acceptance and late rejecti
                 else
                     bytes ++ "\"9223372036854775807\"}");
                 defer scanner.deinit();
-                // No outer arena may hide leaked temporary decoded tokens.
                 break :decode std.json.parseFromTokenSourceLeaky(JsonToolPresentation, allocator, &scanner, .{});
             };
             const value = (result catch |err| {
@@ -2499,7 +2381,6 @@ test "canonical presentation releases allocations on acceptance and late rejecti
                 try std.testing.expectEqual(error.InvalidCharacter, err);
                 return;
             }).value;
-            // Returned bounded facts must outlive the parser's allocations.
             try std.testing.expect(!invalid);
             try std.testing.expectEqualStrings("Read € files", value.description.?.slice());
             try std.testing.expectEqual(protocol.ToolPresentation.Code.succeeded, value.code);
@@ -2534,8 +2415,6 @@ pub fn decodeReadFailure(reply: CommandReply, result_read: bool) !ReadFailure {
     return failure;
 }
 
-/// One operation boundary for synchronous callers and a later worker. No
-/// workflow, terminal, retry or certainty transition is made by this decoder.
 pub fn decodeMutationReply(reply: CommandReply, session: []const u8, target: MutationTarget) MutationReply {
     var result: MutationReply = .{ .status = reply.status, .context = .{ .kind = target }, .target = target, .answer = error.InvalidResponse };
     result.context.session.set(session) catch return result;
@@ -2547,8 +2426,6 @@ pub fn decodeMutationReply(reply: CommandReply, session: []const u8, target: Mut
 
 fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: MutationTarget, diagnostic: *?InvocationDiagnostic, resolved_session: *protocol.Bounded(protocol.max_session_bytes)) @FieldType(MutationReply, "answer") {
     if (reply.body.len > protocol.max_response_bytes) return error.InvalidResponse;
-    // Strings are copied into bounded values and immediately freed. Reserve
-    // scanner nesting first, as in the canonical classifier; no payload arena.
     const capacity = comptime std.ArrayList(u8).growCapacity((protocol.max_response_bytes + 7) / 8) + std.ArrayList(u8).growCapacity(protocol.max_response_bytes);
     var storage: [capacity]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&storage);
@@ -2595,8 +2472,6 @@ pub const MutationIdentity = struct {
     kind: protocol.CommandKind,
 };
 
-// Remaining snapshot/report/Action callers check canonical failure here;
-// mutation and keyed-read callers own diagnostics from their envelope parse.
 pub fn checkCanonicalFailure(reply: CommandReply) !void {
     if (reply.status == 200) return;
     if (reply.body.len > protocol.max_response_bytes) return error.InvalidResponse;
@@ -2641,11 +2516,9 @@ pub fn checkCanonicalFailure(reply: CommandReply) !void {
     const envelope = std.json.parseFromTokenSourceLeaky(Envelope, allocator, &scanner, .{
         .ignore_unknown_fields = true,
     }) catch |err| switch (err) {
-        error.OutOfMemory => unreachable, // The bounded-storage proof above covers every input.
+        error.OutOfMemory => unreachable,
         else => return error.InvalidResponse,
     };
-    // Unknown values receive full syntax validation but no duplicate-key policy;
-    // version, type and code alone establish invocation-error authority.
     if (envelope.code == .canonical) {
         var diagnostic: InvocationDiagnostic = .{ .type = .{}, .code = .{} };
         diagnostic.code.set("canonical_store_failure") catch unreachable;
@@ -2717,7 +2590,6 @@ test "canonical failure classifier bounds deep wide and escaped maximum replies"
     @memset(body[prefix.len..protocol.max_response_bytes], '[');
     try std.testing.expectError(error.InvalidResponse, checkCanonicalFailure(.{ .status = 500, .body = body[0..protocol.max_response_bytes] }));
 
-    // A nearly maximum escaped field name must be released before code decode.
     const field_prefix = "{\"";
     const field_suffix = "\":0,\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"co\\u0064e\":\"canonical_store_\\u0066ailure\"}";
     @memcpy(body[0..field_prefix.len], field_prefix);
@@ -2735,7 +2607,6 @@ test "canonical failure classifier bounds deep wide and escaped maximum replies"
     @memcpy(body[0..prefix.len], prefix);
     length = prefix.len;
     const wide = "{\"x\":0,\"x\":0}";
-    // Discarded wide objects validate syntax, not irrelevant key uniqueness.
     body[length] = '[';
     length += 1;
     while (length + wide.len + 3 <= protocol.max_response_bytes) {
@@ -2754,7 +2625,6 @@ test "canonical failure classifier bounds deep wide and escaped maximum replies"
 
     @memcpy(body[0..prefix.len], prefix);
     length = prefix.len;
-    // Consecutive escaped names must not accumulate decoded allocations.
     const names = "\"ignored\",\"\\u0061\":0,";
     @memcpy(body[length..][0..names.len], names);
     length += names.len;
@@ -2770,13 +2640,10 @@ test "canonical failure classifier bounds deep wide and escaped maximum replies"
     try std.testing.expectError(error.CanonicalStoreFailure, checkCanonicalFailure(.{ .status = 500, .body = body[0..protocol.max_response_bytes] }));
 }
 
-/// A full page's facts after its rows, up to `next`.
 const testing_list_facts = "],\"delta\":\"full\",\"since\":\"abababababababababababababababab.42\",\"next\":";
-/// A list row's facts after its settings, for a Session no one has messaged.
 const testing_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null" ++ testing_row_details;
 const testing_row_details = ",\"parent\":null,\"label\":null,\"created_at\":\"1\",\"revision\":\"1\",\"end\":\"0\",\"first_message\":null,\"last_line\":null," ++
     "\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null},\"peers\":{\"from_person_at\":null}";
-/// The same for a Session a person started, now working.
 const testing_started_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\",\"revision\":\"1\",\"end\":\"9\"," ++
     "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}," ++
     "\"last_line\":null,\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1792925300\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null},\"peers\":{\"from_person_at\":\"1792925001\"}";
@@ -2942,7 +2809,6 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
         try file.writePositionalAll(io, wire, 0);
         try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, wire.len, null, .{}));
     }
-    // Each row fact is checked, alone and against the others.
     const settings = prefix ++ "\"tools\":[],\"permission_mode\":\"ask\"";
     {
         const file = try tmp.dir.createFile(io, "facts-valid", .{ .read = true });
@@ -2977,15 +2843,12 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
         .{ "\"last_line\":null", "\"last_line\":{\"position\":\"8\"}" },
         .{ "\"last_line\":null", "\"last_line\":{\"position\":\"8\",\"text\":false}" },
         .{ "\"last_line\":null", "\"last_line\":{\"position\":\"8\",\"text\":\"" ++ @as([session_list.max_last_line_bytes + 1]u8, @splat('x')) ++ "\"}" },
-        // The first Message lies beyond the activity end.
         .{ "\"end\":\"9\"", "\"end\":\"0\"" },
         .{ "\"sender\":null", "\"sender\":{\"session\":\"k7m2qX\"}" },
-        // A person started it, yet no person ever messaged it.
         .{ "\"from_person_at\":\"1792925001\"", "\"from_person_at\":null" },
         .{ "\"operation\":\"6\"", "\"operation\":null" },
         .{ "\"state\":{\"kind\":\"working\",\"since\":\"1792925300\"}", "\"state\":{\"kind\":\"failed\",\"since\":\"1\",\"code\":\"provider_http_500\",\"resets_at\":\"5\"}" },
         .{ ",\"peers\":{\"from_person_at\":\"1792925001\"}", "" },
-        // No first Message, yet a Turn and a person's Message.
         .{ "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,", "\"first_message\":null,\"ignored\":{\"sender\":null," },
     }, 0..) |case, index| {
         var name_buffer: [32]u8 = undefined;
@@ -3000,7 +2863,6 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
     }
 }
 
-/// A list page of rows named by `references`, then `facts`.
 fn testingListPage(buffer: []u8, references: []const []const u8, facts: []const u8) ![]const u8 {
     var writer = std.Io.Writer.fixed(buffer);
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
@@ -3025,21 +2887,17 @@ test "a since reply answers its request's token: unchanged, changed rows in ID o
     const eight = [_][]const u8{ "d00000", "d00001", "d00002", "d00003", "d00004", "d00005", "d00006", "d00007" };
     const Case = struct { cursor: SessionListCursor, references: []const []const u8, facts: []const u8, valid: bool };
     const cases = [_]Case{
-        // Unchanged: the token's own first page echoes it, with nothing.
         .{ .cursor = asked, .references = &.{}, .facts = "],\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.42\",\"next\":null}", .valid = true },
         .{ .cursor = .{}, .references = &.{}, .facts = "],\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.42\",\"next\":null}", .valid = false },
         .{ .cursor = continued, .references = &.{}, .facts = "],\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.42\",\"next\":null}", .valid = false },
         .{ .cursor = asked, .references = &.{}, .facts = "],\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.43\",\"next\":null}", .valid = false },
         .{ .cursor = asked, .references = &.{"k7m2qx"}, .facts = "],\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.42\",\"next\":null}", .valid = false },
-        // Changed: this instance, no earlier than the token, in ID order.
         .{ .cursor = asked, .references = &.{ "a00000", "k7m2qx" }, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.48\",\"next\":null}", .valid = true },
         .{ .cursor = asked, .references = &.{}, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.42\",\"next\":null}", .valid = true },
         .{ .cursor = .{}, .references = &.{}, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.48\",\"next\":null}", .valid = false },
         .{ .cursor = asked, .references = &.{ "k7m2qx", "a00000" }, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.48\",\"next\":null}", .valid = false },
         .{ .cursor = asked, .references = &.{}, .facts = "],\"delta\":\"changed\",\"since\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd.48\",\"next\":null}", .valid = false },
         .{ .cursor = asked, .references = &.{}, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.41\",\"next\":null}", .valid = false },
-        // A changed continuation resumes after its reference, through the
-        // first page's generation.
         .{ .cursor = continued, .references = &.{"d00000"}, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.48\",\"next\":null}", .valid = true },
         .{ .cursor = continued, .references = &.{"c00000"}, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.48\",\"next\":null}", .valid = false },
         .{ .cursor = continued, .references = &.{"d00000"}, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.49\",\"next\":null}", .valid = false },
@@ -3048,10 +2906,8 @@ test "a since reply answers its request's token: unchanged, changed rows in ID o
         .{ .cursor = asked, .references = &eight, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.48\",\"next\":{\"through\":\"47\",\"after_reference\":\"d00007\"}}", .valid = false },
         .{ .cursor = asked, .references = &eight, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.48\",\"next\":{\"through\":\"48\",\"after_reference\":\"d00006\"}}", .valid = false },
         .{ .cursor = asked, .references = &eight, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.48\",\"next\":{\"after\":\"8\",\"ceiling\":\"20\"}}", .valid = false },
-        // Full: any instance, and a token's request starts the traversal over.
         .{ .cursor = continued, .references = &eight, .facts = "],\"delta\":\"full\",\"since\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd.3\",\"next\":{\"after\":\"8\",\"ceiling\":\"20\"}}", .valid = true },
         .{ .cursor = asked, .references = &eight, .facts = "],\"delta\":\"full\",\"since\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd.3\",\"next\":{\"through\":\"3\",\"after_reference\":\"d00007\"}}", .valid = false },
-        // The facts themselves.
         .{ .cursor = .{}, .references = &.{}, .facts = "],\"since\":\"abababababababababababababababab.42\",\"next\":null}", .valid = false },
         .{ .cursor = .{}, .references = &.{}, .facts = "],\"delta\":\"full\",\"next\":null}", .valid = false },
         .{ .cursor = .{}, .references = &.{}, .facts = "],\"delta\":\"partial\",\"since\":\"abababababababababababababababab.42\",\"next\":null}", .valid = false },
@@ -3072,7 +2928,6 @@ test "a since reply answers its request's token: unchanged, changed rows in ID o
         try page.writeJson(&writer);
         try std.testing.expectEqualStrings(wire, writer.buffered());
     }
-    // A changed page's continuation names the token, its through and its last row.
     const wire = try testingListPage(&buffer, &eight, "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.48\",\"next\":{\"through\":\"48\",\"after_reference\":\"d00007\"}}");
     try file.writePositionalAll(io, wire, 0);
     const changed = try SessionListPage.read(io, file, wire.len, null, asked);
@@ -3085,7 +2940,6 @@ test "a traversal keeps its first page's token, and a changed one that turns ful
     const later = try protocol.SinceToken.parse("abababababababababababababababab.50");
     const other = try protocol.SinceToken.parse("cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd.3");
     const changed_next: SessionListCursor = .{ .since = first, .changed = .{ .through = 48, .after_reference = "d00007".* } };
-    // A full listing's later pages are read after its first; its first token covers them.
     var full = SessionTraversal.init(null);
     try std.testing.expect(full.advance(&.{ .delta = .full, .since = first, .next = .{ .after = 8, .ceiling = 20 } }));
     try std.testing.expectEqualDeep(SessionListCursor{ .after = 8, .ceiling = 20 }, full.cursor);
@@ -3093,7 +2947,6 @@ test "a traversal keeps its first page's token, and a changed one that turns ful
     try std.testing.expect(!full.advance(&.{ .delta = .full, .since = later }));
     try std.testing.expectEqual(protocol.ListDelta.full, full.delta);
     try std.testing.expectEqualDeep(first, full.since.?);
-    // Changed pages continue through the first page's generation...
     var traversal = SessionTraversal.init(first);
     try std.testing.expectEqualDeep(SessionListCursor{ .since = first }, traversal.cursor);
     const through = try protocol.SinceToken.parse("abababababababababababababababab.48");
@@ -3101,15 +2954,12 @@ test "a traversal keeps its first page's token, and a changed one that turns ful
     try std.testing.expect(traversal.advance(&.{ .delta = .changed, .since = through, .next = changed_next }));
     try std.testing.expectEqual(protocol.ListDelta.changed, traversal.delta);
     try std.testing.expectEqualDeep(changed_next, traversal.cursor);
-    // ...until the hint stops covering the token: the traversal is then
-    // full, with the full traversal's token, and drops the rows before.
     try std.testing.expect(traversal.restarts(&.{ .delta = .full, .since = other }));
     try std.testing.expect(traversal.advance(&.{ .delta = .full, .since = other, .next = .{ .after = 8, .ceiling = 20 } }));
     try std.testing.expectEqual(protocol.ListDelta.full, traversal.delta);
     try std.testing.expectEqualDeep(other, traversal.since.?);
     try std.testing.expect(!traversal.advance(&.{ .delta = .full, .since = later }));
     try std.testing.expectEqualDeep(other, traversal.since.?);
-    // Unchanged is one page.
     var unchanged = SessionTraversal.init(first);
     try std.testing.expect(!unchanged.advance(&.{ .delta = .not_modified, .since = first }));
     try std.testing.expectEqual(protocol.ListDelta.not_modified, unchanged.delta);
@@ -3167,7 +3017,6 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     var output = file.writerStreaming(io, &bytes);
     const writer = &output.interface;
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
-    // Every row escapes every byte of its longest texts.
     const largest = std.math.maxInt(i64);
     var maximal: protocol.SessionRow = .{ .read_version = .{ .instance = @splat(0xab), .generation = std.math.maxInt(u64) }, .archive_state = .archiving, .provider = .codex, .tools = try .of(&.{"bash"}), .permission_mode = .bypass, .label = .{}, .created_at = largest, .revision = largest, .end = largest };
     maximal.parent = .{};
@@ -3194,7 +3043,6 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     try writer.flush();
     const length = try file.length(io);
     try std.testing.expect(length > protocol.content_window_bytes);
-    // The derived bound holds the largest page, and a reply past it is refused unread.
     try std.testing.expect(length <= protocol.session_list_reply.max_bytes);
     try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, protocol.session_list_reply.max_bytes + 1, &workspace, .{ .after = 11, .ceiling = 23 }));
     const page = try SessionListPage.read(io, file, length, &workspace, .{ .after = 11, .ceiling = 23 });
@@ -3214,12 +3062,10 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, length, "/wrong", .{}));
     try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, length, null, .{ .after = 19, .ceiling = 23 }));
     try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, length, null, .{ .after = 11, .ceiling = 29 }));
-    // A next cursor needs a ninth row strictly beyond the eighth row's after.
     const tail = testing_list_facts ++ "{\"after\":\"19\",\"ceiling\":\"23\"}}";
     const prefix_length = length - tail.len;
     try file.writePositionalAll(io, testing_list_facts ++ "{\"after\":\"23\",\"ceiling\":\"23\"}}", prefix_length);
     try std.testing.expectError(error.InvalidSessionPage, SessionListReply.decode(io, file, &workspace, .{}, .{ .report = .{ .bytes = length } }));
-    // Eight rows with no ninth row are valid, as is a terminal request probe.
     const terminal = testing_list_facts ++ "null}";
     try file.writePositionalAll(io, terminal, prefix_length);
     const last = try SessionListReply.decode(io, file, &workspace, .{}, .{ .report = .{ .bytes = prefix_length + terminal.len } });
@@ -3241,7 +3087,6 @@ test "keyed observation retains Host state independently of admission and bindin
         .{ "queued", "", ",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1762329000\"},\"first_action\":null}" },
         .{ "processing", testing_observation_binding, ",\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1762329010\",\"call\":\"0\",\"description\":\"Run tests\",\"running\":\"1\",\"approvals\":\"0\"},\"first_action\":null}" },
         .{ "waiting_for_permission", testing_observation_binding, ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
-        // A queued Message observes the permission wait of the Turn ahead of it.
         .{ "waiting_for_permission", "", ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
         .{ "completed", testing_observation_binding, ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}" },
         .{ "failed", testing_observation_binding, ",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\"}" },
@@ -3276,6 +3121,7 @@ test "keyed observation validates every operation shape and binding" {
         .{ "session_pin", ",\"pinned\":false", "" },
         .{ "model_interruption", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"7\"}", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"0\",\"operation\":\"0\"}" },
         .{ "permission_decision", ",\"permission_target\":{\"action\":\"29\",\"decision\":\"allow_once\"}", ",\"permission_target\":{\"action\":\"0\",\"decision\":\"deny\"}" },
+        .{ "action_background", ",\"action_target\":{\"action\":\"29\"},\"action_selection\":{\"kind\":\"background\",\"position\":\"31\"}", ",\"action_target\":{\"action\":\"29\"}" },
     }) |case| {
         const accepted = prefix ++ "\"kind\":\"" ++ case[0] ++ "\",\"status\":\"accepted\"" ++ case[1] ++ "}}";
         const observed = try CommandObservation.parse(.{ .status = 200, .body = accepted }, "k");
@@ -3311,6 +3157,21 @@ test "keyed observation validates every operation shape and binding" {
     const rejection = try CommandObservation.parse(.{ .status = 200, .body = prefix ++ "\"kind\":\"message\",\"status\":\"rejected\",\"state\":\"rejected\",\"code\":\"unknown_session\"}}" }, "k");
     const other = try MessageAddress.init("/store", "09azvw", "k");
     try std.testing.expectError(error.RequestBindingMismatch, rejection.forMessage(&other));
+}
+
+test "keyed Action observation preserves requested zero and maximum targets but rejects zero selection positions" {
+    inline for (.{ "0", "18446744073709551615" }) |target| {
+        const facts = "{\"status\":\"rejected\",\"kind\":\"action_background\",\"target\":\"k7m2qx\",\"code\":\"invalid_target\",\"action_target\":{\"action\":\"" ++ target ++ "\"}}";
+        const observed = try CommandObservation.parse(.{ .status = 200, .body = testing_observation_prefix ++ facts ++ "}" }, "k");
+        try std.testing.expectEqual(try std.fmt.parseInt(u64, target, 10), observed.action_target.?);
+        try std.testing.expectEqualStrings("invalid_target", observed.failureCode().?);
+        var output: [protocol.command_observation_reply.max_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&output);
+        try observed.writeJson(&writer);
+        try std.testing.expectEqualStrings(facts, writer.buffered());
+    }
+    const selected = testing_observation_prefix ++ "{\"status\":\"accepted\",\"kind\":\"action_background\",\"target\":\"k7m2qx\",\"action_target\":{\"action\":\"29\"},\"action_selection\":{\"kind\":\"background\",\"position\":\"0\"}}}";
+    try std.testing.expectError(error.InvalidResponse, CommandObservation.parse(.{ .status = 200, .body = selected }, "k"));
 }
 
 test "keyed observation distinguishes named statuses and omitted fields from numeric tags and null" {
@@ -3355,8 +3216,6 @@ test "keyed observation rejects contradictory permission work variants" {
         const body = testing_observation_prefix ++ testing_observation_message ++ ",\"state\":\"" ++ case[0] ++ "\"" ++ testing_observation_input ++ testing_observation_queue ++ case[1] ++ case[2] ++ "}}";
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = body }, "k"));
     }
-    // A running sibling can coexist with an actionable permission request;
-    // its Session work remains bash, not approval, until only approvals remain.
     const body = testing_observation_prefix ++ testing_observation_message ++ ",\"state\":\"processing\"" ++ testing_observation_input ++ testing_observation_queue ++ testing_observation_binding ++
         ",\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1762329010\",\"call\":\"0\",\"description\":\"Run tests\",\"running\":\"1\",\"approvals\":\"1\"},\"first_action\":\"57\"}}}";
     const observed = try CommandObservation.parse(.{ .status = 200, .body = body }, "k");
@@ -3505,7 +3364,6 @@ test "Current settings preserve decimal token heuristics in projections" {
     try reply.current.writeJson(io, file, &writer);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"compaction_trigger\":\"100000\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"output_reservation\":\"16384\"") != null);
-    // A configured Session's Current always carries its parent, creation time and peers.
     for ([_][]const u8{ ",\"archive_state\":\"active\"", ",\"parent\":null", ",\"created_at\":\"1\"", ",\"peers\":{\"from_person_at\":null}" }) |required| {
         const at = std.mem.indexOf(u8, report, required).?;
         var missing_buffer: [4096]u8 = undefined;
@@ -3576,8 +3434,6 @@ test "Current settings preserve decimal token heuristics in projections" {
         .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":\"-1\",\"label\":null,\"created_at\":\"1\"}", .valid = false },
         .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":\"01\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"}", .valid = false },
         .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":1,\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"}", .valid = false },
-        // An estimate needs a trigger, which compares it only for some
-        // calls; a Host that predates it omits it.
         .{ .suffix = ",\"compaction_trigger\":\"42\",\"context_estimate\":\"50\",\"output_reservation\":\"0\",\"compaction_trigger_override\":\"42\",\"output_reservation_override\":\"0\",\"label\":null,\"created_at\":\"1\"}", .valid = true },
         .{ .suffix = ",\"compaction_trigger\":\"42\",\"context_estimate\":\"0\",\"output_reservation\":\"0\",\"compaction_trigger_override\":\"42\",\"output_reservation_override\":\"0\",\"label\":null,\"created_at\":\"1\"}", .valid = true },
         .{ .suffix = ",\"compaction_trigger\":null,\"context_estimate\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"}", .valid = true },
@@ -3597,7 +3453,6 @@ test "Current settings preserve decimal token heuristics in projections" {
             try parsed.current.writeJson(io, file, &projection);
             if (parsed.current.settings.compaction_trigger == null)
                 try std.testing.expect(std.mem.indexOf(u8, projection.buffered(), "\"compaction_trigger\":null") != null);
-            // The projection keeps the estimate as the report gave it.
             if (std.mem.indexOf(u8, case.suffix, "\"context_estimate\":")) |at| {
                 const end = std.mem.indexOfScalarPos(u8, case.suffix, at, ',').?;
                 try std.testing.expect(std.mem.indexOf(u8, projection.buffered(), case.suffix[at..end]) != null);
@@ -3757,7 +3612,6 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     var again: Sink = .{};
     try roundtrip.current.traverse(io, rendered, &again);
     try std.testing.expectEqual(sink.counts, again.counts);
-    // The terminal selects the saved line from this same capture, no call read.
     const view = @import("session_view.zig");
     const mcp = (try view.actionToolFromCapture(&roundtrip.current, io, rendered, 31)).?;
     try std.testing.expectEqualStrings("fetch_page", mcp.name.slice());
@@ -3806,7 +3660,6 @@ test "a hosted call travels as its presentation alone, in the conversation and t
     try std.testing.expectEqual(protocol.ConversationItemKind.hosted_call, page.items[0].kind);
     try std.testing.expectEqual(@as(u64, 0), page.items[0].content.bytes);
     try std.testing.expectEqualDeep(presentation, page.items[0].presentation.?);
-    // A hosted call has no content, needs its line, and sits at ordinal 0.
     for ([_][]const u8{
         "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\",\"content\":{\"bytes\":\"0\",\"sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"display\":\"omitted\"},\"presentation\":{\"description\":\"a\",\"code\":\"failed\",\"publication_position\":\"7\"}}",
         "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\",\"presentation\":{\"description\":null,\"code\":\"failed\",\"publication_position\":\"7\"}}",
@@ -3970,7 +3823,6 @@ test "keyed observation requires valid delta since and shape-specific facts" {
     }
 }
 
-/// Decode a bounded metadata page into independent allocator-owned strings.
 pub fn decodeSkillSuggestions(gpa: std.mem.Allocator, bytes: []const u8) !@import("skill_suggestions.zig").Page {
     const suggestion = @import("skill_suggestions.zig");
     const Text = @import("json_scalar.zig").Text;

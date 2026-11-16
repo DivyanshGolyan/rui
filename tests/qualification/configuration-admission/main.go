@@ -63,7 +63,6 @@ func run(binary string) (result map[string]any, resultError error) {
 		for admitted < target {
 			identity := fmt.Sprintf("measure-%08d", admitted)
 			if record == nil {
-				// The CLI fills the creation defaults; the rest replay its record.
 				if firstSession, err = client.Configure(identity, "", "--tools", "none"); err != nil {
 					return nil, err
 				}

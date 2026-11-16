@@ -10,7 +10,6 @@ from pathlib import Path
 
 
 class EventNames:
-    """Keep only a short SSE line prefix, discarding data as it arrives."""
     def __init__(self):
         self.prefix = bytearray()
         self.event = None
@@ -76,7 +75,6 @@ def measure(connection, path, body, headers, emit):
                     outcome = events.terminal
                     break
     except Exception as exc:
-        # Exception messages and response bodies can contain private material.
         outcome = type(exc).__name__
     finally:
         connection.close()
@@ -106,7 +104,6 @@ def main():
     parser.add_argument("--effort", default="high")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    # Read existing credentials in memory, with no refresh or account changes.
     tokens = json.loads((Path.home() / ".codex/auth.json").read_text())["tokens"]
     headers = {
         "Authorization": "Bearer " + tokens["access_token"],
@@ -120,7 +117,6 @@ def main():
         "input": [{"role": "user", "content": [{"type": "input_text", "text": PROMPTS[args.case]}]}],
         "reasoning": {"effort": args.effort}, "store": False, "stream": True,
     }).encode()
-    # Experiment backstops, not proposed product limits. No automatic retries.
     def deadline(_signum, _frame):
         raise TimeoutError("experiment lifetime")
     signal.signal(signal.SIGALRM, deadline)

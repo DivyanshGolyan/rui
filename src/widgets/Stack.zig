@@ -1,11 +1,8 @@
-//! A bounded column with natural-height children and at most one remainder child.
 const std = @import("std");
 const vxfw = @import("vaxis").vxfw;
 const Self = @This();
 
-/// Borrowed children; their widgets must outlive the drawn surface.
 children: []const Child,
-/// Which edge keeps its natural rows first when the column is too short.
 priority: enum { top, bottom } = .bottom,
 
 pub const Child = struct {
@@ -21,13 +18,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const self: *const Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
     if (size.width == 0) return .empty(self.widget());
-    // Drawing also updates child layout state. Forward zero remaining height
-    // through nested columns rather than leaving descendants at their old size.
     const children = try ctx.arena.alloc(vxfw.SubSurface, self.children.len);
     var remaining = size.height;
     var fill: ?usize = null;
-    // Allocate natural rows in the caller's edge priority, without changing
-    // their display order or the remainder child's position.
     for (0..self.children.len) |step| {
         const i = if (self.priority == .bottom) self.children.len - 1 - step else step;
         const child = self.children[i];
@@ -99,8 +92,6 @@ test "Stack preserves the requested edge when natural rows compete" {
     };
 }
 
-// Keep cells and the tree on disjoint allocators: an ordinary draw test that
-// aliases both arenas cannot catch a widget retaining its cells between frames.
 test "Stack keeps every composed cell in cell_arena and metadata in arena" {
     const vaxis = @import("vaxis");
     const Footer = @import("Footer.zig");
@@ -135,8 +126,6 @@ test "Stack keeps every composed cell in cell_arena and metadata in arena" {
     const count = try Check.tree(drawn, &cell_bytes);
     try std.testing.expect(count > 24);
     try std.testing.expectEqual(count * @sizeOf(vaxis.Cell), cells.end_index);
-    // Rendering copies the cells; metadata survives their release. Never read
-    // drawn.buffer (or descendant buffers) after this simulated frame boundary.
     var screen = try vaxis.Screen.init(std.testing.allocator, .{ .cols = 24, .rows = 4, .x_pixel = 0, .y_pixel = 0 });
     defer screen.deinit(std.testing.allocator);
     try drawn.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 24, .height = 4, .screen = &screen }, footer.widget());

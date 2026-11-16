@@ -1,4 +1,3 @@
-//! Fixtures Store conformance tests.
 const std = @import("std");
 const store_testing = @import("../testing.zig");
 
@@ -18,7 +17,6 @@ test "a required engine these tests do not build fails them" {
     try std.testing.expectEqual(null, store_testing.unbuiltEngine(.empty, .empty));
     try std.testing.expectEqual(null, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.mysql }), .empty));
     try std.testing.expectEqual(Name.postgres, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.postgres }), .initOne(Name.mysql)));
-    // CI's live shards list both servers; each has a test of its own here.
     try std.testing.expectEqual(null, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.mysql, Name.postgres }), store_testing.checked_elsewhere));
 }
 

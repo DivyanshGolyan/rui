@@ -1,5 +1,3 @@
-//! Model-facing public transcript reads. Store owns provenance and visibility;
-//! this module only selects public rows and renders their bounded text windows.
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
@@ -9,11 +7,7 @@ const utf8_validation = @import("utf8_validation.zig");
 
 const window_bytes = 16 * 1024;
 
-/// A read has no durable effect until its one resolution commits. In particular,
-/// retries after a crash simply read the public feed again.
 pub fn run(store: *storage.Store, arena: std.mem.Allocator, input: *const storage.CoreActionInput, faults: storage.Faults) !void {
-    // Store reads can drain queued writes on this stack. Keep bounded
-    // argument scratch in the same arena as the feed windows.
     const arguments = try arena.create(core.ReadTranscript);
     arguments.* = .{};
     const check: core.ReadTranscriptCheck = if (input.arguments.length > core.read_transcript_max_argument_bytes)
@@ -95,10 +89,6 @@ fn render(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, 
     return output.written();
 }
 
-/// A full address need not be a valid page cursor. Start at the preceding
-/// position boundary and page forward, stopping as soon as it is passed.
-/// The exact arguments of the next read of the same selection, so a model
-/// that follows the line reads the same Session, kinds, query and limit.
 fn continuation(out: *std.Io.Writer, session: []const u8, arguments: *const core.ReadTranscript, position: u64, ordinal: u64) !void {
     try out.print("More: call read_transcript with {{\"id\":\"{s}\"", .{session});
     if (arguments.query) |query| {
@@ -127,7 +117,6 @@ fn findEntry(store: *storage.Store, page: *protocol.ActivityFacts, request: *pro
     request.kinds = .full;
     while (true) {
         try store.activityPage(request, page);
-        // Pin subsequent pages to this read's public end.
         request.end = page.end;
         for (page.items[0..page.count]) |*item| {
             if (item.position > address.position or (item.position == address.position and item.ordinal > address.ordinal.?)) return error.EntryNotFound;
@@ -151,9 +140,6 @@ fn contentOf(item: *const protocol.ActivityItem) ?protocol.ActivityItem.Content 
     };
 }
 
-/// A request carries the wire's Store and Session buffers (hundreds of
-/// bytes). Keep these bounded per-row objects in the call's arena as well:
-/// Store reads can drain other queued writes on the engine's current stack.
 fn contentRequest(arena: std.mem.Allocator, session: []const u8, item: *const protocol.ActivityItem) !*protocol.ReadActivityContent {
     const request = try arena.create(protocol.ReadActivityContent);
     request.* = .{ .position = item.position, .ordinal = item.ordinal };
@@ -178,8 +164,6 @@ fn readLocation(arena: std.mem.Allocator, location: storage.ContentLocation, off
 
 fn nameText(store: *storage.Store, arena: std.mem.Allocator, name: protocol.ProposalFieldReference) ![]const u8 {
     const location = try store.openContent(.{ .length = name.length, .digest = name.digest });
-    // Known tool names fit the wire's name bound. Rejected calls can name
-    // arbitrarily long tools; keep their outline bounded as well.
     const read = try readLocation(arena, location, 0, protocol.max_tool_name_bytes);
     return utf8_validation.wholePrefix(read) orelse read[0..0];
 }
@@ -189,7 +173,6 @@ fn outline(store: *storage.Store, arena: std.mem.Allocator, session: []const u8,
     var note: ?protocol.Bounded(protocol.max_tool_description_bytes) = null;
     switch (item.value) {
         .admission, .user => try out.writeAll(" person"),
-        // A Label is display text, never model input: only the sender's ID.
         .received => |message| if (message.sender) |sender| try out.print(" {s}", .{sender.session.slice()}),
         .sent => |sent| try out.print(" {s}", .{sent.target.session.slice()}),
         .send_failed => |sent| if (sent.target) |target|
@@ -205,12 +188,9 @@ fn outline(store: *storage.Store, arena: std.mem.Allocator, session: []const u8,
             note = tool.presentation.description;
             if (item.value == .tool_result) try out.print(" {s}", .{@tagName(item.value.tool_result.presentation.code)});
         },
-        // Hosted calls keep the provider's saved presentation, not a
-        // separate tool name. Never invent a provider tool in core.
         .hosted_call => |presentation| note = presentation.description,
         .turn_ended => |ended| {
             try out.print(" {s}", .{@tagName(ended.ending)});
-            // A descendant's ending: name the agent whose Turn it was.
             if (!std.mem.eql(u8, ended.session.slice(), session)) try out.print(" agent {s}", .{ended.session.slice()});
         },
         .approval_requested => |requested| if (!std.mem.eql(u8, requested.session.slice(), session)) try out.print(" agent {s}", .{requested.session.slice()}),
@@ -236,8 +216,6 @@ fn full(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, it
     var text: []const u8 = undefined;
     var total: u64 = undefined;
     if (item.value == .call) {
-        // A call is a virtual public text: name, newline, arguments JSON.
-        // Read only the pieces intersecting this window, not the whole JSON.
         const fields = item.value.call.fields;
         const name = fields[@backingInt(protocol.ProposalField.name)];
         const arguments = fields[@backingInt(protocol.ProposalField.arguments)];
@@ -272,8 +250,6 @@ fn full(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, it
     }
     if (text.len > 0 and text[0] & 0xc0 == 0x80) return error.InvalidOffset;
     const prefix = utf8_validation.wholePrefix(text) orelse "";
-    // Canonical content is byte-oriented. Never return a continuation at the
-    // same offset if a public result contains malformed text in its interior.
     if (text.len != 0 and prefix.len == 0) return error.InvalidEntryText;
     text = prefix;
     const end = offset + text.len;
@@ -332,7 +308,6 @@ test "read_transcript core runner reads other Session outlines before full windo
     const oldest = page.items[2].position;
     const args = [_][]const u8{
         try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"limit\":1}}", .{other.slice()}),
-        // Exactly the continuation call 0 emits, so the test follows it.
         try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"limit\":1,\"before\":\"{d}.0\"}}", .{ other.slice(), newest }),
         try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ other.slice(), middle }),
         try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":16383}}", .{ other.slice(), middle }),
@@ -351,16 +326,15 @@ test "read_transcript core runner reads other Session outlines before full windo
         call.* = .{ .item_id = id, .name = "read_transcript", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = quoted[1 .. quoted.len - 1], .decoded_arguments = arguments };
     }
     try settleCallsForTesting(&database, &tmp, model, "transcript-metadata", &calls);
-    // Even malformed runtime arguments settle as core calls under ask.
     try std.testing.expectEqual(@as(u64, args.len), try storage.testing.sqlite_only.queryU64(&database, "SELECT count(*) FROM action_operation WHERE authorized=1 AND approval_position IS NULL", .{}));
-    try std.testing.expect(try database.admitNextActionAttempt(300_000, .{}) == null);
+    try std.testing.expect(try database.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{}) == null);
     const note = try std.fmt.allocPrint(arena, "Read {s}'s transcript", .{other.slice()});
     try std.testing.expectEqual(@as(u64, 8), try storage.testing.sqlite_only.queryU64(&database, "SELECT count(*) FROM model_tool_call WHERE description=?1", .{note}));
     try std.testing.expectEqual(@as(u64, 2), try storage.testing.sqlite_only.queryU64(&database, "SELECT count(*) FROM model_tool_call WHERE description='Read own transcript'", .{}));
     try std.testing.expectEqual(@as(u64, 1), try storage.testing.sqlite_only.queryU64(&database, "SELECT count(*) FROM model_tool_call WHERE description='Read zzzzzz''s transcript'", .{}));
 
     for (args, 0..) |_, index| {
-        const work = (try database.nextCoreWork()).?.action;
+        const work = (try database.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
         try std.testing.expect(work.tool == .read_transcript);
         try run(&database, arena, &work, .{});
         const result_id = try storage.testing.sqlite_only.queryU64(&database, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{work.binding.action_id});
@@ -423,7 +397,7 @@ test "read_transcript core runner reads other Session outlines before full windo
             else => unreachable,
         }
     }
-    try std.testing.expect(try database.nextCoreWork() == null);
+    try std.testing.expect(try database.nextCoreWork(.{ .free_credit = .one, .mcp_open = true }) == null);
 }
 
 test "read_transcript opens public calls and no-content rows and identifies nonzero result ordinals" {
@@ -466,9 +440,9 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
         .{ .item_id = "sender", .name = "bash", .encoded_call_id = "sender", .decoded_call_id = "sender", .encoded_arguments = quoted_sender[1 .. quoted_sender.len - 1], .decoded_arguments = sender_arguments },
     };
     try settleCallsForTesting(&database, &tmp, source_model, "transcript-source-calls", &source_calls);
-    const work = (try database.nextCoreWork()).?.action;
+    const work = (try database.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     try std.testing.expect(try database.deliverAgentMessage(work.binding, "zzzzzz", "hello", .{}) == .failed);
-    const sender_action = (try database.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    const sender_action = (try database.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
     var sender_input: ActionExecutionInput = undefined;
     try database.readActionExecutionInput(.bash, sender_action, &sender_input);
     var rename: wire_request.ConfigureCommand = .{};
@@ -477,8 +451,6 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
     rename.configuration.label.state = .value;
     try rename.configuration.label.value.set("Never expose this target label");
     try std.testing.expect(try database.configure(&rename, .{}) == .accepted);
-    // The real Bash sender writes refusal positions and command identities
-    // together; this fixture never bypasses the open Store's identity owner.
     const refusals = [_]struct { key: []const u8, target: []const u8, code: protocol.MessageRejection }{
         .{ .key = "transcript-invalid-target", .target = "BAD/attempt", .code = .invalid_session_reference },
         .{ .key = "transcript-unknown-target", .target = "absent", .code = .unknown_session },
@@ -491,8 +463,6 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
             .text = try testingBytesContent(&tmp, refusal.key, "Rejected text is never transcript content."),
             .sender = .{},
             .sender_handle = sender_input.sender_handle,
-            // A nonempty target on an initial Message is refused, while
-            // its canonical spelling still identifies a named public peer.
             .configuration = if (index == 2) .{} else null,
         };
         defer refused.removeTemporaryContent(std.testing.io) catch unreachable;
@@ -564,7 +534,7 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
     }
     try settleCallsForTesting(&database, &tmp, model, "transcript-reader-calls", &calls);
     for (arguments, 0..) |_, index| {
-        const input = (try database.nextCoreWork()).?.action;
+        const input = (try database.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
         try run(&database, arena, &input, .{});
         const result_id = try storage.testing.sqlite_only.queryU64(&database, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{input.binding.action_id});
         const reference = try testingContentReference(&database, result_id);
@@ -650,7 +620,6 @@ test "searchActivity finds start_agent call names and stored JSON arguments not 
     var request: protocol.ActivitySearch = .{ .session = session, .kinds = .initOne(.call) };
     try request.query.set("start_agent");
     try database.searchActivity(&request, result);
-    // The reader's own query also names start_agent in its arguments JSON.
     try std.testing.expectEqual(@as(usize, 2), result.count);
     try std.testing.expectEqualStrings("start_agent\n{\"text\":\"find\\nthis\"}", result.items[1].hits[0].snippet.slice());
     try request.query.set("find\\nthis");
@@ -662,12 +631,10 @@ test "searchActivity finds start_agent call names and stored JSON arguments not 
     try request.query.set("hidden-call-identity");
     try database.searchActivity(&request, result);
     try std.testing.expectEqual(@as(usize, 0), result.count);
-    // Settle the earlier invalid start call at its owner boundary, then run
-    // read_transcript against the same public call inventory (D163).
-    const start = (try database.nextCoreWork()).?.action;
+    const start = (try database.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     try std.testing.expect(start.tool == .start_agent);
     _ = try database.failCoreCall(start.binding, "invalid start arguments", .{});
-    const read = (try database.nextCoreWork()).?.action;
+    const read = (try database.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     try run(&database, arena, &read, .{});
     const id = try storage.testing.sqlite_only.queryU64(&database, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{read.binding.action_id});
     const reference = try testingContentReference(&database, id);
@@ -695,8 +662,6 @@ test "read_transcript hosted call uses its recorded provider presentation" {
             const session = try storage.testing.configureTestSession(&database, "hosted-transcript");
             try storage.testingSubmitMessage(&database, &tmp, "hosted-input", "hosted-input", session.slice(), "search");
             const model = (try database.admitNextModelAttempt(.{})).?.permit.binding;
-            // The codec currently admits only this hosted kind. Store keeps its
-            // presentation, not a distinct name: render that recorded identity.
             try storage.settleAnswerItemsForTesting(&database, &tmp, model, &.{
                 "{\"type\":\"web_search_call\",\"id\":\"hosted\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"recorded provider query\"}}",
                 "{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}",

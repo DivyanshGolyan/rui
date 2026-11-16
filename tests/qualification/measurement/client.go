@@ -19,7 +19,6 @@ type Client struct {
 	Deadline  Deadline
 }
 
-// JSONString matches Rui's UTF-8 wire spelling, without HTML or JavaScript escaping.
 func JSONString(value string) string {
 	var out strings.Builder
 	out.WriteByte('"')
@@ -50,8 +49,6 @@ func JSONString(value string) string {
 	return out.String()
 }
 
-// CanonicalStore mirrors realpath for a Store selector whose final directory
-// may not exist yet: existing prefixes resolve symlinks, a missing leaf stays.
 func CanonicalStore(store string) (string, error) {
 	absolute, err := filepath.Abs(store)
 	if err != nil {
@@ -69,7 +66,6 @@ func CanonicalStore(store string) (string, error) {
 	return filepath.Join(parent, filepath.Base(absolute)), nil
 }
 
-// The source-backed fixture uses the same prose as Rui, not a literal copy.
 var modelContextParts = func() []string {
 	_, source, _, _ := runtime.Caller(0)
 	text, err := os.ReadFile(filepath.Join(filepath.Dir(source), "../../../src/model_instructions.txt"))
@@ -79,8 +75,6 @@ var modelContextParts = func() []string {
 	return strings.Split(string(text), "{}")
 }()
 
-// ModelInstructions independently encodes known inputs, never the observed request.
-// session is the exact Store-allocated Session ID. Store paths are not model facts.
 func ModelInstructions(workspace, session, model string) string {
 	workspace = JSONString(workspace)
 	return modelContextParts[0] + workspace[1:len(workspace)-1] + modelContextParts[1] +
@@ -113,8 +107,6 @@ func builtinInstructions(model string) string {
 	return string(text)
 }
 
-// InstructionsSession reads the Session ID from the slot after the escaped
-// Workspace, so it follows the prompt file rather than its wording.
 func InstructionsSession(instructions string) (string, bool) {
 	_, rest, ok := strings.Cut(instructions, modelContextParts[1])
 	if !ok {
@@ -136,7 +128,6 @@ func nested(value map[string]any, names ...string) any {
 	return current
 }
 
-// Configure creates when session is empty, otherwise updates that exact ID.
 func (c Client) Configure(key, session string, extra ...string) (string, error) {
 	workspace, err := RepositoryRoot()
 	if err != nil {
@@ -164,9 +155,6 @@ func (c Client) Configure(key, session string, extra ...string) (string, error) 
 	return allocated, err
 }
 
-// ConfigureRecord is the wire body the CLI saved for Configure(key, ...): the
-// current request shape with the CLI's creation defaults filled in. Sent again
-// under another key, it creates one more identically configured Session.
 func (c Client) ConfigureRecord(key string) (map[string]any, error) {
 	data, err := os.ReadFile(filepath.Join(c.Artifacts, key+"-configure.json"))
 	if err != nil {
@@ -181,7 +169,6 @@ func (c Client) ConfigureRecord(key string) (map[string]any, error) {
 	return record, nil
 }
 
-// ConfigurationSession validates the identity returned at the allocation boundary.
 func ConfigurationSession(reply map[string]any) (string, error) {
 	session, ok := StringField(reply, "answer", "session")
 	if !ok || len(session) != 6 || strings.Trim(session, "0123456789abcdefghjkmnpqrstvwxyz") != "" {

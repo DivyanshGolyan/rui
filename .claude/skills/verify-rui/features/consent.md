@@ -1,34 +1,37 @@
 # Consent
 
-In ask mode, a proposed Bash command appears with its working directory. The user reads it and types `a` Enter to allow once or `d` Enter to deny. Pasted choices do not grant approval.
+In **ask first** mode, a proposed tool call opens Approval with its command and working directory. Read it, select **Allow once** or **Deny** with Left/Right, then press Enter. Typing moves to a draft reason; Esc returns to the choice without losing that draft.
 
 ## Sub-features
 
-- `consent-show`: the `Run Bash` prompt shows the full command, the working directory and the time limit beside the choices.
-- `consent-read`: a long command needs PgDn to read fully before the choice is accepted.
-- `consent-allow`: `a` Enter runs the command once and the answer follows.
-- `consent-deny`: `d` Enter denies it, nothing runs, and the denial is shown at the Action.
-- `consent-paste`: a pasted `a\r` is not approval.
+- Approval shows the request, working directory and time limit. A clipped request shows how many rows remain.
+- Long requests need scrolling before **Allow once** can be confirmed.
+- Left selects **Allow once**; Right selects **Deny**. Enter confirms the shown choice. Clicking a choice uses the same decision path.
+- A typed reason can deny the call and send the reason when the footer offers **enter denies the call and sends this**.
+- Pasted text is draft text, not approval. Single `a`, `d`, `y` or `n` letters do not decide the call.
 
 ## How to get to it (user POV)
 
-- In Session `approve` (or after choosing **ask first** on chat info’s **Permissions** field), send a request whose model reply proposes Bash.
+In Session `approve`, or after choosing **ask first** in Chat info's **Permissions**, send a request that proposes a tool call. Read the request with PgUp/PgDn, arrows or the wheel. Choose **Allow once** or **Deny**, then confirm. Type a reason if needed; Esc or Ctrl-G restores the selector.
 
 ## Driving it with verify-rui
 
-Preconditions:
+Frame states: `approval`, `approval-hover`, `approval-typing`, `approval-after-esc`
 
-- `doctor` PASS. Use a fresh terminal on `--session approve`.
+Run `$V frames FULLSHA --only approval,approval-hover,approval-typing,approval-after-esc` for the request, Deny hover, retained draft and return to the selector.
 
-- **Propose.** Run `$V term "$RUN" k1 --surface tmux-attached --session approve`, wait for the composer, then `$V send "$RUN" k1 --text 'consent check'` and `--keys Enter`. Run `$V wait "$RUN" k1 --marker 'Run Bash'`: the frame shows the command start and the working directory next to the prompt.
-- **Read.** Run `$V send "$RUN" k1 --keys PgDn` repeatedly, `wait` after each, until the frame shows `wc -l progress.log`. Snapshot each page.
-- **Allow.** Run `$V send "$RUN" k1 --text a` then `--keys Enter`, then `wait --marker 'Fixture tool summary'`. `project/progress.log` exists with 30 lines (`wc -l`), and `provider.jsonl` shows `tool-summary`.
-- **Deny.** On a second proposal (`consent check` again), send `d` and Enter. `progress.log` is unchanged, the denial is shown at that Action, and the provider receives a tool result reporting denial.
-- **Paste is not consent.** On a new proposal, send `--hex 1b5b3230307e610d1b5b3230317e`. No command runs and the prompt remains.
-- **Proof.** Run `$V evidence "$RUN"`, plus `wc -l` of `progress.log` before and after, plus snapshots labelled per page.
+Use a fresh terminal on `--session approve` with `doctor` PASS for side effects:
+
+- Open `$V term "$RUN" k1 --surface tmux-attached --session approve`, wait for the input, send `consent check` then Enter, and wait for **Run Bash**.
+- Send `--keys PgDn`, waiting for each new committed frame, until the complete command has been shown. Save snapshots of the pages.
+- Send `--keys Left`, wait for the selected **Allow once** frame, then `--keys Enter`. Wait for **Fixture tool summary**. `project/progress.log` gains 30 lines and `provider.jsonl` records `tool-summary`.
+- On a second proposal, read it, send `--keys Right`, wait for the **Deny** selection, then Enter. The file stays unchanged and the provider receives a denial.
+- On a new proposal, paste with `--hex 1b5b3230307e610d1b5b3230317e`. No command runs. Send Esc, wait for the selector, and capture it.
+
+Use `wait --after GEN` between steps, save `screen` snapshots and export `$V evidence "$RUN"`. Compare the file and provider log before and after each decision.
 
 ## Gotchas
 
-- The fixture proposes the same 32-line command for every `consent check`. `progress.log` grows by 30 lines per allowed run.
-- The choice is accepted only once the command has been fully shown. Typing `a` early is a separate check, not an allow.
-- Hardware a/d (physical keys) belongs to [hardware-input](./hardware-input.md). Here it is L1–L3.
+The fixture proposes a 32-line command for each `consent check`; the file grows by 30 lines for each allowed call. A still of Approval does not prove that a call ran. The current physical-input coach still asks for obsolete letter choices; see [Hardware input](./hardware-input.md) for that limit.
+
+Source: [approval keys](../../../../src/session_keys.zig), [choice and reason rules](../../../../src/session_consent.zig), [reading and delivered choice](../../../../src/SessionScreen.zig).

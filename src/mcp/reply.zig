@@ -1,11 +1,3 @@
-//! What an MCP server answered, as values: how to read the HTTP body, the
-//! JSON-RPC message in it, and the `tools/list` and `tools/call` results
-//! (D65). Every slice returned points into the message the caller passed.
-//!
-//! Left out, as D101 settles: progress (an SSE notification is skipped),
-//! output-schema validation, list-change subscriptions and the
-//! input-required round trip, which needs client capabilities Rui does not
-//! declare.
 const std = @import("std");
 const document = @import("document.zig");
 const json = @import("../codecs/json.zig");
@@ -13,9 +5,6 @@ const headers = @import("headers.zig");
 
 pub const Body = enum { json, event_stream };
 
-/// How a response's body is read, or the HTTP status that ended the
-/// request. A JSON body on an error status still carries the server's
-/// JSON-RPC error, so it is read.
 pub const Reading = union(enum) {
     body: Body,
     failed: u16,
@@ -31,7 +20,6 @@ pub fn reading(status: u16, content_type: ?[]const u8) Reading {
     return .{ .failed = status };
 }
 
-/// The media type, ignoring parameters and case (RFC 9110 section 8.3.1).
 fn bodyOf(content_type: ?[]const u8) ?Body {
     const value = content_type orelse return null;
     const end = std.mem.indexOfScalar(u8, value, ';') orelse value.len;
@@ -42,58 +30,39 @@ fn bodyOf(content_type: ?[]const u8) ?Body {
 }
 
 pub const Invalid = error{
-    /// Not a JSON-RPC 2.0 response or notification.
     NotJsonRpc,
-    /// A response to some other request.
     WrongId,
-    /// A request from the server, which the transport forbids on a
-    /// response stream.
     ServerRequest,
-    /// A result whose shape is not the method's.
     InvalidResult,
-    /// `resultType: "input_required"`: the server wants input this client
-    /// declared it cannot give.
     InputRequired,
     UnknownResultType,
 };
 
 pub const RpcError = struct {
     code: i64,
-    /// The message string's contents as written.
     message: []const u8,
-    /// The `data` value, if any.
     data: ?[]const u8,
 };
 
-/// Value outcome of one tools/call, independent of its transport owner.
 pub const CallOutcome = union(enum) {
     waiting,
-    /// The server's result; `is_error` marks a tool that failed (D144).
     result: CallResult,
-    /// The server's JSON-RPC error, which the model sees as text (D144).
     server_error: RpcError,
-    /// An HTTP status with no JSON-RPC answer, with the start of its body.
     refused: struct { status: u16, body: []const u8 },
 };
 
 pub const Message = union(enum) {
-    /// A notification about the request, such as progress: skipped.
     notification,
-    /// The result object.
     result: []const u8,
     rpc_error: RpcError,
 };
 
-/// Reads one JSON-RPC message, which must answer request `id` or be a
-/// notification.
 pub fn readMessage(bytes: []const u8, id: u64) (document.Error || Invalid)!Message {
     try document.check(bytes);
     const object: Object = .whole(bytes);
     return readEnvelope(object, .wholeMember(object, .@"error"), id);
 }
 
-/// The same field rules serve checked whole objects and valid retained prefixes.
-/// An unfinished value is present, not absent; defaults require a closed object.
 const Field = enum { jsonrpc, id, method, result, @"error", resultType, content, isError, structuredContent, code, message, data };
 const Value = struct {
     bytes: []const u8,
@@ -174,8 +143,6 @@ fn rpcError(object: Object) Invalid!RpcError {
     };
 }
 
-/// A result is complete when resultType is absent from a closed object or
-/// explicitly "complete". This applies equally to list and call results.
 fn checkComplete(object: Object) Invalid!void {
     const value = (try object.defaulted(.resultType)) orelse return;
     if (!value.complete or value.kind() != .string) return error.InvalidResult;
@@ -190,7 +157,6 @@ pub const Answer = struct {
     bytes: []const u8,
     id: u64,
     status: u16 = 200,
-    /// SSE bytes are the current event's decoded data, not event framing.
     format: ?Body = .json,
     extent: Extent = .complete,
 };
@@ -204,15 +170,10 @@ pub fn classify(outcome: CallOutcome) Code {
     };
 }
 
-/// Judge complete and cut answers through the same envelope and result rules.
-/// Only a proven JSON-RPC outcome overrides the HTTP status. Unsupported or
-/// unfinished fields are not defaulted into success. No payload is allocated.
 pub fn judgeCall(answer: Answer) Code {
     return classify(callAnswer(answer));
 }
 
-/// Complete callers may render the borrowed outcome. Cut callers use judgeCall
-/// instead: any result/content slices there may themselves be unfinished.
 pub fn readCallAnswer(answer: Answer) CallOutcome {
     std.debug.assert(answer.extent == .complete);
     return callAnswer(answer);
@@ -233,8 +194,6 @@ fn callAnswer(answer: Answer) CallOutcome {
     };
 }
 
-/// Syntax/ranges only, with no MCP validation. These first-member views have
-/// the same duplicate-key behavior as document.member on a complete object.
 const AnswerFields = struct {
     bytes: []const u8,
     envelope: Object = .{},
@@ -282,11 +241,7 @@ const AnswerFields = struct {
 };
 
 pub const ListPage = struct {
-    /// The `tools` array; read it with `Tools`.
     tools: []const u8,
-    /// The `nextCursor` string's contents as written, to send back as they
-    /// are. `ttlMs` and `cacheScope` are read past (D206): tools are
-    /// fetched at Host start (D110).
     next_cursor: ?[]const u8,
 };
 
@@ -303,20 +258,14 @@ pub fn readList(result: []const u8) Invalid!ListPage {
 }
 
 pub const Tool = struct {
-    /// String contents as written.
     name: []const u8,
     description: ?[]const u8,
-    /// The checked `inputSchema` object.
     input_schema: []const u8,
-    /// `annotations.readOnlyHint`, false when absent (D184).
     read_only: bool,
 };
 
-/// Why a listed tool is left out.
 pub const LeftOut = union(enum) {
-    /// No string `name`, or no object `inputSchema`.
     malformed,
-    /// An invalid `x-mcp-header` annotation (D206).
     header: headers.Invalid,
 };
 
@@ -325,7 +274,6 @@ pub const Listed = union(enum) {
     left_out: struct { name: ?[]const u8, reason: LeftOut },
 };
 
-/// The tools of one page, in the server's order.
 pub const Tools = struct {
     items: document.Items,
 
@@ -360,11 +308,8 @@ pub const Tools = struct {
 };
 
 pub const CallResult = struct {
-    /// `isError: true`: the tool failed and the content says how (D144).
     is_error: bool,
-    /// The `content` array of blocks; empty when absent.
     content: []const u8,
-    /// `structuredContent`, any JSON value.
     structured: ?[]const u8,
 };
 

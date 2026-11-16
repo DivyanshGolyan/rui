@@ -1,5 +1,3 @@
-// Runs against a real Rui. RUI_BINARY names the executable; the build's
-// ts-client step passes the one it built.
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -32,7 +30,6 @@ function newStore(): string {
 	return join(realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-"))), "store");
 }
 
-// Test files run one at a time (--test-concurrency=1): another file's Hosts would show up here.
 function runtimeDirs(): Set<string> {
 	return new Set(readdirSync(tmpdir()).filter((name) => name.startsWith("rui-")));
 }
@@ -321,7 +318,6 @@ test("closing Rui rejects a parked follower and releases its watch without abort
 		});
 		return follower;
 	});
-	// Only the idle page is synthetic; close still exercises the real Rui lifecycle.
 	t.mock.method(rui, "exchange", async () => Buffer.from(JSON.stringify({
 		delta: "full", since: null, items: [], more: false, end: "0", queued: { count: "0" }, work: { state: { kind: "idle" } },
 	})));
@@ -381,13 +377,11 @@ test("a crashed Host restarts and the call in flight is sent again", { skip }, a
 test("an exit listener that closes the client stops the restart", { skip }, async () => {
 	const before = runtimeDirs();
 	const rui = await connect(newStore());
-	// The client keeps nothing alive by itself (the child is unreferenced), so the test does.
 	const alive = setInterval(() => {}, 100);
 	try {
 		const closed = new Promise<void>((done) => rui.on("exit", () => void rui.close().then(done)));
 		process.kill(rui.pid!, "SIGKILL");
 		await closed;
-		// The first restart would have come 0.5 s after the exit.
 		await new Promise((done) => setTimeout(done, 1_500));
 		assert.equal(rui.pid, undefined);
 		assert.deepEqual([...runtimeDirs()].filter((name) => !before.has(name) && !name.startsWith("rui-ts-")), []);
@@ -513,7 +507,6 @@ test("MySQL readiness discovers an opaque id without sending the URL on requests
 		rui = await connect("mysql://user:private@localhost/db", {}, { binary: fixture.executable });
 		const id = "0123456789abcdef0123456789abcdef";
 		assert.equal(rui.hostInfo?.store, id);
-		// No property-presence/union narrowing is needed on the shared shape.
 		const doublewrite: string | undefined = rui.hostInfo?.innodb_doublewrite;
 		assert.equal(doublewrite, "OFF");
 		await rui.exchange("/v1/host-info", store => {
@@ -527,7 +520,6 @@ test("MySQL readiness discovers an opaque id without sending the URL on requests
 });
 
 test("automatic restart retries an unreachable MySQL server and recovers", { timeout: 10_000 }, async () => {
-	// An idle client unreferences its child and restart timer; keep the test alive while awaiting exit.
 	const alive = setInterval(() => {}, 100);
 	const fixture = mysqlHost([null, "mysql_unreachable", null]);
 	let rui: Rui | undefined;

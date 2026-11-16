@@ -1,10 +1,8 @@
-//! The model-facing excerpt and full rendering of one borrowed MCP answer.
 const std = @import("std");
 const utf8_validation = @import("../utf8_validation.zig");
 const reply = @import("reply.zig");
 const document = @import("document.zig");
 
-// MCP's own prefix budget; Bash's head-and-tail excerpt has a separate one.
 pub const excerpt_bytes = 10_000;
 pub const max_answer_bytes = 4 * 1024 * 1024;
 pub const Code = enum { succeeded, failed, spawn_failed, indeterminate, cancelled };
@@ -17,8 +15,6 @@ pub const Ending = union(enum) {
     oversized: reply.Answer,
 };
 
-/// The only owner of MCP resolution certainty. Ending variants encode whether
-/// any request byte was sent; an answer cannot exist on the not-sent side.
 pub fn classify(ending: Ending) Code {
     return switch (ending) {
         .outcome => |outcome| answerCode(reply.classify(outcome)),
@@ -38,7 +34,6 @@ fn answerCode(code: reply.Code) Code {
     };
 }
 
-/// The server name accompanies the transport's ending, not its borrowed result.
 pub const Ended = struct { server_name: []const u8, ended: Ending };
 
 pub fn write(out: *std.Io.Writer, ended: Ended) !Code {
@@ -47,8 +42,6 @@ pub fn write(out: *std.Io.Writer, ended: Ended) !Code {
 
 pub const Excerpt = struct { code: Code, total: usize, omitted: bool };
 
-/// Preserve the existing excerpt bytes; the execution owner may append a
-/// scratch notice when omitted, before releasing the borrowed answer.
 pub fn writeExcerpt(out: *std.Io.Writer, ended: Ended) !Excerpt {
     var bounded: Prefix = .{ .out = out };
     const code = try render(&bounded.writer, ended);
@@ -60,15 +53,10 @@ pub fn writeExcerpt(out: *std.Io.Writer, ended: Ended) !Excerpt {
     return .{ .code = code, .total = bounded.total, .omitted = bounded.total > bounded.shown };
 }
 
-/// A second streaming pass only for omitted output: no full rendered copy is
-/// allocated, and each byte is written to scratch once.
 pub fn writeFull(out: *std.Io.Writer, ended: Ended) !void {
     _ = try render(out, ended);
 }
 
-/// Streams the prefix, holding only its last four bytes and one lookahead.
-/// The lookahead identifies a cut inside a UTF-8 sequence without changing
-/// the server's bytes when the whole output fits (including non-UTF-8 bodies).
 const Prefix = struct {
     writer: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
     out: *std.Io.Writer,
@@ -166,7 +154,6 @@ fn render(out: *std.Io.Writer, ended: Ended) !Code {
             return code;
         },
         .timed_out => |timeout| {
-            // Millisecond precision avoids calling a sub-second deadline zero seconds.
             if (timeout.sent) {
                 try out.print("Outcome unknown: no reply from MCP server {s} within {d} s. The call may or may not have run; it was not retried.", .{ name, @as(f64, @floatFromInt(timeout.after_ms)) / 1000 });
                 return code;
@@ -212,7 +199,6 @@ test "result_text keeps a UTF-8 prefix and counts omitted bytes" {
     const gpa = std.testing.allocator;
     const content = try gpa.alloc(u8, excerpt_bytes + 100);
     defer gpa.free(content);
-    // Use structured JSON so the boundary crosses a multibyte character.
     @memset(content, 'x');
     content[0] = '"';
     @memcpy(content[excerpt_bytes - 1 ..][0..2], "é");
@@ -227,8 +213,6 @@ test "result_text keeps a UTF-8 prefix and counts omitted bytes" {
 
 test "result_text classification covers every ending and certainty boundary" {
     const Case = struct { ending: Ending, code: Code, contains: []const u8 };
-    // Answers imply sent. The sent/not-sent split is carried only by transport
-    // endings, timeout and stop; contradictory answer-without-send states do not exist.
     const cases = [_]Case{
         .{ .ending = .{ .not_sent = error.ConnectFailed }, .code = .spawn_failed, .contains = "Failed, not run" },
         .{ .ending = .{ .lost = error.NoAnswer }, .code = .indeterminate, .contains = "not retried" },
@@ -301,9 +285,6 @@ test "result_text classification covers every ending and certainty boundary" {
         try std.testing.expect(std.mem.endsWith(u8, out.buffered(), case.prefix));
         if (case.code == .indeterminate) try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "not retried") != null);
     }
-    // One reply domain: size, HTTP status, media and envelope correlation are
-    // independent inputs. The overflow is in padding, after the semantic object,
-    // so every observed field must have the same judgment as a fitting answer.
     const AnswerCase = struct { payload: []const u8, code: reply.Code };
     const answers = [_]AnswerCase{
         .{ .payload = "\"result\":{}", .code = .succeeded },

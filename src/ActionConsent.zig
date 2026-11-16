@@ -1,5 +1,3 @@
-//! The permission card owns its selection and the request it last drew.
-//! The Host revalidates every decision. Drawing is not a flush receipt.
 const std = @import("std");
 const policy = @import("session_consent.zig");
 const Self = @This();
@@ -20,14 +18,11 @@ pub const Input = union(enum) {
     other,
 };
 
-/// Input policy is independent of rendering and of whether the kept draft is empty.
 pub const RowKey = enum { printable, paste, escape, enter, arrows, screen, other };
 pub const Route = enum { selector, draft, screen, blocked };
 pub const RowStep = struct { row: policy.Row, route: Route };
 
 pub fn rowStep(row: policy.Row, key: RowKey) RowStep {
-    // The editor, not the choice's key classification, owns every draft key
-    // except returning to the choice and refusing to send while it waits.
     if (row == .draft) return switch (key) {
         .escape => .{ .row = .selector, .route = .blocked },
         .enter => .{ .row = .draft, .route = .blocked },
@@ -64,8 +59,6 @@ pub fn withdraw(self: *Self) void {
     self.row = .selector;
 }
 
-/// Called when the card draws the current request. Authorization is immediate;
-/// a true result schedules the test readiness notification on the next tick.
 pub fn draw(self: *Self) bool {
     const changed = self.drawn != self.request;
     self.drawn = self.request;
@@ -174,7 +167,6 @@ test "Action consent row policy covers every key and kept draft state" {
             try std.testing.expectEqual(expected.route, step.route);
             try std.testing.expectEqual(expected.route, consent.route(case.key));
             try std.testing.expectEqual(expected.row, consent.row);
-            // Arrival always shows the selector, regardless of a kept draft.
             consent.adopt(29);
             try std.testing.expectEqual(policy.Row.selector, consent.row);
         };

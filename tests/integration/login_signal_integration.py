@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""Linux one-shot login signal-installation witness, without provider traffic.
-
-Queue SIGINT at the real handler installation and deny/record native DNS and
-Internet connect attempts. This proves the production dispatcher, not a
-synthetic exchange; it does not qualify stalled device exchange or macOS.
-"""
 import hashlib
 import json
 import os
@@ -82,7 +76,6 @@ int sigaction(int signal, const struct sigaction *action, struct sigaction *old)
 }
 """)
         subprocess.run(["cc", "-shared", "-fPIC", str(source), "-ldl", "-o", str(library)], check=True)
-        # Parent-owned monotonic bytes, not optional stderr, are the effect oracle.
         with tempfile.TemporaryFile(dir=root) as witness:
             witness.write(b"000")
             witness.flush()
@@ -123,14 +116,11 @@ def read_until(master, process, needle, deadline):
 
 
 def key_entry(binary, typed):
-    """Run `rui auth login openai` on a PTY, type `typed` at the hidden
-    prompt, and return (exit code, output, home, attributes before, after)."""
     root = pathlib.Path(tempfile.mkdtemp(prefix="rui-key-entry-"))
     home = root / "home"
     home.mkdir(mode=0o700)
     env = {key: value for key, value in os.environ.items() if key != "RUI_OPENAI_KEY_FILE"}
     env["HOME"] = str(home)
-    # A Codex override must not stop a first OpenAI login creating its directory.
     env["RUI_CODEX_CREDENTIAL_FILE"] = str(root / "elsewhere" / "codex.json")
     master, slave = pty.openpty()
     try:
@@ -139,7 +129,6 @@ def key_entry(binary, typed):
                                    stdin=slave, stdout=slave, stderr=slave)
         deadline = time.monotonic() + 10
         output = read_until(master, process, b"(it is not shown): ", deadline)
-        # Typed the moment the prompt shows: echo must already be off.
         os.write(master, typed)
         process.wait(timeout=10)
         while select.select([master], [], [], 0.2)[0]:
@@ -151,8 +140,6 @@ def key_entry(binary, typed):
 
 
 def key_entry_journey(binary):
-    """The key prompt hides input, Ctrl+C cancels it with the terminal
-    restored and nothing saved, and Enter saves exactly the typed key."""
     code, output, home, before, after = key_entry(binary, b"sk-partial\x03")
     key = home / ".config" / "rui" / "openai.key"
     assert code != 0 and b"Key entry cancelled" in output, (code, output)
@@ -165,8 +152,6 @@ def key_entry_journey(binary):
     assert b"sk-" not in output.split(b"(it is not shown): ", 1)[1], output
     assert after == before
     assert key.read_text() == "sk-good\n" and key.stat().st_mode & 0o777 == 0o600
-    # A receipt that cannot be written never skips the default: the key and
-    # the provider preference are both saved.
     root = pathlib.Path(tempfile.mkdtemp(prefix="rui-key-receipt-"))
     home = root / "home"
     home.mkdir(mode=0o700)

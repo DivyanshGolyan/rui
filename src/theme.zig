@@ -52,7 +52,6 @@ fn palette(mode: Mode) Palette {
     };
 }
 
-/// The pointer wash follows the two surfaces it sits between, never a second palette.
 fn midpoint(a: Rgb, b: Rgb) Rgb {
     var result: Rgb = undefined;
     for (a, b, &result) |x, y, *out| out.* = @intCast((@as(u16, x) + y) / 2);
@@ -80,7 +79,6 @@ pub fn text(mode: Mode, depth: Depth, role: Text, on: Background) Color {
         .strong => p.strong,
         .body => p.body,
         .indigo => p.indigo,
-        // Quiet text darkens on the day wash surfaces to keep 4.5:1.
         .quiet => if (mode == .light and (on == .selvedge or on == .selection or on == .hover)) Rgb{ 0x62, 0x5a, 0x4c } else p.quiet,
         .attention => p.attention,
         .failure => p.failure,
@@ -100,8 +98,6 @@ pub fn thread(mode: Mode, depth: Depth) Color {
     };
 }
 
-/// The colour of xterm entry `index`, from the 6x6x6 cube or the grey ramp;
-/// the terminal defines entries 0-15 itself, so they have none here.
 pub fn xtermRgb(index: u8) Rgb {
     std.debug.assert(index >= 16);
     const levels = [_]u8{ 0, 95, 135, 175, 215, 255 };
@@ -109,7 +105,6 @@ pub fn xtermRgb(index: u8) Rgb {
     return if (index < 232) .{ levels[n / 36], levels[n / 6 % 6], levels[n % 6] } else @splat(@intCast(8 + 10 * (@as(u16, index) - 232)));
 }
 
-/// WCAG 2 relative luminance of an sRGB colour.
 pub fn relativeLuminance(rgb: Rgb) f64 {
     var result: f64 = 0;
     for (rgb, [_]f64{ 0.2126, 0.7152, 0.0722 }) |byte, weight| {
@@ -119,7 +114,6 @@ pub fn relativeLuminance(rgb: Rgb) f64 {
     return result;
 }
 
-/// Nearest xterm cube or grey-ramp entry; terminal-defined entries 0–15 are excluded.
 pub fn nearestIndex(want: Rgb) u8 {
     var best: u8 = 16;
     var distance: u32 = std.math.maxInt(u32);
@@ -144,10 +138,6 @@ const Indexed = struct {
     thread: u8,
 };
 
-/// Nearest distinct entries beside the existing ground and selvedge. Day selection
-/// takes 188 because its nearest, 253, is the selvedge. Hover's nearest free grey,
-/// 252, fails 4.5:1 with attention 58; 254 is the nearest remaining readable entry.
-/// Night selection and hover take 237 and 235 around selvedge 236.
 fn pinnedBackground(mode: Mode, role: Background) ?u8 {
     return switch (role) {
         .selection => if (mode == .dark) 237 else 188,
@@ -174,7 +164,6 @@ const indexed = blk: {
     break :blk tables;
 };
 
-/// A nonempty XTVERSION is authoritative even when it is unrecognised.
 pub fn wordmark(utf8: bool, xtversion: ?[]const u8, term_program: ?[]const u8) []const u8 {
     if (!utf8) return "rui";
     if (xtversion) |version| if (version.len != 0) {

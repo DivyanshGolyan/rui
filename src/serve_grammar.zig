@@ -1,4 +1,3 @@
-//! Foreground Host serve options and conflicts.
 const std = @import("std");
 const grammar = @import("cli_grammar.zig");
 const provider_name = @import("provider_name.zig");
@@ -10,11 +9,6 @@ const hiddenNumber = grammar.hiddenNumber;
 const hiddenFlag = grammar.hiddenFlag;
 pub const destination = &[_]Option{ value("store", "PATH"), grammar.hex("store-hex", "store", 492) };
 
-/// The Host flags this grammar retired, never accepted as options. Two
-/// readers: a typed flag is refused naming its replacement, and the argv of a
-/// Host that a previous release started is read through `currentArguments`.
-/// Remove when the oldest supported previous release no longer starts Hosts
-/// with these flags.
 pub const retired_options = &[_]grammar.RetiredOption{
     grammar.retired("active-capacity", &.{"execution.activeCapacity=VALUE"}, ""),
     grammar.retired("provider", &.{"providers.VALUE={}"}, " (one --set per provider; each adds to the set)"),
@@ -24,9 +18,6 @@ pub const retired_options = &[_]grammar.RetiredOption{
     grammar.retired("bash-timeout-ms", &.{"tools.bash.timeoutMs=VALUE"}, ""),
 };
 
-/// A running Host's `host serve` arguments in this grammar: each retired
-/// flag and its value become the assignments that replace it. An argv with
-/// no retired flag is returned as it is. `arena` owns the result.
 pub fn currentArguments(arena: std.mem.Allocator, args: []const []const u8) error{ OutOfMemory, InvalidArguments }![]const []const u8 {
     var flagged = false;
     var count = args.len;
@@ -142,7 +133,6 @@ fn retiredNamed(name: []const u8) ?grammar.RetiredOption {
     for (retired_options) |old| if (std.mem.eql(u8, old.name, name)) return old;
     return null;
 }
-/// Hide the compatibility identity spelling on Host settings/start surfaces.
 pub const host_destination = &[_]Option{ value("store", "PATH"), blk: {
     var option = grammar.hex("store-hex", "store", 492);
     option.hidden = true;
@@ -152,7 +142,6 @@ pub const settings_options = host_destination ++ &[_]Option{
     value("settings", "FILE|-"),
     .{ .name = "set", .argument = "PATH=VALUE", .repeated = true },
 };
-/// Host fault injection and observation, consumed only by host serve.
 const serve_test = &[_]Option{
     .{ .name = "fault", .argument = "VALUE", .hidden = true, .repeated = true },
     hiddenValue("test-models-dev-url"),

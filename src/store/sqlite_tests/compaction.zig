@@ -1,5 +1,3 @@
-//! Compaction SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
@@ -15,9 +13,6 @@ const submitTestMessage = store_testing.submitTestMessage;
 const testingStore = store_testing.testingSqliteStore;
 const TestingSteps = shared_fixtures.TestingSteps;
 
-/// The floor walk as admission and settlement take it: `FloorSearch`'s
-/// facts round, then a round a page, through the transition runner, outside
-/// any transaction.
 const TestingFloorWalk = struct {
     pub const rounds = transition.rounds(.{
         .facts = .{ .always, error.CorruptStore },
@@ -52,8 +47,6 @@ const TestingFloorWalk = struct {
 };
 
 test "a compaction's floor counts the output bytes a request sends, and none its base covers" {
-    // A 200,000-byte answer with no usage passes level 2's 128,000 bytes,
-    // unless a compaction base covers it and the request sends none of it.
     const answer = try std.testing.allocator.alloc(u8, 200_000);
     defer std.testing.allocator.free(answer);
     @memset(answer, 'a');
@@ -84,7 +77,6 @@ test "a compaction's floor counts the output bytes a request sends, and none its
         if (covered) {
             try std.testing.expect(room == null);
         } else {
-            // The floor drops the answer and keeps "small" above it.
             const position = try store_testing.sqliteQueryU64(storage.sqliteDatabase(), "SELECT admission_position FROM model_operation WHERE operation_id=?1", .{answered.operation_id});
             try std.testing.expectEqual(@as(u8, 2), room.?.choice.level);
             try std.testing.expect(room.?.choice.floor >= position);
@@ -99,8 +91,6 @@ test "a compaction's floor walk reads past its first page to the level that drop
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try tests.configureTestSessionAsk(&storage, "floor-pages-config");
-    // After the first, twenty 30,000-byte Messages: level 1's 512,000
-    // bytes are past at the eighteenth from the newest, on the second page.
     const text = try std.testing.allocator.alloc(u8, 30_000);
     defer std.testing.allocator.free(text);
     @memset(text, 'p');
@@ -124,7 +114,6 @@ test "a compaction's floor read costs the same however long its Session's histor
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try tests.configureTestSessionAsk(&storage, "floor-steps-config");
-    // 200 KB Messages: level 1's 512,000 bytes are past at the fourth.
     const text = try std.testing.allocator.alloc(u8, 200_000);
     defer std.testing.allocator.free(text);
     @memset(text, 'x');
@@ -135,7 +124,6 @@ test "a compaction's floor read costs the same however long its Session's histor
     const compaction = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const Walk = struct {
         fn steps(store: *Store, operation: u64) !u64 {
-            // The first read prepares the walk's statements.
             _ = try deeper(store, operation);
             var counter: TestingSteps = .{};
             counter.begin(store.sqliteDatabase());
@@ -146,8 +134,6 @@ test "a compaction's floor read costs the same however long its Session's histor
         fn deeper(store: *Store, operation: u64) !?history_floor_domain.Room {
             return TestingFloorWalk.deeper(store, operation);
         }
-        /// 1,000 more copies of the big Message, older than the rest: the
-        /// first Message moves past them, as the walk keeps it either way.
         fn addOlder(store: *Store, ref: []const u8, comptime first: u64) !void {
             const sequence = std.fmt.comptimePrint("WITH RECURSIVE sequence(value) AS (VALUES({d}) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) ", .{ first, first + 999 });
             try store_testing.sqlite_only.withoutForeignKeys(store, sequence ++

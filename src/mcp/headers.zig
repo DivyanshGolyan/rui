@@ -1,25 +1,11 @@
-//! The HTTP fields MCP 2026-07-28 mirrors from a request body, as values:
-//! the `Mcp-Name` and `Mcp-Param-{Name}` encoding, and the `x-mcp-header`
-//! annotations a tool's input schema may carry (D206, Streamable HTTP
-//! "Custom Headers from Tool Parameters").
-//!
-//! A tool's annotations are checked once, when its list arrives; a tool
-//! with an invalid one is left out. They are not kept: a call derives them
-//! again from the saved input schema, so nothing can disagree with it.
 const std = @import("std");
 const http1 = @import("../http1/request.zig");
 const Parser = @import("../http1/Parser.zig");
 const document = @import("document.zig");
 
-/// The longest decoded value one mirrored field carries. Servers bound a
-/// whole head (Node at 16 KiB), so a longer one could never arrive; a call
-/// that would need it fails before anything is sent.
 pub const max_value_bytes = 1024;
-/// The most `x-mcp-header` annotations one tool may carry, and the longest
-/// name portion of one.
 pub const max_params = 16;
 pub const max_param_name_bytes = 64;
-/// The longest property name on an annotated property's path.
 pub const max_path_key_bytes = 64;
 
 pub const sentinel_prefix = "=?base64?";
@@ -42,42 +28,29 @@ pub fn writeValue(writer: *std.Io.Writer, name: []const u8, value: []const u8) E
     return http1.writeField(writer, .{ .name = name, .value = encoded[0 .. end + sentinel_suffix.len] });
 }
 
-/// Visible ASCII with inner spaces and tabs, not spelled like the sentinel.
 fn isPlain(value: []const u8) bool {
     if (!http1.isFieldValue(value)) return false;
     return !(std.mem.startsWith(u8, value, sentinel_prefix) and std.mem.endsWith(u8, value, sentinel_suffix));
 }
 
-/// Why a tool's `x-mcp-header` annotations are invalid.
 pub const Invalid = enum {
-    /// An annotation on the schema root or reached through anything but a
-    /// chain of `properties` keys.
     not_statically_reachable,
-    /// The annotation is not a string.
     not_a_string,
-    /// Empty, not an HTTP token, or longer than `max_param_name_bytes`.
     bad_name,
-    /// Two annotations with the same name, ignoring case.
     duplicate_name,
-    /// The property's `type` is not one of string, integer, boolean.
     not_primitive,
     too_many,
-    /// A property name on the path is longer than `max_path_key_bytes`.
     path_key_too_long,
 };
 
 const Primitive = enum { string, integer, boolean };
 
-/// One annotation the walk found: its property path (key contents as
-/// written), name portion (contents as written) and type.
 const Annotation = struct {
     path: []const []const u8,
     name: []const u8,
     primitive: Primitive,
 };
 
-/// Checks every `x-mcp-header` annotation in a tool's `inputSchema`, a
-/// checked JSON value. Null means the tool may be listed.
 pub fn check(input_schema: []const u8) ?Invalid {
     var checker: Checker = .{};
     walk(input_schema, &checker) catch |invalid| return invalidOf(invalid);
@@ -88,7 +61,6 @@ fn invalidOf(err: WalkError) Invalid {
     return std.meta.stringToEnum(Invalid, @errorName(err)).?;
 }
 
-/// `Invalid`'s names as errors, so the walk stops at the first.
 const WalkError = error{ not_statically_reachable, not_a_string, bad_name, duplicate_name, not_primitive, too_many, path_key_too_long };
 
 const Checker = struct {
@@ -111,14 +83,8 @@ const Checker = struct {
     }
 };
 
-/// Writes one `Mcp-Param-{Name}` field for each annotation of
-/// `input_schema` whose property has a primitive value in `arguments`, a
-/// checked JSON object. A value of another type, or none, writes no field:
-/// the server then judges the arguments itself.
 pub fn writeParams(writer: *std.Io.Writer, input_schema: []const u8, arguments: []const u8) Error!void {
     var params: Params = .{ .writer = writer, .arguments = arguments };
-    // The list's check passed this schema, so its walk finds nothing
-    // invalid; a call is never made to a tool the check left out.
     walk(input_schema, &params) catch unreachable;
     if (params.failure) |failure| return failure;
 }
@@ -181,21 +147,15 @@ fn isSafeInteger(value: []const u8) bool {
     return magnitude <= (1 << 53) - 1;
 }
 
-/// Keywords whose values are instances, not schemas: an `x-mcp-header`
-/// key inside one is data.
 const data_keywords = [_][]const u8{ "const", "enum", "default", "examples" };
 
 const max_depth = 64;
 
-/// Walks a schema, telling `visitor` each annotation on a statically
-/// reachable property and failing on one anywhere else.
 fn walk(input_schema: []const u8, visitor: anytype) WalkError!void {
     var path: [max_depth][]const u8 = undefined;
     try walkSchema(input_schema, true, &path, 0, visitor);
 }
 
-/// `reachable`: this schema is the root or sits at the end of a chain of
-/// `properties` keys from it. `depth` keys of `path` lead here.
 fn walkSchema(schema: []const u8, reachable: bool, path: *[max_depth][]const u8, depth: usize, visitor: anytype) WalkError!void {
     if (document.kind(schema) != .object) return walkOther(schema, path, depth, visitor);
     var members = document.Members.init(schema);
@@ -206,7 +166,6 @@ fn walkSchema(schema: []const u8, reachable: bool, path: *[max_depth][]const u8,
         } else if (document.keyIs(found.key, "properties") and document.kind(found.value) == .object) {
             var properties = document.Members.init(found.value);
             while (properties.next()) |property| {
-                // The reader bounds nesting, so the path never outgrows it.
                 path[depth] = property.key;
                 try walkSchema(property.value, reachable, path, depth + 1, visitor);
             }
@@ -216,8 +175,6 @@ fn walkSchema(schema: []const u8, reachable: bool, path: *[max_depth][]const u8,
     }
 }
 
-/// A value under a keyword other than `properties`: any schema in it is
-/// not statically reachable.
 fn walkOther(value: []const u8, path: *[max_depth][]const u8, depth: usize, visitor: anytype) WalkError!void {
     switch (document.kind(value)) {
         .object => try walkSchema(value, false, path, depth, visitor),
@@ -308,7 +265,6 @@ test "an annotation must name a unique token on a primitive property" {
 }
 
 test "values are written plain when header-safe, else base64 with the sentinel" {
-    // The transport's own encoding examples.
     const cases = [_]struct { []const u8, []const u8 }{
         .{ "us-west1", "us-west1" },
         .{ "Hello, \xe4\xb8\x96\xe7\x95\x8c", "=?base64?SGVsbG8sIOS4lueVjA==?=" },
@@ -346,7 +302,6 @@ test "a call mirrors each annotated argument it has, by path" {
             "Mcp-Param-Region: us-west1\r\nMcp-Param-Count: -7\r\nMcp-Param-Flag: true\r\n",
         },
         .{ "{\"region\":\"caf\\u00e9\"}", "Mcp-Param-Region: =?base64?Y2Fmw6k=?=\r\n" },
-        // Values of another type, or out of range, are left to the server.
         .{ "{\"region\":5,\"n\":1.5,\"nested\":{\"flag\":\"yes\"}}", "" },
         .{ "{\"n\":9007199254740992}", "" },
         .{ "{\"n\":9007199254740991,\"nested\":[1]}", "Mcp-Param-Count: 9007199254740991\r\n" },

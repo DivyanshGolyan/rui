@@ -74,36 +74,17 @@ fn captureFailedResponse(host: *Host, request: *const protocol.InspectSession, r
     return capture.seal();
 }
 
-// The complete Debug request -> SQLite -> response path exceeds 512 KiB.
-// Only the two shared workers reserve these stacks, independent of exchanges.
 const intake_worker_stack_bytes = 1024 * 1024;
 
-/// SIGINT, SIGTERM and SIGHUP ask the Host to stop, as `host-stop` does:
-/// Ctrl-C on a foreground Host, closing its terminal or `kill <pid>` is a
-/// stop someone meant. The handler only
-/// records the ask and writes intake's wake socket; intake's loop applies it
-/// through `Host.stopAsked`, the one owner of the stop record. SIGKILL and a
-/// crash leave no record. Bash children start with every signal at its
-/// default (`rui_bash_spawn`), and exec resets a caught signal anyway.
 const StopSignals = struct {
     const signals = .{ std.posix.SIG.INT, std.posix.SIG.TERM, std.posix.SIG.HUP };
 
     var asked: std.atomic.Value(bool) = .init(false);
-    /// Intake's wake socket while it is open, else -1.
     var wake: std.atomic.Value(std.posix.fd_t) = .init(-1);
-    /// Handlers between reading `wake` and finishing their write; `detach`
-    /// waits for none before intake may close the socket. With `wake`, a
-    /// store-buffering handshake: both sides store, then load the other's
-    /// value, all seq_cst, so either `detach` sees the handler in flight or
-    /// the handler sees -1.
     var writing: std.atomic.Value(u32) = .init(0);
 
-    /// The handlers `install` replaced. Static, like the handlers themselves:
-    /// serve's frame stays resident for the Host's life.
     var previous: [signals.len]std.posix.Sigaction = undefined;
 
-    /// Installed before startup, so an ask during startup stops the Host
-    /// once intake runs. `restore` puts the previous handlers back.
     noinline fn install() void {
         var blocked = std.posix.sigemptyset();
         inline for (signals) |signal| std.posix.sigaddset(&blocked, signal);
@@ -139,27 +120,19 @@ const StopSignals = struct {
 
     fn attach(fd: std.posix.fd_t) void {
         wake.store(fd, .seq_cst);
-        // An ask that arrived before this wake socket existed.
         if (asked.load(.seq_cst)) hint(fd);
     }
 
-    /// After it returns no handler holds the socket, so it may be closed.
     fn detach() void {
         wake.store(-1, .seq_cst);
-        // A handler writes one byte and returns; it never waits.
         while (writing.load(.seq_cst) != 0) std.atomic.spinLoopHint();
     }
 
-    /// Applies a pending ask on intake's loop. A repeated ask while the Host
-    /// is already stopping changes nothing (`Host.stopAsked`).
     fn apply(host: *Host) void {
         if (asked.swap(false, .seq_cst)) _ = host.stopAsked();
     }
 };
 
-// One socket owner and one ordinary/one control local-work stack replace
-// per-exchange threads. Workers never wait on peers. Complete requests waiting
-// for Store access remain transient exchanges, not another pending authority.
 const Intake = struct {
     host: *Host,
     wake: [2]std.posix.fd_t = undefined,
@@ -168,9 +141,7 @@ const Intake = struct {
     workers: [2]Worker = undefined,
     threads: [2]std.Thread = undefined,
     started: usize = 0,
-    /// stdin, watched when interface.lifetime selects it (D5, D118).
     stdin: ?std.posix.fd_t = null,
-    /// Lifetime remains after EOF clears the watched descriptor.
     lifetime: host_settings.Interface.Lifetime = .detached,
     deadline_armed: bool = false,
 
@@ -222,24 +193,17 @@ const Intake = struct {
         header: Header = undefined,
         number: ?u64 = null,
         ingress: ?*wire_request.Ingress = null,
-        /// The finished Request; it lives in `ingress`.
         request: ?*wire_request.Request = null,
         reply: ?*Reply = null,
         retained_scratch: ?named_scratch.Owner = null,
         cleanup_retry_at: i128 = 0,
-        /// A Message's client environment: the body's first
-        /// `X-Rui-Environment-Bytes` bytes, read before the request straight
-        /// into the allocation the Session's register keeps. Admission
-        /// spends it.
         environment: ?SessionEnvironments.Offer = null,
         environment_received: usize = 0,
 
         fn retireUnhanded(self: *Exchange) void {
-            // Capture handoff retains files, but grants no admission authority.
             if (self.job == .fill or self.job == .cleanup) return;
             switch (self.state) {
                 .header, .body => self.state = .retired,
-                // Only complete stop retries can still earn their guarded ack.
                 .ready => if (self.route != .host_stop) {
                     self.state = .retired;
                 },
@@ -264,8 +228,6 @@ const Intake = struct {
         }
 
         fn closeSocket(self: *Exchange) void {
-            // Only intake invalidates this descriptor, after local borrowers
-            // finish. Reclamation retries retain scratch, not a finished peer.
             if (self.fd < 0) return;
             _ = std.c.close(self.fd);
             self.fd = -1;
@@ -277,15 +239,12 @@ const Intake = struct {
                 if (reply.body != .none and reply.body != .json) return false;
             }
             if (self.ingress == null and self.request == null) return true;
-            // Reserved routes can own metadata, but cannot capture files.
             const route = self.route orelse return false;
             return route.isControl() or route == .host_info;
         }
 
         fn finishRetirement(self: *Exchange) void {
             self.closeSocket();
-            // File-free retirement must not wait for a local worker while
-            // holding either a classification or a total intake place.
             if (self.canCleanupOnIntake()) {
                 std.debug.assert(self.cleanup());
                 self.state = .closed;
@@ -345,7 +304,6 @@ const Intake = struct {
                 self.state = .retired;
                 return;
             };
-            // No successful header has left while preparation is fallible.
             reply.deinit();
             const status: u16 = switch (err) {
                 error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity, error.OutOfMemory => 503,
@@ -374,9 +332,6 @@ const Intake = struct {
                 else => .invocation_error,
             };
             respondStatic(reply, status, kind, code);
-            // Detect a disconnected predecessor before classifying another
-            // peer in this socket pass. Half-closed clients still receive
-            // their bounded error through the ordinary reply state.
             self.state = if (reply.advance(self.fd) catch true) .retired else .reply;
         }
 
@@ -410,10 +365,6 @@ const Intake = struct {
                             var discovery: usize = 0;
                             for (self.owner.exchanges.items) |peer| {
                                 if (peer.route) |route| {
-                                    // A prior reply can finish earlier in this
-                                    // same socket pass, before retirement is
-                                    // serviced. Ordinary scratch custody still
-                                    // counts until its worker releases it.
                                     if (peer.state == .closed or
                                         (peer.state == .retired and peer.canCleanupOnIntake())) continue;
                                     if (route.isControl()) {
@@ -448,6 +399,7 @@ const Intake = struct {
                         .session_pin => protocol.max_session_pin_request_bytes,
                         .model_interruption => protocol.max_model_interruption_request_bytes,
                         .permission_decision => protocol.max_permission_decision_request_bytes,
+                        .action_background => protocol.max_action_background_request_bytes,
                         else => std.math.maxInt(u64),
                     };
                     if (self.header.content_length > limit) return error.RequestTooLarge;
@@ -475,23 +427,15 @@ const Intake = struct {
                 self.deadline = @as(i128, nowNs(self.host)) + 60 * std.time.ns_per_s;
             if (self.route == .message) {
                 consumed += try self.receiveEnvironment(bytes[consumed..]);
-                // The environment alone arrived: the record, never empty,
-                // is still to come.
                 if (consumed == bytes.len) return;
             }
             if (self.route == .configure or self.route == .message) {
-                // One bounded window is borrowed by local capture work. No
-                // socket read or peer wait runs on those shared stacks.
                 try self.input.appendSlice(self.host.allocator, bytes[consumed..]);
                 self.job = .receive;
                 self.state = .ready;
             } else self.state = try self.receive(bytes[consumed..]);
         }
 
-        /// A Message's body starts with its client environment; every other
-        /// route carries none. Returns the request's own length, which for a
-        /// Message is never zero, so its environment is always complete and
-        /// checked before its request is.
         fn reserveEnvironment(self: *Exchange) !u64 {
             const length = self.header.environment_bytes orelse {
                 if (self.route == .message) return error.EnvironmentRequired;
@@ -505,8 +449,6 @@ const Intake = struct {
             return self.header.content_length - length;
         }
 
-        /// Reads the rest of a Message's environment straight into the
-        /// allocation the register keeps.
         fn readEnvironment(self: *Exchange) !void {
             if (@as(i128, nowNs(self.host)) >= self.deadline) return error.TransferInactive;
             const room = self.environment.?.room()[self.environment_received..];
@@ -527,8 +469,6 @@ const Intake = struct {
             return offer.room().len - self.environment_received;
         }
 
-        /// Takes the environment's bytes from the front of `bytes` and checks
-        /// the whole once it has arrived. Returns how many it took.
         fn receiveEnvironment(self: *Exchange, bytes: []const u8) !usize {
             const wanted = @min(bytes.len, self.environmentRemaining());
             if (wanted == 0) return 0;
@@ -561,11 +501,8 @@ const Intake = struct {
         }
 
         fn prepare(self: *Exchange) !void {
-            // Reply owns all prepared bytes/readers. Imported ingress is no
-            // longer borrowed, even when a peer holds acknowledgment delivery.
             defer self.releaseRequest();
             const reply = try self.ensureReply();
-            // Admission spends the environment; nothing of it outlives this.
             defer self.releaseEnvironment();
             try prepareReply(self.host, reply, self.fd, self.header, self.number.?, self.accepted_at_ns, self.request.?, if (self.environment) |*offer| offer else null);
         }
@@ -623,7 +560,6 @@ const Intake = struct {
     fn deinit(self: *Intake) void {
         self.stopWorkers();
         for (self.exchanges.items) |exchange| {
-            // Joining workers, not response delivery, ends their borrowing.
             exchange.state = .retired;
             while (!exchange.destroy())
                 self.host.io.sleep(.fromMilliseconds(execution_turn.retained_cleanup_retry_ms), .awake) catch {};
@@ -634,12 +570,10 @@ const Intake = struct {
     }
 
     fn notify(self: *Intake) void {
-        // Coalesced hints: a full nonblocking socket is already readable.
         _ = std.c.write(self.wake[1], "x", 1);
     }
 
     fn serviceWorkers(self: *Intake) void {
-        // Retire peers even when both workers are busy or cleanup is not due.
         for (self.exchanges.items) |exchange| {
             if (exchange.state == .retired) exchange.finishRetirement();
         }
@@ -650,7 +584,6 @@ const Intake = struct {
                 const exchange = worker.exchange.?;
                 if (worker.failure) |err| {
                     if (exchange.job != .fill) exchange.fail(err) else {
-                        // Delivery already began. Never append a second reply.
                         if (self.host.store.isFenced()) fenceDispatch(self.host, "reply content", err);
                         exchange.state = .retired;
                     }
@@ -668,8 +601,6 @@ const Intake = struct {
                 worker.state = .idle;
             }
             if (worker.state != .idle) continue;
-            // Ordinary capture, fill and cleanup cannot exhaust control work.
-            // Neither lane can preempt a canonical Store operation.
             var next: ?*Exchange = null;
             for (self.exchanges.items) |exchange| {
                 const control = if (exchange.route) |route| route.isControl() else false;
@@ -683,8 +614,6 @@ const Intake = struct {
                 if (next == null) next = exchange;
             }
             if (next) |exchange| {
-                // Share the shutdown/launch gate only through handoff. Never
-                // hold it across Store I/O or draining an already-owned reply.
                 self.host.launch_mutex.lockUncancelable(self.host.io);
                 defer self.host.launch_mutex.unlock(self.host.io);
                 if (exchange.state == .retired) {
@@ -701,9 +630,6 @@ const Intake = struct {
         }
     }
 
-    /// stdin carries nothing after the settings document; its close, or any
-    /// failure to read it, stops the Host. Shutdown then has 10 seconds
-    /// before the alarm's default action ends the process (D118).
     fn readStdin(self: *Intake) void {
         var bytes: [256]u8 = undefined;
         const count = std.c.read(self.stdin.?, &bytes, bytes.len);
@@ -715,9 +641,6 @@ const Intake = struct {
         _ = self.host.stopAsked();
     }
 
-    /// A stdin-lifetime Host's shutdown, however it began (stdin close or
-    /// `host-stop`), ends the process 10 seconds later if cleanup is still
-    /// running; the alarm survives the drains after intake returns.
     fn armShutdownDeadline(self: *Intake) void {
         if (self.lifetime != .stdin or self.deadline_armed) return;
         self.deadline_armed = true;
@@ -731,8 +654,6 @@ const Intake = struct {
         var failure: ?anyerror = null;
         var accept_retry_at: i128 = 0;
         while (true) {
-            // Drain before rechecking: a hint written after this read stays
-            // readable, so the bounded poll below cannot sleep past it.
             var bytes: [256]u8 = undefined;
             while (std.c.read(self.wake[0], &bytes, bytes.len) > 0) {}
             StopSignals.apply(self.host);
@@ -750,13 +671,8 @@ const Intake = struct {
             }
             const now: i128 = nowNs(self.host);
             self.polls.clearRetainingCapacity();
-            // A readable backlog stays readable when accept cannot acquire a
-            // descriptor or kernel memory. Pause only acquisition, not peers,
-            // workers or shutdown, and avoid spinning on that same readiness.
             try self.polls.append(self.host.allocator, .{ .fd = if (listener_open.* and now >= accept_retry_at) listener.socket.handle else -1, .events = std.posix.POLL.IN, .revents = 0 });
             try self.polls.append(self.host.allocator, .{ .fd = self.wake[0], .events = std.posix.POLL.IN, .revents = 0 });
-            // Sleep until the earliest owned deadline. Workers and shutdown
-            // write the wake pipe; one second bounds any unowned change.
             var wake_at: i128 = now + std.time.ns_per_s;
             if (listener_open.* and now < accept_retry_at) wake_at = @min(wake_at, accept_retry_at);
             for (self.exchanges.items) |exchange| {
@@ -792,8 +708,6 @@ const Intake = struct {
                                     wake_at = @min(wake_at, reply.deadline());
                                 }
                             } else {
-                                // Test delivery holds: a FIFO gate has no
-                                // readiness here, so keep checking it briefly.
                                 wake_at = @min(wake_at, reply.deadline(), if (reply.gate != null) now + 20 * std.time.ns_per_ms else reply.not_before_ns);
                             }
                         } else {
@@ -807,8 +721,6 @@ const Intake = struct {
             }
             try self.polls.append(self.host.allocator, .{ .fd = self.stdin orelse -1, .events = std.posix.POLL.IN, .revents = 0 });
             self.serviceWorkers();
-            // Worker results applied above can leave closures to destroy or
-            // cleanup to retry. A worker owns its exchange's fields meanwhile.
             for (self.exchanges.items) |exchange| {
                 if (exchange.state == .working) continue;
                 if (exchange.cleanup_retry_at > now) {
@@ -841,15 +753,10 @@ const Intake = struct {
             self.retireExchanges();
             if (!listener_open.* and self.exchanges.items.len == 0) return failure orelse error.EffectAwareShutdown;
             if (!listener_open.* or self.polls.items[0].revents == 0) continue;
-            // Accept a bounded batch, then return to existing exchanges.
             for (0..16) |_| {
                 if (self.host.intake_capacity < product_defaults.intake_capacity and
                     self.exchanges.items.len >= self.host.intake_capacity + 3)
                 {
-                    // Unknown routes cannot hold all reserved progress places.
-                    // Release one before accepting its successor: never acquire
-                    // an unbudgeted descriptor or evict classified work. Stop
-                    // this batch so survivors get a read turn before turnover.
                     for (self.exchanges.items, 0..) |peer, peer_index| {
                         if (peer.state == .header and peer.route == null) {
                             const destroyed = peer.destroy();
@@ -882,8 +789,6 @@ const Intake = struct {
                     _ = self.host.advance(.stopping);
                     break;
                 }
-                // Give a newly acquired reserved place a classification turn
-                // before considering it for pressure-driven turnover.
                 if (self.host.intake_capacity < product_defaults.intake_capacity and
                     self.exchanges.items.len >= self.host.intake_capacity + 3) break;
             }
@@ -894,8 +799,6 @@ const Intake = struct {
         var index: usize = 0;
         while (index < self.exchanges.items.len) {
             const exchange = self.exchanges.items[index];
-            // Finish this socket pass's retirements before considering the
-            // listener. No unclassified peer needs evicting for a freed place.
             if (exchange.state == .retired) exchange.finishRetirement();
             if (exchange.state != .closed) {
                 index += 1;
@@ -908,9 +811,6 @@ const Intake = struct {
     }
 
     fn acceptSocket(self: *Intake, listener: std.posix.fd_t) !std.posix.fd_t {
-        // A child must never copy a socket before CLOEXEC is installed. Keep
-        // only native acquisition/flagging (and failure-close) under the same
-        // gate as Prepared.launch, not exchange allocation or peer service.
         self.host.launch_mutex.lockUncancelable(self.host.io);
         defer self.host.launch_mutex.unlock(self.host.io);
         const fd = std.c.accept(listener, null, null);
@@ -950,22 +850,17 @@ fn descriptorTransport(served: *const providers.Providers) descriptor_capacity.T
 
 extern "c" fn rui_write_readiness(fd: c_int, bytes: [*]const u8, length: usize) c_int;
 
-// MCP sockets run beside, not inside, the Bash/model slot population.
 fn reserveMcpDescriptors(requirement: *descriptor_capacity.Requirement) !void {
     const sockets = @import("server_mcp.zig").capacity;
     requirement.execution = try std.math.add(usize, requirement.execution, sockets);
     requirement.total = try std.math.add(usize, requirement.total, sockets);
 }
 
-/// Lists each MCP server and saves the Host tool set: the built-ins and
-/// the servers' tools, with an unreachable server's last saved tools kept
-/// (D147). A name two sources share refuses the start (D142).
 noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, storage: *store_module.Store, servers: []const server_mcp_settings.Server, stop: ?std.posix.fd_t, failure: *?start_report.Failure) !void {
     var saved = try storage.readHostToolSet(arena);
     const kept: ?tools.HostToolSet = if (saved) |*found| found.toolSet() else null;
     var collision: mcp_offered.Collision = .{};
     const host_tool_set = mcp_offered.collect(io, arena, scratch, servers, if (kept) |*value| value else null, &collision, stop) catch |err| switch (err) {
-        // The launcher closed stdin: stop as a closed stdin does later.
         error.Stopped => return error.EffectAwareShutdown,
         error.ToolNameCollision => {
             var message: [start_report.max_refusal_message_bytes]u8 = undefined;
@@ -983,10 +878,10 @@ noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem
     try storage.saveHostToolSet(owned);
 }
 
-// Keep the measured Host main-thread root distinct from its CLI shell.
 pub noinline fn serve(
     io: std.Io,
     allocator: std.mem.Allocator,
+    host_directory: []const u8,
     prepared: host_settings.Prepared,
     tuning: Tuning,
     failure: *?start_report.Failure,
@@ -1000,8 +895,6 @@ pub noinline fn serve(
     var connections = try server_mcp_settings.Connections.init(allocator, settings);
     defer connections.deinit();
     const mcp_servers = connections.servers;
-    // The Host owns child waits. Automatic reaping or an inherited handler
-    // would release process identities before their signal owners retire.
     const child_action: std.posix.Sigaction = .{
         .handler = .{ .handler = std.posix.SIG.DFL },
         .mask = std.posix.sigemptyset(),
@@ -1015,7 +908,7 @@ pub noinline fn serve(
         descriptor_observation.open_descriptors,
         active_capacity,
         product_defaults.intake_capacity,
-        3, // Two controls and concurrent discovery.
+        3,
         descriptorTransport(served),
         served.anySignIn(),
         os.tag,
@@ -1069,8 +962,6 @@ pub noinline fn serve(
     defer if (mysql_url) |url| url.destroy();
     var socket_buffer: [host_settings.max_launch_socket_path_bytes]u8 = undefined;
     const socket_path = if (!settings.interface.dir.anchored) try std.fmt.bufPrint(&socket_buffer, "{s}/" ++ host_settings.socket_name, .{settings.interface.dir.slice()}) else "";
-    // One Host-owned lease in final storage, through Store close and cleanup.
-    // Keep its bounded path buffers off the resident Host main-thread frame.
     const lease = try allocator.create(platform.StoreLease);
     defer allocator.destroy(lease);
     if (mysql_url != null)
@@ -1079,8 +970,7 @@ pub noinline fn serve(
         lease.* = try platform.StoreLease.acquire(io, settings.store.sqlite.dir.slice());
     defer lease.release();
     if (mysql_url == null and !settings.interface.dir.anchored) try lease.useRuntimeDirectory(settings.interface.dir.slice(), socket_path);
-    // fd1 may alias fd2. Exclude flag borrowing before any continuing
-    // startup diagnostic, through readiness delivery and failed unwind.
+    lease.paths.retainReachableDirectory(io, host_directory);
     if (!stderr.tryExclude()) return error.HostReadinessOutputUnavailable;
     var readiness_owned = true;
     defer if (readiness_owned) stderr.release();
@@ -1094,8 +984,6 @@ pub noinline fn serve(
     if (diagnostics) |*writer| try recordCapacity(writer, intake_capacity, descriptor_requirement.total, descriptor_limit_text);
     var startup_failure: []const u8 = "startup_error";
     errdefer if (diagnostics) |*writer| writer.record("failed", startup_failure);
-    // The tool set's records point into this arena, and the Store keeps the
-    // tool set for its life, so it outlives the Store.
     var tool_set_memory = std.heap.ArenaAllocator.init(allocator);
     defer tool_set_memory.deinit();
     var storage: store_module.Store = undefined;
@@ -1130,7 +1018,6 @@ pub noinline fn serve(
     ));
 }
 
-/// All serving owners drain before the Store's shutdown result is decided.
 fn serveOpened(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1178,8 +1065,6 @@ fn serveOpened(
     defer allocator.destroy(environments);
     try environments.init(io, allocator);
     defer environments.deinit();
-    // Zero bytes are an empty custody record and retention entry, so fresh
-    // pages need no initializing pass and an unused one never becomes resident.
     const custody_records = try pages.mapZeroed(execution.CustodyRecord, active_capacity);
     defer pages.unmapZeroed(custody_records);
     const retention_capacity = @min(
@@ -1216,7 +1101,6 @@ fn serveOpened(
         try TestObservation.init(fd, hooks.observation_state_fd orelse return error.MissingTestObservationState, hooks.observation_plan orelse return error.MissingTestObservationPlan, host.trace_run_ns)
     else
         null;
-    // This scope outlives connection, execution and capture-writer joins.
     defer if (observation) |*writer| writer.close();
     host.test_observation = if (observation) |*writer| writer else null;
     var retention = output_retention.Queue.initializeWithRemoval(
@@ -1237,15 +1121,10 @@ fn serveOpened(
         try provider.checkLibraries();
     }
     try std.Io.randomSecure(io, &host.instance);
-    // One served incarnation: readiness fences the same opening whose
-    // Store-read generations order listing and activity presentation.
-    // Intake and execution have not started, so no external token exists.
     storage.instance = host.instance;
     const started_at = std.Io.Clock.real.now(io).toSeconds();
     if (started_at <= 0) return error.ClockReadFailed;
     host.started_at = @intCast(started_at);
-    // Freed after intake and execution are joined: they read and fill it.
-    // Pending from the start: execution launches the fetch, or settles it.
     host.model_lists = .init(io, allocator, served);
     defer host.model_lists.deinit();
     var intake: Intake = undefined;
@@ -1255,17 +1134,12 @@ fn serveOpened(
     if (intake.lifetime == .stdin) intake.stdin = 0;
     host.intake_wake = intake.wake[1];
     StopSignals.attach(intake.wake[1]);
-    // Before intake.deinit closes the socket a handler would write.
     defer StopSignals.detach();
     const execution_thread = try signal_stack.spawn(.{}, executionMain, .{&host});
     defer {
-        // Stop admitting new connections before releasing any Host-owned
-        // execution or request custody. Store and lease outlive both drains.
         if (listener_open) listener.deinit(io);
         listener_open = false;
         if (socket_owned) lease.retireSocket() catch |err| {
-            // The lock still protects this failed cleanup. A later startup
-            // removes the owned socket or refuses to serve if it cannot.
             stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
         };
         socket_owned = false;
@@ -1288,17 +1162,12 @@ fn serveOpened(
 }
 
 fn finishServing(storage: *const store_module.Store, failure: *?start_report.Failure, result: anyerror!void) !void {
-    // This is the sole fence decision site, after intake, workers
-    // and execution have drained. A fence wins over every serving outcome.
     if (storage.kind() == .mysql and storage.isFenced()) {
         failure.* = .init(.store_fenced, "the MySQL Store lost ownership or its connection; restart the Host");
         return error.StoreFenced;
     }
     return result;
 }
-
-// serve's frame stays resident for the Host's life, so each startup-only
-// buffer lives in a noinline function of its own.
 
 noinline fn recordCapacity(writer: *HostDiagnostics, intake_capacity: usize, descriptor_requirement: usize, descriptor_limit_text: []const u8) !void {
     var detail: [256]u8 = undefined;
@@ -1308,7 +1177,6 @@ noinline fn recordCapacity(writer: *HostDiagnostics, intake_capacity: usize, des
     }));
 }
 
-/// Admission gets its own mutable password scratch; Prepared remains immutable.
 noinline fn mysqlLogin(gpa: std.mem.Allocator, bytes: *const host_settings.MysqlBytes) !*MysqlUrl {
     const source = bytes.parsed.?;
     const login = try gpa.create(MysqlUrl);
@@ -1316,8 +1184,6 @@ noinline fn mysqlLogin(gpa: std.mem.Allocator, bytes: *const host_settings.Mysql
     return login;
 }
 
-/// Admission's options and login framing are startup scratch, not part of
-/// serve's resident frame on either engine. The caller provides both owners.
 noinline fn openStoreForHost(
     io: std.Io,
     storage: *store_module.Store,
@@ -1338,32 +1204,28 @@ noinline fn openStoreForHost(
         .found_schema_version = &found_schema_version,
         .identity_mismatch = &identity_mismatch,
         .migration_notice = .{ .context = &migration, .notify = StartupMigration.notify },
-        // With MCP servers the tool set is saved below, once they are listed.
         .host_tool_set = if (!has_mcp) &tools.built_in_tool_set else null,
     };
-    // The login is borrowed only by admission and wiped on every exit.
     defer if (mysql_url) |url| url.wipe();
     const target: store_module.Target = if (mysql_url) |url|
         .{ .mysql = url.options() }
     else
         .{ .sqlite = lease.paths.database.slice() };
-    const selector = if (mysql_url) |url| url.database.slice() else lease.paths.store.slice();
+    const selector = if (mysql_url) |url| url.database.slice() else lease.paths.store_identity.slice();
     storage.openTarget(io, target, selector, store_options) catch |err| {
         if (mysql_url == null) {
             if (err == error.WrongStoreVersion) {
-                try reportWrongStoreVersion(lease.paths.store.slice(), found_schema_version);
+                try reportWrongStoreVersion(lease.paths.store_identity.slice(), found_schema_version);
                 if (diagnostics) |writer| writer.record("failed", "unsupported_store_version");
             } else if (err == error.StoreIdentityMismatch) {
-                try reportStoreIdentityMismatch(identity_mismatch.saved_selector.slice(), lease.paths.store.slice());
+                try reportStoreIdentityMismatch(identity_mismatch.saved_selector.slice(), lease.paths.store_identity.slice());
             }
         }
         return err;
     };
-    lease.paths.store.set(storage.storeId()) catch unreachable;
+    lease.paths.store_identity.set(storage.storeId()) catch unreachable;
 }
 
-/// Announces a startup migration on the startup channel, where a launcher
-/// waits through it (`HostStartupWait`), and in the startup records.
 const StartupMigration = struct {
     diagnostics: ?*HostDiagnostics,
 
@@ -1383,12 +1245,6 @@ const StartupMigration = struct {
                 store_module.schema_version,
             },
         };
-        // `serve` holds stderr custody from before the Store opens through
-        // readiness, so this writes under it. One nonblocking try, so a
-        // foreground Host whose stderr nobody drains never stalls holding the
-        // Store. A launcher drains the channel, so its notices arrive; a
-        // dropped one leaves it to the ordinary wait, and readiness or exit
-        // still ends the wait.
         _ = stderr.writeHeld(text);
         if (self.diagnostics) |writer| writer.record(phase, std.fmt.bufPrint(&detail, "format_{d}", .{format}) catch unreachable);
     }
@@ -1402,7 +1258,6 @@ test "migration notices reach the launcher while serve holds stderr custody" {
     };
     const saved = std.c.dup(2);
     if (saved < 0 or std.c.dup2(pipe[1], 2) < 0) return error.TestUnexpectedResult;
-    // As `serve` holds it from before the Store opens through readiness.
     try std.testing.expect(stderr.tryExclude());
     var migration: StartupMigration = .{ .diagnostics = null };
     StartupMigration.notify(&migration, .{ .begin = store_module.schema_version - 1 });
@@ -1487,7 +1342,7 @@ noinline fn writeReadiness(
     const instance_hex = std.fmt.bytesToHex(instance, .lower);
     try ready.appendFmt("ready instance={s} store={s} socket={s} active_capacity={d} intake_capacity={d} descriptor_requirement={d} descriptor_limit={s} custody_record_bytes={d} execution_slot_bytes={d} model_preparation_bytes={d} scratch_limit_bytes={d} retention_entry_bytes={d} retention_capacity={d} bash_execution=enabled execution={s}", .{
         &instance_hex,
-        paths.store.slice(),
+        paths.store_identity.slice(),
         paths.socket.slice(),
         active_capacity,
         intake_capacity,
@@ -1570,10 +1425,6 @@ const ControlTiming = struct {
         var candidates = std.mem.splitScalar(u8, gate_hook.keys, ',');
         while (candidates.next()) |candidate| {
             if (!std.mem.eql(u8, candidate, self.command_key.slice())) continue;
-            // Integration tests deliberately hold this acquired Store entry
-            // (the Store runs nothing else meanwhile) until intake routes a competing control. Their keeper
-            // descriptor prevents FIFO-open deadlock; process teardown bounds
-            // a missing release without granting this gate semantic authority.
             var gate = std.Io.Dir.cwd().openFile(self.host.io, gate_hook.path, .{}) catch return;
             defer gate.close(self.host.io);
             var release: [1]u8 = undefined;
@@ -1583,7 +1434,6 @@ const ControlTiming = struct {
         }
     }
 
-    /// An inline guard and a noinline body, like the server_host traces.
     inline fn replyComplete(self: *ControlTiming) void {
         if (self.host.hooks.phase_trace) self.writeReplyComplete();
     }
@@ -1624,6 +1474,7 @@ const Route = enum {
     session_pin,
     model_interruption,
     permission_decision,
+    action_background,
     observe,
     read_result,
     read_action,
@@ -1641,11 +1492,9 @@ const Route = enum {
     unsupported_control,
 
     fn isControl(self: Route) bool {
-        return self == .host_stop or self == .host_pause or self == .session_stop or self == .session_archive or self == .session_pin or self == .model_interruption or self == .permission_decision or self == .unsupported_control;
+        return self == .host_stop or self == .host_pause or self == .session_stop or self == .session_archive or self == .session_pin or self == .model_interruption or self == .permission_decision or self == .action_background or self == .unsupported_control;
     }
 
-    /// Answered on the listener from atomics and fixed values alone,
-    /// never by a worker or SQLite.
     fn atomicOnly(self: Route) bool {
         return self == .host_info or self == .host_stop or self == .host_pause;
     }
@@ -1664,25 +1513,17 @@ const DropMode = enum { none, before_admission, during_admission, after_commit }
 const Header = struct {
     route: Route,
     content_length: u64,
-    /// `X-Rui-Environment-Bytes`: how much of the body is client environment.
     environment_bytes: ?u64 = null,
     drop: DropMode = .none,
     instance: ?protocol.InstanceId = null,
 };
 
-/// Admits a Message and, in the same Store transaction's lock, offers its
-/// client environment to the Session's register, so execution never starts
-/// the Turn's Bash before the environment is in place. The register keeps
-/// `offer`'s allocation or leaves it, with what it released, to be freed
-/// right after admission.
 noinline fn submitMessage(host: *Host, command: *const wire_request.MessageCommand, offer: *SessionEnvironments.Offer) error{OutOfMemory}!store_module.MessageReply {
     std.debug.assert(offer.value() != null);
     defer offer.deinit(host.allocator);
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
     defer memory.deinit();
     const prepared = @import("session_skills.zig").prepareMessage(memory.allocator(), host.allocator, host.io, host.store, command, host.bash_facts.home) catch |err| {
-        // The Store owns canonical fault classification. An allocation outside
-        // held access (binding included) cannot corrupt that Store.
         if (host.store.isFenced()) return .infrastructure_failure;
         return if (err == error.OutOfMemory) error.OutOfMemory else .infrastructure_failure;
     };
@@ -1690,8 +1531,6 @@ noinline fn submitMessage(host: *Host, command: *const wire_request.MessageComma
     const captured_skill = prepared.captured;
     const faults = host.hooks.storeFaults(.command);
     if (command.configuration) |*configuration| if (configuration.parent.state == .value) {
-        // A creating child inherits, rather than treating the caller's task
-        // environment as a new person's environment for that child.
         var inheritance = @import("child_environment.zig").Inheritance.init(host.environments, configuration.parent.value.slice(), host.allocator, memory.allocator()) catch |err| {
             if (host.store.isFenced()) return .infrastructure_failure;
             return if (err == error.OutOfMemory) error.OutOfMemory else .infrastructure_failure;
@@ -1716,10 +1555,6 @@ noinline fn submitMessage(host: *Host, command: *const wire_request.MessageComma
     return host.store.submitMessageCapturedSkills(command, .{ .context = &install, .call = Install.call }, initial_skills, if (captured_skill) |*value| value else null, faults);
 }
 
-/// Resolve before the Store hashes or saves. Normal answers bind the resolved
-/// configuration; a preset lookup/update refusal binds the original request,
-/// including its name. The Store keeps that identity for a saved refusal even
-/// if the preset later exists: the same request cannot become an acceptance.
 noinline fn submitConfigure(host: *Host, command: *const wire_request.ConfigureCommand) error{OutOfMemory}!store_module.ConfigureReply {
     const name = command.preset orelse return configureCapturedSkills(host, command, null);
     var decision: store_module.PresetDecision = .{ .request_digest = command.presetRequestDigest() };
@@ -1736,7 +1571,6 @@ noinline fn submitConfigure(host: *Host, command: *const wire_request.ConfigureC
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
     defer memory.deinit();
     const arena = memory.allocator();
-    // Configuration is kilobytes, owned by this request rather than the stack.
     const resolved = try arena.create(wire_request.ConfigureCommand);
     resolved.* = .{
         .store = command.store,
@@ -1746,7 +1580,6 @@ noinline fn submitConfigure(host: *Host, command: *const wire_request.ConfigureC
         .reload_skills = command.reload_skills,
     };
     const checked = core_tools.parseAgentSpec(arena, preset.spec, &resolved.configuration) catch |err| return configureFailure(host, err);
-    // Prepared settings checked this same spec with this parser.
     std.debug.assert(checked == .accepted);
     inline for (@typeInfo(wire_request.Configuration).@"struct".field_names) |field| {
         const override = &@field(command.configuration, field);
@@ -1755,8 +1588,6 @@ noinline fn submitConfigure(host: *Host, command: *const wire_request.ConfigureC
     return configureCapturedSkills(host, resolved, &decision);
 }
 
-/// The Store owns canonical fault classification. Running out of heap
-/// outside held access cannot corrupt the Store: the Host is busy.
 fn configureFailure(host: *Host, err: anyerror) error{OutOfMemory}!store_module.ConfigureReply {
     if (host.store.isFenced()) return .infrastructure_failure;
     return if (err == error.OutOfMemory) error.OutOfMemory else .infrastructure_failure;
@@ -1795,12 +1626,8 @@ test "settings readiness discovers the canonical Store only through host info" {
     }
 }
 
-/// `client_environment` holds a Message's checked environment.
 fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *wire_request.Request, client_environment: ?*SessionEnvironments.Offer) !void {
-    // Readiness learns the owner's canonical identity over its private socket;
-    // default SQLite selection is not duplicated in each client. Every other
-    // request, including controls, must carry that exact identity.
-    if (!matchesStore(std.meta.activeTag(request.*), request.store(), host.lease.paths.store.slice())) {
+    if (!matchesStore(std.meta.activeTag(request.*), request.store(), host.lease.paths.store_identity.slice())) {
         return respondStatic(fd, 409, .invocation_error, "wrong_store_identity");
     }
     if (header.instance) |instance| {
@@ -1819,9 +1646,8 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
     switch (request.*) {
         .host_info => {
             if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
-            // Atomics and fixed values only: this reply never touches SQLite.
             try fd.json(200, protocol.max_host_info_response_bytes, host_reply.renderHostInfo, .{host_reply.HostInfo{
-                .store = host.lease.paths.store.slice(),
+                .store = host.lease.paths.store_identity.slice(),
                 .instance = host.instance,
                 .active_capacity = host.custody.records.len,
                 .intake_capacity = host.intake_capacity,
@@ -1835,7 +1661,6 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         },
         .host_pause => |pause| {
             if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
-            // Execution reads the flag at its next admission pass.
             host.turns_paused.store(pause.paused, .release);
             try fd.json(200, comptime protocol.shapeBytes(protocol.host_pause_reply), host_reply.renderHostPause, .{pause.paused});
         },
@@ -1912,6 +1737,15 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             if (result == .accepted) publishControlHint(host, command.key.slice());
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
             try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderPermissionDecisionReply, .{ host_reply.PermissionTarget{ .session = command.session, .action_id = command.action_id, .decision = command.decision }, result });
+            fd.timing = timing;
+        },
+        .action_background => |*command| {
+            var timing = ControlTiming.init(host, command.key, "action_background", accepted_at_ns);
+            const result = host.store.backgroundAction(command, host.dispatchCapacity(), host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
+            if (result == .infrastructure_failure) fenceDispatch(host, "Action background save", error.CanonicalStoreFailure);
+            if (result == .accepted) publishControlHint(host, command.key.slice());
+            if (header.drop == .after_commit and result != .infrastructure_failure) return;
+            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderActionBackgroundReply, .{ host_reply.ActionBackgroundTarget{ .session = command.session, .action_id = command.action_id }, result });
             fd.timing = timing;
         },
         .observe_command => |*command| {
@@ -1997,8 +1831,6 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             if (fd.gate != null) traceSubject(host, "test_gate_waiting", "path", host.hooks.inspection_reply.gate_path.?);
         },
         .list_sessions => |*request_value| {
-            // Nothing changed since the token: answered from atomics, with no
-            // Store lock, scratch or SQLite.
             if (request_value.since) |since| {
                 if (request_value.changed == null and host.store.notModified(since)) {
                     return fd.json(200, protocol.max_response_bytes, host_reply.renderSessionsNotModified, .{since});
@@ -2068,15 +1900,12 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             const scope: @import("skill_suggestions.zig").Scope = if (command.session) |*session| .{ .session = session.slice() } else .{ .workspace = command.workspace.?.slice() };
             var page = readSkillSuggestions(host, host.allocator, scope, command.prefix.slice()) catch |err| {
                 if (err == error.CanonicalStoreFailure) return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                // Heap exhaustion is the Host being busy, as for a Message: 503.
                 if (err == error.OutOfMemory) return error.OutOfMemory;
                 return respondStatic(fd, 409, .activity_unavailable, if (err == error.SessionNotFound) "SessionNotFound" else "skills_unavailable");
             };
             defer page.deinit(host.allocator);
             try fd.jsonGrowing(200, protocol.skill_suggestions_reply.max_bytes, host_reply.renderSkillSuggestions, .{&page});
         },
-        // Refresh is asynchronous; the selected facts are an operation-scoped
-        // Store read, never retained beside the provider's live account list.
         .model_list => {
             host.listings_requested.store(true, .release);
             var arena: std.heap.ArenaAllocator = .init(host.allocator);
@@ -2091,7 +1920,6 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
     }
 }
 
-/// Materialization uses caller-owned memory after the canonical catalog read.
 fn readSkillSuggestions(host: *Host, allocator: std.mem.Allocator, scope: @import("skill_suggestions.zig").Scope, prefix: []const u8) !@import("skill_suggestions.zig").Page {
     return @import("session_skills.zig").suggestions(allocator, host.allocator, host.io, host.store, scope, prefix, host.bash_facts.home) catch |err| {
         if (scope == .session and host.store.isFenced()) {
@@ -2108,9 +1936,6 @@ fn renderModelList(out: protocol.JsonOut, host: *Host, facts: []const @import("m
     out.writer.writeAll(protocol.model_list_reply.tail) catch return error.BufferTooLarge;
 }
 
-/// One Session report, read by the Store and written by the Host
-/// (`session_report_reply`), in an owned, unlinked scratch file: no SQLite
-/// cursor survives it. Deinitializing it releases its scratch charge.
 fn captureSessionReport(host: *Host, request: *const protocol.InspectSession, request_number: u64) !store_module.SessionReport {
     var capture: store_module.SessionReportCapture = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
     try capture.create(host.lease.paths.scratch.slice(), request_number, host.hooks.fails(.report_unlink));
@@ -2123,9 +1948,6 @@ fn captureSessionReport(host: *Host, request: *const protocol.InspectSession, re
     return capture.seal();
 }
 
-/// One list page, read by the Store and written by the Host
-/// (`session_list_reply`), in an owned, unlinked scratch file: no SQLite
-/// cursor survives it. Deinitializing it releases its scratch charge.
 fn captureSessionList(host: *Host, request: *const protocol.ListSessions, request_number: u64) !store_module.SessionReport {
     try request.validate();
     var capture: store_module.SessionReportCapture = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
@@ -2322,8 +2144,6 @@ test "canonical failure classifier accepts every production mutation failure env
     }
 }
 
-// Test-only DOM edits let every witness start from an actual producer reply;
-// production continues to parse once into bounded values, without a DOM.
 fn expectMutationFieldPresence(body: []const u8, status: u16, session: []const u8, target: @import("protocol_reply.zig").MutationTarget) !void {
     const protocol_reply = @import("protocol_reply.zig");
     const allocator = std.testing.allocator;
@@ -2361,8 +2181,6 @@ fn expectMutationFieldPresence(body: []const u8, status: u16, session: []const u
                     try std.testing.expect(decoded.diagnostic == null);
                     try std.testing.expectEqualStrings(session, decoded.context.session.slice());
                 }
-                // Every field emitted by these producers is required for its
-                // particular outcome; nullable turn is required, not optional.
                 _ = object.object.orderedRemove(field);
                 if (original) |value| {
                     const omitted = try std.json.Stringify.valueAlloc(allocator, parsed.value, .{});
@@ -2446,7 +2264,7 @@ test "mutation decoder validates every actual producer and preserved domain answ
                         try std.testing.expectEqual(.pending, value.completion);
                     },
                     .session_pin => |value| try std.testing.expect(!value.pinned),
-                    .model_interruption, .permission_decision => {},
+                    .model_interruption, .permission_decision, .action_background => {},
                 };
             }
         }
@@ -2481,7 +2299,6 @@ test "initial Message reply binds its allocated Session and original input befor
     try std.testing.expect(reply.isAccepted());
     try std.testing.expectEqualStrings("k7m2qx", reply.context.session.slice());
     try expectMutationFieldPresence(response.slice(), 200, "", target);
-    // Ordinary addressed sends cannot adopt a different Session from a reply.
     try std.testing.expectError(error.RequestBindingMismatch, protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "111111", target).answer);
     var changed = target;
     changed.message.digest[0] ^= 1;
@@ -2501,9 +2318,6 @@ fn respondStatic(reply: *Reply, status: u16, kind: protocol.ErrorType, code: []c
     reply.json(status, protocol.max_control_error_response_bytes, host_reply.renderStatic, .{ kind, code }) catch {};
 }
 
-// A reply retains its reader, not a handler stack or a complete content copy.
-// The exchange owner calls advance only when the socket is writable and keeps
-// this value alive through physical socket retirement, even after the last byte.
 const Reply = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -2542,7 +2356,7 @@ const Reply = struct {
         self.not_before_ns = std.Io.Clock.Timestamp.now(self.io, .awake).raw.nanoseconds + @as(i128, hold.delay_ms) * std.time.ns_per_ms;
         if (hold.gate_path) |value| {
             self.gate = std.posix.openat(std.posix.AT.FDCWD, value, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0) catch |err| switch (err) {
-                error.FileNotFound => return, // The fixture already released it.
+                error.FileNotFound => return,
                 else => return err,
             };
         }
@@ -2557,7 +2371,6 @@ const Reply = struct {
                 .AGAIN, .INTR => return false,
                 else => return error.DeliveryGateReadFailed,
             };
-            // ReleaseGate publishes persistent EOF for all existing readers.
             _ = std.c.close(gate);
             self.gate = null;
         }
@@ -2570,18 +2383,11 @@ const Reply = struct {
         self.renew();
     }
 
-    /// Renders one JSON body straight into heap storage reserved at the
-    /// renderer's proven bound. The reservation writes none of its bytes, so
-    /// only rendered pages become resident, and the body then shrinks to its
-    /// exact length. Allocation or header failure leaves no body and the exchange
-    /// retires unanswered: it cannot revoke an already saved semantic answer.
-    /// Only the renderer's own failure, or outgrowing `max_bytes`, returns.
     fn json(self: *Reply, status: u16, max_bytes: usize, comptime render: anytype, args: anytype) !void {
         const body = std.Io.Writer.Allocating.initCapacity(self.allocator, max_bytes) catch return;
         return self.jsonInto(body, status, max_bytes, render, args);
     }
 
-    /// As `json`, growing from empty: for a bound far above most replies.
     fn jsonGrowing(self: *Reply, status: u16, max_bytes: usize, comptime render: anytype, args: anytype) !void {
         return self.jsonInto(.init(self.allocator), status, max_bytes, render, args);
     }
@@ -2601,7 +2407,6 @@ const Reply = struct {
         self.end = bytes.len;
     }
 
-    /// Moves a report, including its scratch charge, into delivery custody.
     fn setReport(self: *Reply, value: store_module.SessionReport) !void {
         std.debug.assert(self.body == .none);
         self.body = .{ .report = value };
@@ -2609,9 +2414,6 @@ const Reply = struct {
         try self.prepareHeader(200, "application/json", value.length);
     }
 
-    /// Moves one canonical reader; public reads verify their first window and
-    /// empty/one-window EOF before any successful header can leave the Host.
-    /// Opens the reader in this Reply. The location came from a Store open.
     fn setContent(self: *Reply, location: store_module.ContentLocation, start: u64, stream: bool, public: bool) !void {
         std.debug.assert(self.body == .none);
         self.body = .{ .content = .{ .public = public } };
@@ -2640,8 +2442,6 @@ const Reply = struct {
         if (count != wanted) return error.ShortCanonicalRead;
         self.window_length = count;
         self.window_sent = 0;
-        // Local production is not socket inactivity. Discovery, in contrast,
-        // retains its original absolute budget regardless of local progress.
         self.renew();
     }
 
@@ -2658,8 +2458,6 @@ const Reply = struct {
             self.body != .json and self.window_sent == self.window_length;
     }
 
-    /// One nonblocking write, or one bounded production window, per turn.
-    /// false means more delivery remains; readiness alone never renews time.
     fn advance(self: *Reply, fd: std.posix.fd_t) !bool {
         if (std.Io.Clock.Timestamp.now(self.io, .awake).raw.nanoseconds >= self.deadline())
             return if (self.absolute_deadline != null) error.ExchangeDeadlineExceeded else error.TransferInactive;
@@ -2724,7 +2522,6 @@ fn httpReason(status: u16) []const u8 {
     };
 }
 
-/// A finished Request in its Ingress, as `receive` leaves it.
 fn adoptRequestForTest(exchange: *Intake.Exchange, request: wire_request.Request) !void {
     const ingress = try exchange.host.allocator.create(wire_request.Ingress);
     ingress.init(exchange.host.allocator, .{
@@ -2777,7 +2574,6 @@ test "Conversation stream native delivery reads each byte once and closes on fai
     defer _ = std.c.close(sockets[1]);
     const Peer = struct {
         fd: std.posix.fd_t,
-        /// Readable once delivery has returned, when every byte it wrote is queued.
         returned: std.posix.fd_t,
         received: [expected.len + 320]u8 = undefined,
         used: usize = 0,
@@ -2801,7 +2597,7 @@ test "Conversation stream native delivery reads each byte once and closes on fai
                 }
                 while (true) {
                     if (self.used == self.received.len) {
-                        self.failed = true; // More bytes than the response.
+                        self.failed = true;
                         return;
                     }
                     const count = std.c.recv(self.fd, self.received[self.used..].ptr, self.received.len - self.used, std.c.MSG.DONTWAIT);
@@ -2827,9 +2623,6 @@ test "Conversation stream native delivery reads each byte once and closes on fai
     var peer = Peer{ .fd = sockets[1], .returned = returned[0] };
     storage.testing_content_work = .{};
     {
-        // Drain during delivery: the response exceeds Darwin's socket queue.
-        // The parent owns both FDs and keeps peer storage alive until join,
-        // including when delivery fails before the assertions below.
         const thread = try std.Thread.spawn(.{}, Peer.drain, .{&peer});
         defer {
             std.debug.assert(std.c.write(returned[1], "r", 1) == 1);
@@ -2843,8 +2636,6 @@ test "Conversation stream native delivery reads each byte once and closes on fai
     try std.testing.expect(!peer.failed);
     const body_start = (std.mem.indexOf(u8, peer.received[0..peer.used], "\r\n\r\n") orelse return error.MissingHeaders) + 4;
     try std.testing.expectEqualStrings(expected, peer.received[body_start..peer.used]);
-    // Failed delivery is not canonical corruption; the one reader still closes
-    // without traversing the rest of the content or keeping caller storage.
     storage.testing_content_work = .{};
     try deliverConversationContent(&host, -1, command);
     try std.testing.expectEqual(@as(u64, protocol.content_window_bytes), storage.testing_content_work.read.load(.monotonic));
@@ -2874,7 +2665,6 @@ test "discovery identity exhaustion cannot start a new error delivery budget" {
             var descriptors = [_]std.c.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
             const available = std.c.poll(&descriptors, descriptors.len, 0);
             std.debug.assert(available >= 0);
-            // Reading the last header byte consumes the original budget.
             return .fromNanoseconds(if (available > 0) 0 else 10 * std.time.ns_per_s);
         }
     };
@@ -2995,8 +2785,6 @@ test "reply delivery renews on short writes and excludes production between wind
     try std.testing.expectEqualSlices(u8, &expected, peer.actual[0..peer.used]);
     try std.testing.expect(peer.writes >= 3);
     try std.testing.expect(peer.at > 60 * std.time.ns_per_s);
-    // A producer can take longer than the socket inactivity interval before
-    // offering its next window; the next write still gets a fresh budget.
     peer.used = 0;
     peer.at += 120 * std.time.ns_per_s;
     try writeAll(io, sockets[0], "next\x00window");
@@ -3013,8 +2801,6 @@ test "reply delivery retries actual AGAIN without renewing inactivity" {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             self.calls += 1;
             if (self.calls == 3) {
-                // Invalidate the successful poll: another writer fills this
-                // socket before the production write. It must return AGAIN.
                 const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
                 std.debug.assert(std.c.fcntl(self.fd, std.c.F.GETFL) & nonblocking != 0);
                 const bytes = @as([1024]u8, @splat(0x69));
@@ -3065,8 +2851,6 @@ test "reply delivery interrupted poll consumes the existing inactivity budget" {
             while (!self.stop.load(.acquire)) {
                 std.Io.sleep(io, .fromMilliseconds(5), .awake) catch unreachable;
                 if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= limit) {
-                    // Bound even a mutant that keeps retrying poll with the
-                    // original timeout. This is test cleanup, not Host policy.
                     _ = socket_os.shutdown(self.fd, std.c.SHUT.RDWR);
                     return;
                 }
@@ -3132,7 +2916,6 @@ test "delayed control replies retain command identity after request storage reus
         reply.timing.?.store_queued_ns = 2;
         reply.timing.?.lock_acquired_ns = 3;
         reply.timing.?.store_complete_ns = 4;
-        // The request is retired before the reply's physical delivery.
         @memset(&request_key.bytes, 'X');
         var sockets: [2]std.posix.fd_t = undefined;
         try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &sockets));
@@ -3191,7 +2974,6 @@ test "message observation renders Host state binding live work and persistent re
     message.recovery.calls[0] = .{ .action_id = 8, .operation_id = 3, .call = 1, .at = 12 };
     try Expect.rendered(&observation, accepted ++ "processing\"" ++ input ++ queue ++ binding ++ ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"10\"},\"first_action\":null}" ++ recovery ++ "}}");
     message.queue.?.state = .{ .completed = .{ .binding = bound, .answer = .{ .length = 6, .digest = @splat(0xff) } } };
-    // Even inconsistent synthetic live work must never leak after a result.
     try Expect.rendered(&observation, accepted ++ "completed\"" ++ input ++ queue ++ binding ++ ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"6\",\"sha256\":\"" ++ full_digest ++ "\"}}" ++ recovery ++ "}}");
     var code: protocol.Bounded(protocol.max_code_bytes) = .{};
     try code.set("provider_http_422");
@@ -3278,10 +3060,8 @@ test "command observation full and both unchanged tiers render byte exactly with
         }
     };
     try Expect.full(&observed, session.slice(), first.generation);
-    // Tier 1 returns exactly the generation already seen, without a holder.
     try storage.observeCommand("tier-create", first, &observed);
     try Expect.unchanged(&observed, session.slice(), first.generation);
-    // Tier 2 advances over a sibling's commit, without a read access.
     try configure.key.set("tier-sibling");
     try std.testing.expect(try storage.configure(&configure, .{}) == .accepted);
     try storage.observeCommand("tier-create", first, &observed);
@@ -3323,13 +3103,9 @@ test "Message observation work and recovery fit their exchange-owned response bo
     var response: protocol.CommandObservationBuffer = .{};
     try response.render(host_reply.renderFullCommandObservation, .{ &escaped_key, &observation, &@as([change_ring.SessionToken.max_bytes]u8, @splat(1)) });
     try std.testing.expectEqual(protocol.command_observation_reply.maxBytes(.message) - protocol.shapeBytes(protocol.command_observation_reply.code), response.len);
-    // Observations use their exchange-owned writer, not ResponseBuffer.
-    // Neither host-info nor mutation diagnostics determine this bound.
 }
 
 test "MCP rejection diagnostics fit the protocol-owned response bound" {
-    // The resident owner must cover the complete string hole, not just the
-    // shorter semantic advisory emitted for valid tool/server names.
     try std.testing.expect(protocol.configuration_reply.max_bytes <= protocol.max_response_bytes);
     try std.testing.expect(protocol.message_reply.max_bytes <= protocol.max_response_bytes);
     var host_tool_set = tools.built_in_tool_set;
@@ -3423,7 +3199,6 @@ test "control response variants fit exact worst-case JSON bounds" {
         .code = .invalid_session_reference,
     } }, protocol.shapeBytes(protocol.session_stop_reply.rejected));
     try Cases.expectStop(&stop_command, .conflict, protocol.shapeBytes(protocol.session_stop_reply.conflict));
-    // Canonical faults use the fixed invocation error, not a command answer.
     const canonical_error = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}";
     try Cases.expectStop(
         &stop_command,
@@ -3546,7 +3321,6 @@ test "retired reserved exchanges cannot block their successors while workers are
             defer for (intake.exchanges.items) |exchange| {
                 std.debug.assert(exchange.destroy());
             };
-            // Neither local-work lane can reclaim these entries for us.
             for (&intake.workers) |*worker| worker.* = .{ .owner = &intake, .state = .running };
             const places: usize = if (route == .host_info) 1 else 2;
             for (0..places) |_| {
@@ -3573,6 +3347,7 @@ test "retired reserved exchanges cannot block their successors while workers are
                 .session_pin => "control/session-pin",
                 .model_interruption => "control/model-interruption",
                 .permission_decision => "control/permission-decision",
+                .action_background => "control/action-background",
                 .unsupported_control => "control/unknown",
                 else => unreachable,
             };
@@ -3581,7 +3356,6 @@ test "retired reserved exchanges cannot block their successors while workers are
             try writeAll(host.io, sockets[1], line);
             try successor.read();
             try std.testing.expectEqual(.header, successor.state);
-            // A live reservation must still reject excess work.
             for (intake.exchanges.items[0..places]) |peer| peer.state = .header;
             successor.route = null;
             try writeAll(host.io, sockets[1], line);
@@ -3637,8 +3411,6 @@ test "disconnected reserved peers release classification while half-closed peers
                         _ = std.c.close(sockets[1]);
                         clients[index] = -1;
                     }
-                    // The listener can already have accepted the successor when
-                    // this socket pass observes EOF on its predecessor.
                     peer.read() catch |err| peer.fail(err);
                 }
                 var sockets: [2]c_int = undefined;
@@ -3687,11 +3459,9 @@ test "file-free retirement releases intake places before acceptance with occupie
             const peer = intake.exchanges.items[0];
             peer.route = route;
             peer.fail(error.ClientCapacity);
-            // Complete a real bounded error reply, as the socket pass does.
             while (!try peer.reply.?.advance(peer.fd)) {}
             peer.state = .retired;
             if (service_workers) intake.serviceWorkers();
-            // This is the same owner transition used between poll and accept.
             intake.retireExchanges();
             try std.testing.expectEqual(@as(usize, 0), intake.exchanges.items.len);
             var byte: [1024]u8 = undefined;
@@ -3744,7 +3514,6 @@ test "retired ordinary capture still consumes its intake classification and reso
                     .expected_kind = .message,
                 });
                 retained.ingress = ingress;
-                // Seal the content file, but leave request framing incomplete.
                 try ingress.feed("{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"abc\"");
             },
             .retained_scratch, .report => {
@@ -3753,7 +3522,6 @@ test "retired ordinary capture still consumes its intake classification and reso
                 try std.testing.expect(budget.charge(3));
                 retained_fd = file.handle;
                 if (custody == .retained_scratch) {
-                    // Failed reclaim must stay off intake, even with no ingress left.
                     retained.retained_scratch = named_scratch.Owner.init(host.io, file, null, "retained", budget, 3, .injected_failure);
                 } else {
                     retained.route = .inspect;
@@ -3776,8 +3544,6 @@ test "retired ordinary capture still consumes its intake classification and reso
         try std.testing.expectEqual(.retired, retained.state);
         try std.testing.expectEqual(@as(u64, 3), host.scratch_used.load(.acquire));
         if (retained_fd) |fd| try std.testing.expect(std.c.fcntl(fd, std.c.F.GETFL) >= 0);
-        // Only worker cleanup releases the file and charge, once reclamation can
-        // succeed; the occupied lanes above must not perform it on intake.
         if (retained.retained_scratch) |*scratch| scratch.resources.?.removal = .native;
         retained.job = .cleanup;
         retained.state = try retained.work();
@@ -3808,8 +3574,6 @@ test "shutdown fences every unhanded route while preserving request and reply cu
     exchange.retireUnhanded();
     try std.testing.expectEqual(.retired, exchange.state);
 
-    // Exercise actual worker handoff, including the race where shutdown wins
-    // after the socket owner's earlier preflight. No worker may touch Store.
     var intake: Intake = .{ .host = &host };
     defer intake.exchanges.deinit(std.testing.allocator);
     for (&intake.workers) |*worker| worker.* = .{ .owner = &intake };
@@ -3826,8 +3590,6 @@ test "shutdown fences every unhanded route while preserving request and reply cu
         try std.testing.expectEqual(.idle, worker.state);
         try std.testing.expectEqual(null, worker.exchange);
     }
-    // The next owner pass schedules reclamation in the ordinary lane;
-    // control cannot borrow that job merely because shutdown won handoff.
     intake.serviceWorkers();
     try std.testing.expectEqual(.cleanup, exchange.job);
     for (&intake.workers) |*worker| {
@@ -3847,11 +3609,9 @@ test "shutdown fences every unhanded route while preserving request and reply cu
     try std.testing.expectEqual(.requested, intake.workers[0].state);
     try std.testing.expectEqual(&exchange, intake.workers[0].exchange.?);
 
-    // Complete retries already in intake must still validate their instance
-    // and deliver the same acknowledgment after the shutdown fence.
     var lease: platform.StoreLease = undefined;
     lease.paths = .{};
-    try lease.paths.store.set("s");
+    try lease.paths.store_identity.set("s");
     host.lease = &lease;
     host.instance = @splat(17);
     for ([_]?protocol.InstanceId{ @splat(0), host.instance, host.instance, null }, [_][]const u8{
@@ -3873,7 +3633,7 @@ test "shutdown fences every unhanded route while preserving request and reply cu
             .header = .{ .route = .host_stop, .content_length = 0, .instance = instance_id },
         };
         defer std.debug.assert(retry.cleanup());
-        try adoptRequestForTest(&retry, .{ .host_stop = .{ .store = lease.paths.store } });
+        try adoptRequestForTest(&retry, .{ .host_stop = .{ .store = lease.paths.store_identity } });
         retry.retireUnhanded();
         try std.testing.expectEqual(.ready, retry.state);
         try retry.prepare();
@@ -3903,7 +3663,6 @@ test "intake accepts and physically retires a hundred incomplete exchanges" {
     defer {
         for (sockets[0..count]) |pair| {
             _ = std.c.close(pair[1]);
-            // Retain cleanup even for a mutant that omits physical close.
             if (!intake_owned and std.c.fcntl(pair[0], std.c.F.GETFL) >= 0) _ = std.c.close(pair[0]);
         }
     }
@@ -3934,8 +3693,6 @@ test "Host settings fields decide fenced MySQL shutdown once at the return bound
         var used: usize = 0;
 
         fn delete(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8) std.Io.Dir.DeleteFileError!void {
-            // Listener retirement is after the old loop-top fence check.
-            // Emulate execution fencing in that window, without a thread.
             if (fence_on_delete) storage.fenced.store(true, .release);
             return std.testing.io.vtable.dirDeleteFile(userdata, dir, path);
         }
@@ -3970,7 +3727,6 @@ test "Host settings fields decide fenced MySQL shutdown once at the return bound
             for ([_]bool{ false, true }) |early| {
                 for ([_]bool{ false, true }) |late| {
                     var storage: store_module.Store = .{ .io = io, .engine = undefined, .selector = .{}, .changes = undefined };
-                    // No engine operation occurs: only its tag and atomic fence are read.
                     storage.engine = if (mysql) .{ .mysql = undefined } else .{ .sqlite = undefined };
                     storage.fenced.store(early, .release);
                     Probe.storage = &storage;
@@ -3985,7 +3741,6 @@ test "Host settings fields decide fenced MySQL shutdown once at the return bound
                     try lease.paths.socket.set(path);
                     var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage, .phase = .init(.stopping) };
                     var intake: Intake = .{ .host = &host, .lifetime = lifetime, .deadline_armed = true };
-                    // Reuse the real intake owner, with idle workers but no worker threads.
                     for (&intake.workers) |*worker| worker.* = .{ .owner = &intake };
                     try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &intake.wake));
                     try setNonblocking(intake.wake[0]);
@@ -3994,7 +3749,7 @@ test "Host settings fields decide fenced MySQL shutdown once at the return bound
                     try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&stdin));
                     defer _ = std.c.close(stdin[0]);
                     _ = std.c.close(stdin[1]);
-                    intake.stdin = stdin[0]; // EOF makes poll ready without a sleep.
+                    intake.stdin = stdin[0];
                     const address = try std.Io.net.UnixAddress.init(path);
                     var listener = try address.listen(io, .{ .kernel_backlog = 8 });
                     var open = true;
@@ -4004,7 +3759,7 @@ test "Host settings fields decide fenced MySQL shutdown once at the return bound
                     const outcome = finishServing(&storage, &failure, intake.run(&listener, &open, &owned));
                     const fenced = mysql and (early or late);
                     try std.testing.expectError(if (fenced) error.StoreFenced else error.EffectAwareShutdown, outcome);
-                    try std.testing.expectEqual(@as(usize, 0), Probe.used); // The Host never publishes stdout.
+                    try std.testing.expectEqual(@as(usize, 0), Probe.used);
                     var line_buffer: [start_report.max_line_bytes]u8 = undefined;
                     try std.testing.expectEqual(fenced, failure != null);
                     try std.testing.expectEqualStrings(if (fenced)
@@ -4101,14 +3856,13 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         vtable.operate = Probe.operate;
         vtable.dirDeleteFile = Probe.delete;
         const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-        // The host-stop below leaves its stop record beside the lease.
         var lease: platform.StoreLease = .{
             .io = std.testing.io,
             .paths = .{},
             .store_dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{}),
             .lock_file = undefined,
         };
-        try lease.paths.store.set("s");
+        try lease.paths.store_identity.set("s");
         try lease.paths.scratch.set(root);
         try lease.paths.socket.set(socket_path);
         defer lease.store_dir.close(std.testing.io);
@@ -4148,8 +3902,6 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         defer partial_header.socket.close(std.testing.io);
         const partial_body = try address.connect(std.testing.io);
         defer partial_body.socket.close(std.testing.io);
-        // Establish both actual owner states before the reactor starts, so
-        // EOF later proves retirement rather than unconsumed input.
         for ([_]c_int{ partial_header.socket.handle, partial_body.socket.handle }, [_][]const u8{
             "POST /v1/control/host-stop HTTP/1.1\r\nContent-Type: application/json\r\n",
             "POST /v1/control/host-stop HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\nContent-Length: 1024\r\n\r\n{",
@@ -4182,8 +3934,6 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         const sibling = try address.connect(std.testing.io);
         defer sibling.socket.close(std.testing.io);
         try Probe.send(sibling.socket.handle, "/v1/message", message, false);
-        // Classification occurs in the socket pass before its worker handoff
-        // and before that pass can read a subsequently issued control.
         const Uploads = struct {
             host: *const Host,
             expected: u64,
@@ -4280,7 +4030,6 @@ test "readable ingress cannot cross its header or body deadline" {
                 var wire_buffer: [384]u8 = undefined;
                 const wire = try std.fmt.bufPrint(&wire_buffer, "{s}{s}", .{ if (body_only) "" else header, body });
                 try writeAll(std.testing.io, sockets[1], wire);
-                // Readiness is real, but cannot authorize bytes after expiry.
                 var poll = [_]std.c.pollfd{.{ .fd = sockets[0], .events = std.posix.POLL.IN, .revents = 0 }};
                 try std.testing.expectEqual(@as(c_int, 1), std.c.poll(&poll, poll.len, 0));
                 if (offset >= 0) {
@@ -4350,8 +4099,6 @@ test "ingress resumes its peer wait after local capture completion" {
     intake.serviceWorkers();
     try std.testing.expectEqual(.body, exchange.state);
     try std.testing.expectEqual(@as(i128, 130 * std.time.ns_per_s), exchange.deadline);
-    // The remaining bytes were already queued during local capture. Consume
-    // them through the same receive owner without expiring the peer first.
     while (exchange.state == .body) {
         try exchange.read();
         exchange.state = try exchange.work();
@@ -4369,7 +4116,6 @@ test "a Message's environment header and entries are checked before admission" {
     var lease: platform.StoreLease = undefined;
     lease.paths = .{};
     try lease.paths.scratch.set(root);
-    // No Store: a check that reached admission would fault.
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined };
     var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
     host.retention = &retention;
@@ -4384,7 +4130,6 @@ test "a Message's environment header and entries are checked before admission" {
         .{ .header = "X-Rui-Environment-Bytes: 3\r\n", .entries = "A=1", .result = error.InvalidEnvironment },
         .{ .header = "X-Rui-Environment-Bytes: 8\r\n", .entries = "A=1\x00A=2\x00", .result = error.InvalidEnvironment },
         .{ .route = "configure", .header = "X-Rui-Environment-Bytes: 0\r\n", .result = error.InvalidEnvironment },
-        // A record is never empty, so an environment is never the whole body.
         .{ .header = "X-Rui-Environment-Bytes: 4\r\n", .entries = "A=1\x00", .record = false, .result = error.InvalidEnvironment },
         .{ .header = "X-Rui-Environment-Bytes: 0\r\n", .record = false, .result = error.InvalidEnvironment },
         .{ .header = "X-Rui-Environment-Bytes: 0\r\n", .result = "" },
@@ -4409,7 +4154,6 @@ test "a Message's environment header and entries are checked before admission" {
         if (case.result) |expected| {
             try read;
             try std.testing.expectEqualStrings(expected.?, exchange.environment.?.value().?);
-            // The request's own bytes follow, unchanged.
             try std.testing.expectEqualStrings(request, exchange.input.items);
         } else |expected| try std.testing.expectError(expected, read);
     }
@@ -4423,7 +4167,7 @@ test "only a fresh Message changes its Session's environment; a replay or a reje
     var lease: platform.StoreLease = undefined;
     lease.paths = .{};
     try lease.paths.scratch.set(root);
-    try lease.paths.store.set("s");
+    try lease.paths.store_identity.set("s");
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     var storage: store_module.Store = undefined;
     try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
@@ -4471,7 +4215,6 @@ test "only a fresh Message changes its Session's environment; a replay or a reje
             exchange.state = try exchange.work();
             try std.testing.expectEqual(.ready, exchange.state);
             try exchange.prepare();
-            // Admission spent the environment.
             try std.testing.expectEqual(null, exchange.environment);
         }
     };
@@ -4485,15 +4228,12 @@ test "only a fresh Message changes its Session's environment; a replay or a reje
     try Send.message(&host, "first", session, "A=1\x00");
     try expectCopy(&environments, session, "A=1\x00");
     const held = .{ environments.len, environments.value_count, environments.value_bytes };
-    // The same request again, from another terminal: a replay installs nothing.
     try Send.message(&host, "first", session, "B=2\x00");
     try expectCopy(&environments, session, "A=1\x00");
-    // A Message the Store rejects installs nothing, for its Session or another.
     try Send.message(&host, "rejected", "zzzzzz", "C=3\x00");
     try expectCopy(&environments, "zzzzzz", null);
     try expectCopy(&environments, session, "A=1\x00");
     try std.testing.expectEqual(held, .{ environments.len, environments.value_count, environments.value_bytes });
-    // A fresh Message does.
     try Send.message(&host, "second", session, "D=4\x00");
     try expectCopy(&environments, session, "D=4\x00");
 }
@@ -4516,7 +4256,7 @@ test "exchange retirement retains failed ingress cleanup through retry" {
         .io = std.testing.io,
         .allocator = std.testing.allocator,
         .lease = &lease,
-        .store = undefined, // Failed/incomplete captures never reach admission.
+        .store = undefined,
     };
     const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"";
     const payload = @as([8192]u8, @splat('x'));
@@ -4565,7 +4305,6 @@ test "exchange retirement retains failed ingress cleanup through retry" {
         try std.testing.expectEqual(@as(isize, 0), std.c.read(sockets[1], &byte, 1));
         const retained_fd = exchange.retained_scratch.?.resources.?.primary.handle;
         try std.testing.expect(std.c.fcntl(retained_fd, std.c.F.GETFL) >= 0);
-        // A later cleanup retry must not close a new owner's reused fd.
         const recycled = @import("posix").dup2(sockets[1], sockets[0]);
         try std.testing.expectEqual(sockets[0], recycled);
         defer _ = std.c.close(recycled);
@@ -4596,8 +4335,6 @@ test "MySQL Host readiness reports doublewrite OFF while SQLite stays unchanged"
     info.doublewrite = null;
     try response.render(host_reply.renderHostInfo, .{info});
     try std.testing.expect(std.mem.indexOf(u8, response.slice(), "innodb_doublewrite") == null);
-    // The common public bound includes the optional diagnostic even beside
-    // a maximum-width selector; SQLite omits that entire fragment.
     const shape = protocol.host_info_reply;
     try std.testing.expectEqual(protocol.shapeBytes(shape.head) + protocol.shapeBytes(shape.doublewrite) + protocol.shapeBytes(shape.tail), protocol.max_host_info_response_bytes);
 }
@@ -4634,8 +4371,6 @@ test "presets seed configure before Store validation and idempotency" {
     create.* = .{ .preset = .{} };
     try create.preset.?.set("review");
     try create.key.set("preset-create");
-    // Native API intent survives preset resolution: reload cannot create a
-    // Session, and its saved refusal cannot become a plain preset creation.
     const reload = try arena.create(wire_request.ConfigureCommand);
     reload.* = .{ .preset = create.preset, .reload_skills = true };
     try reload.key.set("skills-reload-preset-empty");
@@ -4698,8 +4433,6 @@ test "presets seed configure before Store validation and idempotency" {
     try std.testing.expectEqualSlices(u8, &protocol.contentDigest("Overridden instructions"), &observed.instructions.digest);
     try std.testing.expect(observed.output_schema == null);
 
-    // An edited preset is not saved or looked up by name in the Store. A
-    // request overriding its edited field still has the same resolved digest.
     const edited_spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena,
         \\{"model":"gpt-6-sol","effort":"low","compactAt":10000,"tools":[],"permissionMode":"ask","provider":"openai","instructions":"Preset instructions","outputSchema":{"type":"object"},"label":"Preset label"}
     , .{})).object;
@@ -4709,7 +4442,6 @@ test "presets seed configure before Store validation and idempotency" {
     try std.testing.expect(same == .accepted and same.accepted.replayed);
     try std.testing.expectEqualStrings(overridden.accepted.session.slice(), same.accepted.session.slice());
     try std.testing.expect(try submitConfigure(&host, create) == .conflict);
-    // Changing the catalog does not change the already created Session.
     try storage.inspectSession(session.slice(), &observed);
     try std.testing.expectEqualStrings("gpt-6.1-sol", observed.model.slice());
 
@@ -4785,8 +4517,6 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
     const path = try std.fmt.bufPrint(&path_buffer, "{s}/SKILL.md", .{root});
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    // Enough unbound entries that decoding the catalog grows the request
-    // arena, so the sweep fails allocations inside the Store's held read.
     var entries: [65]skills.Entry = undefined;
     entries[0] = .{ .name = "demo", .description = "Metadata", .path = path };
     var names: [64][6]u8 = undefined;
@@ -4806,19 +4536,15 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
     try std.testing.expect(configured == .accepted);
     var lease: platform.StoreLease = undefined;
     lease.paths = .{};
-    try lease.paths.store.set(root);
+    try lease.paths.store_identity.set(root);
     try lease.paths.scratch.set(root);
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
     const text = "prompt /demo";
     var command: wire_request.MessageCommand = .{ .session = configured.accepted.session, .text = .{ .state = .value, .borrowed = text.ptr, .length = text.len, .digest = protocol.contentDigest(text) } };
     try command.key.set("pressure-key");
-    // Heap pressure anywhere in binding, the recipient catalog's held read
-    // included, is the Host being busy, never canonical corruption: each
-    // allocation in turn fails, until the Message is admitted.
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
-        // Admission takes its offer whether or not it admits.
         var oom_offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
         failing = .init(std.testing.allocator, .{ .fail_index = fail_index });
         host.allocator = failing.allocator();
@@ -4829,7 +4555,6 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
         try std.testing.expectError(error.OutOfMemory, result);
         try std.testing.expect(!try storage.commandExists(command.key.slice()));
     }
-    // Readings past the catalog's held read are the ones the sweep reached.
     try std.testing.expect(fail_index > 2);
     try std.testing.expect(try storage.commandExists(command.key.slice()));
     var intake: Intake = .{ .host = &host };
@@ -4840,26 +4565,21 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
     };
     exchange.fail(error.OutOfMemory);
     try std.testing.expect(std.mem.startsWith(u8, exchange.reply.?.header[0..exchange.reply.?.header_length], "HTTP/1.1 503 "));
-    // readSkills' initial allocation is also before its canonical held access.
     host.allocator = failing.allocator();
     try std.testing.expectError(error.OutOfMemory, readSkillSuggestions(&host, std.testing.allocator, .{ .session = configured.accepted.session.slice() }, ""));
     host.allocator = std.testing.allocator;
     try std.testing.expect(!storage.isFenced() and host.launchAllowed());
-    // Page allocation follows a successful durable read, outside Store access.
     try std.testing.expectError(error.OutOfMemory, readSkillSuggestions(&host, failing.allocator(), .{ .session = configured.accepted.session.slice() }, ""));
     try std.testing.expect(!storage.isFenced() and host.launchAllowed());
     var preview = try readSkillSuggestions(&host, std.testing.allocator, .{ .session = configured.accepted.session.slice() }, "");
     defer preview.deinit(std.testing.allocator);
     try std.testing.expectEqual(@import("skill_suggestions.zig").capacity, preview.entries.len);
     try std.testing.expectEqual(entries.len, preview.total);
-    // The key the sweep admitted replays, with the typed text its content.
     var retry_offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
     const accepted = try submitMessage(&host, &command, &retry_offer);
     try std.testing.expect(accepted == .accepted and accepted.accepted.replayed);
     try std.testing.expectEqual(@as(u64, text.len), accepted.accepted.content.length);
     try std.testing.expect(host.launchAllowed() and !storage.isFenced());
-    // A skills reload's capture and its held write answer the same way; the
-    // root's skills are not the 65 saved, so the reload replaces them.
     var reload: wire_request.ConfigureCommand = .{ .session = configured.accepted.session, .reload_skills = true };
     try reload.key.set("pressure-reload");
     fail_index = 0;
@@ -4890,7 +4610,7 @@ test "inline skills suggestions answer heap exhaustion as busy, not a catalog re
     var lease: platform.StoreLease = undefined;
     lease.paths = .{};
     try lease.paths.scratch.set(root);
-    try lease.paths.store.set("s");
+    try lease.paths.store_identity.set("s");
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     var storage: store_module.Store = undefined;
     try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
@@ -4900,8 +4620,6 @@ test "inline skills suggestions answer heap exhaustion as busy, not a catalog re
     host.retention = &retention;
     var request_buffer: [512]u8 = undefined;
     const request = try std.fmt.bufPrint(&request_buffer, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"skill_suggestions\",\"store\":\"s\",\"workspace\":\"{s}\",\"prefix\":\"\"}}", .{root});
-    // Each allocation in turn fails, until the page is served: every
-    // failure is a 503, and none fences the Store or the Host.
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
         var sockets: [2]c_int = undefined;
@@ -4966,7 +4684,7 @@ test "Host startup reports MCP tool collision and excess tools as owned failures
             var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer memory.deinit();
             try std.testing.expectError(if (too_many) error.TooManyTools else error.ToolNameCollision, offerMcpTools(std.testing.io, memory.allocator(), std.testing.allocator, &storage, &.{server}, null, &failure));
-        } // Failure's formatted bytes must survive the listing arena.
+        }
         try std.testing.expect(failure != null);
         var buffer: [start_report.max_line_bytes]u8 = undefined;
         try std.testing.expectEqualStrings(if (too_many)
@@ -5033,7 +4751,7 @@ test "configure parent inherits the Host environment only after a fresh creation
     var lease: platform.StoreLease = undefined;
     lease.paths = .{};
     try lease.paths.scratch.set(root);
-    try lease.paths.store.set("s");
+    try lease.paths.store_identity.set("s");
     var storage: store_module.Store = undefined;
     try store_module.testing.testingSqliteStore(&storage, &tmp, io);
     defer storage.close() catch unreachable;
@@ -5106,21 +4824,17 @@ test "SIGINT, SIGTERM and SIGHUP ask the Host to stop once through intake's loop
         try lease.prepareForServing(false);
         var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined };
         _ = host.advance(before);
-        // No signal: the loop's pass changes nothing.
         StopSignals.apply(&host);
         try std.testing.expectEqual(before, host.phase.load(.acquire));
         try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
-        // The handler, as the OS calls it, wakes intake and stops nothing.
         StopSignals.handle(signal);
         var bytes: [8]u8 = undefined;
         try std.testing.expectEqual(@as(isize, 1), std.c.read(wake[0], &bytes, bytes.len));
         try std.testing.expectEqual(before, host.phase.load(.acquire));
         StopSignals.apply(&host);
         try std.testing.expect(host.stopping());
-        // A stop the Host had already begun is not the ask's (Host.stopAsked).
         const recorded: platform.StoreLease.LastStop = if (before != .stopping) .asked else .unasked;
         try std.testing.expectEqual(recorded, platform.StoreLease.lastStop(io, path));
-        // A second signal while stopping changes nothing.
         StopSignals.handle(signal);
         StopSignals.apply(&host);
         try std.testing.expect(host.stopping());
@@ -5142,7 +4856,6 @@ test "the Host's stop signals reach its handler until serve restores the previou
     StopSignals.install();
     inline for (StopSignals.signals) |signal| {
         try std.testing.expect(!StopSignals.asked.load(.acquire));
-        // raise delivers to this thread before it returns.
         try std.posix.raise(signal);
         try std.testing.expect(StopSignals.asked.swap(false, .acq_rel));
     }
@@ -5154,10 +4867,6 @@ test "the Host's stop signals reach its handler until serve restores the previou
 }
 
 test "a stop signal handler racing detach never writes to the closed or a reused wake socket" {
-    // The main thread waits on every hammer twice a round. When threads
-    // outnumber cores, a spinning thread holds its core until preempted, so
-    // each wait cost a scheduler slice and the test took minutes. Both sides
-    // yield instead; with free cores, yield returns at once and they still race.
     const Hammer = struct {
         calls: std.atomic.Value(u64) = .init(0),
         stop: std.atomic.Value(bool) = .init(false),
@@ -5192,10 +4901,8 @@ test "a stop signal handler racing detach never writes to the closed or a reused
         StopSignals.attach(wake[1]);
         for (&hammers) |*hammer| hammer.advance(1);
         StopSignals.detach();
-        // Closing the peer first would turn a late write into EPIPE.
         _ = std.c.close(wake[0]);
         _ = std.c.close(wake[1]);
-        // The lowest free numbers: a late handler's write would land here.
         var reused: [2]std.posix.fd_t = undefined;
         try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &reused));
         defer for (reused) |fd| {

@@ -5,17 +5,14 @@
 //! zeroes for every thread, so `cli.zig` disables that and threads use these.
 const std = @import("std");
 
-/// Zig's default size, in builds that install the segfault handler.
 const size: usize = if (std.options.enable_segfault_handler) 1 << 18 else 0;
 
 const Stack = []align(std.heap.page_size_min) u8;
 
-/// Gives the calling thread a signal stack that lives until the process exits.
 pub fn attachMain() std.posix.MMapError!void {
     install(try map());
 }
 
-/// std.Thread.spawn, with a signal stack the thread releases as it exits.
 pub fn spawn(config: std.Thread.SpawnConfig, comptime function: anytype, args: anytype) std.Thread.SpawnError!std.Thread {
     const Args = @TypeOf(args);
     const Entry = struct {
@@ -39,19 +36,14 @@ fn map() std.posix.MMapError!Stack {
     return std.posix.mmap(null, size, .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
 }
 
-// Keep setup scratch out of resident thread frames and visible to the
-// production Host stack gate even when LLVM inlines every spawn wrapper.
 noinline fn install(stack: Stack) void {
     if (stack.len == 0) return;
-    // A sized stack outside any signal handler.
     std.posix.sigaltstack(&.{ .sp = stack.ptr, .flags = 0, .size = @intCast(stack.len) }, null) catch |err|
         std.debug.panic("sigaltstack install failed: {t} (size {d})", .{ err, stack.len });
 }
 
 fn release(stack: Stack) void {
     if (stack.len == 0) return;
-    // Not inside a signal handler. Disabling ignores sp and size; pass the
-    // real region anyway in case a platform checks size first.
     std.posix.sigaltstack(&.{ .sp = stack.ptr, .flags = std.c.SS.DISABLE, .size = @intCast(stack.len) }, null) catch |err|
         std.debug.panic("sigaltstack release failed: {t} (size {d})", .{ err, stack.len });
     std.posix.munmap(stack);

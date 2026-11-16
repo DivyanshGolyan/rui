@@ -1,6 +1,3 @@
-//! What a durable mutation's reply establishes: its answer, bound to the
-//! request that produced it, or why the reply confirms nothing. Decisions over
-//! a parsed reply; protocol_reply.zig bounds and parses the bytes.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const CommandKind = @import("cli_value.zig").CommandKind;
@@ -11,7 +8,6 @@ const JsonEnum = wire_field.JsonEnum;
 const OmittableJson = wire_field.OmittableJson;
 const decimalId = wire_field.decimalId;
 
-// The protocol's sizes; protocol_reply.zig asserts they match.
 pub const max_code_bytes = 96;
 pub const max_session_bytes = 128;
 
@@ -22,8 +18,6 @@ pub const SessionPinObservation = struct { pinned: bool };
 pub const SessionPinRejection = enum { invalid_session_reference, unknown_session, session_archiving, session_archived };
 pub const SessionArchiveObservation = struct { archived: bool, completion: SessionStopCompletion };
 
-// Why the Host refuses each mutation. The Store saves the code and the Host
-// renders its tag name.
 pub const SessionStopRejection = enum { invalid_session_reference, unknown_session };
 pub const SessionArchiveRejection = enum { invalid_session_reference, unknown_session, archive_pending };
 pub const ModelInterruptionRejection = enum {
@@ -44,8 +38,6 @@ pub const PermissionDecisionRejection = enum {
 };
 pub const ContentReference = struct { bytes: u64, digest: [32]u8 };
 
-/// The durable mutations. Tag names are the captured-record and
-/// observation spelling; `rui request recover --kind` uses the hyphenated spelling.
 pub const Target = union(CommandKind) {
     configure,
     message: struct { bytes: u64, digest: [32]u8, creates_session: bool = false },
@@ -54,10 +46,10 @@ pub const Target = union(CommandKind) {
     model_interruption: struct { turn: u64, operation: u64 },
     permission_decision: struct { action: u64, decision: PermissionDecision },
     session_pin: struct { pinned: bool },
+    action_background: u64,
 };
 
 pub const Answer = struct {
-    /// Validated Host-owned input identity, including captured native skills.
     input: ?ContentReference = null,
     result: union(enum) {
         accepted: union(enum) {
@@ -68,6 +60,7 @@ pub const Answer = struct {
             session_pin: SessionPinObservation,
             model_interruption,
             permission_decision,
+            action_background: @import("action_control.zig").Selection,
         },
         rejected: Bounded(max_code_bytes),
         conflict,
@@ -80,10 +73,8 @@ pub const InvocationDiagnostic = struct {
     code: Bounded(max_code_bytes),
 };
 
-/// An answer error is unconfirmed, never rejection or noncommit.
 pub const Error = error{ CanonicalStoreFailure, HostInvocationFailed, InvalidResponse, RequestBindingMismatch };
 
-/// A mutation reply's fields, as the decoder parses them.
 pub const Wire = struct {
     version: JsonString(8),
     type: JsonString(32),
@@ -99,6 +90,7 @@ pub const Wire = struct {
         admission: OmittableJson(JsonString(20)) = .{},
         action: OmittableJson(JsonString(20)) = .{},
         decision: OmittableJson(JsonString(16)) = .{},
+        action_selection: OmittableJson(struct { kind: JsonEnum(@FieldType(@import("action_control.zig").Selection, "kind")), position: JsonString(20) }) = .{},
         archived: OmittableJson(bool) = .{},
         pinned: OmittableJson(bool) = .{},
         selection: OmittableJson(struct { turn: ?JsonString(20), admission_cutoff: JsonString(20) }) = .{},
@@ -110,11 +102,6 @@ pub const Wire = struct {
     completion: OmittableJson(struct { status: JsonString(16) }) = .{},
 };
 
-/// The answer `wire` gives to `target` on `session` with HTTP `status`, when
-/// the Host speaks `current_version` of the wire. A
-/// diagnostic reply sets `diagnostic`; an accepted creation sets
-/// `resolved_session` to the Session the Host created. No workflow,
-/// terminal, retry or certainty transition is made here.
 pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []const u8, target: Target, diagnostic: *?InvocationDiagnostic, resolved_session: *Bounded(max_session_bytes)) Error!Answer {
     if (wire.code.value) |code| {
         if (wire.answer.value != null or wire.input.value != null or wire.queue.value != null or wire.execution.value != null or wire.completion.value != null) return error.InvalidResponse;
@@ -133,6 +120,7 @@ pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []c
         .session_pin => "session_pin_reply",
         .model_interruption => "model_interruption_reply",
         .permission_decision => "permission_decision_reply",
+        .action_background => "action_background_reply",
     };
     if (!wire.version.eql(current_version) or !wire.type.eql(expected_type) or wire.code.value != null) return error.InvalidResponse;
     const answer = wire.answer.value orelse return error.InvalidResponse;
@@ -154,6 +142,9 @@ pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []c
     if (target == .permission_decision) {
         if (try decimalId(answer.action.value orelse return error.InvalidResponse, true) != target.permission_decision.action or
             !(answer.decision.value orelse return error.InvalidResponse).eql(@tagName(target.permission_decision.decision))) return error.RequestBindingMismatch;
+    } else if (target == .action_background) {
+        if (try decimalId(answer.action.value orelse return error.InvalidResponse, true) != target.action_background) return error.RequestBindingMismatch;
+        if (answer.decision.value != null) return error.InvalidResponse;
     } else if (answer.action.value != null or answer.decision.value != null) return error.InvalidResponse;
     const accepted = answer.status.eql("accepted");
     const conflict = answer.status.eql("conflict");
@@ -164,7 +155,7 @@ pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []c
         if (answer.code.value != null) return error.InvalidResponse;
     } else {
         const code = answer.code.value orelse return error.InvalidResponse;
-        if (code.slice().len == 0 or answer.revision.value != null or answer.created.value != null or answer.admission.value != null or answer.selection.value != null or answer.archived.value != null) return error.InvalidResponse;
+        if (code.slice().len == 0 or answer.revision.value != null or answer.created.value != null or answer.admission.value != null or answer.selection.value != null or answer.action_selection.value != null or answer.archived.value != null) return error.InvalidResponse;
         if (conflict and (!code.eql("idempotency_key_conflict") or answer.replayed)) return error.InvalidResponse;
     }
     var value: @FieldType(@FieldType(Answer, "result"), "accepted") = undefined;
@@ -230,11 +221,16 @@ pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []c
         .permission_decision => if (accepted) {
             value = .permission_decision;
         },
+        .action_background => if (accepted) {
+            const selected = answer.action_selection.value orelse return error.InvalidResponse;
+            value = .{ .action_background = .{ .kind = selected.kind.value, .position = try decimalId(selected.position, false) } };
+        },
     }
     if ((target != .configure and (answer.revision.value != null or answer.created.value != null)) or
         (target != .message and (answer.admission.value != null or wire.input.value != null or wire.queue.value != null)) or
         (target != .configure and target != .message and wire.execution.value != null) or
         (target != .session_stop and answer.selection.value != null) or
+        (target != .action_background and answer.action_selection.value != null) or
         (target != .session_archive and answer.archived.value != null) or
         (target != .session_pin and answer.pinned.value != null) or
         (target != .session_stop and target != .session_archive and wire.completion.value != null)) return error.InvalidResponse;
@@ -245,21 +241,16 @@ pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []c
     };
 }
 
-// Shared authority rule for operation replies and static read/error envelopes.
-/// `version` is the reply's; `current_version` is the protocol's.
 pub fn validateInvocationDiagnostic(current_version: []const u8, status: u16, version: []const u8, diagnostic: InvocationDiagnostic) error{InvalidResponse}!void {
     if (status == 200 or !std.mem.eql(u8, version, current_version) or diagnostic.type.len == 0 or diagnostic.code.len == 0) return error.InvalidResponse;
     if (diagnostic.code.eql("canonical_store_failure") and (status != 500 or !diagnostic.type.eql("invocation_error"))) return error.InvalidResponse;
 }
 
-/// Any version: the decisions compare against the one they are given. The
-/// protocol's own lives in protocol.zig alone.
 const current = "7";
 const stale = "6";
 
 const Decoded = struct { answer: Error!Answer, diagnostic: ?InvocationDiagnostic = null, session: Bounded(max_session_bytes) = .{} };
 
-/// Parses `body` as protocol_reply.zig's decoder does, without its byte bound.
 fn decodeForTest(status: u16, body: []const u8, session: []const u8, target: Target) Decoded {
     var storage: [16 * 1024]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&storage);
@@ -390,7 +381,6 @@ test "skills reload reply facts apply only to accepted existing Configure mutati
             }
         }
     }
-    // Ordinary creation remains valid; a reload cannot also create a Session.
     for ([_][]const u8{ "false", "true" }) |created| {
         for (reload_fields) |reload| {
             const body = try std.fmt.bufPrint(&buffer, "{{\"version\":\"{s}\",\"type\":\"configuration_reply\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"31\",\"created\":{s}{s}}}{s}}}", .{ current, created, reload.bytes, cases[0].accepted_tail });
@@ -473,8 +463,6 @@ test "a diagnostic reply confirms nothing, and only an authoritative one names a
         try std.testing.expectError(error.InvalidResponse, value.answer);
         try std.testing.expect(value.diagnostic == null);
     }
-    // A diagnostic needs the current version, and only an invocation
-    // error with status 500 claims a canonical Store failure.
     for ([_][]const u8{
         "{\"version\":\"" ++ stale ++ "\",\"type\":\"invocation_error\",\"code\":\"busy\"}",
         "{\"version\":\"" ++ current ++ "\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}",
@@ -496,7 +484,6 @@ test "a reply carrying another mutation's fields, or the wrong version, confirms
         "{\"version\":\"" ++ stale ++ archive["{\"version\":\"".len + current.len ..] ++ ",\"completion\":{\"status\":\"completed\"}}",
     }, [_]Target{ .session_stop, target }) |invalid, expected|
         try std.testing.expectError(error.InvalidResponse, decodeForTest(200, invalid, "k7m2qx", expected).answer);
-    // An interruption binds the Turn and operation it names.
     const interruption: Target = .{ .model_interruption = .{ .turn = 3, .operation = 4 } };
     for ([_][]const u8{ "\"3\",\"operation\":\"4\"", "\"3\",\"operation\":\"5\"", "\"2\",\"operation\":\"4\"" }, 0..) |echoed, index| {
         var buffer: [256]u8 = undefined;
@@ -504,7 +491,6 @@ test "a reply carrying another mutation's fields, or the wrong version, confirms
         const answer = decodeForTest(200, body, "k7m2qx", interruption).answer;
         if (index == 0) _ = try answer else try std.testing.expectError(error.RequestBindingMismatch, answer);
     }
-    // A conflict is never a replay.
     const conflict = "{\"version\":\"" ++ current ++ "\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":\"conflict\",\"replayed\":";
     const tail = ",\"session\":\"k7m2qx\",\"code\":\"idempotency_key_conflict\"},\"completion\":{\"status\":\"unavailable\"}}";
     try std.testing.expect((try decodeForTest(409, conflict ++ "false" ++ tail, "k7m2qx", .session_stop).answer).result == .conflict);
@@ -522,4 +508,16 @@ test "Session pin replies bind desired value and reject unrelated mutation autho
     try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(200, accepted, "rhvzwc", target).answer);
     const stopped = "{\"version\":\"" ++ version ++ "\",\"type\":\"session_pin_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"pinned\":false},\"completion\":{\"status\":\"completed\"}}";
     try std.testing.expectError(error.InvalidResponse, decodeForTest(200, stopped, "k7m2qx", target).answer);
+}
+
+test "Action promotion replies bind the target and immutable receipt or final selection" {
+    inline for (.{ "background", "final" }) |kind| {
+        const accepted = "{\"version\":\"" ++ current ++ "\",\"type\":\"action_background_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\",\"action\":\"42\",\"action_selection\":{\"kind\":\"" ++ kind ++ "\",\"position\":\"9007199254740993\"}}}";
+        const answer = try decodeForTest(200, accepted, "k7m2qx", .{ .action_background = 42 }).answer;
+        try std.testing.expect(answer.replayed);
+        try std.testing.expectEqualStrings(kind, @tagName(answer.result.accepted.action_background.kind));
+        try std.testing.expectEqual(@as(u64, 9007199254740993), answer.result.accepted.action_background.position);
+        try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(200, accepted, "rhvzwc", .{ .action_background = 42 }).answer);
+        try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(200, accepted, "k7m2qx", .{ .action_background = 43 }).answer);
+    }
 }

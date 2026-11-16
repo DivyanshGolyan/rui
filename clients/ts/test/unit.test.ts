@@ -89,7 +89,6 @@ test("interface defaults are chosen only after canonical byte projection", () =>
 test("schema-derived codecs cover every secret and OS-byte leaf", () => {
 	const schema = JSON.parse(readFileSync(new URL("../../../openapi.json", import.meta.url), "utf8"));
 	const leaves: { path: string[]; kind: string }[] = [];
-	// Walk the source schema independently of the generated runtime descriptor.
 	function walk(node: any, path: string[]) {
 		if (!node || typeof node !== "object") return;
 		if (node.$ref) return;
@@ -396,7 +395,6 @@ test("malformed environment sources are never looked up or forwarded", () => {
 	const environment = process.env;
 	const lookups: string[] = [];
 	let observing = false;
-	// This catches Node's aliasing getter BEFORE the child environment is constructed.
 	process.env = new Proxy(environment, {
 		get(target, name) {
 			if (observing && typeof name === "string") lookups.push(name);
@@ -414,7 +412,6 @@ test("malformed environment sources are never looked up or forwarded", () => {
 				observing = true;
 				let launch: ReturnType<typeof launchFor>;
 				try {
-					// Leave invalid key bytes for the Host's settings_invalid refusal, without aliasing them.
 					launch = launchFor(settings as HostSettings, "/r", { binary: "/fixture/rui" });
 				} finally {
 					observing = false;
@@ -588,7 +585,6 @@ test("a followed feed resumes from the end of an exhausted page", async () => {
 	assert.match(bodies[1] as string, /"position":"9","ordinal":null/);
 });
 
-// These checks are compiled by `npm run check`, but never execute invalid input.
 function launchTypeChecks() {
 	// @ts-expect-error The owner accepts only the two lifetime choices, not null.
 	launchFor({ interface: { lifetime: null } }, "/r");

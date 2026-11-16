@@ -1,4 +1,3 @@
-/* Measurement-only passthrough VFS for the existing production density fixture. */
 #include <sqlite3.h>
 #include <libproc.h>
 #include <unistd.h>
@@ -22,7 +21,6 @@ static sqlite3_vfs wrapper;
 static sqlite3 *connection;
 static uint64_t begins, commits, rollbacks, statements, inserts, selects, sql_profile_ns;
 static uint64_t unique_main_pages, repeated_main_pages;
-/* Measurement capacity: 262,144 4 KiB pages, matching this fixture's configured bound. */
 static unsigned char written[262144/8];
 static int heavy;
 static uint64_t ns(void){struct timespec t;assert(clock_gettime(CLOCK_MONOTONIC,&t)==0);return (uint64_t)t.tv_sec*1000000000+t.tv_nsec;}
@@ -75,7 +73,6 @@ void write_probe_reset(void){
  memset(metrics,0,sizeof metrics);memset(written,0,sizeof written);begins=commits=rollbacks=statements=inserts=selects=sql_profile_ns=unique_main_pages=repeated_main_pages=0;
 }
 void write_probe_report(unsigned long long population){
- // Capture counters before verification queries add read-only trace events.
  Metrics saved[4];memcpy(saved,metrics,sizeof saved);uint64_t st=statements,se=selects,prof=sql_profile_ns;
  long long sessions=number("SELECT count(*) FROM session"),content=number("SELECT count(*) FROM content"),entries=number("SELECT count(*) FROM conversation_entry"),transitions=number("SELECT count(*) FROM session_transition"),bytes=number("SELECT sum(byte_length) FROM content");
  assert(sessions==(long long)population&&content==sessions&&entries==sessions&&transitions==sessions&&bytes==sessions*36);

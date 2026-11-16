@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Store, recovery and upgrade paths that need the strict landing gates."""
 import fnmatch
 import sys
 
@@ -23,5 +22,4 @@ def strict(paths):
 
 
 if __name__ == "__main__":
-    # Paths on stdin, one per line; prints the strict ones.
     print("\n".join(strict(line.strip() for line in sys.stdin if line.strip())))

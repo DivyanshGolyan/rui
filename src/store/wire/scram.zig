@@ -1,5 +1,3 @@
-//! The client side of SCRAM-SHA-256 (RFC 5802, RFC 7677), with the
-//! tls-server-end-point channel binding of SCRAM-SHA-256-PLUS (RFC 5929).
 const std = @import("std");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -8,9 +6,6 @@ const base64 = std.base64.standard;
 
 pub const nonce_seed_bytes = 18;
 const nonce_bytes = base64.Encoder.calcSize(nonce_seed_bytes);
-/// Longer than any client message this file writes: the client-final
-/// message repeats the server's nonce, which is capped by
-/// `max_server_first_bytes`.
 pub const max_message_bytes = 512;
 const max_server_first_bytes = 256;
 comptime {
@@ -18,14 +13,9 @@ comptime {
     std.debug.assert("c=".len + binding + ",r=".len + max_server_first_bytes + ",p=".len + base64.Encoder.calcSize(32) <= max_message_bytes);
 }
 const max_salt_bytes = 64;
-/// Postgres's default is 4096. The cap bounds the PBKDF2 work a server can
-/// ask of the Store worker before it answers anything, to well under a
-/// second.
 pub const max_iterations = 1_000_000;
 
-/// The certificate hash SCRAM-SHA-256-PLUS binds (RFC 5929 section 4.1).
 pub const ChannelBinding = struct {
-    /// EVP_MAX_MD_SIZE.
     buffer: [64]u8,
     len: u8,
 
@@ -35,9 +25,7 @@ pub const ChannelBinding = struct {
 };
 
 pub const Error = error{
-    /// Not printable ASCII; see `checkPassword`.
     UnsupportedPassword,
-    /// The server asked for more than `max_iterations`.
     UnsupportedIterations,
     AuthFailed,
     ProtocolViolation,
@@ -52,12 +40,8 @@ pub fn checkPassword(password: []const u8) Error!void {
 }
 
 pub const Binding = union(enum) {
-    /// `n`: no TLS.
     unsupported,
-    /// `y`: TLS without channel binding, because the server offered none.
-    /// A server that does offer it then refuses the downgrade.
     unused,
-    /// `p=tls-server-end-point`.
     server_end_point: ChannelBinding,
 
     fn gs2Header(self: *const Binding) []const u8 {
@@ -77,14 +61,11 @@ pub const Client = struct {
     server_signature: [Hmac.mac_length]u8 = undefined,
     verified: bool = false,
 
-    /// Postgres takes the user from the startup message and ignores the
-    /// SCRAM one, so the Store sends it empty.
     pub fn init(seed: [nonce_seed_bytes]u8, binding: Binding) Client {
         var text: [nonce_bytes]u8 = undefined;
         return withNonce("", base64.Encoder.encode(&text, &seed), binding);
     }
 
-    /// `user` holds no `,` or `=`, and `nonce` is printable without `,`.
     fn withNonce(user: []const u8, text: []const u8, binding: Binding) Client {
         var client: Client = .{ .binding = binding, .nonce_buffer = undefined, .nonce_len = @intCast(text.len), .user = user };
         @memcpy(client.nonce_buffer[0..text.len], text);
@@ -105,15 +86,12 @@ pub const Client = struct {
         return buffer[0 .. header.len + self.clientFirstBare(buffer[header.len..]).len];
     }
 
-    /// The client-final message for `server_first`. Remembers the server
-    /// signature `verifyServerFinal` expects.
     pub fn clientFinal(self: *Client, server_first: []const u8, password: []const u8, buffer: *[max_message_bytes]u8) Error![]const u8 {
         if (server_first.len > max_server_first_bytes) return error.ProtocolViolation;
         var attributes = std.mem.splitScalar(u8, server_first, ',');
         const combined = try attribute(attributes.next(), 'r');
         const salt_text = try attribute(attributes.next(), 's');
         const iterations_text = try attribute(attributes.next(), 'i');
-        // A mandatory extension (m=) or anything else Rui cannot honour.
         if (attributes.next() != null) return error.ProtocolViolation;
         if (combined.len <= self.nonce_len or !std.mem.startsWith(u8, combined, self.nonce())) return error.ProtocolViolation;
         for (combined) |byte| if (byte < 0x21 or byte > 0x7e or byte == ',') return error.ProtocolViolation;
@@ -149,7 +127,7 @@ pub const Client = struct {
         const without_proof = std.fmt.bufPrint(buffer, "c={s},r={s}", .{
             base64.Encoder.encode(&channel, binding_input[0..binding_len]),
             combined,
-        }) catch unreachable; // max_message_bytes covers the longest (comptime check above).
+        }) catch unreachable;
 
         var bare: [max_message_bytes]u8 = undefined;
         const first_bare = self.clientFirstBare(&bare);
@@ -215,7 +193,6 @@ test "a server nonce that does not extend the client's, or a mandatory extension
     try std.testing.expectError(error.ProtocolViolation, client.clientFinal("r=abc1,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=0", "pencil", &buffer));
     try std.testing.expectError(error.ProtocolViolation, client.clientFinal("r=abc1,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4_096", "pencil", &buffer));
     try std.testing.expectError(error.UnsupportedIterations, client.clientFinal("r=abc1,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=1000001", "pencil", &buffer));
-    // The longest server nonce accepted still fits the client-final buffer.
     const longest = "r=abc" ++ @as([max_server_first_bytes - "r=abc,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=1".len]u8, @splat('x')) ++ ",s=W22ZaJ0SNY7soEsUEjb6gQ==,i=1";
     _ = try client.clientFinal(longest, "pencil", &buffer);
     try std.testing.expectError(error.ProtocolViolation, client.clientFinal("r=abcx" ++ longest[5..], "pencil", &buffer));

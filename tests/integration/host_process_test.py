@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Failure-sensitive checks for bounded Host process startup."""
 
 import http.client
 import http.server
@@ -103,8 +102,6 @@ def prove_wait_hooks():
             sleep.assert_not_called()
         assert events == ["drain", "observe", "descriptors", "drain", "observe"], events
         events.clear()
-        # The opt-out must skip both drainage and descriptor discovery even
-        # when the observation needs another poll.
         with patch.object(host_process.select, "select") as readable, \
              patch.object(host_process.time, "sleep") as sleep:
             wait_for(observe, "drain opt-out", drain=False)
@@ -112,8 +109,6 @@ def prove_wait_hooks():
             sleep.assert_called_once_with(.025)
         assert events == ["observe", "observe"], events
 
-        # Both idle sleeps and continuously readable descriptors spend only
-        # the remaining deadline, and readiness cannot prolong the wait.
         for watched in ([123], []):
             events.clear()
             with patch.object(host_process.time, "monotonic", side_effect=[0, 0, .09, .1]), \
@@ -153,9 +148,6 @@ def main():
         "mismatched readiness",
         required_fields={"execution": "enabled"},
     )
-    # Tail retention needs a running writer, not a Python startup-speed test.
-    # Prepare that input before the helper's unchanged readiness clock;
-    # assert_reaped still bounds the whole call, including this preparation.
     popen = subprocess.Popen
     def start_flood(*args, **kwargs):
         process = popen(*args, **kwargs)
@@ -205,8 +197,6 @@ def main():
 
 
 def prove_numeric_listener():
-    # Binding a numeric fixture endpoint must work even when the machine's
-    # descriptive reverse-DNS service is unavailable. No serving thread needed.
     with patch.object(socket, "getfqdn", side_effect=OSError("reverse DNS unavailable")):
         with TestHTTPServer(("127.0.0.1", 0), lambda *_: None) as endpoint:
             assert endpoint.server_name == "127.0.0.1", endpoint.server_name
@@ -222,7 +212,6 @@ def prove_numeric_listener():
 
 
 class _H2cProbeHandler(http.server.BaseHTTPRequestHandler):
-    """A fixture handler written for HTTP/1.1, as every fixture's is."""
 
     protocol_version = "HTTP/1.1"
 
@@ -238,8 +227,6 @@ class _H2cProbeHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"x")
             self.server.stalled.set()
-            # The client resets the stream; its reset reaches the server
-            # thread at some point, after which every write fails.
 
             def write_fails():
                 try:
@@ -307,7 +294,6 @@ class _H2cProbeClient:
                 if isinstance(event, h2.events.ResponseReceived):
                     head = dict(event.headers)
                 elif isinstance(event, h2.events.DataReceived) and event.data:
-                    # The stream ends with an empty DATA frame.
                     frames.append(event.data)
                 elif isinstance(event, h2.events.StreamEnded):
                     return head, frames
@@ -324,8 +310,6 @@ def prove_h2c_fixture():
         serving.start()
         try:
             client = _H2cProbeClient(endpoint.server_address)
-            # Head and body as one HEADERS frame and a DATA frame per write;
-            # connection fields dropped, names lowercased.
             head, frames = client.response(client.request("/echo"))
             assert head[b":status"] == b"201", head
             assert head[b"x-reply"] == b"one" and b"connection" not in head, head
@@ -333,11 +317,9 @@ def prove_h2c_fixture():
             assert client.settings[h2.settings.SettingCodes.MAX_CONCURRENT_STREAMS] == 3, client.settings
             assert endpoint.seen[-1] == ("/echo", b"ping", "probe", "fixture.test"), endpoint.seen
 
-            # More than the initial 64 KiB window, so writes wait for credit.
             head, frames = client.response(client.request("/large"))
             assert b"".join(frames) == b"y" * (200 * 1024)
 
-            # A write after the client's reset fails as a closed socket would.
             stream_id = client.request("/stall")
             assert endpoint.stalled.wait(5)
             client.conn.reset_stream(stream_id, h2.errors.ErrorCodes.CANCEL)
@@ -345,8 +327,6 @@ def prove_h2c_fixture():
             wait_for(lambda: endpoint.write_errors, "the write after reset to fail", timeout=5, interval=0.01)
             assert isinstance(endpoint.write_errors[0], BrokenPipeError), endpoint.write_errors
 
-            # The same connection still serves; a handler that sends no head
-            # drops the whole connection.
             head, _ = client.response(client.request("/echo"))
             assert head[b":status"] == b"201"
             client.request("/disconnect")
@@ -354,7 +334,6 @@ def prove_h2c_fixture():
                 pass
             client.sock.close()
 
-            # HTTP/1.1 is unchanged on the same listener.
             plain = http.client.HTTPConnection(*endpoint.server_address, timeout=5)
             plain.request("POST", "/echo", body=b"h1", headers={"X-Probe": "h1"})
             reply = plain.getresponse()
@@ -563,8 +542,6 @@ def prove_peer_census():
         diagnostics.condition.wait = original_wait
         diagnostics.close()
 
-    # Another owner's release, a duplicate or an endpoint beyond the original
-    # deadline cannot supply this invocation's admission retirement.
     for fault in ("missing", "wrong-owner", "duplicate", "late"):
         observations.records.clear()
         peers = PeerCensus(diagnostics)
@@ -603,9 +580,6 @@ def prove_peer_census():
         pass
     else:
         raise AssertionError("unissued peer population accepted")
-    # One Host owns four eight-second polls at 25ms intervals, fifty total
-    # inspections, and six setup/control exchanges. Include a boundary probe
-    # per poll; a cumulative census must not shorten any existing wait.
     observations.records.clear()
     peers = PeerCensus(diagnostics)
     deadline = time.monotonic() + 10
@@ -631,8 +605,6 @@ def prove_peer_census():
 
 
 def observation_frame(sequence, *, phase="ordinary_classification_released", subject="message", action=None, process=None, lost=0):
-    # Independent native codec golden: phase=0, timestamp=1, subject kind=2,
-    # subject=3, action=7. Keep the asymmetric route/subject distinct.
     fields = ((0, phase), (1, "1234567"), (2, "route"), (3, subject))
     if action is not None:
         fields += ((7, action),)
@@ -650,7 +622,6 @@ def observation_state(process, state, *, run=37, active=0, version=1):
 
 def prove_required_receipts():
     import host_process
-    # Optional output cannot manufacture native authority, even when complete.
     receipt = b'{"rui_test_phase":"effect_stop_requested","control_key":"interrupt"}\n'
     process = SimpleNamespace(pid=os.getpid(), stderr=io.BytesIO(receipt), poll=lambda: 0)
     diagnostics = HostDiagnostics(process)
@@ -670,8 +641,6 @@ def prove_required_receipts():
             else:
                 raise AssertionError("optional stderr supplied required native evidence")
     diagnostics.close()
-    # Complete optional records and wrong native plans must both fail at the
-    # authority boundary, for positive waits and negative/exact censuses.
     required = {
         "cleanup_started": ("control", "control_peers", "stop", "bash_cleanup"),
         "cleanup_completed": ("control", "control_peers", "stop", "bash_cleanup"),
@@ -810,9 +779,7 @@ time.sleep(30)
 def prove_observation_startup_credit():
     import errno
     import host_process
-    host_process._observation_atomics()  # Compile setup before intercepting launch.
-    # Independent workload bound: ten held inspections, each with request,
-    # captured and gate-waiting receipts of at most 512 bytes.
+    host_process._observation_atomics()
     required = 10 * 3 * 512
     pipe, write, read = os.pipe, os.write, os.read
     for case in ("ready", "write-error", "short-write", "read-error", "short-read", "wrong-bytes", "disabled"):
@@ -977,7 +944,7 @@ def prove_final_observation_state():
                 state = observation_state(process.pid + 1, 2)
             observations = _Observations(process, reader, plan, state)
             os.write(writer, observation_frame(1))
-            os.close(writer)  # A complete received prefix and EOF, never a later loss-bearing frame.
+            os.close(writer)
             try:
                 observations.close()
             except AssertionError as error:
@@ -988,7 +955,7 @@ def prove_final_observation_state():
                 assert expected and expected in str(error), (plan, case, error)
             else:
                 assert case == "normal", (plan, case, "terminal channel loss accepted")
-                observations.close()  # Idempotent readback after mapping custody ends.
+                observations.close()
     print("Host final observation helper: every plan rejects final loss, encoding loss, missing tail, interrupted publication and missing/foreign state with kill status; normal prefix accepted")
 
 
@@ -1017,8 +984,6 @@ def prove_observation_disposal():
                 else:
                     result.append(None)
             if case == "late-loss":
-                # Synthetic post-seal loss stays sticky; the real native
-                # late-attempt/SIGKILL ordering is separately exercised in Zig.
                 state[24] = 3
             worker = threading.Thread(target=dispose)
             worker.start()
@@ -1026,8 +991,6 @@ def prove_observation_disposal():
                      "the fixture to seal native admission", timeout=1, interval=.001)
             if case == "held-final":
                 assert worker.is_alive() and not result, "received final frame falsely proved retirement"
-                # Synthetic retirement shadow: only the count byte changes.
-                # The native regression holds the actual record call here.
                 state[32] = 0
             worker.join(1)
             assert not worker.is_alive(), "bounded disposal worker leaked"
@@ -1053,8 +1016,6 @@ def prove_observation_disposal():
                 assert case in ("late-loss", "missing-tail"), error
             else:
                 assert case in ("held-final", "missing-endpoint")
-    # Actual pre-teardown helper copy survives deletion of its private root,
-    # without Store/HOME reads or a new retention service.
     with tempfile.TemporaryDirectory() as destination:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -1084,8 +1045,6 @@ def prove_intentional_crash_retirement():
     with patch.object(sys, "argv", [sys.argv[0], "unused-rui"]):
         import model_fixture as dispatch
 
-    # Drive the real crash owner and native accessor. Synthetic state changes
-    # discriminate receipt from retirement; actual native holds remain in Zig.
     for case in ("kill-refusal", "wait-timeout", "expired-wait", "kill-future-writer",
                  "retired", "held-final", "held-expired", "missing-tail", "loss", "sealed", "future-writer"):
         clock = [100.0]
@@ -1120,7 +1079,7 @@ def prove_intentional_crash_retirement():
                     if case.startswith("kill-"):
                         clock[0] += .25
                         raise primary
-                    return  # Sent termination has not yet produced an exit.
+                    return
                 if case in ("future-writer", "kill-future-writer"):
                     active = struct.unpack_from("<Q", state, 32)[0]
                     struct.pack_into("<Q", state, 32, active + 1)
@@ -1166,7 +1125,6 @@ def prove_intentional_crash_retirement():
 
 def prove_retention_does_not_own_teardown():
     import host_process
-    # Sampling itself is optional, including failures before write_text/open.
     with tempfile.TemporaryDirectory() as directory:
         try:
             raise AssertionError("original fixture failure")
@@ -1181,7 +1139,7 @@ def prove_retention_does_not_own_teardown():
             process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)",
                 "--store", str(root / "store")], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 pass_fds=(writer,))
-            os.close(writer)  # Only child custody now; kill must produce EOF.
+            os.close(writer)
             state = observation_state(process.pid, 0)
             observations = _Observations(process, reader, "status", state)
             process.rui_observations = observations
@@ -1194,7 +1152,7 @@ def prove_retention_does_not_own_teardown():
             original_kill = process.kill
             def kill():
                 if case == "late-loss":
-                    state[24] = 1  # Synthetic native loss after successful seal.
+                    state[24] = 1
                 original_kill()
             original_open = pathlib.Path.open
             def open_path(path, *args, **kwargs):
@@ -1244,8 +1202,6 @@ def prove_execution_release_oracles():
             raise AssertionError(f"accepted {description}")
 
     clean = dict(dispatch_fenced=False, custody_occupied="0", scratch_used_bytes="0")
-    # Independently authored accounting snapshots: separate zeros do not add
-    # up to a release, and a clean reply at the deadline is already too late.
     for sequence, accepted, finished_at in (
         ([dict(clean, custody_occupied="1"), clean], True, 0.1),
         ([dict(clean, custody_occupied="1")], False, 0.1),
@@ -1285,8 +1241,6 @@ def prove_execution_release_oracles():
 
     processing = dict(turn="7", operation="11", attempt="2")
     endpoint = dict(processing, rui_test_phase="cleanup_completed", action=None)
-    # Drive the actual diagnostics reader and identity selector. Synthetic
-    # frames test the oracle; they do not qualify a native Host's reclamation.
     for records, accepted in (
         ([endpoint], True), ([], False), ([dict(endpoint, turn="8")], False),
         ([dict(endpoint, operation="12")], False), ([dict(endpoint, attempt="3")], False),
@@ -1314,8 +1268,6 @@ def prove_execution_release_oracles():
                         assert diagnostics.wait_model_cleanup(processing, 10) == endpoint
                     else:
                         refused(lambda: diagnostics.wait_model_cleanup(processing, 10), "cleanup endpoint arrived")
-            # A duplicate or unrelated owner discovered after first success
-            # must still fail the complete post-reap population.
             for late in (endpoint, dict(endpoint, operation="12")):
                 diagnostics.records.append(late)
                 refused(lambda: diagnostics.assert_model_cleanup_census(processing), "Counter")
@@ -1330,7 +1282,6 @@ def prove_execution_release_oracles():
 def prove_bash_cleanup_population():
     from bash_fixture import assert_cleanup_population
 
-    # A model owner completes once; the Bash owner starts, releases and completes.
     records = [dict(rui_test_phase="cleanup_completed", turn="7", operation="11", attempt="1", action=None)]
     for phase in ("cleanup_started", "cleanup_release_observed", "cleanup_completed"):
         records.append(dict(rui_test_phase=phase, turn="7", operation="11", action="19"))
@@ -1340,7 +1291,7 @@ def prove_bash_cleanup_population():
         if case == "missing":
             values.pop(2)
         elif case == "duplicate":
-            values.append(dict(values[1]))  # Retry must not duplicate release authority.
+            values.append(dict(values[1]))
         elif case == "wrong-owner":
             values[2]["operation"] = "12"
         elif case == "extra-phase":
@@ -1363,7 +1314,7 @@ def prove_capacity_refusal_oracle(probe):
     module = sys.modules[probe.__module__]
     class ConnectedSocket(socket.socket):
         def connect(self, _path):
-            pass  # The socketpair is already connected; send/receive/close are real.
+            pass
 
     connection_body = b'{"version":"' + host_process.WIRE_VERSION.encode() + b'","type":"busy","code":"connection_capacity_exhausted"}'
     ordinary_body = b'{"version":"' + host_process.WIRE_VERSION.encode() + b'","type":"busy","code":"ordinary_capacity_exhausted"}'
@@ -1411,7 +1362,7 @@ def prove_capacity_refusal_oracle(probe):
             thread = threading.Thread(target=respond)
             thread.start()
         else:
-            respond()  # A complete refusal can precede the client's first write.
+            respond()
         try:
             with patch.object(module.socket, "socket", return_value=client):
                 probe("unused", b"ordinary_capacity_exhausted" if case == "ordinary-complete"
@@ -1456,8 +1407,6 @@ def prove_renderer_comparison_retention():
             assert data["phase"] == "idle-after-configure"
             assert destination.stat().st_mode & 0o777 == 0o700
 
-    # Evidence failures must neither replace the primary assertion nor skip
-    # mandatory disposal. The existing writer/copy caps also apply here.
     for failure in ("write", "copy"):
         with tempfile.TemporaryDirectory() as state, \
                 patch.dict(os.environ, RUI_FAILURE_ARTIFACTS=str(pathlib.Path(state) / "retained")), \
@@ -1479,7 +1428,6 @@ def prove_renderer_comparison_retention():
 
 
 def prove_terminal_stop_budget():
-    """Drive the actual stop caller; only external work uses a virtual clock."""
     with patch.object(sys, "argv", [sys.argv[0], "unused-rui"]):
         import terminal_restoration_fixture as terminal
 
@@ -1616,8 +1564,6 @@ def prove_caller_disposal():
                                     dispose_all(release.set, dispose, lambda: retained.append(True))
                         except BaseException as error:
                             caught = error
-                        # Check retirement before exception identity so a grouped
-                        # process loop mutation fails at the skipped second child.
                         assert all(process.poll() is not None for process in processes), "later child disposal skipped"
                         assert all(process.stdout.closed and process.stderr.closed for process in processes)
                         assert all(endpoint.fileno() == -1 for endpoint in endpoints), "endpoint close skipped"
@@ -1627,15 +1573,12 @@ def prove_caller_disposal():
                         if fault:
                             assert any(f"injected {fault}" in note for note in caught.__notes__), caught
                 finally:
-                    # Keep a deliberately broken candidate from leaking test resources.
                     dispose_all(*(lambda process=process: stop_process(process) for process in processes),
                                 original_shutdown, original_close,
                                 *(endpoint.shutdown for endpoint in endpoints[1:]),
                                 *(endpoint.server_close for endpoint in endpoints[1:]),
                                 *(lambda thread=thread: thread.join(timeout=5) for thread in threads))
 
-    # A close refusal before its effect must leave the endpoint owned for the
-    # outer finalizer, including when an existing assertion stays primary.
     for body_failed in (False, True):
         endpoint = dispatch.SuccessEndpoint([])
         thread = threading.Thread(target=endpoint.serve_forever)
@@ -1661,7 +1604,6 @@ def prove_caller_disposal():
             endpoint.server_close()
             thread.join(timeout=5)
 
-    # Execute stage_action's actual startup boundary, not just its disposer.
     endpoint = dispatch.SuccessEndpoint([])
     startup = RuntimeError("Host startup refused")
     with patch.object(bash.fixture, "SuccessEndpoint", return_value=endpoint), \
@@ -1676,8 +1618,6 @@ def prove_caller_disposal():
             endpoint.server_close()
         assert closed, "stage_action startup leaked endpoint"
 
-    # A permanent refusal remains a failure and reports unretired custody. Use
-    # a short join only for this deliberate leak, then release it ourselves.
     for owner in (dispatch, page, bash):
         for body_failed in (False, True):
             endpoint = dispatch.SuccessEndpoint([])
@@ -1688,8 +1628,6 @@ def prove_caller_disposal():
             primary = AssertionError("body before shutdown refusal")
             shutdown_error = OSError("persistent shutdown refusal")
             try:
-                # Thread.start does not establish selector registration. Closing
-                # earlier could kill the worker instead of leaving live custody.
                 assert serving.wait(timeout=5), "endpoint did not enter serving loop"
                 with patch.object(endpoint, "shutdown", side_effect=shutdown_error), \
                         patch.object(thread, "join", lambda timeout: threading.Thread.join(thread, .01)):
@@ -1716,8 +1654,6 @@ def prove_caller_disposal():
                 thread.join(timeout=5)
                 assert not thread.is_alive()
 
-    # Run the actual whole-stream caller in a fresh interpreter. A non-daemon
-    # serving thread would hang after the preserved failure, despite the join.
     try:
         exit_probe = subprocess.run([sys.executable, "-c", """
 import faulthandler
@@ -1762,7 +1698,6 @@ print("whole-stream failure survived teardown and interpreter exit", flush=True)
     assert exit_probe.returncode == 0, exit_probe.stderr
     assert exit_probe.stdout.strip() == "whole-stream failure survived teardown and interpreter exit", exit_probe.stdout
 
-    # A timed join returning is not retirement, even with successful shutdown.
     endpoint = MagicMock()
     thread = SimpleNamespace(ident=1, join=lambda timeout: None, is_alive=lambda: True)
     for dispose in (lambda: dispatch.stop_endpoint(endpoint, {endpoint: thread}),
@@ -1832,8 +1767,6 @@ def prove_dispose_all():
 
 
 def prove_peer_disconnects():
-    # Exercise the real provider handler: a cancelled consumer is an observed
-    # disconnect, whereas broken fixture I/O must still fail the caller.
     with patch.object(sys, "argv", [__file__, "/bin/false"]):
         import control_fixture as control
 
@@ -1869,8 +1802,6 @@ def prove_peer_disconnects():
     with patch.object(sys, "argv", [__file__, "/bin/false", "/bin/false"]):
         import host_status_fixture as stop
 
-    # Completion keeps every observed byte, including an acceptance prefix
-    # that the shutdown caller must reject even if a reset follows it.
     prefix = b'HTTP/1.1 200 OK\r\n\r\n{"status":"accepted"}'
     for error in accepted + rejected:
         for received in (b"", prefix):
@@ -1944,7 +1875,6 @@ def prove_one_reply():
                 assert sockets and all(sock.fileno() == -1 for sock in sockets), "one-reply socket leaked"
                 assert not path.exists(), "one-reply path survived disposal"
 
-    # Asymmetric binary response, split request, exact header/body limits and reuse.
     response = b"deliberately not HTTP\x00\xff" * 4000
     for length in (0, BODY_LIMIT):
         with case() as path:
@@ -1973,8 +1903,6 @@ def prove_one_reply():
                 with one_reply(path, b"must not be sent"):
                     with connect(path) as client:
                         client.sendall(supplied)
-                        # Malformed bytes reject without EOF and may already
-                        # have closed the peer. Only truncation needs half-close.
                         if error_type is EOFError:
                             client.shutdown(socket.SHUT_WR)
                         assert client.recv(1) == b"", "invalid request received a response"
@@ -1983,7 +1911,6 @@ def prove_one_reply():
             else:
                 raise AssertionError("one-reply worker error was lost")
 
-    # Silent accept/header/body and response backpressure all spend the same budget.
     for supplied in (None, b"POST /", request(4) + b"abc", request(0)):
         with case() as path:
             with contextlib.ExitStack() as clients:
@@ -1999,7 +1926,6 @@ def prove_one_reply():
                 else:
                     raise AssertionError("one-reply deadline was restarted or ignored")
 
-    # Client failure before accept, during header/body, and during blocked send.
     for supplied in (None, b"POST /", request(4) + b"abc", request(0)):
         with case() as path:
             with contextlib.ExitStack() as clients:
@@ -2019,7 +1945,6 @@ def prove_one_reply():
                     raise AssertionError("client failure was suppressed")
                 assert time.monotonic() - started < 2, "cancellation waited for exchange timeout"
 
-    # A completed worker failure and failed unlink remain secondary to the client.
     with tempfile.TemporaryDirectory(prefix="rui-reply-failure-") as root:
         path = canonical_fixture_root(root) / "peer"
         primary = RuntimeError("original client failure")

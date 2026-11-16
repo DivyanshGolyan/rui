@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Seven-kind Session activity through real writers and the typed native Client."""
 import copy
 import hashlib
 import http.server
@@ -131,8 +130,6 @@ def main():
             calls = [r for r in pending if kind(r) == "call"]
             assert calls[0]["value"]["call"]["action"] is not None
             assert all(r["value"]["call"]["rejection"] == "unknown_tool" for r in calls[1:])
-            # The one Action, made while the Session asks, follows its call
-            # with its approval request at ordinal 1.
             approvals = [(i, r) for i, r in enumerate(pending) if kind(r) == "approval_requested"]
             assert len(approvals) == 1, approvals
             index, approval = approvals[0]
@@ -190,7 +187,6 @@ def main():
             for row in complete:
                 if kind(row) in ("assistant", "turn_ended"):
                     assert caller(store, "content", row["position"], row["ordinal"]) == TEXT.encode()
-            # Each done Turn marks one answer final.
             done = [r for r in complete if kind(r) == "turn_ended" and r["value"]["turn_ended"]["ending"] == "done"]
             assert done and len(done) == len([r for r in complete if kind(r) == "assistant" and r["value"]["assistant"]["final"]]), complete
             message(state, store, "third", SESSION, "stopped work")
@@ -201,8 +197,6 @@ def main():
             assert history(store, third[0])[1] == third[1]
             assert {kind(r) for r in stopped} == {"admission", "user", "assistant", "call", "approval_requested", "tool_result", "turn_ended", "stop", "model_call"}
             model_calls = [r["value"]["model_call"] for r in stopped if kind(r) == "model_call"]
-            # One immutable record per resolved Operation, including the calls
-            # awaiting approval at stop, across fixed-end/reverse/restart reads.
             assert [r["status"] for r in model_calls] == ["tool_proposals", "answer", "tool_proposals"], model_calls
             assert all(r["attempts"] == "1" for r in model_calls), model_calls
             assert all(r["latency_ms"] is not None and r["first_event_ms"] is not None for r in model_calls), model_calls
@@ -231,8 +225,6 @@ def main():
             assert history(store, stopped_end)[1] == stopped, "restart changed fixed activity"
             stop_process(process)
             process = None
-            # Keep representative Host fencing for sequence and group faults;
-            # admission and first-read Conversation matrices live with Store.
             for corrupt, position, ordinal in (("UPDATE turn SET outcome_position=NULL WHERE outcome_code IS NOT NULL", pending[0]["position"], 0),
                     ("UPDATE model_tool_call SET item_ordinal=item_ordinal+1000 WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call)", results[0]["position"], results[0]["ordinal"])):
                 for mode in ("page", "content"):
@@ -274,9 +266,8 @@ def main():
                         if fault == "retired": entry["presentation"].update(code="succeeded", publication_position="1")
                     wire["call_activity"]["entries"] = entries
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
-            # Page work is closed: an operation belongs to its Turn, an Action to an active one.
             for work, ok in (({"turn": "1", "operation": "2", "first_action": "3", "state": {"kind": "approval", "since": "1"}}, True),
-                             ({"turn": "1"}, False), ({"operation": "2"}, False), ({"first_action": "3"}, False),
+                             ({"turn": "1"}, False), ({"operation": "2"}, False), ({"first_action": "3"}, True),
                              ({"revision": "0"}, False), ({"state": {"kind": "settled", "since": "1"}}, False), (None, False),
                              ({"state": {"kind": "idle", "since": "0"}}, False), ({"state": {"kind": "idle", "since": "1", "cause": "stop"}}, False),
                              ({"state": {"kind": "failed", "since": "1", "code": "provider_http_403", "resets_at": "5"}}, False),
@@ -285,13 +276,16 @@ def main():
                 if work is None: del wire["work"]
                 else: wire["work"].update(work)
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=ok)
-            for turn, completion, ok in ((None, "completed", True), ("1", "pending", True), (None, "pending", False)):
-                wire = copy.deepcopy(valid)
-                wire["items"] = [{"position": "1", "ordinal": "0", "at": "1", "value": {"stop": {"key": "stop", "turn": turn, "cutoff": "0", "completion": completion}}}]
-                mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=ok)
+            for turn in (None, "1"):
+                for completion in ("pending", "completed"):
+                    wire = copy.deepcopy(valid)
+                    wire["items"] = [{"position": "1", "ordinal": "0", "at": "1", "value": {"stop": {"key": "stop", "turn": turn, "cutoff": "0", "completion": completion}}}]
+                    mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=True)
+            for fault in ({"turn": "0"}, {"turn": "-1"}, {"completion": "unknown"}, {"completion": None}, {"cutoff": "-1"}):
+                wire["items"][0]["value"]["stop"].update(fault)
+                mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
+                wire["items"][0]["value"]["stop"] = {"key": "stop", "turn": None, "cutoff": "0", "completion": "pending"}
             def received(sender):
-                # Another Session's Message is a received row, which names
-                # its sender; a person's admission row never does.
                 wire = copy.deepcopy(valid)
                 value = wire["items"][0]["value"]
                 value["received"] = value.pop("admission")
@@ -302,20 +296,17 @@ def main():
             wire = copy.deepcopy(valid)
             wire["items"][0]["value"]["admission"]["sender"] = {"session": "k7m2qx"}
             mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
-            # Pages carry complete canonical IDs, never renderer abbreviations.
             for session in (SESSION, foreign, "k7m2qx"):
                 sender = {"session": session}
                 mock_reply(fields["socket"], store, "page", json.dumps(received(sender)).encode(), ok=True)
                 sender["prefix"] = "6"
                 mock_reply(fields["socket"], store, "page", json.dumps(received(sender)).encode())
-            # A sender carries its Session's label when it has one.
             for label, ok in (("Review", True), ("", False), ("a\nb", False)):
                 mock_reply(fields["socket"], store, "page", json.dumps(received({"session": "k7m2qx", "label": label})).encode(), ok=ok)
             for session in ("rui/1a2b3c4d-0000-4000-8000-000000000001", "reviewer", "K7m2qx", "k7m2qi", "k7\x00qx"):
                 mock_reply(fields["socket"], store, "page", json.dumps(received({"session": session})).encode())
             for fault in ("order", "union", "digest", "binding", "integer", "field", "stamp", "sender", "undated", "dated"):
                 wire = copy.deepcopy(valid)
-                # Every row is dated, and an admission by its own admission.
                 if fault == "undated": del wire["items"][0]["at"]
                 if fault == "dated": wire["items"][0]["at"] = "1"
                 if fault == "order": wire["items"][1]["position"] = "1"
@@ -348,7 +339,6 @@ def main():
 
 
 def performance_case(item_bytes):
-    """Opt-in real admission witness; stream both copies of the provider item."""
     global SESSION
     from model_fixture import read_result
     root = tempfile.mkdtemp(prefix="rui-activity-performance-")
@@ -421,10 +411,6 @@ def performance_case(item_bytes):
         independent = configure(state, store, "second-config")
         admitted_start = time.monotonic()
         message(state, store, "large", SESSION, "propose command")
-        # Observing the Host's unlinked response capture avoids sending a
-        # bounded Client exchange into the nonpreemptible import; the Host holds
-        # its Store exclusively, so no outside reader exists. This is not
-        # admission proof: the native page below must report the Action.
         def capturing():
             descriptors = pathlib.Path(f"/proc/{process.pid}/fd")
             assert descriptors.exists(), "the live import observer is Linux-only"
@@ -471,7 +457,6 @@ def performance_case(item_bytes):
                     timings.append({"index": index, "current_seconds": current_end - tick,
                         "activity_seconds": end - current_end, "current": current,
                         "start_seconds": tick - admitted_start, "end_seconds": end - admitted_start})
-                    # Pace the workload, never a correctness/acceptance delay.
                     done.wait(max(0, 0.25 - (time.monotonic() - tick)))
             except BaseException as error:
                 errors.append(error)

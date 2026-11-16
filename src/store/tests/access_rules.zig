@@ -1,10 +1,6 @@
-//! Access rules Store conformance tests.
 const std = @import("std");
 
 test "the Store prepares only typed statements, its transaction control and test fixtures" {
-    // Open text cannot reach SQLite beside `rsql`: the one prepare is
-    // `cachedStatic`, called only by these three, and `cachedTyped` takes
-    // only a type `rsql.Read` or `rsql.Write` made (`rsql.isStatement`).
     const source = @embedFile("../engine/Sqlite.zig");
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "sqlite3_" ++ "prepare"));
     const callers = [_][]const u8{ "controlStatement", "cachedTyped", "fixtureStatement" };
@@ -21,8 +17,6 @@ test "the Store prepares only typed statements, its transaction control and test
         before = rest;
     }
     try std.testing.expectEqual(callers.len, found);
-    // Opening's own text: engine settings, and one sweep held to
-    // `rsql.portabilityError`.
     var execs = std.mem.splitSequence(u8, source, "sqlite.exec" ++ "(database.?, ");
     _ = execs.first();
     while (execs.next()) |rest| {
@@ -33,11 +27,6 @@ test "the Store prepares only typed statements, its transaction control and test
 }
 
 test "Store entry points queue and fence only through canonical access" {
-    // Every entry point classifies its errors through `Entry`; a new path
-    // cannot take a lock beside the Store's queue, read or set the fence
-    // beside it, or enter without returning through a classifier. Only the
-    // transition runner opens a writing Access: every other Store file,
-    // tests included, opens a read or survey one.
     const sources = .{
         @embedFile("../Store.zig"),
         @embedFile("../access.zig"),
@@ -50,6 +39,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("../engine/mysql_open.zig"),
         @embedFile("../engine/mysql_refusal.zig"),
         @embedFile("../domain/action.zig"),
+        @embedFile("../domain/action_control.zig"),
         @embedFile("../domain/action_read.zig"),
         @embedFile("../domain/forward.zig"),
         @embedFile("../domain/command.zig"),
@@ -70,6 +60,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("../domain/session_report_read.zig"),
         @embedFile("../domain/skills.zig"),
         @embedFile("../domain/sourced_input.zig"),
+        @embedFile("../domain/tool_fulfillment.zig"),
         @embedFile("../domain/tool_offer.zig"),
         @embedFile("../domain/tool_set.zig"),
         @embedFile("../domain/turn.zig"),
@@ -82,9 +73,6 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("../queue.zig"),
         @embedFile("../transition.zig"),
     };
-    // The Store's test files, the per-domain ones beside tests.zig and
-    // sqlite_tests.zig included, which hold no entry point but may open an
-    // Access; import_architecture.py checks this list too.
     const test_sources = .{
         @embedFile("../mysql_dialect_check.zig"),
         @embedFile("../mysql_session_tests.zig"),
@@ -162,7 +150,6 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("turn.zig"),
     };
     inline for (sources ++ test_sources) |source| {
-        // access.zig, which defines it, and transition.zig, the runner.
         if (source.ptr == sources[1].ptr or source.ptr == sources[sources.len - 1].ptr) continue;
         var at: usize = 0;
         while (std.mem.indexOfPos(u8, source, at, "Access" ++ "(")) |index| : (at = index + 1) {
@@ -189,7 +176,6 @@ test "Store entry points queue and fence only through canonical access" {
             try std.testing.expect(std.mem.indexOf(u8, body, "entry.finish") != null);
         }
     }
-    // The Store's queue: `release`, `closing`, `writeWaiting`, `take`, and its tests' `waitQueued`.
     try std.testing.expectEqual(@as(usize, 5), locks);
     try std.testing.expectEqual(@as(usize, 1), fence_stores);
     try std.testing.expectEqual(@as(usize, 1), fence_loads);

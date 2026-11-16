@@ -383,7 +383,6 @@ class InstallerTemplateTest(unittest.TestCase):
         def users(name):
             return set(git("grep", "-l", "-F", name, "--", ":!*.md", ":!tests/ci/test_release.py", cwd=ROOT).splitlines())
         self.assertEqual(users("rui_publish"), {"release/publish.sh", "release/install.sh", "install.sh"})
-        # host_status_integration.py pins the fragment's JSON reader against the real build.
         self.assertEqual(users("_rui_selected"), {"release/publish.sh", "tests/integration/host_status_integration.py"})
 
 

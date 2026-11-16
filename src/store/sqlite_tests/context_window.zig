@@ -1,5 +1,3 @@
-//! Context window SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -25,9 +23,6 @@ test "frozen context window lookup work is independent of catalog population" {
             try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             try storage.saveModelFacts(&.{}, null);
-            // Half the unrelated facts are retained from an older generation.
-            // Neither they nor the selected generation may turn a point lookup
-            // into a scan. Insert the requested model last when it exists.
             try store_testing.sqlite_only.exec(&storage, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<?1) " ++
                 "INSERT INTO model_fact(model_id,context_window,efforts,openai_listed,generation) " ++
                 "SELECT printf('catalog-noise-%05d',value),256000,0,0,value%2 FROM sequence", .{population});
@@ -61,8 +56,6 @@ test "frozen context window lookup work is independent of catalog population" {
     for (std.enums.values(Measure.Variant)) |variant| {
         const small = try Measure.run(32, variant);
         const large = try Measure.run(10000, variant);
-        // Meter the real Operation INSERT and the sibling single-model reader,
-        // not a restated predicate or just their unchanged Store round counts.
         try std.testing.expectEqual(small.admission, large.admission);
         try std.testing.expectEqual(small.configuration, large.configuration);
     }

@@ -1,4 +1,3 @@
-//! Value-only enums shared by protocol and invocation parsing.
 const std = @import("std");
 const model_capability = @import("model_capability.zig");
 
@@ -7,7 +6,6 @@ pub const Notification = enum { on, off };
 pub const ReportProfile = enum { current, full };
 pub const FailedResponsePart = enum { body, metadata };
 
-/// A reset is CLI syntax, not a model reasoning effort.
 pub const ReasoningChoice = blk: {
     const tags = @typeInfo(model_capability.ReasoningEffort).@"enum".field_names ++ .{"default"};
     var values: [tags.len]u8 = undefined;
@@ -23,6 +21,7 @@ pub const CommandKind = enum {
     model_interruption,
     permission_decision,
     session_pin,
+    action_background,
 
     pub fn route(self: CommandKind) []const u8 {
         return switch (self) {
@@ -33,12 +32,11 @@ pub const CommandKind = enum {
             .session_pin => "/v1/control/session-pin",
             .model_interruption => "/v1/control/model-interruption",
             .permission_decision => "/v1/control/permission-decision",
+            .action_background => "/v1/control/action-background",
         };
     }
 };
 
-/// Recovery uses hyphens where the protocol's tags use underscores. Derive
-/// this spelling enum, too: adding a command cannot silently omit recovery.
 pub const RecoveryKind = blk: {
     const source = @typeInfo(CommandKind).@"enum";
     var tags: [source.field_names.len][]const u8 = undefined;
@@ -63,7 +61,7 @@ test "CLI choice enums preserve protocol tags and derive reset and recovery spel
     try std.testing.expectEqual(effort.len + 1, choice.len);
     for (effort, choice[0..effort.len]) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
     try std.testing.expectEqualStrings("default", choice[effort.len]);
-    const expected = [_][]const u8{ "configure", "message", "session-stop", "session-archive", "model-interruption", "permission-decision", "session-pin" };
+    const expected = [_][]const u8{ "configure", "message", "session-stop", "session-archive", "model-interruption", "permission-decision", "session-pin", "action-background" };
     inline for (comptime std.meta.tags(RecoveryKind), expected) |kind, name| {
         try std.testing.expectEqualStrings(name, @tagName(kind));
         const command = commandKind(kind);

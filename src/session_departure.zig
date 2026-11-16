@@ -1,9 +1,6 @@
-//! Value policy for leaving the frontend. Facts describe completed effects;
-//! they do not perform or stand in for restoration, cancellation or joins.
 const std = @import("std");
 
 pub const ReadPhase = enum { activity, fill, inspection, permission, message, tool, recall, retry };
-/// `inspection`: a pending inspection supersedes a silent read it cancelled.
 pub const Mode = enum { active, inspection, final_exit };
 pub const ReadEnd = union(enum) {
     absent,
@@ -22,8 +19,6 @@ pub const ReadEnd = union(enum) {
     pub fn failure(self: ReadEnd, mode: Mode) ?anyerror {
         return switch (self) {
             .absent, .complete => null,
-            // Nothing a cancelled read produced has shown: it stands only
-            // where no inspection superseded it.
             .cancelled => if (mode == .active) error.Cancelled else null,
             .failed => |failed| if (mode != .final_exit and self.preparationFailure()) null else failed.err,
         };
@@ -34,7 +29,6 @@ pub const Settled = struct {
     restored: anyerror!void,
     reader: ReadEnd,
     admission_error: ?anyerror,
-    /// A skills read's canonical Store failure; it reports nothing else.
     skills_error: ?anyerror = null,
 
     pub fn failure(self: Settled, mode: Mode, cause: ?anyerror) ?anyerror {
@@ -55,8 +49,6 @@ pub const Exit = struct {
     recovery_before_notice: bool,
 };
 
-/// Recovery identity remains Submission's authority. This only selects when
-/// to render it: before an error/unresolved exit, or if the optional notice fails.
 pub fn exit(settled: Settled, cause: ?anyerror, unresolved: bool) Exit {
     const failure = settled.failure(.final_exit, cause);
     return .{ .failure = failure, .recovery_before_notice = failure != null or unresolved };

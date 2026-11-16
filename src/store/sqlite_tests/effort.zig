@@ -1,4 +1,3 @@
-//! Effort SQLite mechanism tests.
 const tests = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -12,7 +11,7 @@ const sqlite = @import("../sqlite.zig");
 const store_testing = @import("../testing.zig");
 const c = sqlite.c;
 const ConfigureReply = configuration_domain.ConfigureReply;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const answerTestTurn = store_testing.answerTestTurn;
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
@@ -65,30 +64,26 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
     try submitTestMessage(&storage, &tmp, "effort-one", "effort-one", session.slice(), "first");
     const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
 
-    // D111/D165: the pinned codec cannot return to unspecified effort.
     const clear = try configureTestEffort(&storage, "effort-clear", session.slice(), .explicit_null, "");
     try std.testing.expect(clear == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, clear.rejected.code);
     try std.testing.expectEqual(observed.revision, (try storage.inspectSessionForTesting(session.slice())).revision);
-    // A client resolves its default to a concrete value before sending it.
     try std.testing.expect(try configureTestEffort(&storage, "effort-client-default", session.slice(), .value, "low") == .accepted);
     observed = try storage.inspectSessionForTesting(session.slice());
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), observed.reasoning_effort);
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), observed.reasoning_effort_override);
 
-    // A replacement Attempt keeps its Operation's frozen effort.
     try storage.settleModelAttemptFailure(first, .{ .uncorrelated = "temporary" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
     try store_testing.sqlite_only.exec(&storage, "UPDATE model_operation SET retry_due_at_ms=1 WHERE resolution_code IS NULL", .{});
     const retry = (try admitRetryForTesting(&storage)).?.permit.binding;
     try std.testing.expectEqual(first.operation_id, retry.operation_id);
     {
-        var view: HistoricalView = undefined;
-        storage.openHistoricalView(retry, &view);
+        var view: TestingPage = undefined;
+        view.open(&storage, retry);
         defer view.close();
         try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .high), (try testSettings(&view)).reasoning_effort);
     }
 
-    // Unsupported and outside-grammar values reject without a revision.
     const revision = observed.revision;
     for ([_][]const u8{ "none", "ultra", "HIGH", "" }, 0..) |invalid, index| {
         var key: [32]u8 = undefined;
@@ -97,7 +92,6 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
         try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, rejected.rejected.code);
         try std.testing.expectEqual(revision, (try storage.inspectSessionForTesting(session.slice())).revision);
     }
-    // An omitted field preserves an override distinct from the client default.
     try std.testing.expect(try configureTestEffort(&storage, "effort-medium", session.slice(), .value, "medium") == .accepted);
     try std.testing.expect(try configureTestEffort(&storage, "effort-omitted", session.slice(), .omitted, "") == .accepted);
     observed = try storage.inspectSessionForTesting(session.slice());
@@ -106,7 +100,6 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
     const revision_count = try testingRevisionEfforts(&storage, session.slice(), &revisions);
     try std.testing.expectEqualSlices(?protocol.ReasoningEffort, &.{ .high, .low, .medium, .medium }, revisions[0..revision_count]);
 
-    // D229: an unlisted model accepts the entire effort grammar, not arbitrary text.
     const unknown = try configureTestSession(&storage, "effort-unknown");
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), (try storage.inspectSessionForTesting(unknown.slice())).reasoning_effort);
     for (std.enums.values(protocol.ReasoningEffort)) |effort| {
@@ -126,8 +119,6 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
         try std.testing.expectEqual(unknown_revision, (try storage.inspectSessionForTesting(unknown.slice())).revision);
     }
 
-    // A new Operation freezes the effective effort current at its admission,
-    // and the frozen value survives reopening.
     try storage.settleModelAttemptFailure(retry, .{ .uncorrelated = "permanent" }, .ordinary, .{});
     try submitTestMessage(&storage, &tmp, "effort-two", "effort-two", session.slice(), "second");
     const second = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -137,8 +128,8 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
     var reopened: Store = undefined;
     try testingStore(&reopened, &tmp, std.testing.io);
     defer reopened.close() catch unreachable;
-    var view: HistoricalView = undefined;
-    reopened.openHistoricalView(second, &view);
+    var view: TestingPage = undefined;
+    view.open(&reopened, second);
     defer view.close();
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .medium), (try testSettings(&view)).reasoning_effort);
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .xhigh), (try reopened.inspectSessionForTesting(session.slice())).reasoning_effort);
@@ -176,8 +167,8 @@ test "an exhausted Attempt still retains its effort refusal for the next Operati
     try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND resolution_code='retry_exhausted' AND latency_ms=37 AND first_event_ms=7", .{binding.operation_id}));
     try submitTestMessage(&storage, &tmp, "exhausted-effort-next-input", "exhausted-effort-next", session.slice(), "next Operation");
     const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    var view: historical_domain.HistoricalView = undefined;
-    storage.openHistoricalView(next, &view);
+    var view: TestingPage = undefined;
+    view.open(&storage, next);
     defer view.close();
     var settings: historical_domain.HistoricalSettings = undefined;
     try view.settings(&settings);

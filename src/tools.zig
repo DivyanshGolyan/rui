@@ -19,6 +19,7 @@ pub const max_host_tool_records = @import("tool_record.zig").max_host_tool_recor
 pub const bash_record = @import("tool_record.zig").bash_record;
 pub const find_tools_record = @import("tool_record.zig").find_tools_record;
 pub const message_agent_record = @import("tool_record.zig").message_agent_record;
+pub const read_action_record = @import("tool_record.zig").read_action_record;
 pub const read_transcript_record = @import("tool_record.zig").read_transcript_record;
 pub const skill_record = @import("tool_record.zig").skill_record;
 pub const start_agent_record = @import("tool_record.zig").start_agent_record;
@@ -28,13 +29,6 @@ pub const record = @import("tool_record.zig").record;
 pub const built_in_tool_set = @import("tool_record.zig").built_in_tool_set;
 pub const Offered = @import("tool_record.zig").Offered;
 
-/// Every tool call is shown as one line, its description: what the call
-/// set out to do, in the base-verb form of "Run parser tests". `describe`
-/// is the one place a call becomes that line, and its switch covers every
-/// tool, so a tool cannot join the tool set without one. A function tool
-/// asks the model for it (Bash's required `description` argument); a tool
-/// the provider hosts takes no arguments of ours, so its line is written
-/// from what the provider reports the call did.
 pub const Description = @import("tool_record.zig").Description;
 
 pub const Call = @import("call_classification.zig").Call;
@@ -86,13 +80,9 @@ test "a web search call's description says what it did, on one line, within the 
         .{ .action = .find_in_page, .target = "ziglang.org", .expected = "Find in ziglang.org" },
         .{ .action = .find_in_page, .expected = "Find in a page" },
         .{ .action = .search, .target = long, .expected = "Search “" ++ (comptime repeat("a", 184)) ++ "…”" },
-        // A cut never splits a scalar.
         .{ .action = .search, .target = "a" ++ (comptime repeat("é", 110)), .expected = "Search “a" ++ (comptime repeat("é", 91)) ++ "…”" },
-        // Two long values share the room; a short first one leaves the rest.
         .{ .action = .find_in_page, .target = long, .pattern = long, .expected = "Find “" ++ (comptime repeat("a", 90)) ++ "…” in " ++ (comptime repeat("a", 89)) ++ "…" },
         .{ .action = .find_in_page, .target = long, .pattern = "x", .expected = "Find “x” in " ++ (comptime repeat("a", 181)) ++ "…" },
-        // Bytes that are not UTF-8 show nothing; a scalar cut at the
-        // excerpt's end is dropped.
         .{ .action = .search, .target = "\xff\xfe\xfd\xfc", .expected = "Search the web" },
         .{ .action = .search, .target = "q\xe2\x82", .expected = "Search “q”" },
     }) |case| {
@@ -161,17 +151,13 @@ test "a call is checked against the offered records before its arguments" {
     for ([_]Case{
         .{ .name = "bash", .arguments = valid, .offered = bash_only, .expected = null, .described = true },
         .{ .name = "bash", .arguments = "{}", .offered = bash_only, .expected = .invalid_arguments },
-        // A Bash call that was not offered keeps its description.
         .{ .name = "bash", .arguments = valid, .offered = "", .expected = .unknown_tool, .described = true },
         .{ .name = "bash", .arguments = "{}", .offered = "web_search", .expected = .unknown_tool },
-        // A provider-run tool never runs as a function call.
         .{ .name = "web_search", .arguments = "{}", .offered = "bash,web_search,message_agent,start_agent,read_transcript,find_tools,skill", .expected = .unknown_tool },
         .{ .name = "", .arguments = "{}", .offered = "", .expected = .unknown_tool },
         .{ .name = "bas", .arguments = valid, .offered = "bash,web_search,message_agent,start_agent,read_transcript,find_tools,skill", .expected = .unknown_tool },
         .{ .name = "bashx", .arguments = valid, .offered = "bash,web_search,message_agent,start_agent,read_transcript,find_tools,skill", .expected = .unknown_tool },
         .{ .name = &(@as([max_name_bytes + 1]u8, @splat('b'))), .arguments = valid, .offered = "bash,web_search,message_agent,start_agent,read_transcript,find_tools,skill", .expected = .unknown_tool },
-        // A tool the Session offered before and withdrew is removed, not
-        // unknown; a provider-run one never runs as a call either way.
         .{ .name = "bash", .arguments = valid, .offered = "", .withdrawn = true, .expected = .unknown_tool, .described = true, .removed = true },
         .{ .name = "web_search", .arguments = "{}", .offered = "", .withdrawn = true, .expected = .unknown_tool },
     }) |case| {
@@ -191,6 +177,12 @@ const TestSource = struct {
 
     pub fn peek(self: *TestSource) !?u8 {
         return if (self.position == self.bytes.len) null else self.bytes[self.position];
+    }
+
+    pub fn next(self: *TestSource) !?u8 {
+        const byte = (try self.peek()) orelse return null;
+        self.position += 1;
+        return byte;
     }
 
     pub fn take(self: *TestSource) !u8 {
@@ -320,7 +312,6 @@ test "rejected Bash arguments name what is wrong" {
         errdefer std.debug.print("arguments: {s}\n", .{case[0]});
         try std.testing.expectEqual(BashCheck{ .rejected = case[1] }, check);
     }
-    // Optional fields may be omitted or null.
     for ([_][]const u8{
         "{\"description\":\"Run tests\",\"cmd\":\"true\"}",
         "{\"description\":\"Run tests\",\"cmd\":\"true\",\"stdin\":null,\"timeout_ms\":null}",
@@ -332,7 +323,6 @@ test "rejected Bash arguments name what is wrong" {
 
 test "an invalid-arguments result tells the model what was wrong" {
     var buffer: [192]u8 = undefined;
-    // The name is read only for an unknown tool.
     var name = struct {
         pub fn next(_: *@This()) !?u8 {
             return error.TestUnexpectedNameRead;
@@ -402,8 +392,6 @@ test "MCP calls check only one JSON object and derive their runner" {
     };
     const records = [_]Record{.{ .name = "fetch_page", .owner = .mcp, .server = "docs" }};
     const offered: Offered = .{ .names = "bash,fetch_page" };
-    // Native names resolve to their built-in records. The Store's tool set
-    // admission tests refuse MCP records that try to shadow those names.
     try std.testing.expectEqual(Runner.mcp, records[0].runner());
     try std.testing.expectEqual(Runner.bash, record(.bash).runner());
     const Case = struct { arguments: []const u8, valid: bool };
@@ -458,4 +446,22 @@ test "find_tools is a core tool and settlement defers its words check" {
         try std.testing.expect(unknown.tool == null and unknown.find_tools);
     }
     try std.testing.expectEqual(Runner.core, Runner.of(&find_tools_record));
+}
+
+test "read_action honors the offered core record and defers argument checks" {
+    for ([_][]const u8{ "{\"action\":\"42\"}", "{\"session\":\"k7m2qx\"}", "not JSON" }) |text| {
+        var name: TestSource = .{ .bytes = "read_action" };
+        var arguments: TestSource = .{ .bytes = text };
+        const offered: Offered = .{ .names = "read_action" };
+        const facts = try inspectCall(&name, "read_action".len, &arguments, &offered);
+        try std.testing.expectEqual(@as(?protocol.ProposalRejection, null), classifyCall(&facts));
+        try std.testing.expectEqual(Runner.core, facts.tool.?.runner());
+        const description = facts.description().?;
+        try std.testing.expectEqualStrings("Read an Action", description.slice());
+        name = .{ .bytes = "read_action" };
+        arguments = .{ .bytes = text };
+        const excluded: Offered = .{ .names = "read_transcript" };
+        const refused = try inspectCall(&name, "read_action".len, &arguments, &excluded);
+        try std.testing.expectEqual(@as(?protocol.ProposalRejection, .unknown_tool), classifyCall(&refused));
+    }
 }

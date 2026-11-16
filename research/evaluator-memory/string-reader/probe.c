@@ -98,7 +98,6 @@ static int string_read(void *opaque, uint64_t offset, uint8_t *out, size_t lengt
     StringSource *s = opaque;
     int result = source_read(s->decoder, s->base + offset, out, length);
     if (!result && offset == 0 && ++s->starts == 2 && s->decoder->mutate && length == 2) {
-        /* Fault injection: violate source immutability after the counting pass. */
         out[0] = 0xc4; out[1] = 0x80;
     }
     return result;
@@ -129,7 +128,6 @@ static int define_index(JSContext *ctx, JSValue array, uint32_t index, JSValue i
 #ifdef OP_NEGATIVE_SET
     return JS_SetPropertyUint32(ctx, array, index, item);
 #else
-    /* Populate data without invoking author-installed prototype setters. */
     return JS_DefinePropertyValueUint32(ctx, array, index, item, JS_PROP_C_W_E);
 #endif
 }
@@ -205,8 +203,6 @@ static JSValue lookup(JSContext *ctx, JSValueConst this_value, int argc, JSValue
     if (d->staged == 1) {
         uint8_t *input = tracked_malloc(&native, (size_t)d->size);
         if (!input) { d->failure = "native_exhaustion"; JS_ThrowOutOfMemory(ctx); goto fail; }
-        /* Set whole_input only after the file read, so source_read cannot read
-         * uninitialized staging. Capture failures retain one cleanup owner. */
         if (source_read(d, 0, input, (size_t)d->size)) { tracked_free(&native, input); JS_ThrowTypeError(ctx, "staging"); goto fail; }
         d->whole_input = input;
     }
@@ -252,7 +248,6 @@ int main(int argc, char **argv) {
     armed_engine_failure = strtoul(argv[5], NULL, 10);
     armed_native_failure = strtoul(argv[6], NULL, 10);
     if (!decoder.window_size || decoder.size > SIZE_MAX || decoder.size > INT64_MAX) return 2;
-    /* Sanitizer-only diagnostic profile; production-policy measurements use 1/2. */
     int diagnostic = atoi(argv[9]);
     assert(diagnostic == 0 || diagnostic == 1);
     struct rlimit core = {0,0}, cpu = {diagnostic ? 10 : 1, diagnostic ? 11 : 2};

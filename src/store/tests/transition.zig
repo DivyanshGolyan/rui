@@ -1,5 +1,3 @@
-//! Transition Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -14,9 +12,6 @@ const configureTestSession = store_testing.configureTestSession;
 const TestingRound = shared_fixtures.TestingRound;
 const RoundMeter = shared_fixtures.RoundMeter;
 
-/// Reads a Session's head in its one round, then takes two positions and
-/// a content id, inserts that content row and dates the Session where its
-/// revision is `revision`, and commits or, with `.done`, ends without.
 const TestingDating = struct {
     pub const rounds = transition.rounds(.{ .head = .{ .always, error.TestingRead } });
     pub const round_budget = 2;
@@ -57,7 +52,6 @@ const TestingDating = struct {
     }
 };
 
-/// What a `TestingDating` changes, to compare before and after.
 const TestingDatingState = struct {
     next_position: u64,
     contents: u64,
@@ -87,7 +81,6 @@ test "a transition's commit lands its writes, positions and identities and answe
             const rounds = storage.testing_content_work.rounds;
             const result = try transition.apply(&storage, TestingDating, .{ .session = session.slice(), .revision = 1, .finish = .commit }, .{});
             try std.testing.expectEqual(TestingDating.Result{ .committed = before.next_position }, result);
-            // Head and commit, with frontier maintenance inline; rerun repeats them.
             if (!case.rerun) try std.testing.expectEqual(rounds + 2, storage.testing_content_work.rounds);
             const after: TestingDatingState = try .of(&storage);
             try std.testing.expectEqual(before.next_position + 2, after.next_position);
@@ -125,7 +118,6 @@ test "a transition's declined guard answers declined and leaves nothing it queue
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "transition-declined");
             const before: TestingDatingState = try .of(&storage);
-            // No revision 99: the dating write's guard stops the commit.
             const result = try transition.apply(&storage, TestingDating, .{ .session = session.slice(), .revision = 99, .finish = .commit }, .{});
             try std.testing.expectEqual(TestingDating.Result.declined, result);
             try std.testing.expectEqual(before, try TestingDatingState.of(&storage));
@@ -134,8 +126,6 @@ test "a transition's declined guard answers declined and leaves nothing it queue
     }.run);
 }
 
-/// Queues twenty content rows, twenty statements, in one round inside its
-/// transaction, then ends done, so none of them stays.
 fn TestingPassWidth(comptime width: transition.Pass) type {
     return struct {
         const Self = @This();
@@ -177,22 +167,15 @@ test "a transition with a wide pass steps twenty statements a pass, an ordinary 
                 const rounds = storage.testing_content_work.rounds;
                 try transition.apply(&storage, TestingPassWidth(width), .{}, .{});
                 taken.* = RoundMeter.QueryShape.snapshot(&storage).since(before).access_passes;
-                // However many passes a full queue takes, the round counts once.
                 if (!case.rerun) try std.testing.expectEqual(rounds + 1, storage.testing_content_work.rounds);
             }
             try std.testing.expect(!storage.isFenced());
-            // Only a batching engine sends passes, and a rerun repeats them.
             if (case.engine != .mysql or case.rerun) return;
             try std.testing.expectEqual([2]u64{ 1, 2 }, passes);
         }
     }.run);
 }
 
-/// Asks whether its transaction is open before and after its first step
-/// queues a read, then ends done. `.outside` has no `begin`, so its read
-/// runs outside the transaction; `.failed` also queues an insert of a
-/// content id the Store holds, which fails in the pass that twelve more
-/// statements force.
 fn TestingTransactionOpen(comptime path: enum { outside, inside, failed }) type {
     return struct {
         const Self = @This();
@@ -251,8 +234,6 @@ test "a step sees its transaction open once it queues from begin on, and never b
     }.run);
 }
 
-/// Counts Sessions a page of one at a time, in a `.paged` round that runs
-/// again until a page finds none.
 const TestingSessionPages = struct {
     pub const rounds = transition.rounds(.{
         .first = .{ .always, error.TestingRead },
@@ -274,10 +255,8 @@ const TestingSessionPages = struct {
     input: Input,
     counted: u64 = 0,
     page_rows: u64 = 0,
-    /// The page's argument, which its statement reads in place.
     after: change_ring.Id = @splat(0),
     after_len: usize = 0,
-    /// The last row a page stepped.
     last: change_ring.Id = undefined,
 
     pub fn step(t: *TestingSessionPages, r: *transition.Round(TestingSessionPages), ran: ?rounds.At) !transition.Next(TestingSessionPages) {
@@ -287,7 +266,6 @@ const TestingSessionPages = struct {
             t.after_len = t.after.len;
         }
         t.page_rows = 0;
-        // Through `readEachFrom`, whose Args the call need not keep.
         r.readEachFrom(after_ref, &.{ .after = t.after[0..t.after_len] }, 1, t);
         return .{ .round = if (ran == null) .first else .next };
     }
@@ -312,14 +290,11 @@ test "a transition's paged round runs again for each page" {
             const sessions = try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{});
             const rounds = storage.testing_content_work.rounds;
             try std.testing.expectEqual(sessions, try transition.apply(&storage, TestingSessionPages, .{}, .{}));
-            // A page per Session, then the empty one.
             try std.testing.expectEqual(rounds + sessions + 1, storage.testing_content_work.rounds);
         }
     }.run);
 }
 
-/// Reads a Session's head and the content count in one round, which names
-/// the head's failed step apart from any other's.
 const TestingNamedRound = struct {
     pub const rounds = transition.rounds(.{
         .reads = .{ .always, error.TestingRead, .{.{ TestingRound.head, error.TestingHeadRead }} },
@@ -368,15 +343,12 @@ test "a transition's round names the failed step of each statement it names, and
     }.run);
 }
 
-/// Dates a Session and, where `follow`, reads its date back after COMMIT
-/// in the commit's message: the reads a transition's `follow` names.
 const TestingFollow = struct {
     pub const rounds = transition.rounds(.{ .head = .{ .always, error.TestingRead } });
     pub const round_budget = 2;
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = null;
     pub const Input = struct { session: []const u8, follow: bool };
-    /// The date the follow read, or null where it did not ride.
     pub const Result = ?u64;
     pub const Ordinary = error{};
     pub const Guards = error{TestingGuard};
@@ -424,7 +396,6 @@ const TestingFollow = struct {
         return t.after.seen;
     }
 
-    /// The body a queued write runs, so the commit is its batch's first.
     fn held(storage: *Store, session: []const u8, follows: bool) !Result {
         return transition.apply(storage, TestingFollow, .{ .session = session, .follow = follows }, .{});
     }
@@ -442,11 +413,8 @@ test "a transition's follow reads ride its commit's message where that message c
             for ([_]bool{ false, true }) |follows| {
                 const rounds = storage.testing_content_work.rounds;
                 const seen = try storage.queue().write(TestingFollow.held, .{ &storage, session.slice(), follows });
-                // A rerun commits at its batch's end, with nothing after it.
                 if (case.rerun) continue;
-                // The head's round, then the commit, which the reads ride.
                 try std.testing.expectEqual(rounds + 2, storage.testing_content_work.rounds);
-                // Only a network engine's lone write sends COMMIT with reads after it.
                 if (follows and case.engine == .mysql) {
                     try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT created_at FROM session", .{}), seen.?);
                 } else try std.testing.expectEqual(@as(?u64, null), seen);
@@ -456,9 +424,6 @@ test "a transition's follow reads ride its commit's message where that message c
     }.run);
 }
 
-/// Dates a Session where its revision is `revision`, or fails its step
-/// after the head's round, noting in `failed` when the runner calls its
-/// failure hook.
 const TestingFailing = struct {
     pub const rounds = transition.rounds(.{ .head = .{ .always, error.TestingRead } });
     pub const round_budget = 2;
@@ -501,7 +466,6 @@ test "a transition's failure hook runs when a step or its commit fails, and only
             const session = try configureTestSession(&storage, "transition-failing");
             const before: TestingDatingState = try .of(&storage);
             var failed = false;
-            // A guard the commit does not decline, then a step's error.
             try std.testing.expectError(error.TestingGuard, transition.apply(&storage, TestingFailing, .{ .session = session.slice(), .revision = 99, .fail_step = false, .failed = &failed }, .{}));
             try std.testing.expect(failed);
             failed = false;
@@ -516,9 +480,6 @@ test "a transition's failure hook runs when a step or its commit fails, and only
     }.run);
 }
 
-/// Reads a Session's head once outside its transaction and once inside,
-/// noting each time whether the transaction is open, then dates the
-/// Session where its revision is `revision`.
 const TestingBegin = struct {
     pub const rounds = transition.rounds(.{ .outside = .{.always}, .inside = .{.always} });
     pub const round_budget = 3;
@@ -579,7 +540,6 @@ test "a transition's guard that it does not decline fails it and leaves nothing 
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "transition-guard");
             const before: TestingDatingState = try .of(&storage);
-            // No revision 99: the dating write's guard stops the commit.
             try std.testing.expectError(error.TestingGuard, transition.apply(&storage, TestingBegin, .{ .storage = &storage, .session = session.slice(), .revision = 99 }, .{}));
             try std.testing.expectEqual(before, try TestingDatingState.of(&storage));
             try std.testing.expect(!storage.engine.inTransaction());
@@ -595,7 +555,6 @@ test "a transition's rounds run in declared order and only a paged round repeats
         .c = .{ .branch, error.TestingRead },
     });
     const At = R.At;
-    // Rows: the round that ran (none first); columns: a, b, c next.
     const cases = [_]struct { last: ?At, allowed: [3]bool }{
         .{ .last = null, .allowed = .{ true, true, true } },
         .{ .last = .a, .allowed = .{ false, true, true } },

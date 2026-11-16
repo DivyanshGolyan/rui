@@ -1,6 +1,3 @@
-// Sessions: create, list, status, send, update, stop, interrupt and decide, plus the
-// model list and Host pause (D7, D8, D14 to D17, D121, D123, D128, D167,
-// D171). Every call is one request to a Host route that exists today.
 import { randomUUID } from "node:crypto";
 
 import type { SessionNotifications } from "./notifications.ts";
@@ -9,7 +6,6 @@ import { listActivity, searchActivity, type ActivitySearchEntry, type SearchActi
 import { WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
-/** What a Session handle needs from the client. */
 export interface Link {
 	readonly activity?: SessionNotifications;
 	exchange(path: string, build: (store: string) => string, environment?: Buffer, limits?: ReplyLimits): Promise<Buffer>;
@@ -17,6 +13,7 @@ export interface Link {
 
 type Schemas = components["schemas"];
 export type ActionStatus = Schemas["ReadActionReply"];
+export type ActionSelection = Extract<Schemas["ActionBackgroundReply"]["answer"], { status: "accepted" }>["action_selection"];
 
 /** The Session settings the Host takes today. */
 export interface AgentSpec {
@@ -117,7 +114,6 @@ export interface ModelSummary {
 	known: boolean;
 }
 
-/** One plain wire spec for configure and connect-time presets. */
 export function agentSpec(spec: Partial<SessionSpec>): Schemas["Configuration"] {
 	return {
 		...(spec.workspace === undefined ? {} : { workspace: spec.workspace }),
@@ -155,13 +151,11 @@ function parse<T>(reply: Buffer): T {
 	return JSON.parse(reply.toString("utf8")) as T;
 }
 
-/** Throws the Host's rejection or conflict; returns the accepted answer. */
 function accepted<A extends RequestAnswer>(answer: A): Extract<A, { status: "accepted" }> {
 	if (answer.status !== "accepted") throw new RuiRequestError(answer.status, answer.code, "message" in answer ? answer.message : undefined);
 	return answer as Extract<A, { status: "accepted" }>;
 }
 
-/** `NAME=VALUE\0` for each entry the Host would keep (D121): a name that is not empty, holds no `=` or NUL and does not start with `RUI_`, and a value without NUL. The rest are left out, because after encoding the Host could not tell where an entry ended. */
 export function environmentBytes(env: Record<string, string> | undefined): Buffer {
 	const forwarded = Object.entries(env ?? {}).filter(
 		([name, entry]) => name !== "" && !name.startsWith("RUI_") && !/[=\0]/.test(name) && !entry.includes("\0"),
@@ -333,6 +327,21 @@ export class Session {
 		return { pinned: answer.pinned };
 	}
 
+	/** Releases the original call with an immutable receipt. Poll `readAction` for the sole final result. */
+	async backgroundAction(action: string, options?: WriteOptions): Promise<ActionSelection> {
+		const idempotencyKey = key(options);
+		const reply = parse<Schemas["ActionBackgroundReply"]>(await this.#link.exchange(
+			"/v1/control/action-background",
+			(store) => JSON.stringify({
+				version: WIRE_VERSION, kind: "action_background", store,
+				key: idempotencyKey, session: this.id, action,
+			} satisfies Schemas["ActionBackgroundRequest"]),
+		));
+		const answer = accepted(reply.answer);
+		this.#link.activity?.notify(this.id);
+		return answer.action_selection;
+	}
+
 	/** Reads an owned Action. Acceptance and attempted state do not assert a running process. */
 	async readAction(action: string, offset = "0"): Promise<ActionStatus> {
 		return parse<ActionStatus>(await this.#link.exchange("/v1/read-action", (store) => JSON.stringify({
@@ -365,7 +374,6 @@ export class Session {
 		try {
 			accepted(parse<Schemas["ModelInterruptionReply"]>(await this.#link.exchange("/v1/control/model-interruption", body)).answer);
 		} catch (error) {
-			// The call ended before the cut reached it: nothing is left to cut.
 			const gone = error instanceof RuiRequestError && (error.code === "operation_resolved" || error.code === "target_mismatch");
 			if (!gone) throw error;
 		}
@@ -391,7 +399,6 @@ export class Session {
 	}
 }
 
-/** Work states in which a model call is the current thing. */
 function modelCallCurrent(kind: string): boolean {
 	return kind === "working" || kind === "retrying" || kind === "pending";
 }
@@ -443,7 +450,6 @@ export class Sessions {
 	}
 }
 
-/** The models each provider offers (D128). */
 export async function models(link: Link): Promise<ModelSummary[]> {
 	const reply = parse<Schemas["ModelListReply"]>(
 		await link.exchange("/v1/model-list", (store) => JSON.stringify({
@@ -451,14 +457,12 @@ export async function models(link: Link): Promise<ModelSummary[]> {
 			kind: "model_list",
 			store,
 		} satisfies Schemas["ModelListRequest"]), undefined, {
-			// A live provider list can take longer than the default response wait.
 			responseMs: 30_000,
 		}),
 	);
 	return reply.providers.flatMap((entry) => entry.models.map((model) => ({ provider: entry.provider, id: model.id, known: model.known })));
 }
 
-/** Holds every new Turn while paused; running work continues (D199). */
 export async function setPaused(link: Link, paused: boolean): Promise<void> {
 	await link.exchange("/v1/control/host-pause", (store) => JSON.stringify({
 		version: WIRE_VERSION,

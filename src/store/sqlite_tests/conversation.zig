@@ -1,5 +1,3 @@
-//! Conversation SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
@@ -40,8 +38,6 @@ test "public content SQL failure fences Store instead of reporting absence" {
     };
     c.sqlite3_progress_handler(storage.sqliteDatabase(), 1, Interrupt.progress, null);
     defer c.sqlite3_progress_handler(storage.sqliteDatabase(), 0, null, null);
-    // The shared provenance query is interrupted during preparation, before
-    // identity lookup can step. Either phase must retain the public fence.
     try std.testing.expectError(error.StatementPrepareFailed, storage.openPublicConversationContent(&request));
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(error.StoreFenced, storage.openPublicConversationContent(&request));
@@ -68,8 +64,6 @@ test "public content SQLite step failure fences after successful preparation" {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             var statement = c.sqlite3_next_stmt(self.database, null);
             while (statement != null) : (statement = c.sqlite3_next_stmt(self.database, statement)) {
-                // Preparation may also invoke progress. Interrupt only a
-                // statement that has actually entered sqlite3_step.
                 if (c.sqlite3_stmt_busy(statement) != 0) {
                     self.interrupted_step = true;
                     return 1;
@@ -165,8 +159,6 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
         .{ .item_id = "sibling", .name = "other", .encoded_call_id = "sibling-call", .decoded_call_id = "sibling-call", .encoded_arguments = "[]", .decoded_arguments = "[]" },
     };
     try settleCallsForTesting(&storage, &tmp, binding, "tool-output", &calls);
-    // Damaging the first rejection must leave the requested sibling healthy;
-    // identical rejection bytes would deduplicate into one content identity.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(DISTINCT rejection_content_id) FROM model_tool_call", .{}));
     var request = protocol.ConversationPage{};
     try request.session.set(session.slice());
@@ -182,8 +174,6 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
         const count = try reader.read(0, &bytes);
         try std.testing.expectEqualStrings(if (target_sibling) "Unknown tool: other." else "Unknown tool: unknown.", bytes[0..count]);
     }
-    // Keep counts, acceptance positions and results intact for sibling damage:
-    // reading the healthy highest ordinal must validate the entire group.
     switch (damage) {
         .sibling_ordinal => try store_testing.sqlite_only.exec(&storage, "UPDATE model_tool_call SET item_ordinal=item_ordinal+1000 WHERE call_ordinal=0", .{}),
         .sibling_call_id => try store_testing.sqlite_only.exec(&storage, "UPDATE model_tool_call SET call_id_content_id=(SELECT name_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0", .{}),
@@ -267,11 +257,9 @@ test "public completed Action sibling corruption fences first Conversation read"
                 try allow.key.set(key);
                 try allow.session.set(session.slice());
                 try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-                const action_binding = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+                const action_binding = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
                 _ = try storage.settleActionAttempt(action_binding, .succeeded, key, .{});
             }
-            // Obtain only the immutable identity, not a traversal on another
-            // public route that could accidentally supply validation authority.
             const position = try store_testing.sqlite_only.queryU64(&storage, "SELECT max(acceptance_position) FROM action_operation", .{});
             try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
             try sqlite.exec(storage.sqliteDatabase(), fault);
@@ -369,7 +357,6 @@ test "missing assistant certificates respect page windows and fixed ends" {
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
         try storage.close();
         try testingStore(&storage, &tmp, std.testing.io);
-        // A historical window ending before the damage remains readable.
         _ = try store_core.publicConversationPageForTesting(&storage, .{ .session = missing.session, .end = missing.position - 1 });
         _ = try store_core.activityPageForTesting(&storage, .{ .session = missing.session, .end = missing.position - 1 });
         if (activity) {

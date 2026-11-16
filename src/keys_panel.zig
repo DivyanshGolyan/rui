@@ -1,4 +1,3 @@
-//! The app's keys-only reference. The keymap owns the rows; Panel owns cells.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -13,7 +12,6 @@ const fields = blk: {
     break :blk rows;
 };
 
-/// A borrowed widget: the caller owns this value for the drawn frame.
 pub fn panel(caps: view.Caps) Panel.KeyList {
     return .{
         .fields = &fields,
@@ -74,9 +72,6 @@ test "Keys panel renders shared rows in two columns at 140 and one column at 46"
 }
 
 test "Keys panel aligns strong keys and plain meanings over every width through 160" {
-    // Text and row count come only from the keymap. The generic Panel owns
-    // measured column layout; this boundary checks that its app binding keeps
-    // the complete shared table and strong-key/plain-meaning styles.
     var key_widths = [_]usize{ 0, 0 };
     var value_widths = [_]usize{ 0, 0 };
     for (keymap.list, 0..) |row, index| {
@@ -113,8 +108,6 @@ test "Keys panel aligns strong keys and plain meanings over every width through 
                 }
             }
         }
-        // Also cover every gap and unused row, retaining the complete-cell
-        // check of the old snapshots without keeping a second text table.
         for (surface.buffer, occupied) |cell, used| if (!used) {
             try std.testing.expectEqualStrings(" ", cell.char.grapheme);
             try std.testing.expect(!cell.style.bold);

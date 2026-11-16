@@ -1,4 +1,3 @@
-//! Allocation SQLite mechanism tests.
 const tests = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -37,14 +36,11 @@ test "an engine OutOfMemory under configure, a skills reload or a catalog read a
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const calls = [_]TestingCall{.{ .item_id = "reload-item", .name = "skill", .encoded_call_id = "reload-call", .decoded_call_id = "reload-call", .encoded_arguments = "{\\\"operation\\\":\\\"reload\\\"}", .decoded_arguments = "{\"operation\":\"reload\"}" }};
             try settleCallsForTesting(&storage, &tmp, model, "engine-oom-calls", &calls);
-            break :binding (try storage.nextCoreWork()).?.action.binding;
+            break :binding (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action.binding;
         } else undefined;
-        // The first statement the call prepares again fails in the engine,
-        // as when its cache cannot grow, with the caller's own memory to spare.
         const cache = &storage.engine.sqlite.statements;
         var cached: [512][*:0]const u8 = undefined;
         var count: usize = 0;
-        // Test oracles on temp tables stay cached; only Store statements go.
         for (cache.slots) |slot| if (slot.sql) |sql| if (std.mem.indexOf(u8, std.mem.span(sql), "temp.") == null) {
             cached[count] = sql;
             count += 1;

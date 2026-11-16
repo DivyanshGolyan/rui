@@ -1,4 +1,3 @@
-//! Persisted tool records, their identities and built-in tool set.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const built_in_tool = @import("built_in_tool.zig");
@@ -6,21 +5,23 @@ const content_string = @import("content_string.zig");
 const tool_name = @import("tool_name.zig");
 const tool_presentation = @import("tool_presentation.zig");
 
-/// The most decoded bytes a `message_agent` text carries.
 pub const message_agent_max_text_bytes = 64 * 1024;
 
-// Prompt text: written here, and given no tests (D141).
 pub const message_agent_description = "Send a Message to another Rui Session by its ID. It returns once the Message is delivered, before any answer. A reply, if the receiver sends one, arrives later as a Message that starts your next turn.";
 pub const message_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
     "\"id\":{\"type\":\"string\",\"description\":\"The receiving Session's six-character ID.\"}," ++
     std.fmt.comptimePrint("\"text\":{{\"type\":\"string\",\"description\":\"The Message: nonempty UTF-8, at most {d} bytes.\"}}", .{message_agent_max_text_bytes}) ++
     "},\"required\":[\"id\",\"text\"],\"additionalProperties\":false}";
 
-// Prompt text: written here, and given no tests (D141).
 pub const find_tools_description = "Find and load tools available to this Session but not yet loaded. Give one to eight space-separated search words, at most 64 bytes each; a tool matches any word in its name or description, ignoring ASCII case. Loads at most eight matches in name order. Loaded tools become available on your next request.";
 pub const find_tools_schema = "{\"type\":\"object\",\"properties\":{\"words\":{\"type\":\"string\",\"description\":\"One to eight search words separated by ASCII spaces; each word is at most 64 bytes.\"}},\"required\":[\"words\"],\"additionalProperties\":false}";
 
-// Prompt text: written here, and given no tests (D141).
+pub const read_action_description = "Read an Action in your own Session by its decimal action ID. Pending Actions report waiting_approval, queued or attempted. A resolved Action returns its immutable final Resolution and up to 4096 UTF-8 bytes, with byte offsets and a more flag. Continue with the returned next offset; reading never consumes or stops the Action. This is polling, not a subscription.";
+pub const read_action_schema = "{\"type\":\"object\",\"properties\":{" ++
+    "\"action\":{\"type\":\"string\",\"pattern\":\"^[1-9][0-9]*$\",\"maxLength\":19,\"description\":\"Action ID in your own Session; positive decimal, at most 9223372036854775807.\"}," ++
+    std.fmt.comptimePrint("\"offset\":{{\"type\":\"string\",\"pattern\":\"^(0|[1-9][0-9]*)$\",\"maxLength\":10,\"description\":\"UTF-8 byte cursor, at most {d}; omitted means zero. Pending Actions require zero.\"}}", .{@import("content_string.zig").max_bytes}) ++
+    "},\"required\":[\"action\"],\"additionalProperties\":false}";
+
 pub const read_transcript_description = "Read any Rui Session's public transcript, newest first. Omit id to read your own. Outline lines give entry addresses, kinds, people or tools, call notes, result codes, byte sizes and quoted first-line previews (at most 100 bytes). Use before to page older entries. Open an entry with full and continue its 16 KiB text windows with offset; call entries show the tool name and arguments JSON. Use query for ASCII-case-insensitive word search with quoted snippets; query cannot be combined with full. Private content is never shown.";
 const transcript_kind_schema = blk: {
     var names: []const u8 = "";
@@ -39,7 +40,6 @@ pub const read_transcript_schema = "{\"type\":\"object\",\"properties\":{" ++
     "\"offset\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"Byte offset, only with full.\"}" ++
     "},\"additionalProperties\":false}";
 
-// Prompt text: written here, and given no tests (D141).
 pub const start_agent_description = "Start another Rui agent on a task. It creates the agent's Session, gives it the task as its first Message and returns the agent's ID at once, before any answer. " ++
     "An attached agent is your child: it works in your Workspace with your provider and Bash environment, and stops when you are stopped or run out of context. A standalone agent has its own lifetime. " ++
     "The spec may only narrow your own tools and permission mode.";
@@ -51,8 +51,6 @@ pub const start_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
     "},\"additionalProperties\":false}" ++
     "},\"required\":[\"task\",\"attached\"],\"anyOf\":[{\"required\":[\"spec\"]},{\"required\":[\"preset\"]}],\"additionalProperties\":false}";
 
-// The same setting vocabulary and scalar kinds as the native wire. A child
-// inherits provider and Workspace, so those alone are not spec properties.
 const agent_spec_properties = blk: {
     var properties: []const u8 = "";
     for (@import("session_settings.zig").entries) |entry| {
@@ -88,30 +86,18 @@ pub const skill_schema = "{\"type\":\"object\",\"properties\":{\"operation\":{\"
 /// and with a small stack rlimit the whole argv+environment shares a 128 KiB
 /// floor; 8 KiB stays for the shell path, environment and pointers.
 pub const bash_max_command_bytes: usize = 120 * 1024;
-/// Reuse the command ceiling for optional decoded stdin in charged scratch.
 pub const bash_max_stdin_bytes: usize = bash_max_command_bytes;
 
-/// Who supplied a tool: D48's "owning server". Who runs it is derived
-/// from this (D46): Rui runs its own tools and an MCP server's, which it
-/// calls over HTTP; the provider runs its own.
 pub const Owner = enum { rui, provider, mcp };
 
-/// The longest MCP server name a record carries, in the tool-name grammar.
 pub const max_server_bytes = tool_name.max_bytes;
 
-/// One tool, as the model is told about it (D48). Request rendering and
-/// call checking work from a list of these. A provider-run tool's
-/// description and schema are the provider's own, so each codec names it
-/// and its record carries neither.
 pub const Record = struct {
     name: []const u8,
     description: []const u8 = "",
-    /// A JSON Schema object, as JSON text.
     input_schema: []const u8 = "",
     owner: Owner,
-    /// The MCP server that serves the tool, for an `.mcp` record only.
     server: []const u8 = "",
-    /// MCP ordering hint only; it never authorizes or retries a call.
     read_only: bool = false,
 
     pub fn runner(self: *const Record) Runner {
@@ -119,16 +105,10 @@ pub const Record = struct {
     }
 };
 
-/// The longest function name a provider accepts (OpenAI: 64 characters);
-/// a longer call name cannot match any record.
 pub const max_name_bytes = tool_name.max_bytes;
 
-/// The most tools one set offers.
 pub const max_tools = tool_name.max_tools;
 
-/// A record's identity: its name, owner, server and the content digests
-/// of its description and input schema. A tool that moves to another
-/// server or changes its read-only hint is another record.
 pub fn recordDigest(member: *const Record) [32]u8 {
     return (RecordIdentity{
         .name = member.name,
@@ -140,8 +120,6 @@ pub fn recordDigest(member: *const Record) [32]u8 {
     }).digest();
 }
 
-/// A record's identity without its texts: a saved record already holds
-/// their digests, so selecting it never reads or copies those texts.
 pub const RecordIdentity = struct {
     name: []const u8,
     owner: Owner,
@@ -158,14 +136,11 @@ pub const RecordIdentity = struct {
         hashField(&hash, self.server);
         hash.update(&self.description);
         hash.update(&self.input_schema);
-        // Absent/false keeps every pre-hint record and saved set byte-identical.
         if (self.read_only) hashField(&hash, "read_only");
         return hash.finalResult();
     }
 };
 
-/// The identity of an ordered set of records, which the Store saves once:
-/// its members' `recordDigest`s, in order.
 pub const SetDigest = struct {
     hash: std.crypto.hash.sha2.Sha256,
 
@@ -191,25 +166,15 @@ fn hashField(hash: *std.crypto.hash.sha2.Sha256, value: []const u8) void {
     hash.update(value);
 }
 
-/// The tools a Host offers, sorted by name with no name twice: what a
-/// Session's tool names resolve against. The Store saves it as one set
-/// when it opens, and a Session's set takes its members from that one.
-/// Today the built-ins; MCP tools join it at Host start (M3a).
 pub const HostToolSet = struct {
     records: []const Record,
-    /// Each record's `recordDigest`, in the same order.
     digests: []const [32]u8,
 
-    /// Launch-only names, borrowed until Host shutdown. Never part of a saved
-    /// tool set or its digest: an empty server has no record to persist.
     configured_servers: []const []const u8 = &.{},
 
     pub const Resolution = union(enum) { found: usize, unknown_tool, mcp_server_unavailable };
     pub const max_refusal_message_bytes = 768;
 
-    /// The name is owned; the Host tool set is borrowed until shutdown.
-    /// Keep reply values small instead of copying formatted text along the
-    /// engine's transaction/queue chain.
     pub const MissingTool = struct {
         name: Bounded(tool_name.max_bytes),
         host_tool_set: *const HostToolSet,
@@ -221,12 +186,10 @@ pub const HostToolSet = struct {
 
     pub fn missingTool(self: *const HostToolSet, name: []const u8) MissingTool {
         var detail: MissingTool = .{ .name = .{ .len = 0 }, .host_tool_set = self };
-        detail.name.set(name) catch unreachable; // ingress already checked the name
+        detail.name.set(name) catch unreachable;
         return detail;
     }
 
-    /// Raw MCP names carry no ownership hint. A missing name may belong to
-    /// any configured server with no records, including no saved copies.
     pub fn resolve(self: *const HostToolSet, name: []const u8) Resolution {
         if (self.find(name)) |index| return .{ .found = index };
         var empty = self.emptyServers();
@@ -254,8 +217,6 @@ pub const HostToolSet = struct {
         return .{ .host_tool_set = self };
     }
 
-    /// Advisory detail about this Host, not a claim of name ownership. The
-    /// settings owner bounds this to eight server names of at most 64 bytes.
     pub fn writeMissingTool(self: *const HostToolSet, name: []const u8, out: *std.Io.Writer) !void {
         try out.print("spec.tools: {s} is not a known tool", .{name});
         var empty = self.emptyServers();
@@ -267,7 +228,6 @@ pub const HostToolSet = struct {
         } else try out.print("; MCP server {s} is unavailable and may provide it", .{first});
     }
 
-    /// The index of the record named `name`.
     pub fn find(self: *const HostToolSet, name: []const u8) ?usize {
         var low: usize = 0;
         var high = self.records.len;
@@ -282,8 +242,6 @@ pub const HostToolSet = struct {
         return null;
     }
 
-    /// Whether the records are sorted by name, each named once, and each
-    /// digest is its record's.
     pub fn valid(self: *const HostToolSet) bool {
         if (self.records.len != self.digests.len or self.records.len > max_host_tool_records) return false;
         for (self.records, self.digests, 0..) |*each, digest, index| {
@@ -295,13 +253,10 @@ pub const HostToolSet = struct {
     }
 };
 
-/// An MCP record names its server, in the tool-name grammar; any other
-/// record names none.
 pub fn validServer(each: *const Record) bool {
     return if (each.owner == .mcp) tool_name.valid(each.server) else each.server.len == 0 and !each.read_only;
 }
 
-/// The most records a Host tool set holds; its saved set holds as many.
 pub const max_host_tool_records = 1024;
 
 pub const bash_record: Record = .{
@@ -329,6 +284,13 @@ pub const message_agent_record: Record = .{
     .input_schema = message_agent_schema,
 };
 
+pub const read_action_record: Record = .{
+    .name = "read_action",
+    .owner = .rui,
+    .description = read_action_description,
+    .input_schema = read_action_schema,
+};
+
 pub const read_transcript_record: Record = .{
     .name = "read_transcript",
     .owner = .rui,
@@ -352,9 +314,6 @@ pub const start_agent_record: Record = .{
 
 pub const web_search_record: Record = .{ .name = "web_search", .owner = .provider };
 
-/// Who carries out an accepted call, derived from its frozen record and
-/// never stored (D46). The two Action adapters run Rui-run Actions; core
-/// tools run core commands (D24), and provider tools remain provider-owned.
 pub const Runner = enum {
     bash,
     core,
@@ -370,7 +329,6 @@ pub const Runner = enum {
         };
     }
 
-    /// Adapter-owned wording, not Store policy or persisted runner state.
     pub fn stoppedText(self: Runner, _: anytype, result: []const u8) []const u8 {
         return switch (self) {
             .bash => @import("bash_action_text.zig").stopped_before_admission,
@@ -397,21 +355,18 @@ pub const Runner = enum {
     }
 };
 
-/// One row per BuiltInTool, in its name order. This is the authority for
-/// each built-in's record and runner; EnumArray requires every tag once.
 pub const BuiltInRow = struct { record: *const Record, runner: Runner };
 pub const built_in_rows = std.enums.EnumArray(Tool, BuiltInRow).init(.{
     .bash = .{ .record = &bash_record, .runner = .bash },
     .find_tools = .{ .record = &find_tools_record, .runner = .core },
     .message_agent = .{ .record = &message_agent_record, .runner = .core },
+    .read_action = .{ .record = &read_action_record, .runner = .core },
     .read_transcript = .{ .record = &read_transcript_record, .runner = .core },
     .skill = .{ .record = &skill_record, .runner = .core },
     .start_agent = .{ .record = &start_agent_record, .runner = .core },
     .web_search = .{ .record = &web_search_record, .runner = .provider },
 });
 
-/// Core tools in table order. The Host's exhaustive dispatch switch over
-/// this generated enum requires a runner arm for every core row.
 pub const CoreTool = blk: {
     var names: []const []const u8 = &.{};
     for (built_in_rows.values) |row| {
@@ -426,12 +381,10 @@ pub fn coreTool(name: []const u8) ?CoreTool {
     return std.meta.stringToEnum(CoreTool, name);
 }
 
-/// The built-in record of each tool `Tool` names: the text a new set saves.
 pub fn record(tool: Tool) *const Record {
     return built_in_rows.get(tool).record;
 }
 
-/// The built-ins, as the tool set of a Host with no other tools.
 pub const built_in_tool_set: HostToolSet = .{ .records = &built_in_records, .digests = &built_in_digests };
 
 const built_in_records = blk: {
@@ -462,13 +415,8 @@ comptime {
     }
 }
 
-/// The saved member names the request offers, for every owner.
 pub const Offered = struct {
-    /// Borrowed comma-separated names from the request's saved tool set.
     names: []const u8 = "",
-    /// Borrowed name identities and flags for otherwise unknown names that
-    /// an earlier revision offered. Reusing the batch's content identities
-    /// avoids retaining another copy of every call name.
     historical_digests: []const [32]u8 = &.{},
     withdrawn: []const bool = &.{},
 
@@ -487,7 +435,6 @@ pub const Offered = struct {
     }
 };
 
-/// The built-in tools; the wire owns their names.
 pub const Tool = built_in_tool.BuiltInTool;
 pub fn builtIn(name: []const u8) ?Tool {
     return std.meta.stringToEnum(Tool, name);
@@ -506,7 +453,6 @@ test "every built-in runner matches its table row" {
 }
 
 test "tool record read-only identity preserves existing digests" {
-    // Pinned from the pre-hint v1 recipe, including content's domain prefix.
     const provider = recordDigest(&web_search_record);
     try std.testing.expectEqualStrings("effe976e5ce171d6033b8cfefd755255535a6bbb32c075577842ac0358417fa0", &std.fmt.bytesToHex(provider, .lower));
     const before: Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" };

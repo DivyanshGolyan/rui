@@ -40,6 +40,12 @@ concurrency:
   group: selected-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}${{ inputs.promotion && '-promotion' || '' }}${{ inputs.compile_only && '-compile' || '' }}
   cancel-in-progress: true
 
+# Cache timeout accounting, not a setup deadline:
+# setup-allowance-minutes: 25
+# save-reserve-minutes: 3
+# Selected 43832831879: setup 213 s; allow four further (200 s retry + 90 s request) windows.
+# Leave setup uncapped: cold fetch outliers still have the original job budget.
+
 jobs:
   plan:
     if: ${{ !github.event.repository.private }}
@@ -110,6 +116,9 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           BASE=$(python3 -c 'import json; print(json.load(open("selection.json"))["base"])')
           python3 tests/ci/pr_shape.py "$BASE"
@@ -203,7 +212,7 @@ jobs:
     if: ${{ needs.plan.outputs.linux_compile_targets != '' && needs.plan.outputs.linux_compile_targets != '[]' }}
     runs-on: ubuntu-24.04
     # Match the cold Release producer budget: a dependency repin misses the compiled cache,
-    # and a producer that times out never saves the warm one.
+    # with a bounded compile step leaving time to save partial work.
     timeout-minutes: 60
     outputs:
       artifact: ${{ steps.publish.outputs.artifact-id }}
@@ -212,14 +221,26 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
+        id: setup
         with:
           targets: ${{ needs.plan.outputs.linux_compile_targets }}
           check-part: compiled
       - name: Compile selected gates once, never test acceptance
+        id: compile
+        # Cache timing: green 851 s, run 43732653500; minimum margin 120 s.
+        # Limit = job budget - cold setup allowance - save reserve.
+        timeout-minutes: 32
         env:
           TARGETS: ${{ needs.plan.outputs.linux_compile_targets }}
           PART: ${{ needs.plan.outputs.linux_split == 'true' && 'rest' || 'all' }}
         run: python3 -B tests/ci/build_artifact.py build "$TARGETS" --part "$PART"
+      - name: Save reusable caches even after failure
+        if: ${{ always() }}
+        uses: ./.github/actions/setup/caches
+        with:
+          save-only: 'true'
+          setup-outcome: ${{ steps.setup.outcome }}
+          work-outcome: ${{ steps.compile.outcome }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: publish
         with:
@@ -241,12 +262,23 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
+        id: setup
         with:
           check-part: compiled-unit
       - name: Compile the unit test roots once, never test acceptance
+        id: compile
+        # Cache timing: green 480 s, run 43819213128; minimum margin 120 s.
+        # No measured save window fits; keep the existing job deadline only.
         env:
           TARGETS: ${{ needs.plan.outputs.linux_compile_targets }}
         run: python3 -B tests/ci/build_artifact.py build "$TARGETS" --part unit
+      - name: Save reusable caches even after failure
+        if: ${{ always() }}
+        uses: ./.github/actions/setup/caches
+        with:
+          save-only: 'true'
+          setup-outcome: ${{ steps.setup.outcome }}
+          work-outcome: ${{ steps.compile.outcome }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: publish
         with:
@@ -268,9 +300,20 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
+        id: setup
         with:
           check-part: typecheck-macos
       - run: zig build typecheck-macos --summary failures
+        id: compile
+        # Cache timing: green 449 s, run 43819213128; minimum margin 120 s.
+        # No measured save window fits; keep the existing job deadline only.
+      - name: Save reusable caches even after failure
+        if: ${{ always() }}
+        uses: ./.github/actions/setup/caches
+        with:
+          save-only: 'true'
+          setup-outcome: ${{ steps.setup.outcome }}
+          work-outcome: ${{ steps.compile.outcome }}
   macos_build:
     needs: plan
     if: ${{ needs.plan.outputs.native == 'true' }}
@@ -284,14 +327,26 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
+        id: setup
         with:
           targets: ${{ needs.plan.outputs.native_targets }}
           check-part: compiled
       - name: Compile selected gates once, never test acceptance
+        id: compile
+        # Cache timing: green 1117 s, run 43720387127; minimum margin 120 s.
+        # Limit = job budget - cold setup allowance - save reserve.
+        timeout-minutes: 32
         env:
           TARGETS: ${{ needs.plan.outputs.native_targets }}
           PART: ${{ needs.plan.outputs.macos_split == 'true' && 'rest' || 'all' }}
         run: python3 -B tests/ci/build_artifact.py build "$TARGETS" --part "$PART"
+      - name: Save reusable caches even after failure
+        if: ${{ always() }}
+        uses: ./.github/actions/setup/caches
+        with:
+          save-only: 'true'
+          setup-outcome: ${{ steps.setup.outcome }}
+          work-outcome: ${{ steps.compile.outcome }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: publish
         with:
@@ -306,7 +361,8 @@ jobs:
     needs: plan
     if: ${{ needs.plan.outputs.macos_split == 'true' }}
     runs-on: macos-15
-    timeout-minutes: 15
+    # A cold cache compiles the unit roots from scratch; match the cold producer budget.
+    timeout-minutes: 60
     outputs:
       artifact: ${{ steps.publish.outputs.artifact-id }}
     steps:
@@ -314,12 +370,24 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
+        id: setup
         with:
           check-part: compiled-unit
       - name: Compile the unit test roots once, never test acceptance
+        id: compile
+        # Cache timing: green 760 s, run 43720387127; minimum margin 120 s.
+        # Limit = job budget - cold setup allowance - save reserve.
+        timeout-minutes: 32
         env:
           TARGETS: ${{ needs.plan.outputs.native_targets }}
         run: python3 -B tests/ci/build_artifact.py build "$TARGETS" --part unit
+      - name: Save reusable caches even after failure
+        if: ${{ always() }}
+        uses: ./.github/actions/setup/caches
+        with:
+          save-only: 'true'
+          setup-outcome: ${{ steps.setup.outcome }}
+          work-outcome: ${{ steps.compile.outcome }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: publish
         with:
@@ -345,11 +413,22 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
+        id: setup
         with:
           targets: '["test-logic"]'
           check-part: cache-execution
       - name: Prove warm compilation does not cache test acceptance
+        id: compile
+        # Cache timing: green 351 s, run 42755585733; minimum margin 120 s.
+        # No measured save window fits; keep the existing job deadline only.
         run: python3 -B tests/ci/cache_execution.py
+      - name: Save reusable caches even after failure
+        if: ${{ always() }}
+        uses: ./.github/actions/setup/caches
+        with:
+          save-only: 'true'
+          setup-outcome: ${{ steps.setup.outcome }}
+          work-outcome: ${{ steps.compile.outcome }}
   linux_codegen:
     # LLVM's production frame oracle is still required, but never delays PR suites.
     needs: plan
@@ -361,11 +440,22 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
+        id: setup
         with:
           targets: '["stack-frames"]'
           check-part: codegen
       - name: Check unchanged LLVM production stack frames
+        id: compile
+        # Cache timing: green 593 s, run 43762678033; minimum margin 120 s.
+        # No measured save window fits; keep the existing job deadline only.
         run: zig build stack-frames -Dcpu=baseline --summary all
+      - name: Save reusable caches even after failure
+        if: ${{ always() }}
+        uses: ./.github/actions/setup/caches
+        with:
+          save-only: 'true'
+          setup-outcome: ${{ steps.setup.outcome }}
+          work-outcome: ${{ steps.compile.outcome }}
   linux_suites:
     name: linux suites (${{ matrix.name }})
     needs: [plan, linux_build, linux_build_unit]
@@ -390,6 +480,7 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
+        id: setup
         with:
           targets: ${{ toJSON(matrix.targets) }}
           compiled: 'true'
@@ -408,12 +499,25 @@ jobs:
           python3 -B tests/ci/live_engine_step.py export mysql \
             "$socket_dir/mysqld.sock" "$password" "$RUNNER_TEMP/mysql-dialect-check-record"
       - name: Use the verified producer artifact or compile locally
+        id: restore
+        # Local fallback rebuild must retain the whole job budget (including promotion).
         env:
           TARGETS: ${{ needs.plan.outputs.linux_compile_targets }}
           ARTIFACT_ID: ${{ needs.linux_build.outputs.artifact }}
           UNIT_ARTIFACT_ID: ${{ needs.linux_build_unit.outputs.artifact }}
           GH_TOKEN: ${{ github.token }}
         run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID" --artifact-id "$UNIT_ARTIFACT_ID"
+      - name: Configure the build runner before acceptance
+        id: compile
+        # Restore/rebuild can consume the job budget; do not cap this follow-up either.
+        run: zig build --fetch=all
+      - name: Save reusable caches even after failure
+        if: ${{ always() }}
+        uses: ./.github/actions/setup/caches
+        with:
+          save-only: 'true'
+          setup-outcome: ${{ steps.setup.outcome == 'success' && steps.restore.outcome == 'success' && 'success' || 'failure' }}
+          work-outcome: ${{ steps.compile.outcome }}
       - name: Start Postgres 15 with TLS for test-pg's live rounds
         if: ${{ contains(matrix.targets, 'test-pg') || contains(matrix.targets, 'check') || (contains(matrix.targets, 'check-full') && matrix.part != 'callers') }}
         run: |
@@ -597,16 +701,30 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
+        id: setup
         with:
           targets: ${{ toJSON(matrix.targets) }}
           compiled: 'true'
       - name: Use the verified producer artifact or compile locally
+        id: restore
+        # Local fallback rebuild must retain the whole job budget (including promotion).
         env:
           TARGETS: ${{ needs.plan.outputs.native_targets }}
           ARTIFACT_ID: ${{ needs.macos_build.outputs.artifact }}
           UNIT_ARTIFACT_ID: ${{ needs.macos_build_unit.outputs.artifact }}
           GH_TOKEN: ${{ github.token }}
         run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID" --artifact-id "$UNIT_ARTIFACT_ID"
+      - name: Configure the build runner before acceptance
+        id: compile
+        # Restore/rebuild can consume the job budget; do not cap this follow-up either.
+        run: zig build --fetch=all
+      - name: Save reusable caches even after failure
+        if: ${{ always() }}
+        uses: ./.github/actions/setup/caches
+        with:
+          save-only: 'true'
+          setup-outcome: ${{ steps.setup.outcome == 'success' && steps.restore.outcome == 'success' && 'success' || 'failure' }}
+          work-outcome: ${{ steps.compile.outcome }}
       - name: Run required native targets
         timeout-minutes: 35
         env:

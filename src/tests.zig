@@ -51,8 +51,6 @@ test {
     _ = @import("installation_path.zig");
     _ = @import("UpgradeJob.zig");
     _ = @import("stderr.zig");
-    // These were previously discovered only while compiling another test's
-    // body. Every filtered root must discover them before ownership filtering.
     _ = @import("BashLifecycle.zig");
     _ = @import("word_search.zig");
     _ = @import("server_mcp.zig");
@@ -124,6 +122,7 @@ test {
     _ = @import("request_encoding.zig");
     _ = @import("tools.zig");
     _ = @import("core_tools.zig");
+    _ = @import("read_action_tool.zig");
     _ = @import("read_transcript.zig");
     _ = @import("find_tools.zig");
     _ = @import("find_tools_tests.zig");

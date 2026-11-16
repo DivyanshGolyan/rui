@@ -3,18 +3,6 @@ const protocol = @import("protocol.zig");
 
 pub const window_bytes = protocol.content_window_bytes;
 
-// A cursor source supplies immutable positional bytes. It must provide:
-//   fn contentLength(self: @This()) u64
-//   fn readContent(self: @This(), offset: u64, destination: []u8) !usize
-//   fn maxWindow(self: @This(), offset: u64, wanted: usize) usize
-// `maxWindow` clips the requested refill size before the read happens; it
-// must return `wanted` unchanged for native content and a positive value
-// bounded by the next absolute partition boundary for test content. It must
-// never turn an unexpectedly short canonical read into success: the cursor
-// still requires the read to return exactly the clipped length.
-// A sink provides `fn write(self: *@This(), bytes: []const u8) !void` which
-// accepts the complete supplied slice on success.
-
 pub const MemorySource = struct {
     bytes: []const u8,
 
@@ -89,8 +77,6 @@ pub const ShortReadSource = struct {
     }
 };
 
-// This is an encoding operation, not another payload owner. The caller's
-// borrowed window remains valid until the synchronous write returns.
 pub fn writePlainJsonRun(writer: anytype, bytes: []const u8, bytes_left: *usize) !usize {
     const limit = @min(bytes.len, bytes_left.* / 2);
     var count: usize = 0;
@@ -122,8 +108,6 @@ pub const JsonCursor = struct {
     buffer_start: u64 = 0,
     buffer_length: usize = 0,
     buffer: [window_bytes]u8 = undefined,
-    // Escape string contents twice when presenting a JSON literal inside
-    // another JSON string. Its enclosing quotes belong to the caller.
     nested_string: bool = false,
     encoded: [7]u8 = undefined,
     encoded_length: u3 = 0,
@@ -141,17 +125,15 @@ pub const JsonCursor = struct {
             const length = source.contentLength();
             if (self.offset == length) return true;
             if (self.offset < self.buffer_start or self.offset >= self.buffer_start + self.buffer_length) {
-                self.buffer_start = self.offset;
                 var wanted: usize = @intCast(@min(length - self.offset, @min(self.buffer.len, bytes_left.*)));
                 wanted = source.maxWindow(self.offset, wanted);
                 if (wanted == 0) return false;
                 const count = try source.readContent(self.offset, self.buffer[0..wanted]);
                 if (count != wanted) return error.ShortCanonicalRead;
+                self.buffer_start = self.offset;
                 self.buffer_length = count;
             }
             const available = self.buffer[@intCast(self.offset - self.buffer_start)..self.buffer_length];
-            // A source scan and its emitted bytes each consume allowance.
-            // Ordinary text stays a borrowed run, not one OS write per byte.
             const run = try writePlainJsonRun(writer, available, bytes_left);
             if (run != 0) {
                 self.offset += run;
@@ -175,15 +157,12 @@ pub const JsonCursor = struct {
                     break :blk single[0..];
                 },
                 else => blk: {
-                    // A one-byte allowance can consume a source byte now
-                    // and emit it on the next advance, without overshoot.
                     single[0] = byte;
                     break :blk single[0..1];
                 },
             };
             if (self.nested_string) {
                 var escaped: std.Io.Writer = .fixed(&self.encoded);
-                // The longest twice-escaped byte is \\u00xx (seven bytes).
                 std.json.Stringify.encodeJsonStringChars(encoded, .{}, &escaped) catch unreachable;
                 self.encoded_length = @intCast(escaped.end);
             } else {
@@ -309,9 +288,6 @@ fn failCtx(case: []const u8, input_len: usize, boundaries: []const u64, byte_seq
     std.debug.print("request encoding failure: case={s} input_len={d} boundaries={any} byte_seq={any} item_seq={any} step={d}\n", .{ case, input_len, boundaries, byte_seq, item_seq, step });
 }
 
-/// Deterministic partition boundaries from an independent seed. Partitions
-/// and allowance sequences must use different seeds so the two dimensions
-/// cannot accidentally correlate.
 fn seededBoundaries(seed: u64, length: usize, buf: []u64) []u64 {
     if (length < 2 or buf.len == 0) return &.{};
     var state = seed | 1;
@@ -391,8 +367,6 @@ fn runJsonCase(case: []const u8, input: []const u8, boundaries: []const u64, byt
 }
 
 fn runJsonSchedules(case: []const u8, input: []const u8, expected: []const u8, expected_work: usize) !void {
-    // Every single split position plus unsplit input, each under constant,
-    // alternating and sawtooth allowance sequences.
     const seqs = [_][]const usize{ &.{1}, &.{2}, &.{3}, &.{5}, &.{6}, &.{7}, &.{ 1, 7 }, &.{ 3, 1, 2 } };
     var i: usize = 0;
     while (i <= input.len) : (i += 1) {
@@ -400,7 +374,6 @@ fn runJsonSchedules(case: []const u8, input: []const u8, expected: []const u8, e
         const boundaries: []const u64 = if (i == input.len) &.{} else boundary_storage[0..];
         for (seqs) |seq| try runJsonCase(case, input, boundaries, seq, expected, expected_work);
     }
-    // One-byte windows over the whole input.
     var all: [256]u64 = undefined;
     const n: usize = @min(input.len, all.len);
     for (0..n) |index| all[index] = @intCast(index + 1);
@@ -437,7 +410,6 @@ fn runRawCase(case: []const u8, input: []const u8, boundaries: []const u64, byte
         failCtx(case, input.len, boundaries, byte_seq, &.{}, steps);
         std.debug.print("offset={d} emitted={d}/{d} work={d}/{d}\n", .{ cursor.offset, sink.output.items.len, input.len, total, 2 * input.len });
         try std.testing.expectEqualStrings(input, sink.output.items);
-        // Every source byte is read once and emitted once.
         try std.testing.expectEqual(2 * input.len, total);
     }
 }
@@ -463,16 +435,12 @@ test "request encoding fixed bytes respect one-byte allowances" {
 }
 
 test "request encoding json escapes across partitions and allowances" {
-    // Work oracle: each source byte costs one scan debit plus its emitted
-    // length (plain 1, short escape 2, \u00xx escape 6).
     try runJsonSchedules("json empty", "", "", 0);
     try runJsonSchedules("json plain", "abc", "abc", 6);
     try runJsonSchedules("json escapes", "a\"b\\c", "a\\\"b\\\\c", 12);
     try runJsonSchedules("json short escapes", "\x08\x0c\n\r\t", "\\b\\f\\n\\r\\t", 15);
     try runJsonSchedules("json control escapes", "\x01\x0b\x1f", "\\u0001\\u000b\\u001f", 21);
-    // Plain run ending immediately before an escape.
     try runJsonSchedules("json run before escape", "abc\"def", "abc\\\"def", 15);
-    // Two-, three- and four-byte UTF-8 sequences are preserved byte-wise.
     try runJsonSchedules("json utf8", "é☃𝄞", "é☃𝄞", 18);
     try runJsonSchedules("json utf8 escape", "xé\"y", "xé\\\"y", 11);
 }
@@ -515,7 +483,6 @@ test "request encoding json output failure cannot report completion" {
             self.remaining -= bytes.len;
         }
     };
-    // Both a small final tail and failure after a complete output window.
     const inputs = .{ "é\n", &@as([window_bytes + 1]u8, @splat('x')) };
     inline for (inputs, 0..) |input, index| {
         var cursor: JsonCursor = .{};
@@ -538,22 +505,18 @@ test "request encoding json window boundaries preserve bytes" {
     while (count < window_bytes - 1) : (count += 1) try stream.writeByte('a');
     try stream.writeAll("\\\"b\\\\");
     const expected = stream.buffered();
-    // (W-1) plain bytes at 2 each plus escapings of `"`, `b`, `\\`.
     const expected_work: usize = 2 * (window_bytes - 1) + 3 + 2 + 3;
     const seqs = [_][]const usize{ &.{1}, &.{ 2, 6 }, &.{7}, &.{4096}, &.{16384}, &.{ 1, 7000 }, &.{ 3, 2, 1 } };
     for ([_]usize{ window_bytes - 1, window_bytes, window_bytes + 1 }) |split| {
         const boundary = [_]u64{@intCast(split)};
         for (seqs) |seq| try runJsonCase("json window split", &input, &boundary, seq, expected, expected_work);
     }
-    // Independently seeded multi-boundary partitions and allowance
-    // sequences around the window size and production allowance.
     var seed_buf: [8]u64 = undefined;
     const seeded = seededBoundaries(0x1ec0de01, input.len, &seed_buf);
     var allowance_buf: [6]usize = undefined;
     const seeded_seq = seededAllowances(0xb1e5502, &allowance_buf, 16384);
     try runJsonCase("json window seeded", &input, seeded, seeded_seq, expected, expected_work);
     try runJsonCase("json window seeded small", &input, seeded, &.{ 2, 1 }, expected, expected_work);
-    // Multiple windows with a large deterministic payload.
     var big: [window_bytes * 2 + 17]u8 = undefined;
     for (&big, 0..) |*byte, index| byte.* = @intCast(0x61 + (index % 26));
     big[10] = '\n';
@@ -567,7 +530,6 @@ test "request encoding json window boundaries preserve bytes" {
     for (big[window_bytes + 1 ..]) |byte| try big_stream.writeByte(byte);
     const big_expected = big_stream.buffered();
     const cuts = [_]u64{ 3, 8, 15, window_bytes - 1, window_bytes, window_bytes + 1, big.len };
-    // Two escapings among otherwise plain bytes.
     const big_work: usize = 2 * (big.len - 2) + 3 + 3;
     const big_seqs = [_][]const usize{ &.{1}, &.{5}, &.{64}, &.{16384}, &.{ 7, 1 }, &.{ 4, 2, 9 } };
     for (big_seqs) |seq| try runJsonCase("json big cuts", &big, &cuts, seq, big_expected, big_work);
@@ -577,13 +539,77 @@ test "request encoding json window boundaries preserve bytes" {
     const big_seeded_seq = seededAllowances(0x85ebca6b, &big_allowance_buf, 16384);
     try runJsonCase("json big seeded", &big, big_seeded, big_seeded_seq, big_expected, big_work);
 
-    // Repeated escapes cross both encoded chunk and source-window boundaries;
-    // expectations are independent literal JSON, not this encoder's output.
     const mixed = &@as([700 * "é中🙂\n\\\"/\x01".len]u8, @bitCast(@as([700]["é中🙂\n\\\"/\x01".len]u8, @splat("é中🙂\n\\\"/\x01".*))));
     const mixed_expected = &@as([700 * "é中🙂\\n\\\\\\\"/\\u0001".len]u8, @bitCast(@as([700]["é中🙂\\n\\\\\\\"/\\u0001".len]u8, @splat("é中🙂\\n\\\\\\\"/\\u0001".*))));
     const mixed_cuts = [_]u64{ 1, 4, window_bytes - 1, window_bytes, window_bytes + 1, mixed.len - 1 };
     for ([_][]const usize{ &.{1}, &.{ 2, 7 }, &.{4095}, &.{4096}, &.{4097}, &.{16384} }) |seq| {
         try runJsonCase("json repeated escape windows", mixed, &mixed_cuts, seq, mixed_expected, mixed.len + mixed_expected.len);
+    }
+}
+
+const RefusingSource = struct {
+    bytes: []const u8,
+    refused: *bool,
+
+    pub fn contentLength(self: RefusingSource) u64 {
+        return self.bytes.len;
+    }
+
+    pub fn maxWindow(self: RefusingSource, offset: u64, wanted: usize) usize {
+        _ = self;
+        _ = offset;
+        return wanted;
+    }
+
+    pub fn readContent(self: RefusingSource, offset: u64, destination: []u8) !usize {
+        self.refused.* = !self.refused.*;
+        if (self.refused.*) return error.Refused;
+        const start: usize = @intCast(offset);
+        @memcpy(destination, self.bytes[start..][0..destination.len]);
+        return destination.len;
+    }
+};
+
+test "request encoding cursors read a refused refill again where they stood" {
+    var input: [2 * window_bytes + 1]u8 = undefined;
+    @memset(&input, 'x');
+    input[window_bytes - 1] = '"';
+    input[2 * window_bytes - 1] = '\\';
+    var expected_buf: [2 * window_bytes + 3]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&expected_buf);
+    for (input) |byte| switch (byte) {
+        '"' => try stream.writeAll("\\\""),
+        '\\' => try stream.writeAll("\\\\"),
+        else => try stream.writeByte(byte),
+    };
+    for ([_]usize{ 1, 7, window_bytes, 3 * window_bytes }) |allowance| {
+        var refused = false;
+        const source: RefusingSource = .{ .bytes = &input, .refused = &refused };
+        var json_sink = TestSink.init(std.testing.allocator);
+        defer json_sink.deinit();
+        var json: JsonCursor = .{};
+        var refusals: usize = 0;
+        while (true) {
+            var left = allowance;
+            if (json.advance(source, &json_sink, &left)) |done| {
+                if (done) break;
+            } else |err| {
+                try std.testing.expectEqual(error.Refused, err);
+                refusals += 1;
+            }
+        }
+        try std.testing.expect(refusals != 0);
+        try std.testing.expectEqualStrings(stream.buffered(), json_sink.output.items);
+        var raw_sink = TestSink.init(std.testing.allocator);
+        defer raw_sink.deinit();
+        var raw: RawCursor = .{};
+        while (true) {
+            var left = allowance;
+            if (raw.advance(source, &raw_sink, &left)) |done| {
+                if (done) break;
+            } else |err| try std.testing.expectEqual(error.Refused, err);
+        }
+        try std.testing.expectEqualStrings(&input, raw_sink.output.items);
     }
 }
 
@@ -640,7 +666,6 @@ test "request encoding plain runs batch writes and conserve allowance" {
     try std.testing.expectEqual(@as(usize, 32), sink.calls);
 }
 
-/// cursor rereads retained bytes during the copy pass.
 const ShortCopySource = struct {
     bytes: []const u8,
     high: u64 = 0,

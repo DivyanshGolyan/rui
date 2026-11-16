@@ -8,14 +8,10 @@ const cross_module = @import("build/cross.zig");
 const fixtures_module = @import("build/fixtures.zig");
 
 pub fn build(b: *std.Build) void {
-    // PR fixtures need ReleaseSafe checks, not shipped LLVM code generation.
-    // Qualification/release and ordinary local builds keep the production backend.
     const pr_ci = b.option(bool, "pr-ci", "Use the Linux x86_64 PR-only integration artifact") orelse false;
     const ci_targets = b.option([]const u8, "ci-targets", "Comma-separated CI targets to compile");
     const ci_part = b.option(ci_module.CiPart, "ci-part", "Which selected CI compiles this producer emits") orelse .all;
     const ci: ci_module.CiArtifacts = .{ .b = b, .directory = b.option([]const u8, "ci-artifacts", "Verified native CI executables") };
-    // Hosted workers can have different CPUs. Transfer only the platform's
-    // baseline instruction set; ordinary local builds still target their host.
     const ci_mode = ci_targets != null or ci.directory != null;
     const ci_query: std.Target.Query = .{ .cpu_model = .baseline };
     const target = b.standardTargetOptions(.{ .default_target = if (ci_mode) ci_query else .{} });
@@ -47,6 +43,7 @@ pub fn build(b: *std.Build) void {
     if (ci.directory != null and test_filters.len != 0) @panic("CI artifacts contain unfiltered tests");
     const model_queue_output = b.option([]const u8, "model-queue-output", "Write model-queue qualification JSON to this path");
     const units = unit_module.add(b, ci, target, pinned_transport, test_filters);
+    var unit_runs = units.runs;
 
     const openapi_emitter = b.addExecutable(.{
         .name = "openapi",
@@ -72,31 +69,32 @@ pub fn build(b: *std.Build) void {
     });
     const emit_catalog = b.addRunArtifact(catalog_emitter);
     const snapshot = emit_catalog.addOutputFileArg("model_catalog_snapshot.zig");
-    // Passthrough arguments disable caching: reread even an unchanged path.
     emit_catalog.addPassthruArgs();
     const update_catalog = b.addUpdateSourceFiles();
     update_catalog.addCopyFileToSource(snapshot, "src/model_catalog_snapshot.zig");
     b.step("model-catalog", "Write the shipped catalog from a models.dev api.json snapshot").dependOn(&update_catalog.step);
 
-    const h2_test_step = b.step("test-h2", "Run the HTTP/2 client's own tests");
-    const pg_test_step = b.step("test-pg", "Run the Postgres wire client's tests (live ones against RUI_TEST_PG_PORT)");
+    const h2_root = unit_module.root(.h2);
+    const pg_root = unit_module.root(.pg);
+    const h2_test_step = b.step(h2_root.target, "Run the HTTP/2 client's own tests");
+    const pg_test_step = b.step(pg_root.target, "Run the Postgres wire client's tests (live ones against RUI_TEST_PG_PORT)");
     if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport, product.addUrl(b))) |tls_client| {
         const h2 = product.addH2(b, target, .ReleaseSafe, pinned_transport, product.addTestPoll(b), tls_client);
-        const h2_tests = b.addTest(.{ .root_module = h2, .filters = test_filters });
+        h2.root_source_file = b.path(h2_root.source);
+        const h2_tests = b.addTest(.{ .name = h2_root.name, .root_module = h2, .filters = test_filters });
         const run_h2_tests = ci.run(h2_tests);
         run_h2_tests.has_side_effects = true;
-        h2_test_step.dependOn(&run_h2_tests.step);
-        const pg_tests = b.addTest(.{ .root_module = product.addPg(b, target, .ReleaseSafe, tls_client), .filters = test_filters });
+        unit_runs.set(.h2, &run_h2_tests.step);
+        unit_module.attach(h2_root.target, .all, h2_test_step, &unit_runs, .runs);
+        const pg = product.addPg(b, target, .ReleaseSafe, tls_client);
+        pg.root_source_file = b.path(pg_root.source);
+        const pg_tests = b.addTest(.{ .name = pg_root.name, .root_module = pg, .filters = test_filters });
         const run_pg_tests = ci.run(pg_tests);
         run_pg_tests.has_side_effects = true;
-        pg_test_step.dependOn(&run_pg_tests.step);
+        unit_runs.set(.pg, &run_pg_tests.step);
+        unit_module.attach(pg_root.target, .all, pg_test_step, &unit_runs, .runs);
     }
 
-    // Test actors are never shipped and run briefly. On x86_64, Zig's own
-    // backend builds each in about a second, where LLVM pays a ~28 CPU-second
-    // ReleaseSafe floor; safety checks stay on. Its aarch64-macos build of these
-    // actors exhausts memory, so Apple Silicon keeps LLVM. Product binaries and
-    // codegen witnesses such as the signal-stack probe always use LLVM.
     const test_actor_llvm: ?bool = if (target.result.cpu.arch == .x86_64) false else null;
     const terminal_notice = b.addExecutable(.{
         .name = "rui-terminal-notice-test",
@@ -113,10 +111,6 @@ pub fn build(b: *std.Build) void {
     const release_safe = if (pr_ci) product.addRui(b, target, .ReleaseSafe, "rui-pr-check", pinned_transport) else production_safe;
     if (pr_ci) release_safe.use_llvm = false;
     const debug = product.addRui(b, target, .Debug, "rui-debug-check", pinned_transport);
-    // The PTY screen observer (tests/integration/terminal_screen.py) loads
-    // libghostty-vt through ctypes. Its test-only package in screen-emulator
-    // keeps it out of this manifest, which installs fetch whole; only steps
-    // that run the observer build it, and no product artifact links it.
     const screen_emulator = screen_module.addScreenEmulator(b, ci, ci_mode);
     const screen = screen_emulator.library;
     const screen_emulator_step = b.step("screen-emulator", "Install the PTY screen observer's libghostty-vt, for harnesses outside build steps");
@@ -130,9 +124,6 @@ pub fn build(b: *std.Build) void {
     const terminal_restoration_step = b.step("terminal-restoration-integration", "Run native terminal restoration with build-owned bindings");
     terminal_restoration_step.dependOn(&terminal_restoration.step);
 
-    // Nonblocking renderer contracts. No gate root imports these sources, and
-    // check, check-full, test and test-logic never depend on these steps.
-    // Each Python harness requires a fresh evidence directory: -- --output DIR.
     const renderer_selftests = b.step(
         "renderer-contracts-selftest",
         "Run the direct-PTY and mutation harness self-tests (nonblocking)",
@@ -268,11 +259,12 @@ pub fn build(b: *std.Build) void {
     const preference_policy_step = b.step("preference-policy-integration", "Run native preference publication and privacy cases");
     preference_policy_step.dependOn(&preference_policy_integration.step);
 
+    const mysql_root = unit_module.root(.mysql);
     const mysql_wire_tests = b.addTest(.{
-        .name = "rui-mysql-wire-test",
+        .name = mysql_root.name,
         .use_llvm = test_actor_llvm,
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/integration/mysql_wire_test.zig"),
+            .root_source_file = b.path(mysql_root.source),
             .target = target,
             .optimize = .ReleaseSafe,
         }),
@@ -283,17 +275,17 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSafe,
         .link_libc = true,
     });
-    // TLS: the connection's tls.zig is on tls_client's OpenSSL.
     if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport, product.addUrl(b))) |tls_client| mysql_connection.addImport("tls_client", tls_client);
     mysql_wire_tests.root_module.addImport("mysql_connection", mysql_connection);
     const mysql_wire_integration = b.addSystemCommand(&.{"python3"});
     mysql_wire_integration.addFileArg(b.path("tests/integration/mysql_wire_integration.py"));
     mysql_wire_integration.addFileArg(ci.path(mysql_wire_tests));
     const mysql_wire_integration_step = b.step(
-        "mysql-wire-integration",
+        mysql_root.target,
         "Run the MySQL wire client against a real MySQL 8.4 server in Docker",
     );
-    mysql_wire_integration_step.dependOn(&mysql_wire_integration.step);
+    unit_runs.set(.mysql, &mysql_wire_integration.step);
+    unit_module.attach(mysql_root.target, .all, mysql_wire_integration_step, &unit_runs, .runs);
 
     const mysql_launch_admin = b.addExecutable(.{
         .name = "rui-mysql-launch-admin",
@@ -353,7 +345,6 @@ pub fn build(b: *std.Build) void {
     settings_step.dependOn(&settings_integration.step);
     settings_step.dependOn(&mysql_settings_integration.step);
 
-    // The TypeScript client against the Rui this build makes; Node strips the types.
     const ts_client = b.addSystemCommand(&.{"python3"});
     ts_client.addFileArg(b.path("tests/integration/host_process.py"));
     ts_client.addArgs(&.{ "exec", "env" });
@@ -417,8 +408,7 @@ pub fn build(b: *std.Build) void {
         "--check",
         "--ast-check",
     });
-    check_step.dependOn(h2_test_step);
-    check_step.dependOn(pg_test_step);
+    unit_module.attach("check", .all, check_step, &unit_runs, .shell);
     format.addFileArg(b.path("build.zig"));
     format.addDirectoryArg(b.path("build"));
     format.addDirectoryArg(b.path("src"));
@@ -430,21 +420,21 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addFileArg(ci.path(release_safe));
     fast_integrations.addFileArg(ci.path(debug));
     fast_integrations.addArg("parallel");
-    fast_integrations.addFileArg(ci.path(units.tests[0]));
+    if (unit_module.includes("check", .all, .native_pair)) fast_integrations.addFileArg(ci.path(units.native_binaries[0])) else fast_integrations.addArg("");
     fast_integrations.addFileArg(ci.path(host_status_actor));
     fast_integrations.addFileArg(ci.path(session_list_client));
     fast_integrations.addFileArg(ci.path(activity_client));
     fast_integrations.addFileArg(ci.path(preference_policy_actor));
     fast_integrations.addFileArg(ci.path(terminal_notice));
     fast_integrations.addFileArg(ci.path(mysql_launch_admin));
-    for (units.tests[1..]) |compile| fast_integrations.addFileArg(ci.path(compile));
+    if (unit_module.includes("check", .all, .native_pair)) {
+        for (units.native_binaries[1..]) |compile| fast_integrations.addFileArg(ci.path(compile));
+    }
     fast_integrations.step.dependOn(&format.step);
-    // Release compilation coverage stays in qualification, not PR fixture startup.
     if (!pr_ci) fast_integrations.addFileInput(ci.path(release_small));
     fast_integrations.step.dependOn(&units.run_renderer_allocation.step);
     fast_integrations.step.dependOn(&units.signal_stack_probe.step);
     check_step.dependOn(&fast_integrations.step);
-    // The gate reads x86-64 prologues; other targets have no frame reader.
     const stack_frames_step = b.step(
         "stack-frames",
         "Fail when a Host thread reaches a ReleaseSafe stack frame over budget (x86-64 Linux only)",
@@ -452,20 +442,17 @@ pub fn build(b: *std.Build) void {
     if (target.result.cpu.arch == .x86_64 and target.result.os.tag == .linux) {
         const stack_frames = b.addSystemCommand(&.{ "python3", "-B" });
         stack_frames.addFileArg(b.path("tests/ci/stack_frames.py"));
-        // This is a production-codegen oracle, never a gate on the PR backend.
         stack_frames.addFileArg(ci.path(production_safe));
         stack_frames.addFileArg(b.path("tests/ci/stack_frames.json"));
         stack_frames_step.dependOn(&stack_frames.step);
     }
-    // Selected PRs run this unchanged LLVM oracle in a separate required job,
-    // so its compile cannot hold every integration shard behind it.
     if (!pr_ci) check_step.dependOn(stack_frames_step);
 
     const full_check_step = b.step(
         "check-full",
         "Run routine native tests and process integrations serially (long witnesses are separate)",
     );
-    const check_part = b.option(enum { all, execution, callers }, "check-part", "Isolated full-check part (default all)") orelse .all;
+    const check_part = b.option(unit_module.Part, "check-part", "Isolated full-check part (default all)") orelse .all;
     const process_integrations = screen_module.screenCommand(b, screen, &.{"env"});
     process_integrations.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
     process_integrations.addArg("sh");
@@ -480,15 +467,10 @@ pub fn build(b: *std.Build) void {
     process_integrations.addFileArg(ci.path(terminal_notice));
     process_integrations.addFileArg(ci.path(mysql_launch_admin));
     process_integrations.step.dependOn(&format.step);
-    // The execution partition overlaps native tests with its serial process
-    // fixtures, just as check already does. Keep the unsplit gate serial and
-    // the callers partition isolated on its own runner. Both peers must pass.
     const native_gate = if (check_part == .execution) full_check_step else &process_integrations.step;
-    if (check_part != .callers) {
-        native_gate.dependOn(&units.run_tests.step);
+    unit_module.attach("check-full", check_part, native_gate, &unit_runs, .runs);
+    if (unit_module.includes("check-full", check_part, .native_pair)) {
         native_gate.dependOn(&units.run_renderer_allocation.step);
-        native_gate.dependOn(h2_test_step);
-        native_gate.dependOn(pg_test_step);
     }
     if (!pr_ci) process_integrations.addFileInput(ci.path(release_small));
     full_check_step.dependOn(&process_integrations.step);
@@ -497,8 +479,6 @@ pub fn build(b: *std.Build) void {
     cross_module.add(b, target, pinned_transport);
     measurement_module.add(b, ci, release_safe, sqlite_shell, model_queue_output);
 
-    // Compile the selected gates once, without executing their fixture Run
-    // steps. Workers still execute the original gates and their assertions.
     const ci_build = b.step("ci-build", "Compile selected CI gates without running tests");
     if (ci_targets) |selected| {
         if (ci_part != .unit) {
@@ -512,8 +492,6 @@ pub fn build(b: *std.Build) void {
             if (&root.step == ci_build) @panic("ci-build cannot select itself");
             collection.collect(&root.step);
         }
-        // The plan splits by target name (qualification.UNIT_TARGETS); a split
-        // that disagrees with this graph would idle a producer or drop a binary.
         if (ci_part != .all and !collection.reached_unit)
             @panic("Split CI producers selected without the unit test compile; update UNIT_TARGETS");
     }

@@ -1,6 +1,3 @@
-//! One request's ordered input custody. The caller transfers two empty,
-//! unlinked files. Ranges borrow the sealed spool; only this owner closes
-//! the descriptors and returns its byte and index charges.
 const std = @import("std");
 const InputCapture = @This();
 const ScratchBudget = @import("ScratchBudget.zig");
@@ -64,8 +61,6 @@ pub fn begin(self: *InputCapture, kind: Incoming, length: u64) !void {
     self.pending = .{ .offset = self.length, .length = length, .kind = validator };
 }
 
-/// Appends at most `allowance` bytes. Every reservation remains held even
-/// after a partial/failed write, until `close` owns the cleanup.
 pub fn append(self: *InputCapture, bytes: []const u8, allowance: *usize, cancelled: bool) !usize {
     std.debug.assert(self.resources != null and self.state == .building);
     errdefer self.state = .failed;
@@ -139,14 +134,10 @@ pub fn seal(self: *InputCapture) !Loan {
     return .{ .capture = self, .digest = digest, .count = self.count, .single_text = single_text };
 }
 
-/// Borrowed until the capture closes. Its cursor has fixed-size metadata,
-/// regardless of how many image parts the index holds.
 pub const Loan = struct {
     capture: *InputCapture,
     digest: [32]u8,
     count: u32,
-    /// The exact original Content identity, only for one Text. Message
-    /// hashing can preserve v4 without reading files inside a Store hold.
     single_text: ?TextIdentity,
 
     pub const TextIdentity = struct { length: u64, digest: [32]u8 };
@@ -461,12 +452,9 @@ test "input cursor verifies its whole certificate before returning the last part
         }
         var cursor = loan.cursor();
         if (damage != .fewer_parts and damage != .more_parts) {
-            // A producer may legitimately save this first part in its open
-            // transaction. It must not receive a last part and commit.
             try std.testing.expect((try cursor.next()) != null);
         }
         try std.testing.expectError(error.ContentChanged, cursor.next());
-        // A caught error cannot turn a failed certificate into an end marker.
         try std.testing.expectError(error.ContentChanged, cursor.next());
         capture.close();
         capture.close();

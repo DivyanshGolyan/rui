@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Run with python3 research/adapter-view/probe.py; no live provider calls."""
 import hashlib
 import json
 import platform
@@ -96,7 +95,6 @@ def run():
         rejected(lambda: value(view,ref),AssertionError)
         passed.append('foreign and expired handles reject')
 
-        # Use writer-side fault injection; the adapter receives only its view.
         victim = core.db.execute('SELECT body FROM item WHERE result=? ORDER BY ordinal LIMIT 1',(result,)).fetchone()[0]
         saved = core.db.execute('SELECT body FROM payload WHERE id=?',(victim,)).fetchone()[0]
         with core.db:
@@ -113,7 +111,6 @@ def run():
                 (victim,saved,hashlib.sha256(saved).hexdigest()))
         passed.append('missing private payload fails without older-base or text fallback')
 
-        # Large payload exercises reader transfer, not the small JSON adapter.
         large = b'x'*(4*1024*1024+17)
         core.fact('user',large)
         large_op = core.admit()
@@ -135,9 +132,6 @@ def run():
         passed.append('large payload transfer bounded to 4096-byte chunks with complete digest')
         passed.append('overlapping readers and fixture decode exhaustion release resources')
 
-        # Counterexample oracles: an originating-operation cutoff leaks late output;
-        # a latest-settings reader rewrites an old operation.
-        # first's result is accepted AFTER first admission, so must be absent there.
         assert core.db.execute('SELECT pos FROM result WHERE operation<=?',(first,)).fetchone()
         assert not any(kind=='response' for kind,_ in core.view(first).history())
         assert core.db.execute("SELECT body FROM fact WHERE kind='settings' ORDER BY pos DESC LIMIT 1").fetchone()[0] != core.view(first).settings().key

@@ -1,5 +1,3 @@
-//! Live final-Attempt observations. The transport publishes boundaries;
-//! the Store saves them in the write ending an attempt (resolution or retry).
 const std = @import("std");
 
 pub const Values = struct {
@@ -7,8 +5,6 @@ pub const Values = struct {
     first_event_ms: ?u64 = null,
 };
 
-/// Stable custody-owned storage, borrowed by a Transfer until its deinit.
-/// Atomics cross the transport/Store threads; no durable timing is owned here.
 pub const Attempt = struct {
     sent_at_ms: std.atomic.Value(i64) = .init(-1),
     first_event_ms: std.atomic.Value(i64) = .init(-1),
@@ -37,15 +33,10 @@ pub const Attempt = struct {
         return latencyMs(self.sent_at_ms.load(.acquire), now.toMilliseconds());
     }
 
-    /// Milliseconds from `sent` to `cutoff_ms`, never negative; null when
-    /// the request was not sent. Callers load `sent` in their own order.
     fn latencyMs(sent: i64, cutoff_ms: i64) ?u64 {
         return if (sent < 0) null else @intCast(@max(0, cutoff_ms - sent));
     }
 
-    /// Read the published boundaries before sampling their cutoff. The event's
-    /// acquire pairs with publication after `begin`, so a known event also has
-    /// a known send. A callback during the clock read cannot amend this value.
     pub fn snapshot(self: *const Attempt, io: std.Io) Values {
         const first_event_ms = self.firstEventMs();
         const sent = self.sent_at_ms.load(.acquire);
@@ -57,8 +48,6 @@ pub const Attempt = struct {
     }
 };
 
-/// The Host lends live attempt observations to the attempt-ending writer.
-/// Backoff uses the pair already saved on the row, not this volatile source.
 pub const Source = struct {
     context: ?*anyopaque = null,
     read: ?*const fn (*anyopaque, u64, std.Io) Values = null,

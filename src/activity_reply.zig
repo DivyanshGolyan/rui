@@ -1,6 +1,3 @@
-//! The `activity-page` and `activity-search` replies: the Host writes the
-//! page and the search the Store reads (`activity_facts.zig`) with the
-//! shapes here, which also give the replies' schemas (`openapi.zig`).
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const activity_facts = @import("activity_facts.zig");
@@ -26,49 +23,32 @@ fn optionalText(value: anytype) ?[]const u8 {
 pub const max_page_bytes = page_reply.max_bytes;
 pub const max_search_bytes = search_reply.max_bytes;
 
-/// One activity row as JSON.
 pub const ItemJson = struct {
     item: *const Item,
 
     pub const openapi_name = "ActivityItem";
 
-    /// Holes: position, ordinal, at; then the value's shape, then `tail`.
     pub fn head(comptime kind: Item.Kind) struct { []const u8, H, []const u8, H, []const u8, H, []const u8 } {
         return .{ "{\"position\":\"", .decimal, "\",\"ordinal\":\"", .decimal, "\",\"at\":\"", .decimal, "\",\"value\":{\"" ++ @tagName(kind) ++ "\":" };
     }
     pub const tail = .{"}}"};
-    /// Each value kind's JSON, named by its tag.
     const call_details = .{ ",\"description\":", H{ .optional_string = activity_read.CallText.max_description_bytes }, ",\"tool\":", H{ .optional_string = activity_read.CallText.max_tool_bytes }, ",\"server\":", H{ .optional_string = activity_read.CallText.max_server_bytes } };
     pub const value_shapes = struct {
-        /// Holes: admission, key, turn, state, admitted at, sender, content.
         const message = .{ "{\"admission\":\"", H.decimal, "\",\"key\":", H{ .string = protocol.max_key_bytes }, ",\"turn\":", H.optional_id, ",\"state\":\"", H{ .tag = @FieldType(Item.Message, "state") }, "\",\"admitted_at\":\"", H.decimal, "\",\"sender\":", H{ .optional_json = NamedPeerJson }, ",\"content\":", H{ .json = ContentJson }, "}" };
         pub const admission = message;
         pub const user = message;
         pub const received = message;
-        /// Holes: content, final.
         pub const assistant = .{ "{\"content\":", H{ .json = ContentJson }, ",\"final\":", H.boolean, "}" };
-        /// Holes: operation, turn, call ordinal, Action, rejection, the three field contents.
         pub const call = .{ "{\"operation\":\"", H.decimal, "\",\"turn\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"action\":", H.optional_id, ",\"rejection\":", H{ .optional_tag = protocol.ProposalRejection }, ",\"fields\":[", H{ .json = ContentJson }, ",", H{ .json = ContentJson }, ",", H{ .json = ContentJson }, "]" } ++ call_details ++ .{"}"};
-        /// Holes: content, presentation.
         pub const tool_result = .{ "{\"content\":", H{ .json = ContentJson }, ",\"presentation\":", H{ .json = ToolPresentationJson }, "}" };
-        /// A call the provider ran, shown by its line alone. Hole: presentation.
         pub const hosted_call = .{ "{\"presentation\":", H{ .json = ToolPresentationJson }, "}" };
-        /// Holes: turn, operation, ending, code, content.
         pub const turn_ended = .{ "{\"session\":", H{ .string = protocol.session_id_bytes }, ",\"turn\":\"", H.decimal, "\",\"operation\":\"", H.decimal, "\",\"ending\":\"", H{ .tag = protocol.TurnEnding }, "\",\"code\":", H{ .string = protocol.max_code_bytes }, ",\"content\":", H{ .optional_json = ContentJson }, "}" };
-        /// Holes: key, turn, cutoff, completion.
         pub const stop = .{ "{\"key\":", H{ .string = protocol.max_key_bytes }, ",\"turn\":", H.optional_id, ",\"cutoff\":\"", H.decimal, "\",\"completion\":\"", H{ .tag = protocol.SessionStopCompletion }, "\"}" };
-        /// Holes: admission, admitted at, target, content.
         pub const sent = .{ "{\"admission\":\"", H.decimal, "\",\"admitted_at\":\"", H.decimal, "\",\"target\":", H{ .json = NamedPeerJson }, ",\"content\":", H{ .json = ContentJson }, "}" };
-        /// Holes: key, target, code.
         pub const send_failed = .{ "{\"key\":", H{ .string = protocol.max_key_bytes }, ",\"target\":", H{ .optional_json = NamedPeerJson }, ",\"code\":", H{ .string = protocol.max_code_bytes }, "}" };
-        /// Holes: action, operation, call ordinal.
         pub const approval_requested = .{ "{\"session\":", H{ .string = protocol.session_id_bytes }, ",\"action\":\"", H.decimal, "\",\"operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\"" } ++ call_details ++ .{"}"};
-        /// Holes: revision, field, provider text.
         pub const session_changed = .{ "{\"revision\":\"", H.decimal, "\",\"field\":\"", H{ .tag = protocol.SessionField }, "\",\"provider_text\":", H{ .optional_string = protocol.max_report_bytes }, "}" };
-        /// Holes: operation, dropped.
         pub const compacted = .{ "{\"operation\":\"", H.decimal, "\",\"dropped\":\"", H.decimal, "\"}" };
-        /// Holes: model, served model, input/output/cached tokens, final-attempt
-        /// latency and first event, status, attempts.
         pub const model_call = .{ "{\"model\":", H{ .string = protocol.max_model_bytes }, ",\"served_model\":", H{ .optional_string = protocol.max_model_bytes }, ",\"input_tokens\":", H.optional_id, ",\"output_tokens\":", H.optional_id, ",\"cached_tokens\":", H.optional_id, ",\"latency_ms\":", H.optional_id, ",\"first_event_ms\":", H.optional_id, ",\"status\":", H{ .string = protocol.max_code_bytes }, ",\"attempts\":\"", H.decimal, "\"}" };
     };
     pub const max_json_bytes = blk: {
@@ -120,9 +100,7 @@ pub const CallActivityJson = struct {
     value: *const activity_facts.CallActivity,
 
     pub const openapi_name = "CallActivity";
-    /// Hole: total.
     pub const head = .{ "{\"total\":\"", H.decimal, "\",\"entries\":[" };
-    /// Holes: operation, ordinal, presentation.
     pub const entry_shape = .{ "{\"operation\":\"", H.decimal, "\",\"ordinal\":\"", H.decimal, "\",\"presentation\":", H{ .json = ToolPresentationJson }, "}" };
     pub const tail = .{"]}"};
     pub const max_json_bytes = shapeBytes(head) + jsonListBytes(@typeInfo(@FieldType(activity_facts.CallActivity, "entries")).array.len, shapeBytes(entry_shape)) + shapeBytes(tail);
@@ -142,7 +120,6 @@ pub const QueuedJson = struct {
     value: *const activity_facts.Queued,
 
     pub const openapi_name = "Queued";
-    /// Holes: count, oldest position, newest admission, newest position.
     pub const json_shape = .{ "{\"count\":\"", H.decimal, "\",\"oldest_position\":\"", H.decimal, "\",\"newest_admission\":\"", H.decimal, "\",\"newest_position\":\"", H.decimal, "\"}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
@@ -156,7 +133,6 @@ pub const PageWorkJson = struct {
     value: *const activity_facts.PageWork,
 
     pub const openapi_name = "PageWork";
-    /// Holes: the work's fields, last line, revision, Workspace.
     pub const json_shape = .{ "{\"read_version\":\"", H{ .text = change_ring.Token.max_bytes }, "\"," } ++ protocol.SessionWork.fields ++ .{ ",\"last_line\":", H{ .optional_json = protocol.LastLine.Fields }, ",\"revision\":\"", H.decimal, "\",\"workspace\":", H{ .string = protocol.max_workspace_bytes }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
@@ -167,11 +143,8 @@ pub const PageWorkJson = struct {
     }
 };
 
-/// An `activity-page` reply: a full page, or the token of an unchanged one.
 pub const page_reply = struct {
-    /// Holes: end, direction; then the items, then `tail`.
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_page\",\"end\":\"", H.decimal, "\",\"direction\":\"", H{ .tag = @FieldType(activity_read.ActivityPage, "direction") }, "\",\"items\":[" };
-    /// Holes: more, call activity, queued, work.
     pub const tail = .{ "],\"more\":", H.boolean, ",\"call_activity\":", H{ .json = CallActivityJson }, ",\"queued\":", H{ .json = QueuedJson }, ",\"work\":", H{ .json = PageWorkJson }, ",\"delta\":\"full\",\"since\":", H{ .optional_string = change_ring.SessionToken.max_bytes }, "}" };
     pub const unchanged = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"not_modified\",\"since\":", H{ .string = change_ring.SessionToken.max_bytes }, "}" };
     pub const max_bytes = shapeBytes(head) + jsonListBytes(@typeInfo(@FieldType(Page, "items")).array.len, ItemJson.max_json_bytes) + shapeBytes(tail);
@@ -217,7 +190,6 @@ pub const SearchCursorJson = struct {
     }
 };
 
-/// One searched row and its hits.
 pub const SearchMatchJson = struct {
     value: *const Search.Match,
 
@@ -235,7 +207,6 @@ pub const SearchMatchJson = struct {
     }
 };
 
-/// An `activity-search` reply.
 pub const search_reply = struct {
     pub const head = .{"{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_search\",\"items\":["};
     pub const tail = .{ "],\"next\":", H{ .optional_json = SearchCursorJson }, "}" };

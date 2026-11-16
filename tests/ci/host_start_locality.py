@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Settings replaces the retired launch owner; only the CLI publishes failures."""
 import sys
 from pathlib import Path
 
@@ -9,12 +8,10 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def scan(source, path="src/server.zig"):
-    """Keep server I/O in production tokens; reject retired names everywhere."""
     tokens = production(lex(source))
     names = [error_identifier(token) if NAME.fullmatch(token.text) or token.text.startswith('@"')
              else token.text for token in tokens]
     found = retired_names(source, path)
-    # Origin is not a Host capability, including in the Host's owner tests.
     all_tokens = lex(source)
     for token in all_tokens:
         name = error_identifier(token) if NAME.fullmatch(token.text) or token.text.startswith('@"') else token.text
@@ -30,7 +27,6 @@ def scan(source, path="src/server.zig"):
 
 
 def retired_names(source, path):
-    """The retired source owner and CLI switch cannot survive anywhere in src."""
     return [f"{path}:{number}: names {name}; use the Host settings document"
             for number, line in enumerate(source.splitlines(), 1)
             for name in ("launch_frame", "--launch-frame") if name in line]

@@ -1,7 +1,3 @@
-"""Real editor handoff, queued input and independently failed cleanup effects.
-
-terminal_restoration_integration.py runs these cases; the human CLI fixture runs
-them too in its full mode."""
 import fcntl
 import json
 import os
@@ -977,8 +973,6 @@ def check_forwarding(state, library):
 
 
 def secret_entry_restore_case(state, library):
-    """An OpenAI key typed at the hidden prompt is refused, not saved, when
-    the terminal's own settings cannot be restored afterwards."""
     root = state / "secret-entry-restore"
     root.mkdir()
     home = root / "home"
@@ -1008,10 +1002,6 @@ def secret_entry_restore_case(state, library):
 
 
 def consent_boundary_cases(state):
-    """At the permission card, Ctrl-C quits with the terminal usable and
-    nothing decided, a paste decides nothing, and a fresh Allow or Deny
-    decides. Authorization starts when the card draws its request (decided
-    2026-11-09: no flush receipt, no per-key spending)."""
     for case in ("cancel", "paste", "allow"):
         root = state / f"consent-{case}"
         root.mkdir()
@@ -1044,8 +1034,6 @@ def consent_boundary_cases(state):
             human.action_ready(read_ready, master)
             before = set(records.glob("*.json"))
             if case == "paste":
-                # A paste, even one holding an Enter, edits the draft but
-                # never decides. Esc must restore the choice before Deny.
                 human.keyed_frame(master, b"\x1b[200~pasted\r\ntext\x1b[201~",
                     lambda screen, x, y: " › pasted" in screen and "   text" in screen and human.CHOICE not in screen)
                 assert set(records.glob("*.json")) == before, "paste at the choice captured a decision"
@@ -1091,12 +1079,10 @@ def consent_boundary_cases(state):
 
 
 def unread_input(slave):
-    """Bytes written to the terminal that the caller has not read yet."""
     return struct.unpack("i", fcntl.ioctl(slave, termios.FIONREAD, b"\0" * 4))[0]
 
 
 def fatal_reporting_cases(state):
-    """Optional fatal text cannot hold exit or name a superseded original."""
     root = state / "fatal-reporting"
     root.mkdir()
     home, store = root / "home", root / "store"
@@ -1141,8 +1127,6 @@ def fatal_reporting_cases(state):
                     lambda: termios.tcflow(error_slave, termios.TCOON),
                     *(lambda fd=fd: close_pty(fd) for fd in (master, slave, error_master, error_slave)),
                 )
-        # Popen restores default SIGPIPE before exec. Rui's initialized IO
-        # runtime must still preserve the real error when stderr disconnects.
         for args, error in diagnostics:
             master, slave = open_pty()
             read_error, write_error = os.pipe()
@@ -1170,9 +1154,6 @@ def fatal_reporting_cases(state):
 
 
 def decision_reporting_cases(state):
-    """A decision still unconfirmed when the conversation ends keeps its exact
-    identity: Ctrl-C, SIGHUP and a closed terminal (EOF, the same hangup) each
-    exit naming its recovery, and the Host, still running, continues it."""
     root = state / "decision-reporting"
     root.mkdir()
     home, store = root / "home", root / "store"
@@ -1219,7 +1200,6 @@ def decision_reporting_cases(state):
                 os.write(master, human.ALLOW)
                 fixture.wait_for(human.draining(master, received.is_set), "permission decision route reached", timeout=10)
                 if ending == "closed":
-                    # The terminal went away: no restoration is claimed.
                     close_pty(master)
                     master = None
                     _, errors = caller.communicate(timeout=6)
@@ -1284,7 +1264,6 @@ def decision_reporting_cases(state):
 
 
 def host_diagnostic_cases(state, library):
-    """Optional fd2 credit cannot own canonical progress or cleanup authority."""
     root = state / "readiness-alias-poison"
     root.mkdir(mode=0o700)
     store, log, arm = (root / name for name in ("store", "probe.log", "arm"))
@@ -1367,8 +1346,6 @@ def host_diagnostic_cases(state, library):
     store.mkdir(mode=0o700)
     diagnostics = store / "diagnostics"
     diagnostics.mkdir(mode=0o700)
-    # Open succeeds with one full private file. Its next rotation fails at
-    # record time, not open time; no new fault hook or I/O interception.
     last = diagnostics / f"host-{2**64 - 2}.jsonl"
     with last.open("wb") as file:
         last.chmod(0o600)
@@ -1406,8 +1383,6 @@ def host_diagnostic_cases(state, library):
         root = state / kind
         root.mkdir(mode=0o700)
         store, log, release = (root / name for name in ("store", "probe.log", "release"))
-        # Save queued work without an execution adapter, then restart it under
-        # the native readiness gate. No live raw Store reads or new hooks.
         seed = fixture.start_host(store, None)
         try:
             session = fixture.configure(root, store, "config", None, "gpt-6-sol")
@@ -1437,8 +1412,6 @@ def host_diagnostic_cases(state, library):
         host = None
         try:
             fixture.wait_for(lambda: log.exists() and "readiness-held\n" in log.read_text(), "required readiness gate")
-            # Receiving the request requires preparation and handoff, both of
-            # which attempt production opt-in traces before transport service.
             fixture.wait_for(lambda: endpoint.requests, "execution during readiness exclusion")
             assert starter.is_alive() and not result, result
             effects = log.read_text()
@@ -1490,7 +1463,6 @@ def host_diagnostic_cases(state, library):
             except HostStartError as error:
                 assert kind == "readiness-error", error
                 assert "readiness-write-failed\n" in log.read_text()
-                # start_ready_process's failure owner has already reaped it.
                 try:
                     os.kill(error.pid, 0)
                 except ProcessLookupError:
@@ -1536,8 +1508,6 @@ def host_diagnostic_cases(state, library):
         reader = os.fdopen(read_fd, "rb", buffering=0)
         flags = fcntl.fcntl(write_fd, fcntl.F_GETFL)
         if credit == "diagnostic-nonblock" or (credit == "filled" and fault == "success"):
-            # Traced successful work can write while idle: establish its
-            # nonblocking flags before spawn, not through an external race.
             flags |= os.O_NONBLOCK
             fcntl.fcntl(write_fd, fcntl.F_SETFL, flags)
         host = None
@@ -1549,8 +1519,6 @@ def host_diagnostic_cases(state, library):
             "RUI_DIAGNOSTIC_ARM": str(arm), "RUI_DIAGNOSTIC_RELEASE": str(release)}
         try:
             if credit == "diagnostic-restore-startup":
-                # An optional startup-file warning poisons later borrowing,
-                # not required readiness or already accepted work.
                 store.mkdir(mode=0o700)
                 (store / "diagnostics").mkdir(mode=0o755)
                 (store / "diagnostics").chmod(0o755)
@@ -1571,8 +1539,6 @@ def host_diagnostic_cases(state, library):
             reported = json.loads(status.stdout)
             assert reported["type"] == "host_status" and reported["status"] == "ready", status
             instance = reported["instance"]
-            # Fill only while idle. The inherited open file description starts
-            # submissions with exactly its original flags, not Python's flags.
             if credit == "filled":
                 fcntl.fcntl(write_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
                 filled = 0
@@ -1595,13 +1561,9 @@ def host_diagnostic_cases(state, library):
                 arm.touch()
             if credit == "diagnostic-partial":
                 fixture.command("session", "inspect", "--store", store, "--session", session)
-                # The Host writes the inspection's trace beside its reply, so
-                # the reply can arrive first.
                 fixture.wait_for(lambda: "diagnostic-partial\n" in log.read_text(), "the armed partial trace write")
                 arm.unlink()
             if credit == "diagnostic-contention-host":
-                # The forwarding driver proves the exact inspection matcher.
-                # Here unrelated optional custody cannot gate canonical reads.
                 def control_remaining():
                     remaining = contention_deadline - time.monotonic()
                     assert remaining > 0, "contention exceeded original 8s deadline"
@@ -1651,7 +1613,6 @@ def host_diagnostic_cases(state, library):
                 arm.unlink()
             for index in range(count):
                 key = f"message-{index}"
-                # The original regression payload: exactly 156000 decoded bytes.
                 text = 'é中🙂\n\\"/' * 12000
                 assert len(text.encode()) == 156000
                 fixture.message(root, store, key, session, text)
@@ -1672,12 +1633,8 @@ def host_diagnostic_cases(state, library):
                     assert resources["custody_occupied"] == "1", resources
                     leftovers = list((store / "scratch").glob("response-[0-9]*.tmp"))
                     assert len(leftovers) == 1, leftovers
-                    # This existing acquisition fault retains an empty named
-                    # file before provider launch, so its correct charge is 0.
                     assert int(resources["scratch_used_bytes"]) == leftovers[0].stat().st_size == 0, resources
                     assert not endpoint.requests, endpoint.requests
-                    # Retained cleanup keeps the lease, so pause waits out its
-                    # whole retirement bound and reports it unconfirmed.
                     stopped = subprocess.run([str(fixture.RUI), "host", "pause", "--store", str(store), "--instance", instance],
                         capture_output=True, text=True, timeout=30)
                     (root / "host-stop.stdout").write_text(stopped.stdout)
@@ -1689,8 +1646,6 @@ def host_diagnostic_cases(state, library):
                     assert "pause interrupts all work in this Store" in stopped.stderr, stopped
                     assert f"still holds this Store after {DEFAULTS.host_shutdown_seconds} seconds" in stopped.stderr, stopped
                     print(f"Host diagnostics: retained response file, charge=0, custody=1; stop reply={stopped.stdout!r}", flush=True)
-                    # A stop acknowledgement is not cleanup completion: the
-                    # injected unlink refusal remains active during shutdown.
                     assert host.poll() is None, "stop falsely completed retained cleanup"
                     (root / "retained-resources.json").write_text(json.dumps(resources, indent=2) + "\n")
                     host.kill()
@@ -1734,8 +1689,6 @@ def host_diagnostic_cases(state, library):
                     contention_complete = True
                 if index == 0 and credit in ("diagnostic-enable", "diagnostic-enable-unmutated"):
                     arm.unlink()
-            # A trace reaches the observation channel before its borrowed
-            # stderr write restores the flags, so wait for the restoration.
             expected_flags = flags | os.O_NONBLOCK if credit.startswith("diagnostic-restore") else flags
             restored = fixture.wait_for(lambda: fcntl.fcntl(write_fd, fcntl.F_GETFL), "stderr flags restored after the last trace",
                 ready=lambda actual: os_semantics.user_file_flags(actual) == os_semantics.user_file_flags(expected_flags))
@@ -1814,9 +1767,6 @@ def host_diagnostic_cases(state, library):
             try:
                 if host is not None:
                     try:
-                        # This is disposal, not a semantic crash cut. The
-                        # canonical owner seals/drains before kill within the
-                        # same eight seconds; stderr assertions ran above.
                         stop_process(host, timeout=8)
                     except Exception as error:
                         cleanup_errors.append(error)
@@ -1863,7 +1813,7 @@ def host_diagnostic_cases(state, library):
                 try:
                     incoming_error.add_note("Fixture diagnostic cleanup failed: " + ", ".join(cleanup_failure(error) for error in cleanup_errors))
                 except BaseException:
-                    pass  # Optional reporting cannot replace the original failure.
+                    pass
 
 
 def app_terminal_cases():
@@ -1887,8 +1837,6 @@ def app_terminal_cases():
 
 def app_signal_cases():
     binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
-    # "late": the shell's hangup reaches Rui only after App released the
-    # terminal, which then exits as it would have without it.
     for sent in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, *([None] * 8), "late"):
         master, slave = open_pty()
         caller = None
@@ -1975,7 +1923,6 @@ def app_full_pty_case():
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
         caller.send_signal(signal.SIGWINCH)
         caller.send_signal(signal.SIGTERM)
-        # Simulate a terminal that stops reading before it catches up.
         select.select([], [], [], 1)
         _, diagnostic = human.terminal_exit(caller, master)
         assert caller.returncode == 0, (caller.returncode, diagnostic)
@@ -2048,7 +1995,6 @@ def app_consent_cases():
     for replaced, keys, expected in (
         (True, b"\r", b"decision=none\n"),
         (False, b"\r", b"decision=17:allow_once\n"),
-        # The surrogate is unknown; a non-authorizing key ends the one-key probe.
         (False, b"\x1b[55296ux", b"decision=none\n"),
     ):
         master, slave = open_pty()

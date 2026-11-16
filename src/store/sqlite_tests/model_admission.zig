@@ -1,5 +1,3 @@
-//! Model admission SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
@@ -19,9 +17,9 @@ const store_testing = @import("../testing.zig");
 const c = sqlite.c;
 const ContentReader = content_domain.ContentReader;
 const HistoricalEntryKind = historical_domain.HistoricalEntryKind;
-const HistoricalReader = historical_domain.HistoricalReader;
+const TestingReader = store_testing.TestingReader;
 const HistoricalSettings = historical_domain.HistoricalSettings;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const ModelOperationKind = historical_domain.ModelOperationKind;
 const OutputMetadataWriter = store_testing.OutputMetadataWriter;
 const ValidatedOutput = model_settlement_domain.ValidatedOutput;
@@ -99,13 +97,12 @@ test "complete call outcomes continue once in call order ahead of pending input"
     try std.testing.expect(stale_reply == .rejected);
     try std.testing.expectEqual(protocol.PermissionDecisionRejection.action_not_pending, stale_reply.rejected.code);
 
-    var view: HistoricalView = undefined;
-    storage.openHistoricalView(continuation, &view);
+    var view: TestingPage = undefined;
+    view.open(&storage, continuation);
     defer view.close();
     var position: u64 = 0;
     try std.testing.expectEqual(HistoricalEntryKind.user, (try view.nextEntry(position)).?.kind);
     position = (try view.nextEntry(position)).?.position;
-    // The Operation that proposed the calls, at its admission position.
     const proposing = (try view.nextEntry(position)).?;
     try std.testing.expectEqual(HistoricalEntryKind.operation, proposing.kind);
     position = proposing.position;
@@ -128,9 +125,9 @@ test "complete call outcomes continue once in call order ahead of pending input"
     for (expected_call_ids, expected_outputs, 0..) |expected_call_id, expected_output, ordinal| {
         _ = ordinal;
         const result = (try view.nextToolResult()).?;
-        var call_id: HistoricalReader = undefined;
+        var call_id: TestingReader = undefined;
         try view.openContent(result.call_id, &call_id);
-        var output: HistoricalReader = undefined;
+        var output: TestingReader = undefined;
         try view.openContent(result.output, &output);
         var buffer: [128]u8 = undefined;
         const call_id_count = try call_id.read(0, &buffer);
@@ -188,7 +185,6 @@ test "tool continuation selection never visits a Turn waiting for its tool resul
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
-    // Each round adds a Turn with two Actions waiting for permission.
     var steps: [2]i32 = undefined;
     for (&steps, 0..) |*cost, round| {
         var name_buffer: [32]u8 = undefined;
@@ -255,8 +251,6 @@ test "one committed selection freezes its settings and input prefix" {
         (try store_testing.observeCommandForTesting(&storage, "dispatch-1")).kind.message.?.queue.?.state == .queued,
     );
 
-    // Failed admission publishes neither projection nor instruction
-    // inclusion; the revision's change row holds position 3.
     try std.testing.expectEqual(@as(i64, 0), try sqlite.pragmaInt(storage.sqliteDatabase(), "SELECT count(*) FROM conversation_entry"));
     try std.testing.expectEqual(@as(i64, 4), try sqlite.pragmaInt(storage.sqliteDatabase(), "SELECT next_position FROM session"));
 
@@ -296,14 +290,13 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expectEqualStrings("model-b", (try storage.inspectSessionForTesting(created_session_0.slice())).model.slice());
     try expectModelRevisions(&storage, created_session_0.slice(), "during-work");
 
-    var view: HistoricalView = undefined;
-    storage.openHistoricalView(binding, &view);
-    defer if (view.active) view.close();
+    var view: TestingPage = undefined;
+    view.open(&storage, binding);
+    defer if (view.page.active) view.close();
     var settings: HistoricalSettings = undefined;
     try view.settings(&settings);
     try std.testing.expectEqual(protocol.Provider.codex, settings.provider);
     try std.testing.expectEqualStrings("model-a", settings.model.slice());
-    // The frozen tools come back as the Store saved them, in set order.
     const offered = [_]*const tool_defs.Record{ tool_defs.record(.bash), tool_defs.record(.web_search) };
     try std.testing.expectEqual(@as(u64, offered.len), settings.tool_count);
     var tool: historical_domain.HistoricalTool = .{};
@@ -319,23 +312,23 @@ test "one committed selection freezes its settings and input prefix" {
     const instruction = (try view.nextEntry(second_input.position)).?;
     try std.testing.expect(instruction.kind == .instruction);
     try std.testing.expect((try view.nextEntry(instruction.position)) == null);
-    var first_reader: HistoricalReader = undefined;
+    var first_reader: TestingReader = undefined;
     try view.openContent(first_input.content.?, &first_reader);
-    defer if (first_reader.active) first_reader.close();
+    defer if (first_reader.reader.active) first_reader.close();
     var actual: [5]u8 = undefined;
     try std.testing.expectEqual(actual.len, try first_reader.read(0, &actual));
     try std.testing.expectEqualStrings("first", &actual);
 
-    var foreign_view: HistoricalView = undefined;
-    storage.openHistoricalView(binding, &foreign_view);
-    try std.testing.expect(first_input.content.?.belongsTo(&view));
-    try std.testing.expect(!first_input.content.?.belongsTo(&foreign_view));
+    var foreign_view: TestingPage = undefined;
+    foreign_view.open(&storage, binding);
+    try std.testing.expect(first_input.content.?.belongsTo(&view.page));
+    try std.testing.expect(!first_input.content.?.belongsTo(&foreign_view.page));
     foreign_view.close();
-    try std.testing.expectEqual(@as(usize, 1), view.readers);
+    try std.testing.expectEqual(@as(usize, 1), view.page.readers);
     first_reader.close();
-    try std.testing.expectEqual(@as(usize, 0), view.readers);
+    try std.testing.expectEqual(@as(usize, 0), view.page.readers);
     view.close();
-    try std.testing.expect(!first_input.content.?.belongsTo(&view));
+    try std.testing.expect(!first_input.content.?.belongsTo(&view.page));
     try std.testing.expect(!first_reader.usable());
 
     try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
@@ -365,8 +358,8 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expect(try storage.configure(&tools_update, .{}) == .accepted);
 
     const later = (try storage.admitNextModelAttempt(.{})).?;
-    var later_view: HistoricalView = undefined;
-    storage.openHistoricalView(later.permit.binding, &later_view);
+    var later_view: TestingPage = undefined;
+    later_view.open(&storage, later.permit.binding);
     defer later_view.close();
     var later_settings: HistoricalSettings = undefined;
     try later_view.settings(&later_settings);
@@ -374,7 +367,6 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expectEqualStrings("model-b", later_settings.model.slice());
     try std.testing.expectEqual(@as(u64, 0), later_settings.tool_count);
     var position: u64 = 0;
-    // The failed first Operation keeps its boundary between the inputs.
     for ([_]HistoricalEntryKind{ .user, .user, .instruction, .operation, .user }) |kind| {
         const entry = (try later_view.nextEntry(position)).?;
         try std.testing.expectEqual(kind, entry.kind);
@@ -470,12 +462,11 @@ test "continued accepted output allows model revisions and keeps public text rea
     var public_reader: ContentReader = undefined;
     public_reader.open(try storage.openPublicConversationContent(&.{ .session = public_request.session, .position = public_page.items[0].position }));
     {
-        // The answer is the message's public text row; its bag is private.
         const backing = try sqlite.prepare(storage.sqliteDatabase(), "SELECT text.private,bag.private FROM model_output_item item " ++
             "JOIN content text ON text.content_id=item.message_content_id " ++
             "JOIN content bag ON bag.content_id=item.extras_content_id WHERE item.message_content_id=?1");
         defer _ = c.sqlite3_finalize(backing);
-        try sqlite.bindI64(backing, 1, public_reader.content_id);
+        try sqlite.bindI64(backing, 1, public_reader.window.content_id);
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(backing));
         try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_column_int(backing, 0));
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_column_int(backing, 1));
@@ -519,8 +510,6 @@ test "continued accepted output allows model revisions and keeps public text rea
 
     const completion_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try storage.settleModelSuccess(completion_binding, &output, .{});
-    // The same output is an answer both before and after pending input is
-    // consumed. Only the owning Turn's completion decision differs.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE resolution_code='answer'", .{}));
     try expectModelRevisions(&storage, created_session_0.slice(), "after-output");
     const completed = (try store_testing.observeCommandForTesting(&storage, "continued-first")).kind.message.?.queue.?;
@@ -575,8 +564,6 @@ test "runnable discovery measures eligible ineligible and history populations in
     defer storage.close() catch unreachable;
 
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
-    // Query-only populations use canonical six-byte fixtures, not named
-    // Session creation. Command keys retain their independent text identities.
     const QueryCost = struct {
         const Result = struct {
             steps: i32,
@@ -723,7 +710,6 @@ test "model admission work excludes failed historical Operation population" {
             const session = try configureTestSession(&storage, "config");
             try submitTestMessage(&storage, &tmp, "input", "input", session.slice(), "retain");
             const current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            // Keep the actual current Operation newer than all injected history.
             try store_testing.sqlite_only.exec(&storage, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL; UPDATE session SET next_position=100001", .{});
             const insert = try sqlite.prepare(storage.sqliteDatabase(), "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
                 "SELECT value+1 FROM sequence WHERE value<?1) " ++
@@ -783,8 +769,6 @@ test "model admission work excludes accepted compaction base history" {
                 try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
                 current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 if (index + 1 != population) {
-                    // Provider-only suffix allows the next overflow recovery
-                    // without accumulating retained host input.
                     const call = TestingCall{ .item_id = "old-item", .name = "unknown", .encoded_call_id = "old-call", .decoded_call_id = "old-call", .encoded_arguments = "{}", .decoded_arguments = "{}" };
                     try settleCallsForTestingWithFaults(&storage, &tmp, current, "old-output", &.{call}, .{}, null);
                     current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -872,16 +856,13 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                 try submitTestMessage(&storage, &tmp, "input", message_key, session.slice(), "old input");
                 const binding = (try storage.admitNextModelAttempt(.{}) orelse return error.MissingPressureInput).permit.binding;
                 if (kind == .instruction and index != population) {
-                    // Isolate revision history from accepted-output population.
                     try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
                 } else {
                     try settleCallsForTestingWithFaults(&storage, &tmp, binding, "output", &.{call}, .{}, if (index == population) (if (compact) (if (kind == .instruction) "{\"input_tokens\":99900,\"output_tokens\":0}" else "{\"input_tokens\":99999,\"output_tokens\":0}") else "{\"input_tokens\":1,\"output_tokens\":0}") else null);
                 }
                 if (kind == .action) {
-                    const action = (try storage.admitNextActionAttempt(1000, .{}) orelse return error.MissingPressureAction).permit.binding;
+                    const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 1000, .{}) orelse return error.MissingPressureAction).permit.binding;
                     _ = try storage.settleActionAttempt(action, .succeeded, "result", .{});
-                    // Measure the actual tool successor: the producer's result
-                    // is after its usage/output and must remain in pressure.
                     if (index != population) {
                         const continuation = (try storage.admitNextModelAttempt(.{}) orelse return error.MissingPressureContinuation).permit.binding;
                         try storage.settleModelAttemptFailure(continuation, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
@@ -894,7 +875,6 @@ test "model admission work excludes usage-covered accepted tool and instruction 
             patch.configuration.compaction_trigger.state = .value;
             try patch.configuration.compaction_trigger.value.set("100000");
             if (kind == .instruction) {
-                // Same-text updates are new input, not content deduplication.
                 patch.configuration.instructions = try testingBytesContent(&tmp, "pending-instruction", &instructions);
             }
             defer patch.removeTemporaryContent(std.testing.io) catch unreachable;
@@ -954,7 +934,6 @@ test "admission fails before COMMIT when a counted write changes other than its 
         try sqlite.exec(storage.sqliteDatabase(), case.trigger);
         try std.testing.expectError(case.expected, storage.admitModelAttempt(.message, .{}));
         try std.testing.expect(storage.isFenced());
-        // The round failed before COMMIT: no Turn, entry or bound Message stays.
         try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM turn", .{}));
         try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM conversation_entry", .{}));
         try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE turn_id IS NOT NULL", .{}));
@@ -962,8 +941,6 @@ test "admission fails before COMMIT when a counted write changes other than its 
 }
 
 test "an admission that selects nothing answers main's names for its idle checks' failed steps" {
-    // The idle round's failed step is TurnReadFailed, but the blocked
-    // Operation's seek and its calls' outcomes are CallReadFailed.
     const statements = model_admission_domain.idle_statements;
     inline for (.{
         .{ statements[0].sql, error.TurnReadFailed },
@@ -978,7 +955,6 @@ test "an admission that selects nothing answers main's names for its idle checks
         const session = try configureTestSessionAsk(&storage, "idle-names");
         try submitTestMessage(&storage, &tmp, "idle-names-input", "idle-names-message", session.slice(), "start");
         const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
-        // Asked calls block the Operation, so every idle statement steps.
         try settleTwoActionsForTesting(&storage, &tmp, first, "idle-names");
         var fault: TestingStatementFault = .{ .sql = case[0] };
         fault.arm(storage.sqliteDatabase());
@@ -989,9 +965,6 @@ test "an admission that selects nothing answers main's names for its idle checks
     }
 }
 
-/// Runs `write` on the connection as the statement whose text is `sql`
-/// starts: another writer's commit, between that statement and the ones
-/// before it in its round.
 const TestingStatementInterleave = struct {
     sql: [:0]const u8,
     write: [:0]const u8,
@@ -1022,8 +995,6 @@ test "a model admission whose Session moves between its selection and its facts 
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "moved-head-config");
     try submitTestMessage(&storage, &tmp, "moved-head-input", "moved-head-message", session.slice(), "work");
-    // The selection reads the Session's head; another writer moves it
-    // before the facts read it again, outside any transaction.
     var interleave: TestingStatementInterleave = .{
         .sql = model_admission_domain.selected_context_sql,
         .write = "UPDATE session SET next_position=next_position+1",

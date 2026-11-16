@@ -1,15 +1,9 @@
-//! The Session screen's chrome, decided over values its shell read: the
-//! status bar under the facts row, the marker over a scrolled-back
-//! transcript, how far Shift-Up/Down scroll, and the terminal title. Nothing here
-//! reads a clock or the terminal; the shell passes the time and widths.
 const std = @import("std");
 const session_line = @import("session_line.zig");
 const utf8_validation = @import("utf8_validation.zig");
 const TerminalText = @import("TerminalText.zig");
 
 pub const Method = session_line.Method;
-
-// --- Footer focus ----------------------------------------------------------
 
 pub const FooterField = enum { model, effort };
 pub const FooterFocus = enum { input, model, effort };
@@ -20,7 +14,6 @@ pub const FooterDecision = struct {
     forward: bool = false,
 };
 
-/// Drawn clicks carry their identity even if newer facts removed the field.
 pub fn footerInput(focus: FooterFocus, has_effort: bool, input: FooterInput) FooterDecision {
     return switch (input) {
         .click => |field| .{ .focus = .input, .open_choice = field, .forward = field == null },
@@ -44,9 +37,6 @@ pub fn footerInput(focus: FooterFocus, has_effort: bool, input: FooterInput) Foo
     };
 }
 
-/// Focus and the not-yet-applied open effect belong to the chat's core.
-/// A new interaction supersedes a deferred effect; only a visible choice
-/// is modal. Read completion itself never goes through this transition.
 pub const Footer = struct {
     focus: FooterFocus = .input,
     pending: ?FooterField = null,
@@ -66,7 +56,6 @@ pub const ChoiceKey = struct { text: []const u8, action: ChoiceAction };
 pub const ChoiceKeys = struct { text: []const u8, actions: [2]ChoiceKey };
 pub const ChoiceState = enum { closed, pick, retry };
 
-/// Drawn actions for the topmost choice; retry is the same owner's Enter.
 pub fn choiceKeys(has_choice: bool) ChoiceKeys {
     const pick = "enter pick";
     const retry = "enter retry";
@@ -87,7 +76,6 @@ pub const FooterKeys = struct {
     choice: ?ChoiceKeys = null,
 };
 
-/// The footer names actions the topmost layer can actually take.
 pub fn footerKeys(choice: ChoiceState) FooterKeys {
     if (choice == .closed) return .{ .text = "alt+i info", .action = .info, .other_actions = true };
     const keys = choiceKeys(choice == .pick);
@@ -107,32 +95,18 @@ pub const FooterSpans = struct {
     }
 };
 
-// --- Notices --------------------------------------------------------------
-
-/// How long a notice about the person's own last action stays without a key.
 pub const notice_ms = 5_000;
 
-/// Whose outcome a notice answers.
 pub const NoticeAnswers = enum { other, panel_copy };
 
-/// The notice about the person's own last action: `Copied 12 lines`,
-/// `! Unknown command /x`. One at a time: a newer one replaces it,
-/// and the next key dismisses it before the key acts, so a key's own
-/// notice survives it. Anything the person must act on is never a notice:
-/// it is the status bar's `needs` text, which lasts until resolved.
 pub fn Notice(comptime capacity: usize) type {
     return struct {
         const Self = @This();
         bytes: [capacity]u8 = undefined,
         len: usize = 0,
-        /// When it was shown, on the shell's clock; null when none is held.
         shown_ms: ?u64 = null,
-        /// Whose outcome it answers: Chat info's Copy last answer reads
-        /// `Copied` only while the reply to its own copy shows.
         answers: NoticeAnswers = .other,
 
-        /// Holds `text`, shown at `now_ms`, in place of any notice. A longer
-        /// text is cut on a character.
         pub fn show(self: *Self, text: []const u8, now_ms: u64) void {
             self.answers = .other;
             const len = utf8_validation.scalarStart(text, @min(text.len, capacity));
@@ -141,31 +115,24 @@ pub fn Notice(comptime capacity: usize) type {
             self.shown_ms = now_ms;
         }
 
-        /// Successful clipboard output, sharing the ordinary notice lifetime;
-        /// `answers` names the copy it reports.
         pub fn showCopy(self: *Self, now_ms: u64, answers: NoticeAnswers) void {
             self.show("Sent to clipboard", now_ms);
             self.answers = answers;
         }
 
-        /// Whether the reply to Chat info's own copy shows at `now_ms`.
         pub fn showsPanelCopy(self: *const Self, now_ms: u64) bool {
             return self.answers == .panel_copy and self.current(now_ms) != null;
         }
 
-        /// The next key: the notice goes.
         pub fn dismiss(self: *Self) void {
             self.shown_ms = null;
         }
 
-        /// The text that shows at `now_ms`, or null once it went.
         pub fn current(self: *const Self, now_ms: u64) ?[]const u8 {
             const shown = self.shown_ms orelse return null;
             return if (now_ms -| shown < notice_ms) self.bytes[0..self.len] else null;
         }
 
-        /// Drops a notice whose time ran out at `now_ms`; true when one
-        /// went, so the shell redraws without it.
         pub fn expire(self: *Self, now_ms: u64) bool {
             if (self.shown_ms == null or self.current(now_ms) != null) return false;
             self.shown_ms = null;
@@ -174,13 +141,10 @@ pub fn Notice(comptime capacity: usize) type {
     };
 }
 
-/// A notice's display-safe single line, owned by the draw arena.
-/// Footer owns alignment and clipping; this core owns notice text.
 pub fn noticeLine(arena: std.mem.Allocator, notice: []const u8) std.mem.Allocator.Error![]const u8 {
     const capacity = std.math.mul(usize, notice.len, TerminalText.max_bytes_per_byte) catch return error.OutOfMemory;
     var out: std.Io.Writer = .fixed(try arena.alloc(u8, capacity));
     var text: TerminalText = .{ .mode = .label };
-    // The fixed buffer holds the sanitizer's worst-case expansion of every byte.
     for (notice) |byte| {
         if (byte == '\n' or byte == '\r') {
             text.finish(&out) catch unreachable;
@@ -197,20 +161,11 @@ test "notice text flattens result lines and escapes terminal controls before Foo
     try std.testing.expectEqualStrings("界e\u{301}", try noticeLine(arena.allocator(), "界e\u{301}"));
 }
 
-// --- Status bar -----------------------------------------------------------
-
-/// The stop key the last row offers while work can be stopped.
 pub const stop_key = session_line.stop_hint;
 
-/// What the status bar says of a send. `status` is the held original's
-/// line (`session_notice.status`); while it is opening or in flight it is
-/// progress, else it needs the person until resolved. With none held it
-/// says nothing: an accepted Message's own row, or its waiting row, is the
-/// feedback.
 pub const Send = struct { needs: ?[]const u8 = null, progress: ?[]const u8 = null };
 
 pub fn send(status: ?[]const u8, in_flight: bool) Send {
-    // An empty status is a waiting Action, which says how to decide it.
     const text = status orelse return .{};
     return if (text.len == 0) .{} else if (in_flight) .{ .progress = text } else .{ .needs = text };
 }
@@ -229,9 +184,7 @@ test "a send is progress while in flight, needs the person once unresolved, and 
     try same(.{ .progress = "Sending…" }, send("Sending…", true));
     try same(.{ .needs = "! Not confirmed · ctrl+r retries original" }, send("! Not confirmed · ctrl+r retries original", false));
     try same(.{}, send("", false));
-    // No original held: accepted or idle, the status bar says nothing.
     for ([_]bool{ false, true }) |in_flight| try same(.{}, send(null, in_flight));
-    // A reply goes to Footer; persistent progress and needs keep their own row.
     try std.testing.expectEqualStrings("! Unknown command /x", bar(.{ .progress = "Sending…", .notice = "! Unknown command /x", .width = 80 }).notice.?);
     const sending = bar(.{ .progress = "Sending…", .overview = "! Other Session failed", .width = 80 });
     try std.testing.expectEqualStrings("Sending…", sending.left);
@@ -239,13 +192,8 @@ test "a send is progress while in flight, needs the person once unresolved, and 
     try std.testing.expectEqualStrings("! x", bar(.{ .needs = "! x", .notice = "Copied 3 lines", .progress = "Sending…", .width = 80 }).left);
 }
 
-/// Bytes `factsRow` writes at most.
 pub const facts_bytes = @import("protocol.zig").max_workspace_bytes + session_line.capacity + " · ".len + "Stopping and archiving".len;
 
-/// The footer keeps its editable facts visible before the name and context.
-/// Ask and effort stay whole, then the model fits (with an ellipsis only
-/// when necessary), then whole context, then the name in the remaining room.
-/// Output order remains name · model · effort · context · ask · archive.
 pub fn factsRow(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, name: []const u8, badge: ?[]const u8, width: usize, method: Method) []const u8 {
     return factsSpans(buffer, facts, name, badge, width, method).text;
 }
@@ -274,7 +222,6 @@ pub fn factsSpans(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, name: []
     var count: usize = 0;
     var model_buffer: [facts_bytes]u8 = undefined;
     var name_buffer: [facts_bytes]u8 = undefined;
-    // Fitting policy lives here, not in the widgets that draw these spans.
     for (if (folder != null) [_]usize{ 2, 1, 5, 4, 3, 0 } else [_]usize{ 4, 2, 1, 3, 0, 5 }) |index| {
         const text = parts[index] orelse continue;
         if (text.len == 0) continue;
@@ -323,9 +270,6 @@ pub fn factsSpans(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, name: []
     return result;
 }
 
-/// `text` within `room` cells, ending at a word with `…` when it is cut.
-/// Only a word wider than the room is cut inside itself. Text that fits
-/// is never cut, even with no room left to mark what dropped after it.
 fn words(out: *std.Io.Writer, text: []const u8, room: usize, method: Method) void {
     if (session_line.cells(text, method) <= room) return out.writeAll(text) catch unreachable;
     const mark = session_line.cells(session_line.ellipsis, method);
@@ -371,9 +315,6 @@ test "a short facts row preserves editable words and ask before context and name
     }
 }
 
-/// The key that ends what needs the person, which the status bar makes
-/// clickable: the part after its last ` · ` (`! Not confirmed · ctrl+r
-/// retries` → `ctrl+r retries`), or nothing when it names none.
 pub fn needsKey(needs: []const u8) []const u8 {
     const at = std.mem.lastIndexOf(u8, needs, " · ") orelse return "";
     return needs[at + " · ".len ..];
@@ -381,37 +322,24 @@ pub fn needsKey(needs: []const u8) []const u8 {
 
 pub const Tone = enum { quiet, attention };
 
-/// Persistent status on the left, and the separate transient reply for Footer.
 pub const Bar = struct {
     notice: ?[]const u8 = null,
     left: []const u8 = "",
     tone: Tone = .quiet,
-    /// Whether `stop_key` shows at the right edge.
     stop: bool = false,
-    /// The column `stop_key` starts at, when it shows.
     stop_column: u16 = 0,
 };
 
-/// The facts the status bar is decided over.
 pub const Facts = struct {
-    /// What needs the person, with its key (`! Not confirmed · ctrl+r
-    /// retries`). Persists until resolved; outranks any notice.
     needs: ?[]const u8 = null,
-    /// Where a send stands while under way: below what needs the person,
-    /// above the overview's persistent line, independently of a Footer reply.
     progress: ?[]const u8 = null,
-    /// The reply to the last key for Footer, independent of persistent state.
     notice: ?[]const u8 = null,
-    /// What the overview says while this Session shows, below progress.
     overview: ?[]const u8 = null,
-    /// `stoppable` for the Session's work.
     stoppable: bool = false,
     width: u16,
     method: Method = .unicode,
 };
 
-/// Whether a command's result is a notice: the status bar is one row, so a
-/// result of more lines opens as a page, as a long one does.
 pub fn fitsBar(result: []const u8) bool {
     return std.mem.indexOfScalar(u8, result, '\n') == null;
 }
@@ -421,14 +349,8 @@ test "a result of one line is a notice; one of two lines is a page" {
     try std.testing.expect(!fitsBar("Saved.\n! Host unavailable"));
 }
 
-/// Cells kept between the left text and the stop key.
 const gap = 2;
 
-/// The status bar. Left: what needs the person, else a send's progress,
-/// else the overview's persistent line. Notices are passed separately to Footer.
-/// Right: the stop key while work can be stopped.
-/// When both don't fit, the left side wins and the stop key drops (Ctrl-X
-/// still works); the shell clips left text that is wider than the row.
 pub fn bar(facts: Facts) Bar {
     var result: Bar = .{ .notice = facts.notice };
     if (facts.needs) |needs| {
@@ -442,43 +364,27 @@ pub fn bar(facts: Facts) Bar {
     const stop_cells = session_line.cells(stop_key, facts.method);
     const left_cells = session_line.cells(result.left, facts.method);
     const used = if (left_cells == 0) 0 else left_cells + gap;
-    // One cell of margin at the right edge, as the mocks set it.
     if (used + stop_cells + 1 > facts.width) return result;
     result.stop = true;
     result.stop_column = @intCast(facts.width - stop_cells - 1);
     return result;
 }
 
-// --- Scrolling ------------------------------------------------------------
-
-/// Rows Shift-Up/Down (and PgUp/PgDn) move: half the transcript's height,
-/// at least one.
 pub fn halfScreen(height: usize) usize {
     return @max(1, height / 2);
 }
 
-/// Bytes `marker` writes at most.
 const newer_mark = @import("marks.zig").marks.get(.newer).unicode;
 pub const marker_bytes = newer_mark.len + 1 + 20 + " new".len;
 
-/// The chip over a scrolled-back transcript's bottom-right: `↓` when
-/// nothing arrived below, `↓ N new` once N new transcript entries did.
-/// Clicking it, or Esc, jumps to the latest.
 pub fn marker(buffer: *[marker_bytes]u8, new_entries: u64) []const u8 {
     if (new_entries == 0) return newer_mark;
     return std.fmt.bufPrint(buffer, "{s} {d} new", .{ newer_mark, new_entries }) catch unreachable;
 }
 
-// --- Terminal title ---------------------------------------------------------
-
-/// Bytes of a Session's name kept in the title, before escaping.
 pub const title_name_bytes = 80;
 pub const title_bytes = TerminalText.max_bytes_per_byte * title_name_bytes + session_line.ellipsis.len + " · rui · ".len + 20 + " needs you".len;
 
-/// The terminal title: `rui`, plus `· N needs you` while any Session waits
-/// on the person; inside a Session it leads with that Session's name. The
-/// name is escaped like a label, so no control reaches the terminal's title
-/// sequence, and a long one is cut at a character and ends in `…`.
 pub fn title(buffer: *[title_bytes]u8, session: ?[]const u8, needs_you: u64) []const u8 {
     var out = std.Io.Writer.fixed(buffer);
     if (session) |name| {
@@ -494,12 +400,10 @@ pub fn title(buffer: *[title_bytes]u8, session: ?[]const u8, needs_you: u64) []c
     return out.buffered();
 }
 
-/// The title the terminal shows, so the shell sets it only when it changes.
 pub const Title = struct {
     bytes: [title_bytes]u8 = undefined,
     len: ?usize = null,
 
-    /// The title to set now, or null when the terminal already shows it.
     pub fn next(self: *Title, session: ?[]const u8, needs_you: u64) ?[]const u8 {
         var buffer: [title_bytes]u8 = undefined;
         const text = title(&buffer, session, needs_you);
@@ -521,13 +425,11 @@ test "a notice goes after about five seconds or at the next key; the newest repl
     try std.testing.expect(notice.expire(15_000));
     try std.testing.expect(!notice.expire(15_001));
     notice.show("Copied 12 lines", 10_000);
-    // A clock that reads earlier than the notice still shows it.
     try std.testing.expect(notice.current(9_000) != null);
     notice.show("! Unknown command /x", 12_000);
     try std.testing.expectEqualStrings("! Unknown command /x", notice.current(16_000).?);
     notice.dismiss();
     try std.testing.expectEqual(@as(?[]const u8, null), notice.current(12_001));
-    // A long notice is cut on a character.
     notice.show(comptime repeat("é", 200), 0);
     try std.testing.expect(std.unicode.utf8ValidateSlice(notice.current(0).?));
     try std.testing.expectEqual(@as(usize, 256), notice.current(0).?.len);
@@ -545,11 +447,10 @@ test "the stop key shows on the right while work can be stopped, and drops first
     try std.testing.expectEqual(@as(u16, 80 - 11 - 1), alone.stop_column);
     try std.testing.expectEqualStrings("", alone.left);
 
-    const needs = "! Not confirmed · ctrl+r retries"; // 32 cells
+    const needs = "! Not confirmed · ctrl+r retries";
     const both = bar(.{ .needs = needs, .stoppable = true, .width = 80 });
     try std.testing.expect(both.stop);
     try std.testing.expectEqualStrings(needs, both.left);
-    // 32 + 2 + 11 + 1 cells fit exactly in 46; one fewer drops the stop key.
     try std.testing.expect(bar(.{ .needs = needs, .stoppable = true, .width = 46 }).stop);
     const narrow = bar(.{ .needs = needs, .stoppable = true, .width = 45 });
     try std.testing.expect(!narrow.stop);
@@ -585,18 +486,15 @@ test "the title leads with the Session, says how many need the person, and never
     try std.testing.expectEqualStrings("rui · 2 needs you", title(&buffer, null, 2));
     try std.testing.expectEqualStrings("Fix flaky store test · rui", title(&buffer, "Fix flaky store test", 0));
     try std.testing.expectEqualStrings("Fix flaky store test · rui · 1 needs you", title(&buffer, "Fix flaky store test", 1));
-    // A title sequence ends at BEL or ST; neither may come from a name.
     const hostile = title(&buffer, "a\x07b\x1b\\c\x9c", 0);
     for (hostile) |byte| try std.testing.expect(byte >= 0x20 and byte != 0x7f);
     try std.testing.expect(std.unicode.utf8ValidateSlice(hostile));
-    // A long name is cut on a character, never inside one.
-    const long = comptime repeat("é", 60); // 120 bytes
+    const long = comptime repeat("é", 60);
     const cut = title(&buffer, long, 0);
     try std.testing.expect(std.unicode.utf8ValidateSlice(cut));
     try std.testing.expectEqualStrings(comptime repeat("é", 40) ++ "… · rui", cut);
     const worst = title(&buffer, &(@as([200]u8, @splat(0x1b))), std.math.maxInt(u64));
     try std.testing.expect(std.mem.endsWith(u8, worst, "… · rui · 18446744073709551615 needs you"));
-    // Set once per change.
     var shown: Title = .{};
     try std.testing.expectEqualStrings("Fix flaky store test · rui", shown.next("Fix flaky store test", 0).?);
     try std.testing.expectEqual(@as(?[]const u8, null), shown.next("Fix flaky store test", 0));
@@ -680,7 +578,6 @@ test "footer spans identify only whole model and effort words across widths effo
         try std.testing.expectEqual(@as(usize, 1), model_count);
         try std.testing.expectEqual(@as(usize, @intFromBool(effort != null)), effort_count);
     };
-    // A field omitted by the whole-item fitter has no phantom click span.
     for (0..40) |width| {
         var buffer: [facts_bytes]u8 = undefined;
         const fitted = factsSpans(&buffer, .{ .name = "model · low", .model = "model", .effort = .low, .asks = true }, "ref", null, width, .unicode);
@@ -723,8 +620,6 @@ test "footer standalone actions describe pick retry and close from one owner" {
     try std.testing.expect(footerKeys(.closed).choice == null);
 }
 
-/// Shared native-test inputs for the standalone lifetime contract. These are
-/// scenarios, not another presentation or backend state machine.
 pub const StandaloneCases = struct {
     pub const Screen = enum { new_chat, chat };
     pub const Phase = enum { open, pending, read_failed, save_failed };

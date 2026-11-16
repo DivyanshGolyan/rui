@@ -1,4 +1,3 @@
-//! Host/Store boundary regressions for native MCP calls (no provider or Bash).
 const std = @import("std");
 const store = @import("store.zig");
 const protocol = @import("protocol.zig");
@@ -10,8 +9,6 @@ const mcp = @import("server_mcp.zig");
 const Script = @import("mcp/test_server.zig");
 const poll = @import("test_poll");
 
-// Compose the fixture with the canonical built-ins so a new core tool cannot
-// make every MCP Host test fail before it reaches the runner.
 const records = blk: {
     var out = tools.built_in_tool_set.records[0..tools.built_in_tool_set.records.len].* ++ [_]tools.Record{
         .{ .name = "fetch_other", .owner = .mcp, .server = "other", .description = "Fetch elsewhere.", .input_schema = "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}" },
@@ -93,7 +90,7 @@ fn run(case: Case) !void {
     };
     const count: usize = if (case == .serial) 2 else 1;
     try store.settleCallsForTesting(storage, &tmp, binding, "mcp-calls", calls[0..count]);
-    try expectHere(@src(), (try storage.admitNextActionAttempt(300_000, .{})) == null);
+    try expectHere(@src(), (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})) == null);
     try expectHere(@src(), (try storage.admitNextModelAttempt(.{})) == null);
 
     const script = try allocator.create(Script);
@@ -111,9 +108,6 @@ fn run(case: Case) !void {
     defer if (case == .concurrent) other_script.stop();
     var other_url_buffer: [128]u8 = undefined;
     const other_url = try std.fmt.bufPrint(&other_url_buffer, "http://127.0.0.1:{d}/mcp", .{if (case == .concurrent) other_script.port else @as(u16, 1)});
-    // Both an unanswered connect and an unanswered sent request must expire
-    // inside the five-second test watchdog. In particular, do not race the
-    // unavailable call's deadline against Context.done's identical deadline.
     const timeout_ms: u64 = switch (case) {
         .timeout, .down => 50,
         .success => @import("mcp/servers.zig").default_timeout_ms,
@@ -130,7 +124,7 @@ fn run(case: Case) !void {
         active.shutdown(host);
     }
     for (0..count) |ordinal| {
-        const work = (try storage.nextCoreWork()).?;
+        const work = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?;
         try expectHere(@src(), work == .mcp);
         try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, active.admit(host, work.mcp));
         if (case != .down) {
@@ -139,7 +133,7 @@ fn run(case: Case) !void {
             try storage.readActionExecutionInput(.mcp, .{ .action_id = work.mcp.action_id, .parent_operation_id = binding.operation_id, .turn_id = binding.turn_id }, input);
             try std.testing.expectEqual(servers[0].timeout_ms, input.timeout_ms);
         }
-        if (case == .serial) try expectHere(@src(), (try storage.nextCoreWork()) == null);
+        if (case == .serial) try expectHere(@src(), (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })) == null);
         const Context = struct {
             active: *mcp.Calls,
             host: *Host,
@@ -156,7 +150,6 @@ fn run(case: Case) !void {
         const context: Context = .{ .active = &active, .host = host, .script = script };
         if (case == .concurrent) {
             try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(5)), context, Context.sent);
-            // A new Session is independent of the first Session's sent call.
             try command.key.set("other-config");
             command.configuration.tools = try .of(&.{"fetch_other"});
             const other_configured = try storage.configure(command, .{});
@@ -168,7 +161,7 @@ fn run(case: Case) !void {
             var other_call = calls[0];
             other_call.name = "fetch_other";
             try store.settleCallsForTesting(storage, &tmp, other_binding, "other-calls", &.{other_call});
-            const other_work = (try storage.nextCoreWork()).?;
+            const other_work = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?;
             try expectHere(@src(), other_work == .mcp);
             try expectHere(@src(), other_work.mcp.action_id != work.mcp.action_id);
             try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, active.admit(host, other_work.mcp));
@@ -199,7 +192,7 @@ fn run(case: Case) !void {
             active.shutdown(host);
             try expectHere(@src(), try storage.recoverOneUncertainAction(.empty()));
             try expectHere(@src(), !try storage.recoverOneUncertainAction(.empty()));
-            try expectHere(@src(), (try storage.nextCoreWork()) == null);
+            try expectHere(@src(), (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })) == null);
         }
         if (case == .stop or case == .stop_unsent) {
             if (case == .stop) try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(5)), context, Context.sent);
@@ -254,14 +247,14 @@ fn run(case: Case) !void {
         try std.testing.expectEqual(@as(u64, if (case == .stop_unsent) 1 else 0), cancelled_count);
         if (case == .stop) try expectHere(@src(), std.mem.indexOf(u8, report, "not retried") != null);
         if (case == .stop_unsent) try std.testing.expect(!script.request_received.load(.acquire));
-        try expectHere(@src(), (try storage.nextCoreWork()) == null);
+        try expectHere(@src(), (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })) == null);
         return;
     }
     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try std.testing.expectEqual(binding.turn_id, continuation.turn_id);
-    const view = try allocator.create(store.HistoricalView);
+    const view = try allocator.create(store.testing.TestingPage);
     defer allocator.destroy(view);
-    storage.openHistoricalView(continuation, view);
+    view.open(storage, continuation);
     defer if (view.isActive()) view.close();
     var position: u64 = 0;
     var found: usize = 0;
@@ -269,7 +262,7 @@ fn run(case: Case) !void {
         position = entry.position;
         if (entry.kind != .tool_results) continue;
         while (try view.nextToolResult()) |result| {
-            var reader: store.HistoricalReader = undefined;
+            var reader: store.testing.TestingReader = undefined;
             try view.openContent(result.output, &reader);
             defer reader.close();
             const bytes = try allocator.alloc(u8, @intCast(result.output.length));
@@ -284,8 +277,6 @@ fn run(case: Case) !void {
     try expectNextRequest(storage, &tmp, continuation, expected, count);
 }
 
-// Assert the sealed provider request, not merely a report projection: the
-// model's next input must include each MCP Tool Result and its original id.
 fn expectNextRequest(storage: *store.Store, tmp: *std.testing.TmpDir, binding: store.AttemptBinding, expected: []const u8, count: usize) !void {
     const allocator = std.testing.allocator;
     const adapter = @import("model_adapter.zig");
@@ -300,15 +291,20 @@ fn expectNextRequest(storage: *store.Store, tmp: *std.testing.TmpDir, binding: s
     defer if (retained) |*owner| {
         _ = owner.reclaim(root) catch unreachable;
     };
-    storage.openHistoricalView(binding, &preparation.view);
+    preparation.page.open(binding);
     try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
-    // A runaway guard on bounded nonblocking work, not a scheduler wait.
     var advances: usize = 0;
     while (true) {
         advances += 1;
         try expectHere(@src(), advances < 16384);
-        switch (preparation.advance(16384, 64)) {
+        var progress = preparation.advance(16384, 64);
+        while (progress == .read) {
+            try storage.readRequestPage(&preparation.page);
+            progress = preparation.proceed();
+        }
+        switch (progress) {
+            .read => unreachable,
             .pending => {},
             .failed => |err| return err,
             .prepared => |request| {

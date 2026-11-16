@@ -1,19 +1,8 @@
-// Publishes the tarballs pack.mjs wrote to npm (D125, D186). The tarballs'
-// own manifests are the inventory: each package is published after the
-// packages it depends on, so the client's optional platform dependencies
-// already resolve when it appears. A version npm already has is skipped, so a
-// rerun after a partial publication finishes the rest.
-//
-//   node scripts/publish.mjs <dir>
 import { execFileSync } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** Orders manifests ({file, name, version, dependencies}) so every package
- * comes after the packages in the set it depends on. A dependency on a
- * package of the same release that has no tarball is refused, since the
- * published package would point at a version that never appears. */
 export function publicationOrder(manifests, release) {
 	const byName = new Map(manifests.map((manifest) => [manifest.name, manifest]));
 	if (byName.size !== manifests.length) throw new Error("two tarballs carry the same package name");

@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-"""P1b: is "top-level tools empty, first declaration at the head of the span" (D75) safe?
-Checks: head-declared function callable; hosted web_search declared in additional_tools works;
-a later re-declaration (reword) of the same name is accepted; cache still hits after each."""
 import json, os, sys, time, urllib.request, urllib.error
 BASE = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 KEY = os.environ["OPENAI_API_KEY"]; MODEL = sys.argv[1] if len(sys.argv) > 1 else "gpt-6.1-sol"
@@ -30,18 +27,15 @@ results = []
 r1 = post(base(head + u1))
 calls = [i for i in r1["body"]["output"] if i.get("type") == "function_call"] if r1["status"] == 200 else []
 results.append(("head_function", r1["status"] == 200 and bool(calls), f"HTTP {r1['status']}, bash called: {bool(calls)}" if r1["status"] == 200 else str(r1["body"])[:300]))
-# second request: same prefix + call/result, cache should hit
 hist = head + u1 + ([i for i in r1["body"]["output"]] if r1["status"] == 200 else [])
 for c in calls: hist.append({"type": "function_call_output", "call_id": c["call_id"], "output": "hi"})
 time.sleep(2)
 r2 = post(base(hist + [{"role": "user", "content": "Thanks. Say ok."}]))
 c, t = cached(r2)
 results.append(("head_cache", r2["status"] == 200 and (c or 0) > 0, f"HTTP {r2['status']}, cached {c}/{t}" if r2["status"] == 200 else str(r2["body"])[:300]))
-# hosted web_search declared only in the head item
 r3 = post(base(head + [{"role": "user", "content": "Search the web: what is the latest Zig release? One line."}]))
 ws = r3["status"] == 200 and any(i.get("type") == "web_search_call" for i in r3["body"]["output"])
 results.append(("head_web_search", ws, f"HTTP {r3['status']}, web_search_call: {ws}" if r3["status"] == 200 else str(r3["body"])[:300]))
-# reword: re-declare bash later with new text
 reword = hist + [{"role": "user", "content": "Thanks. Say ok."}] + ([i for i in r2["body"]["output"]] if r2["status"] == 200 else []) + \
     [{"type": "additional_tools", "role": "developer", "tools": [BASH2]}, {"role": "user", "content": "Use bash to run: echo again"}]
 time.sleep(2)

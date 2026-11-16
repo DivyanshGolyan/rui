@@ -1,9 +1,3 @@
-//! The draft: libvaxis's TextArea over a caller's bank, with Rui's meanings.
-//! TextArea owns the bytes, the caret, Unicode boundaries, the paste
-//! transaction and wrapping. This adapter owns what each key means, Tab's
-//! completion, the refusal that withholds a line until Enter, and the count
-//! of edits its owners compare. It calls TextArea's actions itself
-//! (`bindings = .none`); nothing else edits the draft.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const TextArea = vaxis.vxfw.TextArea;
@@ -13,25 +7,14 @@ const Key = keymap.Key;
 const Editor = @This();
 
 area: TextArea,
-/// What a typed Tab adds to the draft at its end in place of a tab. Null by
-/// default: a screen with commands sets it.
 completion: ?Completion = null,
-/// Why the line is withheld until Enter, which reports it. It withholds
-/// edits, never changes what a key means.
 rejected: ?keymap.Refusal = null,
-/// Counts changes to the draft's bytes or its rejection. A caret move
-/// changes neither.
 edits: u32 = 0,
-/// The current marked paste began at the draft's end, so its text appends.
 paste_appends: bool = false,
 
-/// What an input did before any screen's table: an edit, or, as `action`,
-/// a `Key` the editor had no use for. `appEvent` gives that key the
-/// screen's meaning.
 pub const KeyOutcome = keymap.Outcome(Key);
 pub const TextCheck = TextArea.TextCheck;
 
-/// An empty draft in `buffer`, which it borrows for its lifetime.
 pub fn init(buffer: []u8) Editor {
     var area: TextArea = .init(buffer);
     area.bindings = .none;
@@ -39,54 +22,38 @@ pub fn init(buffer: []u8) Editor {
     return .{ .area = area };
 }
 
-/// A draft of `bytes` with the caret at byte `caret`, which must be text the
-/// draft accepts with the caret on a character's boundary.
 pub fn initText(buffer: []u8, bytes: []const u8, caret: usize) Editor {
     var editor: Editor = .init(buffer);
     std.debug.assert(editor.set(bytes, caret) == null);
     return editor;
 }
 
-/// Rui's text beyond TextArea's own UTF-8 and control checks: no format
-/// character except the zero-width joiner. Where a line feed is text is
-/// decided before insertion.
 fn acceptScalar(_: ?*anyopaque, point: u21) bool {
     return keymap.textScalar(point, true);
 }
 
-/// Whether the draft would take text held elsewhere, fed in pieces: the
-/// check `set` makes, without storage for the text. Capacity is the caller's.
 pub fn textCheck() TextCheck {
     return init(&.{}).area.textCheck();
 }
 
-/// The draft's bytes, borrowed until it next changes.
 pub fn text(self: *const Editor) []const u8 {
     return self.area.text();
 }
 
-/// The caret's byte offset, always between characters.
 pub fn cursor(self: *const Editor) usize {
     return self.area.byteOffsetToCursor();
 }
 
-/// Moves the caret to byte `at`, which must lie between characters.
 pub fn setCursor(self: *Editor, at: usize) void {
     std.debug.assert(self.area.setCursor(at).failure == null);
 }
 
-/// Replaces the whole draft with `bytes`, the caret at `caret`, keeping the
-/// refusal and paste state. Null when it did; otherwise why the draft
-/// stays as it was. `bytes` may lie in the draft's own bank.
 pub fn set(self: *Editor, bytes: []const u8, caret: usize) ?TextArea.Failure {
     const result = self.area.setText(bytes, caret);
     self.edits +%= @truncate(result.edit_count);
     return result.failure;
 }
 
-/// Puts back `bytes` and `caret` that a caller saved before an input it
-/// undoes, as a filter that matched nothing does. Inside a paste, the rest of
-/// the paste still follows at the caret.
 pub fn revert(self: *Editor, bytes: []const u8, caret: usize) void {
     const pasting_now = self.pasting();
     if (pasting_now) _ = self.area.apply(.{ .endPaste = .explicit });
@@ -94,23 +61,15 @@ pub fn revert(self: *Editor, bytes: []const u8, caret: usize) void {
     if (pasting_now) _ = self.beginPaste();
 }
 
-/// This editor saw the current marked paste begin. A replacement editor
-/// receiving the rest of a paste rejects it rather than adopting it.
 pub fn pasting(self: *const Editor) bool {
     return self.area.paste_state != null;
 }
 
-/// A screen hiding its composer closes the edit at the bytes already shown.
-/// Root still owns the terminal's paste flag: the remaining paste must not
-/// reach a new composer or become a permission choice.
 pub fn blur(self: *Editor) KeyOutcome {
     if (!self.pasting()) return .none;
     return self.finishPaste(.focus_loss);
 }
 
-/// App delivers paste boundaries through Root before the focused screen.
-/// Only the editor that received the start may accept pasted text. A screen
-/// calls blur before hiding its composer, retaining the prefix shown then.
 pub fn appEvent(self: *Editor, comptime keys: anytype, event: vaxis.vxfw.Event, pasting_now: bool) keymap.Outcome(@TypeOf(keys).Action) {
     const outcome: KeyOutcome = switch (event) {
         .focus_out => self.blur(),
@@ -132,7 +91,6 @@ pub fn appEvent(self: *Editor, comptime keys: anytype, event: vaxis.vxfw.Event, 
     };
 }
 
-/// A paste start inside a paste marks a new start: what came before stays.
 fn beginPaste(self: *Editor) KeyOutcome {
     if (self.pasting()) _ = self.area.apply(.{ .endPaste = .marker });
     self.paste_appends = self.cursor() == self.text().len;
@@ -150,8 +108,6 @@ fn finishPaste(self: *Editor, reason: TextArea.EndReason) KeyOutcome {
     return .none;
 }
 
-/// One pasted key: its text, a CR or LF line break, or a tab. Any other
-/// key is not text and rejects the line.
 fn paste(self: *Editor, value: vaxis.Key) KeyOutcome {
     if (self.rejected != null) return .none;
     // Terminals send a pasted line break as CR; a CRLF clipboard sends
@@ -170,14 +126,10 @@ fn paste(self: *Editor, value: vaxis.Key) KeyOutcome {
     return self.settle(self.area.apply(.{ .feedPaste = bytes }), self.paste_appends);
 }
 
-/// Withholds the line until its Enter, which reports it invalid: for a key a
-/// screen must let through neither as text nor as an action.
 pub fn refuse(self: *Editor) void {
     self.reject(.invalid);
 }
 
-/// Drops the refusal that withholds the line and keeps its text, for a field
-/// that keeps usable text after Enter reports it.
 pub fn release(self: *Editor) void {
     self.rejected = null;
     self.edits +%= 1;
@@ -189,10 +141,6 @@ fn reject(self: *Editor, reason: keymap.Refusal) void {
     self.edits +%= 1;
 }
 
-/// Counts what TextArea did and maps its failure to Rui's refusal: a typed
-/// overflow or invalid text withholds the line; a paste that cannot fit or
-/// be drawn was rolled back and is reported at its end; a typed character
-/// that cannot be drawn alone is refused at once.
 fn settle(self: *Editor, result: TextArea.Result, at_end: bool) KeyOutcome {
     self.edits +%= @truncate(result.edit_count);
     const pasted = result.origin == .paste;
@@ -206,7 +154,6 @@ fn settle(self: *Editor, result: TextArea.Result, at_end: bool) KeyOutcome {
 }
 
 fn key(self: *Editor, value: vaxis.Key) KeyOutcome {
-    // Root's paste ended without reaching this editor: close its own.
     if (self.pasting()) _ = self.finishPaste(.explicit);
     const press = keypress.classify(value);
     switch (press) {
@@ -243,10 +190,6 @@ fn key(self: *Editor, value: vaxis.Key) KeyOutcome {
     };
 }
 
-/// The one rule for when the editor has a use for a `Key`: the edit it
-/// makes, or null when the draft gives it none and the screen's table
-/// decides. It reads the draft's shape only, so a rejected line changes no
-/// key's meaning; there the edit does nothing, as every edit does.
 fn edit(self: *Editor, key_name: Key) ?KeyOutcome {
     const bytes = self.text();
     const at = self.cursor();
@@ -267,9 +210,6 @@ fn act(self: *Editor, action: TextArea.Action) KeyOutcome {
     return self.settle(self.area.apply(action), false);
 }
 
-/// Typed or completed text at the caret. A line feed is text only where the
-/// draft takes lines (`multiline`); elsewhere it rejects the line after the
-/// text before it.
 fn insert(self: *Editor, bytes: []const u8, multiline: bool) KeyOutcome {
     if (self.rejected != null) return .none;
     const line = if (multiline) null else std.mem.indexOfScalar(u8, bytes, '\n');
@@ -279,28 +219,36 @@ fn insert(self: *Editor, bytes: []const u8, multiline: bool) KeyOutcome {
     return outcome;
 }
 
-/// A screen's Tab: the edit it makes to `draft` with the caret at `caret`,
-/// or null to add the tab.
+pub fn insertMultiline(self: *Editor, gpa: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error!KeyOutcome {
+    if (self.rejected) |why| return .{ .refused = why };
+    if (self.pasting() or self.area.partial_length != 0) return .{ .refused = .edit_rejected };
+    if (bytes.len > self.area.buffer.len - self.text().len) return .{ .refused = .overflow };
+    if (bytes.len == 0) return .none;
+    const caret = self.cursor();
+    const combined = try gpa.alloc(u8, self.text().len + bytes.len);
+    defer gpa.free(combined);
+    @memcpy(combined[0..caret], self.text()[0..caret]);
+    @memcpy(combined[caret..][0..bytes.len], bytes);
+    @memcpy(combined[caret + bytes.len ..], self.text()[caret..]);
+    if (self.set(combined, caret + bytes.len) != null) return .{ .refused = .edit_rejected };
+    return .redraw;
+}
+
 pub const Completion = struct {
     context: *const anyopaque,
     add: *const fn (context: *const anyopaque, draft: []const u8, caret: usize) ?Replacement,
 };
 
-/// What Tab does to the draft: `text` in place of `draft[start..end]`, the
-/// caret after it.
 pub const Replacement = struct {
     start: usize,
     end: usize,
     text: []const u8,
 
-    /// `text` added at the end of `draft`, as a command word completes.
     pub fn append(draft: []const u8, text_: []const u8) Replacement {
         return .{ .start = draft.len, .end = draft.len, .text = text_ };
     }
 };
 
-/// Completes a clean draft; a partial character or a rejected draft takes
-/// the tab as it always did.
 fn tab(self: *Editor) KeyOutcome {
     const completion = self.completion orelse return self.insert("\t", false);
     if (self.area.partial_length != 0 or self.rejected != null) return self.insert("\t", false);
@@ -308,10 +256,6 @@ fn tab(self: *Editor) KeyOutcome {
     return self.replace(completed);
 }
 
-/// Puts `change`'s text in place of its range, the caret after it. A change
-/// at the draft's end is an append; one that would overflow the draft is
-/// refused whole and leaves the draft as it was, as is a range that would
-/// split a character.
 pub fn replace(self: *Editor, change: Replacement) KeyOutcome {
     const length = self.text().len;
     std.debug.assert(change.start <= change.end and change.end <= length);
@@ -327,26 +271,19 @@ pub fn replace(self: *Editor, change: Replacement) KeyOutcome {
     return if (outcome == .refused) outcome else .redraw;
 }
 
-/// Adds `text` at the draft's end, the caret after it, as Tab's completion
-/// does.
 pub fn append(self: *Editor, text_: []const u8) KeyOutcome {
     if (text_.len == 0) return .none;
     _ = self.area.apply(.buffer_end);
     const outcome = self.insert(text_, false);
-    // A rejected draft, one this text overflowed among them, never runs.
     if (self.rejected) |why| return .{ .refused = why };
     return if (outcome == .append) .redraw else outcome;
 }
 
 const AppEvents = @import("testing/app_events.zig").Events;
 
-/// Terminal bytes through vaxis's Parser and `appEvent`, as App delivers
-/// them to a lone editor (tests), with Root's paste flag kept across sends.
-/// Each key the editor has no use for comes back as itself.
 const Typing = struct {
     pasting: bool = false,
 
-    /// The last outcome of `bytes` that is not `.none`.
     fn send(self: *Typing, editor: *Editor, bytes: []const u8) KeyOutcome {
         var events: AppEvents = .init(bytes);
         events.pasting = self.pasting;
@@ -429,8 +366,6 @@ test "renderer declines standalone zero-width edits and rolls back an unrepresen
         try std.testing.expectEqual(KeyOutcome{ .refused = .edit_rejected }, event);
         try std.testing.expectEqualStrings("kept", editor.text());
         try std.testing.expectEqual(@as(usize, 0), editor.cursor());
-        // Roll back a whole paste, including accepted text before a newline,
-        // while retaining both the pre-paste prefix and suffix.
         _ = stream.send(&editor, "\x1b[200~pasted\n");
         _ = stream.send(&editor, scalar);
         event = stream.send(&editor, "discarded\x1b[201~");
@@ -509,8 +444,6 @@ test "oversized marked paste preserves the draft and caret and accepts the next 
         }
         try std.testing.expectEqual(.submit, editor.appEvent(keys, .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, false));
     }
-    // A joiner can merge inserted text with the original suffix. Subsequent
-    // pasted bytes must still precede that suffix for rollback to preserve it.
     for ([_][]const u8{ "👨‍", "👨‍123456" }) |pasted| {
         var storage: [20]u8 = undefined;
         const original = "L👩TAIL";
@@ -540,7 +473,6 @@ test "an append that overflows the draft is refused, not cut short" {
 
 test "Tab puts a completion's completed in place of its range, the caret after it, or refuses it whole" {
     const Complete = struct {
-        /// Completes the `/re` the caret ends to `/review `.
         fn add(_: *const anyopaque, draft: []const u8, caret: usize) ?Replacement {
             const start = std.mem.lastIndexOfScalar(u8, draft[0..caret], '/') orelse return null;
             return .{ .start = start, .end = caret, .text = "/review " };
@@ -555,7 +487,6 @@ test "Tab puts a completion's completed in place of its range, the caret after i
     try std.testing.expectEqual(.redraw, editor.appEvent(keys, press_tab, false));
     try std.testing.expectEqualStrings("use /review  on it", editor.text());
     try std.testing.expectEqual("use /review ".len, editor.cursor());
-    // Three bytes more than fit: refused whole, the draft and caret unchanged.
     var small: [12]u8 = undefined;
     var full: Editor = .initText(&small, "go /re now", "go /re".len);
     full.completion = Complete.review;
@@ -572,7 +503,6 @@ test "Tab over a partial character or a rejected draft does what it did before c
         }
         const status: Completion = .{ .context = &{}, .add = add };
     };
-    // A lead byte waiting for the rest of its character, or an invalid byte.
     for ([_][]const u8{ "\xc3", "\xff" }) |state| {
         errdefer std.debug.print("state={any}\n", .{state});
         var storage: [2][64]u8 = undefined;
@@ -593,11 +523,6 @@ test "Tab over a partial character or a rejected draft does what it did before c
 
 test "an unbound Alt or Meta chord never inserts its bare character" {
     var storage: [64]u8 = undefined;
-    // Legacy ESC prefix (Option as Meta, and tmux's re-encoding of Kitty or
-    // modifyOtherKeys chords), Kitty with and without associated text, and
-    // Super/Meta bits. Each is dropped, keeping the draft
-    // around it, rather than adding ".".
-    // Enter with Alt and another modifier is still a dropped chord.
     for ([_][]const u8{ "\x1b\xff", "\x1b.", "\x1b ", "\x1bx", "\x1b[46;3u", "\x1b[46;3;46u", "\x1b[32;3u", "\x1b[46;9u", "\x1b[46;33u", "\x1b[13;4u", "\x1b[13;4;13u", "\x1b[13:13;4u", "\x1b[13;7u", "\x1b[13;9u", "\x1b[1;4A", "\x1b\x00", "\x1b\x01", "\x1b\x12", "\x1b[28;3u", "\x1b[97;7u", "\x1b[27;3;46~", "\x1b[27;3;32~", "\x1b[27;9;46~", "\x1b[27;4;13~" }) |chord| {
         var editor: Editor = .init(&storage);
         var stream: Typing = .{};
@@ -608,7 +533,6 @@ test "an unbound Alt or Meta chord never inserts its bare character" {
         try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "\r"));
         try std.testing.expectEqualStrings("ok", editor.text());
     }
-    // Bound chords, plain text and marked paste keep their meaning.
     var editor: Editor = .init(&storage);
     var stream: Typing = .{};
     _ = stream.send(&editor, "a. b\x1bb\n\x1b[200~c. d\x1b[201~");
@@ -631,8 +555,6 @@ test "ESC before broken UTF-8 is an ordinary Alt chord and preserves following t
 
 test "xterm modifyOtherKeys bindings mean what the same Kitty keys mean" {
     var storage: [64]u8 = undefined;
-    // Ghostty's legacy table sends Shift-Enter as CSI 27;2;13~ unasked. It
-    // adds a line like Kitty's CSI 13;2u; Ctrl-A moves to the line start and Ctrl-J adds a line.
     for ([_][]const u8{ "\x1b[27;2;13~", "\x1b[13;2u", "\x1b[13;2;13u", "\x1b[13:13;2u" }) |shift_enter| {
         var editor: Editor = .init(&storage);
         var stream: Typing = .{};
@@ -705,13 +627,11 @@ test "unknown CSI retains following text and malformed UTF-8 still rejects" {
     try std.testing.expectEqualStrings("Z", editor.text());
     editor = .init(&storage);
     try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, stream.send(&editor, "\xc3(\r"));
-    // A Kitty report of a surrogate or a codepoint past Unicode is no key.
     for ([_][]const u8{ "a\x1b[55296u\r", "a\x1b[1114112u\r" }) |input| {
         editor = .init(&storage);
         try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, input));
         try std.testing.expectEqualStrings("a", editor.text());
     }
-    // Alt-A remains a screen action, never the permission choice "a".
     editor = .init(&storage);
     try std.testing.expectEqual(KeyOutcome{ .action = .alt_a }, stream.send(&editor, "\x1ba"));
     try std.testing.expectEqual(@as(usize, 0), editor.text().len);
@@ -746,7 +666,6 @@ test "arrows beyond the draft's lines are the screen's keys, not caret moves" {
     var storage: [80]u8 = undefined;
     var editor: Editor = .init(&storage);
     var stream: Typing = .{};
-    // Wheel scrolling arrives as arrow keys in the alternate screen.
     var event: KeyOutcome = .none;
     event = stream.send(&editor, "\x1b[A");
     try std.testing.expectEqual(KeyOutcome{ .action = .up }, event);
@@ -787,8 +706,6 @@ test "Ctrl-D exits only on an empty draft and otherwise deletes forward" {
 
 test "an unbound Ctrl key is dropped and reported, and the draft still sends" {
     var storage: [16]u8 = undefined;
-    // Ctrl-T, Ctrl-L, Ctrl-Y, Ctrl-Space (NUL), Ctrl-\ and Kitty's Ctrl-T,
-    // NUL and Ctrl-\ forms.
     for ([_][]const u8{ "\x14", "\x0c", "\x19", "\x00", "\x1c", "\x1b[116;5u", "\x1b[0u", "\x1b[28u" }) |key_bytes| {
         errdefer std.debug.print("key={any}\n", .{key_bytes});
         var editor: Editor = .init(&storage);
@@ -823,7 +740,6 @@ test "a key no table binds neither edits nor rejects the line" {
         try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "\r"));
         try std.testing.expectEqualStrings("ok", editor.text());
     }
-    // A rejected line changes no key's meaning: Ctrl-X still passes.
     var editor: Editor = .init(&storage);
     var stream: Typing = .{};
     _ = stream.send(&editor, "ok\xc3(");
@@ -872,8 +788,6 @@ test "word movement skips separators and stops at word edges" {
 
 test "Shift-Enter sent as ESC CR adds a line at the caret, as every Alt-Enter does" {
     var storage: [64]u8 = undefined;
-    // ESC CR is Ghostty's Shift-Enter as captured (#538). Kitty and
-    // modifyOtherKeys Alt-Enter decode alike.
     for ([_][]const u8{ "\x1b\r", "\x1b[13;3u", "\x1b[13;3;13u", "\x1b[27;3;13~" }) |alt_enter| {
         var editor: Editor = .init(&storage);
         var stream: Typing = .{};
@@ -888,16 +802,12 @@ test "Shift-Enter sent as ESC CR adds a line at the caret, as every Alt-Enter do
 
 test "Shift held with a binding's key is never that binding, whatever text the key reports" {
     var storage: [64]u8 = undefined;
-    // Kitty may report associated text or a shifted key equal to the base
-    // key; neither may hide Shift. Ctrl-Shift-J does not send, Alt-Shift-J
-    // and Alt-Shift-Enter add no line, Ctrl-Shift-C does not interrupt.
     for ([_][]const u8{ "\x1b[106;6;106u", "\x1b[106:106;6u", "\x1b[106;4;106u", "\x1b[106:106;4u", "\x1b[13;4;13u", "\x1b[99;6;99u", "\x1b[99:99;6u", "\x1b[13;2;13u" }) |chord| {
         var editor: Editor = .init(&storage);
         var stream: Typing = .{};
         _ = stream.send(&editor, "ok");
         const event = stream.send(&editor, chord);
         try std.testing.expect(event != .submit and event != .action);
-        // Shift-Enter is the one bound Shift chord here: it adds a line.
         const expected: []const u8 = if (std.mem.eql(u8, chord, "\x1b[13;2;13u")) "ok\n" else "ok";
         try std.testing.expectEqualStrings(expected, editor.text());
     }
@@ -915,5 +825,57 @@ test "Option arrows leave a draft intact and return its screen navigation key" {
         try std.testing.expectEqual(KeyOutcome{ .action = case.key }, stream.send(&editor, case.bytes));
         try std.testing.expectEqualStrings("own draft", editor.text());
         try std.testing.expectEqual(@as(usize, 8), editor.cursor());
+    }
+}
+
+test "quote insertion is multiline and atomic at an existing caret" {
+    var storage: [128]u8 = undefined;
+    var editor: Editor = .initText(&storage, "leftRIGHT", 4);
+    try std.testing.expectEqual(KeyOutcome.redraw, try editor.insertMultiline(std.testing.allocator, "\n> 雪e\u{301}\n>\n> final\n"));
+    try std.testing.expectEqualStrings("left\n> 雪e\u{301}\n>\n> final\nRIGHT", editor.text());
+    try std.testing.expectEqual(@as(usize, "left\n> 雪e\u{301}\n>\n> final\n".len), editor.cursor());
+    const before = editor.edits;
+    const caret = editor.cursor();
+    for ([_][]const u8{ "ok\x1bBAD", "ok\xff", "ok\xc3" }) |invalid| {
+        try std.testing.expect((try editor.insertMultiline(std.testing.allocator, invalid)) == .refused);
+        try std.testing.expectEqualStrings("left\n> 雪e\u{301}\n>\n> final\nRIGHT", editor.text());
+        try std.testing.expectEqual(caret, editor.cursor());
+        try std.testing.expectEqual(before, editor.edits);
+        try std.testing.expectEqual(null, editor.rejected);
+    }
+    var small: [10]u8 = undefined;
+    var full: Editor = .initText(&small, "leftRIGHT", 4);
+    try std.testing.expectEqual(KeyOutcome{ .refused = .overflow }, try full.insertMultiline(std.testing.allocator, "\n> a\n"));
+    try std.testing.expectEqualStrings("leftRIGHT", full.text());
+    try std.testing.expectEqual(@as(usize, 4), full.cursor());
+    try std.testing.expectEqual(null, full.rejected);
+}
+
+test "quote insertion refuses active paste partial input and rejected drafts without edits" {
+    const State = enum { paste, partial, rejected };
+    for (std.enums.values(State)) |state| {
+        var storage: [64]u8 = undefined;
+        var editor: Editor = .initText(&storage, "leftRIGHT", 4);
+        switch (state) {
+            .paste => {
+                _ = editor.appEvent(keymap.every, .paste_start, false);
+            },
+            .partial => {
+                _ = editor.insert("\xc3", true);
+            },
+            .rejected => {
+                _ = editor.insert("\x01", true);
+            },
+        }
+        const before = editor.edits;
+        const caret = editor.cursor();
+        const refusal = editor.rejected;
+        const was_pasting = editor.pasting();
+        try std.testing.expect((try editor.insertMultiline(std.testing.allocator, "\n> quote\n")) == .refused);
+        try std.testing.expectEqualStrings("leftRIGHT", editor.text());
+        try std.testing.expectEqual(caret, editor.cursor());
+        try std.testing.expectEqual(before, editor.edits);
+        try std.testing.expectEqual(refusal, editor.rejected);
+        try std.testing.expectEqual(was_pasting, editor.pasting());
     }
 }

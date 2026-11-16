@@ -2,7 +2,6 @@ const std = @import("std");
 const default_intake = @import("product_defaults.zig").intake_capacity;
 
 pub const minimum_intake: usize = 10;
-/// Socket, all retained content files, and the last value's overlapping writer.
 pub const ordinary_exchange_descriptors: usize = @import("protocol.zig").max_request_contents + 2;
 
 pub fn fitIntake(default_requirement: usize, soft_limit: ?usize) !usize {
@@ -33,15 +32,10 @@ const ExecutionPopulation = struct {
     maximum: usize,
 };
 
-/// The model transport a Host runs.
 pub const Transport = union(enum) {
     none,
-    /// Model requests.
     requests,
-    /// Model requests and one provider's model list.
     requests_and_model_list,
-    /// The catalog and this many providers' live model lists, with or
-    /// without model requests, even at zero capacity.
     listings: usize,
 };
 
@@ -54,16 +48,11 @@ pub fn calculate(
     authentication_configured: bool,
     os_tag: std.Target.Os.Tag,
 ) !Requirement {
-    // StoreLease owns its directory and lock (2). SQLite DELETE mode can
-    // overlap the database, rollback journal, temp store, and directory-sync
-    // handle (4). The listener adds one. These are independent and remain
-    // reachable while clients and executions are full.
     const store_lease: usize = 2;
     const sqlite: usize = 4;
     const listener: usize = 1;
     var fixed_host = try add(store_lease, sqlite);
     fixed_host = try add(fixed_host, listener);
-    // The h2 Client's one waker: an eventfd on Linux, a pipe on macOS.
     const transport_wake: usize = if (transport == .none)
         0
     else switch (os_tag) {
@@ -72,9 +61,6 @@ pub fn calculate(
         else => return error.UnsupportedDescriptorPlatform,
     };
     fixed_host = try add(fixed_host, transport_wake);
-    // Discovery sockets sit beyond model slots, including a catalog-only
-    // Host with zero Active Capacity. Legacy request-only populations stay
-    // expressible for callers that run no discovery.
     const model_list: usize = switch (transport) {
         .none, .requests => 0,
         .requests_and_model_list => @intFromBool(active_capacity != 0),
@@ -82,37 +68,11 @@ pub fn calculate(
     };
     fixed_host = try add(fixed_host, model_list);
 
-    // While sealing the last creating-Message content value, an ordinary
-    // connection can retain its socket, all earlier sealed files, and both
-    // the last value's writer and read-only custody handles. Absolute POSIX
-    // opens use AT_FDCWD directly and acquire no directory descriptor.
-    // Controls retain only their sockets. These are simultaneous populations
-    // of the supported workload, not runtime connection quotas. Demand beyond
-    // them can fail allocation/open with original request recovery intact.
     const ordinary_clients = try multiply(ordinary_exchanges, ordinary_exchange_descriptors);
     const clients = try add(ordinary_clients, control_exchanges);
 
-    // A model slot owns one request file, two response aliases, and at most
-    // one transport socket: four. h2 tries addresses one socket at a time and
-    // never holds more connections than streams. A running Bash slot owns its
-    // two capture files, two parent pipe ends and optional stdin file: five. Only
-    // one serial preparation/spawn/cleanup transition exists. Its budgeted
-    // excess of five covers Bash spawn, including both stdin aliases and two child pipe
-    // ends in the Host: posix_spawn opens /dev/null for absent stdin and
-    // reports exec failure directly. Model preparation (three: its request
-    // file and read-only alias, plus the scratch directory while creating
-    // them or one history memo file while copying from it; sealing closes
-    // the writer before it opens the memo file), cleanup (three files plus a directory), failed-
-    // response retention beside its occupied slot (one file plus a
-    // directory), transport trust loading, and self-contained native callbacks are smaller and
-    // mutually exclusive with that serial excess.
     const execution = (try executionPopulation(active_capacity)).maximum;
 
-    // The Host-wide authentication worker may refresh while the execution
-    // owner spawns Bash at its descriptor peak. Its credential parent and lock
-    // (2) overlap its private h2 Client's waker (an eventfd on Linux, a pipe
-    // on macOS), one connection socket and up to two trust-loading handles.
-    // Publishing the replacement instead holds at most two additional files.
     const authentication: usize = if (!authentication_configured or active_capacity == 0)
         0
     else switch (os_tag) {
@@ -121,8 +81,6 @@ pub fn calculate(
         else => return error.UnsupportedDescriptorPlatform,
     };
 
-    // The intake owner retains both ends of one nonblocking wake socket pair.
-    // Workers and the execution fence notify without opening new connections.
     const self_wake: usize = 2;
     var total = try add(inherited, fixed_host);
     total = try add(total, clients);
@@ -157,8 +115,6 @@ fn executionPopulation(active_capacity: usize) !ExecutionPopulation {
     const model_full = try multiply(active_capacity, model_slot);
     const bash_full = try multiply(active_capacity, bash_slot);
     const model_preparation = try add(other_slots, 3);
-    // Two captures, canonical reader, stdin writer and read-only alias, and
-    // their temporary directory handle while creating/unlinking stdin.
     const bash_preparation = try add(other_slots, 6);
     const cleanup = try add(other_slots, 4);
     const bash_spawn = try add(other_slots, 10);
@@ -223,7 +179,6 @@ test "zero execution capacity has no unreachable preparation or spawn population
     try std.testing.expectEqual(@as(usize, 0), requirement.execution);
     try std.testing.expectEqual(@as(usize, 0), requirement.authentication);
     try std.testing.expectEqual(@as(usize, 64), requirement.total);
-    // No slot, no Reactor: the model list is never fetched.
     const listing = try calculate(3, 0, 10, 2, .requests_and_model_list, true, .linux);
     try std.testing.expectEqual((try calculate(3, 0, 10, 2, .requests, true, .linux)).fixed_host, listing.fixed_host);
 }
@@ -267,7 +222,6 @@ test "catalog discovery reserves its sockets beyond model capacity including zer
             const requests = try calculate(3, capacity, 10, 2, .requests, false, os_tag);
             const catalog = try calculate(3, capacity, 10, 2, .{ .listings = 0 }, false, os_tag);
             try std.testing.expectEqual(requests.fixed_host + 1, catalog.fixed_host);
-            // One more socket for each live list.
             for ([_]usize{ 1, 2 }) |lists| {
                 const listings = try calculate(3, capacity, 10, 2, .{ .listings = lists }, false, os_tag);
                 try std.testing.expectEqual(requests.fixed_host + 1 + lists, listings.fixed_host);

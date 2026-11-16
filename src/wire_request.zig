@@ -1,7 +1,3 @@
-//! The Host's request ingress: it captures each content string into a sealed
-//! scratch file while protocol.zig's Parser reads the rest, then hands the
-//! parsed Request its content's custody. Files, scratch charges and polling
-//! live here; the grammar they serve is protocol.zig's.
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const named_scratch = @import("named_scratch.zig");
@@ -17,7 +13,6 @@ const requests = protocol.Requests(Custody);
 pub const Request = requests.Request;
 const Parser = requests.Parser;
 
-/// Injected failures of a request's content capture.
 pub const ContentFaults = struct {
     acquire: bool = false,
     write: bool = false,
@@ -35,38 +30,24 @@ pub const ParseOptions = struct {
     expected_kind: ?protocol.Kind = null,
 };
 
-/// Resumable ingress owns captures until complete framing and validation.
-/// Parser remains the sole wire grammar: only its content-read instruction
-/// can open a capture. Replays see metadata, never descriptors or charges.
 pub const Ingress = struct {
     allocator: std.mem.Allocator,
     options: ParseOptions,
     metadata: std.ArrayList(u8) = .empty,
     received: u64 = 0,
     lexical: enum { plain, string, escape } = .plain,
-    /// Where the next byte goes: the metadata, the opening quote of a
-    /// content string, or `capture`.
     content_state: enum { metadata, awaiting_quote, awaiting_schema, capturing, capturing_schema } = .metadata,
-    /// Live while `content_state` is `.capturing`.
     capture: ContentCapture = undefined,
     decoder: protocol.StringDecoder = .{},
     schema_encoder: SchemaEncoder = undefined,
     contents: [protocol.max_request_contents]ContentField = @splat(.{}),
     content_count: usize = 0,
     complete: bool = false,
-    /// The one home of the parsed Request: preview and finish parse into it.
-    /// After finish, the Ingress's owner borrows it until it releases the Ingress.
     request: Request = undefined,
 
-    // Initial Message combines configuration scalars and sender identity.
-    // Allow worst-case escaping of both, of a full `tools` list, and of 128
-    // short grammar tokens (keys, states and literals, each at most 32
-    // bytes), plus punctuation and one preserved whitespace separator at
-    // every lexical boundary.
     const metadata_limit = 2 * (6 * (protocol.max_store_bytes + protocol.max_key_bytes + protocol.max_session_bytes +
         protocol.max_workspace_bytes + protocol.max_provider_bytes + protocol.max_model_bytes + 16 + 2 * protocol.max_tool_list_name_bytes + 128 * 32) + (128 + 2 * protocol.max_tools) * 8);
 
-    /// Builds the Ingress in its home. `request` stays unwritten.
     pub fn init(self: *Ingress, allocator: std.mem.Allocator, options: ParseOptions) void {
         self.* = .{ .allocator = allocator, .options = options };
     }
@@ -104,8 +85,6 @@ pub const Ingress = struct {
                             }
                             continue;
                         },
-                        // A plain nullable spec value needs no capture. Keep
-                        // its literal in metadata for the protocol to validate.
                         'n' => self.content_state = .metadata,
                         else => return error.InvalidJsonShape,
                     }
@@ -130,7 +109,6 @@ pub const Ingress = struct {
             switch (self.lexical) {
                 .plain => switch (byte) {
                     ' ', '\t', '\r', '\n' => {
-                        // Do not join tokens (t rue) or erase trailing input.
                         if (self.metadata.items.len == 0 or self.metadata.items[self.metadata.items.len - 1] != ' ')
                             try self.append(' ');
                         continue;
@@ -184,8 +162,6 @@ pub const Ingress = struct {
         if (self.received != self.options.content_length) return error.TrailingInput;
     }
 
-    /// Parses the complete body into `request`, moves the captured content
-    /// into it, and returns it.
     pub fn finish(self: *Ingress) !*Request {
         if (self.received != self.options.content_length) return error.UnexpectedEndOfBody;
         self.parse() catch |err| switch (err) {
@@ -193,9 +169,6 @@ pub const Ingress = struct {
             else => return err,
         };
         const request = &self.request;
-        // All fallible validation precedes this non-failing custody transfer.
-        // Each value takes the capture its string arrived in, whatever the
-        // members' order.
         var moved: usize = 0;
         switch (request.*) {
             .configure => |*command| {
@@ -233,7 +206,6 @@ pub const Ingress = struct {
     }
 };
 
-// One absolute budget; progress cannot extend an absolute exchange.
 pub fn pollExchange(io: std.Io, fd: std.posix.fd_t, events: i16, deadline: ?i128) !void {
     const end = deadline orelse {
         var descriptors = [_]std.posix.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
@@ -263,13 +235,9 @@ const ContentCapture = struct {
     path: [protocol.max_store_bytes + "/scratch/request-".len + 20 + 1 + 3 + ".tmp".len]u8 = undefined,
     path_len: usize,
     sink: ContentSink,
-    /// The read-only reopen. Seal closes the writer as it sets this, so this
-    /// is the only open descriptor once set; while null, `sink.file` is.
     sealed: ?std.Io.File = null,
     transferred: bool = false,
 
-    /// Opens the scratch file and builds the capture in place. On error
-    /// nothing is open and the capture is not live.
     fn init(self: *ContentCapture, options: ParseOptions, ordinal: u8) !void {
         if (options.content_faults.acquire) return error.InjectedContentAcquireFailure;
         var name_buffer: [96]u8 = undefined;
@@ -370,8 +338,6 @@ const ContentSink = struct {
         if (self.used == 0) return;
         if (self.scratch_budget) |budget| {
             if (!budget.allocate(self.used)) return error.ScratchCapacityExhausted;
-            // A failed streaming write may have written a prefix. Retain the
-            // complete submitted increment until this file is safely removed.
             self.charged += self.used;
         }
         try self.file.writeStreamingAll(self.io, self.buffer[0..self.used]);
@@ -379,7 +345,6 @@ const ContentSink = struct {
     }
 };
 
-/// Captures one JSON string the way Ingress.feed does, into `field`.
 fn captureForTest(field: *ContentField, options: ParseOptions, ordinal: u8, json: []const u8) !void {
     std.debug.assert(json[0] == '"');
     var capture: ContentCapture = undefined;
@@ -644,7 +609,6 @@ test "incremental ingress streams fragmented content and transfers charged custo
     for (suffix) |byte| try ingress.feed(&.{byte});
     const request = try ingress.finish();
     defer request.removeTemporaryContent(io) catch unreachable;
-    // Disposing the exchange's parser cannot refund or close admitted ingress.
     ingress.deinit();
     try std.testing.expectEqual(@as(u64, expected.len), used.load(.acquire));
     try std.testing.expectEqualStrings("p\x00é", request.message.session.slice());
@@ -773,7 +737,6 @@ test "only a creating Message carries require_model, and it binds the digest" {
         try std.testing.expectEqual(case.require_model, request.message.require_model);
         digests[index] = request.message.semanticDigest();
     }
-    // An explicit false is the omitted condition; true is a different intent.
     try std.testing.expectEqualSlices(u8, &digests[0], &digests[1]);
     try std.testing.expect(!std.mem.eql(u8, &digests[0], &digests[2]));
     try std.testing.expect(!std.mem.eql(u8, &digests[0], &digests[5]));
@@ -798,8 +761,6 @@ test "incremental ingress preserves grammar and releases both captures after lat
     var used = std.atomic.Value(u64).init(0);
     var retained: ?named_scratch.Owner = null;
     for (cases, 0..) |case, index| {
-        // Every split of this small command must have the same grammar and
-        // capture lifetime, including suspension between surrogate/quote bytes.
         for (0..case.bytes.len + 1) |split| {
             var ingress: Ingress = undefined;
             ingress.init(std.testing.allocator, .{
@@ -810,7 +771,6 @@ test "incremental ingress preserves grammar and releases both captures after lat
                 .retained_scratch = &retained,
                 .scratch_budget = .{ .used = &used, .limit = 8 },
                 .expected_kind = case.kind,
-                // A mismatched kind must fail before file acquisition.
                 .content_faults = .{ .acquire = case.kind != .configure },
             });
             const result: anyerror!*Request = blk: {
@@ -846,14 +806,12 @@ test "a request's members may come in any order, and its content lands in its ow
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
-    // Content fields can arrive in either order, before or after the header.
     const reordered = "{\"configuration\":{\"outputSchema\":{},\"label\":\"Map\",\"tools\":[\"bash\"],\"instructions\":\"first\\n\"},\"require_model\":true,\"session\":\"peer\",\"key\":\"k\",\"store\":\"s\",\"kind\":\"configure\",\"version\":\"" ++ protocol.wire_version ++ "\"}";
     const ordered = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{\"instructions\":\"first\\n\",\"tools\":[\"bash\"],\"outputSchema\":{},\"label\":\"Map\"},\"require_model\":true}";
     var used = std.atomic.Value(u64).init(0);
     var retained: ?named_scratch.Owner = null;
     var digests: [2][32]u8 = undefined;
     for ([_][]const u8{ ordered, reordered }, 0..) |bytes, index| {
-        // Every split suspends capture at a different byte.
         for (0..bytes.len + 1) |split| {
             var ingress: Ingress = undefined;
             ingress.init(std.testing.allocator, .{
@@ -911,10 +869,8 @@ test "an order-free request still names each member once, carries every required
         .{ .json = "{\"session\":\"x\",\"key\":\"k\",\"kind\":\"session_stop\",\"extra\":{\"a\":[1]}," ++ header ++ "}", .failure = error.UnexpectedField },
         .{ .json = "{\"session\":\"x\",\"key\":\"k\",\"kind\":\"session_stop\",\"extra\":{\"a\":[true,null]}," ++ header ++ "}", .failure = error.UnexpectedField },
         .{ .json = "{\"kind\":\"session_stop\",\"text\":" ++ value ++ ",\"session\":\"x\",\"key\":\"k\"," ++ header ++ "}", .failure = error.UnexpectedField },
-        // A value with no state, or a state with no value.
         .{ .json = "{\"kind\":\"message\",\"text\":{\"value\":\"x\"},\"sender_handle\":null,\"sender\":null,\"session\":\"x\",\"key\":\"k\"," ++ header ++ "}", .failure = error.MissingField },
         .{ .json = "{\"kind\":\"message\",\"text\":{\"state\":\"value\"},\"sender_handle\":null,\"sender\":null,\"session\":\"x\",\"key\":\"k\"," ++ header ++ "}", .failure = error.InvalidFieldState },
-        // Creating Messages carry the same content spec in either field order.
         .{ .json = "{\"kind\":\"message\",\"configuration\":" ++ configuration ++ ",\"outputSchema\":null,\"instructions\":\"x\"},\"text\":" ++ value ++ ",\"sender_handle\":null,\"sender\":null,\"session\":\"\",\"key\":\"k\"," ++ header ++ "}" },
         .{ .json = "{\"configuration\":" ++ configuration ++ ",\"outputSchema\":{},\"instructions\":\"x\"},\"text\":" ++ value ++ ",\"sender_handle\":null,\"sender\":null,\"session\":\"\",\"key\":\"k\"," ++ header ++ ",\"kind\":\"message\"}" },
         .{ .json = "{\"configuration\":" ++ configuration ++ ",\"outputSchema\":{},\"instructions\":\"x\"},\"text\":" ++ value ++ ",\"key\":\"k\",\"session\":\"x\"," ++ header ++ ",\"kind\":\"configure\"}", .failure = error.UnexpectedField },
@@ -966,8 +922,6 @@ test "observation needs no scratch at a full budget" {
     try std.testing.expect(retained == null);
 }
 
-// Every object is a schema, not a reference. The [] custody marker exists
-// only after ingress has captured an object and must not be accepted on wire.
 test "schema object custody is canonical and cannot collide with reference-shaped objects" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});

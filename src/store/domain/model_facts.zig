@@ -1,5 +1,3 @@
-//! Saved models.dev facts. Publication is one transaction: a model_id is
-//! unique across generations, so committing a partial refresh would hide old facts.
 const std = @import("std");
 const Bounded = @import("../../bounded.zig").Bounded;
 const catalog = @import("../../model_catalog.zig");
@@ -41,22 +39,13 @@ pub const openai_ids = rsql.Read(.{
     .cardinality = .each,
 });
 
-// One statement selects the authority and its facts together. The LEFT JOIN
-// deliberately emits a source-only row for an empty generation or absent ID:
-// neither may resurrect a shipped entry. No source emits no rows.
 fn selectionSql(comptime columns: []const u8, comptime model: ?[]const u8) []const u8 {
     return "SELECT " ++ columns ++ " FROM model_catalog_source source LEFT JOIN model_fact fact " ++
         "ON fact.generation=source.generation" ++
-        // Full traversal and a non-null point lookup need different plans.
-        // A nullable OR would scan every fact inside the admission hold.
         (if (model) |id| " AND fact.model_id=" ++ id else "") ++ " WHERE source.slot=1";
 }
 const selection_columns = "fact.model_id,fact.context_window,fact.efforts,fact.openai_listed";
 
-/// Effective window selected inside an Operation's INSERT, with no extra round.
-/// A source-only row (empty generation, missing model or null window) uses the
-/// unlisted fallback; only no source uses the bound shipped window. Keep that
-/// authority selection shared with Model and the full-catalog reader.
 pub fn contextWindowSql(comptime model: []const u8, comptime shipped: []const u8, comptime unlisted: []const u8) []const u8 {
     return "coalesce((" ++ selectionSql("coalesce(fact.context_window," ++ unlisted ++ ")", model) ++ ")," ++ shipped ++ ")";
 }
@@ -88,8 +77,6 @@ const selected_model = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// Operation-scoped single-model selection, including the source-only row.
-/// Queue alongside other reads, then call facts after the round completes.
 pub const Model = struct {
     row: ?SelectionRow = null,
     entry: [1]catalog.Entry = undefined,
@@ -98,9 +85,6 @@ pub const Model = struct {
         a.read(selected_model, .{ .id = id }, &self.row);
     }
 
-    /// Borrowed until this Model is released or read again. When there is no
-    /// source, the shipped snapshot is borrowed instead (the same selection
-    /// rule as the full-catalog read).
     pub fn facts(self: *Model) []const catalog.Entry {
         const row = if (self.row) |*row| row else return catalog.shipped;
         const id = if (row.model_id) |*id| id.slice() else return &.{};
@@ -136,9 +120,6 @@ const Selection = struct {
     }
 };
 
-/// Full selected generation for a single consumer operation. The caller's
-/// arena owns all saved entries and IDs; no source borrows shipped instead.
-/// One SELECT/Store round, with no separately observed source/fact state.
 pub fn readSelected(a: anytype, arena: std.mem.Allocator) ![]const catalog.Entry {
     var selection: Selection = .{ .allocator = arena };
     errdefer selection.deinit();
@@ -178,14 +159,8 @@ const update_source = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// Access bounds each queued batch and flushes repeated statements. All
-/// batches share one transaction; only its final COMMIT publishes the source.
-/// These statements serve the infrequent bulk refresh, not a Session's
-/// hot path. The Store releases their prepared forms after the outer commit.
 pub const save_statements = .{ source, existing, insert_fact, update_fact, insert_source, update_source };
 
-/// Keys borrow only this refresh's entries, not rows from the Store. The
-/// bulk read marks which already exist, including IDs in older generations.
 const Existing = struct {
     ids: std.StringHashMap(bool),
 
@@ -195,18 +170,11 @@ const Existing = struct {
     }
 };
 
-/// Saves `entries` and `etag` as the next generation in one transaction.
-/// Round `.facts` reads the saved source and which IDs exist, in any
-/// generation; the commit round inserts or updates each fact and the
-/// source. Access flushes the commit round's writes in bounded batches,
-/// all inside the transaction.
 pub const Save = struct {
     pub const rounds = transition.rounds(.{ .facts = .{.always} });
     pub const round_budget = 2;
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = .facts;
-    /// The caller's, which outlive the transition: the writes bind each
-    /// entry's ID and the etag in place.
     pub const Input = struct { entries: []const catalog.Entry, etag: ?[]const u8 };
     pub const Result = void;
     pub const Ordinary = store_core.Ordinary.none;
@@ -221,8 +189,6 @@ pub const Save = struct {
         if (ran == null) {
             for (t.input.entries) |entry| try t.known.ids.put(entry.id, false);
             r.read(source, .{}, &t.previous);
-            // D202 forbids production DELETE, and rsql has no upsert. Read all
-            // existence once, then let Access batch writes without per-ID waits.
             r.readEach(existing, .{}, std.math.maxInt(u64), &t.known);
             return .{ .round = .facts };
         }

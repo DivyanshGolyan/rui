@@ -94,6 +94,10 @@ Long, churn, full Debug and H2 targets follow their mappings, not an uncondition
 
 `test-logic` compiles `src/logic_tests.zig`, which includes answer-rendering tests absent from `src/tests.zig`.
 Neither composed gate covers that root, so run it with a selected composed gate.
+
+The verify-rui feature map is policy input: `test_verify_rui_map.py` checks that every named frame belongs to one linked feature recipe with the required sections.
+Changes under `.claude/skills/verify-rui/features/` use the normal policy lane so documentation classification cannot skip this check; local feedback also selects it for those files and `scripts/frames.json`.
+
 The compiler and dependency setup action is bootstrap, not CI policy.
 An unavailable selection base is an error.
 PR selection uses its recorded base and immutable merge candidate.
@@ -180,10 +184,26 @@ The release publisher is serialized and never treats cancelled acceptance as a p
 Build caches hold compilation inputs and outputs, not acceptance.
 All Zig unit Run steps bypass Zig acceptance caching, and Go tests use `-count=1`.
 Cache-policy changes run [the fixed-seed execution regression](../../tests/ci/cache_execution.py) on Linux before main, and on macOS in promotion when the batch changed cache policy.
-Cache policy is the proof and the prune script themselves, and changed non-comment lines that name a Zig build cache or `has_side_effects` in the build, the workflows and the setup action, whose caches are all build caches; any change to the `cache_execution` job counts too.
+Cache policy is the proof, the prune script and the cache publication policy module themselves, and changed non-comment lines that name a Zig build cache or `has_side_effects` in the build, the workflows and the setup action, whose caches are all build caches; any change to the `cache_execution` job counts too.
 The required `admission` aggregate includes this job when selected.
 Build-cache keys separate native tools, Apple SDK, architecture, dependency pins, scripts, source inputs and shard.
 Only `main` saves caches; PR jobs restore main's snapshots and save none, so PR caches never feed a privileged workflow or evict main's.
+Setup restores caches and captures missing exact keys; an explicit `save-only` invocation of the same cache composite runs under `always()` after compilation, before long failure diagnostics.
+The cache owner's `save-keys.cjs` derives publication keys from the setup and bounded work outcomes; it never overwrites an exact hit.
+Only completed work is published under an exact key. The compiler download may save after later failure, but only after installation and version verification finish.
+Build and build-runner compilation that fails or step-times-out after successful setup saves under `<exact>-partial-<run_id>-<run_attempt>`, never under the exact key; failed setup/fetch publishes no compilation snapshot.
+These partial keys match the existing prefix restore keys, report a non-exact hit, and therefore still run dependency fetch and the full build before publishing a complete exact key.
+Package, previous-release and actionlint caches remain save-on-success, with the previous-release build and linter install required to finish first.
+Shards configure and save the build runner after verified artifact restoration, before acceptance; tests still execute normally.
+Cold acceptance still bypasses build, package and build-runner caches.
+A [job timeout cancels the job](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idtimeout-minutes), and [cancellation forcibly terminates remaining work after five minutes](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation), so `always()` alone cannot guarantee an upload then.
+New work-step deadlines exist only to reserve cache publication time: job budget minus a 25-minute cold-setup allowance minus a three-minute save reserve, and only when that limit covers the slowest sampled green step plus at least two minutes.
+The allowance covers the observed 213-second setup (Selected run 43832831879) plus four further retry/request windows (200 + 90 seconds each); it is accounting, not a setup deadline or a measured bound on network tails.
+The workflow comments and cache-maintenance regression record the observed durations and run IDs and check both the derivation and the margin.
+Setup/fetch, cache uploads, linter installation, shard restore/rebuild and subsequent shard configuration have no new step deadline. Existing acceptance and bisect deadlines are unchanged.
+Where the measured save window cannot fit, including short-budget unit/typecheck/proof/codegen jobs, compilation retains only its unchanged job deadline. Saves still run on step failure; on a job timeout they run only if GitHub allows them. Hard runner loss, forced cancellation or an upload failure can also prevent publication.
+Partial Zig compilation caches are safe to restore: [Zig's content-addressed cache validates hashed inputs and manifests, treating incomplete manifests as misses](https://github.com/ziglang/zig/blob/0.17.1/lib/std/Build/Cache.zig).
+That safety argument is source inspection, not a claim of native interrupted-build qualification; cached output never substitutes for test execution.
 
 Each platform builds its target closure once with `ci-build -Dci-targets=...`.
 On Linux and macOS, when the selection compiles the single-threaded unit test binary alongside other gates, one producer builds only that binary (`-Dci-part=unit`) and another builds the rest (`-Dci-part=rest`); build.zig refuses a split whose selection never reaches the unit compile.
@@ -209,11 +229,13 @@ Uploads expire after three days.
 Successful gates do not capture.
 Native observation failure metadata is copied after reap and before temporary-root deletion.
 
-[Cache maintenance](../../.github/workflows/cache-maintenance.yml) warms production compilation after trusted main pushes that change build, dependency or maintenance inputs.
+[Cache maintenance](../../.github/workflows/cache-maintenance.yml) warms production compilation (`baseline`) and both split producer partitions (`compiled` and `compiled-unit`) on Linux and macOS after trusted main pushes that change build, dependency or maintenance inputs.
+The producer warmers run the same `build_artifact.py build` command as Selected checks and Promote, using `rest` and `unit` respectively with the full promotion core (`check-full`, `test-logic`, `admission-debug-integration`, plus Linux `stack-frames`).
+The new split warmers retain their 120-minute job budget and have a derived 92-minute compile step. No existing job budget increases: baseline stays at 30 minutes, runner maintenance at 15, previous release at 45, Linux unit/typecheck at 15, cache proof/codegen at 20, ordinary shards at 35 and Renderer contracts at 45. The existing 60-minute Linux and Mac producer safety nets remain. Only the measured, sufficiently long jobs receive derived work-step deadlines; no job budget changes to make space for saving.
 A build partition restores its own newest snapshot, for the current dependencies first and then across a dependency repin; a partition with neither, such as one only pull requests run, starts from that baseline for the current dependencies, and no partition restores another's snapshot.
 It also compiles the build runner on six Linux slots and one Mac, so test shards on the CPU models those slots drew restore it from main.
-Cleanup keeps main's newest snapshot per platform and partition, per build-runner CPU model, of each platform's compiler and of the package set, and removes every PR cache; these are targets, not a quota.
-Warm baselines are not test acceptance.
+Cleanup keeps main's newest complete snapshot per platform and partition, per build-runner CPU model, of each platform's compiler and of the package set, and removes every PR cache; these are targets, not a quota. It separately keeps at most the newest partial compilation snapshot per platform/partition or runner CPU prefix, so a partial cannot evict the retained complete snapshot.
+Warm compilation snapshots are not test acceptance. Cleanup waits for all maintenance publishers, including the previous-release warmer.
 Maintenance also builds the pinned previous release per platform for the read-only upgrade check.
 The API-only cleanup job runs trusted main code with cache-deletion permission and consumes no producer code, caches or artifacts.
 

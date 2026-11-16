@@ -1,4 +1,3 @@
-//! Pure client choices for a complete fresh spec, not Host-inferred settings.
 const std = @import("std");
 const catalog = @import("model_catalog.zig");
 const capability = @import("model_capability.zig");

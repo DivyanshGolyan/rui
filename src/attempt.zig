@@ -1,7 +1,5 @@
 const std = @import("std");
 
-/// An Action has one Attempt. The Store issues it this ordinal; 0 means the
-/// Action is unattempted.
 pub const action_attempt_ordinal: u64 = 1;
 
 pub const ActionAttemptBinding = struct {
@@ -20,7 +18,6 @@ pub const AttemptBinding = struct {
 
 pub const DispatchPermit = DispatchPermitOf(AttemptBinding);
 
-/// A one-shot permit: `consume` yields `binding` once, then refuses.
 fn DispatchPermitOf(comptime Binding: type) type {
     return struct {
         binding: Binding,

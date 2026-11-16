@@ -36,11 +36,6 @@ enum custody_state {
 
 struct Runtime;
 
-/*
- * Content-free by construction: no byte array and no owned payload pointer.
- * `easy` is an opaque transport handle; descriptors identify disk-backed
- * custody. State publication transfers ownership between the fixed lanes.
- */
 struct PhysicalCustody {
     _Atomic uint32_t state;
     uint8_t kind;
@@ -464,8 +459,6 @@ static int spawn_bash(struct Runtime *runtime, struct PhysicalCustody *cell) {
 
 static void signal_owner(struct Runtime *runtime) {
     pthread_mutex_lock(&runtime->wake_mutex);
-    /* Two consumers share this hint. Broadcast avoids a consumptive wake
-     * selecting the wrong lane; truth remains in the bounded cell scan. */
     pthread_cond_broadcast(&runtime->wake_cond);
     pthread_mutex_unlock(&runtime->wake_mutex);
 }

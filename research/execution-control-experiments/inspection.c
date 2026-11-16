@@ -1,5 +1,3 @@
-// THROWAWAY: one SQLite owner, independent I/O reactor, fake streams and one real shell.
-// Synthetic report schema and command queue; not the Rui server or its semantic proof.
 #include "sqlite3.h"
 #include <assert.h>
 #include <errno.h>
@@ -85,7 +83,7 @@ static void *producer(void *unused) {
 }
 static void *client(void *unused) {
     (void)unused;while(!atomic_load(&start_client))sleep_ns(100000);
-    sleep_ns(1000000); // actual arrival is recorded; no inferred queue latency.
+    sleep_ns(1000000);
     atomic_store(&requested_ns,now_ns());atomic_store(&stop_ready,1);return NULL;
 }
 static void *reactor(void *unused) {
@@ -139,7 +137,7 @@ int main(int argc,char **argv) {
     assert(!strcmp(mode,"fifo")||!strcmp(mode,"control_first"));sql("DELETE FROM cancelled; UPDATE head SET revision=0;");
     setup_io();pthread_t pt,rt,ct;assert(pthread_create(&pt,NULL,producer,NULL)==0);assert(pthread_create(&rt,NULL,reactor,NULL)==0);assert(pthread_create(&ct,NULL,client,NULL)==0);
     uint64_t warmup=now_ns();while(!atomic_load(&shell_bytes)){assert(now_ns()-warmup<5000000000ULL);sleep_ns(1000000);}
-    sleep_ns(20000000); // establish traffic, not included in measured work interval.
+    sleep_ns(20000000);
     uint64_t started=now_ns(),base_footprint=footprint();double cpu_start=cpu_ms();
     const char *fault=getenv("RUI_PROBE_SIGNAL");
     if(fault){fprintf(stderr,"owned_shell_group=%d\n",(int)shell_pid);fflush(stderr);raise(atoi(fault));assert(0);}

@@ -1,4 +1,3 @@
-// One JSONL job interface for stills and movie frames.
 const fs = require('fs');
 const { pathToFileURL } = require('url');
 

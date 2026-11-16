@@ -1,10 +1,8 @@
-//! Allocation-free MySQL URL values and validation.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const mysql = @import("store/wire/mysql.zig");
 const url = @import("url");
 
-/// Caller-owned parsed fields. Slices borrow this storage until parse or wipe.
 pub fn ValueWith(comptime ca_file_bytes: usize) type {
     return struct {
         const Value = @This();
@@ -14,18 +12,15 @@ pub fn ValueWith(comptime ca_file_bytes: usize) type {
         host: Bounded(253) = .{},
         socket: Bounded(107) = .{},
         database: Bounded(64) = .{},
-        // Same path bound as Host settings and TLS loader.
         ca_file: Bounded(ca_file_bytes) = .{},
         port: u16 = default_port,
 
-        /// Replace the previous value; an invalid URL leaves all fields wiped.
         pub fn parse(self: *Value, text: []const u8) error{InvalidMysqlUrl}!void {
             self.wipe();
             errdefer self.wipe();
             try parseInto(self, text);
         }
 
-        /// Erase credentials and every other retained field, including unused bytes.
         pub fn wipe(self: *Value) void {
             std.crypto.secureZero(u8, std.mem.asBytes(self));
             self.port = default_port;
@@ -33,7 +28,6 @@ pub fn ValueWith(comptime ca_file_bytes: usize) type {
     };
 }
 
-/// Parse into fresh, field-compatible storage owned by an adapter.
 pub fn parseInto(self: anytype, text: []const u8) error{InvalidMysqlUrl}!void {
     if (!std.mem.startsWith(u8, text, "mysql://") or std.mem.indexOfAny(u8, text, "#\r\n\x00") != null) return error.InvalidMysqlUrl;
     const query_start = std.mem.indexOfScalar(u8, text, '?') orelse text.len;
@@ -84,8 +78,6 @@ pub fn parseInto(self: anytype, text: []const u8) error{InvalidMysqlUrl}!void {
     }
 }
 
-/// `text` percent-decoded into `out`. MySQL's rules on top of the URL
-/// decoding: no NUL, and outside OS paths no other control and only UTF-8.
 fn decode(out: anytype, text: []const u8, comptime os_path: bool) error{InvalidMysqlUrl}!void {
     const decoded = url.percentDecode(text, &out.bytes, .literal) orelse return error.InvalidMysqlUrl;
     for (decoded) |byte| if (byte == 0 or (!os_path and (byte < 0x20 or byte == 0x7f))) return error.InvalidMysqlUrl;

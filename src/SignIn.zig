@@ -1,4 +1,3 @@
-//! Focused sign-in dialog and sole joined authentication worker.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -33,8 +32,6 @@ const Published = struct { defaults: anyerror!void, activation: anyerror!Activat
 const Outcome = union(enum) { cancelled, failed: struct { cause: anyerror, shown: ?core.Failure = null }, published: Published };
 const Presentation = union(enum) { screen: *vxfw.EventContext, departure: *std.Io.Writer, native_departure };
 const max_receipt_bytes = @max(host_launch.max_report_bytes + 512, 4 * @import("host_settings.zig").max_path_bytes + 1024);
-// One terminal retains at most sixteen worst-case receipts. Refuse a
-// further attempt before replacing its current outcome rather than drop bytes.
 const max_deferred_bytes = 16 * max_receipt_bytes;
 const Receipts = struct { file: std.Io.File, committed_end: u64 = 0, reported: u64 = 0, first_failure: ?anyerror = null };
 const ReceiptFailure = union(enum) {
@@ -50,21 +47,14 @@ pub const Edit = union(enum) { append: []const u8, erase, confirm, clear };
 
 pub const Browser = struct {
     link: @import("bounded.zig").Bounded(plan_login.max_link_bytes),
-    /// Typed address bytes. The first `confirmed` end with Enter's newline
-    /// and wait for the login to read them; the rest are still being typed.
     entry: [plan_wire.max_request_line_bytes]u8,
     len: usize,
     confirmed: usize,
-    /// More was typed than any address can be; Enter discards it.
     overflow: bool,
-    /// The login read the last confirmed lines and none was the address.
     stray: bool,
-    /// An address was confirmed and no answer about it has come.
     checking: bool,
-    /// What the login showed as its failure, for the row once it settles.
     failure: ?core.Failure,
 
-    /// The small fields; the buffers stay as mapped.
     pub fn init(self: *Browser) void {
         self.link.len = 0;
         self.len = 0;
@@ -87,13 +77,11 @@ pub const Browser = struct {
         return moved;
     }
 
-    /// One edit of the address entry, as the key entry edits the key.
     pub fn edit(browser: *Browser, change: Edit) void {
         switch (change) {
             .append => |text| {
                 browser.stray = false;
                 browser.checking = false;
-                // One byte stays for Enter's newline.
                 if (browser.overflow or text.len >= browser.entry.len - browser.len) {
                     browser.overflow = true;
                     return;
@@ -108,7 +96,6 @@ pub const Browser = struct {
                 browser.entry[browser.len] = 0;
             },
             .confirm => {
-                // Nothing that long is an address; say so rather than cut it.
                 if (browser.overflow) {
                     browser.discard();
                     browser.stray = true;
@@ -131,7 +118,6 @@ pub const Browser = struct {
         }
     }
 
-    /// Wipes what is typed and not yet confirmed.
     fn discard(browser: *Browser) void {
         std.crypto.secureZero(u8, browser.entry[browser.confirmed..browser.len]);
         browser.len = browser.confirmed;
@@ -295,8 +281,6 @@ pub fn deinit(self: *Self) void {
 }
 
 const ReceiptFault = struct { after: usize, cause: anyerror };
-/// Serializes without consuming the outcome. Only a complete positional append
-/// advances committed_end; a retry overwrites an uncommitted partial tail.
 noinline fn stageReceipt(self: *Self, fault: ?ReceiptFault) !void {
     if (self.outcome == null) return;
     if (self.reported_current != 0) return self.retainFailure(.{ .internal = error.SignInReceiptPartlyReported });
@@ -362,8 +346,6 @@ fn drainReceipts(self: *Self, presentation: Presentation) !void {
 
 noinline fn finishReceipts(self: *Self, presentation: Presentation) !void {
     self.drainReceipts(presentation) catch |err| return self.receiptIoFailure(presentation, err);
-    // The last receipt never needs disk space: exit remains actionable even
-    // when the scratch cap or a full disk refused the next login attempt.
     var bytes: [max_receipt_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&bytes);
     const current_failure = try self.writeOutcome(&writer);
@@ -495,7 +477,6 @@ fn activatePublished(self: *Self, connection: ?host_start.ConnectionSave) Publis
         .uncertain, .failed => return .{ .defaults = {}, .activation = error.ConnectionNotActive, .connection = connection },
         .saved => {},
     };
-    // API model/provider binding is terminal-local, not a global custom default.
     const defaults: anyerror!void = if (frozen.provider == .openai) {} else preferences.saveProviderAfterLogin(init_.environ_map.get("HOME") orelse "", frozen.provider);
     const intended = if (connection) |*value| &value.saved else if (frozen.provider == .openai) self.savedConnection() else null;
     return .{ .defaults = defaults, .activation = self.activate.?(init_, frozen.intent, intended), .connection = connection };
@@ -518,7 +499,6 @@ fn beginWithFault(self: *Self, ctx: *vxfw.EventContext, attempt: core.Attempt, f
     self.code.len = 0;
     self.shown_pending = false;
     std.debug.assert(self.outcome == null);
-    // A new key save and every non-API flow need their own authority.
     if (attempt == .key or self.frozen == null or self.frozen.?.provider != .openai) self.saved = null;
     self.gate.store(.cancellable, .release);
     if (self.init == null) return;
@@ -565,8 +545,6 @@ fn failedKind(self: *const Self, failure: @FieldType(Outcome, "failed")) core.Fa
     };
 }
 
-/// Operation failure is a value; receipt I/O failure is the error channel. A
-/// failed append can therefore retain the original whole outcome for retry.
 fn writeOutcome(self: *const Self, writer: *std.Io.Writer) !?anyerror {
     if (self.retention_failure) |failure| try writer.print("Replacement sign-in was not started: previous report could not be retained ({s}).\n", .{@errorName(failure.cause())});
     const outcome = self.outcome orelse return null;
@@ -864,8 +842,6 @@ fn formEvent(self: *Self, field: core.Field, input: vxfw.Event, pasting: bool) !
     const form = try self.ensureForm();
     const editor = form.editor(field);
     const edited = @import("panel_editor.zig").event(editor, input, pasting, &self.issue);
-    // A rejected paste rolls back to valid old text. That is not permission
-    // to submit the old text from a different control: acknowledge in-field.
     if (edited == .refused) editor.refuse();
     if (input == .paste_end) {
         const text = editor.text();
@@ -992,7 +968,6 @@ fn appendEditor(rows: *std.ArrayList(Row), ctx: vxfw.DrawContext, label: []const
 fn hostCommand(alloc: std.mem.Allocator, operation: []const u8, store: []const u8) std.mem.Allocator.Error![]const u8 {
     var writer: std.Io.Writer.Allocating = .init(alloc);
     errdefer writer.deinit();
-    // Allocating.drain maps its allocator failure to WriteFailed.
     writer.writer.print("rui host {s} --store ", .{operation}) catch return error.OutOfMemory;
     @import("TerminalText.zig").writeShellWord(&writer.writer, store) catch return error.OutOfMemory;
     return writer.written();
@@ -1238,7 +1213,6 @@ test "Sign-in paste source moves confirmed lines across reads, keeps typing, and
     const browser = mapped.value;
     browser.init();
     var buffer: [8]u8 = undefined;
-    // Nothing waits until Enter confirms what was typed.
     try std.testing.expectEqual(@as(?usize, null), browser.take(&buffer));
     browser.edit(.{ .append = "not it" });
     try std.testing.expectEqual(@as(?usize, null), browser.take(&buffer));
@@ -1246,7 +1220,6 @@ test "Sign-in paste source moves confirmed lines across reads, keeps typing, and
     browser.edit(.{ .append = "http://127.0.0.1:1455/" });
     browser.edit(.{ .append = "auth/callback?code=c" });
     browser.edit(.confirm);
-    // Typing after Enter stays in the entry, unread.
     browser.edit(.{ .append = "still typing" });
     var moved: std.ArrayList(u8) = .empty;
     defer moved.deinit(std.testing.allocator);
@@ -1259,12 +1232,9 @@ test "Sign-in paste source moves confirmed lines across reads, keeps typing, and
     try std.testing.expect(reads > 1);
     try std.testing.expectEqualStrings("not it\nhttp://127.0.0.1:1455/auth/callback?code=c\n", moved.items);
     try std.testing.expectEqualStrings("still typing", browser.entry[0..browser.len]);
-    // What moved is wiped here; only the unconfirmed typing remains.
     for (browser.entry[browser.len..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
-    // Backspace edits only what is unconfirmed.
     browser.edit(.erase);
     try std.testing.expectEqualStrings("still typin", browser.entry[0..browser.len]);
-    // Too much for any address: Enter discards it and reads as no address.
     for (0..browser.entry.len / 64 + 1) |_| browser.edit(.{ .append = &@as([64]u8, @splat('x')) });
     try std.testing.expect(browser.overflow);
     browser.edit(.confirm);
@@ -1272,7 +1242,6 @@ test "Sign-in paste source moves confirmed lines across reads, keeps typing, and
     try std.testing.expectEqual(@as(usize, 0), browser.len);
     try std.testing.expectEqual(@as(?usize, null), browser.take(&buffer));
     for (browser.entry) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
-    // Typing again clears the stray line; Escape's clear wipes everything.
     browser.edit(.{ .append = "abc" });
     browser.edit(.confirm);
     try std.testing.expect(!browser.stray and browser.checking);
@@ -1283,8 +1252,6 @@ test "Sign-in paste source moves confirmed lines across reads, keeps typing, and
     for (browser.entry) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
 }
 
-/// One browser attempt on the worker, against the loopback fixture issuer
-/// in a private HOME.
 const BrowserRig = struct {
     tmp: std.testing.TmpDir,
     env: std.process.Environ.Map,
@@ -1348,7 +1315,6 @@ const BrowserRig = struct {
         return browserField(page, "stray");
     }
 
-    /// The redirect port the shown link names.
     fn port(self: *BrowserRig) ![]const u8 {
         const link = self.page.browser.?.value.link.slice();
         const at = (std.mem.indexOf(u8, link, "127.0.0.1%3A") orelse return error.TestUnexpectedResult) + "127.0.0.1%3A".len;
@@ -1417,11 +1383,9 @@ test "Sign-in guided fields keep edits focus caret masking and paste authority" 
     try std.testing.expect(try page.freeze(.key, .connect));
     try std.testing.expectEqualStrings("service-model", page.frozen.?.intent.model.?);
     try std.testing.expectEqualStrings("openai", page.frozen.?.intent.provider.?);
-    // The whole key bank, including stale trailing bytes, is erased on custody end.
     @memset(&form.key_bank, 'q');
     form.wipeKey();
     for (form.key_bank) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
-    // Tiny fallback uses the same masked field and caret, never secret text.
     _ = form.key.set("secret", 3);
     page.state.focus = .key;
     for ([_]u16{ 1, 2 }) |height| {
@@ -1552,8 +1516,6 @@ test "Sign-in queued edits cannot change frozen fields before redraw or worker j
             break;
         };
         try std.testing.expect(clicked and page.state.page == .saving and page.frozen != null);
-        // With no process init, Connect freezes without starting real persistence.
-        // This borrower observes those same slices only after queued input.
         var gate: Gate = .{ .page = &page };
         try page.task.start(std.testing.io, &gate, Gate.run);
         defer {
@@ -1572,7 +1534,6 @@ test "Sign-in queued edits cannot change frozen fields before redraw or worker j
         try std.testing.expectEqualStrings("sk-before", gate.key.slice());
         try std.testing.expectEqualStrings("https://before.example/v1", gate.base.slice());
         try std.testing.expectEqualStrings("model-before", gate.model.slice());
-        // A returned API page still cannot reuse the previous attempt's frame.
         page.state.page = .api;
         page.state.focus = switch (field) {
             .base => .base,
@@ -1631,7 +1592,6 @@ test "Sign-in refuses every refused field after tab reverse tab and click until 
             .key => .key,
             .model => .model,
         }, page.state.focus);
-        // Enter acknowledges the refused edit without submitting the form.
         try testingSend(&page, &ctx, "\r", 90, 28);
         try std.testing.expect(editor.rejected == null);
         _ = editor.set(valid, valid.len);
@@ -1691,7 +1651,6 @@ test "Sign-in choices subtitle footer and action buttons keep separate drawn key
                 page.state.focus = control;
                 const frame = try testingDraw(&page, ctx.alloc, width, 30);
                 try std.testing.expect(std.mem.indexOf(u8, try testingText(frame, ctx.alloc), label) != null);
-                // Browser reopen is not actionable until its URL has arrived.
                 if (case.page == .browser and control == .open_page) {
                     try std.testing.expect(page.drawn.focused == null);
                     continue;
@@ -1786,7 +1745,6 @@ test "Sign-in exact drawn device code copies only explicitly and never after cli
     try testingSend(&page, &ctx, "c", 90, 28);
     try std.testing.expectEqual(@as(usize, 1), ctx.cmds.items.len);
     try std.testing.expectEqualStrings("ABCD-1234", ctx.cmds.items[0].copy_to_clipboard);
-    // The code below the visible viewport is not copy authority.
     page.state.focus = .open_page;
     const tiny = try testingDraw(&page, ctx.alloc, 72, 3);
     try std.testing.expect(page.drawn.copy == null);
@@ -1798,7 +1756,6 @@ test "Sign-in exact drawn device code copies only explicitly and never after cli
         const frame = try testingDraw(&page, ctx.alloc, width, height);
         if (page.drawn.copy != null) try std.testing.expect(std.mem.indexOf(u8, try testingText(frame, ctx.alloc), "ABCD-1234") != null);
     };
-    // A stale frame cannot copy after the attempt or page changes.
     _ = try testingDraw(&page, ctx.alloc, 90, 28);
     const old = page.drawn.copy.?;
     page.state.attempt += 1;
@@ -1832,7 +1789,6 @@ test "Sign-in browser shows URL rejects stray long callback and switches only af
         try std.testing.expect(rig.page.task.thread != null and rig.page.browser != null);
         try std.testing.expect(rig.page.browser.?.value.failure == .answer);
     }
-    // Method switch must not install/start its replacement until worker join.
     _ = try testingDraw(&rig.page, rig.ctx.alloc, 90, 28);
     try rig.page.activateDrawn(&rig.ctx, .switch_method);
     try std.testing.expect(rig.page.state.page == .stopping);
@@ -1899,7 +1855,6 @@ test "Sign-in whole joined receipt survives screen settlement and departure repo
         defer arena.deinit();
         var env: std.process.Environ.Map = .init(std.testing.allocator);
         defer env.deinit();
-        // Synthetic worker outcomes do not read or write this path.
         try env.put("HOME", "/synthetic-home");
         const init_: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = std.testing.io, .environ_map = &env, .preopens = .empty };
         var answer = try testingActivation(init_);
@@ -1925,7 +1880,6 @@ test "Sign-in whole joined receipt survives screen settlement and departure repo
         const form = try page.ensureForm();
         @memset(&form.key_bank, 's');
         try page.task.start(init_.io, &page, Worker.finish);
-        // Publication has already won; cancellation cannot rewrite the result.
         page.gate.store(.publishing, .release);
         page.cancel();
         try std.testing.expectEqual(.publishing, page.gate.load(.acquire));
@@ -2030,7 +1984,6 @@ test "Sign-in scoped retry keeps admitted model Store and pair instead of old se
         try std.testing.expectEqualStrings("", page.frozen.?.key.provided);
         try std.testing.expectEqualStrings(connection.key_file.slice(), page.savedConnection().?.key_file.slice());
     }
-    // Choosing a ChatGPT credential is a different flow, not an API retry.
     try std.testing.expect(try page.freeze(.existing, .{ .reuse = .codex }));
     try std.testing.expectEqual(core.Provider.codex, page.frozen.?.provider);
 }
@@ -2098,13 +2051,10 @@ test "Sign-in replacement retains whole prior launch and cleanup receipts across
         page.outcome = .{ .published = .{ .defaults = error.UnsupportedPreferencesVersion, .activation = answer } };
         try page.settle(.{ .screen = &rig.ctx });
         try std.testing.expect(page.state.page == .failed);
-        // Retry transfers the first receipt before changing attempt or intent.
         try rig.send("\r");
         try rig.wait(testingCompleted);
         try page.advance(&rig.ctx);
         try std.testing.expect(page.receipts != null);
-        // A failed cleanup is a second independent operation, not erased by
-        // closing/reopening the dialog or by a later successful login.
         try page.stageReceipt(null);
         var key_file: protocol.Bounded(@import("host_settings.zig").max_path_bytes) = .{};
         try key_file.set("/synthetic owned/.openai-retained.key");
@@ -2112,8 +2062,6 @@ test "Sign-in replacement retains whole prior launch and cleanup receipts across
         page.outcome = .{ .published = .{ .defaults = {}, .activation = error.ConnectionNotActive, .connection = .{ .failed = .{ .cause = error.InjectedCredentialWriteFailure, .cleanup = .{ .cause = error.AccessDenied, .key_file = key_file } } } } };
         try page.settle(.{ .screen = &rig.ctx });
         try std.testing.expect(page.state.page == .failed);
-        // reset is the Settings close/reopen boundary; it must preserve both
-        // the current typed obligation and already committed receipt bytes.
         const committed = page.receipts.?.committed_end;
         try page.reset();
         try std.testing.expect(page.outcome != null and page.receipts.?.committed_end == committed);
@@ -2171,7 +2119,6 @@ test "Sign-in receipt admission retains old metadata on quota create and append 
     }
     try page.stageReceipt(null);
     const committed = page.receipts.?.committed_end;
-    // Whole-stream cap includes dirty tails; overflow cannot consume current.
     page.outcome = .{ .failed = .{ .cause = error.LoginExpired } };
     page.receipts.?.committed_end = max_deferred_bytes;
     try std.testing.expectError(error.SignInReceiptLimit, page.stageReceipt(null));
@@ -2278,7 +2225,6 @@ test "Sign-in committed prefix excludes failed dirty tail and shorter overwrite 
     page.outcome = .{ .published = .{ .defaults = {}, .activation = large } };
     try std.testing.expectError(error.NoSpaceLeft, page.stageReceipt(.{ .after = max_receipt_bytes, .cause = error.NoSpaceLeft }));
     try std.testing.expectEqual(prefix, page.receipts.?.committed_end);
-    // The generic positional append contract must survive a shorter retry.
     page.outcome = .{ .failed = .{ .cause = error.X } };
     try page.stageReceipt(null);
     try std.testing.expect((try page.receipts.?.file.stat(page.init.?.io)).size > page.receipts.?.committed_end);
@@ -2324,8 +2270,6 @@ test "Sign-in deferred read failure retains custody and teardown closes the sing
     try std.testing.expect(page.receipts != null and page.receipts.?.reported == 0);
     try std.testing.expect(page.receipts.?.first_failure.? == error.RetainedOperationFailure);
     try std.testing.expect(std.c.fcntl(fd, std.c.F.GETFD) >= 0);
-    // This final cleanup follows an explicit reporting failure, not a claim
-    // of delivery or an attempt to replay the failed sink from byte zero.
     page.deinit();
     try std.testing.expect(page.receipts == null and page.outcome == null);
     try std.testing.expect(std.c.fcntl(fd, std.c.F.GETFD) < 0);

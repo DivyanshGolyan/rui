@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Drive real historical runtime fixtures; this file contains no runtime model."""
 import hashlib, json, os, pathlib, re, shutil, subprocess, tarfile, tempfile, time
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
@@ -12,7 +11,6 @@ def call(args, **kw):
 def require(ok, message):
     if not ok: raise AssertionError(message)
 
-# Use the repository-pinned cached package, not the system SQLite library.
 zon = (ROOT / 'build.zig.zon').read_text()
 pkg = re.search(r'\.sqlite = .*?\.hash = "([^"]+)"', zon, re.S)[1]
 env = call(['zig', 'env']).stdout
@@ -43,7 +41,6 @@ for kind in ('effect', 'patch'):
     builds.append({'fixture':kind,'seconds':round(time.monotonic()-started,3),'source_sha256':hashlib.sha256(original.read_bytes()).hexdigest()})
     fixtures[kind] = binary
 
-# Expectations are small data; mode-specific internal assertions remain in Zig.
 CASES = [
  ('candidate-not-published','effect','crash-prepublication-model',86,[('recover-prepublication-model','finished')],None),
  ('transaction-not-committed','effect','crash-transaction-model',88,[('recover-prepublication-model','finished')],None),
@@ -89,7 +86,6 @@ with tempfile.TemporaryDirectory(prefix='rui-scenarios-') as temp:
             require(result.returncode == 0 and result.stdout.strip() == expected, f'{name}/{mode}: {result.stderr} {result.stdout}')
             events.append({'mode':mode,'exit':result.returncode,'observed':result.stdout.strip()})
             if file_check: check_file(repo/file_check[0],file_check[2])
-        # Validate checker sensitivity without modifying production or its DB.
         if name == 'uncertain-bash-no-replay':
             (repo/'uncertain.txt').write_text('xx')
             try: check_file(repo/'uncertain.txt','x')

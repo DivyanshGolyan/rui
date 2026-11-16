@@ -23,16 +23,20 @@ Documentation-only edits that preserve the reviewed contract also reuse the clea
 Two more changes merge on green `admission` without another Codex review: a commit that only applies the Store format renumber `tests/ci/schema_number.py` computes, and a pure revert of the one merged PR that broke `main`.
 Any other non-test change, including CI, build, release or other operational scripts (the rest of `tests/ci/`, workflows and `build.zig`), needs Codex clean on the new head again.
 Performance changes include A/B numbers.
-Every UI PR embeds actual-implementation screenshots or a screen recording in its PR description before it is merge-ready.
-Use [verify-rui](../../.claude/skills/verify-rui/SKILL.md) for the independent plain-PTY journey; reuse its raw captures to render media where possible.
-For interaction changes, show the sequence with a recording or labelled screenshots; include meaningful before/after layout views when available.
-State the source revision, terminal surface and limits, retain raw capture provenance, and exclude secrets.
-Check `gh pr edit --help` for `--attach` before using the native upload command.
-When supported, use `gh pr edit PR --attach '/absolute/image.png#Alt text'`; the help owns body placement and video options.
-If that capability is absent, edit the PR description in GitHub's browser editor and drag the image or video into that description, then save it ([attachment instructions](https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/attaching-files)).
-After either route, read back the description and verify the uploaded media is viewable.
-If upload partially fails, inspect the updated body before retrying.
-A comment, local path or artifact pointer alone does not meet the description requirement; visual evidence does not replace behavior assertions or hosted acceptance.
+Every UI PR embeds actual-implementation screenshots or a screen recording in its description before it is merge-ready.
+Use [verify-rui](../../.claude/skills/verify-rui/SKILL.md) and the [feature map](../../.claude/skills/verify-rui/features/README.md) to select states for the changed screens.
+Build both pinned revisions, then run `$V frames HEAD --before BASE --only <states for the changed screens> --sizes 140x40,46x30 --record` and `$V publish DIR --pr N [--ssh HOST]` (set `V=.claude/skills/verify-rui/scripts/verify-rui`).
+The comparison loads both default recipes from their pinned HEAD/BASE revisions; a newer or dirty checkout cannot change them. Explicit `--scenario` intentionally overrides both. A selected state absent from BASE is new with only an after capture.
+The publisher selects changed/new PNGs and GIFs, attaches them through `gh pr edit --attach` under `## Screens` with head/base/sizes/surface facts and state/size alt text, and verifies the embeds by reading the body back. `--all` includes unchanged pairs.
+The upload machine requires gh **2.104.0+**, a classic PAT or gh OAuth token, and repository push access. The command fails clearly if those are missing, and reads back partial uploads before refusing them; inspect the body before retrying.
+Cloud threads use `$V publish DIR --pr N --ssh rui-box`, after `bash /mnt/project-files/rui-dev/rui-box-up.sh THREAD-NAME` establishes the SSH alias if needed. The same upload worker runs on the box, using its credentials, after staging only selected media in a fresh directory that is removed afterward. Omit `--ssh` when running on the box itself.
+Cloud writes filter image embeds and the proxy blocks the CLI's GraphQL lookup. **After images have been attached, every later body edit must run on the box too**: copy the file there, then `ssh rui-box 'gh pr edit N -R OWNER/REPO --body-file /path/on/box/body.md'`. Writing the body from a container through REST, open_pr.py or MCP would break its images again.
+Open the PR to obtain its number, then publish before the next push. `Require PR Shape` runs on opened/synchronize/reopened/ready_for_review; body edits do not trigger it. If the opening run failed before upload, manually rerun the failed jobs after publishing; PR Shape reads the current body, falling back to the event payload if that read fails.
+The check accepts a line that, after leading whitespace, starts with `![`, `<img` or `<video` and contains a `https://github.com/user-attachments/` URL outside fenced code and HTML comments. The publisher emits each attachment on its own labelled line. Inline-code examples, reference images, non-attachments images, bare URLs and repository page links do not pass. A change that provably draws nothing different may instead carry `No screen change: <nonempty reason>` on its own line.
+It derives UI paths from Overview's production import closure minus Host dependencies and test owners, including the base tree for deleted files, and also covers verify-rui's `frames.json`.
+For interaction changes, show the sequence with a recording or labelled before/after screenshots. State the source revision, terminal surface and limits, retain raw capture provenance, and exclude secrets.
+Show before/after PNGs to the person who requested the work in your own conversation when possible. Humans with browsers may still upload images or videos as `github.com/user-attachments` media.
+A comment, local path or CI artifact pointer alone does not meet the description requirement; visual evidence does not replace behavior assertions or hosted acceptance.
 Keep published commits unchanged so their CI evidence retains its SHA.
 
 Green means the required `admission` check completed successfully for the PR's current head; it need not be rerun after `main` moves.
@@ -75,6 +79,7 @@ Arm auto-merge only on a PR whose base is `main`; on a stacked PR it would merge
 ## CI failures
 
 Diagnose failures through [rui-ci-triage](../../.claude/skills/rui-ci-triage/SKILL.md) and follow [Evidence](../../CODING_STANDARDS.md#evidence) for reruns, strict-path holds and failure retention.
+The pre-push hook re-runs the last CI red as described in [local feedback evidence](../../CODING_STANDARDS.md#evidence).
 A red whose failing file or fixture is outside the PR's diff is first reproduced on `main`; when `main` itself is red, it gets one fix owner, and the PR's owner is not asked to fix it.
 The fastest fix for a red `main` is often a revert of the one merged PR that broke it.
 The [main build](../../.github/workflows/main-build.yml) names the PRs merged since `main` last compiled in its `ci-red` issue, and when two of them crossed, a revert of the later one is the fast fix.

@@ -1,6 +1,3 @@
-"""Terminal restoration helpers that the human CLI fixture, terminal input replay
-and host_process_test.py share: file-flag assertions, the stop receipt case and
-renderer comparison retention."""
 import json
 import os
 import pathlib
@@ -15,15 +12,11 @@ import os_semantics
 
 
 def assert_file_flags(actual, expected):
-    # Keep every bit but kernel write history exact, including access mode
-    # and O_NONBLOCK.
     assert os_semantics.user_file_flags(actual) == os_semantics.user_file_flags(expected), (
         f"file flags actual={actual:#x} expected={expected:#x} excluded={os_semantics.FILE_FLAG_HISTORY:#x}")
 
 
 def stop_receipt_case(state, library):
-    """While real, unrelated optional stderr custody is held, one response
-    is captured exactly and a required stop receipt is delivered."""
     root = state / "stop-receipt"
     root.mkdir(mode=0o700)
     store = root / "store"
@@ -31,7 +24,6 @@ def stop_receipt_case(state, library):
     answer = b"exact capture answer"
     provider_release = threading.Event()
     stop_release = threading.Event()
-    # The second peer response is never released: that Transfer is stopped.
     endpoint = fixture.SuccessEndpoint([], responses_by_input={
         "hello": (fixture.sse_answer("capture", "reason", "message", answer.decode())[0], provider_release),
         "stop": (fixture.ResponseSpec(b"unused", {}), stop_release)})
@@ -49,16 +41,11 @@ def stop_receipt_case(state, library):
         diagnostics = HostDiagnostics(host)
         session = fixture.configure(root, store, "capture-config", None, "gpt-6-sol")
         stop_session = fixture.configure(root, store, "stop-config", None, "gpt-6-sol")
-        # Admission uses the ordinary worker; complete it before that worker
-        # holds optional stderr. Only provider work must progress under hold.
         fixture.message(root, store, "capture-message", session, "hello")
         fixture.message(root, store, "stop-message", stop_session, "stop")
         fixture.wait_for(lambda: len(endpoint.requests) == 2, "held provider requests", timeout=3)
         processing = fixture.observe(store, "stop-message")["binding"]
         arm.write_text(session)
-        # A specific optional write may lose custody or output credit. Seek an
-        # actual hold without requiring delivery of any one inspection trace.
-        # The first eligible write deliberately fails to exercise that case.
         acquisition_deadline = time.monotonic() + 3
         while True:
             remaining = acquisition_deadline - time.monotonic()
@@ -75,7 +62,6 @@ def stop_receipt_case(state, library):
         assert log.read_text().count("diagnostic-dropped-inspection\n") == 1
         held = [json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")]
         assert len(held) == 1 and held[0]["process"] == str(host.pid) and held[0]["subject"] == session, held
-        # The answer streams in and is captured while stderr is held.
         provider_release.set()
         reply = fixture.command(
             "session", "interrupt-model", "--store", store, "--record", root / "stop-interrupt.json",
@@ -112,7 +98,7 @@ def stop_receipt_case(state, library):
                 except subprocess.TimeoutExpired:
                     inspector.kill()
                     inspector.communicate(timeout=3)
-                    raise  # Mandatory reap does not accept the timed-out caller.
+                    raise
 
         errors = []
         for dispose in (release.touch, retire_inspector,
@@ -134,17 +120,10 @@ def stop_receipt_case(state, library):
             try:
                 incoming_error.add_note("Stop cleanup failed: " + ", ".join(cleanup_failure(error) for error in errors))
             except BaseException:
-                pass  # Secondary reporting cannot replace the primary failure.
+                pass
 
 
 def preserve_renderer_comparison(state, before, after, screen_start, events, omitted_events):
-    """Keep exact synthetic-fixture operands outside disposal's temporary root.
-
-    Hex is lossless encoding, not redaction. This case has only fixture-owned
-    configuration text, no model request/response or user-provided content.
-    Never generalize this capture to other terminal journeys. Existing whole-
-    file/job caps refuse oversized evidence rather than truncating operands.
-    """
     try:
         root = state / "renderer-comparison"
         root.mkdir(mode=0o700)
@@ -166,7 +145,6 @@ def preserve_renderer_comparison(state, before, after, screen_start, events, omi
         copy_failure_diagnostics(root, destination)
         print(f"renderer comparison destination: {destination}", file=sys.stderr, flush=True)
     except Exception as error:
-        # Optional evidence cannot replace the assertion or prevent disposal.
         try:
             print(f"Renderer comparison unavailable: {type(error).__name__}", file=sys.stderr, flush=True)
         except Exception:

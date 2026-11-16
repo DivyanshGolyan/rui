@@ -9,8 +9,6 @@ print(f"Integration Python: {sys.version.split()[0]} ({sys.executable})")
 PY
 
 directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-# Refuse root once, before any case starts. Every case also enters the fixture
-# boundary itself, which builds its environment.
 python3 "$directory/host_process.py" exec true
 release_safe=$1
 debug=$2
@@ -40,8 +38,6 @@ else
     esac
 fi
 
-# One process inventory feeds every policy. Its order is the serial full gate's
-# order; parallel policies defer isolated cases until every batch peer retires.
 cases() {
     run_case execution admission sh "$directory/admission_integration.sh" "$release_safe"
     run_case execution dispatch python3 "$directory/dispatch_integration.py" "$release_safe"
@@ -80,9 +76,6 @@ cases() {
     run_case isolated host-allocator python3 "$directory/host_allocator_test.py" "$release_safe"
 }
 
-# Keep launch/wait in the shell, not a Python subprocess supervisor. The batch
-# shell remains alive through its fixture's status write; no traps, deadlines,
-# process groups or signal forwarding are added. Clock helpers exit immediately.
 with_deadline() {
     python3 - "$@" <<'PY'
 import subprocess
@@ -125,7 +118,6 @@ PY
     "$@" || status=$?
     verdict=passed
     if [ "$status" -ne 0 ]; then verdict=failed; fi
-    # A failed diagnostic must not replace the fixture's original exit status.
     record=$(python3 - "$name" "$verdict" "$status" "$started" <<'PY'
 import sys
 import time
@@ -178,11 +170,9 @@ if [ "$part" = parallel ] || [ "$part" = callers ]; then
     names=
     phase=batch
     if [ "$part" = parallel ]; then
-        # Every other case enters the fixture boundary itself. Off a TTY the
-        # unit runner prints each test's name as it starts, so a run killed
-        # at its deadline names the stalled test in this case's log, which a
-        # job timeout would discard (#755 stalled 34 minutes as "cancelled").
-        run_case execution native with_deadline 1200 python3 "$directory/host_process.py" exec env RUI_TEST_EXACT_INACTIVITY=0 --unit-roots "$test_binary" "$@"
+        if [ -n "$test_binary" ]; then
+            run_case execution native with_deadline 1200 python3 "$directory/host_process.py" exec env RUI_TEST_EXACT_INACTIVITY=0 --unit-roots "$test_binary" "$@"
+        fi
     fi
     cases
     set -- $pids

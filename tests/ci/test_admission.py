@@ -1,4 +1,3 @@
-"""Execute candidate planning and fail-closed PR admission without native builds."""
 from functools import cache
 import json
 import os
@@ -52,16 +51,11 @@ def documentation_env():
 
 @cache
 def plan_sources():
-    """One immutable input snapshot; plan tests need topology, not Rui's sources.
-
-    The selector's real-repository mappings are exercised in test_selection.
-    Here the real Git/selector/workflow handoff runs on a small source graph.
-    """
     names = ['tests/ci/' + name for name in (
         'select_tests.py', 'ci_plan.py', 'docs_only.py', 'qualification.py', 'strict_paths.py', 'platform_boundary.py',
         'import_architecture.py', 'build_files.py', 'release_numbers.py', 'stack_frames.json')]
     names += [path.relative_to(ROOT).as_posix() for path in build_files.files()]
-    names += ['src/store/schema.zig']  # The format/digest tests mutate this real owner.
+    names += ['src/store/schema.zig']
     return {name: (ROOT / name).read_text() for name in names} | {
         'src/logic_tests.zig': 'const cores = .{\n    .{ "history_memo.zig", @import("history_memo.zig") },\n};\n',
         'src/history_memo.zig': '',
@@ -137,11 +131,9 @@ class AdmissionTest(unittest.TestCase):
         release = RELEASE.read_text()
         self.assertGreaterEqual(budget(job(text, 'linux_build')), budget(job(release, 'build')))
         self.assertGreaterEqual(budget(job(text, 'macos_build')), budget(job(release, 'build')))
-        # On-demand Mac qualification compiles the same native gates cold.
         qualify = job((ROOT / '.github/workflows/qualify-macos.yml').read_text(), 'compile')
         self.assertIn("    timeout-minutes: ${{ needs.plan.outputs.platform == 'linux' && 15 || %d }}"
                       % budget(job(text, 'macos_build')), qualify)
-        # Only a promotion's bisect extends a job; the suites keep their deadline.
         for name, step in (('linux_suites', 'Run selected targets'), ('macos_suites', 'Run required native targets')):
             self.assertIn('    timeout-minutes: ${{ inputs.promotion && 300 || 35 }}', job(text, name))
             self.assertEqual(step_budget(job(text, name), step), 35)
@@ -149,14 +141,13 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn("    timeout-minutes: ${{ inputs.batch-base && 300 || 45 }}", upgrade)
         self.assertEqual(step_budget(upgrade, 'Start detached, then install, save real work, reinstall and '
                                      'restart the same Store'), 45)
-        for name in ('linux_build_unit', 'macos_build_unit'):
-            self.assertEqual(budget(job(text, name)), 15)
+        self.assertEqual(budget(job(text, 'linux_build_unit')), 15)
+        self.assertEqual(budget(job(text, 'macos_build_unit')), budget(job(text, 'macos_build')))
 
     def test_main_ruleset_requires_admission_and_prs_with_only_an_admin_pr_bypass(self):
         ruleset = json.loads((ROOT / '.github/main-ruleset.json').read_text())
         self.assertEqual(ruleset['target'], 'branch')
         self.assertEqual(ruleset['enforcement'], 'active')
-        # Admins may merge a PR past a check GitHub never ran; nobody pushes to main directly.
         self.assertEqual(ruleset['bypass_actors'],
                          [{'actor_id': 5, 'actor_type': 'RepositoryRole', 'bypass_mode': 'pull_request'}])
         self.assertEqual(ruleset['conditions']['ref_name'], {'include': ['refs/heads/main'], 'exclude': []})
@@ -165,7 +156,6 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn('non_fast_forward', rules)
         self.assertIn('deletion', rules)
         checks = rules['required_status_checks']['parameters']
-        # Promotion qualifies the merged batch, so a green PR need not rerun after main moves.
         self.assertFalse(checks['strict_required_status_checks_policy'])
         self.assertEqual(checks['required_status_checks'], [{'context': 'admission', 'integration_id': 15368}])
 
@@ -196,7 +186,6 @@ class AdmissionTest(unittest.TestCase):
             self.assertNotEqual(self.admission(UPGRADE=value).returncode, 0)
 
     def test_mac_and_upgrade_admit_only_their_exact_selection(self):
-        # Unselected Mac and upgrade jobs must be skipped, never run or pending.
         for native, upgrade in (('false', 'false'), ('true', 'false'), ('false', 'true')):
             env = dict(NATIVE=native, UPGRADE=upgrade,
                        MACOS_RESULT='success' if native == 'true' else 'skipped',
@@ -295,7 +284,6 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn("needs.plan.outputs.change_kind == 'normal'", policy)
         self.assertIn("needs.plan.outputs.draft_run == 'false'", policy)
         self.assertIn('draft_run: ${{ steps.select.outputs.draft_run }}', job(text, 'plan'))
-        # Only the plan derives routing from PR state; admission independently refuses drafts.
         for name in ('policy', 'linux', 'previous_release_upgrade'):
             self.assertNotIn('github.event.pull_request.draft', job(text, name))
         self.assertIn("needs.plan.outputs.upgrade == 'true'", job(text, 'previous_release_upgrade'))
@@ -315,7 +303,6 @@ class AdmissionTest(unittest.TestCase):
             'test_beta': ('class Kept(unittest.TestCase):\n    def test_kept(self): pass\n'
                           'class Skipped(unittest.TestCase):\n    def test_skipped(self): self.fail()\n'),
             'test_gamma': 'class Gamma(unittest.TestCase):\n    def test_gamma(self): self.fail()\n',
-            # A skipped unit's name is not a prefix of another module.
             'test_gamma_more': 'class More(unittest.TestCase):\n    def test_more(self): pass\n',
         }
         with tempfile.TemporaryDirectory() as root:
@@ -414,7 +401,6 @@ class StrictPathTest(unittest.TestCase):
             'tests/integration/bash_integration.py', 'tests/integration/bash_recovery_integration.py'])
 
     def test_selected_runs_mac_for_every_strict_path(self):
-        # Strict native owner mappings remain available before workflow core acceptance is added.
         available = set(build_files.steps())
         for pattern in STRICT:
             path = pattern.replace('*', '_x')
@@ -435,13 +421,11 @@ class CandidatePlanTest(unittest.TestCase):
         for path, required in (('src/store/schema.zig', True), ('src/upgrade_process.zig', True),
                                ('install.sh', True), ('build.zig', True),
                                ('.github/workflows/previous-release-upgrade.yml', True),
-                               # Owners the upgrade-integration fixture covers, not the installed-release check.
                                ('src/cli.zig', False), ('src/Overview.zig', False), ('src/store/Store.zig', False),
                                ('tests/ci/release.py', False), ('README.md', False)):
             with self.subTest(path=path):
                 self.assertEqual(select([path], 'review', available)['upgrade_required'], required)
                 self.assertFalse(select([path], 'development', available)['upgrade_required'])
-        # Its unit test runs in policy; cache maintenance publishes main's caches, which a PR's run never reads.
         for path in ('tests/ci/test_previous_release_upgrade.py', '.github/workflows/cache-maintenance.yml'):
             with self.subTest(path=path):
                 self.assertFalse(select([path], 'review', available)['upgrade_required'])
@@ -455,11 +439,9 @@ class CandidatePlanTest(unittest.TestCase):
         bumped = (source.replace(f'schema_version: u32 = {version};', f'schema_version: u32 = {version + 1};')
                   .replace(last_row, last_row + f'    .{{ .schema_version = {version + 1}, .digest = 0x0123456789abcdef }},\n'))
         for after, required in (
-                # Imports, comments and code that read the format leave it alone.
                 ('const unused = @import("std");\n' + source, False),
                 (source.replace('/// `digest()` of each', '/// The `digest()` of each'), False),
                 (bumped, True),
-                # An edited released digest is a format change too (its guard then refuses it).
                 (source.replace(last_row, last_row.replace('.digest = 0x', '.digest = 0x1')), True),
                 (None, True)):
             with self.subTest(required=required):
@@ -506,14 +488,11 @@ class CandidatePlanTest(unittest.TestCase):
             self.assertEqual(mixed['retry'], 'false')
             self.assertIn('test-logic', json.loads(mixed['targets']))
             self.assertNotEqual(mixed['targets'], docs['targets'])
-            # Retargeting from docs to a wider base restores normal acceptance.
             self.assertEqual(fixture.plan(self, base=fixture.base, candidate=candidate), mixed)
             fixture.git('checkout', '-q', '--detach', retarget)
             self.assertNotEqual(fixture.run(candidate=candidate).returncode, 0)
 
     def test_pr_plan_diffs_the_merge_commit_against_the_main_it_merged(self):
-        # #1199 changed only docs, but its event base.sha trailed the main its
-        # merge commit was built on, so main's src changes selected builds.
         pr_base = re.search(r"(?m)^          BASE: \$\{\{ github\.event_name == 'pull_request' && '([^']+)' \|\| inputs\.base \}\}$",
                             job(CHECK.read_text(), 'plan'))[1]
         with PlanFixture() as fixture:
@@ -579,7 +558,6 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             fixture.write('README.md', 'First sentence. Second sentence.\n')
             candidate = fixture.commit()
             output = fixture.plan(self, candidate=candidate)
-            # Resolve the real step's output expressions, rather than duplicating the plan values.
             results = dict(plan='success', policy='skipped', linux='success', macos='skipped',
                            previous_release_upgrade='skipped', cache_execution='skipped',
                            linux_build='skipped', linux_build_unit='skipped', linux_codegen='skipped',
@@ -590,7 +568,6 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
 
     @staticmethod
     def aggregate(workflow, name, script, output, results, draft=False):
-        # Resolve real step expressions rather than restating plan values.
         env = {}
         for key, expression in re.findall(r'(?m)^          ([A-Z_]+): \$\{\{ (.*?) \}\}$', job(workflow, name)):
             if expression.startswith('needs.plan.outputs.'):
@@ -598,7 +575,7 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             elif expression == 'github.event.pull_request.draft':
                 env[key] = str(draft).lower()
             elif expression == 'github.token':
-                continue  # only the failure explanation reads it
+                continue
             else:
                 env[key] = results[expression.split('.')[1]]
         assert env
@@ -625,7 +602,6 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             refused = self.aggregate(workflow, 'admission', admission, draft, results, draft=True)
             self.assertNotEqual(refused.returncode, 0)
             self.assertIn('A draft never admits', refused.stdout)
-            # A ready event recomputes the plan even for the exact same tree.
             ready = fixture.plan(self, candidate=candidate)
             self.assertEqual(ready['change_kind'], 'normal')
             self.assertEqual(ready['draft_run'], 'false')
@@ -649,7 +625,6 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
                 cache_execution='success' if ready['cache_execution'] == 'true' else 'skipped')
             result = self.aggregate(workflow, 'admission', admission, ready, accepted)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            # Even falsely relabelling the draft's event as ready cannot admit its skipped policy.
             self.assertNotEqual(self.aggregate(workflow, 'admission', admission, draft, results).returncode, 0)
 
     def test_main_merge_obligation_requires_compile_without_running_unselected_units(self):
@@ -745,7 +720,6 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
                     with self.subTest(part=part, result=value):
                         self.assertNotEqual(self.aggregate(workflow, 'linux', linux, output,
                                                            dict(built, **{part: value})).returncode, 0)
-            # Policy and suites never run in a compile-only build; one that did is a wrong plan.
             for part in ('policy', 'linux_suites'):
                 with self.subTest(ran=part):
                     self.assertNotEqual(self.aggregate(workflow, 'linux', linux, output,
@@ -754,8 +728,6 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
                 self.assertIn("needs.plan.outputs.compile_only == 'false'", job(workflow, part).split('\n    if:', 1)[1].split('\n', 1)[0])
 
     def test_only_a_new_head_reopen_or_readiness_starts_a_candidate(self):
-        # `edited` (title, body or base) and `converted_to_draft` cancelled a
-        # running candidate on an unchanged head 121 times in 14 days.
         on = CHECK.read_text().split('\npermissions:', 1)[0]
         events = re.search(r'types: \[(.*?)\]', on)[1].split(', ')
         self.assertEqual(set(events), {'opened', 'synchronize', 'reopened', 'ready_for_review'})
@@ -797,7 +769,6 @@ class ReleaseFlowTest(unittest.TestCase):
         self.assertIn('compile_only: true', build)
         self.assertIn('promotion: false', build)
         self.assertNotIn('write', build)
-        # One owner for how CI compiles Rui: this file names no build command.
         self.assertNotRegex(text, r'zig build|build_artifact|\.github/actions/setup')
         report = job(text, 'report')
         self.assertIn('needs: build', report)
@@ -837,13 +808,11 @@ class ReleaseFlowTest(unittest.TestCase):
 
     @staticmethod
     def step_list(body):
-        """The NAME=COMMAND arguments a job passes to steps.py, as the shell would split them."""
         script = body.split('python3 -B tests/ci/steps.py', 1)[1].split('\n      - ', 1)[0]
         return [steps.parse(argument) for argument in shlex.split(script.replace('\\\n', ' '))
                 if not argument.startswith('--') and '=' in argument and not argument.startswith('$')]
 
     def test_every_promotion_bisect_replays_only_its_jobs_record(self):
-        # The replayed command is the recorded one: no bisect may restate or select commands.
         check = CHECK.read_text()
         jobs = [('linux_suites', job(check, 'linux_suites'), 'run_selected.py'),
                 ('macos_suites', job(check, 'macos_suites'), 'run_selected.py'),
@@ -864,7 +833,6 @@ class ReleaseFlowTest(unittest.TestCase):
                          ['current-upgrade', 'running-upgrade', 'previous-upgrade'])
         self.assertIn('previous_release_upgrade.py --running-host', dict(upgrade)['running-upgrade'])
         self.assertIn('$RUNNER_TEMP/previous-running-release', dict(upgrade)['running-upgrade'])
-        # The shipped-build Host launch repeat runs first, and only outside PRs.
         body = job(UPGRADE.read_text(), 'upgrade')
         self.assertIn("HOST_LAUNCH: ${{ github.event_name != 'pull_request' }}", body)
         startup = steps.parse(shlex.split(body.split("startup=(", 2)[2].split(")\n", 1)[0])[0])
@@ -877,13 +845,11 @@ class ReleaseFlowTest(unittest.TestCase):
                          ['selftest', 'pty', 'ghostty', 'controls', 'recovery'])
         for name, command in upgrade + contracts:
             with self.subTest(step=name):
-                # Harnesses refuse an existing output; replays get a fresh $STEP_OUTPUT.
                 self.assertNotIn('/contracts/', command)
                 if '--output' in command:
                     self.assertIn('--output "$STEP_OUTPUT"', command)
 
     def test_upgrade_prepares_the_previous_release_before_any_check(self):
-        # A failed check must not leave a later check, or its replay, without its setup.
         body = job(UPGRADE.read_text(), 'upgrade')
         checks = body.index('tests/ci/steps.py')
         for setup in ('ref: 0e4b2225d106dd63fa9c38801188facb5e9c6335',

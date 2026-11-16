@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Tests of the mutation gate's evidence contract, not renderer substitutes."""
 import dataclasses
 import json
 import os
@@ -83,8 +82,6 @@ class MutationGateTests(unittest.TestCase):
             mutation = gate.Mutation("A", "invariant", "fix", "owner.zig", "guard A", "no A", self.check)
             for stage in ("baseline", "A"):
                 with self.subTest(stage=stage):
-                    # A real builder changes a tracked input while emitting the
-                    # expected test transcript. Caller-tree checks cannot see it.
                     script = ("from pathlib import Path\n"
                               "owner = Path('owner.zig')\n"
                               "failed = 'no A' in owner.read_text()\n"

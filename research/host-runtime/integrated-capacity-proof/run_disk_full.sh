@@ -23,8 +23,6 @@ attach_output="$(hdiutil attach -nobrowse -mountpoint "$mount_path" "$image_path
 device="$(print -r -- "$attach_output" | awk '/Apple_HFS/ {print $1; exit}')"
 [[ -n "$device" ]]
 
-# Leave only a small tail for two output spools so a real filesystem write,
-# rather than a synthetic counter, reaches ENOSPC.
 mkfile 4800k "$mount_path/fill"
 client_json="$("$binary" integrated 1 unused unused "$mount_path" \
   "$probe_root/proof.sqlite3" lane 10 bash-only normal)"

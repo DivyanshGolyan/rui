@@ -1,8 +1,3 @@
-"""Exact-byte PTY custody for synthetic frontend contract tests.
-
-The slave stays open until the child is reaped, including on Darwin. No tmux,
-terminal key names, shell quoting, or text encoding intervenes in send(bytes).
-"""
 import errno
 import fcntl
 import json
@@ -27,12 +22,6 @@ LIMIT = 1024 * 1024
 
 
 def assert_file_flags(actual, expected):
-    # Same policy as terminal_restoration_integration.assert_file_flags, which
-    # cannot be imported here without its CLI-binary argv/setup side effects.
-    # XNU exposes kernel-only FWASWRITTEN after a write and FMARK after a
-    # unix-socket collection while the file was in flight (os_semantics.py
-    # explains both); F_SETFL can't change either. Access mode, NONBLOCK and
-    # every other bit must still match exactly.
     history = 0x00010000 | 0x00001000 if sys.platform == "darwin" else 0
     assert actual & ~history == expected & ~history, (
         f"file flags actual={actual:#x} expected={expected:#x} excluded={history:#x}")
@@ -40,11 +29,6 @@ def assert_file_flags(actual, expected):
 
 @contextmanager
 def defer_signals():
-    """Deliver interruption after acquisition and registration, never between.
-
-    Caught handlers still reset normally on exec. No blocked signal mask or
-    ignored disposition leaks into a newly spawned Host/caller.
-    """
     previous = {}
     pending = []
     try:
@@ -116,7 +100,6 @@ class DirectPty:
             if not chunk:
                 self.eof.add(fd)
                 continue
-            # Save before parsing/asserting, including a malformed final frame.
             stream = self.raw if fd == self.master else self.errors
             stream.write(chunk)
             stream.flush()
@@ -169,7 +152,6 @@ class DirectPty:
             self.pump()
 
     def pause(self, seconds):
-        """Explicit vector delay; still drain both output channels."""
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             self.pump(min(0.05, max(0, deadline - time.monotonic())))

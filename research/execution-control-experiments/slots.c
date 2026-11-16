@@ -1,4 +1,3 @@
-/* Throwaway bookkeeping microbenchmark; no provider, SQLite, or scheduler model. */
 #include <assert.h>
 #include <inttypes.h>
 #include <stdatomic.h>
@@ -29,7 +28,6 @@ static uint64_t now_ns(void) {
     return (uint64_t)t.tv_sec * 1000000000 + t.tv_nsec;
 }
 
-/* Compiler barrier prevents whole-call hoisting; atomics retain actual state loads. */
 #define BARRIER() __asm__ volatile("" ::: "memory")
 __attribute__((noinline)) static uint64_t state_scan(struct Cell *cells, unsigned n, unsigned occupied) {
     (void)occupied;
@@ -40,7 +38,6 @@ __attribute__((noinline)) static uint64_t state_scan(struct Cell *cells, unsigne
     return count;
 }
 
-/* Mirrors the prototype's dispatch scan with already active/free model records. */
 __attribute__((noinline)) static uint64_t dispatch_scan(struct Cell *cells, unsigned n, unsigned occupied) {
     (void)occupied;
     BARRIER();
@@ -54,7 +51,6 @@ __attribute__((noinline)) static uint64_t dispatch_scan(struct Cell *cells, unsi
     return count;
 }
 
-/* Each completed model handle is searched from the start, like curl completion lookup. */
 __attribute__((noinline)) static uint64_t completion_lookup(struct Cell *cells, unsigned n, unsigned occupied) {
     BARRIER();
     uint64_t count = 0;
@@ -68,9 +64,6 @@ __attribute__((noinline)) static uint64_t completion_lookup(struct Cell *cells, 
     return count;
 }
 
-/* Full completion burst, linear lookup, owner settlement sweep, first-free reuse.
- * This deliberately explores generic first-free admission; the existing prototype
- * admits known array positions instead. No resources need cleanup in this model. */
 __attribute__((noinline)) static uint64_t completion_reuse(struct Cell *cells, unsigned n, unsigned occupied) {
     BARRIER();
     uint64_t count = 0;
