@@ -24,7 +24,6 @@ const Submission = @import("SessionSubmission.zig");
 const original_state = @import("submission_state.zig");
 const Task = @import("ClientTask.zig");
 const Screen = @import("SessionScreen.zig");
-const Editor = @import("DraftEditor.zig");
 const keymap = @import("keymap.zig");
 const keypress = @import("keypress.zig");
 const overview_view = @import("overview_view.zig");
@@ -1471,7 +1470,6 @@ fn draftSafeToLeave(self: *const Self) bool {
 fn startInput(self: *Self) void {
     self.footer = .{};
     self.input.init();
-    self.input.complete(.{ .context = self, .add = tabCompletion });
     self.menu.reset();
 }
 
@@ -2304,18 +2302,6 @@ fn finishRetry(self: *Self) !void {
             try self.beginMessage(.{ .message = ticket });
         },
     }
-}
-
-fn tabCompletion(context: *const anyopaque, draft: []const u8, caret: usize) ?Editor.Replacement {
-    const self: *Self = @ptrCast(@alignCast(@constCast(context)));
-    if (draft.len == 0) {
-        const rows = self.menu.frame(self.menuSource()) orelse return null;
-        return .append(draft, rows.completion());
-    }
-    const shown = self.menu.frame(self.menuSource()) orelse
-        return if (slash_commands.suggest(draft, .{}) != null) .append(draft, "") else null;
-    const change = skill_completion.edit(draft, caret, shown);
-    return .{ .start = change.start, .end = change.end, .text = change.text };
 }
 
 const status_capacity = 2048;
@@ -9939,6 +9925,78 @@ test "App Session composer click recovers submission from every drawn focus targ
         try std.testing.expectEqual(width == 46, std.mem.indexOfScalar(focus.Target, visited.slice(), .back) != null);
         try std.testing.expectEqual(width == 140, std.mem.indexOfScalar(focus.Target, visited.slice(), .list) != null);
     }
+}
+
+test "App Session Tab encodings preserve drafts except when accepting a drawn row" {
+    const entries = [_]skill_suggestions.Entry{.{ .name = "review", .description = "Review a change" }};
+    const Case = struct { text: []const u8, caret: ?usize = null, row: ?[]const u8 = null };
+    const cases = [_]Case{
+        .{ .text = "" },
+        .{ .text = "plain text" },
+        .{ .text = "/eff", .row = "/effort " },
+        .{ .text = "/review", .row = "/review " },
+        .{ .text = "please /review now", .caret = "please /review".len, .row = "please /review now" },
+        .{ .text = "/unknown" },
+        .{ .text = "//copy" },
+    };
+    const Tab = struct { bytes: []const u8, accepts: bool = true };
+    // Legacy, Kitty/CSI-u press and repeat, and tmux extended-key reports.
+    // A release is parsed but never dispatched as a press.
+    const tabs = [_]Tab{
+        .{ .bytes = "\t" },
+        .{ .bytes = "\x1b[9u" },
+        .{ .bytes = "\x1b[9;1u" },
+        .{ .bytes = "\x1b[9;1:1u" },
+        .{ .bytes = "\x1b[9;1:2u" },
+        .{ .bytes = "\x1b[27;1;9~" },
+        .{ .bytes = "\x1b[Z", .accepts = false },
+        .{ .bytes = "\x1b[9;2u", .accepts = false },
+        .{ .bytes = "\x1b[27;2;9~", .accepts = false },
+        .{ .bytes = "\x1b[9;1:3u", .accepts = false },
+    };
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |drawn| for (tabs) |tab| for (cases) |case| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        defer _ = self.skills.reset();
+        errdefer std.debug.print("Tab domain: width={d} drawn={} key={any} draft={s}\n", .{ width, drawn, tab.bytes, case.text });
+        held.size = .{ .width = width, .height = 30 };
+        try std.testing.expect(self.skills.answer(self.skills.ask("").?.read, .{ .entries = @constCast(&entries), .total = entries.len }, "") == null);
+        _ = self.input.append(case.text);
+        const caret = case.caret orelse case.text.len;
+        self.input.editors[self.input.active].setCursor(caret);
+        if (drawn) try held.frame();
+        try held.keys(tab.bytes);
+        const accepted = drawn and tab.accepts and case.row != null;
+        try std.testing.expectEqualStrings(if (accepted) case.row.? else case.text, self.input.composition().bytes);
+        try std.testing.expectEqual(if (accepted) (case.caret orelse case.row.?.len) else caret, self.input.composition().cursor);
+        try std.testing.expect(self.submission.intent == null and self.input.submitted == null);
+        try std.testing.expect(held.left == null);
+    };
+}
+
+test "App Session bracketed paste keeps Tab literal with drawn command and skill rows" {
+    const entries = [_]skill_suggestions.Entry{.{ .name = "review", .description = "Review a change" }};
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |drawn| for ([_][]const u8{ "", "plain", "/eff", "/review" }) |draft| for (0..draft.len + 1) |caret| for ([_][]const u8{ "", "\t", "\n", "a\tb\n/review" }) |paste| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        defer _ = self.skills.reset();
+        errdefer std.debug.print("paste domain: width={d} drawn={} caret={d} draft={s} paste={any}\n", .{ width, drawn, caret, draft, paste });
+        held.size = .{ .width = width, .height = 30 };
+        try std.testing.expect(self.skills.answer(self.skills.ask("").?.read, .{ .entries = @constCast(&entries), .total = entries.len }, "") == null);
+        _ = self.input.append(draft);
+        self.input.editors[self.input.active].setCursor(caret);
+        if (drawn) try held.frame();
+        var bytes: [128]u8 = undefined;
+        try held.keys(try std.fmt.bufPrint(&bytes, "\x1b[200~{s}\x1b[201~", .{paste}));
+        var expected: [128]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{s}{s}{s}", .{ draft[0..caret], paste, draft[caret..] }), self.input.composition().bytes);
+        try std.testing.expectEqual(caret + paste.len, self.input.composition().cursor);
+        try std.testing.expect(!held.root.input.pasting and !self.input.editors[self.input.active].pasting());
+        try std.testing.expect(self.submission.intent == null and self.input.submitted == null);
+        try std.testing.expect(held.left == null);
+    };
 }
 
 test "App Session paste completion preserves retained draft caret after empty newline and ordinary pastes" {
