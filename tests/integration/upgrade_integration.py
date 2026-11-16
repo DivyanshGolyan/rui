@@ -871,7 +871,7 @@ class TerminalScreen:
 
 def refused_source_cases(root, binary, releases):
     for source in ("saved-relative", "file-relative", "relative-file-name", "invalid-document", "stdin-file", "stdin-lifetime"):
-        with ExitStack() as interfaces, case(root, binary, releases, f"refused-source-{source}") as c:
+        with contextlib.ExitStack() as interfaces, case(root, binary, releases, f"refused-source-{source}") as c:
             c.root.chmod(0o700)
             c.store.mkdir(mode=0o700)
             runtime = interfaces.enter_context(host_process.short_interface_directory())
@@ -935,7 +935,7 @@ def mysql_restart_cases(root, binary, releases):
             sql(f"CREATE DATABASE {database} CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin")
             ddl = subprocess.check_output([binary, "store", "schema", "--engine", "mysql"], text=True, timeout=20)
             sql(f"USE {database};" + ddl)
-            with ExitStack() as interfaces, case(root, binary, releases, "mysql-" + placement) as c, case(root, binary, releases, "mysql-later-" + placement) as later:
+            with contextlib.ExitStack() as interfaces, case(root, binary, releases, "mysql-" + placement) as c, case(root, binary, releases, "mysql-later-" + placement) as later:
                 c.store.mkdir(mode=0o700)
                 c.env["PR6_PRIVATE_DATABASE_URL"] = f"mysql://root:{quote(password, safe='')}@{quote(socket_path, safe='')}/{database}"
                 document = {"store": {"mysql": {"url": {"env": "PR6_PRIVATE_DATABASE_URL"}}}, "providers": {}}
@@ -1160,7 +1160,7 @@ def restart_all_cases(root, binary, releases):
     # admission reloads its saved document; census also finds saved interfaces
     # outside the shallow uid socket directory, without a registry.
     for explicit in ("default", "uid", "external"):
-        with ExitStack() as interfaces, case(root, binary, releases, f"restart-all-moved-storage-{explicit}") as c:
+        with contextlib.ExitStack() as interfaces, case(root, binary, releases, f"restart-all-moved-storage-{explicit}") as c:
             c.store.mkdir(mode=0o700)
             document = {"store": {"sqlite": {"dir": str(c.root / "data")}},
                         "execution": {"paused": True}, "providers": {}}
