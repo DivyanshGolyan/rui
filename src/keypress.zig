@@ -55,7 +55,7 @@ pub fn classify(value: vaxis.Key) Press {
     // key's associated text or shifted key and drops Shift, so Ctrl-Shift-J
     // with text j would send and Shift-Enter with text CR would too.
     // Root names Tab for focus traversal; the draft still edits it through
-    // its completion/literal-tab path when the screen routes it here.
+    // its literal-tab path when the screen routes it here.
     if (value.matchExact(vaxis.Key.tab, .{})) return .{ .edit = .tab };
     if (named(value)) |key_name| return .{ .key = key_name };
     if (isEnter(value)) return .enter;

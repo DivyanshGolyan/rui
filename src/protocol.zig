@@ -2156,7 +2156,7 @@ pub const command_observation_reply = struct {
     const completed_state = .{",\"state\":\"completed\""};
     const failed_state = .{",\"state\":\"failed\""};
     const cancelled_state = .{",\"state\":\"cancelled\""};
-    const permission_work = .{ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"", Hole.decimal, "\"},\"first_action\":", Hole.optional_id, "}" };
+    pub const permission_work = .{ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"", Hole.decimal, "\"},\"first_action\":", Hole.optional_id, "}" };
     pub const message_variants = .{
         rejected_state,
         rejected_state ++ input,
