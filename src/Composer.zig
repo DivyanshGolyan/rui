@@ -6,12 +6,16 @@ const layout = @import("draft_layout.zig");
 const Self = @This();
 const view = @import("overview_view.zig");
 const widget_style = @import("widget_style.zig");
+const commands = @import("slash_commands.zig");
 
 editor: *Editor,
 method: vaxis.gwidth.Method = .unicode,
 style: vaxis.Style = .{},
 quiet: vaxis.Style = .{ .dim = true },
 rule_style: vaxis.Style = .{ .dim = true },
+command_style: vaxis.Style = .{},
+/// The exact-match row's source word, derived by the completion owner.
+known_word: ?commands.Span = null,
 placeholder: []const u8 = "",
 ascii: bool = false,
 caret: bool = true,
@@ -20,6 +24,7 @@ pub fn setCaps(self: *Self, caps: view.Caps) void {
     self.style = widget_style.of(caps, .{ .background = .input_surface });
     self.quiet = widget_style.of(caps, .{ .colour = .quiet, .background = .input_surface });
     self.rule_style = widget_style.of(caps, .{ .colour = .quiet });
+    self.command_style = widget_style.of(caps, .{ .colour = .ink, .background = .input_surface });
     self.method = caps.width;
     self.ascii = !caps.unicode;
 }
@@ -45,8 +50,18 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const shown = area.viewport();
     var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = width, .height = text.size.height + 2 * rule });
     @memset(surface.buffer, .{ .style = self.style });
+    const command = if (self.known_word) |span| self.editor.text()[span.start..][0..span.len] else null;
     for (0..text.size.height) |row| for (0..text.size.width) |col| {
-        surface.writeCell(@intCast(col + prefix), @intCast(row + rule), text.readCell(col, row));
+        var cell = text.readCell(col, row);
+        // TextArea lends grapheme slices from the draft. Style those bytes,
+        // not coordinates: it alone owns wrapping, widths and the viewport.
+        if (command) |word| {
+            const glyph = cell.char.grapheme;
+            const start = @intFromPtr(word.ptr);
+            const at = @intFromPtr(glyph.ptr);
+            if (glyph.len != 0 and at >= start and at - start < word.len and glyph.len <= word.len - (at - start)) cell.style = self.command_style;
+        }
+        surface.writeCell(@intCast(col + prefix), @intCast(row + rule), cell);
     };
     var screen: vaxis.Screen = .{
         .width = surface.size.width,
@@ -271,4 +286,48 @@ test "Composer surface role covers New Session and chat drafts in both themes an
             };
         }
     }
+}
+
+test "Composer colours the list owner's exact word without taking TextArea's layout" {
+    for ([_]?view.Rgb{ .{ 255, 255, 255 }, null }) |terminal| for ([_]@TypeOf(@as(view.Caps, .{}).depth){ .direct, .none }) |depth| {
+        const caps: view.Caps = .{ .background = terminal, .depth = depth };
+        const ink = widget_style.of(caps, .{ .colour = .ink, .background = .input_surface });
+        const body = widget_style.of(caps, .{ .background = .input_surface });
+        const Case = struct { typed: []const u8, word: ?commands.Span = null };
+        for ([_]Case{
+            .{ .typed = "/new", .word = .{ .start = 0, .len = 4 } },
+            .{ .typed = "/help", .word = .{ .start = 0, .len = 5 } },
+            .{ .typed = "/hel" },
+            .{ .typed = "/unknown" },
+            .{ .typed = "/discard" },
+            .{ .typed = "/help /help on more long lines", .word = .{ .start = 0, .len = 5 } },
+            .{ .typed = "/help 界 e\u{301} /help", .word = .{ .start = 0, .len = 5 } },
+            .{ .typed = "/help first\t界 e\u{301} last", .word = .{ .start = 0, .len = 5 } },
+        }) |case| {
+            const typed = case.typed;
+            for ([_]u16{ 4, 8, 40 }) |width| for ([_]usize{ 0, typed.len }) |caret| {
+                var bytes: [128]u8 = undefined;
+                var editor: Editor = .initText(&bytes, typed, caret);
+                var composer: Self = .{ .editor = &editor };
+                composer.setCaps(caps);
+                composer.known_word = case.word;
+                var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer arena.deinit();
+                const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 5 }, .cell_size = .{} };
+                const surface = try composer.widget().draw(ctx);
+                // TextArea's borrowed argument glyphs, tab stand-ins and blank
+                // cells stay plain; only the exact source word takes the ink.
+                for (1..surface.size.height - 1) |row| for (3..width) |col| {
+                    const cell = surface.readCell(@intCast(col), @intCast(row));
+                    const at = @intFromPtr(cell.char.grapheme.ptr);
+                    const start = @intFromPtr(editor.text().ptr);
+                    const borrowed = cell.char.grapheme.len != 0 and at >= start and at - start < typed.len;
+                    const inside = if (case.word) |word| borrowed and at - start >= word.start and at - start < word.start + word.len else false;
+                    try std.testing.expectEqual(if (inside) ink else body, cell.style);
+                };
+                try std.testing.expectEqualStrings(typed, editor.text());
+                try std.testing.expectEqual(caret, editor.area.cursor);
+            };
+        }
+    };
 }

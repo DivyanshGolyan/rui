@@ -230,11 +230,11 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
             return if (std.mem.indexOfAny(u8, text, " \t\n") == null) .word else .message;
         }
 
-        pub fn starting(typed: []const u8) List {
-            var list: List = .{ .typed = typed, .column = description_column };
+        pub fn listed() List {
+            var list: List = .{ .typed = "", .column = description_column };
             for (names) |name| {
                 const command = table.get(name);
-                if (!command.listed or !std.mem.startsWith(u8, @tagName(name), typed)) continue;
+                if (!command.listed) continue;
                 list.add(.{ .word = spaced.get(name)[1 .. spaced.get(name).len - @intFromBool(command.argument == .none)], .shown = spaced.get(name)[0 .. spaced.get(name).len - 1], .description = if (command.description.len != 0) command.description else choices_text.get(name), .runs = !requires(command.argument) });
             }
             return list;
@@ -268,7 +268,7 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
 
         pub fn suggest(draft: []const u8, context: Context) ?List {
             if (!slashed(draft) or std.mem.indexOfAny(u8, draft, "\t\n") != null) return null;
-            const end = std.mem.indexOfScalar(u8, draft, ' ') orelse return starting(draft[1..]);
+            const end = std.mem.indexOfScalar(u8, draft, ' ') orelse return .{ .typed = draft[1..] };
             var list: List = .{ .typed = undefined };
             const name = nameOf(draft[1..end]) orelse return null;
             const words = draft[end + 1 ..];
@@ -313,15 +313,30 @@ pub const Entry = struct {
     shown: []const u8,
     description: []const u8 = "",
     runs: bool = true,
+    /// The part of the row the typed word matched, which the list draws
+    /// bold; `skill_completion` sets it.
+    matches: MatchSpans = .{},
 };
+
+pub const Span = struct { start: usize, len: usize };
+pub const MatchSpans = struct { name: ?Span = null, description: ?Span = null };
 
 pub const List = struct {
     typed: []const u8,
     entries: [capacity]Entry = undefined,
     count: usize = 0,
+    exact: ?usize = null,
+    source_word: ?Span = null,
+
     column: ?usize = null,
 
     pub const capacity = conversation.listed_count + skill_suggestions.capacity;
+
+    /// A typed name is known only when this list contains its exact row.
+    pub fn exactWord(self: *const List) ?Span {
+        _ = self.exact orelse return null;
+        return self.source_word;
+    }
 
     fn add(self: *List, entry: Entry) void {
         std.debug.assert(std.mem.startsWith(u8, entry.word, self.typed));
@@ -356,6 +371,7 @@ pub const List = struct {
     }
 
     pub fn completion(self: *const List, highlight: usize) []const u8 {
+        std.debug.assert(std.mem.startsWith(u8, self.entries[highlight].word, self.typed));
         return self.entries[highlight].word[self.typed.len..];
     }
 
@@ -632,15 +648,15 @@ test "a draft is a command line, one unfinished slash word, or a Message, by the
     for (cases) |case| try std.testing.expectEqual(case[1], conversation.draftOf(case[0]));
 }
 
-test "the first word's command rows are one list whether the grammar or the caret's word asks" {
+test "the grammar leaves a first word's rows to the caret's word" {
+    // `skill_completion` matches a first word against commands and skills
+    // alike; the grammar only says a list is for it.
     for ([_][]const u8{ "", "a", "re", "rel", "requests", "discard", "zz", "model" }) |typed| {
         var buffer: [80]u8 = undefined;
         const draft = try std.fmt.bufPrint(&buffer, "/{s}", .{typed});
-        const listed = conversation.suggest(draft, .{}).?;
-        const starts = conversation.starting(typed);
-        try std.testing.expectEqual(listed.count, starts.count);
-        for (listed.shown(), starts.shown()) |left, right| try std.testing.expectEqualStrings(left.word, right.word);
-        for (starts.shown()) |entry| try std.testing.expect(std.mem.startsWith(u8, entry.word, starts.typed));
+        const list = conversation.suggest(draft, .{}).?;
+        try std.testing.expectEqual(@as(usize, 0), list.count);
+        try std.testing.expectEqualStrings(typed, list.typed);
     }
 }
 
@@ -675,20 +691,12 @@ test "a command admits exactly the arguments its shape names" {
     }
 }
 
-test "the list names the listed commands a command word starts, and Tab puts the highlighted one in" {
+test "a command's list names the choices its word starts, and Tab puts the highlighted one in" {
     const Case = struct { draft: []const u8, shown: ?[]const []const u8, first: ?[]const u8 = null };
     const cases = [_]Case{
-        .{ .draft = "/", .shown = &.{ "archive", "clear", "copy ", "effort ", "model", "new", "pin", "reload-skills", "rename ", "requests", "result ", "setup ", "unarchive", "unpin" } },
-        .{ .draft = "/c", .shown = &.{ "clear", "copy " }, .first = "lear" },
-        .{ .draft = "/cop", .shown = &.{"copy "}, .first = "y " },
-        .{ .draft = "/st", .shown = &.{} },
-        .{ .draft = "/re", .shown = &.{ "reload-skills", "rename ", "requests", "result " } },
-        .{ .draft = "/rel", .shown = &.{"reload-skills"}, .first = "oad-skills" },
-        .{ .draft = "/s", .shown = &.{"setup "}, .first = "etup " },
-        .{ .draft = "/req", .shown = &.{"requests"} },
-        .{ .draft = "/w", .shown = &.{} },
+        .{ .draft = "/", .shown = &.{} },
+        .{ .draft = "/c", .shown = &.{} },
         .{ .draft = "/login", .shown = &.{} },
-        .{ .draft = "/x", .shown = &.{} },
         .{ .draft = "/copy ", .shown = &.{ "code", "file" }, .first = "code" },
         .{ .draft = "/copy f", .shown = &.{"file"}, .first = "ile" },
         .{ .draft = "/copy file ", .shown = null },
@@ -714,8 +722,12 @@ test "the list names the listed commands a command word starts, and Tab puts the
     }
 }
 
-test "skills completion runs reload immediately" {
-    const reload = conversation.suggest("/reload", .{}).?.shown()[0];
+test "listed commands are every listed name in order, and reload runs immediately" {
+    const listed = conversation.listed();
+    const expected = [_][]const u8{ "archive", "clear", "copy ", "effort ", "model", "new", "pin", "reload-skills", "rename ", "requests", "result ", "setup ", "unarchive", "unpin" };
+    try std.testing.expectEqual(expected.len, listed.count);
+    for (expected, listed.shown()) |word, entry| try std.testing.expectEqualStrings(word, entry.word);
+    const reload = listed.shown()[7];
     try std.testing.expectEqualStrings("reload-skills", reload.word);
     try std.testing.expect(reload.runs);
 }
@@ -765,8 +777,8 @@ test "/setup lists its options and every effort for any model" {
 }
 
 test "a key's list is the draft's own, and counts as drawn when the latest frame drew a list" {
-    const c = conversation.suggest("/re", .{}).?;
-    const co = conversation.suggest("/rel", .{}).?;
+    const c = conversation.suggest("/copy ", .{}).?;
+    const co = conversation.suggest("/copy f", .{}).?;
     var stored: ?Shown = Shown.next(null, 1, c);
     stored.?.drew(true);
     Shown.drawnNow(&stored, Shown.next(stored, 1, c)).?.move(true);
@@ -864,10 +876,11 @@ test "archive commands retain separate local command identities" {
             try std.testing.expectEqualStrings(name, @tagName(parsed.command.name));
             try std.testing.expectEqualStrings("", parsed.command.argument);
             try std.testing.expect(screen.parse("/" ++ name ++ " other") == .misused);
-            const list = screen.suggest("/" ++ name, .{}).?;
-            try std.testing.expectEqual(@as(usize, 1), list.count);
-            try std.testing.expectEqualStrings(name, list.shown()[0].word);
-            try std.testing.expect(list.enter(0).runs);
+            const list = screen.listed();
+            const row = for (list.shown()) |entry| {
+                if (std.mem.eql(u8, entry.word, name)) break entry;
+            } else return error.TestUnexpectedResult;
+            try std.testing.expect(row.runs);
         }
     }
 }

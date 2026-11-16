@@ -172,8 +172,12 @@ fn outline(store: *storage.Store, arena: std.mem.Allocator, session: []const u8,
     try out.print("{d}.{d} {s}", .{ item.position, item.ordinal, @tagName(item.value) });
     var note: ?protocol.Bounded(protocol.max_tool_description_bytes) = null;
     switch (item.value) {
-        .admission, .user => try out.writeAll(" person"),
-        .received => |message| if (message.sender) |sender| try out.print(" {s}", .{sender.session.slice()}),
+        .admission, .user, .received => |message| if (message.source_action) |action|
+            try out.print(" Action {d}", .{action})
+        else if (message.sender) |sender|
+            try out.print(" {s}", .{sender.session.slice()})
+        else
+            try out.writeAll(" person"),
         .sent => |sent| try out.print(" {s}", .{sent.target.session.slice()}),
         .send_failed => |sent| if (sent.target) |target|
             try out.print(" {s}", .{target.session.slice()})

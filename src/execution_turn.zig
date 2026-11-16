@@ -276,7 +276,6 @@ const Recording = struct {
     work_scans: usize = 0,
     work_paused: ?bool = null,
     capacity_work: bool = false,
-    background_work: bool = true,
     release_during_scan: bool = false,
     released_credits: usize = 1,
     new_admission: Admission = .no_work,
@@ -448,7 +447,7 @@ const Recording = struct {
         var found = self.work;
         found.mcp = found.mcp and capacity.hasCredit() and capacity.mcp_open;
         if (self.capacity_work) {
-            const eligible = if (self.background_work) capacity.hasHeadroom() else capacity.hasCredit();
+            const eligible = capacity.hasCredit();
             found.mcp = found.mcp and eligible;
             found.bash = found.bash and eligible;
         }
@@ -1142,7 +1141,7 @@ test "ordinary custody snapshot is not relabeled after cleanup during its scan" 
 }
 
 test "dispatch resource snapshots invalidate blocked work and core caches without commits" {
-    for ([_]bool{ false, true }) |background| {
+    {
         var context: Recording = .{
             .generation_advance = 0,
             .auto_advance = 0,
@@ -1150,7 +1149,6 @@ test "dispatch resource snapshots invalidate blocked work and core caches withou
             .free = 0,
             .custody_free = 0,
             .capacity_work = true,
-            .background_work = background,
             .work = .{ .core = false, .mcp = true, .bash = false, .message = false, .tool_continuation = false, .retry = false },
         };
         var state: State = .{};
@@ -1160,15 +1158,8 @@ test "dispatch resource snapshots invalidate blocked work and core caches withou
         context.custody_free = 1;
         context.mcp_available = true;
         const result = run(&state, &context);
-        try std.testing.expectEqual(!background, result == .continue_immediately);
-        try std.testing.expectEqual(@as(usize, if (background) 0 else 1), context.mcp_runs);
-        if (background) {
-            _ = run(&state, &context);
-            try std.testing.expectEqual(@as(usize, 2), context.work_scans);
-            context.custody_free = 2;
-            try std.testing.expect(run(&state, &context) == .continue_immediately);
-            try std.testing.expectEqual(@as(usize, 1), context.mcp_runs);
-        }
+        try std.testing.expectEqual(.continue_immediately, result);
+        try std.testing.expectEqual(@as(usize, 1), context.mcp_runs);
         context.mcp_available = true;
         context.mcp_open = false;
         try std.testing.expect(run(&state, &context) == .wait);

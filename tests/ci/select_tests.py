@@ -624,6 +624,30 @@ def live_mysql_suites(targets, mysql_suites):
     return suites
 
 
+def covers(target, targets) -> bool:
+    """Whether a selected target executes target's checks.
+
+    check-full deliberately excludes stack-frames; promotion adds it separately.
+    """
+    broader = {"test": {"test-native", "test-store"},
+               "check": CHECK_COVERS | {"stack-frames"},
+               "check-full": CHECK_COVERS | {"check"}, **FIXTURE_COVERS}
+    return target in targets or any(target in broader.get(selected, ()) for selected in targets)
+
+
+def normalize(targets: set) -> set:
+    """Return a fresh selection with checks covered by broader targets removed."""
+    checks = set(targets)
+    if {"test-native", "test-store"} <= checks:
+        checks.add("test")
+    covered = {case for cases in FIXTURE_COVERS.values() for case in cases if covers(case, checks)}
+    if CHECK_COVERS - UNIT_ROOTS.keys() - {"test"} <= checks | covered:
+        checks.add("check")
+    if "check-full" in checks:
+        checks.discard("check")
+    return {target for target in checks if not covers(target, checks - {target})}
+
+
 def select(paths, phase, available, graph=None, contents=None, fixture_literals=None):
     graph = graph or tree_graph()
     paths = [BUILD_HUB if BUILD_MODULES.get(path) == BUILD_HUB else path for path in paths]
@@ -725,20 +749,6 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
             native_targets.update(asserted - LINUX_ONLY)
             reasons.add("Asserted text: a fixture waits for text this file draws")
     unit_roots = targets & ({"test"} | UNIT_ROOTS.keys()) - FIXTURES.keys()
-    for checks in (targets, native_targets):
-        if "test" in checks or {"test-native", "test-store"} <= checks:
-            checks.difference_update({"test-native", "test-store"})
-            checks.add("test")
-        covered = {case for broad, cases in FIXTURE_COVERS.items() if broad in checks for case in cases}
-        checks -= covered
-        if CHECK_COVERS - UNIT_ROOTS.keys() - {"test"} <= checks | covered:
-            checks.add("check")
-        if "check-full" in checks:
-            checks.discard("check")
-        if checks & {"check", "check-full"}:
-            checks -= CHECK_COVERS
-        if "check" in checks:
-            checks.discard("stack-frames")
     mac_required = phase == "review" and any(mac_path(path) for path in paths)
     if mac_required:
         reasons.add("Mac-specific path: PR runs Mac Selected (tests/ci/platform_boundary.py)")
@@ -752,10 +762,8 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
                    ({"installer-integration"} if any(matches(path, INSTALLER_PATHS) for path in paths) else set())
                    if targets else set())
         native_targets = set()
-        if {"test-native", "test-store"} <= targets:
-            targets.add("test")
-    if "test" in targets:
-        targets.difference_update({"test-native", "test-store"})
+    targets = normalize(targets)
+    native_targets = normalize(native_targets)
     mysql_suites = live_mysql_suites(targets, graph.live_mysql)
     targets.update(mysql_suites)
     if mysql_suites:

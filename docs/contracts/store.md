@@ -68,7 +68,7 @@ Unpin and archive intent clear that pointer with a typed Session-head update, re
 The SQLite step preserves all Commands and their references while widening the kind CHECK.
 The operator-run MySQL step resolves the exact old kind CHECK in the current database catalog, because its generated name can differ between fresh and previously migrated Stores.
 An absent or ambiguous match refuses before DDL; unrelated checks and foreign keys remain unchanged.
-The step to 77 adds canonical `session_group` and `session_group_member` facts and the group Command kind.
+The step to 78 adds canonical `session_group` and `session_group_member` facts and the group Command kind.
 A group stores its positive ID, unique name, collapse state, revision, and optional automatic-topic or family anchor.
 Each Session stores one nullable membership, manual-choice flag, birth creator, and automatic-evaluation flag.
 The migration makes a family for each existing top-level parent tree that has children; unrelated roots remain ungrouped.

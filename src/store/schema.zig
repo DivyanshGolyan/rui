@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 77;
+pub const schema_version: u32 = 78;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -55,7 +55,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 74, .digest = 0xda8e267adbfcef45 },
     .{ .schema_version = 75, .digest = 0xcea5bf4db0d3978d },
     .{ .schema_version = 76, .digest = 0x0d2cb1706af6379c },
-    .{ .schema_version = 77, .digest = 0xbeb4681fe795258b },
+    .{ .schema_version = 77, .digest = 0x180d1a249b979d56 },
+    .{ .schema_version = 78, .digest = 0x33d8c6f5f8cd5957 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -681,10 +682,29 @@ pub const migrations = [_]Migration{
     .{
         .from = 76,
         .sqlite = &.{
-            "ALTER TABLE core_command RENAME TO core_command_before_77",
+            "ALTER TABLE message_admission RENAME TO message_admission_before_77",
+            "CREATE TABLE message_admission(\n admission_id INTEGER PRIMARY KEY NOT NULL CHECK(admission_id>0),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n command_key TEXT NOT NULL UNIQUE REFERENCES core_command(command_key),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n admission_position INTEGER CHECK(admission_position>0),\n turn_id INTEGER REFERENCES turn(turn_id),\n admitted_at INTEGER NOT NULL CHECK(admitted_at>0),\n sender_session_ref TEXT REFERENCES session(session_ref),\n sender_position INTEGER CHECK(sender_position>0),\n source_action_id INTEGER UNIQUE REFERENCES action_operation(action_id),\n CHECK((sender_session_ref IS NULL)=(sender_position IS NULL)),\n CHECK(source_action_id IS NULL OR sender_session_ref IS NULL)\n) STRICT",
+            "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position) SELECT admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position FROM message_admission_before_77",
+            "DROP TABLE message_admission_before_77",
+            "CREATE UNIQUE INDEX message_admission_sent ON message_admission(sender_session_ref,sender_position) WHERE sender_session_ref IS NOT NULL",
+            "CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id)",
+            "CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL",
+            "CREATE INDEX message_admission_session_pending ON message_admission(session_ref,admission_id) WHERE turn_id IS NULL",
+            "CREATE INDEX message_admission_person ON message_admission(session_ref,admission_position) WHERE sender_session_ref IS NULL AND source_action_id IS NULL",
+            "CREATE INDEX message_admission_unpositioned ON message_admission(session_ref) WHERE admission_position IS NULL",
+            "CREATE INDEX message_admission_position ON message_admission(session_ref,admission_position)",
+        },
+        .mysql = &.{
+            "ALTER TABLE message_admission ADD COLUMN source_action_id BIGINT AFTER sender_position, ADD UNIQUE(source_action_id), ADD FOREIGN KEY(source_action_id) REFERENCES action_operation(action_id), ADD CHECK(source_action_id IS NULL OR sender_session_ref IS NULL), MODIFY COLUMN message_admission_person_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN sender_session_ref IS NULL AND source_action_id IS NULL THEN session_ref END) STORED",
+        },
+    },
+    .{
+        .from = 77,
+        .sqlite = &.{
+            "ALTER TABLE core_command RENAME TO core_command_before_78",
             "CREATE TABLE core_command(\n command_key TEXT NOT NULL UNIQUE CHECK(length(CAST(command_key AS BLOB))<=128),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 9),\n target TEXT NOT NULL CHECK(length(CAST(target AS BLOB))<=128),\n input_digest BLOB NOT NULL CHECK(length(input_digest)=32),\n primary_content_id INTEGER REFERENCES content(content_id),\n secondary_content_id INTEGER REFERENCES content(content_id),\n accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),\n code TEXT NOT NULL CHECK(length(CAST(code AS BLOB))<=96),\n revision INTEGER NOT NULL CHECK(revision>=0),\n created INTEGER NOT NULL CHECK(created IN (0,1)),\n command_seq INTEGER PRIMARY KEY NOT NULL CHECK(command_seq>0)\n) STRICT",
-            "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM core_command_before_77",
-            "DROP TABLE core_command_before_77",
+            "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM core_command_before_78",
+            "DROP TABLE core_command_before_78",
             "CREATE INDEX core_command_target_order ON core_command(target,kind,command_seq)",
             "CREATE TABLE session_group(\n group_id INTEGER PRIMARY KEY NOT NULL CHECK(group_id>0),\n name TEXT NOT NULL UNIQUE CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 100),\n collapsed INTEGER NOT NULL CHECK(collapsed IN (0,1)),\n revision INTEGER NOT NULL CHECK(revision>0),\n automatic_anchor BLOB UNIQUE CHECK(automatic_anchor IS NULL OR length(automatic_anchor)=32)\n) STRICT",
             "CREATE TABLE session_group_member(\n session_ref TEXT PRIMARY KEY NOT NULL REFERENCES session(session_ref),\n group_id INTEGER REFERENCES session_group(group_id),\n manual INTEGER NOT NULL CHECK(manual IN (0,1)),\n creator_ref TEXT REFERENCES session(session_ref),\n evaluated INTEGER NOT NULL CHECK(evaluated IN (0,1)),\n CHECK(creator_ref IS NULL OR creator_ref<>session_ref)\n) STRICT, WITHOUT ROWID",
@@ -1181,17 +1201,19 @@ pub const tables = [_]Table{
             .{ .name = "admitted_at", .type = .int, .check = "admitted_at>0", .read_by = .both },
             .{ .name = "sender_session_ref", .type = .{ .text = null }, .nullable = true, .read_by = .both },
             .{ .name = "sender_position", .type = .int, .nullable = true, .check = "sender_position>0", .read_by = .both },
+            .{ .name = "source_action_id", .type = .int, .nullable = true },
         },
         .primary_key = &.{"admission_id"},
-        .uniques = &.{&.{"command_key"}},
+        .uniques = &.{ &.{"command_key"}, &.{"source_action_id"} },
         .foreign_keys = &.{
             references("session_ref", "session", session_reference),
             references("command_key", "core_command", command_reference),
             references("content_id", "content", content_reference),
             references("turn_id", "turn", &.{"turn_id"}),
             references("sender_session_ref", "session", session_reference),
+            references("source_action_id", "action_operation", &.{"action_id"}),
         },
-        .checks = &.{"(sender_session_ref IS NULL)=(sender_position IS NULL)"},
+        .checks = &.{ "(sender_session_ref IS NULL)=(sender_position IS NULL)", "source_action_id IS NULL OR sender_session_ref IS NULL" },
     },
     .{
         .name = "sent_rejection",
@@ -1685,7 +1707,7 @@ pub const indexes = [_]Index{
     .{ .name = "message_admission_session_order", .table = "message_admission", .columns = &.{ "session_ref", "turn_id", "admission_id" } },
     .{ .name = "message_admission_pending", .table = "message_admission", .columns = &.{ "admission_id", "session_ref" }, .where = "turn_id IS NULL" },
     .{ .name = "message_admission_session_pending", .table = "message_admission", .columns = &.{ "session_ref", "admission_id" }, .where = "turn_id IS NULL" },
-    .{ .name = "message_admission_person", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" }, .where = "sender_session_ref IS NULL" },
+    .{ .name = "message_admission_person", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" }, .where = "sender_session_ref IS NULL AND source_action_id IS NULL" },
     .{ .name = "message_admission_unpositioned", .table = "message_admission", .columns = &.{"session_ref"}, .where = "admission_position IS NULL" },
     .{ .name = "message_admission_position", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" } },
     .{ .name = "core_command_target_order", .table = "core_command", .columns = &.{ "target", "kind", "command_seq" } },
@@ -3234,7 +3256,7 @@ test "model call timing format 68 migration preserves format 67 resolutions with
 }
 
 test "session group migration creates canonical objects for both dialects" {
-    const step = migrations[76 - migration_baseline];
+    const step = migrations[77 - migration_baseline];
     inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
         const expected = comptime objects(dialect);
         const statements = if (dialect == .sqlite) step.sqlite else step.mysql;
@@ -3268,12 +3290,14 @@ test "session group migration backfills parent trees and leaves unrelated roots 
         try sqlite.exec(db, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
         try sqlite.exec(db, @embedFile("migration_baseline_rows.sql"));
         for (migrations) |step| {
-            if (step.from == 76) break;
+            if (step.from == 77) break;
             for (step.sqlite) |statement| try sqlite.exec(db, statement);
         }
+        try sqlite.exec(db, "UPDATE message_admission SET source_action_id=1 WHERE session_ref='brhkcj'");
         if (depth >= 1) try sqlite.exec(db, "UPDATE session SET parent_ref='d8mv7p' WHERE session_ref='brhkcj'");
         if (depth == 2) try sqlite.exec(db, "UPDATE session SET parent_ref='brhkcj' WHERE session_ref='rhvzwc'");
-        for (migrations[76 - migration_baseline].sqlite) |statement| try sqlite.exec(db, statement);
+        for (migrations[77 - migration_baseline].sqlite) |statement| try sqlite.exec(db, statement);
+        try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(db, "SELECT count(*) FROM message_admission WHERE session_ref='brhkcj' AND source_action_id=1"));
         try std.testing.expectEqual(@as(u32, 3), try sqlite.pragmaInt(db, "SELECT count(*) FROM session_group_member"));
         try std.testing.expectEqual(@as(u32, if (depth == 0) 0 else 1), try sqlite.pragmaInt(db, "SELECT count(*) FROM session_group"));
         try std.testing.expectEqual(@as(u32, if (depth == 0) 0 else depth + 1), try sqlite.pragmaInt(db, "SELECT count(*) FROM session_group_member WHERE group_id IS NOT NULL"));

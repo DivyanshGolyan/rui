@@ -57,14 +57,19 @@ The next model Operation can consume it once every sibling call has a fulfillmen
 Promotion preserves the same Action, Attempt, arguments, authorization, executor and deadline; it grants no permission and launches no replacement invocation.
 The Session owns the promoted Action beyond its original Turn, including approval discovery and Stop propagation through attached descendants.
 
-An already attempted Action can be promoted only with at least one genuinely free custody record.
-Dispatching a pending background Action requires at least two free records, enforced by the existing reservation owner before any Attempt or effect.
-Detached cleanup still occupies custody.
-Capacity one refuses promotion; a pending accepted Action may wait for capacity.
-A saved refusal remains the result of its key, and a fresh refusal leaves the original call and executor unchanged.
+The Host calls the same promotion owner when a live foreground Action has run for `execution.backgroundAfterMs` (default 30 seconds). Bash, MCP and future Host-run tools use the shared custody launch clock; Core tools and provider-hosted `web_search` do not hold live Action custody. No model intent or per-tool option selects backgrounding. Each launch is checked once, and promotion never resets the original execution deadline. Execution remains live-Host only, with no durable resume or automatic retry after Host death.
 
-Native users poll `action read` for the sole terminal Resolution.
-Completion does not append a new input or wake the model in this delivery.
+Promotion keeps an attempted Action's existing custody credit and never needs a free credit or changes how many credits are held. That credit remains occupied until final Resolution and safe cleanup. An unattempted promoted Action waits for an ordinary credit before dispatch.
+When background Actions hold every credit, new foreground work waits for one as usual. Deadlines bound that starvation; no Action waits on its own continuation to finish.
+A repeated matching command preserves the original selection; an existing background or final selection takes precedence over a later stop. A fresh stop refusal leaves the original call and executor unchanged.
+
+A promoted Action’s final Resolution atomically admits one sourced Session input through the same admission owner as person and peer Messages.
+The input identifies its source Action and references the sole Resolution’s content; it never copies the payload.
+Resolution commitment and input admission share one transaction, so restart and replay cannot admit it twice.
+The existing Resolution reader validates the reference when model history renders it.
+Eligible final input joins the running Turn at its next input boundary without changing an in-flight model request, and starts a Turn when the Session is idle.
+A Session stop suppresses final input from its selected Actions, retaining readable terminal evidence; archive uses that same stop selection.
+Native users can also read the sole terminal Resolution through `action read`.
 A Session Stop keeps the existing runner-aware cancellation and uncertainty rules; Host recovery records uncertainty without replaying an invocation.
 
 Bash arguments require `cmd` and `description`; `stdin` and `timeout_ms` are optional.

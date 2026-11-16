@@ -496,6 +496,7 @@ const Handle = union(enum) {
     content: store.HistoricalContent,
     instructions,
     sender,
+    action_final,
 };
 
 const Segment = struct {
@@ -532,6 +533,8 @@ pub const Preparation = struct {
     handles: [codec_abi.max_handles]Handle = undefined,
     output_bag: ?store.HistoricalContent = undefined,
     sender: protocol.Bounded(protocol.max_session_bytes) = undefined,
+    source_action: [20]u8 = undefined,
+    source_action_len: usize = 0,
     tool: store.HistoricalTool = undefined,
     state: State,
 
@@ -807,6 +810,12 @@ pub const Preparation = struct {
                         if (entry.sender) |sender| {
                             self.sender = sender;
                             self.handles[1] = .sender;
+                            handles |= 0b10;
+                        }
+                        if (entry.source_action) |action| {
+                            const text = std.fmt.bufPrint(&self.source_action, "{d}", .{action.id}) catch unreachable;
+                            self.source_action_len = text.len;
+                            self.handles[1] = .action_final;
                             handles |= 0b10;
                         }
                         return self.loadItemHeader(.{ .message = if (entry.kind == .instruction) .instruction else .user }, handles);
@@ -1148,6 +1157,12 @@ pub const Preparation = struct {
                 5 => .{ .source = .{ .bytes = model_catalog.builtinInstructions(self.settings.model.slice()).bytes() } },
                 6 => .{ .source = .{ .bytes = context_parts[3] } },
                 7 => .{ .source = .{ .content = self.settings.baseline_instructions } },
+                else => null,
+            },
+            .action_final => switch (index) {
+                0 => .{ .source = .{ .bytes = "[Rui: background Action " } },
+                1 => .{ .source = .{ .bytes = self.source_action[0..self.source_action_len] } },
+                2 => .{ .source = .{ .bytes = " reached its final Resolution. The result follows.]\n" } },
                 else => null,
             },
             .sender => switch (index) {

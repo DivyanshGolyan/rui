@@ -2314,7 +2314,7 @@ pub const conversation_page_reply = struct {
         return .{ "{\"position\":\"", .decimal, "\",\"ordinal\":\"", .decimal, "\",\"kind\":\"" ++ @tagName(kind) ++ "\",\"content\":{\"bytes\":\"", .decimal, "\",\"sha256\":\"", .{ .hex = 32 }, "\",\"display\":\"omitted\"}" };
     }
     pub const hosted_call = .{ "{\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"kind\":\"hosted_call\"" };
-    pub const admission = .{ ",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = NamedPeerJson } };
+    pub const admission = .{ ",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = NamedPeerJson }, ",\"source_action\":", Hole.optional_id };
     pub const presentation = .{ ",\"presentation\":", Hole{ .json = ToolPresentationJson } };
     pub const item_end = .{"}"};
 
