@@ -6,6 +6,15 @@ pub const Source = union(enum) {
     peer: struct { key: []const u8, session: rsql.SessionHead },
 };
 
+/// An admitted Message must name its accepted kind-2 command, recipient
+/// and exact Content. Both receiving and sending Activity reads use this
+/// source check; their own position and Turn checks remain with each reader.
+pub fn consistentSql(comptime message: []const u8, comptime command: []const u8) []const u8 {
+    return command ++ ".kind=2 AND " ++ command ++ ".accepted=1 AND " ++
+        command ++ ".target=" ++ message ++ ".session_ref AND " ++
+        command ++ ".primary_content_id=" ++ message ++ ".content_id";
+}
+
 /// A person's Message.
 const admit_message = rsql.Write(.{
     .sql = "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) VALUES(?1,@session(?2),?3,?4,?5,@now)",

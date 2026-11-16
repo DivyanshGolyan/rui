@@ -917,3 +917,53 @@ test "configure parent refuses every widening field, missing or ended parents an
         }
     }.run);
 }
+
+test "received and sent Activity reject disagreement with their accepted Message source" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Damage = enum { kind, accepted, target, content, missing_content, missing_command };
+            inline for (.{ false, true }) |sent| {
+                inline for (std.enums.values(Damage)) |damage| {
+                    var tmp = std.testing.tmpDir(.{});
+                    defer tmp.cleanup();
+                    var storage: Store = undefined;
+                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                    defer storage.close() catch unreachable;
+                    var path: [protocol.max_workspace_bytes]u8 = undefined;
+                    var create = try completeConfiguration("source-check-sender", "", try canonicalCwd(std.testing.io, &path), "model-a");
+                    create.configuration.tools = try .of(&.{"message_agent"});
+                    create.configuration.permission_mode.state = .value;
+                    try create.configuration.permission_mode.value.set("bypass");
+                    const sender = (try storage.configure(&create, .{})).accepted.session;
+                    const receiver = try configureTestSession(&storage, "source-check-receiver");
+                    try submitTestMessage(&storage, &tmp, "source-check-task", "source-check-task", sender.slice(), "send");
+                    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    var arguments_buffer: [128]u8 = undefined;
+                    const arguments = try std.fmt.bufPrint(&arguments_buffer, "{{\"id\":\"{s}\",\"text\":\"hello\"}}", .{receiver.slice()});
+                    var encoded_buffer: [192]u8 = undefined;
+                    const encoded = try std.fmt.bufPrint(&encoded_buffer, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"hello\\\"}}", .{receiver.slice()});
+                    try settleCallsForTesting(&storage, &tmp, model, "source-check-call", &.{.{ .item_id = "send", .name = "message_agent", .encoded_call_id = "send", .decoded_call_id = "send", .encoded_arguments = encoded, .decoded_arguments = arguments }});
+                    const action = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
+                    const original = "\xef\xbb\xbfexact\x00peer";
+                    try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(action.binding, receiver.slice(), original, .{}));
+                    const request: protocol.ActivityPage = .{ .session = if (sent) sender else receiver, .kinds = if (sent) .initOne(.sent) else .initOne(.received) };
+                    const page = try store_core.activityPageForTesting(&storage, request);
+                    try std.testing.expectEqual(@as(usize, 1), page.count);
+                    const id = try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE session_ref=?1", .{receiver.slice()});
+                    try expectContent(&storage, try testingContentReference(&storage, id), original);
+                    try std.testing.expect(!storage.isFenced());
+                    switch (damage) {
+                        .kind => try store_testing.exec(&storage, "UPDATE core_command SET kind=1 WHERE command_key=(SELECT command_key FROM message_admission WHERE session_ref=?1)", .{receiver.slice()}),
+                        .accepted => try store_testing.exec(&storage, "UPDATE core_command SET accepted=0 WHERE command_key=(SELECT command_key FROM message_admission WHERE session_ref=?1)", .{receiver.slice()}),
+                        .target => try store_testing.exec(&storage, "UPDATE core_command SET target=?1 WHERE command_key=(SELECT command_key FROM message_admission WHERE session_ref=?2)", .{ sender.slice(), receiver.slice() }),
+                        .content => try store_testing.exec(&storage, "UPDATE core_command SET primary_content_id=(SELECT content_id FROM message_admission WHERE command_key='source-check-task') WHERE command_key=(SELECT command_key FROM message_admission WHERE session_ref=?1)", .{receiver.slice()}),
+                        .missing_content => try store_testing.exec(&storage, "UPDATE core_command SET primary_content_id=NULL WHERE command_key=(SELECT command_key FROM message_admission WHERE session_ref=?1)", .{receiver.slice()}),
+                        .missing_command => try store_testing.withoutForeignKeys(&storage, "DELETE FROM core_command WHERE command_key=(SELECT command_key FROM message_admission WHERE session_ref=?1)", .{receiver.slice()}),
+                    }
+                    try std.testing.expectError(error.CorruptStore, store_core.activityPageForTesting(&storage, request));
+                    try std.testing.expect(storage.isFenced());
+                }
+            }
+        }
+    }.run);
+}
