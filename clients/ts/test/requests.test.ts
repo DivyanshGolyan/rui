@@ -232,3 +232,30 @@ test("Action reads preserve identity and byte cursor without mutation", async ()
 	await session.readAction(action, "16383");
 	assert.deepEqual(requests, [{ path: "/v1/read-action", body: { version: WIRE_VERSION, kind: "read_action", store: "store", session: "session", action, offset: "16383" } }]);
 });
+
+
+test("Action promotion preserves the key and lossless saved selection", async () => {
+	for (const kind of ["background", "final"] as const) {
+		const action = "9007199254740993";
+		const selection = { kind, position: "9007199254740995" };
+		const link: Link = {
+			async exchange(path, build) {
+				assert.equal(path, "/v1/control/action-background");
+				assert.deepEqual(JSON.parse(build('store"\n')), {
+					version: WIRE_VERSION, kind: "action_background", store: 'store"\n',
+					key: "promote", session: "session", action,
+				});
+				return Buffer.from(JSON.stringify({ answer: { status: "accepted", replayed: true, session: "session", action, action_selection: selection } }));
+			},
+		};
+		assert.deepEqual(await new Session(link, "session").backgroundAction(action, { idempotencyKey: "promote" }), selection);
+	}
+});
+
+test("Action promotion reports capacity refusal and changed-key conflicts", async () => {
+	for (const [status, code] of [["rejected", "background_unavailable"], ["conflict", "idempotency_key_conflict"]]) {
+		const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ answer: { status, code } })) };
+		await assert.rejects(new Session(link, "session").backgroundAction("1"), (error: unknown) =>
+			error instanceof RuiRequestError && error.type === status && error.code === code);
+	}
+});

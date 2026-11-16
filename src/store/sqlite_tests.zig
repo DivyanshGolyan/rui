@@ -218,36 +218,7 @@ pub const TestingSteps = struct {
     }
 };
 
-/// Interrupts the one statement whose text is `sql` as it steps, the way an
-/// I/O fault fails a read. No schema changes, so no cached plan expires.
-pub const TestingStatementFault = struct {
-    sql: [:0]const u8,
-    running: bool = false,
-    failed: u64 = 0,
-
-    pub fn arm(self: *TestingStatementFault, database: *c.sqlite3) void {
-        _ = c.sqlite3_trace_v2(database, c.SQLITE_TRACE_STMT, traced, self);
-        c.sqlite3_progress_handler(database, 1, progress, self);
-    }
-
-    pub fn disarm(_: *const TestingStatementFault, database: *c.sqlite3) void {
-        _ = c.sqlite3_trace_v2(database, 0, null, null);
-        c.sqlite3_progress_handler(database, 0, null, null);
-    }
-
-    pub fn traced(_: c_uint, context: ?*anyopaque, statement: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
-        const self: *TestingStatementFault = @ptrCast(@alignCast(context.?));
-        self.running = std.mem.eql(u8, std.mem.span(c.sqlite3_sql(@ptrCast(statement))), self.sql);
-        return 0;
-    }
-
-    pub fn progress(context: ?*anyopaque) callconv(.c) c_int {
-        const self: *TestingStatementFault = @ptrCast(@alignCast(context.?));
-        if (!self.running) return 0;
-        self.failed += 1;
-        return 1;
-    }
-};
+pub const TestingStatementFault = store_testing.TestingStatementFault;
 
 /// Every claimed Session position is used exactly once: the claims, from
 /// every table that saves one, are exactly 1 through `next_position - 1`.
@@ -347,7 +318,7 @@ pub fn attemptBashForTesting(storage: *Store, tmp: *std.testing.TmpDir, session:
     try std.testing.expect(try storage.configure(&tools, .{}) == .accepted);
     try submitTestMessage(storage, tmp, "bash-seed", "bash-seed", session, "run two");
     try settleTwoActionsForTesting(storage, tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "bash-calls");
-    return (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    return (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
 }
 
 /// Counts the statements the Store starts from `begin` to `end`: not a
@@ -494,7 +465,7 @@ const mcp_digests = blk: {
 pub const mcp_tool_set: tool_defs.HostToolSet = .{ .records = &mcp_records, .digests = &mcp_digests };
 
 pub fn expectOnlyForwardsThenIdle(storage: *Store) !void {
-    while (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })) |work| {
+    while (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })) |work| {
         try std.testing.expect(work == .forward);
         try std.testing.expect(try storage.deliverSessionForward(work.forward, .{}));
     }

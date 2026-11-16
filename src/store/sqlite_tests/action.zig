@@ -64,7 +64,7 @@ test "Action settlement atomically yields to an earlier Session stop" {
     try allow.key.set("settlement-stop-allow");
     try allow.session.set(allocated_session_0.slice());
     try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-    const action_binding = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    const action_binding = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
 
     var stop = try completeSessionStop("settlement-stop", allocated_session_0.slice());
     const pending_stop = storage.stopSession(&stop, .{});
@@ -112,8 +112,8 @@ test "a stale Action settlement leaves the Store byte-identical" {
         try allow.session.set(session.slice());
         try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
     }
-    const settled = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
-    const open = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    const settled = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+    const open = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
     try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(settled, .succeeded, "Bash succeeded.", .{}));
 
     const Snapshot = struct {
@@ -227,7 +227,7 @@ test "Action admission never visits an Action waiting for permission" {
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         var metadata_buffer: [32]u8 = undefined;
         try settleTwoActionsForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&metadata_buffer, "waiting-metadata-{d}", .{round}));
-        try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
+        try std.testing.expect((try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})) == null);
         allowed_id.* = try store_testing.sqlite_only.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
 
         const select = try sqlite.prepare(storage.sqliteDatabase(), next_action_attempt_sql);
@@ -250,10 +250,10 @@ test "Action admission never visits an Action waiting for permission" {
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqliteQueryU64(storage.sqliteDatabase(), "SELECT count(*) FROM action_operation INDEXED BY action_operation_executable " ++
         "WHERE authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0", .{}));
     for (allowed) |action_id| {
-        const admitted = (try storage.admitNextActionAttempt(300_000, .{})).?;
+        const admitted = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?;
         try std.testing.expectEqual(action_id, admitted.permit.binding.action_id);
     }
-    try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
+    try std.testing.expect((try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})) == null);
 }
 
 test "a Bash binding that is unknown, unattempted or without its revision is stale, and fences nothing" {
@@ -348,7 +348,7 @@ test "Bash admission entry points agree on readiness" {
                 .stopped => try store_testing.sqlite_only.exec(&storage, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) SELECT 'bash-matrix',session_ref,turn_id,0,1 FROM turn", .{}),
             }
             result.* = if (entry == 0)
-                (try storage.admitNextActionAttempt(300_000, .{})) != null
+                (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})) != null
             else
                 (try storage.admitActionAttempt(.{ .action_id = id, .runner = .bash }, 300_000, .{})) != null;
         }

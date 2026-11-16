@@ -73,7 +73,7 @@ pub const Calls = struct {
         const entry = place orelse return .retry_later;
         // Reserve the local owner before the durable attempt. After that
         // commit every failure either settles or fences, never retries.
-        const token = host.custody.reserve() orelse return .retry_later;
+        const token = (if (call.background) host.custody.reserveLeaving(1) else host.custody.reserve()) orelse return .retry_later;
         const active = host.allocator.create(Active) catch {
             host.custody.releaseUnused(token) catch unreachable;
             return .retry_later;
@@ -333,7 +333,7 @@ test "MCP full output hints follow the frozen Bash offer despite later settings"
         update.configuration.tools = try .of(if (bash_offered) &.{"fetch_page"} else &.{ "bash", "fetch_page" });
         try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
         try store.settleCallsForTesting(&storage, &tmp, model, "mcp-output-calls", &.{.{ .item_id = "item", .name = "fetch_page", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }});
-        const selected = (try storage.nextAction(.mcp)).?;
+        const selected = (try storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true })).?;
         var script: Script = .{ .reply = reply };
         try script.start();
         defer script.stop();
@@ -407,7 +407,7 @@ test "MCP ordinary custody covers preparation failure init failure stop shutdown
         try store_testing.submitTestMessage(&storage, &tmp, "input", "task", session.slice(), "fetch");
         const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try store.settleCallsForTesting(&storage, &tmp, model, "calls", &.{.{ .item_id = "item", .name = "fetch_page", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }});
-        const selected = (try storage.nextAction(.mcp)).?;
+        const selected = (try storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true })).?;
         var oversized_token: [40 * 1024]u8 = @splat('t');
         var name = "docs".*;
         var url = "http://127.0.0.1:1/mcp".*;

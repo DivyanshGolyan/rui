@@ -77,6 +77,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../engine/mysql_open.zig"),
         @embedFile("../engine/mysql_refusal.zig"),
         @embedFile("../domain/action.zig"),
+        @embedFile("../domain/action_control.zig"),
         @embedFile("../domain/action_read.zig"),
         @embedFile("../domain/forward.zig"),
         @embedFile("../domain/command.zig"),
@@ -97,6 +98,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../domain/session_report_read.zig"),
         @embedFile("../domain/skills.zig"),
         @embedFile("../domain/sourced_input.zig"),
+        @embedFile("../domain/tool_fulfillment.zig"),
         @embedFile("../domain/tool_offer.zig"),
         @embedFile("../domain/tool_set.zig"),
         @embedFile("../domain/turn.zig"),
@@ -407,12 +409,12 @@ test "each Store entry point takes its round budget on its common path" {
                 .{ .item_id = "mcp-item-two", .name = "fetch_page", .encoded_call_id = "mcp-call-two", .decoded_call_id = "mcp-call-two", .encoded_arguments = "{}", .decoded_arguments = "{}" },
             });
             meter.start();
-            const action = (try storage.nextAction(.mcp)).?;
+            const action = (try storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true })).?;
             meter.stop(.nextAction);
             meter.start();
             try storage.resolveAction(action, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", .{});
             meter.stop(.resolveAction);
-            const second = (try storage.nextAction(.mcp)).?;
+            const second = (try storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true })).?;
             meter.start();
             const binding = (try storage.admitActionAttempt(second, 600_000, .{})).?.permit.binding;
             meter.stop(.admitActionAttempt);
@@ -421,7 +423,7 @@ test "each Store entry point takes its round budget on its common path" {
             try storage.readActionExecutionInput(.mcp, binding, &input);
             meter.stop(.readMcpExecutionInput);
             _ = try storage.settleActionAttempt(binding, .succeeded, "done", .{});
-            try std.testing.expect((try storage.nextAction(.mcp)) == null);
+            try std.testing.expect((try storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true })) == null);
             try std.testing.expect((try storage.admitNextModelAttempt(.{})) != null);
         }
 
@@ -462,7 +464,7 @@ test "each Store entry point takes its round budget on its common path" {
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const calls = [_]TestingCall{.{ .item_id = "skill-item", .name = "skill", .encoded_call_id = "skill-call", .decoded_call_id = "skill-call", .encoded_arguments = "{\\\"operation\\\":\\\"invoke\\\",\\\"name\\\":\\\"demo\\\"}", .decoded_arguments = "{\"operation\":\"invoke\",\"name\":\"demo\"}" }};
             try settleCallsForTesting(&storage, &tmp, model, "budget-skill-calls", &calls);
-            const input = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
+            const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
             try std.testing.expectEqual(action_domain.CoreTool.skill, input.tool);
             const captured: skills_fixture_domain.Capture = .{ .invocation = "Skill file: \"/budget/demo/SKILL.md\"\n\nbudget bytes" };
             meter.start();
@@ -483,7 +485,7 @@ test "each Store entry point takes its round budget on its common path" {
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const calls = [_]TestingCall{.{ .item_id = "find-item", .name = "find_tools", .encoded_call_id = "find-call", .decoded_call_id = "find-call", .encoded_arguments = "{\\\"words\\\":\\\"absent0 absent1 absent2 absent3 absent4 absent5 absent6 absent7\\\"}", .decoded_arguments = "{\"words\":\"absent0 absent1 absent2 absent3 absent4 absent5 absent6 absent7\"}" }};
             try settleCallsForTesting(storage, tmp, model, "budget-find-calls", &calls);
-            const input = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
+            const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
             const words: @import("../../core_tools.zig").FindTools = .{ .words = .{ "absent0", "absent1", "absent2", "absent3", "absent4", "absent5", "absent6", "absent7" }, .count = 8 };
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
@@ -515,18 +517,18 @@ test "each Store entry point takes its round budget on its common path" {
             };
             try settleCallsForTesting(storage, tmp, model, "budget-core-calls", &calls);
             meter.start();
-            const core = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
+            const core = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
             meter.stop(.nextCoreWork);
             meter.start();
             try std.testing.expect(try storage.deliverAgentMessage(core.binding, session.slice(), "hi", .{}) == .delivered);
             meter.stop(.deliverAgentMessage);
-            const start = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
+            const start = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
             try std.testing.expect(start.tool == .start_agent);
             var spec = try testingAgentSpec(&.{"message_agent"}, "ask");
             meter.start();
             try std.testing.expect(try storage.startAgent(start.binding, session.slice(), "look around", true, &spec, null, .{}) == .started);
             meter.stop(.startAgent);
-            const refused = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
+            const refused = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
             meter.start();
             try std.testing.expect(try storage.failCoreCall(refused.binding, "Rui could not start the agent: task is required. Nothing was started.", .{}));
             meter.stop(.resolveCoreCall);
@@ -544,17 +546,17 @@ test "each Store entry point takes its round budget on its common path" {
             while (try storage.admitNextModelAttempt(.{})) |_| {}
             var stop = try completeSessionStop("budget-core-stop", session.slice());
             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-            const owed = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.stop;
+            const owed = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.stop;
             var owed_stop: protocol.SessionStopCommand = .{ .key = owed.key };
             try owed_stop.session.set(owed.session.slice());
             meter.start();
             try std.testing.expect(storage.stopOwedSession(&owed_stop, .{}) == .accepted);
             meter.stop(.stopOwedSession);
-            const ending = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.ending;
+            const ending = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.ending;
             meter.start();
             try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
             meter.stop(.deliverChildEnding);
-            const forward = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.forward;
+            const forward = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.forward;
             meter.start();
             try std.testing.expect(try storage.deliverSessionForward(forward, .{}));
             meter.stop(.deliverSessionForward);
@@ -590,7 +592,7 @@ test "each Store entry point takes its round budget on its common path" {
             try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
             meter.stop(.decidePermission);
             meter.start();
-            const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+            const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
             meter.stop(.admitNextActionAttempt);
             var input: ActionExecutionInput = undefined;
             meter.start();
@@ -608,6 +610,18 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{});
             meter.stop(.settleActionAttempt);
+            var background: @import("../../command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = allowed };
+            try background.key.set("budget-background");
+            const credit: usize = 2;
+            const capacity: @import("../domain/action_control.zig").CapacityView = .{ .total = 2, .context = &credit, .freeFn = struct {
+                fn read(context: *const anyopaque) usize {
+                    return @as(*const usize, @ptrCast(@alignCast(context))).*;
+                }
+            }.read };
+            meter.start();
+            const selected_final = storage.backgroundAction(&background, capacity, .{});
+            try std.testing.expect(selected_final == .accepted and selected_final.accepted.selection.kind == .final);
+            meter.stop(.backgroundAction);
             var deny: protocol.PermissionDecisionCommand = .{ .action_id = denied, .decision = .deny };
             try deny.key.set("budget-deny");
             try deny.session.set(session.slice());
@@ -680,7 +694,7 @@ test "each Store entry point takes its round budget on its common path" {
             try std.testing.expect(try storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{}, null) == null);
             meter.stop(.tryAdmitNextModelRetry);
             meter.start();
-            _ = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true });
+            _ = try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true });
             meter.stop(.dispatchWork);
             meter.start();
             try std.testing.expect(!try storage.recoverOneExhaustedModelAttempt(ActiveOperationFilter.empty()));

@@ -13,11 +13,11 @@ fn call(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, argument
     const encoded = try std.json.Stringify.valueAlloc(arena, arguments, .{});
     const calls = [_]store.TestingCall{.{ .item_id = id, .name = "find_tools", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = arguments }};
     try store.settleCallsForTesting(storage, tmp, model, id, &calls);
-    const input = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
+    const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     try std.testing.expect(input.tool == .find_tools);
     try std.testing.expectEqualStrings(session, input.session.slice());
     // A core call never becomes a process Attempt.
-    try std.testing.expect(try storage.admitNextActionAttempt(30000, .{}) == null);
+    try std.testing.expect(try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 30000, .{}) == null);
     return input;
 }
 
@@ -80,7 +80,7 @@ test "find_tools loads saved name and description matches once in one revision a
             };
             try store.settleCallsForTesting(&storage, &tmp, model, "find-first", &calls);
             try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE operation_id=?1 AND rejection_code='unknown_tool'", .{model.operation_id}));
-            const input = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
+            const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
             try std.testing.expect(input.tool == .find_tools);
             const revisions = try count(&storage, session.slice(), "session_revision");
             const changes = try count(&storage, session.slice(), "session_change");
@@ -107,7 +107,7 @@ test "find_tools loads saved name and description matches once in one revision a
             view.close();
             const found = [_]store.TestingCall{.{ .item_id = "found", .name = "read_transcript", .encoded_call_id = "found", .decoded_call_id = "found", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
             try store.settleCallsForTesting(&storage, &tmp, next, "find-found", &found);
-            const read = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
+            const read = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
             try std.testing.expect(read.tool == .read_transcript);
             try @import("read_transcript.zig").run(&storage, alloc, &read, .{});
             try std.testing.expect(!storage.isFenced());
@@ -245,7 +245,7 @@ test "find_tools caps eight sorted matches skips loaded and out of set and rolls
             try std.testing.expectEqual(@as(u64, 1), try count(&storage, session.slice(), "session_revision"));
             try std.testing.expectEqual(@as(u64, 0), try count(&storage, session.slice(), "session_change"));
             try std.testing.expect(!try loaded(&storage, session.slice(), "match_01"));
-            const retry = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
+            const retry = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
             try std.testing.expectEqual(input.binding.action_id, retry.binding.action_id);
             try loader.run(&storage, alloc, &retry, .{});
             for (1..9) |index| try std.testing.expect(try loaded(&storage, session.slice(), names[index + 1]));

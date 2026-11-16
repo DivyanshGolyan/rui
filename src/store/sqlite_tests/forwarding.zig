@@ -147,19 +147,19 @@ test "K4 ending hops rollback reopen once and never backfill frozen feeds" {
     try std.testing.expectEqual(@as(usize, 1), own.count);
     const frozen = try store_core.activityPageForTesting(&storage, .{ .session = root, .kinds = .initOne(.turn_ended) });
     try std.testing.expectEqual(@as(usize, 0), frozen.count);
-    const ending = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.ending;
+    const ending = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.ending;
     try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
-    const first = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.forward;
+    const first = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.forward;
     try std.testing.expect(try storage.deliverSessionForward(first, .{}));
-    const second = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.forward;
+    const second = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.forward;
     try std.testing.expectError(error.InjectedCommitFailure, storage.deliverSessionForward(second, .{ .before_commit = true }));
     try storage.close();
     try testingStore(&storage, &tmp, std.testing.io);
-    try std.testing.expectEqual(second, (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.forward);
+    try std.testing.expectEqual(second, (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.forward);
     try std.testing.expect(!try storage.deliverSessionForward(first, .{}));
     try std.testing.expect(try storage.deliverSessionForward(second, .{}));
     try std.testing.expect(!try storage.deliverSessionForward(second, .{}));
-    try std.testing.expect(try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true }) == null);
+    try std.testing.expect(try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true }) == null);
     const prefix = try store_core.activityPageForTesting(&storage, .{ .session = root, .end = frozen.end, .kinds = .initOne(.turn_ended) });
     try std.testing.expectEqual(@as(usize, 0), prefix.count);
     for ([_]@TypeOf(root){ parent, root }) |session| {

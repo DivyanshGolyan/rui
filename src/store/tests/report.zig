@@ -168,6 +168,75 @@ test "Full preserves rejected model interruption targets as canonical u64 text" 
     }.run);
 }
 
+test "work uses the latest Resolution position across foreground and background Actions when clocks step backward" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]?usize{ null, 0, 1 }) |promoted| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSessionAsk(&storage, "resolution-config");
+                try submitTestMessage(&storage, &tmp, "resolution-file", "resolution-message", session.slice(), "propose");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleTwoActionsForTesting(&storage, &tmp, binding, "resolution-calls");
+                const first = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation WHERE parent_operation_id=?1", .{binding.operation_id});
+                const last = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation WHERE parent_operation_id=?1", .{binding.operation_id});
+                const actions = [_]u64{ first, last };
+                var fulfillments = [_]?u64{ null, null };
+                var finals = [_]?u64{ null, null };
+                if (promoted) |index| {
+                    var command: @import("../../command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = actions[index] };
+                    try command.key.set("resolution-promote");
+                    const free: usize = 2;
+                    const capacity: @import("../domain/action_control.zig").CapacityView = .{ .total = 2, .context = &free, .freeFn = struct {
+                        fn read(context: *const anyopaque) usize {
+                            return @as(*const usize, @ptrCast(@alignCast(context))).*;
+                        }
+                    }.read };
+                    const accepted = storage.backgroundAction(&command, capacity, .{});
+                    try std.testing.expect(accepted == .accepted);
+                    fulfillments[index] = accepted.accepted.selection.position;
+                }
+                for (actions, [_]u64{ 900, 400 }, [_][]const u8{ "resolution-first", "resolution-last" }, 0..) |action, at, key, index| {
+                    var deny: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = action, .decision = .deny };
+                    try deny.key.set(key);
+                    try std.testing.expect(storage.decidePermission(&deny, .{}) == .accepted);
+                    finals[index] = try store_testing.queryU64(&storage, "SELECT acceptance_position FROM action_operation WHERE action_id=?1", .{action});
+                    if (fulfillments[index] == null) fulfillments[index] = finals[index];
+                    try store_testing.exec(&storage, "UPDATE action_operation SET resolved_at=?1 WHERE action_id=?2", .{ at, action });
+                    const work = (try store_testing.observeCommandForTesting(&storage, "resolution-message")).kind.message.?.work.?;
+                    try std.testing.expectEqual(at, work.state.since());
+                    try std.testing.expectEqual(if (index == 0) protocol.MessageProgressStatus.waiting_for_permission else .runnable, work.state.progress().?);
+                    var request: protocol.ActivityPage = .{};
+                    try request.session.set(session.slice());
+                    const page = try store_core.activityPageForTesting(&storage, request);
+                    try std.testing.expectEqual(at, page.work.work.state.since());
+                    const bytes = try shared_fixtures.testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
+                    defer std.testing.allocator.free(bytes);
+                    var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+                    defer report.deinit();
+                    const resolved = report.value.object.get("actions").?.object.get("resolved").?.array.items;
+                    try std.testing.expectEqual(index + 1, resolved.len);
+                    const publication: ?u64 = if (fulfillments[0] != null and fulfillments[1] != null) @max(fulfillments[0].?, fulfillments[1].?) else null;
+                    for (resolved, 0..) |row, ordinal| {
+                        try std.testing.expectEqual(actions[ordinal], try std.fmt.parseInt(u64, row.object.get("action").?.string, 10));
+                        try std.testing.expectEqualStrings("denied", row.object.get("code").?.string);
+                        try std.testing.expectEqual(finals[ordinal].?, try std.fmt.parseInt(u64, row.object.get("acceptance_position").?.string, 10));
+                        const saved = row.object.get("presentation").?.object.get("publication_position").?;
+                        const expected = if (promoted != null and promoted.? == ordinal) null else publication;
+                        if (expected) |position| {
+                            try std.testing.expectEqual(position, try std.fmt.parseInt(u64, saved.string, 10));
+                        } else try std.testing.expect(saved == .null);
+                    }
+                }
+                try std.testing.expect(!storage.isFenced());
+            }
+        }
+    }.run);
+}
+
 test "Current, activity pages and Message progress report one work through an approval" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -220,7 +289,7 @@ test "Current, activity pages and Message progress report one work through an ap
             try pageWorkAgrees(&storage, mixed.value, action_id + 1);
 
             // Once it runs, the Session is in Bash with one approval outstanding.
-            _ = (try storage.admitNextActionAttempt(300_000, .{})).?;
+            _ = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?;
             const running = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
             defer std.testing.allocator.free(running);
             var bash = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, running, .{});
@@ -327,7 +396,7 @@ test "Current, activity pages and Message progress report one work in each state
             try allow.key.set("one-work-allow");
             try allow.session.set(bash.slice());
             try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-            const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+            const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
             _ = try expectOneWork(&storage, &tmp, bash.slice(), "bash");
             try expectProgress(&storage, "one-work-bash-message", .in_flight);
             var stop = try completeSessionStop("one-work-stop", bash.slice());
@@ -367,7 +436,7 @@ test "Full reports every closed Action resolution without fencing" {
             try allow.key.set("shutdown-report-allow");
             try allow.session.set(session.slice());
             try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-            const action_binding = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+            const action_binding = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
             var input: ActionExecutionInput = undefined;
             try storage.readActionExecutionInput(.bash, action_binding, &input);
             try std.testing.expectEqual(@as(u64, 1234), input.timeout_ms);

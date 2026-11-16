@@ -17,6 +17,7 @@ export interface Link {
 
 type Schemas = components["schemas"];
 export type ActionStatus = Schemas["ReadActionReply"];
+export type ActionSelection = Extract<Schemas["ActionBackgroundReply"]["answer"], { status: "accepted" }>["action_selection"];
 
 /** The Session settings the Host takes today. */
 export interface AgentSpec {
@@ -331,6 +332,21 @@ export class Session {
 		const answer = accepted(reply.answer);
 		this.#link.activity?.notify(this.id);
 		return { pinned: answer.pinned };
+	}
+
+	/** Releases the original call with an immutable receipt. Poll `readAction` for the sole final result. */
+	async backgroundAction(action: string, options?: WriteOptions): Promise<ActionSelection> {
+		const idempotencyKey = key(options);
+		const reply = parse<Schemas["ActionBackgroundReply"]>(await this.#link.exchange(
+			"/v1/control/action-background",
+			(store) => JSON.stringify({
+				version: WIRE_VERSION, kind: "action_background", store,
+				key: idempotencyKey, session: this.id, action,
+			} satisfies Schemas["ActionBackgroundRequest"]),
+		));
+		const answer = accepted(reply.answer);
+		this.#link.activity?.notify(this.id);
+		return answer.action_selection;
 	}
 
 	/** Reads an owned Action. Acceptance and attempted state do not assert a running process. */

@@ -27,6 +27,7 @@ const skills_domain = @import("skills.zig");
 const history_floor_domain = @import("history_floor.zig");
 const reads_domain = @import("reads.zig");
 const rsql = @import("../rsql.zig");
+const tool_fulfillment = @import("tool_fulfillment.zig");
 const tool_set = @import("tool_set.zig");
 const store_access = @import("../access.zig");
 const transition = @import("../transition.zig");
@@ -2362,14 +2363,14 @@ const group_sources = rsql.Read(.{
 const group_calls = rsql.Read(.{
     .sql = "WITH sources AS (SELECT source.operation_id " ++ group_sources_from ++ ") " ++
         "SELECT sources.operation_id AS source,proposed.call_ordinal AS ordinal,item.item_ordinal,item.item_kind," ++
-        "coalesce(tool_call.acceptance_position,action.acceptance_position) AS accepted_position," ++
-        "CASE WHEN tool_call.rejection_code IS NOT NULL OR (action.resolution_code IS NOT NULL AND " ++
+        "" ++ tool_fulfillment.positionSql("tool_call", "action") ++ " AS accepted_position," ++
+        "CASE WHEN tool_call.rejection_code IS NOT NULL OR (" ++ tool_fulfillment.actionCompleteSql("action") ++ " AND " ++
         "action.session_ref=op.session_ref AND action.tool_kind=tool_call.action_kind) THEN 1 ELSE 0 END AS outcome_consistent," ++
         "result.private AS result_private," ++ reads_domain.proposal_columns ++ " " ++
         "FROM sources JOIN model_tool_call proposed ON proposed.operation_id=sources.operation_id " ++
         "LEFT JOIN model_output_item item ON item.operation_id=proposed.operation_id AND item.item_ordinal=proposed.item_ordinal " ++
         reads_domain.proposal_joins ++
-        "LEFT JOIN content result ON result.content_id=coalesce(tool_call.rejection_content_id,action.resolution_content_id) " ++
+        "LEFT JOIN content result ON result.content_id=" ++ tool_fulfillment.contentSql("tool_call", "action") ++ " " ++
         "WHERE sources.operation_id>?2 OR proposed.call_ordinal>=?4 " ++
         // Ordered by the page's sources, so MySQL reads the calls from
         // them and never walks every Session's calls in key order.
@@ -2782,9 +2783,9 @@ const group_results = rsql.Read(.{
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=source.operation_id LEFT JOIN action_operation action " ++
         "ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
         "LEFT JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
-        "LEFT JOIN content output ON output.content_id=coalesce(tool_call.rejection_content_id,action.resolution_content_id) " ++
+        "LEFT JOIN content output ON output.content_id=" ++ tool_fulfillment.contentSql("tool_call", "action") ++ " " ++
         "WHERE current.operation_id=?1 AND " ++ store_schema.resolutionIs("source.resolution_code", .tool_proposals) ++ " " ++
-        "AND coalesce(tool_call.acceptance_position,action.acceptance_position)<current.admission_position " ++
+        "AND " ++ tool_fulfillment.positionSql("tool_call", "action") ++ "<current.admission_position " ++
         "AND tool_call.call_ordinal>=?3 ORDER BY tool_call.call_ordinal LIMIT " ++ std.fmt.comptimePrint("{d}", .{Page.result_batch}),
     .Args = struct { operation: u64, source: u64, from: u64 },
     .Row = struct {

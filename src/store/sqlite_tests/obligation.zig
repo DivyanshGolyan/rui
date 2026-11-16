@@ -169,6 +169,72 @@ test "obligation frontier read cost is flat in finished children" {
     try std.testing.expectEqual(writer_costs[0], writer_costs[1]);
 }
 
+test "obligation reconciliation cost is flat in completed background Actions" {
+    var costs: [2]i32 = undefined;
+    for ([_]usize{ 10, 10_000 }, &costs) |history, *cost| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const root = try configureTestSessionAsk(&storage, "background-frontier-root");
+        try submitTestMessage(&storage, &tmp, "background-cost-file", "background-cost-message", root.slice(), "work");
+        try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=9 WHERE command_key='background-cost-message'", .{});
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try settleTwoActionsForTesting(&storage, &tmp, binding, "background-cost-calls");
+        const first = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{});
+        const last = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
+        try denyForTesting(&storage, root.slice(), "background-cost-deny-first", first);
+        try denyForTesting(&storage, root.slice(), "background-cost-deny-last", last);
+        const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try store_testing.settleItemsForTesting(&storage, &tmp, continuation, &.{"{\"type\":\"message\",\"id\":\"background-cost-answer\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done.\"}]}"}, "Done.");
+        // Native VM fixture: completed background Actions owe no work. Retain
+        // their real causal Operation, Turn and Message so the lookup runs.
+        // Unrelated tool-call FK contents are omitted, as in other VM fixtures.
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+        const seed = try std.testing.allocator.printSentinel(
+            "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized," ++
+                "resolution_code,resolution_content_id,acceptance_position,resolved_at,background_content_id,background_position,background_at) " ++
+                "SELECT value+{3},{2},value+2,'{1s}',1,1,0,'denied',1,value*2+100,1,1,value*2+99,1 FROM sequence",
+            .{ history, root.slice(), binding.operation_id, last },
+            0,
+        );
+        defer std.testing.allocator.free(seed);
+        try sqlite.exec(storage.sqliteDatabase(), seed);
+        try std.testing.expectEqual(history, try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE background_position IS NOT NULL AND resolution_code IS NOT NULL", .{}));
+        // Production reads must accept the population before the measured write.
+        for (0..2) |pass| {
+            {
+                const entry = try store_core.enter(&storage, .none);
+                defer entry.release();
+                var a: reads_domain.ReadAccess = .open(&entry);
+                defer a.deinit();
+                var work = [_]report_domain.WorkRead{.{ .session = root.slice() }};
+                try report_domain.readWorks(&a, &work);
+                try std.testing.expect(work[0].inputs.owed_since == null);
+                try std.testing.expect((try work[0].work(1, 1)).state == .finished);
+            }
+            if (pass == 1) break;
+            // Scope the actual writer independently of the read's counters.
+            _ = statementWorkSince(storage.sqliteDatabase());
+            try tests.refreshFrontierForTesting(&storage, root.slice());
+            var statement = c.sqlite3_next_stmt(storage.sqliteDatabase(), null);
+            var measured = false;
+            while (statement) |each| : (statement = c.sqlite3_next_stmt(storage.sqliteDatabase(), each)) {
+                if (!std.mem.startsWith(u8, std.mem.span(c.sqlite3_sql(each)), "UPDATE session SET obligation_since=")) continue;
+                try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_RUN, 0));
+                cost.* = c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_VM_STEP, 0);
+                measured = true;
+            }
+            try std.testing.expect(measured);
+        }
+        try std.testing.expect(!storage.isFenced());
+    }
+    std.debug.print("obligation owner completed background Actions: 10={d} VM steps; 10000={d} VM steps\n", .{ costs[0], costs[1] });
+    try std.testing.expectEqual(costs[0], costs[1]);
+}
+
 test "Session work dates a tool group by its last acceptance, even when the clock stepped back" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -205,7 +271,7 @@ test "Session work dates a tool group by its last acceptance, even when the cloc
     try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
     try submitTestMessage(&storage, &tmp, "stepped-bypass-input", "stepped-bypass-input", bypass.slice(), "propose");
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "stepped-bypass-calls");
-    const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
     _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{});
     var sql: [256]u8 = undefined;
     try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&sql, "UPDATE model_operation SET resolved_at=300 WHERE session_ref='{0s}';" ++

@@ -878,7 +878,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                     try settleCallsForTestingWithFaults(&storage, &tmp, binding, "output", &.{call}, .{}, if (index == population) (if (compact) (if (kind == .instruction) "{\"input_tokens\":99900,\"output_tokens\":0}" else "{\"input_tokens\":99999,\"output_tokens\":0}") else "{\"input_tokens\":1,\"output_tokens\":0}") else null);
                 }
                 if (kind == .action) {
-                    const action = (try storage.admitNextActionAttempt(1000, .{}) orelse return error.MissingPressureAction).permit.binding;
+                    const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 1000, .{}) orelse return error.MissingPressureAction).permit.binding;
                     _ = try storage.settleActionAttempt(action, .succeeded, "result", .{});
                     // Measure the actual tool successor: the producer's result
                     // is after its usage/output and must remain in pressure.

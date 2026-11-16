@@ -583,6 +583,9 @@ test "a page of approval requests costs the same however many calls ran without 
     try std.testing.expectEqual(@as(u64, 4002), try store_testing.sqliteQueryU64(storage.sqliteDatabase(), "SELECT count(*) FROM action_operation", .{}));
     // A fixed cost: the seek past the bypassed rows is one step, whatever
     // their number.
+    const many = try Page.steps(&storage, request);
+    if (thousand < few or thousand - few > 1 or many != thousand)
+        std.debug.print("Approval page VM steps: few={d}, thousand={d}, two thousand={d}\n", .{ few, thousand, many });
     try std.testing.expect(thousand - few <= 1);
-    try std.testing.expectEqual(thousand, try Page.steps(&storage, request));
+    try std.testing.expectEqual(thousand, many);
 }

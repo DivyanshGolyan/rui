@@ -3621,7 +3621,7 @@ test "a Page derives its text, Args and next keyset from the index it walks" {
             "WHERE tool_call.session_ref=?1 AND tool_call.acceptance_position IS NOT NULL AND (tool_call.operation_id,tool_call.acceptance_position)>(?2,?3) " ++
             "UNION ALL SELECT action.parent_operation_id AS operation_id,action.acceptance_position AS acceptance_position,action.call_ordinal " ++
             "FROM action_operation action INDEXED BY action_operation_session_results " ++
-            "WHERE action.session_ref=?1 AND action.acceptance_position IS NOT NULL AND (action.parent_operation_id,action.acceptance_position)>(?2,?3) " ++
+            "WHERE action.session_ref=?1 AND action.acceptance_position IS NOT NULL AND action.background_position IS NULL AND (action.parent_operation_id,action.acceptance_position)>(?2,?3) " ++
             "ORDER BY operation_id,acceptance_position LIMIT 9",
         Results.sql,
     );

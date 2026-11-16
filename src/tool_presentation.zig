@@ -13,7 +13,7 @@ pub const ToolPresentation = struct {
     description: ?Bounded(max_description_bytes),
     code: Code,
     publication_position: ?u64,
-    pub const Code = enum { unresolved, pending_permission, succeeded, failed, timed_out, indeterminate, storage_failed, spawn_failed, cancelled, infrastructure_shutdown, denied, unknown_tool, invalid_arguments };
+    pub const Code = enum { unresolved, pending_permission, background, succeeded, failed, timed_out, indeterminate, storage_failed, spawn_failed, cancelled, infrastructure_shutdown, denied, unknown_tool, invalid_arguments };
 
     /// One non-blank line of UTF-8 within the description bound.
     pub fn validDescription(bytes: []const u8) bool {

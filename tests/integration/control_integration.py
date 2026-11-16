@@ -422,6 +422,7 @@ def check_schema(database_path):
             ("admission_cutoff", "INTEGER", 1, None, 0),
             ("stopped_at", "INTEGER", 1, None, 0),
             ("parent_caused", "INTEGER", 1, "0", 0),
+            ("action_cutoff", "INTEGER", 1, "0", 0),
         ]
         assert interruption_columns == [
             "command_key",

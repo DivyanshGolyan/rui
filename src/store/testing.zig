@@ -524,6 +524,84 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
     }
 }
 
+/// Retire only empty format-76 representations in disposable upgrade fixtures.
+/// All loss checks and MySQL catalog assertions precede the first DDL.
+fn dropBackgroundUpgradeShape(storage: *Store) !void {
+    const schema = @import("schema.zig");
+    const Native = struct {
+        fn exec(store: *Store, sql: [:0]const u8) !void {
+            if (store.engine == .mysql) return mysql_testing.rawExec(store, sql);
+            return sqlite.exec(store.sqliteDatabase(), sql);
+        }
+    };
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM core_command WHERE kind>=7", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_pin_command", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_pin WHERE command_key IS NOT NULL", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_control_command", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_operation WHERE background_content_id IS NOT NULL OR background_position IS NOT NULL OR background_at IS NOT NULL", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_stop WHERE action_cutoff<>0", .{}));
+    const catalog = " FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.CONSTRAINT_TYPE='CHECK' AND tc.TABLE_NAME=";
+    const checks = .{
+        .{ "action_operation", "LOCATE('background_',cc.CHECK_CLAUSE)>0", 2 },
+        .{ "session_stop", "LOCATE('action_cutoff',cc.CHECK_CLAUSE)>0", 1 },
+    };
+    const background_fk = " FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='action_operation' AND COLUMN_NAME='background_content_id' AND REFERENCED_TABLE_NAME='content' AND REFERENCED_COLUMN_NAME='content_id'";
+    if (storage.engine == .mysql) {
+        inline for (checks) |check| {
+            try std.testing.expectEqual(@as(u64, check[2]), try mysql_testing.rawQueryU64(storage, "SELECT count(*) AS value" ++ catalog ++ "'" ++ check[0] ++ "' AND " ++ check[1]));
+        }
+        try std.testing.expectEqual(@as(u64, 1), try mysql_testing.rawQueryU64(storage, "SELECT count(*) AS value" ++ background_fk));
+        try std.testing.expectEqual(@as(u64, 1), try mysql_testing.rawQueryU64(storage, "SELECT count(*) AS value" ++ catalog ++ "'core_command' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 8'"));
+        inline for (checks) |check| {
+            try Native.exec(storage, "SET @rui_rewind_ddl=(SELECT CONCAT('ALTER TABLE " ++ check[0] ++ " ',GROUP_CONCAT(CONCAT('DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') ORDER BY tc.CONSTRAINT_NAME SEPARATOR ', '))" ++ catalog ++ "'" ++ check[0] ++ "' AND " ++ check[1] ++ ")");
+            try Native.exec(storage, "PREPARE rui_rewind FROM @rui_rewind_ddl");
+            try Native.exec(storage, "EXECUTE rui_rewind");
+            try Native.exec(storage, "DEALLOCATE PREPARE rui_rewind");
+        }
+        try Native.exec(storage, "SET @rui_rewind_ddl=(SELECT CONCAT('ALTER TABLE action_operation DROP FOREIGN KEY `',REPLACE(CONSTRAINT_NAME,'`','``'),'`')" ++ background_fk ++ ")");
+        try Native.exec(storage, "PREPARE rui_rewind FROM @rui_rewind_ddl");
+        try Native.exec(storage, "EXECUTE rui_rewind");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_rewind");
+        try Native.exec(storage, "SET @rui_rewind_ddl=NULL");
+    }
+    try Native.exec(storage, "DROP TABLE action_control_command");
+    if (storage.engine == .mysql) {
+        try Native.exec(storage, "ALTER TABLE action_operation DROP INDEX action_operation_background, DROP INDEX action_operation_background_results, DROP INDEX action_operation_background_ready, DROP INDEX action_operation_awaiting, DROP COLUMN action_operation_background_results_lead, DROP COLUMN action_operation_background_ready_lead, DROP COLUMN action_operation_awaiting_lead");
+        try Native.exec(storage, "ALTER TABLE action_operation DROP INDEX action_operation_session_results, MODIFY action_operation_session_results_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN acceptance_position IS NOT NULL THEN session_ref END) STORED, ADD INDEX action_operation_session_results(action_operation_session_results_lead,parent_operation_id,acceptance_position)");
+        try Native.exec(storage, "ALTER TABLE action_operation DROP COLUMN background_at, DROP COLUMN background_position, DROP COLUMN background_content_id");
+        try Native.exec(storage, "ALTER TABLE session_stop DROP COLUMN action_cutoff");
+    } else {
+        inline for (.{ "action_operation_background", "action_operation_background_results", "action_operation_background_ready", "action_operation_awaiting", "action_operation_session_results" }) |name| {
+            try Native.exec(storage, "DROP INDEX " ++ name);
+        }
+        try Native.exec(storage, "ALTER TABLE action_operation DROP COLUMN background_at");
+        try Native.exec(storage, "ALTER TABLE action_operation DROP COLUMN background_position");
+        try Native.exec(storage, "ALTER TABLE action_operation DROP COLUMN background_content_id");
+        const result_index = comptime blk: {
+            @setEvalBranchQuota(200_000);
+            var statements = std.mem.splitScalar(u8, baseline_sqlite_ddl, ';');
+            while (statements.next()) |statement| {
+                const text = std.mem.trim(u8, statement, " \n\r\t");
+                if (std.mem.startsWith(u8, text, "CREATE INDEX action_operation_session_results ")) break :blk std.fmt.comptimePrint("{s}", .{text});
+            }
+            @compileError("the upgrade fixture requires the baseline Action result index");
+        };
+        try Native.exec(storage, result_index);
+        try Native.exec(storage, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        defer Native.exec(storage, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF") catch unreachable;
+        try Native.exec(storage, "ALTER TABLE session_stop RENAME TO upgrade_session_stop");
+        for (schema.migrations[56 - schema.migration_baseline].sqlite) |sql| {
+            if (std.mem.startsWith(u8, sql, "CREATE TABLE session_stop(")) try Native.exec(storage, sql);
+        }
+        try Native.exec(storage, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused) SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused FROM upgrade_session_stop");
+        try Native.exec(storage, "DROP TABLE upgrade_session_stop");
+        for (schema.migrations[56 - schema.migration_baseline].sqlite) |sql| {
+            if (std.mem.startsWith(u8, sql, "CREATE INDEX session_stop_")) try Native.exec(storage, sql);
+        }
+        try std.testing.expectEqual(@as(u64, 0), try sqliteQueryU64(storage.sqliteDatabase(), "SELECT count(*) FROM pragma_foreign_key_check", .{}));
+    }
+}
+
 /// Rewind pin-free upgrade fixtures before replaying the format-75 step.
 fn dropPinOrganization(storage: *Store) !void {
     const schema = @import("schema.zig");
@@ -533,12 +611,12 @@ fn dropPinOrganization(storage: *Store) !void {
             return sqlite.exec(store.sqliteDatabase(), sql);
         }
     };
-    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_pin_command", .{}));
+    try dropBackgroundUpgradeShape(storage);
     try Native.exec(storage, "DROP TABLE session_pin");
     try Native.exec(storage, "DROP TABLE session_pin_command");
     if (storage.engine == .mysql) {
         try Native.exec(storage, "SET @rui_pin_kind_ddl=NULL");
-        try Native.exec(storage, "SET @rui_pin_kind_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK(kind BETWEEN 1 AND 6)') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 7')");
+        try Native.exec(storage, "SET @rui_pin_kind_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK(kind BETWEEN 1 AND 6)') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 8')");
         try Native.exec(storage, "PREPARE rui_pin_kind FROM @rui_pin_kind_ddl");
         try Native.exec(storage, "EXECUTE rui_pin_kind");
         try Native.exec(storage, "DEALLOCATE PREPARE rui_pin_kind");
@@ -870,9 +948,43 @@ pub const sqlite_only = struct {
     }
 };
 
-/// Leaves `table` preparing normally but failing at the first step of a
+/// Interrupts the one statement whose text is `sql` as it steps, the way an
+/// I/O fault fails a read. No schema changes, so no cached plan expires.
+pub const TestingStatementFault = struct {
+    const c = sqlite.c;
+
+    sql: [:0]const u8,
+    running: bool = false,
+    failed: u64 = 0,
+
+    pub fn arm(self: *TestingStatementFault, database: *c.sqlite3) void {
+        _ = c.sqlite3_trace_v2(database, c.SQLITE_TRACE_STMT, traced, self);
+        c.sqlite3_progress_handler(database, 1, progress, self);
+    }
+
+    pub fn disarm(_: *const TestingStatementFault, database: *c.sqlite3) void {
+        _ = c.sqlite3_trace_v2(database, 0, null, null);
+        c.sqlite3_progress_handler(database, 0, null, null);
+    }
+
+    pub fn traced(_: c_uint, context: ?*anyopaque, statement: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
+        const self: *TestingStatementFault = @ptrCast(@alignCast(context.?));
+        self.running = std.mem.eql(u8, std.mem.span(c.sqlite3_sql(@ptrCast(statement))), self.sql);
+        return 0;
+    }
+
+    pub fn progress(context: ?*anyopaque) callconv(.c) c_int {
+        const self: *TestingStatementFault = @ptrCast(@alignCast(context.?));
+        if (!self.running) return 0;
+        self.failed += 1;
+        return 1;
+    }
+};
+
+/// For unhinted statements, leaves `table` preparing normally but failing at the first step of a
 /// statement that reads it, the shape of an I/O or corruption fault after
-/// a statement compiled: a renamed table and an overflowing view.
+/// a statement compiled: a renamed table and an overflowing view. SQLite
+/// indexed statements use TestingStatementFault: a view cannot retain indexes.
 pub fn failReadsOf(storage: *Store, comptime table: []const u8) !void {
     if (storage.engine == .mysql) return mysql_testing.rawExec(storage, "RENAME TABLE " ++ table ++ " TO " ++ table ++ "_unreadable;CREATE VIEW " ++ table ++ " AS SELECT * FROM " ++ table ++ "_unreadable WHERE abs(-9223372036854775808) IS NOT NULL");
     try sqlite.exec(storage.sqliteDatabase(), "ALTER TABLE " ++ table ++ " RENAME TO " ++ table ++ "_unreadable");

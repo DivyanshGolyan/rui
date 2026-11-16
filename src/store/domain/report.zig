@@ -366,12 +366,8 @@ const active_proposer = rsql.Read(.{
 const active_tool_calls = reads_domain.ToolOutcome("", "SELECT DISTINCT operation.operation_id," ++
     reads_domain.expectedCallsSql("operation.operation_id") ++ " " ++ active_proposers_sql, struct { session: []const u8 }, false);
 
-/// The active Turn's Actions, as main counted them.
 const action_count = rsql.Read(.{
-    .sql = "SELECT count(*) AS actions FROM turn active @index(turn_one_active_per_session) " ++
-        "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
-        "CROSS JOIN action_operation action ON action.parent_operation_id=operation.operation_id " ++
-        "WHERE active.session_ref=?1 AND active.outcome_code IS NULL",
+    .sql = "SELECT count(*) AS actions FROM action_operation WHERE session_ref=?1 AND acceptance_position IS NULL",
     .Args = struct { session: []const u8 },
     .Row = struct { actions: u64 },
     .cardinality = .each,
@@ -398,6 +394,105 @@ pub const session_count_failures = .{
     .{ command_domain.pending_messages, error.MessageAdmissionReadFailed },
 };
 
+const ActiveToolCounts = struct {
+    check: reads_domain.ToolOutcomeCheck = .{},
+    settled: u64 = 0,
+    failed: bool = false,
+
+    pub fn visit(counts: *ActiveToolCounts, row: *const reads_domain.ToolOutcomeRow) bool {
+        if (counts.failed or !counts.check.visit(row)) return false;
+        if (row.ordinal != null and row.action_id != null and row.action_resolved) {
+            counts.settled = std.math.add(u64, counts.settled, 1) catch {
+                counts.failed = true;
+                return false;
+            };
+        }
+        return true;
+    }
+
+    fn finish(counts: *ActiveToolCounts) error{CorruptStore}!u64 {
+        if (counts.failed) return error.CorruptStore;
+        try counts.check.finish();
+        return counts.settled;
+    }
+};
+
+test "Session Action counts reuse certified active calls across Operations and refuse damaged groups" {
+    const certificate = @import("../../activity_read.zig").FieldCertificate;
+    var metadata: certificate.Bytes = undefined;
+    for (0..3) |index| certificate.write(&metadata, index, .{ .length = 0, .digest = @splat(0) });
+    const resolved: reads_domain.ToolOutcomeRow = .{
+        .scope_operation = .of(1),
+        .expected = 1,
+        .ordinal = 0,
+        .item_kind = 3,
+        .call_acceptance = null,
+        .rejection_present = false,
+        .action_resolved = true,
+        .action_content = true,
+        .action_acceptance = .of(10),
+        .result_present = true,
+        .operation_id = .of(1),
+        .turn_id = .of(1),
+        .call_ordinal = 0,
+        .action_id = .of(1),
+        .rejection_code = null,
+        .name_content_id = .of(1),
+        .call_id_content_id = .of(2),
+        .arguments_content_id = .of(3),
+        .consistent = true,
+        .field_metadata = metadata,
+        .length0 = 0,
+        .digest0 = @splat(0),
+        .private0 = false,
+        .length1 = 0,
+        .digest1 = @splat(0),
+        .private1 = false,
+        .length2 = 0,
+        .digest2 = @splat(0),
+        .private2 = false,
+    };
+    var unresolved = resolved;
+    unresolved.scope_operation = .of(2);
+    unresolved.operation_id = .of(2);
+    unresolved.action_id = .of(2);
+    unresolved.action_resolved = false;
+    unresolved.action_content = false;
+    unresolved.action_acceptance = null;
+    unresolved.result_present = false;
+    var later = resolved;
+    later.scope_operation = .of(3);
+    later.operation_id = .of(3);
+    later.action_id = .of(3);
+    var counted: ActiveToolCounts = .{};
+    try std.testing.expect(counted.visit(&resolved));
+    try std.testing.expect(counted.visit(&unresolved));
+    try std.testing.expect(counted.visit(&later));
+    try std.testing.expectEqual(@as(u64, 2), try counted.finish());
+    var empty: ActiveToolCounts = .{};
+    try std.testing.expectEqual(@as(u64, 0), try empty.finish());
+    var duplicate: ActiveToolCounts = .{};
+    try std.testing.expect(duplicate.visit(&resolved));
+    try std.testing.expect(!duplicate.visit(&resolved));
+    try std.testing.expectError(error.CorruptStore, duplicate.finish());
+    var missing = resolved;
+    missing.expected = 2;
+    var incomplete: ActiveToolCounts = .{};
+    try std.testing.expect(incomplete.visit(&missing));
+    try std.testing.expect(!incomplete.visit(&unresolved));
+    try std.testing.expectError(error.CorruptStore, incomplete.finish());
+    inline for (.{ "consistent", "result_present", "action_resolved" }) |field| {
+        var damaged = resolved;
+        @field(damaged, field) = false;
+        var rejected: ActiveToolCounts = .{};
+        _ = rejected.visit(&damaged);
+        try std.testing.expectError(error.CorruptStore, rejected.finish());
+    }
+    var overflow: ActiveToolCounts = .{ .settled = std.math.maxInt(u64) };
+    try std.testing.expect(!overflow.visit(&resolved));
+    try std.testing.expectError(error.CorruptStore, overflow.finish());
+}
+
 /// What the Current report and Session inspection count, with the tool
 /// outcome rule over the active Turn's calls (`active_tool_calls`). Round
 /// 1 (`queue`) reads the latest stop's cutoff and whether the active Turn
@@ -410,7 +505,7 @@ pub const SessionCounts = struct {
     session: []const u8,
     cutoff: reads_domain.First(command_domain.stop_cutoff.Row) = .{},
     proposer: reads_domain.First(active_proposer.Row) = .{},
-    check: reads_domain.ToolOutcomeCheck = .{},
+    calls: ActiveToolCounts = .{},
     actions: reads_domain.First(action_count.Row) = .{},
     rejected: reads_domain.First(rejected_call_count.Row) = .{},
     pending: reads_domain.First(command_domain.pending_messages.Row) = .{},
@@ -430,7 +525,7 @@ pub const SessionCounts = struct {
 
     pub fn queuePending(counts: *SessionCounts, a: *ReadAccess) void {
         a.readEach(command_domain.pending_messages, .{ .session = counts.session, .cutoff = counts.stopCutoff() }, 1, &counts.pending);
-        if (counts.proposer.row != null) a.readEach(active_tool_calls, .{ .session = counts.session }, std.math.maxInt(u64), &counts.check);
+        if (counts.proposer.row != null) a.readEach(active_tool_calls, .{ .session = counts.session }, std.math.maxInt(u64), &counts.calls);
         a.readEach(action_count, .{ .session = counts.session }, 1, &counts.actions);
         a.readEach(rejected_call_count, .{ .session = counts.session }, 1, &counts.rejected);
     }
@@ -439,10 +534,10 @@ pub const SessionCounts = struct {
     /// the name main gave its failed step.
     pub fn judge(counts: *SessionCounts) !Counted {
         const pending = counts.pending.row orelse return error.MessageAdmissionReadFailed;
-        try counts.check.finish();
+        const settled = try counts.calls.finish();
         const actions = counts.actions.row orelse return error.ActionReadFailed;
         const rejected = counts.rejected.row orelse return error.CallReadFailed;
-        return .{ .pending = pending.pending, .actions = actions.actions, .rejected = rejected.rejected };
+        return .{ .pending = pending.pending, .actions = std.math.add(u64, actions.actions, settled) catch return error.CorruptStore, .rejected = rejected.rejected };
     }
 };
 
@@ -493,19 +588,66 @@ const WorkLatestRow = struct {
     stopped_at: ?rsql.Positive,
 };
 
+fn firstApprovalSql(comptime session: []const u8) []const u8 {
+    return "SELECT approval.action_id FROM action_operation approval " ++
+        "JOIN model_operation source_operation ON source_operation.operation_id=approval.parent_operation_id " ++
+        "JOIN turn source_turn ON source_turn.turn_id=source_operation.turn_id " ++
+        "WHERE approval.session_ref=" ++ session ++ " AND approval.authorized=0 AND approval.resolution_code IS NULL AND " ++
+        action_domain.eligibleSql("approval", "source_operation", "source_turn") ++ " ORDER BY approval.action_id LIMIT 1";
+}
+
+test "optional approval index does not change MySQL prepared slots or tokens" {
+    const query = comptime firstApprovalSql("?1");
+    const after = comptime std.mem.indexOf(u8, query, "action_operation approval ").? + "action_operation approval ".len;
+    const Plain = rsql.Read(.{
+        .sql = query,
+        .Args = struct { session: []const u8 },
+        .Row = struct { action_id: rsql.Positive },
+        .cardinality = .each,
+    });
+    const Hinted = rsql.Read(.{
+        .sql = query[0..after] ++ "@index(action_operation_awaiting) " ++ query[after..],
+        .Args = Plain.Args,
+        .Row = Plain.Row,
+        .cardinality = .each,
+    });
+    try std.testing.expect(comptime !store_schema.mysqlCanForceIndex("action_operation_awaiting"));
+    try std.testing.expectEqual(Plain.mysql.slots.len, Hinted.mysql.slots.len);
+    for (Plain.mysql.slots, Hinted.mysql.slots) |plain, hinted| try std.testing.expectEqualDeep(plain, hinted);
+    try std.testing.expectEqual(Plain.mysql.parts.len, Hinted.mysql.parts.len);
+    for (Plain.mysql.parts, Hinted.mysql.parts) |plain, hinted| {
+        var a = std.mem.tokenizeAny(u8, plain, " \t\r\n");
+        var b = std.mem.tokenizeAny(u8, hinted, " \t\r\n");
+        while (a.next()) |token| try std.testing.expectEqualStrings(token, b.next() orelse return error.TestUnexpectedResult);
+        try std.testing.expect(b.next() == null);
+    }
+}
+
+const work_approval = rsql.Read(.{
+    .sql = "SELECT (" ++ firstApprovalSql("?1") ++ ") AS first_action",
+    .Args = struct { session: []const u8 },
+    .Row = struct { first_action: ?rsql.Positive },
+    .cardinality = .each,
+});
+
 /// One aggregate over an active Turn's Operation's Actions, bounded by
 /// its calls. Its last resolution seeks the Session's results index.
 const work_actions = WorkActions(struct { operation: u64, session: []const u8 }, "?1", "?2");
 
 fn WorkActions(comptime Args: type, comptime operation: []const u8, comptime session: []const u8) type {
     return rsql.Read(.{
-        .sql = "SELECT count(*) AS total,@count_where(a.resolution_code IS NULL) AS unresolved," ++
+        .sql = "WITH action_results AS (SELECT acceptance_position,resolved_at FROM action_operation @index(action_operation_session_results) " ++
+            "WHERE session_ref=" ++ session ++ " AND parent_operation_id=" ++ operation ++ " AND acceptance_position IS NOT NULL AND background_position IS NULL " ++
+            "UNION ALL SELECT acceptance_position,resolved_at FROM action_operation @index(action_operation_background_results) " ++
+            "WHERE session_ref=" ++ session ++ " AND parent_operation_id=" ++ operation ++ " AND background_position IS NOT NULL AND acceptance_position IS NOT NULL) " ++
+            "SELECT count(*) AS total,@count_where(a.resolution_code IS NULL) AS unresolved," ++
             "@count_where(a.resolution_code IS NULL AND a.authorized=0) AS awaiting," ++
             "min(CASE WHEN a.resolution_code IS NULL AND a.authorized=0 THEN a.action_id END) AS first_awaiting," ++
+            "(" ++ firstApprovalSql(session) ++ ") AS first_action," ++
             "@count_where(a.resolution_code IS NULL AND a.attempt_ordinal=1) AS running," ++
-            // The last resolution is the one at the greatest position.
-            "(SELECT resolved_at FROM action_operation WHERE session_ref=" ++ session ++ " AND parent_operation_id=" ++ operation ++ " AND acceptance_position IS NOT NULL " ++
-            "ORDER BY acceptance_position DESC LIMIT 1) AS latest_resolution_at," ++
+            // Both disjoint result indexes seek this Operation. A background
+            // final still counts, independently of its earlier call receipt.
+            "(SELECT resolved_at FROM action_results ORDER BY acceptance_position DESC LIMIT 1) AS latest_resolution_at," ++
             // Under an `ask` revision only an `allow_once` decision
             // authorizes; under `bypass` the proposal did.
             "@max_where(a.decided_at,a.resolution_code IS NULL AND r.permission_mode=0) AS latest_decision_at " ++
@@ -514,6 +656,7 @@ fn WorkActions(comptime Args: type, comptime operation: []const u8, comptime ses
         .Args = Args,
         .Row = WorkActionsRow,
         .cardinality = .each,
+        .compound = true,
     });
 }
 
@@ -522,6 +665,7 @@ const WorkActionsRow = struct {
     unresolved: u64,
     awaiting: u64,
     first_awaiting: ?rsql.Positive,
+    first_action: ?rsql.Positive,
     running: u64,
     latest_resolution_at: ?rsql.Positive,
     latest_decision_at: ?rsql.Positive,
@@ -600,6 +744,7 @@ pub const report_failures = .{
 pub const work_failures = .{
     .{ work_latest, error.TurnReadFailed },
     .{ work_actions, error.ActionReadFailed },
+    .{ work_approval, error.ActionReadFailed },
     .{ command_domain.stop_cutoff, error.SessionStopReadFailed },
     .{ work_queued, error.MessageAdmissionReadFailed },
     .{ work_excluded, error.MessageAdmissionReadFailed },
@@ -635,6 +780,7 @@ pub const WorkRead = struct {
     /// The active Turn's stages `queuePending` read ahead, and the rows
     /// its Actions and oldest running Action read found.
     ahead: ?[2]reads_domain.RowCount = null,
+    approval: reads_domain.First(work_approval.Row) = .{},
     /// What `session_work.derive` weighs, but its texts, which `work`
     /// points at this read's own copies.
     inputs: session_work.Inputs = .{ .now_ms = 0, .created_at = 0 },
@@ -655,7 +801,10 @@ pub const WorkRead = struct {
             .latest => reads_domain.readFirst(a, work_latest, .{ .session = w.session }, w),
             .actions => reads_domain.readFirst(a, work_actions, .{ .operation = w.inputs.latest.?.operation_id, .session = w.session }, w),
             .oldest => reads_domain.readFirst(a, work_oldest, .{ .operation = w.inputs.latest.?.operation_id }, w),
-            .cutoff => reads_domain.readFirst(a, command_domain.stop_cutoff, .{ .session = w.session }, w),
+            .cutoff => {
+                if (w.ahead == null and w.inputs.latest != null) a.readEach(work_approval, .{ .session = w.session }, 1, &w.approval);
+                reads_domain.readFirst(a, command_domain.stop_cutoff, .{ .session = w.session }, w);
+            },
             .queued => reads_domain.readFirst(a, work_queued, .{ .session = w.session, .cutoff = w.cutoff }, w),
             .excluded => reads_domain.readFirst(a, work_excluded, .{ .session = w.session, .cutoff = w.cutoff }, w),
             .stop => reads_domain.readFirst(a, work_stop, .{ .session = w.session, .admission = w.inputs.excluded.?.admission }, w),
@@ -696,6 +845,10 @@ pub const WorkRead = struct {
     /// After the round that ran this stage's read: judges what it found
     /// and picks the next stage.
     pub fn advance(w: *WorkRead) !void {
+        if (w.stage == .cutoff and w.ahead == null and w.inputs.latest != null) {
+            const row = w.approval.row orelse return error.ActionReadFailed;
+            w.inputs.first_action = optional(row.first_action);
+        }
         if (w.stage == .latest) if (w.ahead) |ahead| {
             // The round that read the latest Turn read these too.
             try w.step(w.count);
@@ -726,6 +879,7 @@ pub const WorkRead = struct {
         const Row = @TypeOf(row.*);
         if (Row == WorkLatestRow) return w.keepLatest(row);
         if (Row == WorkActionsRow) {
+            w.inputs.first_action = optional(row.first_action);
             // Read ahead, the aggregate has a row with no active Turn too.
             const turn = if (w.inputs.latest) |*latest| latest else return;
             if (turn.terminal != null) return;
@@ -2096,6 +2250,16 @@ pub const full_results = rsql.Page(.{
             .joins = "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
                 "LEFT JOIN content call_id_content ON call_id_content.content_id=tool_call.call_id_content_id " ++
                 "LEFT JOIN content result ON result.content_id=action.resolution_content_id",
+        },
+        .{
+            .on = .{ .index = "action_operation_background_results" },
+            .alias = "action",
+            .columns = "action.call_ordinal,tool_call.call_id_content_id AS call_id,call_id_content.byte_length AS call_id_length," ++
+                "call_id_content.digest AS call_id_digest,'background' AS code,action.background_content_id AS result_id," ++
+                "result.byte_length AS result_length,result.digest AS result_digest",
+            .joins = "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
+                "LEFT JOIN content call_id_content ON call_id_content.content_id=tool_call.call_id_content_id " ++
+                "LEFT JOIN content result ON result.content_id=action.background_content_id",
         },
     },
     .Row = struct {

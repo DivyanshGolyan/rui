@@ -35,7 +35,7 @@ pub const Work = struct {
     retry: bool = true,
 };
 
-const WorkKey = struct { generation: u64, paused: bool, mcp_credit: bool };
+const WorkKey = struct { generation: u64, paused: bool, capacity: DispatchCapacity };
 
 /// The retry scans read Store rows, which a commit moves, and skip the
 /// Operations execution slots hold, which a slot change moves. A scheduled
@@ -121,7 +121,7 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
     };
     const retry_key: RetryKey = .{ .generation = admission_key.generation, .slot_changes = admission_key.slot_changes };
     const scanned = if (state.idle_admission) |previous| std.meta.eql(previous, admission_key) else false;
-    const work_key: WorkKey = .{ .generation = admission_key.generation, .paused = admission_key.paused, .mcp_credit = admission_key.capacity.includesMcp() };
+    const work_key: WorkKey = .{ .generation = admission_key.generation, .paused = admission_key.paused, .capacity = admission_key.capacity.workInput() };
     const core_due = if (state.idle_core) |kept| !std.meta.eql(kept, work_key) else true;
     // One round says which of the scans below would find work, so a commit
     // costs that round rather than an empty scan of each kind.
@@ -317,7 +317,10 @@ const Recording = struct {
     work_fence: bool = false,
     work_scans: usize = 0,
     work_paused: ?bool = null,
+    capacity_work: bool = false,
+    background_work: bool = true,
     release_during_scan: bool = false,
+    released_credits: usize = 1,
     new_admission: Admission = .no_work,
     continuation_admission: Admission = .no_work,
     completions_available: usize = 0,
@@ -427,7 +430,7 @@ const Recording = struct {
     }
 
     fn dispatchCapacity(self: *const Recording) DispatchCapacity {
-        return .{ .free_credit = (self.custody_free orelse self.free) != 0, .mcp_open = self.mcp_open };
+        return .fromFree(self.custody_free orelse self.free, self.mcp_open);
     }
 
     fn freeSlots(self: *const Recording) usize {
@@ -487,9 +490,14 @@ const Recording = struct {
         self.work_paused = paused;
         if (self.work_fence) return error.Fence;
         var found = self.work;
-        found.mcp = found.mcp and capacity.includesMcp();
+        found.mcp = found.mcp and capacity.hasCredit() and capacity.mcp_open;
+        if (self.capacity_work) {
+            const eligible = if (self.background_work) capacity.hasHeadroom() else capacity.hasCredit();
+            found.mcp = found.mcp and eligible;
+            found.bash = found.bash and eligible;
+        }
         if (self.release_during_scan) {
-            self.custody_free = 1;
+            self.custody_free = self.released_credits;
             self.release_during_scan = false;
         }
         return found;
@@ -1192,13 +1200,76 @@ test "ordinary custody release admits finite work while MCP remains locally full
     try std.testing.expect(!context.dispatchCapacity().includesMcp());
     try std.testing.expect(run(&state, &context) == .continue_immediately);
     try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
-    try std.testing.expectEqual(@as(usize, 1), context.work_scans);
+    try std.testing.expectEqual(@as(usize, 2), context.work_scans);
     try std.testing.expectEqual(@as(u64, 0), context.generation);
     try std.testing.expectEqual(@as(u64, 0), context.slot_changes);
 }
 
 test "ordinary custody snapshot is not relabeled after cleanup during its scan" {
     var context: Recording = .{ .free = 1, .custody_free = 0, .generation_advance = 0, .auto_advance = 0, .provider = false, .release_during_scan = true, .mcp_available = true, .work = .{ .core = false, .mcp = true, .bash = false, .message = false, .tool_continuation = false, .retry = false } };
+    var state: State = .{};
+    try std.testing.expect(run(&state, &context) == .wait);
+    try std.testing.expectEqual(@as(usize, 0), context.mcp_runs);
+    try std.testing.expect(run(&state, &context) == .continue_immediately);
+    try std.testing.expectEqual(@as(usize, 2), context.work_scans);
+    try std.testing.expectEqual(@as(usize, 1), context.mcp_runs);
+}
+
+test "dispatch resource snapshots invalidate blocked work and core caches without commits" {
+    for ([_]bool{ false, true }) |background| {
+        var context: Recording = .{
+            .generation_advance = 0,
+            .auto_advance = 0,
+            .provider = false,
+            .free = 0,
+            .custody_free = 0,
+            .capacity_work = true,
+            .background_work = background,
+            .work = .{ .core = false, .mcp = true, .bash = false, .message = false, .tool_continuation = false, .retry = false },
+        };
+        var state: State = .{};
+        for (0..2) |_| try std.testing.expect(run(&state, &context) == .wait);
+        try std.testing.expectEqual(@as(usize, 1), context.work_scans);
+        try std.testing.expectEqual(@as(usize, 0), context.count(.run_core));
+        context.custody_free = 1;
+        context.mcp_available = true;
+        const result = run(&state, &context);
+        try std.testing.expectEqual(!background, result == .continue_immediately);
+        try std.testing.expectEqual(@as(usize, if (background) 0 else 1), context.mcp_runs);
+        if (background) {
+            _ = run(&state, &context);
+            try std.testing.expectEqual(@as(usize, 2), context.work_scans);
+            context.custody_free = 2;
+            try std.testing.expect(run(&state, &context) == .continue_immediately);
+            try std.testing.expectEqual(@as(usize, 1), context.mcp_runs);
+        }
+        context.mcp_available = true;
+        context.mcp_open = false;
+        try std.testing.expect(run(&state, &context) == .wait);
+        const scans = context.work_scans;
+        _ = run(&state, &context);
+        try std.testing.expectEqual(scans, context.work_scans);
+        context.mcp_open = true;
+        try std.testing.expect(run(&state, &context) == .continue_immediately);
+        try std.testing.expectEqual(@as(usize, 2), context.mcp_runs);
+        try std.testing.expectEqual(@as(u64, 0), context.generation);
+        try std.testing.expectEqual(@as(u64, 0), context.slot_changes);
+    }
+}
+
+test "a dispatch snapshot is not relabeled when custody releases during its scan" {
+    var context: Recording = .{
+        .generation_advance = 0,
+        .auto_advance = 0,
+        .provider = false,
+        .free = 0,
+        .custody_free = 0,
+        .capacity_work = true,
+        .release_during_scan = true,
+        .released_credits = 2,
+        .mcp_available = true,
+        .work = .{ .core = false, .mcp = true, .bash = false, .message = false, .tool_continuation = false, .retry = false },
+    };
     var state: State = .{};
     try std.testing.expect(run(&state, &context) == .wait);
     try std.testing.expectEqual(@as(usize, 0), context.mcp_runs);

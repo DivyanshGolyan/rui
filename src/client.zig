@@ -516,6 +516,12 @@ pub const ModelInterruptionInput = struct {
     operation_id: u64,
 };
 
+pub const ActionBackgroundInput = struct {
+    store: []const u8,
+    session: []const u8,
+    action_id: u64,
+};
+
 pub const PermissionDecisionInput = struct {
     store: []const u8,
     session: []const u8,
@@ -1771,6 +1777,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
             .turn = protocol_reply.decimalId(fields.target.?.turn, true) catch return error.InvalidRequestRecord,
             .operation = protocol_reply.decimalId(fields.target.?.operation, true) catch return error.InvalidRequestRecord,
         } },
+        .action_background => .{ .action_background = protocol_reply.decimalId(fields.action orelse return error.InvalidRequestRecord, false) catch return error.InvalidRequestRecord },
         .permission_decision => .{ .permission_decision = .{
             .action = protocol_reply.decimalId(fields.action orelse return error.InvalidRequestRecord, true) catch return error.InvalidRequestRecord,
             .decision = std.meta.stringToEnum(protocol.PermissionDecision, (fields.decision orelse return error.InvalidRequestRecord).slice()) orelse return error.InvalidRequestRecord,
@@ -1783,7 +1790,8 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         (kind != .configure and fields.reload_skills != null) or
         (kind != .session_pin and fields.pinned != null) or
         (kind != .message and (fields.text != null or fields.sender != null or fields.sender_handle != null)) or (kind != .model_interruption and fields.target != null) or
-        (kind != .permission_decision and (fields.action != null or fields.decision != null))) return error.InvalidRequestRecord;
+        (kind != .permission_decision and fields.decision != null) or
+        (kind != .permission_decision and kind != .action_background and fields.action != null)) return error.InvalidRequestRecord;
     return .{ .saved = saved, .target = target };
 }
 
@@ -1963,6 +1971,16 @@ pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, tar
     try protocol_reply.validateIdentityInputs(location.key, input.session);
     if (input.action_id == 0) return error.InvalidTarget;
     return runCapture(io, paths.store.slice(), &location, input.session, .permission_decision, null, Capture.writePermissionDecision, .{ paths.store.slice(), location.key, input });
+}
+
+pub fn captureActionBackground(io: std.Io, input: ActionBackgroundInput, target: CaptureTarget) !CapturedRecord {
+    const paths = try platform.resolveClientPaths(io, input.store);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const location = try target.resolve(io, &path_buffer, &key_buffer);
+    try protocol_reply.validateIdentityInputs(location.key, input.session);
+    if (input.action_id == 0 or input.action_id > std.math.maxInt(i64)) return error.InvalidTarget;
+    return runCapture(io, paths.store.slice(), &location, input.session, .action_background, null, Capture.writeRequest, .{ protocol.action_background_request, .{ paths.store.slice(), location.key, input.session, input.action_id } });
 }
 
 fn finishCapture(io: std.Io, capture: *Capture, location: *const CaptureTarget.Location, store: []const u8, session: []const u8, kind: protocol.CommandKind) !CapturedRecord {
@@ -3290,6 +3308,7 @@ test "client capture rejects noncanonical Session references before publication"
                 .session_pin => captureSessionPin(io, .{ .store = root, .session = session, .pinned = true }, target),
                 .model_interruption => captureModelInterruption(io, .{ .store = root, .session = session, .turn_id = 1, .operation_id = 1 }, target),
                 .permission_decision => capturePermissionDecision(io, .{ .store = root, .session = session, .action_id = 1 }, target),
+                .action_background => captureActionBackground(io, .{ .store = root, .session = session, .action_id = 1 }, target),
             };
             if (result) |record| {
                 var unexpected = record;
@@ -3330,6 +3349,7 @@ test "client recovery rejects noncanonical Session references without retransmis
                     .session_pin => ",\"pinned\":true}",
                     .model_interruption => ",\"turn\":\"1\",\"operation\":\"1\"}}",
                     .permission_decision => ",\"action\":\"1\",\"decision\":\"deny\"}",
+                    .action_background => ",\"action\":\"1\"}",
                 });
                 const file = try tmp.dir.createFile(io, handle ++ ".json", .{});
                 try file.writeStreamingAll(io, body.slice());
@@ -4303,6 +4323,7 @@ test "every request renders its exact worst-case bound from the shape it writes"
         .{ protocol.session_pin_request.all, .{ &store, &key, &session, false }, protocol.max_session_pin_request_bytes },
         .{ protocol.model_interruption_request, .{ &store, &key, &session, id, id }, protocol.max_model_interruption_request_bytes },
         .{ protocol.permission_decision_request, .{ &store, &key, &session, id, protocol.PermissionDecision.allow_once }, protocol.max_permission_decision_request_bytes },
+        .{ protocol.action_background_request, .{ &store, &key, &session, id }, protocol.max_action_background_request_bytes },
         .{ protocol.observe_command_request.all, .{ &store, &key, @as(?[]const u8, &observation_token) }, protocol.max_observe_command_request_bytes },
         .{ protocol.host_info_request, .{&store}, protocol.max_host_info_request_bytes },
         .{ protocol.host_stop_request, .{&store}, protocol.max_host_stop_request_bytes },
@@ -4328,8 +4349,8 @@ test "every request renders its exact worst-case bound from the shape it writes"
         try body.appendShape(case[0], case[1]);
         try std.testing.expectEqual(@as(usize, case[2]), body.len);
         try std.testing.expect(try std.json.validate(std.testing.allocator, body.slice()));
-        // The first four are control requests, captured to a record file.
-        if (index >= 4) largest = @max(largest, body.len);
+        // The first six are control requests, captured to a record file.
+        if (index >= 6) largest = @max(largest, body.len);
     }
     try std.testing.expectEqual(protocol.max_client_request_bytes, largest);
     try std.testing.expectEqual(protocol.max_control_request_bytes, protocol.max_model_interruption_request_bytes);

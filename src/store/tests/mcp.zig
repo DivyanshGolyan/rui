@@ -143,7 +143,7 @@ test "saved MCP call lines survive all work reads pending, running and completed
                     .decoded_arguments = args,
                 }});
                 try reads(&storage, &tmp, session.slice(), "pending", text);
-                const action = (try storage.nextAction(.mcp)).?;
+                const action = (try storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true })).?;
                 const binding = (try storage.admitActionAttempt(action, 600_000, .{})).?.permit.binding;
                 try reads(&storage, &tmp, session.slice(), "bash", text);
                 _ = try storage.settleActionAttempt(binding, .succeeded, "done", .{});
@@ -263,7 +263,7 @@ test "MCP read-only ordering uses frozen offers and admits read waves between wr
                 for (pattern.waves) |width| {
                     const end = start + width;
                     for (start..end) |index| {
-                        const next = try storage.nextAction(.mcp);
+                        const next = try storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true });
                         try std.testing.expect(next != null);
                         const selected = next.?;
                         try std.testing.expectEqual(ready[index].action_id, selected.action_id);
@@ -274,15 +274,110 @@ test "MCP read-only ordering uses frozen offers and admits read waves between wr
                             try std.testing.expect((try storage.admitActionAttempt(blocked, 1234, .{})) == null);
                         }
                     }
-                    try std.testing.expect((try storage.nextAction(.mcp)) == null);
+                    try std.testing.expect((try storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true })) == null);
                     for (start..end) |index| {
                         try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(bindings[index], .succeeded, "done", .{}));
-                        if (index + 1 < end) try std.testing.expect((try storage.nextAction(.mcp)) == null);
+                        if (index + 1 < end) try std.testing.expect((try storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true })) == null);
                     }
                     start = end;
                 }
-                try std.testing.expect((try storage.nextAction(.mcp)) == null);
+                try std.testing.expect((try storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true })) == null);
             }
+        }
+    }.run);
+}
+
+test "MCP promotion keeps old frozen Operations eligible without hiding finite work or repeating Attempts" {
+    try store_testing.forEachEngine(struct {
+        fn propose(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, key: []const u8) !u64 {
+            try submitTestMessage(storage, tmp, key, key, session, "Fetch a page.");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var metadata_name: [64]u8 = undefined;
+            try settleCallsForTesting(storage, tmp, model, try std.fmt.bufPrint(&metadata_name, "{s}-metadata", .{key}), &.{.{
+                .item_id = "item",
+                .name = "fetch_page",
+                .encoded_call_id = "call",
+                .decoded_call_id = "call",
+                .encoded_arguments = "{}",
+                .decoded_arguments = "{}",
+            }});
+            return store_testing.queryU64(storage, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1", .{model.operation_id});
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            body(case) catch |err| {
+                std.debug.print("MCP promotion regression error: {s}\n", .{@errorName(err)});
+                return err;
+            };
+        }
+
+        fn body(case: *store_testing.Case) !void {
+            var phase: []const u8 = "configure";
+            errdefer std.debug.print("MCP promotion regression phase: {s}\n", .{phase});
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var digests: [membership_records.len][32]u8 = undefined;
+            const host_tools = membershipToolSet(&digests);
+            var storage: Store = undefined;
+            try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tools });
+            defer storage.close() catch unreachable;
+            var sessions: [2]protocol.Bounded(protocol.max_session_bytes) = undefined;
+            for (&sessions, 0..) |*session, index| {
+                const key = if (index == 0) "old-background" else "finite-mcp";
+                var workspace: [protocol.max_workspace_bytes]u8 = undefined;
+                var configure = try completeConfiguration(key, "", try canonicalCwd(std.testing.io, &workspace), "model-a");
+                configure.configuration.tools = try .of(&.{"fetch_page"});
+                configure.configuration.permission_mode.state = .value;
+                try configure.configuration.permission_mode.value.set("bypass");
+                session.* = (try storage.configure(&configure, .{})).accepted.session;
+            }
+            phase = "old proposal";
+            const old = try propose(&storage, &tmp, sessions[0].slice(), "old-call");
+            var promote: @import("../../command_input.zig").ActionBackgroundCommand = .{ .action_id = old };
+            try promote.key.set("promote-old");
+            promote.session = sessions[0];
+            const free: usize = 2;
+            const capacity: @import("../domain/action_control.zig").CapacityView = .{
+                .total = 2,
+                .context = &free,
+                .freeFn = struct {
+                    fn read(context: *const anyopaque) usize {
+                        return @as(*const usize, @ptrCast(@alignCast(context))).*;
+                    }
+                }.read,
+            };
+            phase = "promotion";
+            try std.testing.expect(storage.backgroundAction(&promote, capacity, .{}) == .accepted);
+            try std.testing.expectEqual(old, (try storage.nextAction(.mcp, .fromFree(2, true))).?.action_id);
+            phase = "continuation";
+            const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try shared_fixtures.settleMessagesForTesting(&storage, &tmp, continuation, 1, false, null);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM turn WHERE turn_id=?1 AND outcome_code IS NOT NULL", .{continuation.turn_id}));
+            phase = "serialized proposal";
+            const serialized = try propose(&storage, &tmp, sessions[0].slice(), "same-session-call");
+            phase = "finite proposal";
+            const finite = try propose(&storage, &tmp, sessions[1].slice(), "finite-call");
+            phase = "selection";
+            try std.testing.expect(old < serialized and serialized < finite);
+            try std.testing.expect((try storage.nextAction(.mcp, .fromFree(0, true))) == null);
+            try std.testing.expect((try storage.nextAction(.mcp, .fromFree(2, false))) == null);
+            try std.testing.expectEqual(finite, (try storage.nextAction(.mcp, .fromFree(1, true))).?.action_id);
+            const selected_old = (try storage.nextAction(.mcp, .fromFree(2, true))).?;
+            try std.testing.expectEqual(old, selected_old.action_id);
+            phase = "old Attempt";
+            const old_binding = (try storage.admitActionAttempt(selected_old, 30_000, .{})).?.permit.binding;
+            try std.testing.expect((try storage.admitActionAttempt(selected_old, 30_000, .{})) == null);
+            const selected_finite = (try storage.nextAction(.mcp, .fromFree(1, true))).?;
+            try std.testing.expectEqual(finite, selected_finite.action_id);
+            phase = "finite Attempt";
+            const finite_binding = (try storage.admitActionAttempt(selected_finite, 30_000, .{})).?.permit.binding;
+            phase = "finite settlement";
+            try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(finite_binding, .succeeded, "Finite result", .{}));
+            try std.testing.expect((try storage.nextAction(.mcp, .fromFree(2, true))) == null);
+            phase = "old settlement";
+            try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(old_binding, .succeeded, "Old background result", .{}));
+            try std.testing.expectEqual(serialized, (try storage.nextAction(.mcp, .fromFree(1, true))).?.action_id);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND attempt_ordinal=1 AND resolution_code='succeeded'", .{old}));
         }
     }.run);
 }

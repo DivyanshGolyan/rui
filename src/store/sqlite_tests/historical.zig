@@ -664,7 +664,11 @@ test "Attempt checks keep main cost and prefix seals include one frontier reconc
         _ = try storage.openContent(attempt.content);
         work[4] = statementWorkSince(storage.sqliteDatabase());
         if (call == 0) continue;
-        for (work, main_work) |measured, main| {
+        const stages = .{ "open view", "record prefix seal", "Operation kind", "dispatch handoff", "content lookup" };
+        inline for (work, main_work, stages) |measured, main, stage| {
+            if (measured[0] > main[0] or measured[1] > main[1]) {
+                std.debug.print("Attempt check {s}: statements {d}/{d}, VM steps {d}/{d}\n", .{ stage, measured[0], main[0], measured[1], main[1] });
+            }
             try std.testing.expect(measured[0] <= main[0]);
             try std.testing.expect(measured[1] <= main[1]);
         }

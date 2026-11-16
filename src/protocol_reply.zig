@@ -269,7 +269,6 @@ pub const ActivityPage = struct {
                     fact.value = .{ .turn_ended = .{ .session = ended.session.value, .turn = try id(ended.turn, false), .operation = try id(ended.operation, false), .ending = ending, .code = ended.code.value, .content = if (ended.content) |reference| try content(reference) else null } };
                 },
                 .stop => |stop| {
-                    if (stop.turn == null and stop.completion.value == .pending) return error.InvalidActivityPage;
                     fact.value = .{ .stop = .{ .key = stop.key.value, .turn = if (stop.turn) |turn| try id(turn, false) else null, .cutoff = try id(stop.cutoff, true), .completion = stop.completion.value } };
                 },
             }
@@ -306,8 +305,7 @@ pub const ActivityPage = struct {
         inline for (.{ &work.turn, &work.operation, &work.first_action }, .{ wire.work.turn, wire.work.operation, wire.work.first_action }) |fact, value| {
             fact.* = if (value) |text| try id(text, false) else null;
         }
-        // An operation belongs to its Turn; an Action to the active one.
-        if ((work.turn == null) != (work.operation == null) or (work.first_action != null and work.turn == null)) return error.InvalidActivityPage;
+        if ((work.turn == null) != (work.operation == null)) return error.InvalidActivityPage;
         if (wire.work.last_line) |line| facts.last_line = .{ .position = try id(line.position, false), .text = if (line.text) |text| text.value else null };
         facts.read_version = protocol.SinceToken.parse(wire.work.read_version.slice()) catch return error.InvalidActivityPage;
         facts.revision = try id(wire.work.revision, false);
@@ -1209,8 +1207,7 @@ pub const Current = struct {
             execution.custody_occupied.value == null or execution.scratch_used_bytes.value == null or execution.unavailable.value == null) return error.InvalidObservation;
         const work = wire.work.value orelse return error.InvalidObservation;
         const peers = wire.peers.value orelse return error.InvalidObservation;
-        if ((work.turn == null) != (work.operation == null) or (work.latest_outcome != null and work.turn == null) or
-            (work.first_action != null and work.turn == null)) return error.InvalidObservation;
+        if ((work.turn == null) != (work.operation == null) or (work.latest_outcome != null and work.turn == null)) return error.InvalidObservation;
         if (work.latest_outcome) |outcome| {
             if (outcome.code.slice().len == 0 or (if (outcome.content) |content| content.type.value != null else false)) return error.InvalidObservation;
         }
@@ -1490,7 +1487,7 @@ pub const SessionListPage = struct {
                 if (row.last_line.?.position > row.end) return error.InvalidCharacter;
             }
             const work = row.work;
-            if ((work.turn == null) != (work.operation == null) or (work.first_action != null and work.turn == null)) return error.InvalidCharacter;
+            if ((work.turn == null) != (work.operation == null)) return error.InvalidCharacter;
             // A person's Message is a Message, and the first one is either a
             // person's or a peer's.
             if (row.first_message) |first| {
@@ -1661,6 +1658,8 @@ pub const CommandObservation = struct {
     completion: ?protocol.SessionStopCompletion = null,
     interruption_target: ?struct { session: protocol.Bounded(protocol.max_session_bytes), turn: u64, operation: u64 } = null,
     permission_target: ?struct { action: u64, decision: protocol.PermissionDecision } = null,
+    action_target: ?u64 = null,
+    action_selection: ?@import("action_control.zig").Selection = null,
 
     pub const ContentReference = mutation_answer.ContentReference;
 
@@ -1739,6 +1738,8 @@ pub const CommandObservation = struct {
             try writer.print(",\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{ target.turn, target.operation });
         }
         if (self.permission_target) |target| try writer.print(",\"permission_target\":{{\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{ target.action, @tagName(target.decision) });
+        if (self.action_target) |action| try writer.print(",\"action_target\":{{\"action\":\"{d}\"}}", .{action});
+        if (self.action_selection) |selection| try writer.print(",\"action_selection\":{{\"kind\":\"{s}\",\"position\":\"{d}\"}}", .{ @tagName(selection.kind), selection.position });
         try writer.writeByte('}');
     }
 
@@ -1780,6 +1781,8 @@ pub const CommandObservation = struct {
             completion: OmittableJson(struct { status: JsonEnum(@typeInfo(@FieldType(CommandObservation, "completion")).optional.child) }) = .{},
             interruption_target: OmittableJson(struct { session: JsonString(protocol.max_session_bytes), turn: JsonString(20), operation: JsonString(20) }) = .{},
             permission_target: OmittableJson(struct { action: JsonString(20), decision: JsonEnum(protocol.PermissionDecision) }) = .{},
+            action_target: OmittableJson(struct { action: JsonString(20) }) = .{},
+            action_selection: OmittableJson(struct { kind: JsonEnum(@FieldType(@import("action_control.zig").Selection, "kind")), position: JsonString(20) }) = .{},
         };
         const Since = struct {
             value: ?JsonString(SessionToken.max_bytes),
@@ -1833,6 +1836,8 @@ pub const CommandObservation = struct {
         if (facts.completion.value) |value| observed.completion = value.status.value;
         if (facts.interruption_target.value) |value| observed.interruption_target = .{ .session = value.session.value, .turn = try decimalId(value.turn, true), .operation = try decimalId(value.operation, true) };
         if (facts.permission_target.value) |value| observed.permission_target = .{ .action = try decimalId(value.action, true), .decision = value.decision.value };
+        if (facts.action_target.value) |value| observed.action_target = try decimalId(value.action, true);
+        if (facts.action_selection.value) |value| observed.action_selection = .{ .kind = value.kind.value, .position = try decimalId(value.position, false) };
         try observed.validate();
         if (since) |token| {
             const target = observed.target orelse return error.InvalidObservation;
@@ -1850,7 +1855,7 @@ pub const CommandObservation = struct {
 
     fn validate(self: *const CommandObservation) !void {
         if (self.status == .absent) {
-            inline for (.{ "kind", "target", "code", "revision", "created", "input", "state", "queue", "binding", "result", "work", "recovery", "selection", "archived", "pinned", "completion", "interruption_target", "permission_target" }) |name| if (@field(self, name) != null) return error.InvalidObservation;
+            inline for (.{ "kind", "target", "code", "revision", "created", "input", "state", "queue", "binding", "result", "work", "recovery", "selection", "archived", "pinned", "completion", "interruption_target", "permission_target", "action_target", "action_selection" }) |name| if (@field(self, name) != null) return error.InvalidObservation;
             return;
         }
         const kind = self.kind orelse return error.InvalidObservation;
@@ -1866,6 +1871,8 @@ pub const CommandObservation = struct {
             (self.pinned != null) != (accepted and kind == .session_pin) or
             (self.completion != null) != (accepted and (kind == .session_stop or kind == .session_archive))) return error.InvalidObservation;
         if ((self.interruption_target != null) != (kind == .model_interruption) or (self.permission_target != null) != (kind == .permission_decision)) return error.InvalidObservation;
+        if ((self.action_target != null) != (kind == .action_background) or
+            (self.action_selection != null) != (accepted and kind == .action_background)) return error.InvalidObservation;
         if (self.interruption_target) |target| if (!target.session.eql(self.target.?.slice())) return error.RequestBindingMismatch;
         if (kind != .message) {
             if (self.state != null or self.input != null or self.queue != null or self.binding != null or self.result != null or self.work != null or self.recovery != null) return error.InvalidObservation;
@@ -3276,6 +3283,7 @@ test "keyed observation validates every operation shape and binding" {
         .{ "session_pin", ",\"pinned\":false", "" },
         .{ "model_interruption", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"7\"}", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"0\",\"operation\":\"0\"}" },
         .{ "permission_decision", ",\"permission_target\":{\"action\":\"29\",\"decision\":\"allow_once\"}", ",\"permission_target\":{\"action\":\"0\",\"decision\":\"deny\"}" },
+        .{ "action_background", ",\"action_target\":{\"action\":\"29\"},\"action_selection\":{\"kind\":\"background\",\"position\":\"31\"}", ",\"action_target\":{\"action\":\"29\"}" },
     }) |case| {
         const accepted = prefix ++ "\"kind\":\"" ++ case[0] ++ "\",\"status\":\"accepted\"" ++ case[1] ++ "}}";
         const observed = try CommandObservation.parse(.{ .status = 200, .body = accepted }, "k");
@@ -3311,6 +3319,21 @@ test "keyed observation validates every operation shape and binding" {
     const rejection = try CommandObservation.parse(.{ .status = 200, .body = prefix ++ "\"kind\":\"message\",\"status\":\"rejected\",\"state\":\"rejected\",\"code\":\"unknown_session\"}}" }, "k");
     const other = try MessageAddress.init("/store", "09azvw", "k");
     try std.testing.expectError(error.RequestBindingMismatch, rejection.forMessage(&other));
+}
+
+test "keyed Action observation preserves requested zero and maximum targets but rejects zero selection positions" {
+    inline for (.{ "0", "18446744073709551615" }) |target| {
+        const facts = "{\"status\":\"rejected\",\"kind\":\"action_background\",\"target\":\"k7m2qx\",\"code\":\"invalid_target\",\"action_target\":{\"action\":\"" ++ target ++ "\"}}";
+        const observed = try CommandObservation.parse(.{ .status = 200, .body = testing_observation_prefix ++ facts ++ "}" }, "k");
+        try std.testing.expectEqual(try std.fmt.parseInt(u64, target, 10), observed.action_target.?);
+        try std.testing.expectEqualStrings("invalid_target", observed.failureCode().?);
+        var output: [protocol.command_observation_reply.max_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&output);
+        try observed.writeJson(&writer);
+        try std.testing.expectEqualStrings(facts, writer.buffered());
+    }
+    const selected = testing_observation_prefix ++ "{\"status\":\"accepted\",\"kind\":\"action_background\",\"target\":\"k7m2qx\",\"action_target\":{\"action\":\"29\"},\"action_selection\":{\"kind\":\"background\",\"position\":\"0\"}}}";
+    try std.testing.expectError(error.InvalidResponse, CommandObservation.parse(.{ .status = 200, .body = selected }, "k"));
 }
 
 test "keyed observation distinguishes named statuses and omitted fields from numeric tags and null" {

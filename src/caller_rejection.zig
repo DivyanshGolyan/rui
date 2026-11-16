@@ -12,7 +12,7 @@ const rejection_enums = .{
     protocol.ConfigurationRejection,     protocol.MessageRejection,
     protocol.SessionStopRejection,       protocol.SessionArchiveRejection,
     protocol.ModelInterruptionRejection, protocol.PermissionDecisionRejection,
-    protocol.ProposalRejection,
+    protocol.ProposalRejection,          @import("action_control.zig").Rejection,
 };
 
 pub fn fromProtocol(rejection: anytype) Code {

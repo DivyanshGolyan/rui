@@ -318,6 +318,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .request_read_result => try readResult(init, parsed),
         .request_list => try requests(init),
         .action_read => try readAction(init, parsed),
+        .action_background => try backgroundAction(init, parsed),
         .action_inspect => try inspectAction(init, .{ .io = init.io }, parsed.get("store"), parsed.get("session").?, (try parsed.number(u64, "action")).?),
         .action_allow => try decideAction(init, parsed, .allow_once),
         .action_deny => try decideAction(init, parsed, .deny),
@@ -3352,6 +3353,19 @@ fn readAction(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     }
 }
 
+fn backgroundAction(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const input: client.ActionBackgroundInput = .{
+        .store = try selectedStore(init, parsed.get("store"), &selected_buffer),
+        .session = parsed.get("session").?,
+        .action_id = (try parsed.number(u64, "action")).?,
+    };
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const target = try captureTarget(init, parsed, &directory_buffer);
+    var captured = try client.captureActionBackground(init.io, input, target);
+    try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null, .json);
+}
+
 fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision: @FieldType(client.PermissionDecisionInput, "decision")) !void {
     const io = init.io;
     var input = client.PermissionDecisionInput{
@@ -3753,10 +3767,11 @@ fn writeSavedRejection(out: *std.Io.Writer, reply: protocol_reply.MutationReply)
         .session_pin => |target| if (target.pinned) "pin" else "unpin",
         .model_interruption => "interrupt-model",
         .permission_decision => |target| if (target.decision == .allow_once) "allow" else "deny",
+        .action_background => "background",
     };
     // Only the saved rejection is authority. In particular, replay never
     // borrows a current argv value or reads today's configuration for advice.
-    try caller_error.writeSavedLine(out, savedRejectionCode(answer), .{ .resource = if (reply.target == .permission_decision) "action" else "session", .operation = operation });
+    try caller_error.writeSavedLine(out, savedRejectionCode(answer), .{ .resource = if (reply.target == .permission_decision or reply.target == .action_background) "action" else "session", .operation = operation });
 }
 
 fn reportUnconfirmed(context: protocol_reply.MutationIdentity, replay: client.Replay, err: anyerror) void {
@@ -3826,6 +3841,7 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
     switch (reply.target) {
         .model_interruption => |target| try writer.print("target Turn: {d}; Operation: {d}\n", .{ target.turn, target.operation }),
         .permission_decision => |target| try writer.print("target Action: {d}; decision: {s}\n", .{ target.action, @tagName(target.decision) }),
+        .action_background => |action| try writer.print("target Action: {d}\n", .{action}),
         else => {},
     }
     const answer = reply.answer catch |err| {
@@ -3856,6 +3872,7 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
         },
         .session_archive => |value| try writer.print("archived: {}; completion: {s}\n", .{ value.archived, @tagName(value.completion) }),
         .session_pin => |value| try writer.print("pinned: {}\n", .{value.pinned}),
+        .action_background => |selection| try writer.print("Action selection: {s}; position: {d}\n", .{ @tagName(selection.kind), selection.position }),
         .model_interruption, .permission_decision => {},
     };
     try writer.flush();
@@ -3899,6 +3916,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
     switch (reply.target) {
         .model_interruption => |target| try writer.print(",\"request_target\":{{\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{ target.turn, target.operation }),
         .permission_decision => |target| try writer.print(",\"request_target\":{{\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{ target.action, @tagName(target.decision) }),
+        .action_background => |action| try writer.print(",\"request_target\":{{\"action\":\"{d}\"}}", .{action}),
         else => {},
     }
     const answer = reply.answer catch |err| {
@@ -3919,6 +3937,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         try std.json.Stringify.value(reply.context.session.slice(), .{}, writer);
     }
     if (reply.target == .permission_decision) try writer.print(",\"action\":\"{d}\",\"decision\":\"{s}\"", .{ reply.target.permission_decision.action, @tagName(reply.target.permission_decision.decision) });
+    if (reply.target == .action_background) try writer.print(",\"action\":\"{d}\"", .{reply.target.action_background});
     switch (answer.result) {
         .accepted => |accepted| switch (accepted) {
             .configure => |value| {
@@ -3933,6 +3952,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
             },
             .session_archive => |value| try writer.print(",\"archived\":{}", .{value.archived}),
             .session_pin => |value| try writer.print(",\"pinned\":{}", .{value.pinned}),
+            .action_background => |selection| try writer.print(",\"action_selection\":{{\"kind\":\"{s}\",\"position\":\"{d}\"}}", .{ @tagName(selection.kind), selection.position }),
             .model_interruption, .permission_decision => {},
         },
         .rejected => |code| {
@@ -4879,6 +4899,26 @@ test "a saved rejection code this build does not know keeps the answer and says 
     out = .fixed(&storage);
     try std.testing.expectError(error.MutationNotAccepted, presentMutationReply(&out, reply, .json));
     try std.testing.expectEqualStrings("{\"context\":{\"store\":\"/s\",\"session\":\"k7m2qx\",\"key\":\"saved\",\"kind\":\"configure\"},\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"future_cause\"}}\n", out.buffered());
+}
+
+test "native promotion saved refusals keep their catalog code and refused exit" {
+    inline for (.{ "source_stopped", "background_unavailable" }) |code| {
+        const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"action_background_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":true,\"session\":\"k7m2qx\",\"action\":\"42\",\"code\":\"" ++ code ++ "\"}}";
+        var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = body }, "k7m2qx", .{ .action_background = 42 });
+        try reply.context.store.set("/s");
+        try reply.context.key.set("saved");
+        reply.context.kind = .action_background;
+        var storage: [2048]u8 = undefined;
+        var out = std.Io.Writer.fixed(&storage);
+        try writeSavedRejection(&out, reply);
+        try std.testing.expect(std.mem.startsWith(u8, out.buffered(), "rui action background: "));
+        try std.testing.expect(std.mem.endsWith(u8, out.buffered(), "[" ++ code ++ "]\n"));
+        try std.testing.expectEqual(caller_exit.Status.refused, caller_exit.forCode(.saved_refusal, savedRejectionCode(try reply.answer)));
+        out = .fixed(&storage);
+        try std.testing.expectError(error.MutationNotAccepted, presentMutationReply(&out, reply, .json));
+        try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "\"code\":\"" ++ code ++ "\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "\"replayed\":true") != null);
+    }
 }
 
 test "saved CLI rejection goldens preserve JSON and explain permission and incomplete configuration" {

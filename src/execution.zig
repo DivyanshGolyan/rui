@@ -302,12 +302,28 @@ pub const CustodyRecord = struct {
     timing: model_timing.Attempt = .{},
 };
 
-pub const DispatchCapacity = packed struct(u2) {
-    free_credit: bool,
+pub const DispatchCapacity = packed struct(u3) {
+    free_credit: enum(u2) { none, one, multiple },
     mcp_open: bool,
 
-    pub fn includesMcp(capacity: DispatchCapacity) bool {
-        return capacity.free_credit and capacity.mcp_open;
+    pub fn fromFree(free: usize, mcp_open: bool) DispatchCapacity {
+        return .{ .free_credit = if (free == 0) .none else if (free == 1) .one else .multiple, .mcp_open = mcp_open };
+    }
+
+    pub fn hasCredit(self: DispatchCapacity) bool {
+        return self.free_credit != .none;
+    }
+
+    pub fn hasHeadroom(self: DispatchCapacity) bool {
+        return self.free_credit == .multiple;
+    }
+
+    pub fn includesMcp(self: DispatchCapacity) bool {
+        return self.hasCredit() and self.mcp_open;
+    }
+
+    pub fn workInput(self: DispatchCapacity) DispatchCapacity {
+        return .{ .free_credit = self.free_credit, .mcp_open = self.includesMcp() };
     }
 };
 
@@ -330,6 +346,17 @@ pub const CustodyPool = struct {
             record.delivered.store(false, .release);
             return .{ .index = index, .generation = generation };
         }
+        return null;
+    }
+
+    pub fn reserveLeaving(self: *CustodyPool, minimum_free: usize) ?CustodyToken {
+        const token = self.reserve() orelse return null;
+        return self.keepReservation(token, minimum_free);
+    }
+
+    fn keepReservation(self: *CustodyPool, token: CustodyToken, minimum_free: usize) ?CustodyToken {
+        if (self.records.len - self.occupied() >= minimum_free) return token;
+        self.releaseUnused(token) catch unreachable;
         return null;
     }
 
@@ -488,7 +515,7 @@ pub const CustodyPool = struct {
     }
 
     pub fn dispatchCapacity(self: *const CustodyPool, mcp_open: bool) DispatchCapacity {
-        return .{ .free_credit = self.occupied() < self.records.len, .mcp_open = mcp_open };
+        return .fromFree(self.records.len - self.occupied(), mcp_open);
     }
 
     pub fn occupied(self: *const CustodyPool) usize {
@@ -1065,21 +1092,103 @@ test "model prepared routes preserve one shot handoff across rejection and reuse
     }
 }
 
+test "background custody reservations retain headroom in both last-two contender orders" {
+    for ([_]bool{ false, true }) |reverse| {
+        var records: [2]CustodyRecord = @splat(.{});
+        var pool = CustodyPool.initialize(&records);
+        const one = pool.reserve().?;
+        const two = pool.reserve().?;
+        const first = if (reverse) two else one;
+        const second = if (reverse) one else two;
+        try std.testing.expect(pool.keepReservation(first, 1) == null);
+        const kept = pool.keepReservation(second, 1).?;
+        try pool.checkReserved(kept);
+        try std.testing.expectEqual(@as(usize, 1), pool.occupied());
+        try pool.releaseUnused(kept);
+        try std.testing.expectEqual(@as(usize, 0), pool.occupied());
+    }
+}
+
+test "background custody refusal rolls back before finite work and stale-token reuse" {
+    var records: [2]CustodyRecord = @splat(.{});
+    var pool = CustodyPool.initialize(&records);
+    const background = pool.reserve().?;
+    const finite = pool.reserve().?;
+    try std.testing.expect(pool.keepReservation(background, 1) == null);
+    try pool.checkReserved(finite);
+    try std.testing.expect(pool.reserveLeaving(1) == null);
+    try pool.releaseUnused(finite);
+    const fresh = pool.reserveLeaving(1).?;
+    try std.testing.expectError(error.StaleCustody, pool.checkReserved(background));
+    try pool.checkReserved(fresh);
+    try pool.releaseUnused(fresh);
+    const first = pool.reserve().?;
+    const last = pool.reserve().?;
+    try std.testing.expect(pool.reserve() == null);
+    try pool.releaseUnused(first);
+    try pool.releaseUnused(last);
+}
+
+test "background custody headroom includes detached cleanup and permits finite consumers" {
+    var records: [2]CustodyRecord = @splat(.{});
+    var pool = CustodyPool.initialize(&records);
+    const retained = pool.reserve().?;
+    var permit = attempt.ActionDispatchPermit{ .binding = .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 } };
+    const binding = try pool.attach(retained, &permit);
+    try pool.detach(retained);
+    try std.testing.expect(pool.reserveLeaving(1) == null);
+    try pool.checkDetached(retained, .{ .action = binding });
+    try pool.cleanupComplete(retained);
+    const background = pool.reserveLeaving(1).?;
+    const finite = pool.reserve().?;
+    try pool.checkReserved(background);
+    try pool.checkReserved(finite);
+    try pool.releaseUnused(finite);
+    try pool.releaseUnused(background);
+}
+
+test "background custody capacity one refuses without consuming launch authority" {
+    var records: [1]CustodyRecord = @splat(.{});
+    var pool = CustodyPool.initialize(&records);
+    try std.testing.expect(pool.reserveLeaving(1) == null);
+    try std.testing.expectEqual(@as(usize, 0), pool.occupied());
+    const finite = pool.reserve().?;
+    var permit = attempt.ActionDispatchPermit{ .binding = .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 } };
+    const binding = try pool.attach(finite, &permit);
+    try pool.consumeLaunchAuthority(finite, .{ .action = binding });
+    try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(finite, .{ .action = binding }));
+    try pool.detach(finite);
+    try pool.cleanupComplete(finite);
+}
+
 test "dispatch capacity reflects shared custody through detached cleanup" {
     var records: [1]CustodyRecord = @splat(.{});
     var pool = CustodyPool.initialize(&records);
     const open = pool.dispatchCapacity(true);
-    try std.testing.expect(open.free_credit and open.includesMcp());
+    try std.testing.expect(open.hasCredit() and open.includesMcp());
     const locally_full = pool.dispatchCapacity(false);
-    try std.testing.expect(locally_full.free_credit and !locally_full.includesMcp());
+    try std.testing.expect(locally_full.hasCredit() and !locally_full.includesMcp());
     const token = pool.reserve().?;
-    try std.testing.expect(!pool.dispatchCapacity(true).free_credit);
+    try std.testing.expect(!pool.dispatchCapacity(true).hasCredit());
     try std.testing.expect(!pool.dispatchCapacity(true).includesMcp());
     var permit = attempt.DispatchPermit{ .binding = .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 1 } };
     _ = try pool.attach(token, &permit);
     try pool.detach(token);
-    try std.testing.expect(!pool.dispatchCapacity(true).free_credit);
+    try std.testing.expect(!pool.dispatchCapacity(true).hasCredit());
     try pool.cleanupComplete(token);
     try std.testing.expect(pool.dispatchCapacity(true).includesMcp());
-    try std.testing.expect(open.free_credit and open.includesMcp());
+    try std.testing.expect(open.hasCredit() and open.includesMcp());
+}
+
+test "dispatch capacity keeps physical headroom and effective work inputs distinct" {
+    for ([_]usize{ 0, 1, 2, 16 }) |free| {
+        for ([_]bool{ false, true }) |mcp_open| {
+            const capacity: DispatchCapacity = .fromFree(free, mcp_open);
+            try std.testing.expectEqual(free > 0, capacity.hasCredit());
+            try std.testing.expectEqual(free > 1, capacity.hasHeadroom());
+            try std.testing.expectEqual(free > 0 and mcp_open, capacity.includesMcp());
+        }
+    }
+    try std.testing.expectEqual(DispatchCapacity.fromFree(0, false).workInput(), DispatchCapacity.fromFree(0, true).workInput());
+    try std.testing.expect(!std.meta.eql(DispatchCapacity.fromFree(1, false).workInput(), DispatchCapacity.fromFree(2, false).workInput()));
 }
