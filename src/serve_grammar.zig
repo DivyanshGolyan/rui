@@ -238,10 +238,14 @@ test "running Host sources have one syntax owner across current and retired argv
         .{ .argv = &.{ "rui", "host", "serve", "--store", "/host", "--fault", "injected" }, .dir = "/host", .restartable = false },
         .{ .argv = &.{ "rui", "host", "serve", "--help" }, .restartable = false },
     };
-    for (cases) |case| {
+    for (cases, 0..) |case, index| {
+        errdefer std.debug.print("running source case {d}\n", .{index});
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const sources = try runningSources(arena.allocator(), case.argv);
+        const sources = runningSources(arena.allocator(), case.argv) catch |err| {
+            std.debug.print("source parse error: {s}\n", .{@errorName(err)});
+            return err;
+        };
         try std.testing.expectEqual(case.restartable, sources.restartable);
         if (case.dir) |dir| try std.testing.expectEqualStrings(dir, sources.dir.?) else try std.testing.expect(sources.dir == null);
         if (case.settings) |file| try std.testing.expectEqualStrings(file, sources.settings_file.?) else try std.testing.expect(sources.settings_file == null);

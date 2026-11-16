@@ -142,6 +142,8 @@ fn read(settings: *SessionSettings) void { _ = settings.tools; }
             root = Path(directory)
             (root / 'src').mkdir()
             (root / 'openapi.json').write_text((ROOT / 'openapi.json').read_text())
+            (root / 'src/serve_grammar.zig').write_text('fn runningSources() void { currentArguments(); }\n')
+            (root / 'src/HostLifecycle.zig').write_text('fn finish() void { previousProviders(); }\n')
             path = root / 'src/cli.zig'
             clean = 'const x = "store";\n'
             path.write_text(clean)
