@@ -1268,8 +1268,7 @@ fn reportStartedHost(io: std.Io, ready: *const HostLaunchResult.Ready, quiet: bo
 fn writeRetainedHostNotice(writer: *std.Io.Writer, selector: []const u8) !void {
     try writer.writeAll("rui: the running Host keeps its settings; --set assignments apply only to a new Host. Changing settings means pausing this Host and all its work: rui host pause --store ");
     try TerminalText.writeShellWord(writer, selector);
-    try writer.writeByte('
-');
+    try writer.writeByte('\n');
 }
 
 fn loginProvider(name: []const u8, device_code: bool) ?protocol.Provider {
