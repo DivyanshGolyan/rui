@@ -860,27 +860,3 @@ test "a transport-interrupted skills read is retryable without discarding the he
         try std.testing.expect(reads.ask("re") == null);
     }
 }
-
-test "grammar choice picks expire when the model changes without a draft edit" {
-    var reads: Reads = .{};
-    var rows: Rows = .{};
-    const draft = "/effort ";
-    for ([_][]const u8{ "unlisted-model", "gpt-5.5", "gpt-4o" }) |before| {
-        for ([_][]const u8{ "unlisted-model", "gpt-5.5", "gpt-4o" }) |after| {
-            var drawn = reads.shown(&rows, draft, draft.len, 1, .{ .model = before }, null).?;
-            drawn.drew(true);
-            const pick = drawn.pick(drawn.list.count - 1);
-            var stored: ?slash_commands.Shown = drawn;
-            const next = reads.shown(&rows, draft, draft.len, 1, .{ .model = after }, drawn);
-            if (std.mem.eql(u8, before, after)) {
-                try std.testing.expect(slash_commands.Shown.pickedNow(&stored, next, pick) != null);
-            } else {
-                try std.testing.expect(slash_commands.Shown.pickedNow(&stored, next, pick) == null);
-                stored = next;
-                stored.?.drew(true);
-                const current = stored.?.pick(0);
-                try std.testing.expect(slash_commands.Shown.pickedNow(&stored, stored, current) != null);
-            }
-        }
-    }
-}

@@ -182,6 +182,7 @@ pub const Facts = struct {
     details: bool = false,
     draft_empty: bool = true,
     host_startable: bool = false,
+    /// Whether slash_menu.Menu accepted this key's Enter or drawn-pick intent.
     shown_row: bool = false,
     send: Send = .{},
 
