@@ -80,6 +80,13 @@ pub fn match(typed: []const u8, name: []const u8, description: []const u8) ?Matc
     } };
 }
 
+/// The shared row order: rank first, then the catalog's byte-lexical name.
+/// Incoming preview order may belong to an earlier query and is no tie-breaker.
+pub fn order(left_rank: Rank, left_name: []const u8, right_rank: Rank, right_name: []const u8) std.math.Order {
+    const ranked = std.math.order(@backingInt(left_rank), @backingInt(right_rank));
+    return if (ranked == .eq) std.mem.order(u8, left_name, right_name) else ranked;
+}
+
 /// The longest name prefix the Host reads suggestions for.
 pub const max_prefix_bytes = 64;
 
@@ -222,7 +229,7 @@ pub const Rows = struct {
 
     /// The rows for a word whose name is `typed`: the `commands` (a draft's
     /// first word lists them) and the page's skills that `match` it, by
-    /// rank, commands first within one, each in its own order, as many as
+    /// rank, commands first within one, skills in lexical name order, as many as
     /// the list holds. A command owns its name, listed or not, so beside
     /// the commands a skill of that name could never be sent and is left
     /// out. Null when nothing matches.
@@ -240,11 +247,28 @@ pub const Rows = struct {
                 rows.entries[rows.count].matches = matched.spans;
                 rows.count += 1;
             };
-            for (page.entries) |entry| {
+            if (rows.count == slash_commands.List.capacity) return rows;
+            const Candidate = struct { entry: *const skill_suggestions.Entry, matched: Match };
+            var selected: [slash_commands.List.capacity]Candidate = undefined;
+            var count: usize = 0;
+            const limit = slash_commands.List.capacity - rows.count;
+            for (page.entries) |*entry| {
                 if (commands != null and slash_commands.conversation.nameOf(entry.name) != null) continue;
                 const matched = match(typed, entry.name, entry.description) orelse continue;
                 if (matched.rank != rank) continue;
-                if (rows.count == slash_commands.List.capacity) return rows;
+                var at: usize = 0;
+                while (at < count and order(selected[at].matched.rank, selected[at].entry.name, matched.rank, entry.name) != .gt) : (at += 1) {}
+                if (at == limit) continue;
+                const next = @min(count + 1, limit);
+                var move = next - 1;
+                while (move > at) : (move -= 1) selected[move] = selected[move - 1];
+                selected[at] = .{ .entry = entry, .matched = matched };
+                count = next;
+            }
+            // Format only after ordering. Moving candidates never moves or
+            // overwrites the row text that the completed list will borrow.
+            for (selected[0..count]) |candidate| {
+                const entry = candidate.entry;
                 const text = &self.text[rows.count];
                 text[0] = '/';
                 @memcpy(text[1..][0..entry.name.len], entry.name);
@@ -255,7 +279,7 @@ pub const Rows = struct {
                     .shown = text[0 .. entry.name.len + 1],
                     .description = entry.description,
                     .runs = false,
-                    .matches = matched.spans,
+                    .matches = candidate.matched.spans,
                 };
                 rows.count += 1;
             }
@@ -385,6 +409,7 @@ test "skill completion bounds the ranked list, not its candidates" {
         entry.* = .{ .name = name, .description = "" };
     }
     entries[entries.len - 1].name = "skill";
+    std.mem.reverse(skill_suggestions.Entry, entries[0 .. entries.len - 1]);
     const page: skill_suggestions.Page = .{ .entries = &entries, .total = entries.len };
     var rows: Rows = .{};
     const listed = rows.list("skill", null, &page).?;
@@ -445,16 +470,16 @@ test "a /word's list ranks exact, prefix, inside and description matches, comman
         // Later in a Message, the skill is the only owner of its name.
         .{ .draft = "use /model", .rows = &.{.{ .shown = "/model", .bold = "model" }} },
         .{ .draft = "use /hel", .rows = &.{
-            .{ .shown = "/help-me", .bold = "hel" },
             .{ .shown = "/help", .bold = "hel" },
+            .{ .shown = "/help-me", .bold = "hel" },
             .{ .shown = "/review-help", .bold = "hel" },
-            .{ .shown = "/triage", .bold = "hel", .in_description = true },
             .{ .shown = "/model", .bold = "hel", .in_description = true },
+            .{ .shown = "/triage", .bold = "hel", .in_description = true },
         } },
         // Prefix-only matches are not exact known names.
         .{ .draft = "/hel", .rows = &.{
-            .{ .shown = "/help-me", .bold = "hel" },
             .{ .shown = "/help", .bold = "hel" },
+            .{ .shown = "/help-me", .bold = "hel" },
             .{ .shown = "/review-help", .bold = "hel" },
             .{ .shown = "/triage", .bold = "hel", .in_description = true },
         } },
@@ -748,6 +773,111 @@ test "Enter runs a row only where its word ends the draft" {
 
 fn testPage(entries: []const skill_suggestions.Entry) skill_suggestions.Page {
     return .{ .entries = entries, .total = entries.len };
+}
+
+test "skill ranking is identical for fresh and reused complete or truncated previews" {
+    const Entry = skill_suggestions.Entry;
+    // A Host page for re: prefixes first, then name substrings, then descriptions.
+    const prior = [_]Entry{
+        .{ .name = "re-review", .description = "Prefix becomes a name substring" },
+        .{ .name = "recap", .description = "Review captured notes" },
+        .{ .name = "rev", .description = "Prefix becomes exact" },
+        .{ .name = "reverie", .description = "Prefix stays prefix" },
+        .{ .name = "a-review", .description = "First lexical substring" },
+        .{ .name = "b-review", .description = "Second lexical substring" },
+        .{ .name = "z-task", .description = "Review issues" },
+    };
+    // Independently authored fresh Host order for rev, not sorted by the test.
+    const narrowed = [_]Entry{ prior[2], prior[3], prior[4], prior[5], prior[0], prior[1], prior[6] };
+    const old_names = [_][]const u8{ "re-review", "recap", "rev", "reverie", "a-review", "b-review", "z-task" };
+    const new_names = [_][]const u8{ "rev", "reverie", "a-review", "b-review", "re-review", "recap", "z-task" };
+    const Check = struct {
+        fn lists(names: []const []const u8, catalog: []const Entry, draft: []const u8, fresh: slash_commands.Shown, cached: slash_commands.Shown) !void {
+            try std.testing.expectEqual(names.len, fresh.list.count);
+            try std.testing.expectEqual(names.len, cached.list.count);
+            try std.testing.expectEqual(fresh.list.exact, cached.list.exact);
+            try std.testing.expectEqualDeep(fresh.list.source_word, cached.list.source_word);
+            for (names, fresh.list.shown(), cached.list.shown(), 0..) |name, direct, reused, index| {
+                try std.testing.expectEqualStrings(name, direct.shown[1..]);
+                try std.testing.expectEqualStrings(name, reused.shown[1..]);
+                try std.testing.expectEqualStrings(name, std.mem.trimEnd(u8, reused.word, " "));
+                try std.testing.expectEqualStrings(direct.word, reused.word);
+                const description = for (catalog) |entry| {
+                    if (std.mem.eql(u8, name, entry.name)) break entry.description;
+                } else return error.TestUnexpectedResult;
+                try std.testing.expectEqualStrings(description, reused.description);
+                try std.testing.expectEqualStrings(direct.description, reused.description);
+                try std.testing.expectEqualDeep(direct.matches, reused.matches);
+                try std.testing.expectEqual(direct.runs, reused.runs);
+                var fresh_pick = fresh;
+                var cached_pick = cached;
+                fresh_pick.highlight = index;
+                cached_pick.highlight = index;
+                // Tab, Enter and clicks use this owner: every same row makes
+                // the same replacement, regardless of which page arrived.
+                try expectReplacement(enter(draft, draft.len, &fresh_pick).edit, enter(draft, draft.len, &cached_pick).edit);
+            }
+        }
+    };
+    const Case = struct { from: []const u8, query: []const u8, page: []const Entry, names: []const []const u8 };
+    const cases = [_]Case{
+        .{ .from = "re", .query = "re", .page = &prior, .names = &old_names }, // unchanged query
+        .{ .from = "r", .query = "re", .page = &prior, .names = &old_names }, // unchanged ranks
+        .{ .from = "re", .query = "rev", .page = &narrowed, .names = &new_names }, // changed and collapsed ranks
+    };
+    for (cases) |case| for ([_]bool{ true, false }) |complete_page| {
+        // Pure ranking ignores every incoming page rotation and reversal.
+        for (0..prior.len) |rotation| for ([_]bool{ false, true }) |reverse| {
+            errdefer std.debug.print("from={s} query={s} complete={} rotation={} reverse={}\n", .{ case.from, case.query, complete_page, rotation, reverse });
+            var incoming: [prior.len]Entry = undefined;
+            for (&incoming, 0..) |*entry, index| {
+                const source = (rotation + index) % prior.len;
+                entry.* = prior[if (reverse) prior.len - 1 - source else source];
+            }
+            var cached: Reads = .{};
+            var cached_rows: Rows = .{};
+            const read = cached.ask(case.from).?.read;
+            _ = cached.answer(read, .{ .entries = &incoming, .total = incoming.len + @intFromBool(!complete_page) }, case.from);
+            const next = cached.ask(case.query);
+            const needs_read = !complete_page and !std.mem.eql(u8, case.from, case.query);
+            try std.testing.expectEqual(needs_read, next != null);
+            var fresh: Reads = .{};
+            var fresh_rows: Rows = .{};
+            _ = fresh.answer(fresh.ask(case.query).?.read, testPage(case.page), case.query);
+            var text: [80]u8 = undefined;
+            const draft = try std.fmt.bufPrint(&text, "use /{s}", .{case.query});
+            const direct = fresh.shown(&fresh_rows, draft, draft.len, 1, .{}, null).?;
+            // For truncated previews this comparison is over the SAME available
+            // entries, not the full catalog that the outstanding read may add.
+            const reused = cached.shown(&cached_rows, draft, draft.len, 1, .{}, null).?;
+            try Check.lists(case.names, &prior, draft, direct, reused);
+            if (next) |pending| {
+                try std.testing.expect(cached.answer(pending.read, testPage(case.page), case.query) != null);
+                const replaced = cached.shown(&cached_rows, draft, draft.len, 1, .{}, null).?;
+                try Check.lists(case.names, &prior, draft, direct, replaced);
+                try std.testing.expect(cached.ask(case.query) == null);
+            }
+        };
+    };
+    // A truncated old page can omit a better new match. Keep its available
+    // rows ordered while reading; once replaced, match the full fresh page.
+    const short = [_]Entry{ prior[0], prior[4] };
+    const full = [_]Entry{ prior[2], prior[4], prior[0] };
+    var cached: Reads = .{};
+    var cached_rows: Rows = .{};
+    _ = cached.answer(cached.ask("re").?.read, .{ .entries = &short, .total = 3 }, "re");
+    try std.testing.expect(cached.ask("re") == null);
+    const next = cached.ask("rev").?;
+    const draft = "use /rev";
+    const waiting = cached.shown(&cached_rows, draft, draft.len, 1, .{}, null).?;
+    try std.testing.expectEqual(@as(usize, 2), waiting.list.count);
+    try std.testing.expectEqualStrings("/a-review", waiting.list.entries[0].shown);
+    try std.testing.expectEqualStrings("/re-review", waiting.list.entries[1].shown);
+    _ = cached.answer(next.read, testPage(&full), "rev");
+    var fresh: Reads = .{};
+    var fresh_rows: Rows = .{};
+    _ = fresh.answer(fresh.ask("rev").?.read, testPage(&full), "rev");
+    try Check.lists(&.{ "rev", "a-review", "re-review" }, &prior, draft, fresh.shown(&fresh_rows, draft, draft.len, 1, .{}, null).?, cached.shown(&cached_rows, draft, draft.len, 1, .{}, null).?);
 }
 
 test "skill reads ask once per name, one at a time, and not while the held page answers" {

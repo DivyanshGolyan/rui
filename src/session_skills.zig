@@ -270,8 +270,8 @@ pub fn suggestions(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allo
 fn selectSuggestions(allocator: std.mem.Allocator, found: catalog.Catalog, prefix: []const u8) !@import("skill_suggestions.zig").Page {
     const suggestion = @import("skill_suggestions.zig");
     const completion = @import("skill_completion.zig");
-    // Catalogs are lexical: stable insertion by rank retains that order
-    // within each rank, even when the best match follows a full page.
+    // The shared order, not catalog traversal, chooses the bounded page
+    // even when a better rank or lexical tie follows a full page.
     const Selected = struct { entry: catalog.Entry, rank: completion.Rank };
     var selected: [suggestion.capacity]Selected = undefined;
     var retained: usize = 0;
@@ -288,7 +288,7 @@ fn selectSuggestions(allocator: std.mem.Allocator, found: catalog.Catalog, prefi
         const matched = completion.match(prefix, entry.name, entry.description) orelse continue;
         total += 1;
         var at: usize = 0;
-        while (at < retained and @backingInt(selected[at].rank) <= @backingInt(matched.rank)) : (at += 1) {}
+        while (at < retained and completion.order(selected[at].rank, selected[at].entry.name, matched.rank, entry.name) != .gt) : (at += 1) {}
         if (at == selected.len) continue;
         const next = @min(retained + 1, selected.len);
         var move = next - 1;
@@ -364,6 +364,42 @@ test "inline skills suggestions retain late best ranks beyond page capacity" {
     try std.testing.expectEqualStrings("reviewer", page.entries[1].name);
     for (page.entries[2..], entries[0 .. suggestion.capacity - 2]) |actual, expected|
         try std.testing.expectEqualStrings(expected.name, actual.name);
+}
+
+test "inline skills suggestions use shared rank and lexical order regardless of catalog traversal at the page boundary" {
+    const suggestion = @import("skill_suggestions.zig");
+    const best = [_][]const u8{ "review", "review-a", "review-b", "a-review", "b-review" };
+    var names: [suggestion.capacity][16]u8 = undefined;
+    var entries: [best.len + suggestion.capacity]catalog.Entry = undefined;
+    for (best, entries[0..best.len]) |name, *entry| entry.* = .{ .name = name, .description = "Metadata", .path = "/never-read" };
+    for (&names, entries[best.len..], 0..) |*name, *entry, index| entry.* = .{
+        .name = try std.fmt.bufPrint(name, "metadata-{d:0>2}", .{index}),
+        .description = "REVIEW changes",
+        .path = "/never-read",
+    };
+    var permuted: [entries.len]catalog.Entry = undefined;
+    // Below, at and above capacity, plus a full extra rank: every rotation
+    // and its reversal must select the same explicit names, not traversal ties.
+    for ([_]usize{ suggestion.capacity - 1, suggestion.capacity, suggestion.capacity + 1, entries.len }) |total| {
+        for (0..total) |rotation| for ([_]bool{ false, true }) |reverse| {
+            for (permuted[0..total], 0..) |*entry, index| {
+                const offset = if (reverse) total - 1 - index else index;
+                entry.* = entries[(rotation + offset) % total];
+            }
+            var page = try selectSuggestions(std.testing.allocator, .{ .entries = permuted[0..total] }, "ReViEw");
+            defer page.deinit(std.testing.allocator);
+            try std.testing.expectEqual(total, page.total);
+            try std.testing.expectEqual(@min(total, suggestion.capacity), page.entries.len);
+            for (page.entries[0..best.len], best) |entry, expected| try std.testing.expectEqualStrings(expected, entry.name);
+            for (page.entries[best.len..], 0..) |entry, index| {
+                var expected: [16]u8 = undefined;
+                try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "metadata-{d:0>2}", .{index}), entry.name);
+                try std.testing.expectEqualStrings("REVIEW changes", entry.description);
+            }
+            // Revision hashes catalog traversal independently of the query;
+            // it is intentionally not an order-equivalence oracle here.
+        };
+    }
 }
 
 test "inline skills bind the complete catalog beyond a truncated suggestion preview" {
