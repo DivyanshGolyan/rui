@@ -1,4 +1,6 @@
 name: Release
+# Only a green promotion (promote.yml) calls this, with the main SHA it qualified.
+# Recover a failed publication by rerunning that promotion's failed jobs.
 on:
   workflow_call:
     inputs:
@@ -10,9 +12,11 @@ on:
 permissions:
   contents: read
 
+# Released bytes come from cold builds; the release publishes no caches.
 cache-mode: read
 
 concurrency:
+  # Serialize numbering and publication.
   group: release
   cancel-in-progress: false
 
@@ -22,12 +26,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
+      # Draft reservations are visible only with push access. This job never writes.
       contents: write
     outputs:
       version: ${{ steps.plan.outputs.version }}
       sha: ${{ steps.plan.outputs.sha }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -50,6 +55,8 @@ jobs:
       fail-fast: true
       matrix:
         include:
+          # Portable targets: baseline CPUs and the oldest libc each build links.
+          # host_launch.c needs closefrom from glibc 2.34; Zig's macOS minimum is 15.
           - os: ubuntu-24.04
             platform: linux-x86_64
             target: x86_64-linux-gnu.2.34
@@ -60,13 +67,14 @@ jobs:
             platform: darwin-arm64
             target: aarch64-macos
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup
         with:
           publish-caches: 'false'
+          # Released bytes never come from shared build caches.
           cold: 'true'
       - name: Build and check the tagged release
         env:
@@ -76,6 +84,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
+          # build.zig reads the version from this local tag.
           if git rev-parse --verify "refs/tags/v$VERSION" >/dev/null 2>&1; then
             test "$(git rev-parse "v$VERSION^{commit}")" = "$SHA"
           else
@@ -85,6 +94,8 @@ jobs:
           zig build -Doptimize=ReleaseSafe "-Dtarget=$TARGET" --prefix "$RUNNER_TEMP/$name" --summary all
           mkdir dist
           if [ "$(uname -s)" = Linux ]; then
+            # Debug info is most of a Linux executable, so it ships as a separate archive.
+            # Extracted beside the executable, Zig crash traces find it through .gnu_debuglink.
             mkdir -p "$RUNNER_TEMP/debug/$name/bin"
             debug_file="$RUNNER_TEMP/debug/$name/bin/rui.debug"
             objcopy --only-keep-debug "$RUNNER_TEMP/$name/bin/rui" "$debug_file"
@@ -94,13 +105,14 @@ jobs:
           test "$("$RUNNER_TEMP/$name/bin/rui" --version)" = "rui $VERSION ($SHA)"
           if [ "$(uname -s)" = Darwin ]; then otool -L "$RUNNER_TEMP/$name/bin/rui"; else ldd "$RUNNER_TEMP/$name/bin/rui"; fi
           COPYFILE_DISABLE=1 tar -czf "dist/$name.tar.gz" -C "$RUNNER_TEMP" "$name"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rui-${{ matrix.platform }}
           path: dist/*.tar.gz
           retention-days: 3
           if-no-files-found: error
   npm:
+    # The npm tarballs: the compiled client (npm name ruicode) and one package per platform. npm_publish publishes them.
     needs: [plan, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -108,11 +120,11 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
       - name: Pack the tarballs from the built executables
@@ -139,7 +151,7 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           node scripts/pack.mjs "$VERSION" "$RUNNER_TEMP/npm" "${executables[@]}"
           ls -l "$RUNNER_TEMP/npm"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rui-npm
           path: ${{ runner.temp }}/npm/*.tgz
@@ -152,12 +164,13 @@ jobs:
           (needs.build.result == 'success' || needs.build.result == 'skipped') &&
           (needs.npm.result == 'success' || needs.npm.result == 'skipped') }}
     runs-on: ubuntu-24.04
+    # Ten for publication, seven for fetching and measuring Host memory.
     timeout-minutes: 17
     permissions:
       contents: write
       actions: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -168,7 +181,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ needs.plan.outputs.sha }}
         run: python3 -B tests/ci/release.py repair "$SHA"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ needs.plan.outputs.version != '' }}
         with:
           ref: ${{ needs.plan.outputs.sha }}
@@ -183,6 +196,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name rui-linux-x86_64 --dir "$RUNNER_TEMP/memory"
       - name: Measure the released Linux executable's Host memory
+        # Never holds back the release: the notes say "not measured" when this step does not finish.
+        # No token here: this step installs packages and runs fixture and product code.
         if: ${{ needs.plan.outputs.version != '' && steps.memory_fetch.outcome == 'success' }}
         continue-on-error: true
         timeout-minutes: 5
@@ -249,15 +264,18 @@ jobs:
     needs: [plan, publish]
     if: ${{ needs.plan.outputs.version != '' && needs.publish.result == 'success' }}
     runs-on: ubuntu-24.04
+    # The script owns a shared 90-minute deadline, including API calls. Leave
+    # checkout slack so its named timeout reaches the log before job teardown.
     timeout-minutes: 95
     permissions:
       actions: write
       pull-requests: read
       contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 3
         with:
+          # Trusted workflow code, never an open PR's head.
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Recheck wire-changing PRs against the published release
@@ -266,10 +284,15 @@ jobs:
           VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
+          # The tag exists from publication: a policy check started since then reads it.
           RELEASE_PUBLISHED_AT=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION" --jq .published_at)
           export RELEASE_PUBLISHED_AT
           python3 -B tests/ci/recheck_wire_prs.py
   npm_publish:
+    # Publishes the npm tarballs after the GitHub release; scripts/publish.mjs reads their manifests
+    # and orders dependencies first. npm trusted publishing (OIDC) authenticates it: each package
+    # trusts this repository's promote.yml, the workflow that calls this one. No token is stored.
+    # A rerun skips versions npm already has.
     needs: [plan, npm, publish]
     if: ${{ needs.plan.outputs.version != '' && needs.publish.result == 'success' }}
     runs-on: ubuntu-24.04
@@ -279,11 +302,11 @@ jobs:
       actions: read
       id-token: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'

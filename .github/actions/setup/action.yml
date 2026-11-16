@@ -14,11 +14,16 @@ inputs:
     description: A verified same-run artifact supplies emitted executables and pinned package sources
     default: 'false'
   publish-caches:
+    # Only main publishes. PR jobs compile about as fast from main's snapshots
+    # as from their own, whose 0.1-0.7 GB saves per job overflowed the shared
+    # quota and evicted main's.
     description: Allow explicit failure-safe cache saves; read-only cache workflows pass 'false' to restore only
     default: ${{ github.ref == 'refs/heads/main' }}
 runs:
   using: composite
   steps:
+    # Each part selects its own checks (select_tests.BUILD_MODULES): an edit
+    # to this file selects the full build gate, an edit to a part only what it can break.
     - uses: ./.github/actions/setup/fixtures
       id: fixtures
       with:
@@ -51,6 +56,9 @@ runs:
           *) echo "Unsupported actual native architecture" >&2; exit 1 ;;
         esac
         if [ ! -x "$RUNNER_TEMP/rui-zig/zig" ]; then
+          # Mirrors serve identical archives and the pinned checksum is the
+          # authority, so a stalled source falls through to the next one and
+          # the slow origin is tried last, as in .agents/setup.
           verified=false
           for source in https://pkg.hexops.org/zig https://zigmirror.hryx.net/zig https://ziglang.org/download/0.17.1; do
             if curl --fail --location --show-error --connect-timeout 10 --max-time 90 \

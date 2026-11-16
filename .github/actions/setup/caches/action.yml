@@ -96,13 +96,16 @@ runs:
           echo "key=$CPU$BUILD"
           echo "prefix-cpu=$CPU"
         } >> "$GITHUB_OUTPUT"
-    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+    # Restore for readers and writers alike. Only main's publishers capture
+    # missing exact keys for the explicit, failure-safe save after compilation.
+    # Build/test execution is side-effectful; caches contain no acceptance.
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       id: compiler-cache
       if: ${{ inputs.save-only != 'true' }}
       with:
         path: ${{ runner.temp }}/rui-zig
         key: rui-compiler-${{ runner.os }}-${{ runner.arch }}-0.17.1
-    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       id: build-cache
       if: ${{ inputs.save-only != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
       with:
@@ -116,14 +119,14 @@ runs:
           ${{ steps.build-keys.outputs.prefix-deps }}
           ${{ steps.build-keys.outputs.prefix-part }}
           ${{ steps.build-keys.outputs.prefix-seed }}
-    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       id: packages-cache
       if: ${{ inputs.save-only != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
       with:
         path: zig-pkg
         key: rui-packages-v1-${{ hashFiles('build.zig.zon') }}
         restore-keys: rui-packages-v1-
-    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       id: runner-cache
       if: ${{ inputs.save-only != 'true' && inputs.cold != 'true' && inputs.compiled == 'true' }}
       with:
@@ -166,12 +169,12 @@ runs:
       run: node .github/actions/setup/caches/save-keys.cjs
     # A composite has no post hook. Call this same owner with save-only: true
     # under always() after the bounded compile step, before slow diagnostics.
-    - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+    - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       if: ${{ always() && inputs.save-only == 'true' && steps.save-keys.outputs.compiler-key != '' }}
       with:
         path: ${{ runner.temp }}/rui-zig
         key: ${{ steps.save-keys.outputs.compiler-key }}
-    - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+    - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       if: ${{ always() && inputs.save-only == 'true' && steps.save-keys.outputs.build-key != '' }}
       with:
         path: |
@@ -180,12 +183,12 @@ runs:
           zig-pkg
           screen-emulator/zig-pkg
         key: ${{ steps.save-keys.outputs.build-key }}
-    - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+    - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       if: ${{ success() && inputs.save-only == 'true' && steps.save-keys.outputs.packages-key != '' }}
       with:
         path: zig-pkg
         key: ${{ steps.save-keys.outputs.packages-key }}
-    - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+    - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       if: ${{ always() && inputs.save-only == 'true' && steps.save-keys.outputs.runner-key != '' }}
       with:
         path: |

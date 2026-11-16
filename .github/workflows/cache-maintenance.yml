@@ -2,6 +2,7 @@ name: Maintain shared build caches
 on:
   push:
     branches: [main]
+    # Refresh when compatibility inputs change, not on ordinary source edits.
     paths:
       - 'build.zig*'
       - 'src/build_*'
@@ -18,13 +19,22 @@ permissions:
   contents: read
 
 concurrency:
+  # Completion cleanups must not replace a pending push warmup.
   group: cache-maintenance-${{ github.event_name == 'workflow_run' && 'prune' || 'baseline' }}
+  # Finish cache saves; only superseded pending refreshes may be replaced.
   cancel-in-progress: false
 
+# Cache timeout accounting, not a setup deadline:
+# setup-allowance-minutes: 25
+# save-reserve-minutes: 3
+# Selected 43832831879: setup 213 s; allow four further (200 s retry + 90 s request) windows.
+# Leave setup uncapped: cold fetch outliers still have the original job budget.
 
 jobs:
   prune:
     needs: [baseline, compiled, runner, previous_release]
+    # Job completion includes explicit failure-safe saves. workflow_run
+    # skips warming but still reconciles snapshots from failed producers.
     if: ${{ always() && !github.event.repository.private && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -32,12 +42,14 @@ jobs:
       contents: read
       actions: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # workflow_run uses the default-branch SHA, never the producer's head.
+          # Do not restore its caches or download its artifacts in this job.
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Remove obsolete Rui cache snapshots
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             await require('./.github/scripts/prune-caches.cjs')({github, context, core});
@@ -54,7 +66,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -64,6 +76,8 @@ jobs:
           check-part: baseline
       - name: Warm production compilation, not test acceptance
         id: compile
+        # Cache timing: green 568 s, run 43433947643; minimum margin 120 s.
+        # No measured save window fits; keep the existing job deadline only.
         env:
           EXPECTED_ARCH: ${{ matrix.arch }}
         run: |
@@ -78,7 +92,8 @@ jobs:
           save-only: 'true'
           setup-outcome: ${{ steps.setup.outcome }}
           work-outcome: ${{ steps.compile.outcome }}
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      # Selected checks' policy job restores this tarball from main.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: actionlint-cache
         if: ${{ runner.os == 'Linux' }}
         with:
@@ -93,12 +108,14 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/actionlint"
           bash .github/scripts/install-actionlint.sh "$RUNNER_TEMP/actionlint"
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ success() && steps.actionlint-install.outcome == 'success' && runner.os == 'Linux' && steps.actionlint-cache.outputs.cache-hit != 'true' && steps.actionlint-cache.outputs.cache-primary-key != '' }}
         with:
           path: ${{ runner.temp }}/actionlint
           key: ${{ steps.actionlint-cache.outputs.cache-primary-key }}
   compiled:
+    # Match Selected checks/Promote's split producers, not only ReleaseSafe.
+    # ci-build compiles their gates without executing or caching acceptance.
     if: ${{ github.event_name != 'workflow_run' && !github.event.repository.private && github.ref == 'refs/heads/main' }}
     strategy:
       fail-fast: false
@@ -110,7 +127,7 @@ jobs:
     env:
       TARGETS: ${{ matrix.runner == 'ubuntu-24.04' && '["check-full","test-logic","admission-debug-integration","stack-frames"]' || '["check-full","test-logic","admission-debug-integration"]' }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -121,6 +138,9 @@ jobs:
           check-part: ${{ matrix.part }}
       - name: Compile the same gates as the split producers
         id: compile
+        # Cache timing: green 1117 s, run 43720387127; minimum margin 120 s.
+        # Equivalent consumer build; this new warm matrix has no main-run sample yet.
+        # Limit = job budget - cold setup allowance - save reserve.
         timeout-minutes: 92
         env:
           PART: ${{ matrix.part == 'compiled-unit' && 'unit' || 'rest' }}
@@ -133,6 +153,10 @@ jobs:
           setup-outcome: ${{ steps.setup.outcome }}
           work-outcome: ${{ steps.compile.outcome }}
   runner:
+    # Test shards restore the build runner compiled for their CPU model, which
+    # saves them a median 89 s, and only main saves it. Each Linux slot lands
+    # on a random model of the pool and saves only a model still missing; six
+    # cover about three quarters of shards per build.zig, more over pushes.
     if: ${{ github.event_name != 'workflow_run' && !github.event.repository.private && github.ref == 'refs/heads/main' }}
     strategy:
       fail-fast: false
@@ -141,7 +165,7 @@ jobs:
     runs-on: ${{ matrix.slot == 'mac' && 'macos-15' || 'ubuntu-24.04' }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -149,7 +173,8 @@ jobs:
         id: setup
         with:
           compiled: 'true'
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      # Shards get packages from the producer artifact; this has none.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: zig-pkg
           key: rui-packages-v1-${{ hashFiles('build.zig.zon') }}
@@ -161,6 +186,9 @@ jobs:
         run: bash src/fetch_dependencies.sh
       - name: Configure the fetched build runner
         id: compile
+        # Cache timing: green 99 s, run 43381025988; minimum margin 120 s.
+        # Conservative upper bound from the combined fetch/configure step.
+        # No measured save window fits; keep the existing job deadline only.
         run: zig build --fetch=all
       - name: Save reusable caches even after failure
         if: ${{ always() }}
@@ -170,6 +198,7 @@ jobs:
           setup-outcome: ${{ steps.setup.outcome == 'success' && steps.fetch.outcome == 'success' && 'success' || 'failure' }}
           work-outcome: ${{ steps.compile.outcome }}
   previous_release:
+    # The upgrade check restores this; requested refs cannot publish caches.
     if: ${{ github.event_name != 'workflow_run' && !github.event.repository.private && github.ref == 'refs/heads/main' }}
     strategy:
       fail-fast: false
@@ -178,7 +207,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -187,15 +216,16 @@ jobs:
         with:
           check-part: previous-release
       - name: Check out the pinned previous release
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Keep in step with previous-release-upgrade.yml.
           ref: 0e4b2225d106dd63fa9c38801188facb5e9c6335
           path: .amp/previous-release
           persist-credentials: false
       - run: mv .amp/previous-release "$RUNNER_TEMP/previous-release"
       - name: Restore the existing previous-release compilation
         id: restore
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ${{ runner.temp }}/previous-release/.zig-cache
@@ -203,6 +233,8 @@ jobs:
           key: rui-previous-release-${{ runner.os }}-${{ runner.arch }}-0.17.1-0e4b2225d106dd63fa9c38801188facb5e9c6335
       - name: Build the previous release as its installer does
         id: compile
+        # Cache timing: green 354 s, run 43381025988; minimum margin 120 s.
+        # Limit = job budget - cold setup allowance - save reserve.
         timeout-minutes: 17
         if: ${{ steps.restore.outputs.cache-hit != 'true' }}
         working-directory: ${{ runner.temp }}/previous-release
@@ -219,7 +251,7 @@ jobs:
           work-outcome: ${{ steps.compile.outcome }}
       - name: Publish the previous-release compilation
         if: ${{ success() && steps.compile.outcome == 'success' && steps.restore.outputs.cache-hit != 'true' && steps.restore.outputs.cache-primary-key != '' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ${{ runner.temp }}/previous-release/.zig-cache

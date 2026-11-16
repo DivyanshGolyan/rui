@@ -1,4 +1,8 @@
 name: Retry infrastructure failures
+# Rerun a PR's failed Selected checks jobs once when GitHub, a mirror or the
+# runner failed and no check did: a 504 while fetching, a runner never acquired
+# or lost. tests/ci/failure_cause.py decides; a test or build failure, a later
+# attempt or a superseded head never reruns.
 on:
   workflow_run:
     workflows: [Selected checks]
@@ -18,8 +22,9 @@ jobs:
       checks: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # workflow_run runs trusted main code; it never checks out the PR's head.
           ref: ${{ github.sha }}
           sparse-checkout: tests/ci
           persist-credentials: false
