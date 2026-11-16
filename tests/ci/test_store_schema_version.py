@@ -6,6 +6,7 @@ Every step is string literals only, so the source compared is what runs.
 """
 from pathlib import Path
 import re
+import subprocess
 import textwrap
 import unittest
 
@@ -13,10 +14,24 @@ from release_numbers import (MIGRATIONS, SCHEMA, digest_rows, drifted_row_fix, g
                              schema_version)
 
 ROOT = Path(__file__).resolve().parents[2]
+BASELINES = ("src/store/migration_baseline.sqlite.sql", "src/store/migration_baseline.mysql.sql",
+             "src/store/migration_baseline_rows.sql")
+BASELINE_VERSION = re.compile(r"^pub const migration_baseline: u32 = (\d+);$", re.MULTILINE)
 TAG = re.compile(r"v0\.(\d+)\.\d+")
 STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
 LITERALS = r'(?:"(?:,")*,?)?'
 LITERAL_STEP = re.compile(r"\{\.from=\d+,\.sqlite=&\.\{" + LITERALS + r"\},\.mysql=&\.\{" + LITERALS + r"\},?\}")
+
+
+def baseline_version(source):
+    match = BASELINE_VERSION.search(source)
+    if match is None:
+        raise AssertionError(f"{SCHEMA} declares no migration_baseline")
+    return int(match[1])
+
+
+def baseline_changed_without_bump(candidate_version, reference_version, candidate, reference):
+    return candidate_version == reference_version and candidate != reference
 
 
 def non_literal_steps(steps):
@@ -48,6 +63,35 @@ def schema_bump_error(candidate, base):
 
 
 class StoreSchemaVersionTest(unittest.TestCase):
+    def test_baseline_snapshot_rule(self):
+        self.assertTrue(baseline_changed_without_bump(51, 51, b"changed", b"original"))
+        self.assertFalse(baseline_changed_without_bump(52, 51, b"changed", b"original"))
+        self.assertFalse(baseline_changed_without_bump(51, 51, b"original", b"original"))
+
+    def test_baseline_snapshots_stay_unchanged(self):
+        base = main_base(ROOT)
+        if base is None:
+            self.skipTest("no origin/main in this checkout to take the merge base from")
+        candidate_version = baseline_version((ROOT / SCHEMA).read_text())
+        tag = released_tag(ROOT)
+        references = [("main merge base", base)]
+        if tag is not None:
+            references.append((f"release {tag}", tag))
+        for label, ref in references:
+            reference_version = baseline_version(git(ROOT, "show", f"{ref}:{SCHEMA}"))
+            if candidate_version != reference_version:
+                continue
+            for path in BASELINES:
+                with self.subTest(reference=label, path=path):
+                    reference = subprocess.run(["git", "-C", str(ROOT), "show", f"{ref}:{path}"],
+                                               check=True, capture_output=True).stdout
+                    changed = baseline_changed_without_bump(candidate_version, reference_version,
+                                                            (ROOT / path).read_bytes(), reference)
+                    self.assertFalse(changed, f"{path} differs from {label} with unchanged migration_baseline: "
+                                     "append a migration step instead")
+        if tag is None:
+            self.skipTest("no v0.S.N release tags in this checkout; the policy job checks out with fetch-depth 0")
+
     def test_reads_the_owner(self):
         source = (ROOT / SCHEMA).read_text()
         self.assertEqual(max(digest_rows(source)), schema_version(source), "the last row is the current version")
