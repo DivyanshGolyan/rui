@@ -4690,7 +4690,7 @@ test "find_tools declares a found tool on the next request without losing the me
     });
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const find = (try setup.storage.nextCoreWork()).?.action;
+    const find = (try setup.storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
     try @import("find_tools.zig").run(&setup.storage, arena.allocator(), &find, .{});
     admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     binding = try admitted.permit.consume();
@@ -4714,7 +4714,7 @@ test "find_tools declares a found tool on the next request without losing the me
     try settleItemsForTesting(&setup, binding, "find-codec-found", &.{
         "{\"type\":\"function_call\",\"id\":\"read-item\",\"call_id\":\"read-call\",\"name\":\"read_transcript\",\"arguments\":\"{}\"}",
     });
-    const read = (try setup.storage.nextCoreWork()).?.action;
+    const read = (try setup.storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
     try std.testing.expect(read.tool == .read_transcript);
     try @import("read_transcript.zig").run(&setup.storage, arena.allocator(), &read, .{});
 }
@@ -5225,7 +5225,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     try settleItemsForTesting(&setup, binding, "skills-invoke-call", &.{
         "{\"type\":\"function_call\",\"id\":\"skill-invoke-item\",\"call_id\":\"skill-invoke-call\",\"name\":\"skill\",\"arguments\":\"{\\\"operation\\\":\\\"invoke\\\",\\\"name\\\":\\\"demo\\\"}\"}",
     });
-    const action = (try setup.storage.nextCoreWork()).?.action;
+    const action = (try setup.storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
     try std.testing.expectEqual(@TypeOf(action.tool).skill, action.tool);
     const current = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .invoke, .name = demo }, null);
     try std.testing.expect(std.mem.endsWith(u8, current.invocation, current_raw));
@@ -5258,7 +5258,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     try settleItemsForTesting(&setup, binding, "skills-reload-call", &.{
         "{\"type\":\"function_call\",\"id\":\"skill-reload-item\",\"call_id\":\"skill-reload-call\",\"name\":\"skill\",\"arguments\":\"{\\\"operation\\\":\\\"reload\\\"}\"}",
     });
-    const reload_action = (try setup.storage.nextCoreWork()).?.action;
+    const reload_action = (try setup.storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
     const no_change = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .reload }, null);
     try std.testing.expect(try setup.storage.settleSkillTool(reload_action.binding, arena, &no_change, .{}));
     admitted = (try setup.storage.admitNextModelAttempt(.{})).?;

@@ -251,12 +251,12 @@ test "Session archive gates core peer sends and restores only fresh delivered wo
                 .{ .item_id = "core-two", .name = "message_agent", .encoded_call_id = "core-two", .decoded_call_id = "core-two", .encoded_arguments = encoded, .decoded_arguments = decoded },
             };
             try fixtures.settleCallsForTesting(&storage, &tmp, model, "archive-core-calls", &calls);
-            const blocked = (try storage.nextCoreWork() orelse return error.ExpectedBlockedCoreWork).action;
+            const blocked = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true }) orelse return error.ExpectedBlockedCoreWork).action;
             try std.testing.expectEqual(@as(@import("domain/command.zig").AgentDelivery, .failed), try storage.deliverAgentMessage(blocked.binding, receiver.session.slice(), "blocked", .{}));
             try expectState(&storage, receiver.session.slice(), .archiving);
             try std.testing.expectEqual(action.ActionSettlement.session_stop, try storage.settleActionAttempt(receiver.binding, .cancelled, "Bash stopped.", .{}));
             try expectState(&storage, receiver.session.slice(), .archived);
-            const fresh = (try storage.nextCoreWork() orelse return error.ExpectedFreshCoreWork).action;
+            const fresh = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true }) orelse return error.ExpectedFreshCoreWork).action;
             try std.testing.expectEqual(@as(@import("domain/command.zig").AgentDelivery, .delivered), try storage.deliverAgentMessage(fresh.binding, receiver.session.slice(), "fresh", .{}));
             try expectState(&storage, receiver.session.slice(), .active);
             try std.testing.expect(storage.archiveSession(&archive, .{}).accepted.replayed);
@@ -324,7 +324,7 @@ fn attachedFamily(storage: *Store, tmp: *std.testing.TmpDir) !Family {
         .encoded_arguments = "{}",
         .decoded_arguments = "{}",
     }});
-    const start = (try storage.nextCoreWork() orelse return error.ExpectedStartAgent).action;
+    const start = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true }) orelse return error.ExpectedStartAgent).action;
     var spec = try fixtures.testingAgentSpec(&.{"bash"}, "bypass");
     try std.testing.expectEqual(@as(@import("domain/command.zig").AgentStart, .started), try storage.startAgent(start.binding, parent.slice(), "child task", true, &spec, null, .{}));
     const listing = try fixtures.TestingListing.read(storage, tmp, .{ .archive = .all });
@@ -335,7 +335,7 @@ fn attachedFamily(storage: *Store, tmp: *std.testing.TmpDir) !Family {
 }
 
 fn drainChildStop(storage: *Store) !void {
-    const stop = (try storage.nextCoreWork() orelse return error.ExpectedChildStop).stop;
+    const stop = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true }) orelse return error.ExpectedChildStop).stop;
     var owed: protocol.SessionStopCommand = .{ .key = stop.key };
     try owed.session.set(stop.session.slice());
     try std.testing.expect(storage.stopOwedSession(&owed, .{}) == .accepted);
@@ -361,7 +361,7 @@ test "Session archive preserves child organization and suppresses owed endings" 
             try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
             try expectState(&storage, parent.slice(), .archived);
             try expectState(&storage, child, .active);
-            const stop = (try storage.nextCoreWork() orelse return error.ExpectedChildStop).stop;
+            const stop = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true }) orelse return error.ExpectedChildStop).stop;
             var owed: protocol.SessionStopCommand = .{ .key = stop.key };
             try owed.session.set(stop.session.slice());
             try std.testing.expect(storage.stopOwedSession(&owed, .{}) == .accepted);
@@ -443,7 +443,7 @@ test "Session archive ending causality survives restored parents and ordinary ch
                 const expected_pending: u64 = if (ordering == .fresh_after_restore) 1 else 0;
                 try std.testing.expectEqual(expected_pending, (try storage.inspectSessionForTesting(family.parent.slice())).pending_messages);
                 if (ordering != .close_before_owed_stop) {
-                    const forward = (try storage.nextCoreWork() orelse return error.ExpectedEndingForward).forward;
+                    const forward = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true }) orelse return error.ExpectedEndingForward).forward;
                     try std.testing.expect(try storage.deliverSessionForward(forward, .{}));
                     const page = try store_core.activityPageForTesting(&storage, .{ .session = family.parent, .kinds = .initOne(.turn_ended) });
                     var forwarded: usize = 0;

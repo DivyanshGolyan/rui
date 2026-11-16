@@ -67,7 +67,7 @@ test "skills start_agent imports six distinct contents atomically and retries af
                     .encoded_arguments = "{}",
                     .decoded_arguments = "{}",
                 }});
-                const action = (try storage.nextCoreWork()).?.action;
+                const action = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
                 const baseline = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
                 const parent_position = (try store_core.readSessionForTesting(&storage, parent.slice())).?.next_position;
                 const task = "A distinct child task captured after its parent existed";
@@ -361,7 +361,7 @@ test "skills reload out of memory in configure or the skill tool rolls back with
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const calls = [_]TestingCall{.{ .item_id = "reload-item", .name = "skill", .encoded_call_id = "reload-call", .decoded_call_id = "reload-call", .encoded_arguments = "{\\\"operation\\\":\\\"reload\\\"}", .decoded_arguments = "{\"operation\":\"reload\"}" }};
             try settleCallsForTesting(&storage, &tmp, model, "reload-oom-calls", &calls);
-            const input = (try storage.nextCoreWork()).?.action;
+            const input = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
             const tool: skills_fixture_domain.Capture = .{ .reload = .{ .entries = entries } };
             fail_index = 0;
             while (true) : (fail_index += 1) {
@@ -967,7 +967,7 @@ test "find_tools and the skill tool leave a call whose Session owes a stop to th
                 .{ .item_id = "invoke", .name = "skill", .encoded_call_id = "invoke", .decoded_call_id = "invoke", .encoded_arguments = "{\\\"operation\\\":\\\"reload\\\"}", .decoded_arguments = "{\"operation\":\"reload\"}" },
             };
             try settleCallsForTesting(&storage, &tmp, model, "owed-calls", &calls);
-            const find = (try storage.nextCoreWork()).?.action;
+            const find = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
             try std.testing.expect(find.tool == .find_tools);
             var skill = find.binding;
             skill.action_id = try store_testing.queryU64(&storage, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1 AND action_id<>?2", .{ find.binding.parent_operation_id, find.binding.action_id });
@@ -1021,7 +1021,7 @@ test "the skill tool resolves an invocation or a failed capture with its text, a
                 .{ .captured = &invocation, .code = "succeeded", .text = "the skill's own text" },
                 .{ .captured = &failed, .code = "failed", .text = "Rui could not read the skill's file." },
             }) |expected| {
-                const pending = (try storage.nextCoreWork()).?.action;
+                const pending = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
                 // An injected fault rolls back the result and resolution.
                 for ([_]struct { Faults, anyerror }{
                     .{ .{ .content_import = true }, error.InjectedContentImportFailure },

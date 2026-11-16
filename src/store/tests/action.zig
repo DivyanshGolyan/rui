@@ -231,7 +231,7 @@ test "core tool table routes every built-in to its sole action selector" {
                     .decoded_arguments = arguments,
                 }};
                 try settleCallsForTesting(&storage, &tmp, binding, "table-calls", &calls);
-                const core = try storage.nextCoreWork();
+                const core = try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true });
                 const bash = try storage.admitNextActionAttempt(300_000, .{});
                 try std.testing.expectEqual(expected == .core, core != null);
                 try std.testing.expectEqual(expected == .bash, bash != null);
@@ -242,11 +242,11 @@ test "core tool table routes every built-in to its sole action selector" {
                     try std.testing.expectEqual(binding.turn_id, call.binding.turn_id);
                     try std.testing.expectEqualStrings(session.slice(), call.session.slice());
                     // Selection is a read, not an Attempt or a resolution.
-                    try std.testing.expectEqual(call.binding.action_id, (try storage.nextCoreWork()).?.action.binding.action_id);
+                    try std.testing.expectEqual(call.binding.action_id, (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action.binding.action_id);
                 }
                 if (bash) |attempted| {
                     try std.testing.expectEqual(binding.operation_id, attempted.permit.binding.parent_operation_id);
-                    try std.testing.expect((try storage.nextCoreWork()) == null);
+                    try std.testing.expect((try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })) == null);
                     try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
                 }
             }

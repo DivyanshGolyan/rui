@@ -548,7 +548,7 @@ test "an entry point that changed rows sets the commit wake, and a read leaves i
             var wake: std.Io.Event = .unset;
             storage.commitWake().store(&wake, .release);
             defer storage.commitWake().store(null, .release);
-            _ = try storage.dispatchWork(false, true);
+            _ = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true });
             try std.testing.expect(!wake.isSet());
             _ = try configureTestSession(&storage, "wake-config");
             try std.testing.expect(wake.isSet());
