@@ -645,6 +645,13 @@ pub const HostControlObservation = struct {
     profile: protocol_reply.HostInfoProfile,
     facts: protocol_reply.HostInfoFacts,
     pid: c_int,
+    /// Local discovery routing, never wire Store identity. Most direct readers
+    /// already hold DIR; socket discovery must retain it for restart-all.
+    host_directory: @import("host_settings.zig").OsBytes(protocol.max_store_bytes) = .{},
+
+    pub fn directory(self: *const HostControlObservation) []const u8 {
+        return if (self.host_directory.len != 0) self.host_directory.slice() else self.facts.store.slice();
+    }
 };
 
 pub fn observeHostForUpgrade(io: std.Io, store_path: []const u8, deadline: ?i128) !HostControlObservation {
@@ -720,8 +727,9 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
     if (!std.fs.path.isAbsolute(supplied)) return error.HostServeStoreRelative;
     const paths = try resolveClientPaths(io, supplied);
     if (!std.mem.eql(u8, paths.socket.slice(), socket_path)) return error.HostSocketStoreMismatch;
-    const observed = try observeHostForUpgradeAt(io, &paths, until);
+    var observed = try observeHostForUpgradeAt(io, &paths, until);
     if (observed.pid != pid) return error.HostPeerPidMismatch;
+    try observed.host_directory.set(supplied);
     return observed;
 }
 

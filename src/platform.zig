@@ -363,10 +363,20 @@ pub fn mysqlRuntimeDirectory(store: []const u8) ?[]const u8 {
 /// A routing hint, not Store authority: the Host checks `store` on every call.
 pub noinline fn mysqlClientPaths(io: std.Io, store: []const u8, runtime: []const u8) !Paths {
     if (!validStoreId(store) or !std.fs.path.isAbsolute(runtime)) return error.InvalidStorePath;
-    var dir = try std.Io.Dir.cwd().openDir(io, runtime, .{});
+    return privateInterfacePaths(io, .mysql, store, runtime, .refuse);
+}
+
+/// Every explicit-interface lookup admits an existing directory before any
+/// connection. Saved placement may name a directory the starter has yet to
+/// create; the legacy opaque-id lookup still requires an existing runtime.
+fn privateInterfacePaths(io: std.Io, kind: Kind, store: []const u8, runtime: []const u8, missing: enum { allow, refuse }) !Paths {
+    var dir = std.Io.Dir.cwd().openDir(io, runtime, .{}) catch |err| {
+        if (err == error.FileNotFound and missing == .allow) return interfacePaths(kind, store, runtime);
+        return err;
+    };
     defer dir.close(io);
     try validatePrivateDirectory(dir, io);
-    return interfacePaths(.mysql, store, runtime);
+    return interfacePaths(kind, store, runtime);
 }
 
 /// The single Paths construction for both saved placement and legacy MySQL hints.
@@ -415,11 +425,11 @@ pub noinline fn savedPlacement(io: std.Io, dir: []const u8) !Paths {
 }
 
 pub noinline fn placementPaths(io: std.Io, settings: *const @import("host_settings.zig").Settings) !Paths {
-    if (settings.store == .mysql) return interfacePaths(.mysql, "", settings.interface.dir.slice());
+    if (settings.store == .mysql) return privateInterfacePaths(io, .mysql, "", settings.interface.dir.slice(), .allow);
     var canonical: [protocol.max_store_bytes]u8 = undefined;
     var paths = try pathsForCanonicalStore(try canonicalStoreDestination(io, settings.store.sqlite.dir.slice(), &canonical));
     if (!settings.interface.dir.anchored) {
-        const interface = try interfacePaths(.sqlite, paths.store.slice(), settings.interface.dir.slice());
+        const interface = try privateInterfacePaths(io, .sqlite, paths.store.slice(), settings.interface.dir.slice(), .allow);
         paths.socket = interface.socket;
         paths.scratch = interface.scratch;
     }
@@ -1313,4 +1323,47 @@ test "runtime socket storage preserves every non-NUL OS byte" {
     const over: [@max(max_socket_path_bytes, max_launch_socket_path_bytes) + 1]u8 = @splat('x');
     try std.testing.expectError(error.SettingsInvalid, paths.socket.set(&over));
     try std.testing.expectEqualSlices(u8, &.{255}, paths.socket.slice());
+}
+
+test "saved and legacy explicit interfaces share private directory admission before lookup" {
+    const io = std.testing.io;
+    var host = try @import("socket_fixture.zig").Directory.init();
+    defer host.cleanup();
+    var runtime = try @import("socket_fixture.zig").Directory.init();
+    defer runtime.cleanup();
+    const directory = runtime.root[0..runtime.root_len];
+    const settings = try std.testing.allocator.create(hs.Settings);
+    defer std.testing.allocator.destroy(settings);
+    const id = "0123456789abcdef0123456789abcdef";
+    for ([_]u32{ 0o700, 0o755, 0o777, 0o000 }) |mode| {
+        try runtime.dir.setPermissions(io, .fromMode(mode));
+        defer runtime.dir.setPermissions(io, .fromMode(0o700)) catch @panic("restore interface privacy");
+        for ([_]enum { legacy_mysql, saved_mysql, moved_sqlite }{ .legacy_mysql, .saved_mysql, .moved_sqlite }) |door| {
+            settings.* = .{};
+            defer settings.deinit();
+            try settings.interface.dir.text.set(directory);
+            settings.interface.dir.anchored = false;
+            if (door == .saved_mysql) settings.store = .{ .mysql = .{} } else try settings.store.sqlite.dir.text.set(host.root[0..host.root_len]);
+            const paths = if (door == .legacy_mysql) mysqlClientPaths(io, id, directory) else placementPaths(io, settings);
+            if (mode == 0o700) {
+                _ = try paths;
+            } else {
+                try std.testing.expectError(if (mode == 0) error.AccessDenied else error.InsecureDirectoryPermissions, paths);
+            }
+        }
+    }
+    settings.* = .{};
+    defer settings.deinit();
+    var missing_buffer: [hs.max_path_bytes]u8 = undefined;
+    const missing = try std.fmt.bufPrint(&missing_buffer, "{s}/not-created", .{directory});
+    try settings.interface.dir.text.set(missing);
+    settings.interface.dir.anchored = false;
+    for ([_]Kind{ .sqlite, .mysql }) |kind| {
+        if (kind == .mysql) settings.store = .{ .mysql = .{} } else try settings.store.sqlite.dir.text.set(host.root[0..host.root_len]);
+        const paths = try placementPaths(io, settings);
+        try std.testing.expectEqual(kind, paths.kind);
+        try std.testing.expect(std.mem.startsWith(u8, paths.socket.slice(), missing));
+    }
+    try std.testing.expectError(error.FileNotFound, mysqlClientPaths(io, id, missing));
+    try std.testing.expectError(error.FileNotFound, runtime.dir.access(io, "not-created", .{}));
 }

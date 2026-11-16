@@ -90,11 +90,13 @@ pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, store
         .access_failure => return .{ .unsupported = .inaccessible },
         .ready => {},
     }
-    // Current activation waits for SQLite Store-lock retirement. A MySQL
-    // runtime lease proves endpoint retirement, not release of GET_LOCK on
-    // the database; retain the refusal until that transition has an owner.
+    // This replay owner can preserve only default SQLite placement. A moved
+    // Store/interface needs DIR all the way through the new-build starter;
+    // PR6 owns that transition. Refuse before taking a launch snapshot or stop
+    // authority, never substitute wire Store identity for the Host directory.
     const paths = client.resolveClientPaths(io, store) catch return .{ .unsupported = .inaccessible };
-    if (paths.kind == .mysql) return .{ .unsupported = .application_owned };
+    const ordinary = if (paths.kind == .sqlite) platform.sqliteClientPaths(io, store) catch null else null;
+    if (replayPlacementRefusal(paths, ordinary)) |reason| return .{ .unsupported = reason };
     const observed = client.observeHostForUpgrade(io, store, null) catch return .{ .unsupported = .ownership_unconfirmed };
     var snapshot = identity.snapshot(allocator, observed.pid) catch return .{ .unsupported = .configuration_unavailable };
     errdefer snapshot.deinit(allocator);
@@ -146,6 +148,16 @@ pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, store
         return .{ .unsupported = .ownership_unconfirmed };
     }
     return .{ .managed = .{ .observed = observed, .snapshot = snapshot, .launch = launch, .version = version, .previous_release = previous_release } };
+}
+
+/// One eligibility rule for the old replay owner. The ordinary paths are
+/// derived from DIR independently, not from the resolved wire Store identity.
+fn replayPlacementRefusal(actual: platform.Paths, ordinary: ?platform.Paths) ?Limitation {
+    if (actual.kind == .mysql) return .application_owned;
+    const baseline = ordinary orelse return .configuration_unavailable;
+    if (!std.mem.eql(u8, actual.store.slice(), baseline.store.slice()) or
+        !std.mem.eql(u8, actual.socket.slice(), baseline.socket.slice())) return .configuration_unavailable;
+    return null;
 }
 
 fn sameHost(a: client.HostControlObservation, b: client.HostControlObservation) bool {
@@ -921,4 +933,19 @@ test "upgrade replay keeps the provider set a previous release's Host served" {
         const entries = settings.providers.entries;
         try std.testing.expectEqual(case.served, Served{ .codex = entries.codex != null, .openai = entries.openai != null, .chatgpt = entries.chatgpt != null });
     }
+}
+
+test "upgrade replay eligibility covers the complete placement domain before retirement" {
+    var ordinary: platform.Paths = .{};
+    try ordinary.store.set("/host");
+    try ordinary.socket.set("/default.sock");
+    for ([_]bool{ false, true }) |mysql| for ([_]bool{ false, true }) |moved_store| for ([_]bool{ false, true }) |moved_interface| {
+        var actual = ordinary;
+        if (mysql) actual.kind = .mysql;
+        if (moved_store) try actual.store.set("/data");
+        if (moved_interface) try actual.socket.set("/explicit/rui.sock");
+        const expected: ?Limitation = if (mysql) .application_owned else if (moved_store or moved_interface) .configuration_unavailable else null;
+        try std.testing.expectEqual(expected, replayPlacementRefusal(actual, ordinary));
+    };
+    try std.testing.expectEqual(Limitation.configuration_unavailable, replayPlacementRefusal(ordinary, null).?);
 }

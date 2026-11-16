@@ -802,6 +802,30 @@ def restart_all_cases(root, binary, releases):
         rejected = c.run("host", "restart", "--all", "--store", c.store, expect=2)
         assert "[option_unknown]" in rejected, rejected
 
+    # PR5b's private replay is safe only while Host directory and wire Store
+    # identity have default placement. Refusal must preserve the live Host,
+    # including when its socket remains discoverable in the UID directory.
+    for explicit in (False, True):
+        with case(root, binary, releases, f"restart-all-moved-storage-{explicit}") as c:
+            c.store.mkdir(mode=0o700)
+            document = {"store": {"sqlite": {"dir": str(c.root / "data")}},
+                        "execution": {"paused": True}, "providers": {}}
+            if explicit:
+                runtime = pathlib.Path(f"/tmp/rui-{os.geteuid()}")
+                document["interface"] = {"dir": str(runtime)}
+            saved = c.store / "host.json"
+            saved.write_text(json.dumps(document))
+            saved.chmod(0o600)
+            original = saved.read_bytes()
+            old, previous = c.start_host("moved-storage-retained", extra=("--set", "providers={}"))
+            c.select(c.build("moved-storage-selected"))
+            c.binary = c.link
+            output = c.run("host", "restart", "--all", timeout=60)
+            assert "left running" in output and "launch configuration cannot be safely reconstructed" in output, output
+            assert "0 restarted" in output and "1 left unchanged" in output, output
+            assert old.poll() is None and c.status()["instance"] == previous["instance"], output
+            assert saved.read_bytes() == original, output
+
     with case(root, binary, releases, "restart-all-first") as first, \
             case(root, binary, releases, "restart-all-second") as second:
         # Both retained managed builds belong to the one installing user/home.
