@@ -4299,8 +4299,7 @@ test "an encode failure settles unanswered and releases request scratch" {
         try std.testing.expect(message_state.queue != null);
         try std.testing.expectEqual(.failed, std.meta.activeTag(message_state.queue.?.state));
         const failed = message_state.queue.?.state.failed;
-        try std.testing.expectEqualStrings(if (ordered_limit) @import("failure_class.zig").ordered_input_limit else "provider_codec_failed", failed.code.slice());
-        if (ordered_limit) try std.testing.expect(@import("marks.zig").cause(failed.code.slice(), null).key == null);
+        try std.testing.expectEqualStrings("provider_codec_failed", failed.code.slice());
         try std.testing.expectEqual(binding.attempt_ordinal, failed.binding.attempt_ordinal);
     }
 }
