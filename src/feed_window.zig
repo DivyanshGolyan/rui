@@ -1291,8 +1291,7 @@ test "quote body extraction keeps actual UserBody preview prefixes beside inline
     try body.init(&sink, source.len, false);
     try body.feed(source);
     try std.testing.expect(try body.finish());
-    try sink.body("\n");
-    try sink.feed("");
+    try sink.feed("\n");
     var document: viewport.Sized(2048, true) = .{};
     try document.append(rendered.written());
     try document.prepare();

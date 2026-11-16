@@ -288,8 +288,8 @@ pub fn UserBody(comptime Sink: type) type {
             return self.finishTarget(null);
         }
 
-        pub fn finishMessage(self: *Self, target: Collapsed) anyerror!void {
-            _ = try self.finishTarget(target);
+        pub fn finishMessage(self: *Self, target: Collapsed) anyerror!bool {
+            return self.finishTarget(target);
         }
 
         fn finishTarget(self: *Self, target: ?Collapsed) anyerror!bool {
@@ -675,7 +675,8 @@ pub fn Indented(comptime Sink: type) type {
             try self.write(bytes, true);
         }
         fn emit(self: *@This(), bytes: []const u8, authored: bool) !void {
-            if (authored) try Text.writeBody(self.sink, bytes) else try self.sink.feed(bytes);
+            const sink = if (@typeInfo(Sink) == .pointer) self.sink else &self.sink;
+            if (authored) try Text.writeBody(sink, bytes) else try sink.feed(bytes);
         }
         fn write(self: *@This(), bytes: []const u8, authored: bool) anyerror!void {
             var storage: [4096]u8 = undefined;
@@ -1045,7 +1046,8 @@ pub fn Escaped(comptime Sink: type) type {
         storage: [256]u8 = undefined,
         used: usize = 0,
         fn emit(self: *@This(), bytes: []const u8) !void {
-            if (self.authored) try Text.writeBody(self.sink, bytes) else try self.sink.feed(bytes);
+            const sink = if (@typeInfo(Sink) == .pointer) self.sink else &self.sink;
+            if (self.authored) try Text.writeBody(sink, bytes) else try sink.feed(bytes);
         }
         pub fn writeAll(self: *@This(), bytes: []const u8) anyerror!void {
             try self.feed(bytes);
@@ -1102,7 +1104,8 @@ pub fn Answer(comptime Sink: type) type {
         }
         fn forward(self: *@This(), bytes: []const u8) std.Io.Writer.Error!void {
             if (bytes.len == 0) return;
-            Text.writeBody(self.sink, bytes) catch |err| {
+            const sink = if (@typeInfo(Sink) == .pointer) self.sink else &self.sink;
+            Text.writeBody(sink, bytes) catch |err| {
                 self.failure = err;
                 return error.WriteFailed;
             };
@@ -1250,8 +1253,9 @@ pub fn message(requests: client.Requests, store: []const u8, session: []const u8
     var body: UserBody(@TypeOf(sink)) = undefined;
     try body.init(sink, value.content.length, false);
     try content(requests, store, session, item, value.content, &body);
-    try body.finishMessage(block);
-    try Text.writeBody(sink, "\n");
+    if (try body.finishMessage(block)) {
+        try sink.feed("\n");
+    } else try Text.writeBody(sink, "\n");
 }
 
 fn content(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, reference: protocol.ActivityItem.Content, target: anytype) !void {
