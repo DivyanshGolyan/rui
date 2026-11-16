@@ -379,6 +379,35 @@ test "session list verifies the first unsupported Message when later rows decode
     }.run);
 }
 
+test "historical fixture rewind rejects non-scalar input before changing the Store" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            inline for (.{ mixed[1..2], &mixed }) |segments| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var used = std.atomic.Value(u64).init(0);
+                var capture: InputCapture = undefined;
+                const loan = try captureInto(&capture, tmp.dir, .{ .used = &used, .limit = 8192 }, segments);
+                defer capture.close();
+                var storage: Store = undefined;
+                try testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try testing.configureTestSession(&storage, "rewind-input-config");
+                const command = try commandFor("rewind-input-message", session.slice());
+                try std.testing.expect(storage.submitMessageInput(&command, .{ .parts = loan }, null, null, null, .{}) == .accepted);
+                _ = (try storage.admitNextModelAttempt(.{})).?;
+                const pins_before = try testing.queryU64(&storage, "SELECT count(*) FROM session_pin", .{});
+                try std.testing.expectError(error.TestExpectedEqual, testing.stageObligationUpgrade(&storage));
+                try std.testing.expectEqual(pins_before, try testing.queryU64(&storage, "SELECT count(*) FROM session_pin", .{}));
+                try std.testing.expectEqual(@as(u64, @intCast(segments.len)), try testing.queryU64(&storage, "SELECT input_part_count FROM core_command WHERE command_key=?1", .{command.key.slice()}));
+                try expectOriginals(&storage, .{ .message = command.key }, segments);
+                try std.testing.expect(!storage.isFenced());
+                _ = try testing.configureTestSession(&storage, "rewind-after-refusal");
+            }
+        }
+    }.run);
+}
+
 test "ordered input frozen history validates compound facts before floors and excludes later arrivals" {
     try testing.forEachEngine(struct {
         fn run(case: *testing.Case) !void {
