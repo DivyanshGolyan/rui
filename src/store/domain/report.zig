@@ -636,14 +636,18 @@ const work_actions = WorkActions(struct { operation: u64, session: []const u8 },
 
 fn WorkActions(comptime Args: type, comptime operation: []const u8, comptime session: []const u8) type {
     return rsql.Read(.{
-        .sql = "SELECT count(*) AS total,@count_where(a.resolution_code IS NULL) AS unresolved," ++
+        .sql = "WITH action_results AS (SELECT acceptance_position,resolved_at FROM action_operation @index(action_operation_session_results) " ++
+            "WHERE session_ref=" ++ session ++ " AND parent_operation_id=" ++ operation ++ " AND acceptance_position IS NOT NULL AND background_position IS NULL " ++
+            "UNION ALL SELECT acceptance_position,resolved_at FROM action_operation @index(action_operation_background_results) " ++
+            "WHERE session_ref=" ++ session ++ " AND parent_operation_id=" ++ operation ++ " AND background_position IS NOT NULL AND acceptance_position IS NOT NULL) " ++
+            "SELECT count(*) AS total,@count_where(a.resolution_code IS NULL) AS unresolved," ++
             "@count_where(a.resolution_code IS NULL AND a.authorized=0) AS awaiting," ++
             "min(CASE WHEN a.resolution_code IS NULL AND a.authorized=0 THEN a.action_id END) AS first_awaiting," ++
             "(" ++ firstApprovalSql(session) ++ ") AS first_action," ++
             "@count_where(a.resolution_code IS NULL AND a.attempt_ordinal=1) AS running," ++
-            // The last resolution is the one at the greatest position.
-            "(SELECT resolved_at FROM action_operation WHERE parent_operation_id=" ++ operation ++ " AND acceptance_position IS NOT NULL " ++
-            "ORDER BY acceptance_position DESC LIMIT 1) AS latest_resolution_at," ++
+            // Both disjoint result indexes seek this Operation. A background
+            // final still counts, independently of its earlier call receipt.
+            "(SELECT resolved_at FROM action_results ORDER BY acceptance_position DESC LIMIT 1) AS latest_resolution_at," ++
             // Under an `ask` revision only an `allow_once` decision
             // authorizes; under `bypass` the proposal did.
             "@max_where(a.decided_at,a.resolution_code IS NULL AND r.permission_mode=0) AS latest_decision_at " ++
@@ -652,6 +656,7 @@ fn WorkActions(comptime Args: type, comptime operation: []const u8, comptime ses
         .Args = Args,
         .Row = WorkActionsRow,
         .cardinality = .each,
+        .compound = true,
     });
 }
 

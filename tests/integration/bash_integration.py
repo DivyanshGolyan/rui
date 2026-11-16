@@ -808,7 +808,7 @@ def prove_native_background(state, *, deadline=None):
         if deadline - time.monotonic() < 45:
             raise TimeoutError("native promotion case startup reserve")
         case = state / f"native-background-{name}"
-        case.mkdir()
+        case.mkdir(mode=0o700)
         workspace = case / "workspace"
         workspace.mkdir()
         gate = ReleaseGate(workspace / "producer-gate")

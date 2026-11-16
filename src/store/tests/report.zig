@@ -168,6 +168,52 @@ test "Full preserves rejected model interruption targets as canonical u64 text" 
     }.run);
 }
 
+test "work uses the latest Resolution position across foreground and background Actions when clocks step backward" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]?usize{ null, 0, 1 }) |promoted| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSessionAsk(&storage, "resolution-config");
+                try submitTestMessage(&storage, &tmp, "resolution-file", "resolution-message", session.slice(), "propose");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleTwoActionsForTesting(&storage, &tmp, binding, "resolution-calls");
+                const first = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation WHERE parent_operation_id=?1", .{binding.operation_id});
+                const last = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation WHERE parent_operation_id=?1", .{binding.operation_id});
+                const actions = [_]u64{ first, last };
+                if (promoted) |index| {
+                    var command: @import("../../command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = actions[index] };
+                    try command.key.set("resolution-promote");
+                    const free: usize = 2;
+                    const capacity: @import("../domain/action_control.zig").CapacityView = .{ .total = 2, .context = &free, .freeFn = struct {
+                        fn read(context: *const anyopaque) usize {
+                            return @as(*const usize, @ptrCast(@alignCast(context))).*;
+                        }
+                    }.read };
+                    try std.testing.expect(storage.backgroundAction(&command, capacity, .{}) == .accepted);
+                }
+                for (actions, [_]u64{ 900, 400 }, [_][]const u8{ "resolution-first", "resolution-last" }, 0..) |action, at, key, index| {
+                    var deny: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = action, .decision = .deny };
+                    try deny.key.set(key);
+                    try std.testing.expect(storage.decidePermission(&deny, .{}) == .accepted);
+                    try store_testing.exec(&storage, "UPDATE action_operation SET resolved_at=?1 WHERE action_id=?2", .{ at, action });
+                    const work = (try store_testing.observeCommandForTesting(&storage, "resolution-message")).kind.message.?.work.?;
+                    try std.testing.expectEqual(at, work.state.since());
+                    try std.testing.expectEqual(if (index == 0) protocol.MessageProgressStatus.waiting_for_permission else .runnable, work.state.progress().?);
+                    var request: protocol.ActivityPage = .{};
+                    try request.session.set(session.slice());
+                    const page = try store_core.activityPageForTesting(&storage, request);
+                    try std.testing.expectEqual(at, page.work.work.state.since());
+                }
+                try std.testing.expect(!storage.isFenced());
+            }
+        }
+    }.run);
+}
+
 test "Current, activity pages and Message progress report one work through an approval" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
