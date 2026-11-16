@@ -1060,7 +1060,7 @@ test "a Label is configured, replayed, cleared and validated like any setting" {
     }.run);
 }
 
-test "definite rejections retain Message input but not configuration payloads" {
+test "definite rejections retain decisions without retaining payloads for configuration; Messages retain input" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
