@@ -751,7 +751,7 @@ pub const migrations = [_]Migration{
         },
         .mysql = &.{
             "ALTER TABLE core_command ADD COLUMN input_part_count BIGINT AFTER command_seq",
-            "ALTER TABLE core_command ADD COLUMN input_reference_length BIGINT AFTER input_part_count, ADD COLUMN input_reference_digest VARBINARY(32) AFTER input_reference_length",
+            "ALTER TABLE core_command ADD COLUMN input_reference_length BIGINT AFTER input_part_count, ADD COLUMN input_reference_digest BLOB AFTER input_reference_length",
             "UPDATE core_command c JOIN content original ON original.content_id=c.primary_content_id SET c.input_reference_length=original.byte_length,c.input_reference_digest=original.digest WHERE c.kind=2 AND c.accepted=1",
             "UPDATE core_command SET input_part_count=CASE WHEN kind=2 THEN CASE WHEN accepted=1 THEN 1 ELSE 0 END ELSE NULL END",
             "ALTER TABLE core_command ADD UNIQUE(command_key,kind,input_part_count)",
