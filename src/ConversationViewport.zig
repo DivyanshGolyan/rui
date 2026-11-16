@@ -612,7 +612,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 var stop = end;
                 if (styled) {
                     stop = start + 1;
-                    while (stop < end and self.styles[stop] == self.styles[start]) stop += 1;
+                    while (stop < end and (self.styles[stop] & ~body_bit) == (self.styles[start] & ~body_bit)) stop += 1;
                 }
                 const shown = !styled or (isSidenote(self.styles[start]) == notes and foregroundIndex(self.styles[start]) != address_index);
                 if (shown) {
@@ -1762,4 +1762,21 @@ test "quote body extraction retains metadata through split controls normalizatio
         try document.append("unknown");
         try std.testing.expect(!document.bodyAt(0));
     }
+}
+
+test "quote body extraction metadata leaves grapheme layout and visual styles unchanged" {
+    var marked: Sized(256, true) = .{};
+    try marked.append("prefix " ++ TerminalText.body_on ++ "\u{301}body\n\u{200b}" ++ TerminalText.body_off ++ " status\n");
+    try marked.prepare();
+    var plain: Sized(256, true) = .{};
+    try plain.append("prefix \u{301}body\n\u{200b} status\n");
+    try plain.prepare();
+    for (1..41) |width| for ([_]bool{ false, true }) |colour| {
+        var actual: TestScreen = undefined;
+        var expected: TestScreen = undefined;
+        const a = marked.draw(actual.window(@intCast(width), 14), .{}, true, colour, .{}, .{});
+        const b = plain.draw(expected.window(@intCast(width), 14), .{}, true, colour, .{}, .{});
+        try std.testing.expectEqualDeep(b, a);
+        try std.testing.expectEqualDeep(expected.cells[0 .. width * 14], actual.cells[0 .. width * 14]);
+    };
 }
