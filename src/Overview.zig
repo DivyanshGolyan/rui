@@ -912,7 +912,7 @@ fn appListDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!v
 
 fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) std.mem.Allocator.Error!vxfw.Surface {
     const size = ctx.max.size();
-    if (part == .whole) _ = try view.step(&self.state, .{ .launch_frame = .{ .size = .{ .width = size.width, .height = size.height }, .wide = size.width >= Root.split_at } });
+    if (part == .whole) _ = try view.step(&self.state, .{ .launch_size = .{ .size = .{ .width = size.width, .height = size.height }, .wide = size.width >= Root.split_at } });
     self.caps.width = self.attention.vx.caps.unicode;
     const normal = @import("widget_style.zig").of(self.caps, .{});
     self.sign_in.style = normal;

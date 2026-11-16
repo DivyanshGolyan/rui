@@ -304,7 +304,7 @@ pub const Event = union(enum) {
     list_settled: struct { wide: bool, focused: bool },
 
     resized: Size,
-    launch_frame: struct { size: Size, wide: bool },
+    launch_size: struct { size: Size, wide: bool },
     launch_poll,
 
     tick: u64,
@@ -1300,7 +1300,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             state.releaseModels();
         },
         .resized => |size| state.size = size,
-        .launch_frame => |frame| {
+        .launch_size => |frame| {
             state.size = frame.size;
             if (state.launch == .sizing and frame.size.width != 0) state.launch = if (frame.wide) .waiting else .done;
         },
@@ -6172,7 +6172,7 @@ test "launch core creation outcomes reveal or open exactly once" {
         var state = try opened(&.{});
         defer state.deinit();
         state.launch = .sizing;
-        try expectEffects(&.{}, try step(&state, .{ .launch_frame = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } }));
+        try expectEffects(&.{}, try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } }));
         try std.testing.expect(state.hidesOverview());
         const admitted = try step(&state, .launch_poll);
         try expectEffects(&.{.{ .create = null }}, admitted);
@@ -6211,7 +6211,7 @@ test "launch core reopens newest active empty Session" {
     var state = try opened(&.{ older, newest, archived, populated });
     defer state.deinit();
     state.launch = .sizing;
-    _ = try step(&state, .{ .launch_frame = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+    _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
     const opened_effect = try step(&state, .launch_poll);
     try expectEffects(&.{ .{ .open = "bbbbbb".* }, .list_models }, opened_effect);
     try std.testing.expect(opened_effect.redraw);
@@ -6225,12 +6225,12 @@ test "launch core exposes overview after unsuccessful first listing" {
         var state = try testState();
         defer state.deinit();
         state.launch = .sizing;
-        if (first_frame) _ = try step(&state, .{ .launch_frame = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+        if (first_frame) _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
         _ = try step(&state, .{ .tick = test_now_s * 1000 });
         try expectEffects(&.{}, try step(&state, .{ .list = .failed }));
         try std.testing.expectEqual(.done, state.launch);
         try std.testing.expect(!state.hidesOverview());
-        _ = try step(&state, .{ .launch_frame = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+        _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
         try expectEffects(&.{}, try step(&state, .launch_poll));
     }
 }
@@ -6239,7 +6239,7 @@ test "launch core exposes overview after an invalid first listing" {
     var state = try testState();
     defer state.deinit();
     state.launch = .sizing;
-    _ = try step(&state, .{ .launch_frame = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+    _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
     _ = try step(&state, .{ .tick = test_now_s * 1000 });
     const wrong: Token = .{ .instance = @splat(0xff), .generation = 1 };
     _ = try step(&state, .{ .list = .{ .page = .{ .rows = &.{}, .answer = .{ .delta = .full, .since = wrong } } } });
@@ -6253,11 +6253,11 @@ test "launch core exposes overview when Host becomes unavailable" {
         var state = try testState();
         defer state.deinit();
         state.launch = .sizing;
-        if (first_frame) _ = try step(&state, .{ .launch_frame = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+        if (first_frame) _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
         try expectEffects(&.{}, try step(&state, .{ .host = null }));
         try std.testing.expectEqual(.done, state.launch);
         try std.testing.expect(!state.hidesOverview());
-        _ = try step(&state, .{ .launch_frame = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+        _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
         try expectEffects(&.{}, try step(&state, .launch_poll));
     }
 }
@@ -6266,7 +6266,7 @@ test "launch core exposes overview when Host is lost during creation" {
     var state = try opened(&.{});
     defer state.deinit();
     state.launch = .sizing;
-    _ = try step(&state, .{ .launch_frame = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+    _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
     _ = try step(&state, .launch_poll);
     try std.testing.expect(state.hidesOverview());
     _ = try step(&state, .{ .host = null });
@@ -6281,10 +6281,10 @@ test "launch core leaves narrow overview alone after widening" {
     var state = try opened(&.{});
     defer state.deinit();
     state.launch = .sizing;
-    _ = try step(&state, .{ .launch_frame = .{ .size = .{ .width = 46, .height = 30 }, .wide = false } });
+    _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 46, .height = 30 }, .wide = false } });
     try std.testing.expectEqual(.done, state.launch);
     try std.testing.expect(!state.hidesOverview());
-    _ = try step(&state, .{ .launch_frame = .{ .size = .{ .width = 140, .height = 30 }, .wide = true } });
+    _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 30 }, .wide = true } });
     try expectEffects(&.{}, try step(&state, .launch_poll));
     try std.testing.expectEqual(@as(usize, 0), state.request_count);
 }
