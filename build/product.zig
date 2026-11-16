@@ -28,6 +28,20 @@ pub fn addRui(
     return addRuiWithIdentity(b, target, optimize, name, pinned_transport, buildIdentity(b));
 }
 
+/// Integration products share the qualified PR backend; production builds keep Zig's default.
+pub fn addIntegrationRui(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    name: []const u8,
+    pinned_transport: ?PinnedTransport,
+    pr_ci: bool,
+    identity: BuildIdentity,
+) *std.Build.Step.Compile {
+    const executable = addRuiWithIdentity(b, target, .ReleaseSafe, name, pinned_transport, identity);
+    if (pr_ci) executable.use_llvm = false;
+    return executable;
+}
+
 const BuildIdentity = struct { version: []const u8, revision: []const u8 };
 
 var identity_memo: ?struct { owner: *std.Build, identity: BuildIdentity } = null;
@@ -39,7 +53,7 @@ pub fn buildIdentity(b: *std.Build) BuildIdentity {
     return identity;
 }
 
-pub fn addRuiWithIdentity(
+fn addRuiWithIdentity(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
