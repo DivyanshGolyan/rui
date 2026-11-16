@@ -219,7 +219,7 @@ fn knownBadTarget(build: Installation.Selection) bool {
     return build == .released and build.released.version.schema == 75 and build.released.version.patch == 0;
 }
 
-fn stopObserved(io: std.Io, allocator: std.mem.Allocator, plan: *const Plan, context: process.Context) !client.StopResult {
+fn stopObserved(io: std.Io, allocator: std.mem.Allocator, plan: *const Plan, context: process.Context) !client.HostStopResult {
     const directory = plan.sources.request.dir;
     if (plan.observed.profile.historical()) {
         const instance = std.fmt.bytesToHex(plan.observed.facts.instance, .lower);
@@ -267,12 +267,21 @@ fn verify(init: std.process.Init, allocator: std.mem.Allocator, plan: *const Pla
                         if (sameSnapshot(&before, &after)) {
                             const actual = (try installedVersion(allocator, init.io, init.environ_map.get("HOME") orelse return .{ .unconfirmed = .verifying }, after.executable, null)) orelse return .{ .unconfirmed = .verifying };
                             if (replacementMatches(plan, facts, actual, version)) {
-                                return if (client.hostStatus(init.io, plan.sources.request.dir) == .incompatible)
-                                    .{ .client_incompatible = after.pid }
-                                else
-                                    .{ .ready = .{ .instance = facts.instance, .pid = after.pid } };
+                                const status = client.hostStatus(init.io, plan.sources.request.dir);
+                                const usable = statusAgrees(status, facts);
+                                if (usable) {
+                                    if (client.observeUpgradePeer(allocator, init.io, plan.sources.request.dir, until)) |last_peer| {
+                                        var final_peer = last_peer;
+                                        defer final_peer.deinit(allocator);
+                                        if (sameSnapshot(&after, &final_peer)) return if (status == .incompatible)
+                                            .{ .client_incompatible = final_peer.pid }
+                                        else
+                                            .{ .ready = .{ .instance = facts.instance, .pid = final_peer.pid } };
+                                    } else |_| {}
+                                }
+                            } else {
+                                return .replacement_observed;
                             }
-                            return .replacement_observed;
                         }
                     } else |_| {}
                 }
@@ -281,6 +290,16 @@ fn verify(init: std.process.Init, allocator: std.mem.Allocator, plan: *const Pla
         _ = try sleepToward(init.io, until);
     }
     return .{ .unconfirmed = .verifying };
+}
+
+/// Used ONLY after target-public readiness, instance and answering release
+/// proof. An explicit negative final probe must never become success.
+fn statusAgrees(status: protocol_reply.HostStatus, facts: client.ReplacementFacts) bool {
+    return switch (status) {
+        .ready => |ready| std.mem.eql(u8, &ready.instance, &facts.instance) and std.mem.eql(u8, ready.store.slice(), facts.store.slice()) and ready.active_capacity == facts.active_capacity,
+        .incompatible => true,
+        .unavailable, .owned_unavailable, .access_failure => false,
+    };
 }
 
 fn replacementMatches(plan: *const Plan, facts: client.ReplacementFacts, actual: candidate.Version, target: candidate.Version) bool {
@@ -433,6 +452,17 @@ test "upgrade replacement proof accepts adopted target version but not old insta
     var facts: client.ReplacementFacts = .{ .instance = @splat(2), .store = .{}, .active_capacity = 3 };
     try facts.store.set("database-wire-identity");
     try std.testing.expect(replacementMatches(&plan, facts, target, target));
+    var ready = plan.observed.facts;
+    ready.instance = facts.instance;
+    try std.testing.expect(statusAgrees(.{ .ready = ready }, facts));
+    for ([_]protocol_reply.HostStatus{ .unavailable, .owned_unavailable, .access_failure }) |status| try std.testing.expect(!statusAgrees(status, facts));
+    try std.testing.expect(statusAgrees(.incompatible, facts));
+    ready.instance = plan.observed.facts.instance;
+    try std.testing.expect(!statusAgrees(.{ .ready = ready }, facts));
+    ready.instance = facts.instance;
+    ready.active_capacity += 1;
+    try std.testing.expect(!statusAgrees(.{ .ready = ready }, facts));
+
     facts.instance = @splat(1);
     try std.testing.expect(!replacementMatches(&plan, facts, target, target));
     facts.instance = @splat(2);
