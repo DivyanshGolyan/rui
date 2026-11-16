@@ -5913,8 +5913,7 @@ test "read-only capture routing does not eagerly validate a replay body" {
     const file = try tmp.dir.openFile(io, filename, .{ .mode = .write_only });
     {
         defer file.close(io);
-        try file.seekTo(io, try file.length(io));
-        try file.writeStreamingAll(io, "not another immutable request");
+        try file.writePositionalAll(io, "not another immutable request", try file.length(io));
     }
     try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } }));
     const observed = try inspectCapturedRequest(io, root, key.slice());
