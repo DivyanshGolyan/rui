@@ -138,6 +138,7 @@ Clients given `--store PATH` read that directory's saved placement, including My
 Pause the Host before changing placement: directory-based clients immediately use the saved location, while a running Host keeps its original settings.
 Save Store and interface placement with `rui host set`; a differing placement supplied only through `host start --settings` or `--set` is refused because a later client cannot see it.
 Other one-off settings still apply to a new Host. Foreground `host serve` permits unsaved placement, but directory-based clients need the same placement saved.
+Request captures still record Store identity, not a Host-directory locator. With custom placement, use `request inspect|wait --store DIR --key KEY`, or `request recover --store DIR --record FILE --kind KIND`; a handle alone still relies on the Store identity's default socket or the legacy MySQL runtime hint.
 A started Host runs in `/` without stdin. Relative paths you type on the command line (`--settings FILE`, `@FILE`, and `--set` paths or `file:` sources) are taken from the directory you run the command in.
 A relative path saved in `host.json` or written inside a document has no such directory, so bare `rui` and `rui host start` refuse it, as they refuse `interface.lifetime` `stdin`; give an absolute path.
 Run such a Host with `rui host serve --store PATH`.
