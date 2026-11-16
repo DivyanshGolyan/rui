@@ -5534,9 +5534,10 @@ test "Host launch saved MySQL preflight needs no running Host or login" {
     defer directory.close(io);
     const file = try directory.createFile(io, "host.json", .{ .permissions = .fromMode(0o600) });
     defer file.close(io);
-    try file.writeStreamingAll(io, "{\"store\":{\"mysql\":{\"url\":\"env:PR5B_UNRESOLVED_LOGIN\"}}}");
+    try file.writeStreamingAll(io, "{\"store\":{\"mysql\":{\"url\":{\"env\":\"PR5B_UNRESOLVED_LOGIN\"}}}}");
     var buffer: [protocol.max_store_bytes]u8 = undefined;
     const dir = buffer[0..try directory.realPath(io, &buffer)];
+    try std.testing.expectEqual(platform.Kind.mysql, (try host_start.savedPlacement(io, dir)).kind);
     try preflightNewSession(io, dir, true);
 }
 
