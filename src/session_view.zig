@@ -558,11 +558,13 @@ fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colou
     try escaped.feed(if (presentation.description) |label| label.slice() else "Tool call");
     try escaped.finish();
     try indented.feed(state.suffix);
-    if (presentation.code == .failed and exit.len != 0) {
-        try indented.feed(" · ");
-        try indented.feed(exit);
-    }
     try indented.finish();
+    if (presentation.code == .failed and exit.len != 0) {
+        try sink.feed(tool_fold.exit_open);
+        try sink.feed("exit ");
+        try sink.feed(exit);
+        try sink.feed(Text.link_close);
+    }
     try sink.feed("\n");
 }
 
@@ -1139,13 +1141,19 @@ test "a queued Message is labelled only while work under way holds it" {
     inline for (.{ .queued, .excluded, .applied }) |state| try std.testing.expect(messageLabel(state, .none) == null);
 }
 
+fn inputPrefix(sink: anytype, colour: bool, admitted_at: u64, action: ?u64) !void {
+    if (action) |id| {
+        try print(sink, "{s}Background Action {d}{s}\n", .{ Style.quiet.code(colour), id, Style.normal.code(colour) });
+    } else try userPrefix(sink, colour, admitted_at);
+}
+
 pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool) !void {
     if (messageLabel(value.state, labels)) |text| {
         try print(sink, "{s}{s}{s}\n", .{ Style.quiet.code(colour), text, Style.normal.code(colour) });
     }
     if (value.sender) |sender| return peerLine(sink, .inbound, sender, value.admitted_at);
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
-    try userPrefix(sink, colour, value.admitted_at);
+    try inputPrefix(sink, colour, value.admitted_at, value.source_action);
     var body: UserBody(@TypeOf(sink)) = undefined;
     try body.init(sink, value.content.length, false);
     try content(requests, store, session, item, value.content, &body);
@@ -1226,7 +1234,7 @@ test "tool header hides all body lines for every outcome and first-line split" {
         .{ protocol.ToolPresentation.Code.pending_permission, "? Tool call" },
         .{ protocol.ToolPresentation.Code.background, "✓ Tool call · background" },
         .{ protocol.ToolPresentation.Code.succeeded, "✓ Tool call" },
-        .{ protocol.ToolPresentation.Code.failed, "× Tool call · 7" },
+        .{ protocol.ToolPresentation.Code.failed, "× Tool call" ++ tool_fold.exit_open ++ "exit 7" ++ Text.link_close },
         .{ protocol.ToolPresentation.Code.timed_out, "× Tool call · timed out" },
         .{ protocol.ToolPresentation.Code.indeterminate, "× Tool call · may have run" },
         .{ protocol.ToolPresentation.Code.storage_failed, "× Tool call · output lost" },
@@ -1270,7 +1278,7 @@ test "tool header hides all body lines for every outcome and first-line split" {
     }
 }
 
-test "failed tool suffix is the bare exit status" {
+test "failed tool heading carries an explicit exit field" {
     const Sink = struct {
         out: *std.Io.Writer,
         pub fn feed(self: *@This(), bytes: []const u8) !void {
@@ -1289,7 +1297,7 @@ test "failed tool suffix is the bare exit status" {
             var sink: Sink = .{ .out = &out };
             try toolHeadingWith(presentation, &sink, false, exit, false);
             var expected: [128]u8 = undefined;
-            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "× {s} · {s}\n", .{ title orelse "Tool call", exit }), out.buffered());
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "× {s}" ++ tool_fold.exit_open ++ "exit {s}" ++ Text.link_close ++ "\n", .{ title orelse "Tool call", exit }), out.buffered());
         }
     }
 }
@@ -1490,8 +1498,8 @@ pub fn tight(value: protocol.ActivityItem.Value) bool {
     };
 }
 
-pub fn gap(above: bool, below: bool) bool {
-    return !(above and below);
+pub fn gap(above: bool, below: bool, tool_pair: bool) bool {
+    return !(tool_pair or (above and below));
 }
 
 pub fn render(requests: client.Requests, store: []const u8, session: []const u8, provider: ?protocol.Provider, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
@@ -1503,7 +1511,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
         },
         .received => |value| try message(requests, store, session, item, value, .none, sink, colour),
         .user => |value| {
-            if (value.sender != null) return false;
+            if (value.sender != null or value.source_action != null) return false;
             try message(requests, store, session, item, value, .none, sink, colour);
         },
         .assistant => |assistant| {
@@ -1535,6 +1543,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             if (fold == .open) try fold.open.finish(sink);
         },
         .hosted_call => |presentation| {
+            try sink.feed(tool_fold.row_marker);
             try toolResult(presentation, .{}, sink, colour);
         },
         .call => {},
@@ -1596,7 +1605,7 @@ fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const
     }
 }
 
-test "hosted calls draw as tool rows: successes pack together, a failure stands apart" {
+test "hosted calls draw as adjacent tool rows across outcomes" {
     const Sink = struct {
         bytes: [512]u8 = undefined,
         length: usize = 0,
@@ -1620,12 +1629,12 @@ test "hosted calls draw as tool rows: successes pack together, a failure stands 
         try toolResult(presentation, .{}, &row, false);
         try std.testing.expectEqualStrings(call[2], row.bytes[0..row.length]);
         const below = tight(.{ .hosted_call = presentation });
-        if (above) |value| if (gap(value, below)) try joined.feed("\n");
+        if (above) |value| if (gap(value, below, true)) try joined.feed("\n");
         try joined.feed(row.bytes[0..row.length]);
         above = below;
     }
     try std.testing.expectEqualStrings(
-        "✓ Search “zig 0.17”\n✓ Open ziglang.org/x\n\n× Find “Io” in ziglang.org/x\n\n✓ Search the web\n",
+        "✓ Search “zig 0.17”\n✓ Open ziglang.org/x\n× Find “Io” in ziglang.org/x\n✓ Search the web\n",
         joined.bytes[0..joined.length],
     );
 }
@@ -1765,4 +1774,17 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
     const projection = Consent.project(screen.consent, .{ .action_page = true, .read = true }, false);
     try std.testing.expect(projection.approval == .preview);
     try std.testing.expect(Consent.offered(screen.consent, projection.approval) == null);
+}
+
+test "background final input prefix names the Action instead of a person" {
+    const Sink = struct {
+        bytes: std.Io.Writer.Allocating,
+        pub fn feed(self: *@This(), text: []const u8) !void {
+            try self.bytes.writer.writeAll(text);
+        }
+    };
+    var sink: Sink = .{ .bytes = .init(std.testing.allocator) };
+    defer sink.bytes.deinit();
+    try inputPrefix(&sink, false, 1, 42);
+    try std.testing.expectEqualStrings("Background Action 42\n", sink.bytes.written());
 }

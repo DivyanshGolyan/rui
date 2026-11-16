@@ -94,6 +94,10 @@ Long, churn, full Debug and H2 targets follow their mappings, not an uncondition
 
 `test-logic` compiles `src/logic_tests.zig`, which includes answer-rendering tests absent from `src/tests.zig`.
 Neither composed gate covers that root, so run it with a selected composed gate.
+
+The verify-rui feature map is policy input: `test_verify_rui_map.py` checks that every named frame belongs to one linked feature recipe with the required sections.
+Changes under `.claude/skills/verify-rui/features/` use the normal policy lane so documentation classification cannot skip this check; local feedback also selects it for those files and `scripts/frames.json`.
+
 The compiler and dependency setup action is bootstrap, not CI policy.
 An unavailable selection base is an error.
 PR selection uses its recorded base and immutable merge candidate.
@@ -200,6 +204,11 @@ Setup/fetch, cache uploads, linter installation, shard restore/rebuild and subse
 Where the measured save window cannot fit, including short-budget unit/typecheck/proof/codegen jobs, compilation retains only its unchanged job deadline. Saves still run on step failure; on a job timeout they run only if GitHub allows them. Hard runner loss, forced cancellation or an upload failure can also prevent publication.
 Partial Zig compilation caches are safe to restore: [Zig's content-addressed cache validates hashed inputs and manifests, treating incomplete manifests as misses](https://github.com/ziglang/zig/blob/0.17.1/lib/std/Build/Cache.zig).
 That safety argument is source inspection, not a claim of native interrupted-build qualification; cached output never substitutes for test execution.
+
+Linux x86_64 pull requests use `-Dpr-ci=true`: both `rui-pr-check` and the synthetic-release `rui-upgrade-release-fixture` are ReleaseSafe integration products built without LLVM through `product.addIntegrationRui`.
+The upgrade fixture uses the same production sources with a synthetic release identity; its archive size and checksum are derived from the supplied binary.
+In PR mode only, that fixture also strips debug data, matching shipped Linux archive packaging and avoiding unnecessary checksum and extraction work in native publication tests.
+Promotion, release and default local builds retain Zig's default backend, as does the production binary used by `stack-frames`.
 
 Each platform builds its target closure once with `ci-build -Dci-targets=...`.
 On Linux and macOS, when the selection compiles the single-threaded unit test binary alongside other gates, one producer builds only that binary (`-Dci-part=unit`) and another builds the rest (`-Dci-part=rest`); build.zig refuses a split whose selection never reaches the unit compile.

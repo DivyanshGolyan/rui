@@ -2,6 +2,7 @@ const std = @import("std");
 const protocol = @import("protocol.zig");
 const change_ring = @import("change_ring.zig");
 const command_reply = @import("command_reply.zig");
+const command_spec = @import("command_spec.zig");
 const AttemptBinding = @import("attempt.zig").AttemptBinding;
 const skill_suggestions = @import("skill_suggestions.zig");
 const activity_reply = @import("activity_reply.zig");
@@ -77,7 +78,7 @@ pub fn renderConversationPage(response: protocol.JsonOut, page: *const command_r
             inline else => |kind| try response.appendShape(shapes.item(kind), .{ item.position, item.ordinal, item.content.length, item.content.digest }),
         }
         switch (item.kind) {
-            .user => if (item.admitted_at) |second| try response.appendShape(shapes.admission, .{ second, protocol.NamedPeerJson.optional(item.sender) }),
+            .user => if (item.admitted_at) |second| try response.appendShape(shapes.admission, .{ second, protocol.NamedPeerJson.optional(item.sender), item.source_action }),
             .tool_result, .hosted_call => if (item.presentation) |presentation| try response.appendShape(shapes.presentation, .{protocol.ToolPresentationJson{ .value = presentation }}),
             .assistant => {},
         }
@@ -89,101 +90,77 @@ pub fn renderConversationPage(response: protocol.JsonOut, page: *const command_r
     } else try response.appendShape(shapes.last, .{});
 }
 
-pub fn renderSessionStopReply(
-    response: protocol.JsonOut,
-    session: []const u8,
-    result: command_reply.SessionStopReply,
-) !void {
-    const shapes = protocol.session_stop_reply;
-    try switch (result) {
-        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, value.selection.selected_turn_id, value.selection.admission_cutoff, value.completion }),
-        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, value.code }),
-        .conflict => response.appendShape(shapes.conflict, .{session}),
-        .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
+const SubjectTypes = struct {
+    pub const model_interruption = command_reply.ModelInterruptionTarget;
+    pub const permission_decision = struct {
+        session: protocol.Bounded(protocol.max_session_bytes),
+        action_id: u64,
+        decision: protocol.PermissionDecision,
     };
-}
-
-pub fn renderSessionArchiveReply(
-    response: protocol.JsonOut,
-    session: []const u8,
-    result: command_reply.SessionArchiveReply,
-) !void {
-    const shapes = protocol.session_archive_reply;
-    try switch (result) {
-        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, value.archived, value.completion }),
-        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, value.code }),
-        .conflict => response.appendShape(shapes.conflict, .{session}),
-        .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
+    pub const action_background = struct {
+        session: protocol.Bounded(protocol.max_session_bytes),
+        action_id: u64,
     };
-}
-
-pub fn renderSessionPinReply(
-    response: protocol.JsonOut,
-    session: []const u8,
-    result: command_reply.SessionPinReply,
-) !void {
-    const shapes = protocol.session_pin_reply;
-    try switch (result) {
-        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, value.pinned }),
-        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, value.code }),
-        .conflict => response.appendShape(shapes.conflict, .{session}),
-        .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
-    };
-}
-
-pub fn renderModelInterruptionReply(
-    response: protocol.JsonOut,
-    target: command_reply.ModelInterruptionTarget,
-    result: command_reply.ModelInterruptionReply,
-) !void {
-    const shapes = protocol.model_interruption_reply;
-    const session = target.session.slice();
-    try switch (result) {
-        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, target.turn_id, target.operation_id }),
-        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, target.turn_id, target.operation_id, value.code }),
-        .conflict => response.appendShape(shapes.conflict, .{ session, target.turn_id, target.operation_id }),
-        .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
-    };
-}
-
-pub const PermissionTarget = struct {
-    session: protocol.Bounded(protocol.max_session_bytes),
-    action_id: u64,
-    decision: protocol.PermissionDecision,
 };
 
-pub fn renderPermissionDecisionReply(
-    response: protocol.JsonOut,
-    target: PermissionTarget,
-    result: command_reply.PermissionDecisionReply,
-) !void {
-    const shapes = protocol.permission_decision_reply;
-    const session = target.session.slice();
-    try switch (result) {
-        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, target.action_id, target.decision }),
-        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, target.action_id, target.decision, value.code }),
-        .conflict => response.appendShape(shapes.conflict, .{ session, target.action_id, target.decision }),
-        .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
+/// Concrete subject consumed by each mutation's typed reply renderer.
+pub fn MutationSubject(comptime kind: command_spec.CommandKind) type {
+    return command_spec.spec(kind).Subject(SubjectTypes);
+}
+
+/// Canonical Store result type for each mutation's typed reply renderer.
+pub fn MutationResult(comptime kind: command_spec.CommandKind) type {
+    return switch (kind) {
+        .configure => command_reply.ConfigureReply,
+        .message => command_reply.MessageReply,
+        .session_stop => command_reply.SessionStopReply,
+        .session_archive => command_reply.SessionArchiveReply,
+        .session_pin => command_reply.SessionPinReply,
+        .model_interruption => command_reply.ModelInterruptionReply,
+        .permission_decision => command_reply.PermissionDecisionReply,
+        .action_background => @import("action_control.zig").Reply,
     };
 }
 
-pub const ActionBackgroundTarget = struct {
-    session: protocol.Bounded(protocol.max_session_bytes),
-    action_id: u64,
-};
+/// Keeps every mutation's subject and Store result concrete at the call boundary.
+pub fn renderMutationReply(comptime kind: command_spec.CommandKind) @TypeOf(switch (kind) {
+    .configure => renderConfigureReply,
+    .message => renderMessageReply,
+    else => ControlRenderer(kind).render,
+}) {
+    return switch (kind) {
+        .configure => renderConfigureReply,
+        .message => renderMessageReply,
+        else => ControlRenderer(kind).render,
+    };
+}
 
-pub fn renderActionBackgroundReply(
-    response: protocol.JsonOut,
-    target: ActionBackgroundTarget,
-    result: @import("action_control.zig").Reply,
-) !void {
-    const shapes = protocol.action_background_reply;
-    const session = target.session.slice();
-    try switch (result) {
-        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, target.action_id, value.selection.kind, value.selection.position }),
-        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, target.action_id, value.code }),
-        .conflict => response.appendShape(shapes.conflict, .{ session, target.action_id }),
-        .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
+fn ControlRenderer(comptime kind: command_spec.CommandKind) type {
+    const facts = command_spec.spec(kind);
+    return struct {
+        fn render(response: protocol.JsonOut, subject: MutationSubject(kind), result: MutationResult(kind)) !void {
+            const shapes = facts.Reply(protocol);
+            const target = switch (kind) {
+                .session_stop, .session_archive, .session_pin => .{subject},
+                .model_interruption => .{ subject.session.slice(), subject.turn_id, subject.operation_id },
+                .permission_decision => .{ subject.session.slice(), subject.action_id, subject.decision },
+                .action_background => .{ subject.session.slice(), subject.action_id },
+                .configure, .message => unreachable,
+            };
+            try switch (result) {
+                .accepted => |value| response.appendShape(shapes.accepted, .{value.replayed} ++ target ++ switch (kind) {
+                    .session_stop => .{ value.selection.selected_turn_id, value.selection.admission_cutoff, value.completion },
+                    .session_archive => .{ value.archived, value.completion },
+                    .session_pin => .{value.pinned},
+                    .model_interruption, .permission_decision => .{},
+                    .action_background => .{ value.selection.kind, value.selection.position },
+                    .configure, .message => unreachable,
+                }),
+                .rejected => |value| response.appendShape(shapes.rejected, .{value.replayed} ++ target ++ .{value.code}),
+                .conflict => response.appendShape(shapes.conflict, target),
+                .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
+            };
+        }
     };
 }
 
@@ -361,54 +338,60 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
 
     const message_expansion = protocol.Hole.maxBytes(.{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }) - "null".len;
     try std.testing.expectEqual(protocol.configuration_reply.max_bytes, @max(
-        try Worst.reply(renderConfigureReply, @as([]const u8, &escaped_session), .{
+        try Worst.reply(renderMutationReply(.configure), @as([]const u8, &escaped_session), .{
             command_reply.ConfigureReply{ .accepted = .{ .replayed = false, .revision = max, .created = false, .session = session, .skills = .unchanged } },
             command_reply.ConfigureReply.conflict,
         }),
-        try Worst.reply(renderConfigureReply, @as([]const u8, &escaped_session), .{
+        try Worst.reply(renderMutationReply(.configure), @as([]const u8, &escaped_session), .{
             command_reply.ConfigureReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.ConfigurationRejection) } },
         }) + message_expansion,
     ));
 
     try std.testing.expectEqual(protocol.message_reply.max_bytes, @max(
-        try Worst.reply(renderMessageReply, @as([]const u8, &escaped_session), .{
+        try Worst.reply(renderMutationReply(.message), @as([]const u8, &escaped_session), .{
             command_reply.MessageReply{ .accepted = .{ .replayed = false, .admission_id = max, .content = content, .session = session } },
             command_reply.MessageReply.conflict,
         }),
-        try Worst.reply(renderMessageReply, @as([]const u8, &escaped_session), .{
+        try Worst.reply(renderMutationReply(.message), @as([]const u8, &escaped_session), .{
             command_reply.MessageReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.MessageRejection), .content = content } },
         }) + message_expansion,
     ));
 
-    try std.testing.expectEqual(protocol.session_stop_reply.max_bytes, try Worst.reply(renderSessionStopReply, @as([]const u8, &escaped_session), .{
+    try std.testing.expectEqual(protocol.session_stop_reply.max_bytes, try Worst.reply(renderMutationReply(.session_stop), @as([]const u8, &escaped_session), .{
         command_reply.SessionStopReply{ .accepted = .{ .replayed = false, .selection = .{ .selected_turn_id = max, .admission_cutoff = max }, .completion = Worst.tag(protocol.SessionStopCompletion) } },
         command_reply.SessionStopReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.SessionStopRejection) } },
         command_reply.SessionStopReply.conflict,
     }));
 
-    try std.testing.expectEqual(protocol.session_archive_reply.max_bytes, try Worst.reply(renderSessionArchiveReply, @as([]const u8, &escaped_session), .{
+    try std.testing.expectEqual(protocol.session_archive_reply.max_bytes, try Worst.reply(renderMutationReply(.session_archive), @as([]const u8, &escaped_session), .{
         command_reply.SessionArchiveReply{ .accepted = .{ .replayed = false, .archived = false, .completion = Worst.tag(protocol.SessionStopCompletion) } },
         command_reply.SessionArchiveReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.SessionArchiveRejection) } },
         command_reply.SessionArchiveReply.conflict,
     }));
 
+    try std.testing.expectEqual(protocol.session_pin_reply.max_bytes, try Worst.reply(renderMutationReply(.session_pin), @as([]const u8, &escaped_session), .{
+        command_reply.SessionPinReply{ .accepted = .{ .replayed = false, .pinned = false } },
+        command_reply.SessionPinReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.SessionPinRejection) } },
+        command_reply.SessionPinReply.conflict,
+    }));
+
     const interruption: command_reply.ModelInterruptionTarget = .{ .session = session, .turn_id = max, .operation_id = max };
-    try std.testing.expectEqual(protocol.model_interruption_reply.max_bytes, try Worst.reply(renderModelInterruptionReply, interruption, .{
+    try std.testing.expectEqual(protocol.model_interruption_reply.max_bytes, try Worst.reply(renderMutationReply(.model_interruption), interruption, .{
         command_reply.ModelInterruptionReply{ .accepted = .{ .replayed = false } },
         command_reply.ModelInterruptionReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.ModelInterruptionRejection) } },
         command_reply.ModelInterruptionReply.conflict,
     }));
 
-    const decision: PermissionTarget = .{ .session = session, .action_id = max, .decision = Worst.tag(protocol.PermissionDecision) };
-    try std.testing.expectEqual(protocol.permission_decision_reply.max_bytes, try Worst.reply(renderPermissionDecisionReply, decision, .{
+    const decision: MutationSubject(.permission_decision) = .{ .session = session, .action_id = max, .decision = Worst.tag(protocol.PermissionDecision) };
+    try std.testing.expectEqual(protocol.permission_decision_reply.max_bytes, try Worst.reply(renderMutationReply(.permission_decision), decision, .{
         command_reply.PermissionDecisionReply{ .accepted = .{ .replayed = false } },
         command_reply.PermissionDecisionReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.PermissionDecisionRejection) } },
         command_reply.PermissionDecisionReply.conflict,
     }));
 
-    const background: ActionBackgroundTarget = .{ .session = session, .action_id = max };
+    const background: MutationSubject(.action_background) = .{ .session = session, .action_id = max };
     const control = @import("action_control.zig");
-    try std.testing.expectEqual(protocol.action_background_reply.max_bytes, try Worst.reply(renderActionBackgroundReply, background, .{
+    try std.testing.expectEqual(protocol.action_background_reply.max_bytes, try Worst.reply(renderMutationReply(.action_background), background, .{
         control.Reply{ .accepted = .{ .replayed = false, .action_id = max, .selection = .{ .kind = Worst.tag(@FieldType(control.Selection, "kind")), .position = max } } },
         control.Reply{ .rejected = .{ .replayed = false, .code = Worst.tag(control.Rejection) } },
         control.Reply.conflict,
@@ -485,6 +468,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
             .presentation = if (kind == .tool_result or kind == .hosted_call) presentation else null,
             .admitted_at = if (kind == .user) max else null,
             .sender = if (kind == .user) .{ .session = session, .label = label } else null,
+            .source_action = if (kind == .user) max else null,
         };
         var response: protocol.FixedJsonBuffer(protocol.max_conversation_page_response_bytes) = .{};
         try response.render(renderConversationPage, .{&page});
@@ -498,8 +482,8 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     const reference: protocol.ActivityItem.Content = .{ .length = max, .digest = content.digest };
     const field: protocol.ProposalFieldReference = .{ .length = max, .digest = content.digest };
     const values = [_]protocol.ActivityItem.Value{
-        .{ .admission = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
-        .{ .user = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
+        .{ .admission = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer, .source_action = max } },
+        .{ .user = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer, .source_action = max } },
         .{ .assistant = .{ .content = reference, .final = false } },
         .{ .call = .{ .position = max, .operation = max, .turn = max, .call_ordinal = max, .action = max, .rejection = Worst.tag(protocol.ProposalRejection), .fields = @splat(field), .description = .{ .bytes = @splat(1), .len = CallText.max_description_bytes }, .tool = .{ .bytes = @splat(1), .len = CallText.max_tool_bytes }, .server = .{ .bytes = @splat(1), .len = CallText.max_server_bytes } } },
         .{ .tool_result = .{ .content = reference, .presentation = presentation } },
@@ -508,7 +492,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         .{ .stop = .{ .key = key, .turn = max, .cutoff = max, .completion = Worst.tag(protocol.SessionStopCompletion) } },
         .{ .sent = .{ .admission = max, .target = peer, .content = reference, .admitted_at = max } },
         .{ .send_failed = .{ .key = key, .target = peer, .code = code } },
-        .{ .received = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
+        .{ .received = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer, .source_action = max } },
         .{ .approval_requested = .{ .session = .{ .bytes = session.bytes[0..6].*, .len = 6 }, .action = max, .operation = max, .call_ordinal = max, .description = .{ .bytes = @splat(1), .len = CallText.max_description_bytes }, .tool = .{ .bytes = @splat(1), .len = CallText.max_tool_bytes }, .server = .{ .bytes = @splat(1), .len = CallText.max_server_bytes } } },
         .{ .session_changed = .{ .revision = max, .field = Worst.tag(protocol.SessionField), .provider_text = .{ .bytes = @splat(1), .len = protocol.max_report_bytes } } },
         .{ .compacted = .{ .operation = max, .dropped = max } },

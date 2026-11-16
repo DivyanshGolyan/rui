@@ -125,6 +125,9 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .down = .next,
     .left = null,
     .right = .open_session,
+    // Focus order's keys, which `app_input.keys` takes first.
+    .tab = null,
+    .shift_tab = null,
     .shift_up = .select_previous,
     .shift_down = .select_next,
     .page_up = null,
@@ -135,7 +138,7 @@ pub const keys: keymap.Keymap(Action) = .init(.{
 });
 
 test "keys list covers both screens without unbound or duplicate keys" {
-    try std.testing.expectEqual(@as(?keymap.ListError, null), keymap.listError(.{ keys, @import("session_keys.zig").keys }));
+    try std.testing.expectEqual(@as(?keymap.ListError, null), keymap.listError(.{ keys, @import("session_keys.zig").keys, @import("app_input.zig").keys }));
 }
 
 pub const Input = union(enum) { action: Action, enter, left, ignored };
@@ -144,6 +147,7 @@ pub const InputDelivery = struct {
     key: Input,
     under: bool = false,
     pasted: bool = false,
+    wide: bool = false,
 };
 
 pub const Delta = enum {
@@ -298,6 +302,7 @@ pub const CreateResult = union(enum) {
 
 pub const Event = union(enum) {
     input: InputDelivery,
+    list_settled: struct { wide: bool, focused: bool },
 
     resized: Size,
 
@@ -539,6 +544,7 @@ pub const Size = struct { width: u16 = 0, height: u16 = 0 };
 pub const IntentAdmission = enum { admitted, refused };
 
 pub const Effects = struct {
+    browse_open: bool = false,
     intent_admission: IntentAdmission = .refused,
     items: [3]Effect = undefined,
     len: usize = 0,
@@ -656,6 +662,8 @@ pub const State = struct {
     lines: Vec(Bounded(max_line_bytes)) = .{},
 
     selected: Selection = .new_session,
+    /// Coalesce moves until the existing application tick; no feed cache.
+    browse_pending: bool = false,
 
     conversing: ?Reference = null,
     read_instance: ?[16]u8 = null,
@@ -1177,6 +1185,11 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
     var effects: Effects = .{};
     switch (event) {
         .input => |input| try listInput(state, input, &effects),
+        .list_settled => |frame| {
+            const pending = state.browse_pending;
+            state.browse_pending = false;
+            if (pending and frame.wide and frame.focused) try activateList(state, .browse, &effects);
+        },
         .tick => |now_ms| try tick(state, now_ms, &effects),
         .list => |reply| switch (reply) {
             .page => |page| try listPage(state, page, &effects),
@@ -1832,18 +1845,25 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
         return;
     }
     if (delivery.under or state.creating()) return;
+    const before = state.selected;
     switch (input) {
         .ignored => unreachable,
-        .enter => try enter(state, effects),
+        .enter => {
+            state.browse_pending = false;
+            try activateList(state, .enter, effects);
+        },
         .left => if (state.selected == .archived) {
             state.selected = .sessions;
         },
         .action => |action| switch (action) {
             .exit => unreachable,
-            .open_session => switch (state.selected) {
-                .session => try enter(state, effects),
-                .sessions => state.selected = .archived,
-                .new_session, .archived, .settings => {},
+            .open_session => {
+                state.browse_pending = false;
+                switch (state.selected) {
+                    .session => try activateList(state, .open_session, effects),
+                    .sessions => state.selected = .archived,
+                    .new_session, .archived, .settings => {},
+                }
             },
             .clear => {
                 state.notice = null;
@@ -1860,6 +1880,9 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
                 select(state, action);
             },
         },
+    }
+    if (input == .action and (input.action == .previous or input.action == .next)) {
+        state.browse_pending = delivery.wide and (state.browse_pending or !std.meta.eql(before, state.selected));
     }
 }
 
@@ -1882,7 +1905,15 @@ fn adjacentSession(state: *State, direction: Action, effects: *Effects) error{Ou
 }
 
 fn enter(state: *State, effects: *Effects) error{OutOfMemory}!void {
+    try activateList(state, .enter, effects);
+}
+
+/// Enter activates any row; Right (`open_session`) and a settled browse
+/// act only on a Session row.
+const ListIntent = enum { enter, open_session, browse };
+fn activateList(state: *State, intent: ListIntent, effects: *Effects) error{OutOfMemory}!void {
     if (state.creating()) return;
+    if (intent != .enter and state.selected != .session) return;
     if (state.selected == .settings) {
         effects.add(.open_settings);
         return;
@@ -1890,7 +1921,7 @@ fn enter(state: *State, effects: *Effects) error{OutOfMemory}!void {
     if (state.selected == .sessions) return selectView(state, .active, effects);
     if (state.selected == .archived) return selectView(state, .archived, effects);
     if (state.selected == .session) if (state.conversing) |open| if (std.mem.eql(u8, &state.selected.session, &open)) {
-        effects.add(.focus_chat);
+        if (intent != .browse) effects.add(.focus_chat);
         return;
     };
     if (!admitHostRequest(state)) return;
@@ -1902,6 +1933,7 @@ fn enter(state: *State, effects: *Effects) error{OutOfMemory}!void {
         .settings, .sessions, .archived => unreachable,
         .session => if (state.selectedRow()) |row| {
             effects.add(.{ .open = row.reference });
+            effects.browse_open = intent == .browse;
         },
         .new_session => {
             if (state.request(.create, null)) effects.add(.{ .create = state.nextStart() });
@@ -2292,7 +2324,24 @@ const Spans = struct {
 pub const Keep = enum { head, tail };
 
 pub fn fitted(arena: Allocator, caps: Caps, bytes: []const u8, room: usize, keep: Keep) error{OutOfMemory}!Piece {
-    if (room == 0) return .{ .bytes = "", .cells = 0 };
+    return (try fittedMarked(arena, caps, bytes, room, keep, null)).piece;
+}
+
+/// A half-open byte interval in source text or its fitted display text.
+pub const ByteSpan = struct { start: usize, len: usize };
+
+pub const MarkedPiece = struct {
+    piece: Piece,
+    /// Only retained display bytes whose source intersects the requested
+    /// span, expanded to complete display pieces; never the ellipsis.
+    span: ?ByteSpan = null,
+};
+
+/// Fit through the same terminal-safe pieces as `fitted`, translating one
+/// source span as those pieces are retained. Normalization can change byte
+/// lengths before or within a match, so output equality is not provenance.
+pub fn fittedMarked(arena: Allocator, caps: Caps, bytes: []const u8, room: usize, keep: Keep, source_span: ?ByteSpan) error{OutOfMemory}!MarkedPiece {
+    if (room == 0) return .{ .piece = .{ .bytes = "", .cells = 0 } };
     const glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs;
     const total = measured(caps, glyphs, bytes);
     const ellipsis = glyphs.ellipsis;
@@ -2306,21 +2355,30 @@ pub fn fitted(arena: Allocator, caps: Caps, bytes: []const u8, room: usize, keep
     }
     var skip = if (keep == .tail) total - budget else 0;
     var pieces: Pieces = .{ .bytes = bytes, .caps = caps, .glyphs = glyphs };
-    while (pieces.next()) |piece| {
+    var displayed: ?ByteSpan = null;
+    while (true) {
+        const source_start = pieces.at;
+        const piece = pieces.next() orelse break;
         if (skip > 0) {
             skip -|= piece.cells;
             continue;
         }
         if (cells + piece.cells > budget) break;
+        const display_start = used;
         @memcpy(out[used..][0..piece.bytes.len], piece.bytes);
         used += piece.bytes.len;
         cells += piece.cells;
+        if (source_span) |mark| {
+            if (mark.len != 0 and mark.start < pieces.at and source_start < mark.start +| mark.len) {
+                if (displayed) |*mapped| mapped.len = used - mapped.start else displayed = .{ .start = display_start, .len = used - display_start };
+            }
+        }
     }
     if (keep == .head and total > room) {
         @memcpy(out[used..][0..ellipsis.len], ellipsis);
         used += ellipsis.len;
     }
-    return .{ .bytes = out[0..used], .cells = cells + @intFromBool(total > room) };
+    return .{ .piece = .{ .bytes = out[0..used], .cells = cells + @intFromBool(total > room) }, .span = displayed };
 }
 
 fn measured(caps: Caps, glyphs: Glyphs, bytes: []const u8) usize {
@@ -5709,6 +5767,152 @@ test "Overview list Right does not create or open Settings and clicks share resu
     try std.testing.expectEqual(@as(usize, 1), resumes);
 }
 
+test "Overview browse settles only the last wide list move and never activates controls" {
+    const rows = [_]Listed{
+        session("aaaaaa", .{ .idle = ago(1) }, .{ .label = "One" }),
+        session("bbbbbb", .{ .idle = ago(2) }, .{ .label = "Two" }),
+        session("cccccc", .{ .idle = ago(3) }, .{ .label = "Three" }),
+        session("dddddd", .{ .idle = ago(4) }, .{ .label = "Four" }),
+    };
+    for ([_]bool{ false, true }) |wide| for (std.enums.values(enum { chat, new_session, settings, rapid })) |landing| {
+        var state = try opened(&rows);
+        defer state.deinit();
+        _ = try step(&state, .{ .conversation = "aaaaaa".* });
+        state.selected = .{ .session = "aaaaaa".* };
+        if (landing == .settings) state.selected = .{ .session = "dddddd".* };
+        const moves: usize = if (landing == .rapid) 3 else 1;
+        var reads: usize = 0;
+        for (0..moves) |_| {
+            const effects = try step(&state, .{ .input = .{ .wide = wide, .key = .{ .action = if (landing == .new_session) .previous else .next } } });
+            for (effects.slice()) |effect| {
+                if (effect == .open) reads += 1;
+                try std.testing.expect(effect != .create and effect != .open_settings);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 0), reads);
+        const settled = try step(&state, .{ .list_settled = .{ .wide = wide, .focused = true } });
+        for (settled.slice()) |effect| {
+            if (effect == .open) {
+                reads += 1;
+                try std.testing.expectEqualStrings(if (landing == .rapid) "dddddd" else "bbbbbb", &effect.open);
+            }
+            try std.testing.expect(effect != .create and effect != .open_settings and effect != .focus_chat);
+        }
+        const expected = wide and (landing == .chat or landing == .rapid);
+        try std.testing.expectEqual(@as(usize, @intFromBool(expected)), reads);
+        try std.testing.expectEqual(expected, settled.browse_open);
+        try std.testing.expectEqual(@as(usize, 0), (try step(&state, .{ .list_settled = .{ .wide = wide, .focused = true } })).len);
+    };
+}
+
+test "Overview browse explicit Enter and Right share activation and focus departure cancels settle" {
+    for ([_]bool{ false, true }) |wide| for ([_]Input{ .enter, .{ .action = .open_session } }) |key| for ([_]Selection{ .new_session, .settings, .{ .session = "b2c3d4".* }, .{ .session = "g7h8j9".* } }) |selection| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        _ = try step(&state, .{ .conversation = "b2c3d4".* });
+        state.selected = selection;
+        state.browse_pending = true;
+        const effects = try step(&state, .{ .input = .{ .wide = wide, .key = key } });
+        try std.testing.expect(!state.browse_pending and !effects.browse_open);
+        const expected: std.meta.Tag(Effect) = switch (selection) {
+            .sessions, .archived => unreachable,
+            .new_session => if (key == .enter) .new_session else continue,
+            .settings => if (key == .enter) .open_settings else continue,
+            .session => |reference| if (std.mem.eql(u8, &reference, "b2c3d4")) .focus_chat else .open,
+        };
+        var count: usize = 0;
+        for (effects.slice()) |effect| if (std.meta.activeTag(effect) == expected) {
+            count += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), count);
+    };
+    var state = try opened(&mixed);
+    defer state.deinit();
+    _ = try step(&state, .{ .input = .{ .wide = true, .key = .{ .action = .next } } });
+    try std.testing.expect(state.browse_pending);
+    const cancelled = try step(&state, .{ .list_settled = .{ .wide = true, .focused = false } });
+    try std.testing.expectEqual(@as(usize, 0), cancelled.len);
+    try std.testing.expect(!state.browse_pending);
+}
+
+test "Overview browse New Session never activates until Enter and remains reachable from chat lists" {
+    for ([_]bool{ false, true }) |wide| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        state.selected = .new_session;
+        state.browse_pending = true;
+        const settled = try step(&state, .{ .list_settled = .{ .wide = wide, .focused = true } });
+        try std.testing.expectEqual(@as(usize, 0), settled.len);
+        _ = try step(&state, .{ .conversation = "b2c3d4".* });
+        _ = try step(&state, .{ .input = .{ .wide = wide, .key = .{ .action = .first } } });
+        try std.testing.expect(state.selected == .new_session);
+        _ = try step(&state, .{ .input = .{ .wide = wide, .key = .{ .action = .previous } } });
+        try std.testing.expect(state.selected == .new_session);
+    }
+}
+
+test "the shared row fitter translates source marks through normalization and clipping" {
+    const Case = struct {
+        text: []const u8,
+        source: ?ByteSpan,
+        room: usize = 40,
+        keep: Keep = .head,
+        unicode: bool = true,
+        shown: []const u8,
+        span: ?ByteSpan = null,
+    };
+    const cases = [_]Case{
+        .{ .text = "Verify", .source = .{ .start = 0, .len = 6 }, .shown = "Verify", .span = .{ .start = 0, .len = 6 } },
+        .{ .text = "界 Verify the project", .source = .{ .start = 4, .len = 6 }, .shown = "界 Verify the project", .span = .{ .start = 4, .len = 6 } },
+        .{ .text = "界 Verify the project", .source = .{ .start = 4, .len = 6 }, .unicode = false, .shown = "? Verify the project", .span = .{ .start = 2, .len = 6 } },
+        .{ .text = "Verify 界", .source = .{ .start = 0, .len = 6 }, .shown = "Verify 界", .span = .{ .start = 0, .len = 6 } },
+        .{ .text = "Verify 界", .source = .{ .start = 0, .len = 6 }, .unicode = false, .shown = "Verify ?", .span = .{ .start = 0, .len = 6 } },
+        .{ .text = "界Verify", .source = .{ .start = 0, .len = 9 }, .shown = "界Verify", .span = .{ .start = 0, .len = 9 } },
+        .{ .text = "界Verify", .source = .{ .start = 0, .len = 9 }, .unicode = false, .shown = "?Verify", .span = .{ .start = 0, .len = 7 } },
+        .{ .text = "\tVerify", .source = .{ .start = 1, .len = 6 }, .shown = " Verify", .span = .{ .start = 1, .len = 6 } },
+        .{ .text = "\tVerify", .source = .{ .start = 1, .len = 6 }, .unicode = false, .shown = " Verify", .span = .{ .start = 1, .len = 6 } },
+        .{ .text = "\x01 Verify", .source = .{ .start = 2, .len = 6 }, .shown = "? Verify", .span = .{ .start = 2, .len = 6 } },
+        .{ .text = "\xff Verify", .source = .{ .start = 2, .len = 6 }, .shown = "? Verify", .span = .{ .start = 2, .len = 6 } },
+        .{ .text = "Ver\tify", .source = .{ .start = 0, .len = 7 }, .shown = "Ver ify", .span = .{ .start = 0, .len = 7 } },
+        .{ .text = "Ver\nify", .source = .{ .start = 0, .len = 7 }, .shown = "Ver↵ify", .span = .{ .start = 0, .len = 9 } },
+        .{ .text = "Ver\nify", .source = .{ .start = 0, .len = 7 }, .unicode = false, .shown = "Ver|ify", .span = .{ .start = 0, .len = 7 } },
+        .{ .text = "界 Verify the project", .source = .{ .start = 4, .len = 6 }, .room = 9, .shown = "界 Verif…", .span = .{ .start = 4, .len = 5 } },
+        .{ .text = "界 Verify the project", .source = .{ .start = 4, .len = 6 }, .room = 9, .unicode = false, .shown = "? Verify.", .span = .{ .start = 2, .len = 6 } },
+        .{ .text = "界 Verify the project", .source = .{ .start = 4, .len = 6 }, .room = 3, .shown = "界…" },
+        .{ .text = "界 Verify the project", .source = .{ .start = 4, .len = 6 }, .room = 3, .unicode = false, .shown = "? ." },
+        .{ .text = "Verify", .source = .{ .start = 0, .len = 6 }, .room = 0, .shown = "" },
+        .{ .text = "Verify", .source = .{ .start = 0, .len = 6 }, .room = 1, .shown = "…" },
+        .{ .text = "Verify", .source = .{ .start = 0, .len = 6 }, .room = 1, .unicode = false, .shown = "." },
+        .{ .text = "Verify", .source = .{ .start = 0, .len = 6 }, .room = 1, .keep = .tail, .shown = "…" },
+        .{ .text = "Verify", .source = .{ .start = 0, .len = 6 }, .room = 1, .keep = .tail, .unicode = false, .shown = "." },
+        .{ .text = "界 Verify", .source = .{ .start = 4, .len = 6 }, .room = 6, .keep = .tail, .shown = "…erify", .span = .{ .start = 3, .len = 5 } },
+        .{ .text = "界 Verify", .source = .{ .start = 4, .len = 6 }, .room = 6, .keep = .tail, .unicode = false, .shown = ".erify", .span = .{ .start = 1, .len = 5 } },
+        .{ .text = "界 Verify", .source = .{ .start = 0, .len = 3 }, .room = 6, .keep = .tail, .shown = "…erify" },
+        .{ .text = "界 Verify", .source = .{ .start = 0, .len = 3 }, .room = 6, .keep = .tail, .unicode = false, .shown = ".erify" },
+        .{ .text = "Verify 界", .source = .{ .start = 0, .len = 10 }, .room = 4, .keep = .tail, .shown = "… 界", .span = .{ .start = 3, .len = 4 } },
+        .{ .text = "Verify 界", .source = .{ .start = 0, .len = 10 }, .room = 4, .keep = .tail, .unicode = false, .shown = ".y ?", .span = .{ .start = 1, .len = 3 } },
+        .{ .text = "e\u{301}clair", .source = .{ .start = 0, .len = 1 }, .room = 5, .shown = "e\u{301}cla…", .span = .{ .start = 0, .len = 3 } },
+        .{ .text = "e\u{301}clair", .source = .{ .start = 0, .len = 1 }, .room = 5, .unicode = false, .shown = "e?cl.", .span = .{ .start = 0, .len = 1 } },
+        .{ .text = "e\u{301}clair", .source = .{ .start = 1, .len = 2 }, .room = 5, .shown = "e\u{301}cla…", .span = .{ .start = 0, .len = 3 } },
+        .{ .text = "e\u{301}clair", .source = .{ .start = 1, .len = 2 }, .room = 5, .unicode = false, .shown = "e?cl.", .span = .{ .start = 1, .len = 1 } },
+        .{ .text = "Verify", .source = null, .shown = "Verify" },
+        .{ .text = "Verify", .source = .{ .start = 0, .len = 0 }, .shown = "Verify" },
+        .{ .text = "Verify", .source = .{ .start = 99, .len = 1 }, .shown = "Verify" },
+        .{ .text = "Verify", .source = .{ .start = 5, .len = std.math.maxInt(usize) }, .shown = "Verify", .span = .{ .start = 5, .len = 1 } },
+    };
+    for (std.enums.values(gwidth.Method)) |method| for (cases) |case| {
+        errdefer std.debug.print("source={s} unicode={} room={} keep={t} method={t}\n", .{ case.text, case.unicode, case.room, case.keep, method });
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const caps: Caps = .{ .unicode = case.unicode, .width = method };
+        const shown = try fittedMarked(arena.allocator(), caps, case.text, case.room, case.keep, case.source);
+        try std.testing.expectEqualStrings(case.shown, shown.piece.bytes);
+        try std.testing.expectEqualDeep(case.span, shown.span);
+        const plain = try fitted(arena.allocator(), caps, case.text, case.room, case.keep);
+        try std.testing.expectEqualDeep(plain, shown.piece);
+    };
+}
+
 test "the shared row fitter handles no description cells without allocating or underflowing" {
     for ([_]Keep{ .head, .tail }) |keep| {
         var storage: [0]u8 = .{};
@@ -5716,6 +5920,9 @@ test "the shared row fitter handles no description cells without allocating or u
         const shown = try fitted(fixed.allocator(), .{}, "description", 0, keep);
         try std.testing.expectEqualStrings("", shown.bytes);
         try std.testing.expectEqual(@as(usize, 0), shown.cells);
+        const marked = try fittedMarked(fixed.allocator(), .{}, "description", 0, keep, .{ .start = 0, .len = 6 });
+        try std.testing.expectEqualDeep(shown, marked.piece);
+        try std.testing.expectEqual(@as(?ByteSpan, null), marked.span);
     }
 }
 

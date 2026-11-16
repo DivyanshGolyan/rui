@@ -16,8 +16,8 @@ from textwrap import dedent
 from unittest.mock import patch
 
 import build_files
-from select_tests import (BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURE_COVERS, FIXTURES, LIVE_POSTGRES_TARGETS, LIVE_RULES,
-                          POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, SCREEN_TARGETS, SETUP_PARTS, TEST_CODE, UNIT_ROOTS, Graph, execution_batches, matches, select,
+from select_tests import (BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURES, LIVE_POSTGRES_TARGETS, LIVE_RULES,
+                          POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, SCREEN_TARGETS, SETUP_PARTS, TEST_CODE, UNIT_ROOTS, Graph, covers, execution_batches, matches, select,
                           setup_requirements, tree_graph, uses_live_mysql, live_mysql_suites, mysql_provisioning)
 from qualification import LONG_GATES, NATIVE, RESOURCES, SHARDS_BESIDE_LONG_GATE, qualification, shards
 
@@ -34,14 +34,6 @@ def named_paths(patterns):
     named = {pattern for pattern in included if not any(char in pattern for char in "*?[")}
     named |= {path for path in tracked if matches(path, patterns)}
     return sorted(path for path in named if matches(path, patterns))
-
-
-def covered(target, targets):
-    return (target in targets or target in CHECK_COVERS and bool(targets & {"check", "check-full"})
-            or target in {"test-native", "test-store"} and "test" in targets
-            or any(target in cases and broad in targets for broad, cases in FIXTURE_COVERS.items())
-            or target in {"check", "stack-frames"} and "check-full" in targets
-            or target == "stack-frames" and "check" in targets)
 
 
 class AssertedTextSelectionTest(unittest.TestCase):
@@ -393,7 +385,7 @@ class RuleMatchTest(unittest.TestCase):
                     wanted = set(checks) if phase == "review" else set()
                     if checks and not targets:
                         failures.append((phase, path, reason, "selected nothing"))
-                    missing = {target for target in wanted if not covered(target, targets)}
+                    missing = {target for target in wanted if not covers(target, targets)}
                     if missing:
                         failures.append((phase, path, reason, sorted(missing)))
                     if served_by and not targets & served_by:
@@ -455,15 +447,23 @@ class BuildModuleTest(unittest.TestCase):
                 owned = {step for step, owner in defined.items() if owner == module}
                 self.assertEqual(bool(selected), bool(owned & selectable) or bool(targets), module)
                 self.assertLessEqual(set(targets) if targets != BUILD_HUB else set(), AVAILABLE)
-                covered = (selected | {case for broad, cases in FIXTURE_COVERS.items() if broad in selected for case in cases}
-                           | (CHECK_COVERS if selected & {"check", "check-full"} else set())
-                           | ({"test-native", "test-store"} if "test" in selected else set()))
-                self.assertLessEqual({step for step, owner in defined.items() if owner == module} & selectable, covered)
+                required = owned & selectable
                 if targets != BUILD_HUB:
-                    self.assertLessEqual(set(targets), covered)
+                    required |= set(targets)
+                self.assertTrue(all(covers(target, selected) for target in required), (module, required, selected))
 
 
 class SelectionTest(unittest.TestCase):
+    def test_verify_rui_map_is_never_skipped_for_map_inputs(self):
+        for path in (".claude/skills/verify-rui/scripts/frames.json",
+                     ".claude/skills/verify-rui/features/README.md",
+                     ".claude/skills/verify-rui/features/frames.md",
+                     ".claude/skills/verify-rui/features/new-feature.md"):
+            for phase in ("development", "review"):
+                with self.subTest(path=path, phase=phase):
+                    skips = select([path], phase, AVAILABLE)["policy_skips"]
+                    self.assertFalse(any(unit.startswith("test_verify_rui_map") for unit in skips))
+
     def test_live_mysql_case_detection_ignores_forwarding_and_provisioning(self):
         for source in (
             'import live_engines\nsocket = env.get(live_engines.MYSQL_SOCKET)',
@@ -639,7 +639,7 @@ class SelectionTest(unittest.TestCase):
                      "tests/integration/model_fixture.py", "tests/integration/host_process.py",
                      "tests/integration/bash_fixture.py", "tests/integration/canonical_fixture.py"):
             selected = set(select([path], "review", AVAILABLE)["targets"])
-            self.assertTrue(covered("request-wait-integration", selected), (path, selected))
+            self.assertTrue(covers("request-wait-integration", selected), (path, selected))
         core = select(["src/request_wait.zig"], "review", AVAILABLE)["targets"]
         self.assertIn("test-logic", core)
         self.assertIn("request-wait-integration", core)
@@ -737,7 +737,7 @@ class SelectionTest(unittest.TestCase):
                               ("src/peer_message.txt", {"peer-integration", "sender-identity-integration"})):
             with self.subTest(path=path):
                 targets = set(select([path], "review", AVAILABLE)["targets"])
-                self.assertEqual({target for target in request | readers if not covered(target, targets)}, set())
+                self.assertEqual({target for target in request | readers if not covers(target, targets)}, set())
 
     def test_cli_configuration_surface_runs_the_measurement_configure_contract(self):
         for path in ("src/cli_args.zig", "src/client.zig", "src/configure_input.zig", "src/product_defaults.zig",
@@ -863,12 +863,12 @@ class SelectionTest(unittest.TestCase):
             self.assertNotIn("human-cli-integration", result[family])
         result = select(["src/serve_grammar.zig"], "review", AVAILABLE)
         for target in ("host-launch-integration", "request-wait-integration"):
-            self.assertTrue(covered(target, set(result["targets"])), target)
+            self.assertTrue(covers(target, set(result["targets"])), target)
         for path in ("src/cli_grammar.zig", "src/cli_option_names.zig"):
             targets = set(select([path], "review", AVAILABLE)["targets"])
             for target in ("human-cli-integration", "request-wait-integration", "admission-debug-integration",
                            "measurement-check", "upgrade-integration", "installer-integration"):
-                self.assertTrue(covered(target, targets), (path, target))
+                self.assertTrue(covers(target, targets), (path, target))
 
     def test_strict_paths_never_retry(self):
         for paths in (["tests/integration/bash_integration.py"], ["src/store.zig"], ["src/server.zig"],
@@ -1330,8 +1330,7 @@ class SelectionTest(unittest.TestCase):
             for path in (*scripts, *executables):
                 with self.subTest(target=target, path=path):
                     result = select([path], "review", AVAILABLE)
-                    covering = {broad for broad, cases in FIXTURE_COVERS.items() if target in cases}
-                    self.assertTrue(({target} | covering | {"check", "check-full"}) & set(result["targets"]))
+                    self.assertTrue(covers(target, set(result["targets"])), (path, target, result["targets"]))
 
     def test_every_script_the_build_runs_is_a_declared_fixture(self):
         declared = {script for scripts, _, _ in FIXTURES.values() for script in scripts}
@@ -1393,7 +1392,7 @@ class SelectionTest(unittest.TestCase):
                      "tests/integration/mcp_sdk/server.mjs",
                      "tests/integration/mcp_sdk/package-lock.json"):
             targets = set(select([path], "review", AVAILABLE)["targets"])
-            self.assertTrue(covered("settings-integration", targets), (path, targets))
+            self.assertTrue(covers("settings-integration", targets), (path, targets))
         for target in ("settings-integration", "check", "check-full"):
             self.assertTrue(setup_requirements([target])["node"], target)
 

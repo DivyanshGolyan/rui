@@ -1,6 +1,7 @@
 const std = @import("std");
 const model_catalog = @import("model_catalog.zig");
 const protocol = @import("protocol.zig");
+const command_spec = @import("command_spec.zig");
 const session_list = @import("session_list.zig");
 const activity_reply = @import("activity_reply.zig");
 pub const SessionToken = @import("change_ring.zig").SessionToken;
@@ -38,6 +39,7 @@ pub const ConversationPage = struct {
         presentation: ?protocol.ToolPresentation = null,
         admitted_at: ?u64 = null,
         sender: ?protocol.NamedPeer = null,
+        source_action: ?u64 = null,
     };
     end: u64,
     items: [protocol.public_conversation_page_items]Item = undefined,
@@ -58,6 +60,7 @@ pub const ConversationPage = struct {
             presentation: ?JsonToolPresentation = null,
             admitted_at: ?JsonString(20) = null,
             sender: ?JsonNamedPeer = null,
+            source_action: ?JsonString(20) = null,
         };
         const Rows = JsonArray(Row, protocol.public_conversation_page_items);
         const Wire = struct {
@@ -85,8 +88,10 @@ pub const ConversationPage = struct {
             item.presentation = if (row.presentation) |p| p.value else null;
             item.admitted_at = if (row.admitted_at) |second| try decimalId(second, false) else null;
             item.sender = if (row.sender) |sender| sender.peer() catch return error.InvalidConversationPage else null;
+            item.source_action = if (row.source_action) |action| try decimalId(action, false) else null;
             if ((item.kind == .tool_result or hosted) != (item.presentation != null) or (item.kind == .user) != (item.admitted_at != null) or
-                (item.kind != .user and item.sender != null) or
+                (item.kind != .user and (item.sender != null or item.source_action != null)) or
+                (item.sender != null and item.source_action != null) or
                 (item.admitted_at orelse 0) > std.math.maxInt(i64)) return error.InvalidConversationPage;
             if (item.presentation) |p| if (p.publication_position != item.position or (hosted and p.description == null)) return error.InvalidConversationPage;
             if (row.content) |reference| {
@@ -138,7 +143,7 @@ pub const ActivityPage = struct {
         if (bytes.len > activity_reply.max_page_bytes) return error.InvalidActivityPage;
         const Ref = struct { bytes: JsonString(20), sha256: JsonString(64) };
         const Fact = protocol.ActivityItem;
-        const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonNamedPeer, content: Ref };
+        const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonNamedPeer, source_action: ?JsonString(20) = null, content: Ref };
         const Sent = struct { admission: JsonString(20), admitted_at: JsonString(20), target: JsonNamedPeer, content: Ref };
         const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: ?JsonNamedPeer, code: JsonString(protocol.max_code_bytes) };
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref, description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
@@ -190,9 +195,9 @@ pub const ActivityPage = struct {
                 }) or !cursor.kinds.contains(std.meta.stringToEnum(protocol.ActivityItem.Kind, @tagName(item.value)).?)) return error.InvalidActivityPage;
             switch (item.value) {
                 inline .admission, .user, .received => |message, kind| {
-                    const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = try content(message.content), .admitted_at = try id(message.admitted_at, false), .sender = if (message.sender) |sender| try sender.peer() else null };
+                    const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = try content(message.content), .admitted_at = try id(message.admitted_at, false), .sender = if (message.sender) |sender| try sender.peer() else null, .source_action = if (message.source_action) |action| try id(action, false) else null };
                     if ((value.state == .applied) != (value.turn != null) or (kind == .user and value.state != .applied)) return error.InvalidActivityPage;
-                    if (kind != .user and (fact.at != value.admitted_at or (kind == .received) != (value.sender != null))) return error.InvalidActivityPage;
+                    if ((value.sender != null and value.source_action != null) or (kind != .user and (fact.at != value.admitted_at or (kind == .received) != (value.sender != null or value.source_action != null)))) return error.InvalidActivityPage;
                     fact.value = @unionInit(Fact.Value, @tagName(kind), value);
                 },
                 .sent => |sent| {
@@ -1757,7 +1762,25 @@ pub const CommandObservation = struct {
         return result;
     }
 
+    fn validateFieldPresence(self: *const CommandObservation, comptime kind: protocol.CommandKind, comptime message_fields: bool) !void {
+        @setEvalBranchQuota(10_000);
+        const fields = comptime command_spec.spec(kind).observation_fields;
+        const message = comptime command_spec.spec(.message).observation_fields;
+        inline for (comptime std.meta.tags(command_spec.ObservationField)) |field| {
+            const belongs_to_message = comptime command_spec.ObservationFields.contains(message.always, field) or
+                command_spec.ObservationFields.contains(message.accepted, field) or command_spec.ObservationFields.contains(message.conditional, field);
+            if (comptime belongs_to_message != message_fields) continue;
+            const required = comptime command_spec.ObservationFields.contains(fields.always, field);
+            const on_acceptance = comptime command_spec.ObservationFields.contains(fields.accepted, field);
+            const conditional = comptime command_spec.ObservationFields.contains(fields.conditional, field);
+            const present = @field(self, @tagName(field)) != null;
+            const needed = required or (self.status == .accepted and on_acceptance);
+            if ((needed and !present) or (present and !needed and !conditional)) return error.InvalidObservation;
+        }
+    }
+
     fn validate(self: *const CommandObservation) !void {
+        @setEvalBranchQuota(10_000);
         if (self.status == .absent) {
             inline for (.{ "kind", "target", "code", "revision", "created", "input", "state", "queue", "binding", "result", "work", "recovery", "selection", "archived", "pinned", "completion", "interruption_target", "permission_target", "action_target", "action_selection" }) |name| if (@field(self, name) != null) return error.InvalidObservation;
             return;
@@ -1769,19 +1792,14 @@ pub const CommandObservation = struct {
         if (self.code) |code| if (code.len == 0) return error.InvalidObservation;
         const accepted = self.status == .accepted;
         if (accepted and !protocol.validSessionId(self.target.?.slice())) return error.InvalidObservation;
-        if ((self.revision != null) != (accepted and kind == .configure) or (self.created != null) != (accepted and kind == .configure)) return error.InvalidObservation;
-        if ((self.selection != null) != (accepted and kind == .session_stop) or
-            (self.archived != null) != (accepted and kind == .session_archive) or
-            (self.pinned != null) != (accepted and kind == .session_pin) or
-            (self.completion != null) != (accepted and (kind == .session_stop or kind == .session_archive))) return error.InvalidObservation;
-        if ((self.interruption_target != null) != (kind == .model_interruption) or (self.permission_target != null) != (kind == .permission_decision)) return error.InvalidObservation;
-        if ((self.action_target != null) != (kind == .action_background) or
-            (self.action_selection != null) != (accepted and kind == .action_background)) return error.InvalidObservation;
-        if (self.interruption_target) |target| if (!target.session.eql(self.target.?.slice())) return error.RequestBindingMismatch;
-        if (kind != .message) {
-            if (self.state != null or self.input != null or self.queue != null or self.binding != null or self.result != null or self.work != null or self.recovery != null) return error.InvalidObservation;
-            return;
+        switch (kind) {
+            inline else => |command_kind| {
+                try self.validateFieldPresence(command_kind, false);
+                if (self.interruption_target) |target| if (!target.session.eql(self.target.?.slice())) return error.RequestBindingMismatch;
+                try self.validateFieldPresence(command_kind, true);
+            },
         }
+        if (kind != .message) return;
         const state = self.state orelse return error.InvalidObservation;
         if (!accepted) {
             if (state != .rejected or self.queue != null or self.binding != null or self.result != null or self.work != null or self.recovery != null) return error.InvalidObservation;
@@ -3111,6 +3129,76 @@ test "keyed observation retains Host state independently of admission and bindin
     }
 }
 
+fn observationFieldSample() !CommandObservation {
+    const body = testing_observation_prefix ++ testing_observation_message ++ ",\"state\":\"queued\"" ++ testing_observation_input ++ testing_observation_queue ++ testing_observation_work ++ "}}";
+    var sample = try CommandObservation.parse(.{ .status = 200, .body = body }, "k");
+    sample.revision = 31;
+    sample.created = true;
+    sample.binding = .{ .turn = 37, .operation = 41, .attempt = 0 };
+    sample.result = .{ .status = .cancelled, .code = try protocol.Bounded(protocol.max_code_bytes).from("cancelled"), .text = null };
+    sample.recovery = .{ .more = false };
+    sample.selection = .{ .turn = null, .admission_cutoff = 0 };
+    sample.archived = false;
+    sample.pinned = false;
+    sample.completion = .completed;
+    sample.interruption_target = .{ .session = try protocol.Bounded(protocol.max_session_bytes).from("k7m2qx"), .turn = 3, .operation = 7 };
+    sample.permission_target = .{ .action = 29, .decision = .allow_once };
+    sample.action_target = 29;
+    sample.action_selection = .{ .kind = .background, .position = 31 };
+    return sample;
+}
+
+// Each base fixture below has one valid minimal shape. Toggling any payload
+// field invalidates it, except that a rejected Message may also retain its input.
+// This expectation comes from the pre-table validator, not command_spec's sets.
+fn expectObservationFieldPresence(original: *const CommandObservation) !void {
+    const sample = try observationFieldSample();
+    inline for (comptime std.meta.fieldNames(CommandObservation)) |name| {
+        if (comptime !std.mem.eql(u8, name, "key") and !std.mem.eql(u8, name, "status") and
+            !std.mem.eql(u8, name, "kind") and !std.mem.eql(u8, name, "target") and !std.mem.eql(u8, name, "code"))
+        {
+            var changed = original.*;
+            @field(changed, name) = if (@field(original, name) != null) null else @field(sample, name).?;
+            const retained_input = comptime std.mem.eql(u8, name, "input");
+            if (retained_input and original.kind == .message and original.status == .rejected) {
+                try changed.validate();
+            } else try std.testing.expectError(error.InvalidObservation, changed.validate());
+        }
+    }
+}
+
+test "keyed observation preserves binding error precedence beside foreign fields" {
+    const body = testing_observation_prefix ++ "{\"status\":\"accepted\",\"kind\":\"model_interruption\",\"target\":\"k7m2qx\",\"interruption_target\":{\"session\":\"09azvw\",\"turn\":\"3\",\"operation\":\"7\"}}}";
+    var mismatch: CommandObservation = .{
+        .key = try protocol.Bounded(protocol.max_key_bytes).from("k"),
+        .kind = .model_interruption,
+        .status = .accepted,
+        .target = try protocol.Bounded(protocol.max_session_bytes).from("k7m2qx"),
+        .interruption_target = .{ .session = try protocol.Bounded(protocol.max_session_bytes).from("09azvw"), .turn = 3, .operation = 7 },
+    };
+    try std.testing.expectError(error.RequestBindingMismatch, CommandObservation.parse(.{ .status = 200, .body = body }, "k"));
+    const sample = try observationFieldSample();
+    inline for (.{ .accepted, .rejected }) |status| {
+        mismatch.status = status;
+        mismatch.code = if (status == .rejected) try protocol.Bounded(protocol.max_code_bytes).from("unknown_operation") else null;
+        inline for (.{ "input", "state", "queue", "binding", "result", "work", "recovery" }) |name| {
+            var changed = mismatch;
+            @field(changed, name) = @field(sample, name);
+            try std.testing.expectError(error.RequestBindingMismatch, changed.validate());
+            changed.interruption_target.?.session = changed.target.?;
+            try std.testing.expectError(error.InvalidObservation, changed.validate());
+        }
+        inline for (.{ "revision", "created", "selection", "archived", "pinned", "completion", "permission_target", "action_target", "action_selection" }) |name| {
+            var changed = mismatch;
+            @field(changed, name) = @field(sample, name);
+            try std.testing.expectError(error.InvalidObservation, changed.validate());
+        }
+    }
+    mismatch.interruption_target = null;
+    mismatch.input = sample.input;
+    try std.testing.expectError(error.InvalidObservation, mismatch.validate());
+}
+
 test "keyed observation validates every operation shape and binding" {
     const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{\"target\":\"k7m2qx\",";
     inline for (.{
@@ -3127,6 +3215,7 @@ test "keyed observation validates every operation shape and binding" {
         const observed = try CommandObservation.parse(.{ .status = 200, .body = accepted }, "k");
         try std.testing.expectEqualStrings(case[0], @tagName(observed.kind.?));
         try std.testing.expectEqual(.accepted, observed.status);
+        try expectObservationFieldPresence(&observed);
         var output: [protocol.command_observation_reply.max_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&output);
         try observed.writeJson(&writer);
@@ -3135,6 +3224,7 @@ test "keyed observation validates every operation shape and binding" {
         const rejected = try CommandObservation.parse(.{ .status = 200, .body = prefix ++ "\"kind\":\"" ++ case[0] ++ "\",\"status\":\"rejected\",\"code\":\"unknown_session\"" ++ case[2] ++ "}}" }, "k");
         try std.testing.expectEqual(.rejected, rejected.status);
         try std.testing.expectEqualStrings("unknown_session", rejected.failureCode().?);
+        try expectObservationFieldPresence(&rejected);
         writer = std.Io.Writer.fixed(&output);
         try rejected.writeJson(&writer);
         try std.testing.expectEqualStrings("{\"status\":\"rejected\",\"kind\":\"" ++ case[0] ++ "\",\"target\":\"k7m2qx\",\"code\":\"unknown_session\"" ++ case[2] ++ "}", writer.buffered());
@@ -3152,6 +3242,7 @@ test "keyed observation validates every operation shape and binding" {
             try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = creation ++ target ++ "}}" }, "k"));
     }
     const absent = try CommandObservation.parse(.{ .status = 200, .body = testing_observation_prefix ++ "{\"status\":\"absent\"}}" }, "k");
+    try expectObservationFieldPresence(&absent);
     const address = try MessageAddress.init("/store", "k7m2qx", "k");
     try std.testing.expectError(error.RequestNotAdmitted, absent.forMessage(&address));
     const rejection = try CommandObservation.parse(.{ .status = 200, .body = prefix ++ "\"kind\":\"message\",\"status\":\"rejected\",\"state\":\"rejected\",\"code\":\"unknown_session\"}}" }, "k");
@@ -3953,4 +4044,36 @@ test "Session pin list ranks round trip as positive decimal strings" {
     var writer = std.Io.Writer.fixed(&output);
     try decoded.page.writeJson(&writer);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"pin_order\":\"9223372036854775807\"") != null);
+}
+
+test "command_spec observation fields match CommandObservation" {
+    const Observation = CommandObservation;
+    inline for (comptime std.meta.fieldNames(Observation)) |name| {
+        if (comptime !std.mem.eql(u8, name, "key") and !std.mem.eql(u8, name, "status") and
+            !std.mem.eql(u8, name, "kind") and !std.mem.eql(u8, name, "target") and !std.mem.eql(u8, name, "code"))
+        {
+            try std.testing.expect(std.meta.stringToEnum(command_spec.ObservationField, name) != null);
+        }
+    }
+    inline for (comptime std.meta.tags(command_spec.ObservationField)) |field| {
+        try std.testing.expect(@hasField(Observation, @tagName(field)));
+        var owned = false;
+        inline for (comptime std.meta.tags(protocol.CommandKind)) |kind| {
+            const fields = comptime command_spec.spec(kind).observation_fields;
+            owned = owned or command_spec.ObservationFields.contains(fields.always, field) or
+                command_spec.ObservationFields.contains(fields.accepted, field) or command_spec.ObservationFields.contains(fields.conditional, field);
+        }
+        try std.testing.expect(owned);
+    }
+    inline for (comptime std.meta.tags(protocol.CommandKind)) |kind| {
+        const fields = comptime command_spec.spec(kind).observation_fields;
+        inline for (.{ fields.always, fields.accepted, fields.conditional }, 0..) |set, index| {
+            for (set, 0..) |field, at| {
+                try std.testing.expect(!command_spec.ObservationFields.contains(set[0..at], field));
+                inline for (.{ fields.always, fields.accepted, fields.conditional }, 0..) |other, other_index| {
+                    if (index != other_index) try std.testing.expect(!command_spec.ObservationFields.contains(other, field));
+                }
+            }
+        }
+    }
 }
