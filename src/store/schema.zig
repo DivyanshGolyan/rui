@@ -1908,7 +1908,7 @@ pub fn objects(comptime dialect: rsql.Dialect) []const Object {
 pub const mysql_session = [_][:0]const u8{
     "SET NAMES utf8mb4 COLLATE utf8mb4_0900_bin",
     "SET SESSION sql_mode='ONLY_FULL_GROUP_BY,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION,NO_BACKSLASH_ESCAPES'",
-    std.fmt.comptimePrint("SET SESSION group_concat_max_len={d}", .{tool_name.max_names_bytes}),
+    std.fmt.comptimePrint("SET SESSION group_concat_max_len={d}", .{tool_name.max_offered_names_bytes}),
     "SET SESSION autocommit=1",
 };
 

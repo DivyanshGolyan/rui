@@ -44,11 +44,11 @@ const projected = rsql.Read(.{
 pub const OfferedRecord = projected.Row;
 
 pub fn project(a: anytype, allowed: u64, loaded: ?u64, sink: anytype) void {
-    a.readEach(projected, .{ .allowed = allowed, .loaded = loaded orelse allowed }, tool_name.max_tools + 2, sink);
+    a.readEach(projected, .{ .allowed = allowed, .loaded = loaded orelse allowed }, tool_name.max_offered_tools + 1, sink);
 }
 
 const Projection = struct {
-    members: [tool_name.max_tools + 1]tool_set.Member = undefined,
+    members: [tool_name.max_offered_tools]tool_set.Member = undefined,
     count: usize = 0,
     invalid: bool = false,
 

@@ -137,3 +137,71 @@ test "stop_action refuses another Session's Action" {
         }
     }.check);
 }
+
+test "stop_action cancellation races do not fence the Store" {
+    try storage.testing.forEachEngine(struct {
+        fn check(case: *storage.testing.Case) !void {
+            for ([_]enum { stop, archive }{ .stop, .archive }) |mode| {
+                for ([_]enum { before_selection, after_selection, after_stop_selection }{ .before_selection, .after_selection, .after_stop_selection }) |phase| {
+                    var tmp = std.testing.tmpDir(.{});
+                    defer tmp.cleanup();
+                    var database: storage.Store = undefined;
+                    try storage.testing.testingStore(case, &database, &tmp, std.testing.io);
+                    defer database.close() catch unreachable;
+                    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                    defer arena_state.deinit();
+                    const arena = arena_state.allocator();
+                    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                    const workspace = try storage.testingCanonicalCwd(std.testing.io, &workspace_buffer);
+                    var configure = try storage.testingCompleteConfiguration("stale-stop", "", workspace, "model-a");
+                    configure.configuration.tools = try .of(&.{ "bash", "read_action", "stop_action" });
+                    configure.configuration.permission_mode.state = .value;
+                    try configure.configuration.permission_mode.value.set("bypass");
+                    const session = (try database.configure(&configure, .{})).accepted.session;
+                    try storage.testingSubmitMessage(&database, &tmp, "stale-task", "stale-task", session.slice(), "run");
+                    const first = (try database.admitNextModelAttempt(.{})).?.permit.binding;
+                    try queueCallsForTesting(&database, &tmp, arena, first, "target", "bash", &.{"{\"cmd\":\"true\",\"description\":\"Held\"}"});
+                    const target = try storage.testing.queryU64(&database, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1", .{first.operation_id});
+                    var background: @import("command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = target };
+                    try background.key.set("stale-background");
+                    try std.testing.expect(database.backgroundAction(.{ .command = &background }, .{}) == .accepted);
+                    const second = (try database.admitNextModelAttempt(.{})).?.permit.binding;
+                    const args = try std.fmt.allocPrint(arena, "{{\"action\":\"{d}\"}}", .{target});
+                    try queueCallsForTesting(&database, &tmp, arena, second, "stop", "stop_action", &.{args});
+                    const source_id = try storage.testing.queryU64(&database, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1", .{second.operation_id});
+                    const source: storage.ActionAttemptBinding = .{ .action_id = source_id, .parent_operation_id = second.operation_id, .turn_id = second.turn_id };
+                    if (phase != .before_selection) {
+                        const selected = (try database.nextCoreWork(.fromFree(2, true))).?.action;
+                        try std.testing.expectEqual(source_id, selected.binding.action_id);
+                    }
+                    if (phase == .after_stop_selection) try std.testing.expect((try database.stopAction(source, target, .{})) == .selected);
+                    switch (mode) {
+                        .stop => {
+                            var stop: protocol.SessionStopCommand = .{ .session = session };
+                            try stop.key.set("stale-session-stop");
+                            try std.testing.expect(database.stopSession(&stop, .{}) == .accepted);
+                        },
+                        .archive => {
+                            var archive: protocol.SessionArchiveCommand = .{ .session = session };
+                            try archive.key.set("stale-session-archive");
+                            try std.testing.expect(database.archiveSession(&archive, .{}) == .accepted);
+                        },
+                    }
+                    if (phase == .before_selection) {
+                        if (try database.nextCoreWork(.fromFree(2, true))) |work| {
+                            if (work == .action) try std.testing.expect(work.action.binding.action_id != source_id);
+                        }
+                    }
+                    try std.testing.expectError(error.StaleActionAttemptBinding, database.stopAction(source, target, .{}));
+                    if (phase == .after_stop_selection) {
+                        try std.testing.expectEqual(@as(u64, 1), try storage.testing.queryU64(&database, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code='cancelled'", .{target}));
+                        try std.testing.expectEqual(@as(u64, 0), try storage.testing.queryU64(&database, "SELECT count(*) FROM message_admission WHERE source_action_id=?1", .{target}));
+                    }
+                    try std.testing.expect(!database.isFenced());
+                    try configure.key.set("unrelated-still-works");
+                    try std.testing.expect((try database.configure(&configure, .{})) == .accepted);
+                }
+            }
+        }
+    }.check);
+}

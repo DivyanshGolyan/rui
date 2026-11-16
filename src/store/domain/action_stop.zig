@@ -44,7 +44,7 @@ pub const Stop = struct {
     pub const begin: ?rounds.At = .facts;
     pub const Input = struct { source: action.ActionAttemptBinding, target: u64 };
     pub const Result = Outcome;
-    pub const Ordinary = store.Ordinary.none;
+    pub const Ordinary = store.Ordinary.action_attempt;
     pub const Guards = error{ActionSelectionChanged};
     pub const Declined = error{};
 
