@@ -95,6 +95,25 @@ WHITESPACE = logged(
 )
 
 
+class GhCompatibilityTest(unittest.TestCase):
+    def test_compile_selection_comes_from_the_failed_producer(self):
+        self.assertEqual(report_issue.compile_targets("zig build ci-build -Dci-targets=check,test-logic -Dci-part=rest failed with exit 1; no gates executed.\n"), ["check", "test-logic"])
+        self.assertEqual(report_issue.compile_targets(logged('  TARGETS: ["request-wait-integration"]')), ["request-wait-integration"])
+        self.assertEqual(report_issue.compile_targets(logged('  TARGETS: [', '    "check",', '    "test-logic"', '  ]', '  PART: rest')), ["check", "test-logic"])
+        self.assertEqual(report_issue.compile_targets("TARGETS: [truncated\n"), [])
+        self.assertEqual(report_issue.compile_targets("src/cli.zig:2: error: no field"), [])
+
+    def test_old_gh_retries_only_the_unsupported_escape_flag(self):
+        error = subprocess.CalledProcessError(1, ["gh"], stderr="unknown flag: --allow-escape-sequences")
+        with mock.patch.object(report_issue.subprocess, "run", side_effect=[error, subprocess.CompletedProcess([], 0, stdout="log")]) as run:
+            self.assertEqual(report_issue.gh("api", "--allow-escape-sequences", "repos/o/r/logs"), "log")
+        self.assertEqual(run.call_args.args[0], ["gh", "api", "repos/o/r/logs"])
+        with mock.patch.object(report_issue.subprocess, "run", side_effect=subprocess.CalledProcessError(1, ["gh"], stderr="HTTP 503")) as run:
+            with self.assertRaises(subprocess.CalledProcessError):
+                report_issue.gh("api", "--allow-escape-sequences", "repos/o/r/logs")
+        self.assertEqual(run.call_count, 1)
+
+
 class CauseTest(unittest.TestCase):
     def setUp(self):
         self.cases = report_issue.fixtures()

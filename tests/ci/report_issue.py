@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import time
 
@@ -60,10 +61,19 @@ class Cause:
     signature: str
     paths: list = field(default_factory=list)
     detail: str = ""
+    zig_test: str = ""
+    python_test: str = ""
 
 
 def gh(*args):
-    return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
+    try:
+        return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
+    except subprocess.CalledProcessError as error:
+        # Older gh releases print escaped output without this newer opt-in.
+        if "--allow-escape-sequences" not in args or "unknown flag: --allow-escape-sequences" not in (error.stderr or ""):
+            raise
+        return subprocess.run(["gh", *(arg for arg in args if arg != "--allow-escape-sequences")],
+                              check=True, capture_output=True, text=True).stdout
 
 
 def untimed(log):
@@ -175,15 +185,15 @@ def failure_causes(log, cases, keep_unexplained=False):
         # The test's stderr follows, indented: the failed expectation, then the panic.
         following = log[crash.end():].split("\n")[1:4]
         detail = "\n".join(line.strip() for line in following if line.startswith("  "))
-        found.append(Cause(f"zig test '{test}' {how}", zig_paths(test), detail))
+        found.append(Cause(f"zig test '{test}' {how}", zig_paths(test), detail, zig_test=test))
     for test, error in ZIG_FAIL.findall(log):
-        found.append(Cause(f"zig test '{test}' failed ({error})", zig_paths(test)))
+        found.append(Cause(f"zig test '{test}' failed ({error})", zig_paths(test), zig_test=test))
     for test, output in UNITTEST.findall(log):
         modules = sorted(Path("tests").rglob(test.split(".", 1)[0] + ".py"))
         paths = [str(modules[0])] if len(modules) == 1 else []
         raised = raising_line(list(tracebacks(output)), paths[0]) if paths else None
         failure = f"{raised[0]} raised {raised[1].split(':', 1)[0]}" if raised else "failed"
-        found.append(Cause(f"python test '{test}': {failure}", paths, raised[1] if raised else ""))
+        found.append(Cause(f"python test '{test}': {failure}", paths, raised[1] if raised else "", python_test=test))
     for gate, message in GATE.findall(log):
         found.append(Cause(f"{gate} gate failed: {message}"))
     if problems := WHITESPACE.findall(log):
@@ -197,6 +207,30 @@ def failure_causes(log, cases, keep_unexplained=False):
     for cause in found:
         unique.setdefault(cause.signature, cause)
     return list(unique.values())
+
+
+def compile_targets(log):
+    """Selected producer inputs from build_artifact.py's failing command.
+
+    Its final error prints argv as shell words; older logs still carry the
+    step's TARGETS JSON environment row even if compilation was interrupted.
+    """
+    lines = untimed(log).splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        line = lines[index]
+        if line.startswith("zig build ci-build "):
+            for arg in shlex.split(line):
+                if arg.startswith("-Dci-targets="):
+                    return arg.partition("=")[2].split(",")
+        if line.strip().startswith("TARGETS: "):
+            value = "\n".join(lines[index:]).lstrip().removeprefix("TARGETS: ")
+            try:
+                targets, _ = json.JSONDecoder().raw_decode(value)
+            except ValueError:
+                continue
+            if isinstance(targets, list) and all(isinstance(target, str) for target in targets):
+                return targets
+    return []
 
 
 def signature_state(body):
@@ -296,9 +330,10 @@ def job_log(repository, job_id):
         time.sleep(delay)
 
 
-def run_jobs(repository, run_id):
+def run_jobs(repository, run_id, attempt=None):
+    suffix = f"/attempts/{attempt}" if attempt is not None else ""
     pages = json.loads(gh("api", "--paginate", "--slurp",
-                          f"repos/{repository}/actions/runs/{run_id}/jobs?per_page=100"))
+                          f"repos/{repository}/actions/runs/{run_id}{suffix}/jobs?per_page=100"))
     return [job for page in pages for job in page["jobs"]]
 
 
