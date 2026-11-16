@@ -747,6 +747,9 @@ def detached_settings_checks(root, env):
     directory = root / "detached-checks"
     host_ok(env, "set", "--store", directory, "providers", "{}")
     sources = directory / "document.json"
+    sources.write_text("{}")
+    sources.chmod(0o600)
+    original_files = {path.name for path in directory.iterdir()}
     cases = (
         ("bare", {}, (), None),
         ("nonplacement", {"execution": {"activeCapacity": 3}}, (), None),
@@ -783,7 +786,11 @@ def detached_settings_checks(root, env):
         failure = json.loads(checked.stdout)["rui_start_error"]
         assert failure["code"] == "settings_invalid" and reason in failure["message"], failure
     # No database, diagnostics or lease was created by a check.
-    assert {path.name for path in directory.iterdir()} == {"host.json", "document.json"}
+    assert {path.name for path in directory.iterdir()} == original_files
+    assert json.loads((directory / "host.json").read_text()) == {"providers": {}}
+    absent = root / "check-does-not-create"
+    checked = host_command(env, "settings", "--check", "--store", absent, "--set", "providers={}")
+    assert checked.returncode == 0 and not absent.exists(), checked
     started = run_start(directory, env)
     assert started.returncode == 0, started
     try:
@@ -1138,7 +1145,7 @@ def launch_fixture_root():
 
 
 def main():
-    assert len(sys.argv) in (2, 3), "usage: host_launch_integration.py /absolute/path/to/rui [startup-limits|store-identity|provider-policy]"
+    assert len(sys.argv) in (2, 3), "usage: host_launch_integration.py /absolute/path/to/rui [startup-limits|store-identity|provider-policy|detached-checks]"
     from host_launch_exit_test import check_exit_reader, check_process_discovery, check_failure_retention, check_provider_disposal
     with launch_fixture_root() as root_text:
         root = canonical_fixture_root(pathlib.Path(root_text))
@@ -1147,6 +1154,9 @@ def main():
         credential = root / "credentials" / "missing.json"
         env = environment(home, credential)
         check_provider_disposal(dispose_provider_case, stop_endpoint)
+        if len(sys.argv) == 3 and sys.argv[2] == "detached-checks":
+            detached_settings_checks(root, env)
+            return
         if len(sys.argv) == 3 and sys.argv[2] == "provider-policy":
             new_host_provider_policy(root, env)
             return
