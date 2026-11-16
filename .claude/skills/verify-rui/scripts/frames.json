@@ -2081,8 +2081,8 @@
         "enter sends",
         "Type a task",
         "enter start",
-        " \u00b7 127",
-        " \u00b7 1"
+        "Fail with exit 127 \u00b7 127",
+        "Fail with an excerpt \u00b7 1"
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
@@ -2180,8 +2180,8 @@
         "enter sends",
         " \u00b7 exit 127",
         " \u00b7 exit 1",
-        " \u00b7 127",
-        " \u00b7 1"
+        "Fail with exit 127 \u00b7 127",
+        "Fail with an excerpt \u00b7 1"
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
@@ -2241,8 +2241,8 @@
         "\u00d7 Fail with exit 127": "\u00d7 Fail with an excerpt"
       },
       "absent": [
-        " \u00b7 127",
-        " \u00b7 1"
+        "Fail with exit 127 \u00b7 127",
+        "Fail with an excerpt \u00b7 1"
       ]
     },
     {
@@ -2341,8 +2341,8 @@
       "absent": [
         " \u00b7 exit 127",
         " \u00b7 exit 1",
-        " \u00b7 127",
-        " \u00b7 1"
+        "Fail with exit 127 \u00b7 127",
+        "Fail with an excerpt \u00b7 1"
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
@@ -2457,8 +2457,8 @@
         "\u00d7 Fail with exit 127": "\u00d7 Fail with an excerpt"
       },
       "absent": [
-        " \u00b7 127",
-        " \u00b7 1"
+        "Fail with exit 127 \u00b7 127",
+        "Fail with an excerpt \u00b7 1"
       ]
     },
     {

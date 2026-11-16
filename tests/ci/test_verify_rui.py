@@ -1136,7 +1136,7 @@ while True:
                 self.assertIn("exit 127", states[name]["expect"])
                 self.assertIn("exit 1", states[name]["expect"])
                 self.assertEqual(states[name]["expect_next"]["× Fail with exit 127"], "× Fail with an excerpt")
-                self.assertIn(" · 127", states[name]["absent"])
+                self.assertIn("Fail with exit 127 · 127", states[name]["absent"])
 
     def test_two_open_folds_select_list_before_resizing_to_the_split_layout(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
