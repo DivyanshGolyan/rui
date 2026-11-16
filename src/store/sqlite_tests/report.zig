@@ -446,7 +446,7 @@ test "a Current report's presentation reads answer their list's name" {
     // Turn proposes an asked-for call, whose Action waits, and a call of
     // an unknown tool, which is rejected.
     inline for (.{
-        .{ namedStatementForTesting(session_report_read_domain.current_failures, null, "WHERE a.session_ref=?1 AND " ++ action_domain.unresolvedSql("a") ++ " ORDER BY a.action_id"), error.ActionReadFailed },
+        .{ namedStatementForTesting(session_report_read_domain.current_failures, null, "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.permission_revision,a.authorized,"), error.ActionReadFailed },
         .{ namedStatementForTesting(session_report_read_domain.current_failures, null, "CROSS JOIN content rejection"), error.CallReadFailed },
     }) |case| {
         var tmp = std.testing.tmpDir(.{});
