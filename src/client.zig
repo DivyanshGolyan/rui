@@ -5799,18 +5799,18 @@ test "capture routing retains OS bytes and legacy opaque runtime without storing
     const root = tmp.root[0..tmp.root_len];
     const directory = try std.fs.path.join(gpa, &.{ root, "host-\xff" });
     defer gpa.free(directory);
-    var host = try std.Io.Dir.cwd().createDirPathOpen(io, directory, .{ .permissions = .fromMode(0o700) });
-    const document = try std.fmt.allocPrint(gpa, "{{\"store\":{{\"sqlite\":{{\"dir\":\"{s}/data\"}}}}}}", .{root});
-    defer gpa.free(document);
-    try host.writeFile(io, .{ .sub_path = "host.json", .data = document, .flags = .{ .permissions = .fromMode(0o600) } });
-    host.close(io);
-    var captured = try captureSessionStop(io, .{ .store = directory, .session = "k7m2qx" }, .{ .generated = root });
+    // This tests the local codec, not SQLite's UTF-8 wire identity rule.
+    var initial = try platform.resolveClientPaths(io, root);
+    try initial.host_directory.set(directory);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const location = try (CaptureTarget{ .generated = root }).resolve(io, &path_buffer, &key_buffer);
+    var captured = try writeSessionStopCapture(io, &initial, .{ .store = root, .session = "k7m2qx" }, location);
     const key = captured.saved.key;
     captured.close(io);
     var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } });
     defer recovered.close(io);
-    const paths = try recovered.resolvePaths(io);
-    try std.testing.expectEqualStrings(directory, paths.selector());
+    try std.testing.expectEqualStrings(directory, recovered.routing.?.host_directory.slice());
     const legacy = try platform.mysqlClientPaths(io, "0123456789abcdef0123456789abcdef", root);
     const route = try CaptureRouting.fromPaths(&legacy);
     try std.testing.expectEqual(@as(usize, 0), route.host_directory.len);
