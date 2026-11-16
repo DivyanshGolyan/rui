@@ -968,25 +968,37 @@ def saved_capture_cases(state, store, workspace):
 #include <dlfcn.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <stdlib.h>
 #include <unistd.h>
 int fsync(int fd) {
     struct stat value;
-    if (!fstat(fd, &value) && S_ISDIR(value.st_mode)) { errno = EIO; return -1; }
+    static int directories;
+    if (!fstat(fd, &value) && S_ISDIR(value.st_mode) &&
+        ++directories == atoi(getenv("RUI_TEST_CAPTURE_SYNC_AT"))) { errno = EIO; return -1; }
     int (*real_sync)(int) = dlsym(RTLD_NEXT, "fsync");
     return real_sync(fd);
 }
 """)
         subprocess.run(os_semantics.shared_library_command(source, library), check=True)
-        before = set(json.loads(run(home, "request", "list")))
-        failed = subprocess.run([str(fixture.RUI), *map(str, args)],
-            env={**os.environ, "HOME": str(home), os_semantics.PRELOAD: str(library)},
-            capture_output=True, text=True, timeout=20)
-        assert failed.returncode == 1 and "[internal_unexpected]" in failed.stderr, failed
-        assert failed.stdout == "", failed.stdout
-        uncertain, = set(json.loads(run(home, "request", "list"))) - before
-        assert fixture.command("request", "inspect", "--store", store,
-            "--key", uncertain)["observation"]["status"] == "absent"
-        assert json.loads(run(home, "request", "recover", uncertain))["answer"]["replayed"] is False
+        # Routing must be durable before the immutable request is published.
+        # The second sync seals that request; its failure must retain both files.
+        for sync_at in (1, 2):
+            before = set(json.loads(run(home, "request", "list")))
+            failed = subprocess.run([str(fixture.RUI), *map(str, args)],
+                env={**os.environ, "HOME": str(home), os_semantics.PRELOAD: str(library),
+                     "RUI_TEST_CAPTURE_SYNC_AT": str(sync_at)},
+                capture_output=True, text=True, timeout=20)
+            assert failed.returncode == 1 and "[internal_unexpected]" in failed.stderr, failed
+            assert failed.stdout == "", failed.stdout
+            added = set(json.loads(run(home, "request", "list"))) - before
+            if sync_at == 1:
+                assert not added, added
+            else:
+                uncertain, = added
+                assert (records / f"{uncertain}.json.routing").is_file()
+                assert fixture.command("request", "inspect", "--store", store,
+                    "--key", uncertain)["observation"]["status"] == "absent"
+                assert json.loads(run(home, "request", "recover", uncertain))["answer"]["replayed"] is False
     else:
         print("capture directory-sync injection: unavailable outside Linux", flush=True)
 
