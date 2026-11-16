@@ -943,7 +943,7 @@ test "received and sent Activity reject disagreement with their accepted Message
                     var encoded_buffer: [192]u8 = undefined;
                     const encoded = try std.fmt.bufPrint(&encoded_buffer, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"hello\\\"}}", .{receiver.slice()});
                     try settleCallsForTesting(&storage, &tmp, model, "source-check-call", &.{.{ .item_id = "send", .name = "message_agent", .encoded_call_id = "send", .decoded_call_id = "send", .encoded_arguments = encoded, .decoded_arguments = arguments }});
-                    const action = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
+                    const action = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
                     const original = "\xef\xbb\xbfexact\x00peer";
                     try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(action.binding, receiver.slice(), original, .{}));
                     const request: protocol.ActivityPage = .{ .session = if (sent) sender else receiver, .kinds = if (sent) .initOne(.sent) else .initOne(.received) };

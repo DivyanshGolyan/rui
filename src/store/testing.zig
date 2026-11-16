@@ -328,10 +328,10 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
     const background_fk = " FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='action_operation' AND COLUMN_NAME='background_content_id' AND REFERENCED_TABLE_NAME='content' AND REFERENCED_COLUMN_NAME='content_id'";
     if (storage.engine == .mysql) {
         inline for (checks) |check| {
-            try std.testing.expectEqual(@as(u64, check[2]), try mysql_testing.queryU64(storage, "SELECT count(*) AS value" ++ catalog ++ "'" ++ check[0] ++ "' AND " ++ check[1], .{}));
+            try std.testing.expectEqual(@as(u64, check[2]), try mysql_testing.rawQueryU64(storage, "SELECT count(*) AS value" ++ catalog ++ "'" ++ check[0] ++ "' AND " ++ check[1]));
         }
-        try std.testing.expectEqual(@as(u64, 1), try mysql_testing.queryU64(storage, "SELECT count(*) AS value" ++ background_fk, .{}));
-        try std.testing.expectEqual(@as(u64, 1), try mysql_testing.queryU64(storage, "SELECT count(*) AS value" ++ catalog ++ "'core_command' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 8'", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try mysql_testing.rawQueryU64(storage, "SELECT count(*) AS value" ++ background_fk));
+        try std.testing.expectEqual(@as(u64, 1), try mysql_testing.rawQueryU64(storage, "SELECT count(*) AS value" ++ catalog ++ "'core_command' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 8'"));
         inline for (checks) |check| {
             try Native.exec(storage, "SET @rui_rewind_ddl=(SELECT CONCAT('ALTER TABLE " ++ check[0] ++ " ',GROUP_CONCAT(CONCAT('DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') ORDER BY tc.CONSTRAINT_NAME SEPARATOR ', '))" ++ catalog ++ "'" ++ check[0] ++ "' AND " ++ check[1] ++ ")");
             try Native.exec(storage, "PREPARE rui_rewind FROM @rui_rewind_ddl");
