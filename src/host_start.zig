@@ -2686,8 +2686,10 @@ test "Host detached check shares source admission then resolves and seals withou
         }
     };
     // Check resolves/seals MySQL input, but never dials or locks it.
-    try tmp.dir.writeFile(init.io, .{ .sub_path = "host.json", .data = "{\"providers\":{},\"store\":{\"mysql\":{\"url\":{\"env\":\"CHECK_MYSQL_URL\"}}}}" });
-    try tmp.dir.setFilePermissions(init.io, "host.json", .fromMode(0o600), .{});
+    var host = try tmp.dir.openDir(init.io, "host-dir", .{});
+    defer host.close(init.io);
+    try host.writeFile(init.io, .{ .sub_path = "host.json", .data = "{\"providers\":{},\"store\":{\"mysql\":{\"url\":{\"env\":\"CHECK_MYSQL_URL\"}}}}" });
+    try host.setFilePermissions(init.io, "host.json", .fromMode(0o600), .{});
     settings.* = .{};
     defer settings.deinit();
     var failure: start_report.Failure = undefined;
