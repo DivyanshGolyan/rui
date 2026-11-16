@@ -90,6 +90,24 @@ pub fn renderConversationPage(response: protocol.JsonOut, page: *const command_r
     } else try response.appendShape(shapes.last, .{});
 }
 
+const SubjectTypes = struct {
+    pub const model_interruption = command_reply.ModelInterruptionTarget;
+    pub const permission_decision = struct {
+        session: protocol.Bounded(protocol.max_session_bytes),
+        action_id: u64,
+        decision: protocol.PermissionDecision,
+    };
+    pub const action_background = struct {
+        session: protocol.Bounded(protocol.max_session_bytes),
+        action_id: u64,
+    };
+};
+
+/// Concrete subject consumed by each mutation's typed reply renderer.
+pub fn MutationSubject(comptime kind: command_spec.CommandKind) type {
+    return command_spec.spec(kind).Subject(SubjectTypes);
+}
+
 /// Canonical Store result type for each mutation's typed reply renderer.
 pub fn MutationResult(comptime kind: command_spec.CommandKind) type {
     return switch (kind) {
@@ -120,7 +138,7 @@ pub fn renderMutationReply(comptime kind: command_spec.CommandKind) @TypeOf(swit
 fn ControlRenderer(comptime kind: command_spec.CommandKind) type {
     const facts = command_spec.spec(kind);
     return struct {
-        fn render(response: protocol.JsonOut, subject: facts.Subject, result: MutationResult(kind)) !void {
+        fn render(response: protocol.JsonOut, subject: MutationSubject(kind), result: MutationResult(kind)) !void {
             const shapes = facts.Reply(protocol);
             const target = switch (kind) {
                 .session_stop, .session_archive, .session_pin => .{subject},
@@ -364,14 +382,14 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         command_reply.ModelInterruptionReply.conflict,
     }));
 
-    const decision: command_spec.spec(.permission_decision).Subject = .{ .session = session, .action_id = max, .decision = Worst.tag(protocol.PermissionDecision) };
+    const decision: MutationSubject(.permission_decision) = .{ .session = session, .action_id = max, .decision = Worst.tag(protocol.PermissionDecision) };
     try std.testing.expectEqual(protocol.permission_decision_reply.max_bytes, try Worst.reply(renderMutationReply(.permission_decision), decision, .{
         command_reply.PermissionDecisionReply{ .accepted = .{ .replayed = false } },
         command_reply.PermissionDecisionReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.PermissionDecisionRejection) } },
         command_reply.PermissionDecisionReply.conflict,
     }));
 
-    const background: command_spec.spec(.action_background).Subject = .{ .session = session, .action_id = max };
+    const background: MutationSubject(.action_background) = .{ .session = session, .action_id = max };
     const control = @import("action_control.zig");
     try std.testing.expectEqual(protocol.action_background_reply.max_bytes, try Worst.reply(renderMutationReply(.action_background), background, .{
         control.Reply{ .accepted = .{ .replayed = false, .action_id = max, .selection = .{ .kind = Worst.tag(@FieldType(control.Selection, "kind")), .position = max } } },

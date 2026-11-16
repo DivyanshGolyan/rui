@@ -1656,7 +1656,7 @@ fn submitControl(host: *Host, comptime kind: command_spec.CommandKind, command: 
     };
 }
 
-fn controlSubject(comptime kind: command_spec.CommandKind, command: *const @FieldType(wire_request.Request, @tagName(kind))) command_spec.spec(kind).Subject {
+fn controlSubject(comptime kind: command_spec.CommandKind, command: *const @FieldType(wire_request.Request, @tagName(kind))) host_reply.MutationSubject(kind) {
     return switch (kind) {
         .session_stop, .session_archive, .session_pin => command.session.slice(),
         .model_interruption => .{ .session = command.session, .turn_id = command.turn_id, .operation_id = command.operation_id },
@@ -1668,14 +1668,14 @@ fn controlSubject(comptime kind: command_spec.CommandKind, command: *const @Fiel
 
 // Returns false only for the deliberate post-commit drop, so controls keep the
 // original timing lifetime even when reply allocation itself cannot succeed.
-fn answerMutation(host: *Host, fd: *Reply, header: Header, comptime kind: command_spec.CommandKind, subject: command_spec.spec(kind).Subject, result: host_reply.MutationResult(kind)) !bool {
+fn answerMutation(host: *Host, fd: *Reply, header: Header, comptime kind: command_spec.CommandKind, subject: host_reply.MutationSubject(kind), result: host_reply.MutationResult(kind)) !bool {
     if (result == .infrastructure_failure) fenceDispatch(host, command_spec.spec(kind).fence_message, error.CanonicalStoreFailure);
     if (header.drop == .after_commit and result != .infrastructure_failure) return false;
     try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderMutationReply(kind), .{ subject, result });
     return true;
 }
 
-fn answerControl(host: *Host, fd: *Reply, header: Header, comptime kind: command_spec.CommandKind, subject: command_spec.spec(kind).Subject, result: host_reply.MutationResult(kind), timing: ControlTiming) !void {
+fn answerControl(host: *Host, fd: *Reply, header: Header, comptime kind: command_spec.CommandKind, subject: host_reply.MutationSubject(kind), result: host_reply.MutationResult(kind), timing: ControlTiming) !void {
     comptime std.debug.assert(command_spec.spec(kind).is_control);
     // Acceptance and infrastructure failure are disjoint. The hint precedes
     // every reply effect, including the deliberate post-commit drop.

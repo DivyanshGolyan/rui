@@ -1,17 +1,4 @@
 const std = @import("std");
-const Bounded = @import("bounded.zig").Bounded;
-const session_id = @import("session_id.zig");
-
-pub const PermissionTarget = struct {
-    session: Bounded(session_id.max_reference_bytes),
-    action_id: u64,
-    decision: @import("mutation_answer.zig").PermissionDecision,
-};
-
-pub const ActionBackgroundTarget = struct {
-    session: Bounded(session_id.max_reference_bytes),
-    action_id: u64,
-};
 
 pub const CommandKind = enum {
     configure,
@@ -66,12 +53,16 @@ pub const Spec = struct {
     route: []const u8,
     reply_type: []const u8,
     summary: []const u8,
-    Subject: type,
+    subject_type: ?[]const u8 = null,
     fence_message: []const u8,
     Request: type,
     Observation: type,
     observation_fields: ObservationFields = .{},
     is_control: bool = true,
+
+    pub fn Subject(comptime self: Spec, comptime Subjects: type) type {
+        return if (self.subject_type) |name| @field(Subjects, name) else []const u8;
+    }
 
     pub fn Reply(comptime self: Spec, comptime Wire: type) type {
         const name = self.reply_type;
@@ -187,7 +178,6 @@ const ArchiveRequest = struct {
 pub fn spec(comptime kind: CommandKind) Spec {
     return switch (kind) {
         .configure => .{
-            .Subject = []const u8,
             .fence_message = "configuration save",
             .route = "/v1/configure",
             .reply_type = "configuration_reply",
@@ -198,7 +188,6 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .is_control = false,
         },
         .message => .{
-            .Subject = []const u8,
             .fence_message = "message save",
             .route = "/v1/message",
             .reply_type = "message_reply",
@@ -212,7 +201,6 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .is_control = false,
         },
         .session_stop => .{
-            .Subject = []const u8,
             .fence_message = "Session stop save",
             .route = "/v1/control/session-stop",
             .reply_type = "session_stop_reply",
@@ -222,7 +210,6 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .observation_fields = .{ .accepted = &.{ .selection, .completion } },
         },
         .session_archive => .{
-            .Subject = []const u8,
             .fence_message = "Session archive save",
             .route = "/v1/control/session-archive",
             .reply_type = "session_archive_reply",
@@ -232,7 +219,6 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .observation_fields = .{ .accepted = &.{ .archived, .completion } },
         },
         .session_pin => .{
-            .Subject = []const u8,
             .fence_message = "Session pin save",
             .route = "/v1/control/session-pin",
             .reply_type = "session_pin_reply",
@@ -242,7 +228,7 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .observation_fields = .{ .accepted = &.{.pinned} },
         },
         .model_interruption => .{
-            .Subject = @import("command_reply.zig").ModelInterruptionTarget,
+            .subject_type = "model_interruption",
             .fence_message = "model interruption save",
             .route = "/v1/control/model-interruption",
             .reply_type = "model_interruption_reply",
@@ -252,7 +238,7 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .observation_fields = .{ .always = &.{.interruption_target} },
         },
         .permission_decision => .{
-            .Subject = PermissionTarget,
+            .subject_type = "permission_decision",
             .fence_message = "permission decision save",
             .route = "/v1/control/permission-decision",
             .reply_type = "permission_decision_reply",
@@ -262,7 +248,7 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .observation_fields = .{ .always = &.{.permission_target} },
         },
         .action_background => .{
-            .Subject = ActionBackgroundTarget,
+            .subject_type = "action_background",
             .fence_message = "Action background save",
             .route = "/v1/control/action-background",
             .reply_type = "action_background_reply",
@@ -296,5 +282,26 @@ test "command_spec covers every kind and preserves routes and request limits" {
         _ = facts.Reply(protocol).max_bytes;
         _ = facts.Observation.shapes(protocol).values;
         try std.testing.expect(facts.summary.len != 0);
+    }
+}
+
+test "command_spec resolves every subject from injected types" {
+    const Subjects = struct {
+        pub const model_interruption = struct { turn: u64 };
+        pub const permission_decision = struct { decision: bool };
+        pub const action_background = struct { action: u64 };
+    };
+    const expected = .{
+        []const u8,
+        []const u8,
+        []const u8,
+        []const u8,
+        Subjects.model_interruption,
+        Subjects.permission_decision,
+        []const u8,
+        Subjects.action_background,
+    };
+    inline for (comptime std.meta.tags(CommandKind), expected) |kind, Expected| {
+        try std.testing.expect(spec(kind).Subject(Subjects) == Expected);
     }
 }
