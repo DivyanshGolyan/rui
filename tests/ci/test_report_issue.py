@@ -125,6 +125,28 @@ class CauseTest(unittest.TestCase):
         for path in self.cases.values():
             self.assertTrue(Path(path).is_file(), path)
 
+    def test_unit_launchers_are_not_registered_as_integration_fixtures(self):
+        self.assertNotIn("native", self.cases)
+        self.assertNotIn("store", self.cases)
+        shell = '\n'.join([
+            'run_case execution native python3 "$directory/host_process.py" exec python3 "$directory/../ci/store_shards.py" native',
+            'run_case execution store python3 "$directory/host_process.py" exec python3 "$directory/../ci/store_shards.py" run',
+            'run_case callers host-stop python3 "$directory/nested/../host_stop_integration.py"',
+        ])
+        with mock.patch.object(Path, "read_text", return_value=shell):
+            self.assertEqual(report_issue.fixtures(), {"host-stop": "tests/integration/host_stop_integration.py"})
+
+    def test_launcher_command_aliases_do_not_add_a_second_cause_to_a_zig_failure(self):
+        for launcher in ("tests/ci/store_shards.py", "tests/integration/../ci/store_shards.py",
+                         "tests/integration/./../ci/store_shards.py"):
+            with self.subTest(launcher=launcher):
+                log = ZIG_FAIL + logged("error: process exited with code 1",
+                                        f"failed command: python3 /w/{launcher} run /tmp/unit-store-tests")
+                [cause] = report_issue.failure_causes(log, self.cases)
+                self.assertEqual(cause.zig_test,
+                                 "codex_auth.test.refresh transport keeps not-sent evidence")
+                self.assertEqual(cause.paths, ["src/codex_auth.zig"])
+
     def test_a_fixture_is_named_by_its_raising_line_not_by_neighbouring_tracebacks(self):
         [cause] = report_issue.failure_causes(HOST_STOP, self.cases)
         self.assertEqual(cause.signature, 'tests/integration/host_stop_integration.py: upload.sendall(header[:-2] if phase == "header" '
