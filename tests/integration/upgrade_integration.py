@@ -789,6 +789,7 @@ def restart_all_cases(root, binary, releases):
                             "tools": {"bash": {"path": "/bin/bash", "timeoutMs": 1500}}}
                 path = c.store / "host.json" if source == "saved" else c.root / "settings.json"
                 path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                path.parent.chmod(0o700)
                 path.write_text(json.dumps(document))
                 path.chmod(0o600)
                 if source == "file":
