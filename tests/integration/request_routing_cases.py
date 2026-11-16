@@ -52,7 +52,7 @@ def capture_routing(binary, directory, root, env, *, message=None):
         # Configure is not a Message. This must be the Host's typed answer,
         # not a failure to discover the captured endpoint.
         assert result.returncode != 0 and any(
-            line.startswith("{") and json.loads(line).get("code") == "result_not_found"
+            line.startswith("{") and json.loads(line).get("error", {}).get("code") == "result_not_found"
             for line in result.stderr.splitlines()), result
     assert record.read_bytes() == original and route.read_bytes() == routing
     return handle

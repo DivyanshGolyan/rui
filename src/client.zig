@@ -1584,6 +1584,11 @@ const CaptureRouting = struct {
         return error.InvalidRequestRecord;
     }
 
+    fn matchesPlacement(self: *const CaptureRouting, paths: *const platform.Paths) bool {
+        if (self.host_directory.len != 0) return std.mem.eql(u8, self.host_directory.slice(), paths.host_directory.slice());
+        return paths.kind == .mysql and paths.host_directory.len == 0 and std.mem.eql(u8, self.runtime_hint.slice(), paths.runtimeHint().?);
+    }
+
     fn name(record_name: []const u8, buffer: []u8) ![]const u8 {
         return std.fmt.bufPrint(buffer, "{s}.routing", .{record_name});
     }
@@ -1705,7 +1710,7 @@ pub fn openCaptured(io: std.Io, saved: SavedRecord) !CapturedRecord {
         .generated => .generated,
         .explicit => |explicit| .{ .explicit = .{ .record = explicit.record, .host_directory = if (routing) |route| route.host_directory else paths.host_directory } },
     };
-    return .{ .file = file, .length = try file.length(io), .saved = binding.saved, .target = binding.target, .replay = replay, .paths = if (saved == .explicit and routing == null) paths else null, .routing = routing };
+    return .{ .file = file, .length = try file.length(io), .saved = binding.saved, .target = binding.target, .replay = replay, .paths = if (saved == .explicit and (routing == null or routing.?.matchesPlacement(&paths))) paths else null, .routing = routing };
 }
 
 pub fn inspectCaptured(io: std.Io, directory: []const u8, handle: []const u8) !protocol_reply.MutationIdentity {
@@ -5565,7 +5570,7 @@ test "capture routing round trips six placements without conflating selector and
     const gpa = std.testing.allocator;
     const Peer = struct {
         fn serve(listener: *std.Io.net.Server, expected_store: []const u8) anyerror!void {
-            for (0..4) |index| {
+            for (0..3) |index| {
                 const connection = try listener.accept(std.testing.io);
                 defer connection.close(std.testing.io);
                 const deadline = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 5 * std.time.ns_per_s;
@@ -5586,7 +5591,7 @@ test "capture routing round trips six placements without conflating selector and
                 }
                 try std.testing.expectEqualStrings(expected, request[0..body_used]);
                 var body: protocol.ResponseBuffer = .{};
-                const info: @import("host_reply.zig").HostInfo = .{ .store = if (index == 3) "fedcba9876543210fedcba9876543210" else expected_store, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .routes = protocol.routesAll(.unserved), .doublewrite = null };
+                const info: @import("host_reply.zig").HostInfo = .{ .store = if (index == 2) "fedcba9876543210fedcba9876543210" else expected_store, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .routes = protocol.routesAll(.unserved), .doublewrite = null };
                 try body.render(@import("host_reply.zig").renderHostInfo, .{info});
                 var head_buffer: [512]u8 = undefined;
                 const head = try std.fmt.bufPrint(&head_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\nConnection: close\r\n\r\n", .{body.len});
@@ -5837,4 +5842,15 @@ test "capture routing retains OS bytes and legacy opaque runtime without storing
     try std.testing.expectEqualStrings(legacy.socket.slice(), restored.socket.slice());
     try std.testing.expectEqualStrings(legacy.store_identity.slice(), restored.store_identity.slice());
     try std.testing.expectError(error.InvalidStorePath, route.resolve(io, "/not-an-opaque-identity"));
+    const legacy_location = try (CaptureTarget{ .generated = root }).resolve(io, &path_buffer, &key_buffer);
+    var saved_legacy = try writeSessionStopCapture(io, &legacy, .{ .store = legacy.store_identity.slice(), .session = "k7m2qx" }, legacy_location);
+    const legacy_key = saved_legacy.saved.key;
+    saved_legacy.close(io);
+    var generated = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = legacy_key.slice() } });
+    defer generated.close(io);
+    try std.testing.expectEqualStrings(root, generated.routing.?.runtime_hint.slice());
+    try std.testing.expectEqualStrings(legacy.socket.slice(), (try generated.resolvePaths(io)).socket.slice());
+    var explicit = try openCaptured(io, .{ .explicit = .{ .store = legacy.store_identity.slice(), .record = legacy_location.record, .kind = .session_stop } });
+    defer explicit.close(io);
+    try std.testing.expectEqualStrings(legacy.socket.slice(), (try explicit.resolvePaths(io)).socket.slice());
 }
