@@ -1,15 +1,7 @@
-//! Inline Upgrade: where its run stands and what the status bar
-//! says about it, on the overview and in a conversation alike. Values in,
-//! words out; the worker that runs the check and the install says where
-//! the run stands. Whether Host requests wait is `session_upgrade`'s decision.
-
 const std = @import("std");
 
-/// What a run leaves Host requests: nothing installed, the selected Rui
-/// speaks this Host's protocol, or it does not.
 pub const Outcome = enum { unchanged, compatible, incompatible };
 
-/// A release's version, as `0.{schema}.{patch}`.
 pub const Version = struct {
     schema: u32,
     patch: u32,
@@ -19,54 +11,36 @@ pub const Version = struct {
     }
 };
 
-/// Same-user Hosts discovered for the install-wide restart, including skips.
 pub const Host = union(enum) { none, running: usize };
 
-/// Warning census only: the publication target does not exist during preparation.
 pub const Found = struct { host: Host };
 
-/// Why the check installs nothing here. The full reason prints in a shell.
 pub const Refusal = enum { first_install, source_build, unknown_build, package_managed };
 
-/// Where an install stands. Only `preparing` can still roll back.
 pub const Step = enum { preparing, publishing, restarting };
 
 pub const Failure = enum { download, release, other };
 
 pub const Ended = union(enum) {
     up_to_date: Version,
-    /// Another install selected a build newer than the release found:
-    /// nothing changed and nothing restarted.
     superseded,
     refused: Refusal,
-    /// Cancelled before publishing: nothing changed.
     cancelled,
-    /// Failed before publishing: nothing changed.
     failed: Failure,
     upgraded: struct { version: Version, restarted: bool },
-    /// Installed, but this client cannot use the Host it left.
     incompatible: Version,
 };
 
-/// Where a run stands. Its worker says the whole of it each time it
-/// changes, and the status bar says only that: nothing here is advanced
-/// step by step, so no step can arrive out of turn.
 pub const Run = union(enum) {
     checking,
     installing: struct { found: Found, step: Step = .preparing },
-    /// A stop was asked for and the run has not yet ended.
     cancelling,
-    /// How it ended, as the status bar says it, and what it leaves Host
-    /// requests: the run's own outcome, never read back from the words.
     ended: struct { how: Ended, outcome: Outcome },
 
-    /// The run has not ended: Host requests wait and the worker is polled.
     pub fn going(self: Run) bool {
         return self != .ended;
     }
 
-    /// Esc is the run's while it can still change nothing, as its line
-    /// offers; whether the stop holds is the worker's to say.
     pub fn takesEscape(self: Run) bool {
         return switch (self) {
             .checking, .cancelling => true,
@@ -78,18 +52,14 @@ pub const Run = union(enum) {
 
 pub const Tone = enum { normal, attention };
 
-/// How long the status bar keeps a line: while the run goes on, as a
-/// notice (until the next key or about 5 s), or until another Upgrade.
 pub const Lasts = enum { until_done, notice, persistent };
 
 pub const Line = struct { text: []const u8, tone: Tone, lasts: Lasts };
 
 pub const Script = enum { unicode, ascii };
 
-/// Bytes the longest line takes.
 pub const max_line_bytes = 160;
 
-/// What the status bar says of `run`. Borrows `buffer`.
 pub fn line(run: Run, buffer: *[max_line_bytes]u8, script: Script) Line {
     const dot = if (script == .unicode) "·" else "-";
     const ellipsis = if (script == .unicode) "…" else "...";
@@ -160,8 +130,6 @@ const failure_words = std.enums.EnumArray(Failure, []const u8).init(.{
     .other = "Upgrade failed",
 });
 
-/// The installed client is about to run, so old-client incompatibility no
-/// longer asks the person to restart it. Other endings retain their exact line.
 pub fn relaunchLine(run: Run, buffer: *[max_line_bytes]u8, script: Script) []const u8 {
     const ending = if (run == .ended and run.ended.how == .incompatible)
         Run{ .ended = .{ .how = .{ .upgraded = .{ .version = run.ended.how.incompatible, .restarted = false } }, .outcome = run.ended.outcome } }
@@ -178,7 +146,6 @@ const refusals = std.enums.EnumArray(Refusal, []const u8).init(.{
 });
 
 comptime {
-    // The widest line fits: the longest version, Host count and refusal.
     const version = "0.4294967295.4294967295";
     std.debug.assert(("Preparing Upgrade · restarts every eligible Host (18446744073709551615 found) · esc cancels").len <= max_line_bytes);
     std.debug.assert(("Rui " ++ version ++ " installed · restart rui to continue · your draft is kept until you leave").len <= max_line_bytes);
@@ -192,10 +159,8 @@ test "a run's line: the check, what the restart will do, each step, and a stop" 
         .{ .{ .installing = .{ .found = .{ .host = .{ .running = 1 } } } }, "Preparing Upgrade · restarts every eligible Host (1 found) · esc cancels", true },
         .{ .{ .installing = .{ .found = .{ .host = .{ .running = 0 } } } }, "Preparing Upgrade · restarts every eligible Host (0 found) · esc cancels", true },
         .{ .{ .installing = .{ .found = .{ .host = .none } } }, "Preparing Upgrade · no Hosts running · esc cancels", true },
-        // Once it publishes the line stops offering Esc, and Esc is the screen's.
         .{ .{ .installing = .{ .found = .{ .host = .none }, .step = .publishing } }, "Publishing; cancelling no longer rolls back", false },
         .{ .{ .installing = .{ .found = .{ .host = .none }, .step = .restarting } }, "Restarting Hosts…", false },
-        // A second Esc is still the run's while it winds down.
         .{ .cancelling, "Cancelling…", true },
     }) |case| {
         var buffer: [max_line_bytes]u8 = undefined;
@@ -205,7 +170,6 @@ test "a run's line: the check, what the restart will do, each step, and a stop" 
         try std.testing.expectEqual(Lasts.until_done, shown.lasts);
         try std.testing.expect(case[0].going());
         try std.testing.expectEqual(case[2], case[0].takesEscape());
-        // A line offers Esc exactly while Esc is the run's to take.
         if (case[0] != .cancelling and case[0] != .checking) try std.testing.expectEqual(case[2], std.mem.endsWith(u8, shown.text, "esc cancels"));
     }
 }
@@ -214,7 +178,6 @@ test "how a run ended: a notice, or held until another Upgrade when the client c
     const v: Version = .{ .schema = 60, .patch = 1 };
     for ([_]struct { Ended, []const u8, Tone, Lasts }{
         .{ .{ .up_to_date = .{ .schema = 59, .patch = 7 } }, "Rui is up to date (0.59.7)", .normal, .notice },
-        // Another install selected a newer build: no version of ours to name.
         .{ .superseded, "A newer Rui is already installed; nothing changed", .normal, .notice },
         .{ .{ .refused = .first_install }, "Can't upgrade here: no managed install · run rui upgrade in a shell for details", .attention, .notice },
         .{ .{ .refused = .source_build }, "Can't upgrade here: a source build · run rui upgrade in a shell for details", .attention, .notice },
@@ -228,7 +191,6 @@ test "how a run ended: a notice, or held until another Upgrade when the client c
         .{ .{ .upgraded = .{ .version = v, .restarted = false } }, "Upgraded to 0.60.1", .normal, .notice },
         .{ .{ .incompatible = .{ .schema = 61, .patch = 0 } }, "Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave", .attention, .persistent },
     }) |case| {
-        // The words never depend on what the run leaves Host requests.
         const run: Run = .{ .ended = .{ .how = case[0], .outcome = .unchanged } };
         var buffer: [max_line_bytes]u8 = undefined;
         const shown = line(run, &buffer, .unicode);
@@ -245,8 +207,6 @@ test "ASCII spells the ellipsis and dot" {
     try std.testing.expectEqualStrings("Preparing Upgrade - restarts every eligible Host (2 found) - esc cancels", line(.{ .installing = .{ .found = .{ .host = .{ .running = 2 } } } }, &buffer, .ascii).text);
 }
 
-/// Compact state for a Version field. The shell status line can offer recovery
-/// commands; a settings field contains state only, never a second command UI.
 pub fn fieldTail(run: Run, buffer: *[max_line_bytes]u8) []const u8 {
     var writer = std.Io.Writer.fixed(buffer);
     const text: []const u8 = switch (run) {

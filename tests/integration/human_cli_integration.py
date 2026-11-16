@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Public one-shot caller recovery and exact Bash authorization."""
 import base64
 import errno
 import json
@@ -29,7 +28,6 @@ from host_process import assert_caller_error, canonical_fixture_root, dispose_al
 from product_defaults import CATALOG, DEFAULTS, compaction_trigger, start_effort
 
 
-# From 60 columns a user Message's first row ends with its admission time.
 TIMED_ROW = re.compile(r"^(.*?) +(\d\d:\d\d)$")
 
 
@@ -38,14 +36,8 @@ def untimed(row):
     return match.group(1) if match else row
 
 
-# What work under way says: the running call's row, "⠹ Run tests · 42s", or
-# the conversation's last line, "⠹ Thinking · 12s",
-# "⠹ Rate limited · retry 2 in 18s", "Stopping…".
 LIVE_LINE = re.compile(r"^(?:[⠹◌?] .+ · (?:\d|retry )|Stopping…)", re.M)
-# What the line under a draft beside an Action says once Enter there denies
-# the Action and sends the draft as the reason.
 REASON = "enter denies the call and sends this"
-# The refusal of an Enter there before such a frame was offered.
 REASON_NOT_READY = "! Not ready; nothing denied · " + REASON
 
 
@@ -54,15 +46,12 @@ def reason_shown(shown):
 
 
 def send_reason(master, ready, description):
-    """Once a frame saying Enter denies is offered, press Enter in the draft
-    beside the Action; return the frames up to the Action's denial."""
     shown = action_ready(ready, master, shows=reason_shown)
     os.write(master, b"\r")
     return shown + read_terminal(master, f"■ {description} · denied")
 
 
 def time_limit(milliseconds):
-    """A custom time limit as an Action's request block shows it."""
     for unit, size in (("min", 60000), ("s", 1000)):
         if milliseconds % size == 0:
             return f"{milliseconds // size} {unit}"
@@ -78,7 +67,6 @@ from human_cli_fixture import chat_info_geometry, model_choice_frame, model_choi
 
 
 def terminal_safe_json(text):
-    """Metadata JSON reaches terminals as printable ASCII and still decodes exactly."""
     unsafe = [character for character in text if not (" " <= character <= "~" or character == "\n")]
     assert not unsafe, ("raw terminal-unsafe characters in metadata JSON", unsafe, text)
     return json.loads(text)
@@ -97,13 +85,11 @@ def json_strings(value):
 
 
 def permission_row(frame, mode):
-    """The chat info Permissions field, unwrapped from a narrow panel."""
     value = "run without asking" if mode == "bypass" else "ask first"
     return f"Permissions {value} Tools" in " ".join(frame.split())
 
 
 def home_path(home, path):
-    """`path` as chat info shows it: from `~` under HOME."""
     text, home = str(path), str(home)
     if len(home) > 1 and (text == home or text.startswith(home + "/")):
         text = "~" + text[len(home):]
@@ -111,19 +97,15 @@ def home_path(home, path):
 
 
 def folder_row(home, path):
-    """An unclipped, home-relative Folder row for short visible paths."""
     return "Folder          " + home_path(home, path)
 
 
 def status_row(page, label, following):
-    """A chat info row's value and note, words single-spaced: the text from
-    `label`'s row up to the next row, `following`."""
     flat = " ".join(page.split())
     return flat.split(f" {label} ", 1)[1].split(f" {following} ", 1)[0]
 
 
 def invoke(home, *args, expect=0, environment=None, input=None):
-    """Both streams of one call: metadata on stdout, notices on stderr."""
     env = {**os.environ, "HOME": str(home), **(environment or {})}
     result = subprocess.run([str(fixture.RUI), *map(str, args)], env=env, capture_output=True, text=True, timeout=20, input=input)
     assert result.returncode == expect, (args, result.stdout, result.stderr)
@@ -131,7 +113,6 @@ def invoke(home, *args, expect=0, environment=None, input=None):
 
 
 def create_session(home, *args):
-    """Capture the allocated identity; callers carry it unchanged thereafter."""
     reply = terminal_safe_json(run(home, "session", "configure", *args))
     session = reply["answer"]["session"]
     assert re.fullmatch(r"[0123456789abcdefghjkmnpqrstvwxyz]{6}", session), reply
@@ -141,14 +122,12 @@ def create_session(home, *args):
 
 
 def shell_word(text):
-    """Rui's Bash ANSI-C quoting of one argv value."""
     escaped = "".join("\\'" if byte == 0x27 else "\\\\" if byte == 0x5c else
         chr(byte) if 32 <= byte <= 126 else f"\\{byte:03o}" for byte in text.encode())
     return f"$'{escaped}'"
 
 
 def defaults(home, *args, success=True, environment=None):
-    """One defaults JSON value; failures leave stdout empty. Only a saved Store says it became the global default."""
     env = {**os.environ, "HOME": str(home), **(environment or {})}
     result = subprocess.run([str(fixture.RUI), "defaults", "configure" if args else "inspect", *map(str, args)],
         env=env, capture_output=True, text=True, timeout=20)
@@ -207,8 +186,6 @@ def help_case():
         send_help = run(home, "session", "send", "--help")
         assert "\nRequires: --to ID.\n" in send_help and "stdin" in send_help, send_help
         assert "\nRequires: PROVIDER.\n" in run(home, "auth", "login", "--help")
-        # Each syntactically valid call lacks one declared requirement and
-        # fails before capture with scoped help, never the root usage.
         record = home / "explicit.json"
         for args, accepted in (
                 (("session", "send"), "--to ID"),
@@ -225,8 +202,6 @@ def help_case():
             assert "usage:" not in result.stderr and "rui [PROMPT]" not in result.stderr, (args, result.stderr)
             assert "request:" not in result.stderr, ("missing requirement printed a capture notice", result.stderr)
             assert list(home.iterdir()) == [], ("missing requirement created capture or record state", args)
-        # Rejected input forms must name a usable correction, without reading
-        # even available stdin or creating a recovery record.
         for args, (context, code) in (
                 (("session", "send", "k7m2qx"),
                  ("k7m2qx", "session_id_needs_to")),
@@ -260,9 +235,6 @@ def help_case():
                 assert list(home.iterdir()) == [], ("invalid input created runtime state", args)
             finally:
                 dispose_all(lambda: os.close(input_read), lambda: os.close(input_write))
-        # Fresh typed choices, saved-HANDLE conflicts and malformed IDs must
-        # refuse before reading stdin or publishing a capture.
-        # The permission mode's choices come from the option, not the catalog.
         for args, context, code, accepted in (
                 (("session", "start", "--permission-mode", "auto"),
                  "rui session start: --permission-mode auto: ", "choice_unsupported", " Accepted: ask, bypass. "),
@@ -283,8 +255,6 @@ def help_case():
                 assert list(home.iterdir()) == [], (args, "rejected invocation created runtime state")
             finally:
                 dispose_all(lambda: os.close(input_read), lambda: os.close(input_write))
-        # Retired names are refused before any entry path, even with a
-        # terminal that could otherwise reach the provider chooser.
         master, slave = pty.openpty()
         try:
             caller = spawn([str(fixture.RUI), "setup"],
@@ -299,7 +269,6 @@ def help_case():
         assert b"Provider:" not in output + errors and b"ChatGPT login" not in output + errors, (output, errors)
         assert b"usage:" not in errors and b"rui [PROMPT]" not in errors, errors
         assert list(home.iterdir()) == [], "retired name created runtime state"
-        # Bare entry has no inline Message operand, even after --.
         literal = subprocess.run([str(fixture.RUI), "--", "setup"], env={**os.environ, "HOME": str(home)},
             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
         assert literal.returncode == 2 and '[positional_unexpected]' in literal.stderr, literal
@@ -308,9 +277,7 @@ def help_case():
 
 
 def compiled_model_cases():
-    """One release list owns help; any ID with valid syntax is admitted, an unlisted one with default limits."""
     import host_launch_fixture as launch
-    # The generated shipped snapshot is the source, not a second hand list.
     models = tuple(model for model, row in CATALOG.items() if row.openai_listed)
     windows = {model: CATALOG[model].context_window for model in models}
     assert DEFAULTS.recommended_model in models
@@ -329,7 +296,6 @@ def compiled_model_cases():
         help_without_home = subprocess.run([str(fixture.RUI), "session", "configure", "--help"],
             env=no_home, capture_output=True, text=True, timeout=10)
         assert help_without_home.returncode == 0 and listing in help_without_home.stdout and not help_without_home.stderr
-        # An ID without valid syntax is refused before capture.
         for named in ((), ("--session", "k7m2qx")):
             for model in ("bad\x1b[31m", "two words", "x" * 257):
                 record = root / "must-not-exist.json"
@@ -345,7 +311,6 @@ def compiled_model_cases():
                 assert "\x1b" not in result.stderr, result.stderr
                 assert not record.exists() and not (root / "absent-store").exists()
                 assert list(home.iterdir()) == [], "invalid model created capture or preference state"
-        # Malformed Store paths and closed parser choices exit 2.
         for arguments, code in ((("session", "list", "--store", ""), "store_path_malformed"),
                 (("session", "inspect", "--store", str(root / "absent-store"), "--session", "k7m2qx", "--profile", "invalid"), "choice_unsupported")):
             result = subprocess.run([str(fixture.RUI), *arguments], env=env, capture_output=True, text=True, timeout=10)
@@ -357,7 +322,6 @@ def compiled_model_cases():
         assert "Accepted: a supported model ID of 1-256 printable non-space ASCII bytes." in rejected_default.stderr, rejected_default.stderr
         assert not list(home.iterdir()), "refused default model created preferences"
         assert "error: InvalidModel" not in rejected_default.stderr, rejected_default.stderr
-        # An unlisted ID with valid syntax is saved, with one line on its limits.
         for model in ("retired-model", "GPT-6-SOL"):
             accepted = subprocess.run([str(fixture.RUI), "defaults", "configure", "--provider", "codex", "--model", model],
                 env=env, capture_output=True, text=True, timeout=10)
@@ -368,12 +332,10 @@ def compiled_model_cases():
         assert saved.read_text().endswith("model=GPT-6-SOL\n")
         saved.write_bytes(saved.read_bytes().replace(b"model=GPT-6-SOL", b"model=retired-model"))
         original = saved.read_bytes()
-        # Bare rui with the saved unlisted pin goes on to sign-in, not a refusal.
         with terminal_process([str(fixture.RUI), "--store", str(root / "absent-store")], env=env) as (entered, master):
             shown = provider_prompt(master)
             assert "invalid model" not in shown and listing.strip() not in shown, shown
         assert saved.read_bytes() == original
-        # The Host starts quietly with an unlisted pin, and leaves it as it is.
         started = launch.run_start(store, env)
         assert started.returncode == 0, started.stderr
         assert "retired-model" not in started.stderr, started.stderr
@@ -421,7 +383,6 @@ def compiled_model_cases():
 
 
 def preference_edits(home, store):
-    """Exact saved intent, independent of prospective recommendation output."""
     defaults(home, "--store", store, "--provider", "codex", "--model", "gpt-6-luna")
     saved = home / ".config/rui/preferences"
     pinned = f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n"
@@ -445,8 +406,6 @@ def preference_edits(home, store):
     assert saved.read_text() == cleared
     defaults(home, "--model", "gpt-6-luna")
     assert saved.read_text() == pinned
-    # Notifications are on by default; off keeps every other choice and is
-    # the only choice an older Rui cannot read.
     assert defaults(home)["notifications"] is True
     assert defaults(home, "--notifications", "off")["notifications"] is False
     assert saved.read_text() == pinned.replace("version=1", "version=2") + "notifications=off\n"
@@ -454,7 +413,6 @@ def preference_edits(home, store):
     assert defaults(home, "--notifications", "on")["notifications"] is True
     assert saved.read_text() == pinned
 
-    # Permissions-only edits publish through setup, and inspection reads them.
     original = saved.read_bytes()
     for mode in ("ask", "bypass"):
         changed = defaults(home, "--permission-mode", mode)
@@ -470,11 +428,6 @@ def preference_edits(home, store):
 
 
 def read_pipe_output(stream, *, count=None, timeout=10):
-    """Read one complete line or an exact prefix without consuming later output.
-
-    Use raw descriptor reads consistently: a buffered readline after select can
-    still block, and read-ahead would invalidate the large-result backpressure case.
-    """
     limit = 16 * 1024
     assert count is None or 0 < count <= limit, count
     output = bytearray()
@@ -496,10 +449,6 @@ def forget_terminal(master):
 
 
 def discard_terminal(master):
-    """Drop a reaped writer's queued output and its screen, so the next
-    caller's capture starts at that caller's first byte. A writer killed while
-    the PTY was full leaves a frame begun and never ended; it is no later
-    frame's start."""
     discarded = 0
     while select.select([master], [], [], 0)[0]:
         chunk = os.read(master, 65536)
@@ -511,22 +460,16 @@ def discard_terminal(master):
 
 
 def info_frame(master, session, timeout=15):
-    """Read the panel on the already selected chat; keep CLI identity explicit."""
     assert session
     return chat_info_frame(master, timeout)
 
 
 def saved_default(master, command, line):
-    """The /setup reply that shows `line`. Every such reply opens with the
-    same words and stays shown until the next, so the line this command
-    changed is what tells its reply from the last one."""
     return command_frame(master, command, lambda frame: "Saved defaults for future Sessions" in conversation_text(frame) and shown(line, conversation_text(frame)))
 
 
 
 def leave_overview(master, timeout=15):
-    """Ctrl-D leaves the overview; returns the text
-    printed after it, through the notice's Overview line."""
     capture = terminal_capture(master)
     total = capture.plain_total
     os.write(master, b"\x04")
@@ -544,14 +487,12 @@ def leave_overview(master, timeout=15):
 
 
 def overview_store(notice):
-    """The Store the overview's notice names, without its shell quoting."""
     line = notice.split("Overview: rui --store ", 1)[1].splitlines()[0]
     assert line.startswith("$'") and line.endswith("'") and "\\" not in line, line
     return line[2:-1]
 
 
 def permanent_tool_count(screen, heading):
-    """Count a call heading's rows in one frame (not repeated frames)."""
     return len(re.findall(r"(?m)^" + re.escape(heading) + r"$", "\n".join(chat_content_row(row) for row in screen.split("\n"))))
 
 
@@ -595,12 +536,6 @@ def pipe_wait_oracles():
 
 
 def command_wait_oracles():
-    """command_frame against a scripted terminal that keeps its page shown
-    while a command runs, as Rui does. Enter follows the first frame that
-    shows typed text, and a wait that frame already satisfies is refused
-    before Enter: the page still shown would have passed for the reply. A
-    later frame that shows the whole command in the composer is not the
-    reply either, though the command's own words satisfy the wait."""
     command = "/setup --model new"
 
     def frame(page, draft=""):
@@ -625,7 +560,6 @@ def command_wait_oracles():
                 if not part:
                     return
                 typed += part
-            # Recorded before the frame that answers it.
             events.append("command and Enter" if b"\r" in typed else "command")
             os.write(slave, frame(old, command[:6]))
             while b"\r" not in typed:
@@ -657,11 +591,6 @@ def command_wait_oracles():
 
 
 def conversation_wait_oracles():
-    """The list's answer arrives first; only the conversation ends a wait.
-
-    Queue committed frames, not byte substrings: the same ordering must hold
-    for an already shown frame, a fresh read and a command's ready reply.
-    """
     marker = "edited 2"
     for wide in (False, True):
         def rows(answer, draft="", listed=marker):
@@ -690,8 +619,6 @@ def conversation_wait_oracles():
         reader, writer = socket.socketpair()
         master = reader.fileno()
         try:
-            # command_frame sees the draft before Enter, then two ready replies.
-            # Its result is the first matching frame, even in one observer read.
             writer.sendall(terminal_frame(rows("edited 1", "send", listed="edited 1"))
                 + terminal_frame(pending) + terminal_frame(complete))
             observed = terminal_step(master, "send", marker, composer=True)
@@ -702,22 +629,14 @@ def conversation_wait_oracles():
 
 
 def terminal_frame(lines, cursor=None):
-    """One synchronized full-screen frame as the renderer commits it."""
     row, column = cursor if cursor is not None else (len(lines), len(lines[-1]) + 1 if lines else 1)
     body = "\r\n".join(lines)
     return f"\x1b[?2026h\x1b[H\x1b[2J{body}\x1b[{row};{column}H\x1b[?2026l".encode()
 
 
 def shown_bash_command(master):
-    """The current Action's "$ " command, rejoined across wrapped rows.
-
-    A later line of the command starts with the content mark `│`; a wrapped
-    row starts with `┆`. As in raw_export, a row filled to the edge broke
-    inside a word; any other soft break consumed a space.
-    """
     capture = terminal_capture(master)
     width = capture.screen.columns
-    # PermissionCard is an overlay with its own two-column inset, not feed content.
     rows = [line.rstrip() for line in capture.screen.display]
     start = next(index for index, line in enumerate(rows) if line.startswith("  $ "))
     command = rows[start][4:]
@@ -734,24 +653,14 @@ def shown_bash_command(master):
 
 
 def drawn_cluster(text):
-    """`text` as a terminal draws it: libghostty-vt, like the terminals Rui
-    runs in, keeps at most 64 combining marks on one cell. The submitted
-    bytes still carry every mark."""
     return re.sub("([\u0300-\u036f]{64})[\u0300-\u036f]+", r"\1", text)
 
 
-# Palette index 12, which SGR 94 and 38;5;12 both select.
 USER_COLOUR = {12}
-# Palette index 3 (attention), which SGR 33 and 38;5;3 both select.
 ATTENTION_COLOUR = {3}
 
 
 def scroll_until(master, key, marker, *, presses=40):
-    """Press `key` until the committed screen shows `marker`; return frames.
-
-    A press that moves nothing at an edge draws nothing, and a page load can
-    draw several frames, so each press drains frames until output is quiet.
-    """
     seen = []
     for _ in range(presses):
         if marker in conversation_text(current_screen(master)):
@@ -764,12 +673,7 @@ def scroll_until(master, key, marker, *, presses=40):
 
 
 def raw_export(master, screen):
-    """The printed raw export command, rejoined across word-wrapped rows.
-
-    Word wrap consumes the space at a soft break; a row filled to the edge
-    broke inside a word instead (a long hex identity), so it joins directly.
-    """
-    columns = terminal_capture(master).screen.columns - 1  # Feed width, without its gutter.
+    columns = terminal_capture(master).screen.columns - 1  
     lines = [chat_content_row(line) for line in screen.split("\n")]
     start = next(index for index, line in enumerate(lines) if line.lstrip(" ").startswith("Raw export: "))
     command = lines[start].lstrip(" ").removeprefix("Raw export: ")
@@ -784,13 +688,10 @@ def raw_export(master, screen):
 
 
 def drawn_style(master, text, offset=0):
-    """Cell style where the latest committed frame draws `text`."""
     return terminal_capture(master).style(text, offset)
 
 
 def raw_output(master, until, timeout=15):
-    """Raw terminal bytes, fed on to the screen capture, until they hold the
-    bytes `until` or a committed frame `until` accepts."""
     capture = terminal_capture(master)
     raw = b""
     deadline = time.monotonic() + timeout
@@ -805,7 +706,6 @@ def raw_output(master, until, timeout=15):
 
 
 def quiet_output(master, seconds):
-    """Whatever the terminal writes within `seconds`."""
     raw = b""
     deadline = time.monotonic() + seconds
     while (remaining := deadline - time.monotonic()) > 0:
@@ -819,10 +719,6 @@ def quiet_output(master, seconds):
 
 
 def persistent_copy_case():
-    """/copy sends the last answer, and /copy code its last code block, to the
-    clipboard as one OSC 52 sequence of at most 75,000 bytes; /copy file saves
-    the answer where Rui runs, mode 0600 even over an earlier file, and replaces
-    a link at its name without following it."""
     state = screen_fixture_root("rui-copy.")
     home = state / "home"
     home.mkdir(mode=0o700)
@@ -830,7 +726,6 @@ def persistent_copy_case():
     here = state / "here"
     here.mkdir()
     answer = "Run:\n```sh\nzig build\n```\nThen:\n```py\nprint('é')\n```\nDone."
-    # The code block is the clipboard's limit exactly; the answer is over it.
     limit = 75_000
     block = ("x" * 99 + "\n") * 749 + "x" * 100
     large = "```\n" + block + "\n```\nLarge done."
@@ -852,8 +747,6 @@ def persistent_copy_case():
             terminal_step(master, "/copy code", "No answer to copy", composer=True)
             assert capture.clipboard == [] and not any(here.iterdir()), capture.clipboard
             terminal_step(master, "Copy request", "Done.", composer=True)
-            # A left drag over the answer's last word copies exactly the text
-            # it covered, in one OSC 52 sequence, once the button is released.
             lines = current_screen(master).split("\n")
             row = next(index for index, line in enumerate(lines) if line.strip() == "Done.")
             column = lines[row].index("Done.")
@@ -875,11 +768,8 @@ def persistent_copy_case():
                 return "\x1b]52;c;" + base64.b64encode(text.encode()).decode() + "\x1b\\"
 
             assert sent("/copy") == osc52(answer)
-            # The chat info action uses the same last-answer clipboard owner.
             copied = len(capture.clipboard)
             chat_info_open(master)
-            # Down stops on the action row beside its actions and walks the
-            # stacked row to Copy last answer; Right then walks the beside row.
             panel_frame(master, lambda frame: len(capture.clipboard) == copied + 1,
                         b"\x1b[B" * 6 + b"\x1b[C" * 2 + b"\r")
             assert capture.clipboard[-1] == osc52(answer), capture.clipboard
@@ -900,7 +790,6 @@ def persistent_copy_case():
             saved.chmod(0o644)
             terminal_step(master, "/copy file", f"Saved to ./{name}", composer=True)
             assert saved.read_bytes() == large.encode() and saved.stat().st_mode & 0o777 == 0o600, saved
-            # A link at the export name is replaced, never followed.
             sentinel = state / "sentinel"
             sentinel.write_bytes(b"sentinel")
             sentinel.chmod(0o640)
@@ -925,7 +814,6 @@ def persistent_copy_case():
 
 
 def provider_prompt(master):
-    # First run is now a committed app frame, not a canonical line prompt.
     return await_screen(master, "Sign in to Rui")
 
 
@@ -935,7 +823,6 @@ def chatgpt_method(master):
 
 
 def sign_in_focus(master, keys, previous, target):
-    """Commit the target's selected styling before choosing its drawn action."""
     capture = terminal_capture(master)
     rows = [row for row in capture.completed.splitlines() if row.lstrip().startswith(previous + " ")]
     assert len(rows) == 1, (previous, capture.completed)
@@ -965,16 +852,10 @@ def reuse_chatgpt(master):
 
 
 def terminal_bulk(master, command, marker="› ", *, submit=True, draft=None, caret=None, timeout=15):
-    """Write a large input in chunks while the screen is read.
-
-    With `draft`, wait instead until the composer shows exactly that draft
-    with its caret at display column `caret`. Returns the frames seen; the
-    terminal's output volume meanwhile is in `terminal_bulk.received`.
-    """
     fixture.wait_for(lambda: not termios.tcgetattr(master)[3] & termios.ICANON,
         "noncanonical terminal input")
     def send():
-        payload = (command + ("\r" if submit else "")).encode()  # Enter is CR; LF is Ctrl-J.
+        payload = (command + ("\r" if submit else "")).encode()  
         for offset in range(0, len(payload), 1024):
             os.write(master, payload[offset:offset + 1024])
 
@@ -1020,8 +901,6 @@ def saved_capture_cases(state, store, workspace):
         original = record.read_bytes()
         assert fixture.command("request", "inspect", "--store", store,
             "--key", handle)["observation"]["status"] == "absent"
-        # A pathname replacement after publication must not swap the bytes
-        # selected by the captured owner before its announcement.
         replaced = json.loads(original)
         assert replaced["session"] == "", replaced
         replaced["session"] = "000000"
@@ -1042,7 +921,6 @@ def saved_capture_cases(state, store, workspace):
         dispose_all(lambda: stop_process(caller, timeout=5),
                     lambda: record.write_bytes(original) if original is not None else None)
 
-    # Recovery must ignore a newly selected, nonexistent preference Store.
     defaults(home, "--store", store)
     preferences = home / ".config/rui/preferences"
     saved_preferences = preferences.read_bytes()
@@ -1050,8 +928,6 @@ def saved_capture_cases(state, store, workspace):
     assert json.loads(run(home, "request", "recover", handle))["answer"]["replayed"] is True
     preferences.write_bytes(saved_preferences)
 
-    # Rejected creation has no allocated Session. It remains inspectable and
-    # recoverable, without hiding another Session's valid recovery handles.
     sessions_before = run(home, "session", "list", "--store", store, "--all")
     rejected_handles = []
     for operation, kind in (("configure", "configure"), ("start", "message")):
@@ -1069,20 +945,14 @@ def saved_capture_cases(state, store, workspace):
         expected = {"status": "rejected", "kind": kind, "target": "", "code": "invalid_workspace"}
         if kind == "message":
             expected["state"] = "rejected"
-        # Rejected observations retain no canonical Message content; its
-        # original input remains in the unchanged local capture and receipt.
         assert observed == expected, observed
         recovered = json.loads(run(home, "request", "recover", rejected_handle, success=False))
         assert recovered["answer"] == {**rejected_answer, "replayed": True}, recovered
         assert rejected_record.read_bytes() == rejected_bytes
-        # The rejected record advances Store freshness, not Session facts.
         after = json.loads(run(home, "session", "list", "--store", store, "--all"))
         assert session_values(after) == session_values(json.loads(sessions_before))
 
-    # Later capture faults update that same allocated Session, so /requests
-    # must retain all of its recoverable configuration handles together.
     args += ["--session", session]
-    # Failure to announce happens after publication but before any send.
     before = set(json.loads(run(home, "request", "list")))
     output = run(home, *args, success=False,
         environment={"RUI_TEST_CAPTURE_GATE": str(state / "missing-parent/gate")})
@@ -1092,8 +962,6 @@ def saved_capture_cases(state, store, workspace):
         "--key", failed_notice)["observation"]["status"] == "absent"
     assert json.loads(run(home, "request", "recover", failed_notice))["answer"]["replayed"] is False
 
-    # Linux libc fault injection reaches the actual post-rename directory sync,
-    # not a fixture-only success path. No automatic send may follow uncertainty.
     if os_semantics.SYNC_FAULT_PRELOAD:
         source, library = state / "capture-sync.c", state / "capture-sync.so"
         source.write_text(r"""
@@ -1125,7 +993,6 @@ int fsync(int fd) {
     invalid = "01234567-89ab-4cde-8012-3456789abcde"
     stopped = "01234567-89ab-4cde-8012-3456789abcdf"
     (records / f"{invalid}.json").write_text("not a readable record")
-    # Every mutation kind, including Session stop, is a recoverable capture.
     stop = {"version": host_process.WIRE_VERSION, "kind": "session_stop", "store": str(store.resolve()),
         "key": stopped, "session": session}
     (records / f"{stopped}.json").write_text(json.dumps(stop, separators=(",", ":")))
@@ -1151,7 +1018,6 @@ int fsync(int fd) {
 
 
 def silent_read_edit_cases():
-    """Silent observation must not hide accepted draft edits with ECHO off."""
     import canonical_fixture as canonical
     state = screen_fixture_root("rui-silent-edit.")
     home, store = state / "home", state / "store"
@@ -1160,7 +1026,6 @@ def silent_read_edit_cases():
     completed = False
     try:
         host = fixture.start_host(store, None)
-        # A live scan reads only its activity page.
         for index, route in enumerate(("/v1/activity-page",)):
             reference = create_session(home, "--store", store,
                 "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
@@ -1210,14 +1075,11 @@ def silent_read_edit_cases():
 
 
 def wait_for_listed_call(tty):
-    # A matching Bash projection supplies the unresolved row's clock. The
-    # command stays held until after traversal; a bare heading can precede claim.
     running = re.compile(r"⠹ Held call · (?:[0-9]+s|[0-9]+m [0-9]+s|[0-9]+h [0-9]+m)")
     tty.wait(predicate=lambda: any(running.fullmatch(row) for row in conversation_text(tty.capture.completed).splitlines()), timeout=30)
 
 
 def listed_call_readiness_cases():
-    """A heading may precede claim; only the current running row is a barrier."""
     from terminal_screen import ScreenCapture
 
     class OfferedFrames:
@@ -1232,7 +1094,6 @@ def listed_call_readiness_cases():
                 "⠹ Held call · " + elapsed,
             )
             self.offered = None
-            # Accumulated output already contains a timed row: it is not current.
             self.frame("⠹ Held call · 99s")
             self.frame(self.frames[0])
 
@@ -1254,7 +1115,6 @@ def listed_call_readiness_cases():
 
 
 def renderer_cases():
-    """Full-screen geometry, input, consent and restoration through screen cells."""
     from contextlib import contextmanager, ExitStack
     from terminal_screen import ScreenCapture
     import canonical_fixture as canonical
@@ -1262,7 +1122,6 @@ def renderer_cases():
 
     listed_call_readiness_cases()
 
-    # Every-frame oracles see each synchronized commit, not just the newest one after a read.
     control, seen = ScreenCapture(), []
     control.listener = lambda screen, x, y: seen.append(screen)
     control.feed(b"\x1b[?2026h\x1b[HBROKEN INTERMEDIATE\x1b[?2026l"
@@ -1274,7 +1133,6 @@ def renderer_cases():
     resource.setrlimit(resource.RLIMIT_NOFILE, (min(256, original_limit[0]), original_limit[1]))
 
     state = screen_fixture_root("rui-renderer.")
-    # Always wrap the Workspace, whatever the temporary root.
     home, store, workspace = state / "home", state / "store", state / ("workspace-" + "w" * 80)
     home.mkdir(mode=0o700)
     workspace.mkdir()
@@ -1297,7 +1155,6 @@ def renderer_cases():
             self.capture.feed(data)
 
         def draining(self, observe):
-            """`observe` after reading this screen, as `draining` does."""
             return draining(self.master, observe, self.feed)
 
         def wait(self, marker=None, *, predicate=None, after=None, timeout=15):
@@ -1323,8 +1180,6 @@ def renderer_cases():
                         self.caller.poll(), self.capture.screen.cursor)
                     chunk = os.read(self.master, 65536)
                     assert chunk, ("renderer terminal closed", marker)
-                    # Collection budget excludes observer work on long combining
-                    # cells; this is not a native wall-response performance claim.
                     before = time.monotonic()
                     self.feed(chunk)
                     deadline += time.monotonic() - before
@@ -1333,8 +1188,6 @@ def renderer_cases():
                 self.capture.listener = previous
 
         def every_frame(self):
-            """Every committed frame from now on. One read can commit several
-            frames; the newest after a read hides the ones before it."""
             frames = []
             self.capture.listener = lambda screen, x, y: frames.append(screen)
             return frames
@@ -1361,11 +1214,6 @@ def renderer_cases():
             return result
 
         def ready(self, descriptor, until=lambda: True):
-            """Return once an offered frame shows what `until` accepts. Rui
-            writes a token after each offered frame, so a token can belong
-            to a frame drawn before the one a case waits for: keys that
-            draw a frame of their own before the last one (Ctrl-R before
-            Enter) offer that frame too."""
             deadline = time.monotonic() + 15
             while True:
                 remaining = deadline - time.monotonic()
@@ -1380,9 +1228,6 @@ def renderer_cases():
                         assert time.monotonic() < deadline
                         self.feed(os.read(self.master, 65536))
                     if until():
-                        # Spend the tokens of later offers too, with their
-                        # frames (each token follows its frame), so the next
-                        # ready() waits for an offer made after this one.
                         while select.select([descriptor], [], [], 0)[0]:
                             assert os.read(descriptor, 1) == b"x"
                             while select.select([self.master], [], [], 0)[0]:
@@ -1391,8 +1236,6 @@ def renderer_cases():
                         return
 
         def finish(self, expected=0):
-            # Own BOTH streams through actual exit, rather than communicate
-            # while an undrained PTY can still hold the final renderer writes.
             deadline = time.monotonic() + 10
             pending = {self.master, self.caller.stderr.fileno()}
             output, errors = bytearray(), bytearray()
@@ -1419,7 +1262,6 @@ def renderer_cases():
                         errors.extend(chunk)
                     assert len(output) + len(errors) < 1024 * 1024
             assert self.caller.wait(timeout=1) == expected, bytes(errors)
-            # These are protocol cleanup checks, not displayed-content claims.
             assert b"\x1b[?1049l" in output and b"\x1b[?2004l" in output, output
             assert b"\x1b[?25h" in output, output
             return bytes(output), bytes(errors)
@@ -1429,7 +1271,6 @@ def renderer_cases():
         master, slave = open_pty()
         original = termios.tcgetattr(slave)
         original_flags = fcntl.fcntl(slave, fcntl.F_GETFL)
-        # Asymmetric user state catches restoration to generic sane defaults.
         original[6][termios.VERASE] = b"\x08"
         termios.tcsetattr(slave, termios.TCSANOW, original)
         caller = None
@@ -1451,8 +1292,6 @@ def renderer_cases():
                 cwd=workspace, env=env, pass_fds=(() if ready_write is None else (ready_write,)),
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             terminal = Terminal(master, slave, caller)
-            # The capture matches the pty before the first frame: the input
-            # draws on the bottom row, past a default-sized capture's last.
             terminal.capture.resize(columns, rows)
             if opening:
                 terminal.wait(predicate=lambda: terminal.capture.draft("", 2))
@@ -1490,13 +1329,10 @@ def renderer_cases():
         assert actual.encode() == text.encode(), ("renderer changed submitted bytes", actual, text)
 
     def joined(tty):
-        # A final answer frame is not proof that its reader has joined.
         tty.send("\x1bi", "Copy last answer")
         tty.send("\x1b", predicate=lambda: tty.capture.draft("", 2))
 
     try:
-        # One read can replace a valid Message frame with the final reply.
-        # The wait and existing every-frame oracle must both see that frame.
         master, writer = os.pipe()
         try:
             tty = Terminal(master, None, None)
@@ -1538,13 +1374,10 @@ def renderer_cases():
             tty.send("kept\x01", predicate=lambda: tty.capture.draft("kept", 2))
             tty.send("\x1b[200~\u0301discarded\x1b[201~", "! Input rejected")
             assert tty.capture.draft("kept", 2), tty.capture.completed
-            # An identical frame writes nothing: clear the notice with an
-            # edit and its undo before the next rejection.
             tty.send("x", predicate=lambda: tty.capture.draft("xkept", 3))
             tty.send("\x7f", predicate=lambda: tty.capture.draft("kept", 2) and "! Input rejected" not in tty.capture.completed)
             tty.send("\x1b[200~prefix\n\u0301discarded\x1b[201~", "! Input rejected")
             assert tty.capture.draft("kept", 2), tty.capture.completed
-            # Rejection leaves a usable editor, not a latent fatal redraw.
             tty.send("é", predicate=lambda: tty.capture.draft("ékept", 3))
             assert os.write(tty.master, b"\x03") == 1
             tty.finish()
@@ -1565,8 +1398,6 @@ def renderer_cases():
         submitted(pipe_text)
         print("renderer: non-TTY rejection and literal multiline pipe output retain their existing contracts", flush=True)
         with terminal(geometry) as tty:
-            # Keep the historical native Mac OOM sequence exactly: wide5000X
-            # at 24x2048, shrink to 24x80, then a + 2048 combining acutes.
             tty.resize(2048)
             marker = answer("wide")
             tty.send("X" * 5000 + "\r", marker)
@@ -1577,7 +1408,6 @@ def renderer_cases():
                     ("A中e\u0301\tB", 8), ("e" + "\u0301" * 1024, 3))):
                 before = len(endpoint.requests)
                 records = set((home / ".config/rui/requests").glob("*.json"))
-                # A draft tab shows as one cell; the submitted bytes keep it.
                 drawn = "A中é B" if index == 1 else drawn_cluster(draft)
                 tty.send("\x1b[200~" + draft + "\x1b[201~", predicate=lambda: tty.capture.draft(drawn, caret))
                 assert len(endpoint.requests) == before and set((home / ".config/rui/requests").glob("*.json")) == records
@@ -1587,8 +1417,6 @@ def renderer_cases():
                 joined(tty)
             multiline = "first café\nsecond 中"
             before = len(endpoint.requests)
-            # Continuation rows align under the draft, inside the composer margin,
-            # without a second glyph.
             tty.send("\x1b[200~" + multiline + "\x1b[201~",
                 predicate=lambda: "   second 中" in tty.capture.completed)
             screen = tty.capture.screen
@@ -1613,7 +1441,6 @@ def renderer_cases():
             assert all(value in shown for value in escaped), shown
             joined(tty)
             shown = tty.send("\x0f", chat_content_row("    Bash "))
-            # Both the saved Tool Result and answer use the same display sink.
             assert all(value in shown for value in escaped), shown
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
@@ -1624,10 +1451,6 @@ def renderer_cases():
             tty.finish()
         print("renderer: invisible answer and tool output escaped; saved conversation reopens", flush=True)
 
-        # The request stays above the input row. Its choice initially hides
-        # the kept draft, highlights Allow once and accepts Enter even before
-        # a long command's end is shown. Typing or paste reveals and edits the
-        # draft without deciding; Esc returns to the choice.
         consent_session = configure("ask")
         proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", lambda response: response)
         command = "\n".join(f"# exact command line {index}" for index in range(100)) + "\nprintf approved > renderer-effect"
@@ -1643,8 +1466,6 @@ def renderer_cases():
                 opened = tty.wait(CHOICE)
                 tty.ready(ready_read)
                 assert highlighted(tty.capture) == "Allow once", opened
-                # One title, then the exact command cut to what fits. Only
-                # the choice is on the input row; the kept draft is hidden.
                 assert opened.count("? Renderer consent") == 1 and "$ # exact command line 0" in opened, opened
                 assert "printf approved > renderer-effect" not in opened and "› a" not in opened, opened
                 assert "Workspace" not in opened and "Time limit" not in opened and "Run Bash" not in opened, opened
@@ -1653,9 +1474,6 @@ def renderer_cases():
                 action = current["actionable_permissions"][0]["action"]
                 exact = json.loads(run(home, "action", "inspect", "--store", store, "--session", consent_session, "--action", action))
                 assert exact["arguments"] == arguments
-                # Ctrl-R and Shift-Enter as Ghostty sends it (ESC CR) do
-                # not decide at the choice. A printable key then reveals
-                # the kept draft and is inserted at its caret.
                 drafting = tty.send("\x12\x1b\ry", predicate=lambda: tty.capture.draft("ay", 4))
                 assert "? Renderer consent" in drafting and highlighted(tty.capture) is None, drafting
                 tty.send("\r", "Not sent: this Action needs a decision")
@@ -1668,8 +1486,6 @@ def renderer_cases():
                             and screen.display[screen.cursor.y].rstrip() == "   text"
                             and screen.cursor.x == 7)
 
-                # A paste switches back to the draft too. Its embedded
-                # Enter is text, never a decision, and the request stays up.
                 drafting = tty.send("\x1b[200~pasted\r\ntext\x1b[201~", predicate=pasted_draft)
                 assert "? Renderer consent" in drafting and highlighted(tty.capture) is None, drafting
                 tty.send("\x1b", predicate=lambda: highlighted(tty.capture) == "Allow once")
@@ -1677,7 +1493,6 @@ def renderer_cases():
                 tty.send("\x1b[D", predicate=lambda: highlighted(tty.capture) == "Allow once")
                 assert set((home / ".config/rui/requests").glob("*.json")) == records and not proxy.exchanges
                 assert not (workspace / "renderer-effect").exists(), "editing the draft authorized an Action"
-                # Enter allows at once, though the command's end is not shown.
                 tty.send("\r", marker)
                 assert (workspace / "renderer-effect").read_bytes() == b"approved"
                 decisions = [json.loads(path.read_text()) for path in set((home / ".config/rui/requests").glob("*.json")) - records]
@@ -1686,7 +1501,6 @@ def renderer_cases():
                 body, response = proxy.exchanges[0]
                 assert json.loads(body)["action"] == action and json.loads(body)["decision"] == "allow_once"
                 assert json.loads(response.split(b"\r\n\r\n", 1)[1])["answer"]["status"] == "accepted"
-                # The edited draft returns unchanged, including its caret.
                 tty.wait(predicate=pasted_draft)
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
@@ -1696,9 +1510,6 @@ def renderer_cases():
 
         proxy.close()
         proxy = None
-        # A preview past the old 256 KiB veto can still be approved, at once
-        # (audit item 8, 2026-11-09). Left waiting, its detach notice names
-        # the exact shell commands.
         oversized_session = configure("ask")
         command = "#" + "x" * (256 * 1024) + "\nprintf oversized > renderer-oversized-effect"
         arguments = json.dumps({"cmd": command, "description": "Oversized proposal", "timeout_ms": None})
@@ -1718,17 +1529,12 @@ def renderer_cases():
             assert "printf oversized" not in tty.capture.completed, tty.capture.completed
             records = set((home / ".config/rui/requests").glob("*.json"))
             tty.send("\r", marker)
-            # The decision is the oracle: Linux refuses a 256 KiB argument,
-            # so whether Bash then ran depends on the platform.
             decisions = [json.loads(path.read_text()) for path in set((home / ".config/rui/requests").glob("*.json")) - records]
             assert [(item["action"], item["decision"]) for item in decisions] == [(action, "allow_once")], decisions
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         print("renderer: an oversized Action can be approved; left waiting, its exact shell commands survive exit", flush=True)
 
-        # Another client decides: the card leaves on its own, with the
-        # outcome and answer shown, never an Action that still looks pending.
-        # A key typed at the choice remains in the draft after that decision.
         for decision in ("allow", "deny"):
             session = configure("ask")
             effect = workspace / f"renderer-elsewhere-{decision}"
@@ -1755,8 +1561,6 @@ def renderer_cases():
                 tty.finish()
         print("renderer: an Action decided by another client leaves the card and shows its outcome; a key typed at the choice stays in the draft", flush=True)
 
-        # The card decides only the request it drew: when the first of two is
-        # decided elsewhere, the second gets its own card and readiness.
         session = configure("ask")
         endpoint.responses.append(fixture.sse_tool_calls("renderer-successor", [
             ("bash", f"successor-{index}", json.dumps({"cmd": f"printf decided > renderer-successor-{index}", "description": f"Successor {index}", "timeout_ms": None}))
@@ -1773,7 +1577,6 @@ def renderer_cases():
                 tty.wait(predicate=lambda: "? Successor 2" in conversation_text(tty.capture.completed) and CHOICE in conversation_text(tty.capture.completed), after=generation)
                 tty.ready(ready_read)
                 assert highlighted(tty.capture) == "Allow once", tty.capture.completed
-                # The other client saved its own record in this HOME.
                 records = set((home / ".config/rui/requests").glob("*.json"))
                 tty.send("\x1b[C", predicate=lambda: highlighted(tty.capture) == "Deny")
                 tty.send("\r", marker)
@@ -1786,8 +1589,6 @@ def renderer_cases():
             dispose_all(lambda: os.close(ready_read), lambda: os.close(ready_write))
         print("renderer: a card decides only the request it drew", flush=True)
 
-        # Chat info is its own Layer, independent of an Activity read in flight.
-        # Closing it and opening Settings > Keys must not let a delayed read reopen it.
         session = configure()
         marker = answer("info yields")
         holding = threading.Event()
@@ -1808,7 +1609,6 @@ def renderer_cases():
             fixture.wait_for(tty.draining(held[0].is_set), "first held Activity page", timeout=10)
             tty.send("\x1bi", "Copy last answer")
             released[0].set()
-            # The next Activity read carries the info inspection request.
             fixture.wait_for(tty.draining(held[1].is_set), "info Activity page", timeout=10)
             tty.send("\x1b", predicate=lambda: "Copy last answer" not in tty.capture.completed)
             row, line = next((index, line) for index, line in enumerate(tty.capture.completed.split("\n")) if "Settings" in line)
@@ -1828,14 +1628,11 @@ def renderer_cases():
         proxy = None
         print("renderer: delayed info inspection cannot cover Settings > Keys after the panel closes", flush=True)
 
-        # A short fresh feed clamps at its first saved row; scrolling does
-        # not add a start label or duplicate the admitted Message and reply.
         session = configure()
         marker = answer("fresh start")
         with terminal(session) as tty:
             tty.send("fresh start\r", marker)
             frames = tty.every_frame()
-            # Only the first PgUp moves a feed this short; the rest draw nothing.
             shown = tty.send("\x1b[5~" * 3, predicate=lambda: "› fresh start" in conversation_text(tty.capture.completed)
                 and marker in conversation_text(tty.capture.completed) and "↓" in tty.capture.completed)
             assert shown.count("› fresh start") == 1 and shown.count(marker) == 1, shown
@@ -1860,7 +1657,6 @@ def renderer_cases():
 
 
 def provider_line_cases():
-    """First-run screen: choices, device cancellation, masked keys and no TTY."""
     state = screen_fixture_root("rui-provider-screen.")
     store = state / "store"
     endpoint = fixture.SuccessEndpoint([])
@@ -1920,8 +1716,6 @@ def provider_line_cases():
                         sign_in_focus(master, b"\x1b[C", "ChatGPT", "API key")
                         os.write(master, b"\r")
                         await_screen(master, "Connect with an API key")
-                        # Blank key reuses its admitted source, but still stages
-                        # an immutable selected-Host pair and proves fresh activation.
                         sign_in_focus(master, b"\t\t", "API key", "[ Connect ]")
                         os.write(master, b"\r")
                     else:
@@ -2074,7 +1868,6 @@ def main(selected="all"):
     workspace.mkdir()
     counter = workspace / "effect-count"
     arguments = json.dumps({"cmd": "printf x >> effect-count", "description": "Write first effect", "timeout_ms": None}, separators=(",", ":"))
-    # RLO, C1 CSI and DEL as well as ESC: each can disguise terminal output.
     control_call = "human-call\x1b[1Ghidden\u202e\u009b\x7f"
     control_arguments = arguments + "\r  "
     sibling_started = state / "sibling-started"
@@ -2112,8 +1905,6 @@ def main(selected="all"):
         assert (fresh_setup["store"], fresh_setup["store_source"], fresh_setup["store_available"]) == (str(fallback), "home", False), fresh_setup
         assert fresh_setup["next_session"] == {"status": "choose_provider"} and fresh_setup["host"] == {"status": "store_unavailable"}, fresh_setup
         assert not (preferences_home / ".config").exists(), "inspection created private state"
-        # The shorter preferences path fits while the unsaved Store fallback
-        # does not. Independent provider publication still succeeds.
         max_path = os.pathconf(preferences_home, "PC_PATH_MAX")
         long_home = str(preferences_home) + "/." * ((max_path - 16 - len(str(preferences_home))) // 2)
         oversized_setup = defaults(long_home, "--provider", "codex")
@@ -2126,7 +1917,6 @@ def main(selected="all"):
         except OSError as err:
             if err.errno != errno.EILSEQ:
                 raise
-            # macOS filesystems may reject this name before Rui sees HOME.
         invalid = subprocess.run([os.fsencode(fixture.RUI), b"defaults", b"configure", b"--provider", b"codex"],
             env={**os.environb, b"HOME": invalid_home}, capture_output=True, timeout=20)
         assert invalid.returncode == 6 and b"[home_unavailable]" in invalid.stderr, invalid
@@ -2151,8 +1941,6 @@ def main(selected="all"):
         assert saved.read_text() == f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n"
         preference_edits(preferences_home, store)
         original_preferences = saved.read_text()
-        # Malformed saved fields are an environment repair, even when a valid
-        # edit reaches the locked snapshot. Refusals never rewrite that file.
         for invalid_saved in (
                 original_preferences.replace(f"store={store.resolve()}", "store=relative"),
                 original_preferences.replace("model=gpt-6-luna", "model=two words"),
@@ -2254,8 +2042,6 @@ def main(selected="all"):
             assert f"[{code}]" in refused_edit.stderr and flag in refused_edit.stderr, refused_edit
             assert f"Accepted: {accepted}." in refused_edit.stderr, refused_edit
             assert saved.read_bytes() == original_defaults, (flag, value, "refused edit changed defaults")
-        # A directory in the temporary-file slot is an honest save failure;
-        # no partial replacement may appear as a saved preference.
         temp = saved.parent / "preferences.tmp"
         temp.mkdir()
         blocked = subprocess.run([str(fixture.RUI), "defaults", "configure", "--store", str(store)],
@@ -2286,7 +2072,6 @@ def main(selected="all"):
         defaults(preferences_home, "--provider", "codex", "--model", "gpt-6-luna")
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=old-model\n")
         prospective = defaults(preferences_home)["next_session"]
-        # A model Rui does not list is still the next Session's, with default limits.
         assert prospective["status"] == "selected" and prospective["model"] == "old-model", prospective
         assert defaults(preferences_home)["model"] == "old-model", "inspection rewrote the stale pin"
         defaults(preferences_home, "--model", "gpt-6-luna")
@@ -2315,8 +2100,6 @@ def main(selected="all"):
             "--tools", "bash", "--permission-mode", "ask")
         assert config["admission"]["answer"]["status"] == "accepted", config
         session = config["admission"]["answer"]["session"]
-        # A one-shot read selects the saved Store; explicit targeting bypasses
-        # even corrupt preferences, and an invalid saved destination never falls back.
         assert json.loads(run(preferences_home, "session", "inspect", "--session", session))["work"]["state"]["kind"] == "idle"
         saved.write_text("version=9\n")
         invalid_preferences = invoke(preferences_home, "session", "inspect", "--session", session, expect=6)
@@ -2409,9 +2192,6 @@ def main(selected="all"):
             raise
         try:
             assert "Sign in to Rui" in provider_prompt(master)
-            # Another client installs a fixture credential while this caller
-            # waits for a choice. Its explicit selectors must still bypass the
-            # malformed prospective defaults when it rechecks readiness.
             codex_fixture.credentials(explicit_config / "codex.json")
             reuse_chatgpt(master)
             welcome = overview_frame(master, lambda frame: "Sign-in saved; couldn't save default" in frame, timeout=10, ready=False)
@@ -2428,8 +2208,6 @@ def main(selected="all"):
         finally:
             dispose_all(lambda: stop_process(explicit, timeout=5),
                         lambda: close_pty(master), lambda: close_pty(slave))
-        # A renewal-due opaque credential arrives while the prompt is open. It
-        # remains usable for creation.
         (explicit_config / "codex.json").unlink()
         master, slave = open_pty()
         original_mode = termios.tcgetattr(slave)
@@ -2494,8 +2272,6 @@ def main(selected="all"):
         finally:
             fixture.stop_host(other_host)
         codex_fixture.credentials(credential)
-        # The CLI checks each name's spelling and repeats and sends nothing
-        # when one fails; which names exist is the Host's to say.
         for index, (tools, code) in enumerate((("edit", "unknown_tool"), ("bash,edit", "unknown_tool"),
                                                ("edit,bash", "unknown_tool"), ("bash,bash", "internal_unexpected"),
                                                ("Bash", "unknown_tool"), ("none,bash", "unknown_tool"),
@@ -2507,7 +2283,6 @@ def main(selected="all"):
                 capture_output=True, text=True, timeout=10)
             assert rejected.returncode == (3 if code == "unknown_tool" else 1), (tools, rejected)
             assert (code in rejected.stdout if code == "unknown_tool" else f"[{code}]" in rejected.stderr), (tools, rejected)
-            # A request the Host refuses was sent, so its capture stays.
             assert record.exists() == (code == "unknown_tool"), ("tool selection capture", tools)
         for tools, mode in (("none", "bypass"), ("none", "ask"),
                             ("bash", "bypass"), ("bash", "ask"),
@@ -2564,17 +2339,12 @@ def main(selected="all"):
         try:
             blocked = spawn([str(fixture.RUI)], cwd=workspace,
                 env={**os.environ, "HOME": str(blocked_home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-            # New Session's Configure capture fails before any send; no
-            # editor, Session or Message is created.
             overview_frame(master, overview_title)
             refused = overview_frame(master, lambda frame: "Not created: NotDir" in frame,
                                      keys=b"\x1b[H\r", ready=False)
             assert "Type a task" not in refused, refused
             os.write(master, b"\x03")
-            # Keep the slave alive until all output is collected: Darwin can
-            # discard unread PTY bytes when the last slave closes.
             output, errors = terminal_exit(blocked, master, timeout=20)
-            # App writes the detach notice to stderr once it released the terminal.
             assert blocked.returncode == 0 and errors.startswith(b"\nDetached. Host work continues.\n"), (output, errors)
             assert b"request: " not in output + errors, (output, errors)
             assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original_mode)
@@ -2612,8 +2382,6 @@ def main(selected="all"):
         assert record.read_bytes() == captured
         assert len(endpoint.requests) == 1, endpoint.requests
 
-        # One-shot observations replace the removed waits: the original request
-        # and its Session both report the same pending Action.
         attention = fixture.wait_for(lambda: (value if (value := fixture.observe(store, first))["state"]
             == "waiting_for_permission" else None), "first request attention")
         assert attention["work"]["state"]["kind"] == "approval", attention
@@ -2635,7 +2403,6 @@ def main(selected="all"):
         assert "\\u001b" in presentation and "\\u202e" in presentation and "\\r  " in presentation, presentation
         assert "\x1b" not in presentation and "\u202e" not in presentation and "\r" not in presentation, presentation
         terminal_safe_json(presentation)
-        # Full inspection exposes the same Action identities and proposal.
         full = terminal_safe_json(run(home, "session", "inspect", "--store", store, "--session", session, "--profile", "full"))
         assert control_call in json_strings(full) and control_arguments in json_strings(full), full
         fresh_home = state / "fresh-home"
@@ -2650,8 +2417,6 @@ def main(selected="all"):
             env={**os.environ, "HOME": str(fresh_home), "TMPDIR": str(state / "missing-scratch")},
             capture_output=True, text=True, timeout=20)
         assert unavailable.returncode != 0 and unavailable.stdout == "", unavailable
-        # Explicit content readers keep stdout byte-exact: a missing Action
-        # reports its Host diagnostic on stderr only.
         for field in ("call-id", "arguments"):
             absent = subprocess.run([str(fixture.RUI), "action", f"read-{field}", "--store", str(store),
                 "--session", session, "--action", "999999"], env={**os.environ, "HOME": str(home)},
@@ -2699,15 +2464,11 @@ def main(selected="all"):
             binding = chat_info_frame(master)
             bound_session = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
             assert bound_session["workspace"] == str(workspace.resolve()) and bound_session["provider"] == "codex", bound_session
-            # A long read-only Folder keeps its basename rather than clipping
-            # the right-hand path suffix; the canonical inspection above is full.
             folder = next(row.split("Folder", 1)[1].strip() for row in binding.split("\n")
                           if row.strip().startswith("Folder"))
             assert folder.endswith(workspace.resolve().name), binding
             assert folder.startswith(("…/", "~/", "/")), binding
             assert "gpt-6-sol" in binding and "asks before Bash/MCP" not in binding and permission_row(binding, "ask"), binding
-            # The wide layout exposes the pinned Settings row without
-            # leaving this conversation or changing its draft.
             terminal_capture(master).resize(140, 50)
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 140, 0, 0))
             wide = keyed_frame(master, b"", lambda screen, x, y: "Settings" in screen and "first answer" in screen)
@@ -2746,7 +2507,6 @@ def main(selected="all"):
             saved_default(master, "/setup --clear-model", "Model: not selected")
             assert interactive_saved.read_text().endswith("provider=codex\nmodel=\n")
             cleared_preferences = interactive_saved.read_bytes()
-            # Neighbours differ: an identical rejection draws no new frame.
             for command, error in (("/setup --clear-model --model gpt-6-luna", "model_excludes_clear_model"),
                                    ('/setup --model ""', 'preference_model_invalid'),
                                    ("/setup --model gpt-6-luna --clear-model", "model_excludes_clear_model")):
@@ -2775,7 +2535,6 @@ def main(selected="all"):
             chat_info_frame(master)
             assert fixture.command("session", "inspect", "--store", store,
                 "--session", session)["session"]["model"] == "gpt-6-sol"
-            # Misused property commands cannot configure through a second path.
             before_configure = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
             for command in ("/model gpt-5.5", "/new --model gpt-5.5"):
                 terminal_step(master, command, "Usage:", composer=True)
@@ -2785,8 +2544,6 @@ def main(selected="all"):
             model_choice_frame(master, b"gpt-6-sol", query="gpt-6-sol", more=False)
             configured = panel_frame(master, lambda frame: not model_choice_shown(frame) and "saving" not in frame, b"\r")
             assert "gpt-6-sol" in configured and "request:" not in configured, configured
-            # The natural body leaves the previous /setup result in the feed.
-            # A typed Configure adds no CLI receipt to the info body itself.
             geometry = chat_info_geometry(configured)
             configured_body = "\n".join(geometry["rows"][geometry["top"]:geometry["input"] - 1])
             for receipt in ("Store:", "Session:", "key:", "admitted:", "replayed:"):
@@ -3047,8 +2804,6 @@ def main(selected="all"):
         interactive = create_session(home, "--store", store,
             "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol",
             "--tools", "bash", "--permission-mode", "ask")
-        # The card's own PTY checks live in renderer_cases; this keeps the
-        # exact Action's caller checks with the session flow that follows.
         interactive_key = admit(home, "session", "send", "--to", interactive,
             input="interactive request")["request"]
         current_action = fixture.wait_for(lambda: (value if (value := fixture.command("session", "inspect",
@@ -3070,14 +2825,11 @@ def main(selected="all"):
         invalid_name = "human/name\n\x1b[2J\u202e"
         rejected_name = invoke(home, "session", "configure", "--store", store, "--session", invalid_name, expect=2)
         assert not rejected_name.stdout and "[invalid_session_reference]" in rejected_name.stderr, rejected_name
-        # Keep hostile bytes visible after home shortening; long absolute
-        # folders otherwise elide whole leading components.
         control_workspace = home / "name\n\x1b[2J\u202e"
         control_workspace.mkdir()
         escaped_workspace = str(control_workspace).replace("\n", "\\n").replace("\x1b", "\\x1b").replace("\u202e", "\\u202e")
         control_session = create_session(home, "--store", store,
             "--workspace", control_workspace, "--provider", "codex", "--model", "gpt-6-sol")
-        # Arbitrary Workspace bytes still escape safely in metadata and pages.
         current = terminal_safe_json(run(home, "session", "inspect", "--store", store, "--session", control_session))
         assert str(control_workspace) in json_strings(current), current
         listed = terminal_safe_json(run(home, "session", "list", "--store", store, "--all"))
@@ -3096,8 +2848,6 @@ def main(selected="all"):
             assert entered.wait(timeout=5) == 0
             resume = farewell.split("Resume: ", 1)[1].split("\n", 1)[0]
             assert "\x1b" not in resume and "\u202e" not in resume, resume
-        # Execute the printed command, not a reconstructed equivalent. Both
-        # exact selectors must survive shell quoting and changed defaults.
         other_store = workspace / "unused-store"
         other_store.mkdir(mode=0o700)
         defaults(home, "--store", other_store)
@@ -3206,11 +2956,11 @@ def main(selected="all"):
                     observed = terminal_step(master, "Z", f"edited {index}")
                 elif index == 1:
                     os.write(master, typed.encode())
-                    read_terminal(master, "› A中\u00e9")  # Cells hold the NFC cluster.
+                    read_terminal(master, "› A中\u00e9")  
                     observed = terminal_step(master, "", f"edited {index}")
                 elif typed == "abc\x1b[D\x1b[DZ":
                     os.write(master, b"abc\x1b[")
-                    time.sleep(0.2)  # A recognized CSI must outlive the bare-ESC ambiguity timeout.
+                    time.sleep(0.2)  
                     observed = terminal_step(master, "D\x1b[DZ", f"edited {index}")
                 else:
                     observed = terminal_step(master, typed, f"edited {index}")
@@ -3240,7 +2990,7 @@ def main(selected="all"):
             read_terminal(master, "a" * 100)
             for _ in range(100):
                 os.write(master, b"\x7f")
-                time.sleep(0.025)  # Longer than the editor's repaint window.
+                time.sleep(0.025)  
             observed = terminal_step(master, "Z", "paced edited")
             assert "\n› Z" in conversation_text(observed), observed
             body = json.loads(endpoint.requests[-1])
@@ -3257,7 +3007,6 @@ def main(selected="all"):
             before = len(endpoint.requests)
             for invalid in (b"\xc3(\r", b"\xc3\r"):
                 os.write(master, invalid)
-                # A repeated identical notice redraws nothing.
                 rejected = await_screen(master, "Input rejected; nothing sent.")
                 assert "Input rejected; nothing sent." in rejected, rejected
             settle_screen(master, quiet=0.5)
@@ -3265,8 +3014,6 @@ def main(selected="all"):
             endpoint.responses.append(fixture.sse_answer("editor-limit-answer", "editor-limit-reason",
                 "editor-limit-message", "limit accepted")[0])
             at_limit = "a" * (64 * 1024 - 2) + "é"
-            # 64 KiB typed a KiB at a time is a third of the default budget on
-            # an idle machine, and has run past it on a loaded runner.
             accepted = terminal_bulk(master, at_limit, "limit accepted", timeout=60)
             assert "limit accepted" in accepted, accepted[-1000:]
             body = json.loads(endpoint.requests[-1])
@@ -3314,7 +3061,6 @@ def main(selected="all"):
                 "--", empty_session], env={**os.environ, "HOME": str(fresh_home)},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             try:
-                # A narrow terminal still draws the Session; it has no minimum size.
                 read_terminal(master, "› ")
                 os.write(master, b"\x03")
                 output, errors = terminal_exit(entered, master)
@@ -3333,24 +3079,18 @@ def main(selected="all"):
         observation_held, observation_continue = threading.Event(), threading.Event()
         master, slave = open_pty()
         original_terminal = termios.tcgetattr(slave)
-        # The TUI starts a crashed Host once by itself. The Host it starts
-        # inherits this https proxy and refuses it at startup, so that start
-        # fails without serving the accepted Message, which the fixture Host
-        # recovers below.
         entered = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", empty_session], env={**os.environ, "HOME": str(home), "HTTPS_PROXY": "https://proxy.invalid"},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         proxy = None
         try:
             read_terminal(master, "› ")
-            # Cache actual Session facts before the Host is deliberately lost;
-            # the stopped-Host modal probes edit those already-known facts.
             chat_info_frame(master)
             before = set(json.loads(run(home, "request", "list")))
             def hold_observation(response):
                 observation_held.set()
                 assert observation_continue.wait(15), "accepted observation gate was not released"
-                return b""  # Lost read framing is the Host's loss, not partial success.
+                return b""  
 
             def after_admission(response):
                 assert json.loads(response.split(b"\r\n\r\n", 1)[1])["answer"]["status"] == "accepted"
@@ -3371,17 +3111,12 @@ def main(selected="all"):
                 "--key", saved_key)["observation"]["status"] == "accepted"
             fixture.crash_host(host, state, "accepted-before-observation-loss")
             observation_continue.set()
-            # Nobody asked the Host to stop, so the screen stays up and starts
-            # it once by itself; that start fails and leaves the person a
-            # retry. Nothing is sent again.
             starting = read_terminal(master, "Host starting")
             assert "Host stopped" not in starting, starting
             stopped = read_terminal(master, " · r retry")
             assert "× Host stopped · " in stopped, stopped
             assert "TruncatedResponse" not in stopped and "Not confirmed" not in stopped and "rui host start" not in stopped, stopped
             assert entered.poll() is None, "the Host's stop ended the TUI"
-            # With the chat draft empty, Host recovery's `r` must still defer
-            # to the modal editor. No Configure is submitted by these probes.
             chat_info_open(master)
             panel_frame(master, lambda frame: any(row.strip() == "r" for row in frame.split("\n")),
                         b"\x1b[B\x1b[B\x1b[B\x1b[B\r\x01\x0br")
@@ -3414,8 +3149,6 @@ def main(selected="all"):
                         lambda: stop_process(entered, timeout=5),
                         lambda: proxy.close() if proxy is not None else None,
                         lambda: close_pty(master), lambda: close_pty(slave))
-        # SIGTERM, SIGINT and SIGHUP to the Host are a stop someone asked for, as
-        # host-stop is: the open conversation says so and leaves it to r.
         for stop_signal in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             master, slave = open_pty()
             entered = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
@@ -3425,7 +3158,6 @@ def main(selected="all"):
             try:
                 read_terminal(master, "› ")
                 served.send_signal(stop_signal)
-                # The Host shuts down itself; the signal does not end it.
                 assert served.wait(timeout=10) >= 0, (stop_signal, served.returncode)
                 stopped = read_terminal(master, "Host stopped · r start")
                 assert "Host starting" not in stopped, stopped
@@ -3437,7 +3169,6 @@ def main(selected="all"):
                 dispose_all(lambda: stop_process(served),
                             lambda: stop_process(entered, timeout=5),
                             lambda: close_pty(master), lambda: close_pty(slave))
-            # The TUI started no Host, so the Store's lease is free again.
             host = fixture.start_host(store, url)
         completed = True
         print("human CLI: saved recovery, one-shot observation/re-entry, exact PTY approval, bounded input and Host restart passed")

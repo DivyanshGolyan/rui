@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Native protected stop, exact-instance retry, and Host-owned drain."""
 
 import contextlib
 import json
@@ -35,8 +34,6 @@ def actor(*args, timeout=10):
 
 
 def exchange_phase(diagnostics, phase, began_ns, deadline, **fields):
-    # This isolated Host has one fixture issuer. Earlier buffered milestones
-    # cannot satisfy this invocation; ambiguous or missing evidence is failure.
     with diagnostics.condition:
         while True:
             assert diagnostics.read_error is None, diagnostics.read_error
@@ -96,15 +93,10 @@ def request(sock, store, identity=None, *, extra=b""):
 
 
 def mixed_effect_drain(provider_first):
-    """A peer-held provider stream cannot postpone the Host's stop or another
-    owner's retirement."""
     order = "provider-before-Bash" if provider_first else "Bash-before-provider"
     with tempfile.TemporaryDirectory(prefix="rui-mixed-stop-") as root, contextlib.ExitStack() as handles:
         state = canonical_fixture_root(root)
         store = state / "store"
-        # These real shutdown journeys must survive absent optional stderr.
-        # The existing startup adapter owns an EOF reader while fd 2 goes to
-        # /dev/null; required readiness and native receipts remain unchanged.
         reader, writer = os.pipe()
         os.close(writer)
         stderr_pipe = (handles.enter_context(os.fdopen(reader, "rb")),
@@ -128,8 +120,6 @@ def mixed_effect_drain(provider_first):
         thread.start()
         host = None
         diagnostics = None
-        # Shutdown holds after signalling every effect until the trap has run:
-        # the 100 ms grace KILL must not race Bash's scheduling.
         signalled = ReleaseGate(state / "shutdown-signalled")
         try:
             host = fixture.start_host(
@@ -165,8 +155,6 @@ def mixed_effect_drain(provider_first):
             assert actor("stop", store, instance(store)) == "acknowledged"
             fixture.wait_for(lambda: not socket_path(store).exists(), "listener closure with held provider")
 
-            # Both admission orders must retire Bash, and stop cancels the
-            # provider stream while its peer still holds the response.
             diagnostics.wait("test_gate_waiting", subject=str(signalled.path), timeout=3)
             fixture.wait_for(lambda: "TERM\n" in events.read_text(),
                              f"{order}: Bash TERM with provider held", timeout=2)
@@ -178,13 +166,10 @@ def mixed_effect_drain(provider_first):
             stop_process(host)
             assert len(diagnostics.matching("cleanup_completed", action=action["action"])) == 1
             model_cleanups = [record for record in diagnostics.matching("cleanup_completed") if "action" not in record]
-            # The proposal and the discarded provider each release once.
             assert len(model_cleanups) == 2 and len({record["operation"] for record in model_cleanups}) == 2
             assert proposal_cleanup in {record["operation"] for record in model_cleanups}
             assert status(store) == "unavailable"
             assert list((store / "scratch").iterdir()) == [], "mixed shutdown retained scratch"
-            # Stopped-Store audit: infrastructure cleanup must not become a
-            # user cancellation, a provider failure or a new continuation.
             assert bash_fixture.rows(store, "SELECT attempt_ordinal,resolution_code FROM action_operation") == [(1, "infrastructure_shutdown")]
             assert bash_fixture.rows(store, "SELECT session_ref,attempt_ordinal,resolution_code FROM model_operation ORDER BY session_ref") == sorted([
                 (bash_session, 1, "tool_proposals"), (provider_session, 1, None),
@@ -211,7 +196,6 @@ def mixed_effect_drain(provider_first):
 
 
 def signal_stop():
-    """SIGINT, SIGTERM and SIGHUP stop the Host as host-stop does; SIGKILL is a crash."""
     with tempfile.TemporaryDirectory(prefix="rui-host-signal-") as root:
         state = canonical_fixture_root(root)
         endings = {}
@@ -227,13 +211,11 @@ def signal_stop():
                 else:
                     host.send_signal(ending)
                     if ending != signal.SIGKILL:
-                        # A second ask while stopping changes nothing.
                         host.send_signal(ending)
                 endings[name] = host.wait(timeout=10)
             finally:
                 stop_process(host)
             assert status(store) == "unavailable", (name, status(store))
-            # The stop record a client reads to tell an asked stop from a crash.
             endings[name] = endings[name], (store / "host.stopped").exists()
         asked = endings["host-stop"]
         assert asked[1], endings
@@ -276,7 +258,7 @@ def main():
             assert b"host_instance_required" in finish(missing, body)
             assert instance(store) == target
             detached, _ = request(sock, store, target)
-            detached.close()  # Incomplete request / terminal detach is not a stop.
+            detached.close()  
             assert instance(store) == target
 
             session = bash_fixture.configure(state, store, "stop-config")
@@ -294,12 +276,8 @@ def main():
                            subject=str(reply_gate))
             held_fds = len(os.listdir(f"/proc/{host.pid}/fd")) if os_semantics.PROC_FS else None
 
-            # Both classified headers and captured bodies still belong to
-            # intake, not admission. Completing either after stop must not save
-            # work that an explicit restart would later execute.
             for kind in ("message", "configure"):
                 for phase in ("header", "body"):
-                    # Hold a streamed plain-spec content value before admission.
                     fields = {"sender": None, "sender_handle": None, "text": {"state": "value", "value": "x" * 8192}} if kind == "message" else {
                         "configuration": {"instructions": "x" * 8192}}
                     body = json.dumps({"version": host_process.WIRE_VERSION, "kind": kind, "store": str(store),
@@ -319,8 +297,6 @@ def main():
                         began, time.monotonic() + 5,
                         **({"subject": kind} if phase == "header" else {}))
 
-            # Share the original ten-second actor budget with synchronization;
-            # connects and header writes alone do not establish classification.
             deadline = time.monotonic() + 10
             began_ns = time.monotonic_ns()
             pending, _ = request(sock, store, target)
@@ -334,14 +310,10 @@ def main():
             transferred.sendall(b"POST /v1/observe-command HTTP/1.1\r\n")
             first = actor_after_classification(diagnostics, began_ns, deadline, pending_phase, store, target)
             assert first == "TruncatedResponse", first
-            # Routed headers are still incomplete input, not a guarded retry.
-            # The complete-retry owner test separately requires acknowledgment.
             assert pending.recv(1) == b"", "incomplete Host stop survived shutdown"
             pending.close()
             pending = None
             for upload, remainder in uploads:
-                # Stop retires held input without a reply; an early rejection
-                # would leave its reply buffered here.
                 try:
                     reply = upload.recv(1, socket.MSG_PEEK)
                 except OSError as error:
@@ -381,7 +353,7 @@ def main():
             output, errors = inspector.communicate(timeout=5)
             assert inspector.returncode == 0 and json.loads(output)["session"]["reference"] == session, (output, errors)
             inspector = None
-            assert host.wait(timeout=10) != 0  # existing graceful owner reports EffectAwareShutdown
+            assert host.wait(timeout=10) != 0  
             stop_process(host)
             diagnostics = None
             host = None
@@ -393,8 +365,6 @@ def main():
             for kind in ("message", "configure"):
                 for phase in ("header", "body"):
                     assert fixture.observe(store, f"late-{kind}-{phase}") == {"status": "absent"}
-            # The first reply was lost. Retrying A's retained input must not
-            # rediscover or stop live replacement B.
             assert actor("stop", store, target) == "instance_changed"
             assert instance(store) == newer
             stale_cli = subprocess.run([RUI, "host", "pause", "--store", store, "--instance", target],

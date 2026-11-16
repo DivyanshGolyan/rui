@@ -1,45 +1,4 @@
 #!/usr/bin/env python3
-"""Report where merged PRs spent their time (read-only, GitHub REST only).
-
-  python3 tests/ci/pr_timeline.py --since 2026-11-12 [--pr 1418] [--format json]
-
-Release source: published releases API, ordered by published_at, with REST
-compare proving that the release tag contains the merge commit (not merely a
-later date). No checkout, fetch, tag, or GitHub mutation is performed.
-Every review stage (first review, Codex-clean, rounds) derives from one list
-of review outcomes: formal Codex reviews (findings), Codex receipt comments (no
-findings), the mutable summary at its Code Review completion time (updated_at in
-its older format), and a maintainer's interim opus-review-state:v1 marker at its
-created_at (each interim review is a new comment; a later edit, even after the
-merge, does not move it). Rounds count reviews, receipts and interim markers; the summary is
-only a fallback for a head without a review or receipt. Codex-clean is the time
-of the last outcome before merge when it is clean, on any head: landing.md lets
-test-only fixes, merges of main and stacked heads merge without another review,
-and only a later outcome with findings revokes it. A malformed summary or
-interim marker (bad JSON, a missing field, a bad completion time) is dropped
-from that PR's outcomes with a stderr warning naming the PR and comment URL;
-the report carries on.
-Pushes include branch creation and subsequent pushes through merge, starting
-at the last creation before opening; missing creation/fork history is unknown.
-Adjacent durations are signed minutes: stages can occur out of the listed order,
-and a missing endpoint stays blank rather than bridging to a different stage.
-
-Red-main minutes read main_build.py's record instead of judging runs again:
-main is red while a "Main build red" issue (the ci-red label and
-main_build.MARKER in its body) is open: from its creation, through its own
-closed and reopened events in time order, and still red now while one is open.
-Main is red while any such issue is open, so red_main returns the union of
-every issue's open spans (overlapping or touching spans merged, still-open
-spans ending at the report time); two issues open at once count each minute
-once.
-main_build.py alone decides red and green (a stale rerun of an older SHA
-changes nothing; the build job, not the whole run, is the result), and a
-closed stretch counts green even when the issue is later reopened, so this
-report agrees with that issue's open/closed history by construction. Intervals split at UTC midnight
-and today's end at report time. The record starts with #1430's merge
-(RED_MAIN_KNOWN_FROM, 2026-11-13T11:56:38Z): a day that starts before it is
-unknown, never zero red minutes.
-"""
 import argparse
 from datetime import date, datetime, time, timedelta, timezone
 import html
@@ -56,14 +15,10 @@ from report_issue import LABEL as CI_RED_LABEL
 
 REPO = "DivyanshGolyan/rui"
 CODEX = "chatgpt-codex-connector[bot]"
-# main_build.py, which files the red-main issue, merged in #1430 (c2ba6b05)
-# at this time; no red-main record exists before it.
 RED_MAIN_KNOWN_FROM = "2026-11-13T11:56:38Z"
 STAGES = ("opened", "codex_requested", "codex_reviewed", "codex_clean", "ready",
           "admission_green", "merged", "released")
 SUMMARY = re.compile(r"<!--\s*codex-review-state:v1\s+(.*?)\s*-->", re.S)
-# Interim stand-in for Codex, posted by a maintainer: same commit_sha and
-# has_unresolved_findings fields as Codex's code_review state.
 INTERIM = re.compile(r"<!--\s*opus-review-state:v1\s+(.*?)\s*-->", re.S)
 MAINTAINERS = ("OWNER", "MEMBER", "COLLABORATOR")
 
@@ -85,15 +40,12 @@ def minutes(start, end):
 
 
 def code_review_time(comment):
-    # Do not take the Security Review row's timestamp, or the summary's creation
-    # time: the latter is when Codex started, often on a different head.
     row = next((line for line in comment["body"].splitlines() if "**Code Review**" in line), "")
     match = re.search(r'datetime="([^"]+)"', row)
     return match[1] if match else comment["updated_at"]
 
 
 def push_count(pr, activity):
-    """Count the branch's push operations, not commits or CI runs."""
     ref = "refs/heads/" + pr["head"]["ref"]
     rows = [row for row in activity if row["ref"] == ref and instant(row["timestamp"]) <= instant(pr["merged_at"])]
     created = [row["timestamp"] for row in rows if row["activity_type"] == "branch_creation"
@@ -106,7 +58,6 @@ def push_count(pr, activity):
 
 
 def stages(pr, timeline, comments, reviews, checks, activity, release=None):
-    """Pure projection of recorded API JSON; the PR head is the head merged."""
     head = pr["head"]["sha"]
     reviewed, clean, rounds = review_stages(review_outcomes(comments, reviews, pr["number"]), pr["merged_at"])
     ready = [row["created_at"] for row in timeline if row["event"] == "ready_for_review"]
@@ -127,11 +78,6 @@ def stages(pr, timeline, comments, reviews, checks, activity, release=None):
 
 
 def marker_state(pattern, row, path, fields):
-    """The JSON state of a review marker comment, or None when it has none.
-
-    path is the key chain to the state; fields must be present in it. A
-    malformed marker raises ValueError (hand-written interim markers can be).
-    """
     match = pattern.search(row.get("body") or "")
     if not match:
         return None
@@ -152,15 +98,6 @@ def warning(message):
 
 
 def review_outcomes(comments, reviews, number, warn=warning):
-    """Every review outcome as {when, head, clean, source}; the one review record.
-
-    Codex posts findings as a formal review ("review") and a clean result as a
-    receipt comment ("receipt"). Its mutable summary ("summary") holds the
-    latest state at its Code Review completion time. A maintainer's interim
-    opus-review-state:v1 marker ("interim") stands in while Codex is unavailable.
-    A malformed summary or interim marker is no outcome: warn names the PR and
-    comment, and the report carries on.
-    """
     result = []
     for row in reviews:
         if row["user"]["login"] == CODEX and row.get("submitted_at") and row["state"] != "PENDING":
@@ -181,7 +118,7 @@ def review_outcomes(comments, reviews, number, warn=warning):
             try:
                 state = marker_state(pattern, row, path, ("commit_sha", "has_unresolved_findings")
                                      + (("status",) if source == "summary" else ()))
-                when = state and time_of()  # The summary's completion time is body text too.
+                when = state and time_of()
             except ValueError as error:
                 warn(f"PR #{number}: ignoring malformed {source} marker in {row.get('html_url') or 'a comment'}: {error}")
                 continue
@@ -192,16 +129,6 @@ def review_outcomes(comments, reviews, number, warn=warning):
 
 
 def review_stages(outcomes, merged_at):
-    """First review time, Codex-clean time and round count from review_outcomes.
-
-    A round is a review, receipt or interim outcome. The mutable summary is a
-    round only for a head no review or receipt records: it is overwritten, so
-    lost historical rounds are never inferred.
-    Clean is the time of the last outcome before merge when that outcome is
-    clean, on any head: landing.md lets test-only fixes, merges of main and
-    unchanged stacked heads merge without another review, so the clean head
-    need not be the merged head. Only a later outcome with findings revokes it.
-    """
     durable = [o["head"] for o in outcomes if o["source"] in ("review", "receipt") and o["head"]]
     rounds = [o for o in outcomes if o["source"] != "summary"
               or not any(o["head"] and o["head"].startswith(commit) for commit in durable)]
@@ -211,12 +138,6 @@ def review_stages(outcomes, merged_at):
 
 
 def daily(rows, since, until, red):
-    """UTC merge-date cohorts; absent releases are excluded from the median.
-
-    red is red_main's sorted, disjoint (start, end) intervals; this only clips
-    them to each day. A day that starts before RED_MAIN_KNOWN_FROM has no
-    record, so its red minutes are unknown (None), never zero.
-    """
     result = []
     day = date.fromisoformat(since)
     end = instant(until)
@@ -291,16 +212,6 @@ def containing_release(api, pr, releases):
 
 
 def red_main(api, now):
-    """When main was red up to now: sorted, disjoint (start, end) UTC intervals.
-
-    Each "Main build red" issue (ci-red label, main_build.MARKER in its body)
-    is open exactly while main_build.py judges main red. Each issue's spans
-    come from its own record: open at created_at, then each closed event ends
-    a span and each reopened event starts one; a span still open ends at now.
-    Main is red while any of them is open, so the result is the union of all
-    issues' spans: overlapping or touching spans merge, and no minute appears
-    twice. This is the one owner of "when was main red"; readers only clip it.
-    """
     spans = []
     for row in pages(api, f"repos/{REPO}/issues?state=all&labels={quote(CI_RED_LABEL)}"):
         if "pull_request" in row or RED_MAIN_MARKER not in (row.get("body") or ""):

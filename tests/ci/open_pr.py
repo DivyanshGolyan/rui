@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""Open a ready PR so selected CI and Codex review start together.
-
-Merge still requires current-candidate admission and the Codex evidence in
-CODING_STANDARDS.md. `ready` converts older drafts without another push.
-
-  open_pr.py open --title TITLE --body-file FILE [--base main]
-  open_pr.py ready
-"""
 import argparse
 import json
 import subprocess
@@ -20,10 +12,6 @@ from pr_shape import refusal as shape_refusal
 
 
 def create_args(repo, title, body, base, branch):
-    """REST `gh api` arguments creating a ready PR without draft conversion.
-
-    `gh pr create`, `gh pr comment` and `gh pr list` use GraphQL, which cloud sessions are refused.
-    """
     return ["api", "-X", "POST", f"repos/{repo}/pulls", "-f", f"title={title}", "-f", f"head={branch}",
             "-f", f"base={base}", "-F", "draft=false", "-f", f"body={body}"]
 
@@ -39,11 +27,6 @@ def open_refusal(local_head, pushed_head, dirty=False):
 
 
 def ready_refusal(pr, local_head, dirty):
-    """Why the PR (a REST pull request) cannot become ready yet, or None.
-
-    Convert an older draft when: the PR's head on GitHub is this checkout's committed
-    head, with nothing left uncommitted to push after it.
-    """
     if pr is None:
         return "This branch has no open PR; open one with `open_pr.py open`."
     if not pr["draft"]:

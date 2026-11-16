@@ -1,4 +1,3 @@
-//! A lazy, whole-row, variable-height list. The caller owns selection and all words.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -10,15 +9,12 @@ pub const Region = struct {
     start: u16,
     end: u16,
     target: u32,
-    /// Frame-derived keyboard location; selected spans keep selection over hover.
     selected: bool = false,
 };
 pub const Row = struct {
-    /// At least one line. Borrowed until rowFn returns; copied into the frame arena.
     lines: []const Line,
     target: ?u32 = null,
     alternate_target: ?u32 = null,
-    /// Column-specific actions override the whole-row target.
     regions: []const Region = &.{},
 };
 
@@ -26,8 +22,6 @@ pub const Rows = struct {
     userdata: *const anyopaque,
     count: u32,
     rowFn: *const fn (*const anyopaque, usize, std.mem.Allocator) std.mem.Allocator.Error!Row,
-    /// Number of selectable rows in [first, count), without building their text.
-    /// Required when an indicator is set; excludes uncounted entries such as New Session.
     countFromFn: ?*const fn (*const anyopaque, first: u32) u32 = null,
 
     pub const none: Rows = .{ .userdata = undefined, .count = 0, .rowFn = undefined };
@@ -62,19 +56,14 @@ rows: Rows = .none,
 selected: ?u32 = null,
 on_press: ?Press = null,
 base_style: vaxis.Style = .{},
-/// Only background and reverse override the row's styles; foregrounds stay intact.
 selection_style: vaxis.Style = .{ .reverse = true },
-/// Shared presentation for the above and below lines; row styles are unaffected.
 indicator_style: ?vaxis.Style = null,
 indicator_align: @FieldType(vxfw.RichText, "text_align") = .left,
 aboveFn: ?*const fn (count: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!Line = null,
-/// The pointer's target, a whole row or one region; only background, reverse and underline apply.
-/// A row that is both selected and hovered keeps the selection.
 hover_style: vaxis.Style = .{ .ul_style = .single },
 belowFn: ?*const fn (count: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!Line = null,
 list: vxfw.ListView = .{ .children = .{ .slice = &.{} }, .draw_cursor = false },
 shown: Range = .{},
-/// Borrowed from the latest draw's arena, invalidated by the next draw.
 shown_at: []const Span = &.{},
 last_size: ?vxfw.Size = null,
 hover: Hover = .{},
@@ -86,7 +75,6 @@ pub fn widget(self: *Self) vxfw.Widget {
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     try self.hover.handleEvent(ctx, input);
-    // Navigation belongs to the caller, never to ListView.
     if (input != .mouse) return;
     const mouse = input.mouse;
     if ((mouse.button == .left or mouse.button == .right) and mouse.type == .press) {
@@ -108,8 +96,6 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     try self.list.handleEvent(ctx, input);
 }
 
-/// One arena-owned snapshot per built row, reused across layout passes and retained
-/// child redraws. No row source or mutable segment text survives into the frame.
 const Lazy = struct {
     owner: *const Self,
     index: u32,
@@ -117,7 +103,6 @@ const Lazy = struct {
     base_style: vaxis.Style = .{},
     hovered: ?struct { start: u16, end: u16 } = null,
     selection_style: vaxis.Style = .{},
-    /// Snapshot of the owner's hover look; null while this row is selected, since selection wins.
     hover_style: ?vaxis.Style = null,
 
     fn widget(self: *Lazy) vxfw.Widget {
@@ -155,7 +140,6 @@ const Lazy = struct {
         for (row.lines, 0..) |line, y| {
             var label: vxfw.RichText = .{ .text = line, .base_style = self.base_style, .width_basis = .parent, .softwrap = false };
             const drawn = try label.widget().draw(ctx.withConstraints(.{}, .{ .width = surface.size.width, .height = 1 }));
-            // RichText's widget is stack-local; only its cells escape.
             if (drawn.size.height != 0) @memcpy(surface.buffer[y * surface.size.width ..][0..surface.size.width], drawn.buffer[0..surface.size.width]);
         }
         if (self.hovered) |range| if (self.hover_style) |hover| for (0..surface.size.height) |y| {
@@ -223,8 +207,6 @@ const Building = struct {
     }
 };
 
-/// A single whole-row range owns text, both counts and press spans. A row
-/// taller than the entire viewport is hidden, never shown as a partial row.
 const Window = struct {
     first: u32,
     end: u32,
@@ -242,8 +224,6 @@ fn measure(self: *const Self, building: *Building, first: u32, height: u16, keep
     window.above = above;
     if (self.belowFn != null and marker_room > above and count_from.?(self.rows.userdata, window.end) > 0) {
         window.below = 1;
-        // Removing only complete rows keeps the below count exact. No clipped
-        // row can masquerade as visible at either edge.
         while (window.height > height - above - 1) {
             window.end -= 1;
             window.height -= try building.height(window.end);
@@ -275,14 +255,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     var building: Building = .{ .owner = self, .arena = ctx.arena };
     var first = @min(self.list.scroll.top, self.rows.count - 1);
     var offset: i32 = @as(i32, self.list.scroll.offset) + self.list.scroll.pending_lines;
-    // Wheel intent owns this draw. Otherwise follow a changed selection or
-    // preserve one that was actually visible in the last normalized window.
-    // A marker-free probe must never pull a wheel-scrolled window back.
     const keep_selected = if (self.selected) |selected| self.list.scroll.pending_lines == 0 and (changed or (previously_shown.first <= selected and selected < previously_shown.end)) else false;
     if (keep_selected and (cursor < first or cursor - first > size.height)) first = cursor;
-    // ListView only collects wheel intent. This owner consumes it in whole
-    // rows, snapping in the direction of travel so even a one-line upward
-    // scroll progresses through rows taller than the wheel step.
     if (offset < 0) {
         while (offset < 0 and first > 0) {
             first -= 1;
@@ -298,13 +272,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     var window = try self.measure(&building, first, size.height, keep_selected);
     if (keep_selected) {
         const selected = self.selected.?;
-        // A distant jump was handled above; this walks at most the old window.
         while (selected >= window.end and window.first < selected) {
             window = try self.measure(&building, window.first + 1, size.height, true);
         }
     }
-    // At EOF fill upward only with complete preceding rows. Testing the whole
-    // candidate also accounts for the above marker disappearing at the top.
     while (window.end == self.rows.count and window.first > 0) {
         const previous = try self.measure(&building, window.first - 1, size.height, keep_selected);
         if (previous.end != self.rows.count) break;
@@ -342,11 +313,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     var surface: vxfw.Surface = .{ .widget = self.list.widget(), .size = .{ .width = size.width, .height = window.height }, .buffer = &.{}, .children = content };
     self.shown_at = spans;
     self.hover.targets = hover_targets.items;
-    // Build press spans before adding markers: markers never have row targets.
     if (above_rows + below_rows > 0) {
         const count_from = self.rows.countFromFn.?;
-        // Keep content and markers as sibling viewports, with hit targets
-        // measured in the outer coordinates above.
         const children = try ctx.arena.alloc(vxfw.SubSurface, 1 + above_rows + below_rows);
         children[0] = .{ .origin = .{ .row = above_rows, .col = 0 }, .surface = surface };
         if (above_rows > 0) children[1] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.indicator(ctx, self.aboveFn.?, count_from(self.rows.userdata, 0) - count_from(self.rows.userdata, self.list.scroll.top)) };
@@ -471,7 +439,6 @@ test "List keeps both selected lines visible at small heights and leaves every k
     list.selected = 1;
     try Testing.expectSelected(try list.widget().draw(ctx.withConstraints(.{}, .{ .width = 20, .height = 3 })), "O", 2);
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    // Exhaust the key codepoint domain, including ListView navigation and Escape.
     for (0..@as(usize, std.math.maxInt(u21)) + 1) |codepoint| {
         try list.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = @intCast(codepoint) } });
         try std.testing.expect(!events.consume_event);
@@ -490,14 +457,12 @@ test "List below counts fully hidden selectable rows and disappears at the end" 
     defer arena.deinit();
     const ctx = Testing.context(arena.allocator(), 5);
     try Testing.expectBelow(try list.widget().draw(ctx), 2);
-    // Content height two cannot fit the next two-line row: all three targets remain below.
     try Testing.expectBelow(try list.widget().draw(ctx.withConstraints(.{}, .{ .width = 20, .height = 3 })), 3);
     list.selected = 4;
     const end = try list.widget().draw(ctx);
     try Testing.expectSelected(end, "F", 1);
     try std.testing.expectEqual(@as(u32, 5), list.shown.end);
     try std.testing.expectEqualStrings("F", end.children[end.children.len - 1].surface.readCell(0, 0).char.grapheme);
-    // A non-selectable tail alone must not cause an indicator.
     const heading_tail: []const Row = &.{ Testing.mixed[4], Testing.mixed[0], Testing.mixed[0] };
     list.rows = .of(&heading_tail);
     list.selected = 0;
@@ -645,7 +610,7 @@ test "List preserves each segment foreground while selecting every line and blan
 test "List updates its row count through exhausted resizes without building rows" {
     const Source = struct {
         fn row(_: *const anyopaque, _: usize, _: std.mem.Allocator) std.mem.Allocator.Error!Row {
-            return error.OutOfMemory; // An exhausted viewport must never ask for text.
+            return error.OutOfMemory;
         }
     };
     var list: Self = .{};
@@ -720,7 +685,6 @@ test "List both markers count rows and preserve selection at viewport edges" {
         };
         list.list.scroll.top = case.top;
         const ctx = Testing.context(arena.allocator(), 6).withConstraints(.{}, .{ .width = width, .height = 6 });
-        // An unchanged redraw must resolve to exactly the same window.
         for (0..2) |_| {
             const surface = try list.widget().draw(ctx);
             try std.testing.expectEqual(case.first, list.shown.first);
@@ -865,8 +829,6 @@ test "List mixed-height rows scroll in both directions and reach EOF without par
         list.list.item_count = @intCast(rows.len);
         list.list.scroll = .{ .top = @intCast(index), .offset = @intCast(offset) };
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        // Every starting line offset settles on a whole-row boundary. Every
-        // subsequent one-line wheel step must progress, even across four-line rows.
         for ([_]bool{ false, true }) |up| {
             for (0..data.len + 1) |_| {
                 const surface = try list.widget().draw(ctx);
@@ -909,8 +871,6 @@ test "List mixed-height rows scroll in both directions and reach EOF without par
 }
 
 test "List wheel reaches every Session from either end regardless of selection markers or spacer" {
-    // A pinned control contributes a one-line spacer, not a Session. Sessions
-    // have two lines; wheel steps straddle their boundaries, including step 1.
     var data: [9]Row = @splat(.{ .lines = &.{ &.{.{ .text = "Session" }}, &.{.{ .text = "detail" }} } });
     for (data[1..], 0..) |*row, index| row.target = @intCast(index);
     data[0] = .{ .lines = &.{&.{}} };
@@ -926,8 +886,6 @@ test "List wheel reaches every Session from either end regardless of selection m
             .aboveFn = if (markers & 1 != 0) Testing.below else null,
             .belowFn = if (markers & 2 != 0) Testing.below else null,
         };
-        // Establish an unchanged selection at either end, as after scrolling
-        // there: initial focus-following is tested separately from wheel intent.
         list.last_size = ctx.max.size();
         list.list.item_count = @intCast(rows.len);
         list.list.cursor = selected orelse 0;
@@ -956,7 +914,6 @@ test "List wheel reaches every Session from either end regardless of selection m
                 }
             }
             const shown = list.shown;
-            // A redraw with no new intent must not undo the wheel either.
             _ = try list.widget().draw(ctx);
             try std.testing.expectEqualDeep(shown, list.shown);
             try std.testing.expectEqual(selected, list.selected);
@@ -1003,7 +960,6 @@ test "List hover paints only complete clickable rows without moving selection an
             try std.testing.expect(list.hover.pointing);
         }
     }
-    // The selected row keeps the selection under the pointer.
     try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 0, .row = 6, .button = .none, .type = .motion, .mods = .{} } });
     const both = try list.widget().draw(ctx);
     for (both.children[4].surface.buffer) |cell| try std.testing.expectEqual(list.selection_style.bg, cell.style.bg);
@@ -1023,7 +979,6 @@ test "List hover paints only complete clickable rows without moving selection an
     }
     try list.widget().handleEvent(&events, Testing.left(2));
     try std.testing.expectEqual(@as(?u32, 11), pressed.target);
-    // A two-line row that does not fit has no painted or interactive fragment.
     list.selected = null;
     const clipped_ctx = ctx.withConstraints(.{}, .{ .width = 20, .height = 2 });
     _ = try list.widget().draw(clipped_ctx);
@@ -1032,7 +987,6 @@ test "List hover paints only complete clickable rows without moving selection an
     try std.testing.expectEqual(@as(usize, 1), clipped.children.len);
     try std.testing.expectEqual(@as(usize, 1), list.shown_at.len);
     try std.testing.expect(!list.hover.pointing);
-    // Starting at its boundary exposes both lines and the same whole-row target.
     list.list.scroll.top = 1;
     const whole = try list.widget().draw(clipped_ctx);
     try std.testing.expectEqual(list.hover_style.bg, whole.children[0].surface.readCell(0, 0).style.bg);
@@ -1060,7 +1014,6 @@ test "List column actions override row targets and region-only rows clip hover a
     const draw_ctx = Testing.context(arena.allocator(), 2);
     const first = try list.widget().draw(draw_ctx);
     try Testing.expectBelow(first, 2);
-    // Full viewport for the region-only row and its clipped right edge.
     list.belowFn = null;
     _ = try list.widget().draw(Testing.context(arena.allocator(), 3));
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
@@ -1068,7 +1021,6 @@ test "List column actions override row targets and region-only rows clip hover a
     var mouse: vaxis.Mouse = .{ .row = 1, .col = 5, .button = .none, .mods = .{}, .type = .motion };
     try list.widget().handleEvent(&ctx, .{ .mouse = mouse });
     const hovered = try list.widget().draw(Testing.context(arena.allocator(), 3));
-    // Region-only actions hover only their clipped columns.
     try std.testing.expectEqual(vaxis.Style.Underline.off, hovered.children[1].surface.readCell(0, 0).style.ul_style);
     try std.testing.expectEqual(vaxis.Style.Underline.single, hovered.children[1].surface.readCell(4, 0).style.ul_style);
     try std.testing.expect(!hovered.children[1].surface.readCell(0, 0).style.reverse);
@@ -1102,7 +1054,6 @@ test "Hover leave never reads targets from a frame that may be freed" {
     var hover: Hover = .{ .targets = &.{.{ .row = 2, .width = 4 }} };
     try hover.handleEvent(&ctx, .{ .mouse = .{ .col = 1, .row = 2, .button = .none, .mods = .{}, .type = .motion } });
     try std.testing.expect(hover.pointing);
-    // Stand-in for a reset frame arena: any read of these faults.
     const freed = @as([*]const Hover.Rect, @ptrFromInt(0x1000))[0..4];
     for ([_]bool{ true, false }) |was_pointing| {
         ctx.cmds = .empty;
@@ -1112,7 +1063,6 @@ test "Hover leave never reads targets from a frame that may be freed" {
         try std.testing.expect(!hover.pointing);
         try std.testing.expect(hover.point == null);
         try std.testing.expectEqual(was_pointing, ctx.redraw);
-        // Only leaving a pointer restores the default shape.
         try std.testing.expectEqual(@as(usize, @intFromBool(was_pointing)), ctx.cmds.items.len);
         if (was_pointing) try std.testing.expectEqual(vaxis.Mouse.Shape.default, ctx.cmds.items[0].set_mouse_shape);
     }
@@ -1169,7 +1119,6 @@ test "List selected regions retain focus while other regions hover and whitespac
             const under = if (hovered) |index| x >= ranges[index].start and x < ranges[index].end else false;
             try std.testing.expectEqual(if (selected) list.selection_style.bg else if (under) list.hover_style.bg else list.base_style.bg, shown.children[0].surface.readCell(@intCast(x), 0).style.bg);
         };
-        // Identical reports keep native pointer custody without synthetic leave/enter churn.
         events.redraw = false;
         events.cmds.clearRetainingCapacity();
         try list.widget().handleEvent(&events, .{ .mouse = mouse });

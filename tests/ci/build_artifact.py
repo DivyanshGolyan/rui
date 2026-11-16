@@ -1,4 +1,3 @@
-"""Same-run compiled-output handoff, never a test-acceptance receipt."""
 import argparse
 import hashlib
 import json
@@ -44,10 +43,6 @@ def pr_ci():
 
 
 def identity(targets, part):
-    # Everything the transferred executables depend on that can differ inside
-    # one run. Runner image versions and tool listings are logged, not compared:
-    # a rollout that keeps these fields still executes the producer's binaries.
-    # build.zig rejects a foreign baseline-CPU manifest before any gate runs.
     return dict(format=5, pr_ci=pr_ci(), tree=git("rev-parse", "HEAD^{tree}"), targets=targets, part=part,
                 system=platform.system(), machine=platform.machine(),
                 compiler=digest(shutil.which("zig")))
@@ -59,7 +54,6 @@ def runner():
 
 def build(targets, part="all"):
     prefix = Path(os.environ["RUNNER_TEMP"]) / "rui-compiled-build"
-    # A prior failed build must not supply extra or stale installed binaries.
     if prefix.exists():
         shutil.rmtree(prefix)
     # Zig async slots also wait for subprocesses; eight avoids serializing the
@@ -71,9 +65,6 @@ def build(targets, part="all"):
 
 
 def linked_package_file(root, link):
-    # A fetched package may link one of its files to another (WAMR links a
-    # LICENSE). Ship the linked file's bytes under the link's name, so the
-    # archive still holds regular files only; any other link is refused.
     package_root = (root / link.relative_to(root).parts[0]).resolve()
     target = link.resolve()
     if not target.is_relative_to(package_root) or target.is_symlink() or not target.is_file():
@@ -90,7 +81,6 @@ def package(targets, destination, binaries=None, part="all"):
     if binaries is not None:
         sources["binaries"] = binaries
     if part == "unit":
-        # The rest producer carries the package sources, once.
         del sources["packages"]
     with tarfile.open(archive, "w:gz", compresslevel=1) as output:
         for label, root in sources.items():
@@ -123,10 +113,6 @@ def package(targets, destination, binaries=None, part="all"):
 
 
 def unpack(archive, receipt, targets):
-    # "Re-run failed jobs" keeps the passed producer and its earlier attempt's
-    # artifact; that is the same build of this run and source. Rejecting it
-    # recompiled every rerun from the network, so a mirror outage that failed
-    # the first attempt failed the retry too.
     if ((receipt["run_id"], receipt["source_sha"]) != (int(os.environ["GITHUB_RUN_ID"]), git("rev-parse", "HEAD"))
             or not 1 <= receipt["run_attempt"] <= int(os.environ["GITHUB_RUN_ATTEMPT"])):
         raise Mismatch("Compiled origin differs: run, attempt or source SHA")
@@ -142,8 +128,6 @@ def unpack(archive, receipt, targets):
                for label, root in destinations.items() for path in root.rglob("*") if path.is_file()}
     seen = set()
     with tarfile.open(archive, "r:gz") as source:
-        # Validate the entire inventory before writing, and never extract through
-        # a link. Hardlinks/devices/directories are not in the producer format.
         for member in source:
             path = PurePosixPath(member.name)
             if (path.is_absolute() or ".." in path.parts or len(path.parts) < 2
@@ -156,7 +140,6 @@ def unpack(archive, receipt, targets):
         for name in names:
             if any(str(parent) in names for parent in PurePosixPath(name).parents):
                 raise ValueError("Compiled file used as parent")
-        # A second streaming pass avoids retaining archive payloads in RAM.
     with tarfile.open(archive, "r:gz") as source:
         for member in source:
             path = PurePosixPath(member.name)
@@ -198,13 +181,8 @@ def verify(receipts):
 
 
 def download_artifact(path, destination):
-    # Follow GitHub's short-lived redirect afresh on each attempt. curl streams
-    # the ZIP and detects stalled transfers; a wall-clock timeout alone made a
-    # stalled gh api download wait 180 s before throwing away the producer build.
     for attempt in range(2):
         try:
-            # Keep the token off argv; --location does not forward Authorization
-            # to the blob-storage host (unlike --location-trusted).
             with destination.open("wb") as output:
                 subprocess.run([
                     "curl", "--disable", "--fail", "--silent", "--show-error", "--location",
@@ -220,7 +198,6 @@ def download_artifact(path, destination):
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
             if attempt:
                 raise
-            # Idempotent download only, never receipt verification or tests.
             print(f"::warning::Compiled artifact download failed ({error}); retrying once.", flush=True)
 
 
@@ -229,7 +206,6 @@ def fetch(artifact_id, targets):
     artifact = api(f"repos/{repository}/actions/artifacts/{artifact_id}")
     if artifact["expired"] or artifact["workflow_run"]["id"] != int(os.environ["GITHUB_RUN_ID"]):
         raise ValueError("Foreign or expired compiled artifact")
-    # Exact immutable ID comes from the successful producer's needs output.
     with tempfile.TemporaryDirectory() as directory:
         download = Path(directory) / "artifact.zip"
         download_artifact(f"repos/{repository}/actions/artifacts/{artifact_id}/zip", download)
@@ -250,8 +226,6 @@ def fetch(artifact_id, targets):
 
 
 def rebuild(targets):
-    # Downloaded bytes are discarded whole, including package sources; compile
-    # this worker's own checkout from freshly fetched, hash-pinned packages.
     for root in roots().values():
         if root.is_symlink():
             root.unlink()
@@ -295,7 +269,6 @@ def main():
         else:
             restore([artifact_id for artifact_id in args.artifact_id if artifact_id], targets)
     except subprocess.CalledProcessError as error:
-        # A failed local fetch or compile stops before gates with its own status.
         print(f"{' '.join(map(str, error.cmd))} failed with exit {error.returncode}; no gates executed.",
               file=sys.stderr)
         raise SystemExit(error.returncode) from error

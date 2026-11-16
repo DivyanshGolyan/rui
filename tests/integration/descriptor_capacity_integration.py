@@ -31,8 +31,6 @@ fixture.RUI = RUI
 control.RUI = RUI
 
 
-# Observe actual EMFILE as well as inject system-wide resource errors without
-# exhausting the runner. This descriptor belongs to the fixture from startup.
 ACCEPT_PROBE = r"""
 #include <dlfcn.h>
 #include <errno.h>
@@ -257,8 +255,6 @@ def admitted_at_gate(diagnostics, ordinal):
 
 
 def prove_borrower_oracle():
-    # Independent golden endpoints for two fixture-issued exchanges. Channel
-    # validity is not authority for a missing last start/release before begin.
     golden = [dict(rui_test_phase=phase, subject_kind="request_number", subject=str(subject),
                    process="123", run="37", clock="awake_ns", sequence=str(sequence), at_ns=str(at))
               for phase, subject, sequence, at in (
@@ -338,10 +334,6 @@ def prove_bash_spawn_with_full_client_population(state, required):
     completed = False
     expected_routes = []
     try:
-        # Two inherited observation descriptors are counted by startup: writer
-        # and publication-state file (closed after mapping). The FIFO adds one
-        # live descriptor at spawn. Thus requirement = production + 2, and
-        # limit = production + 2 + 1; the unobserved main witness stays exact.
         witness_limit = required + 2 + 1
         host, ready = start_ready_process(
             limited_host(
@@ -379,8 +371,6 @@ def prove_bash_spawn_with_full_client_population(state, required):
         diagnostics.borrower_census(time.monotonic() + 10, expected_routes)
         starts = []
         population_deadline = time.monotonic() + 10
-        # Ten numbered body borrowers, then exactly two incomplete request
-        # lines. No saturation retries can supply or hide retirement evidence.
         for ordinal in range(10):
             expected_routes.append("inspect")
             held.append(control.open_partial(socket_path, "/v1/inspect-session"))
@@ -411,8 +401,6 @@ def prove_bash_spawn_with_full_client_population(state, required):
             connection.close()
             released = diagnostics.borrower_release(started, deadline)
             assert int(released["at_ns"]) >= began_ns, (started, released)
-        # These borrowers have no request number. Retire them serially to
-        # correlate each native admission decrement with its own local close.
         classification_releases = []
         for ordinal, connection in enumerate(held[10:]):
             assert len(diagnostics.matching("connection_place_released")) == ordinal
@@ -444,7 +432,7 @@ def prove_bash_spawn_with_full_client_population(state, required):
             nonlocal probes
             probes += 1
             assert probes <= 40, "descriptor fixture exceeded status-plan probe population"
-            expected_routes.append("inspect")  # Both resolution and idle predicates issue one inspection.
+            expected_routes.append("inspect")
             result = predicate()
             diagnostics.borrower_census(deadline, expected_routes)
             return result
@@ -518,8 +506,6 @@ def prove_accept_record_oracle(state):
         for cut in range(len(golden) + 1):
             prefix = golden[:cut]
             log.write_bytes(prefix)
-            # Expected framing is derived from the producer's literal LF,
-            # independently of the reader and integer-token availability.
             count = prefix.count(b"\n")
             assert accept_records(log) == expected[:count], (cut, prefix)
             if not prefix or prefix.endswith(b"\n"):
@@ -575,10 +561,6 @@ def prove_accept_pressure(state):
                    "RUI_ACCEPT_LOG": str(log), "RUI_ACCEPT_ARM": str(arm), "RUI_ACCEPT_ERRNO": str(injected or 0),
                    "RUI_ACCEPT_HOLD": str(backlog_hold), "RUI_ACCEPT_READY": str(backlog_ready),
                    "RUI_ACCEPT_RELEASE": str(backlog_release)}
-            # A system shell on macOS can strip DYLD_INSERT_LIBRARIES. Use
-            # the selected fixture Python to set this child's limit and exec.
-            # Full intake must remain demand-scaled: reduced intake would
-            # shed sockets before this real EMFILE counterexample can occur.
             pressure_limit = 1024
             host, ready = start_ready_process([sys.executable, "-c",
                 "import os, resource, sys; limit=int(sys.argv[1]); resource.setrlimit(resource.RLIMIT_NOFILE, (limit, limit)); os.execv(sys.argv[2], sys.argv[2:])",
@@ -605,11 +587,6 @@ def prove_accept_pressure(state):
                 arm.touch()
                 pending = connect(ready["socket"])
             else:
-                # Real per-process exhaustion, isolated to this limited Host.
-                # Incomplete headers require sockets but no content handles.
-                # Hold one real accept so backlog pressure occurs before FD
-                # exhaustion, independently of scheduler load. A failed connect
-                # alone must not be mistaken for the required EMFILE receipt.
                 backlog_hold.touch()
                 pending = connect(ready["socket"])
                 wait_for(backlog_ready.exists, "held accept before backlog fill", timeout=10)
@@ -619,8 +596,6 @@ def prove_accept_pressure(state):
                         pending = connect(ready["socket"])
                         attempts += 1
                     except (TimeoutError, BlockingIOError, ConnectionRefusedError):
-                        # Linux may report EAGAIN/timeout and Darwin refuses a
-                        # full queue. Neither means Host descriptors ran out.
                         connections.pop().close()
                         backlog_release.touch()
                         time.sleep(0.01)
@@ -629,7 +604,6 @@ def prove_accept_pressure(state):
                 assert backlog_release.exists(), "real listener backlog was not exercised"
             expected = injected or errno.EMFILE
             wait_for(lambda: any(code == expected for code, _ in accept_records(log)), "accept resource exhaustion", timeout=10)
-            # Existing accepted peers still progress during pressure.
             body = json.dumps({"version": host_process.WIRE_VERSION, "kind": "host_info", "store": str(store)}).encode()
             held.sendall(f"Content-Type: application/json\r\nX-Rui-Wire-Version: {host_process.WIRE_VERSION}\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
             head, response = control.read_http_response(held)
@@ -645,7 +619,6 @@ def prove_accept_pressure(state):
                     head, response = control.read_http_response(stopping)
                     assert head.startswith(b"HTTP/1.1 200 "), head
                     assert json.loads(response) == {"version": host_process.WIRE_VERSION, "type": "host_stop_reply", "status": "acknowledged"}, response
-                    # Keep acquisition pressure armed through physical shutdown.
                     for peer in connections:
                         peer.close()
                     host.wait(timeout=8)
@@ -654,7 +627,6 @@ def prove_accept_pressure(state):
                     continue
                 arm.unlink()
             else:
-                # Releasing sockets restores the actual descriptor supply.
                 for peer in connections:
                     peer.close()
             if injected is not None:
@@ -731,9 +703,6 @@ os.execv('/bin/bash', ['/bin/bash', *sys.argv[1:]])
         peer = os_semantics.unix_stream()
         peer.connect(fields["socket"])
         wait_for(lambda: ready.exists() and ready.read_bytes().endswith(b"\n"), "accepted socket before flags", timeout=10)
-        # Open a competing launch window, not a timing acceptance assertion.
-        # The child reports exact socket identity whether it spawns during or
-        # after acquisition. The unfixed-path control must witness inheritance.
         timer = threading.Timer(2, release.touch)
         timer.start()
         os.write(keeper, b"x")
@@ -763,21 +732,13 @@ def main():
     documented = None
     diagnostics = None
     try:
-        # Keep allocator defaults enabled. macOS libmalloc may itself open a
-        # socket before Host ownership begins; it belongs in inherited, not
-        # in the independently calculated Host population below.
         if os_semantics.HOST_MALLOC_REEXEC:
             assert os.environ.get("RUI_HOST_MALLOC_DEFAULTS") != "0"
             for name in ("MallocMaxMagazines", "MallocSpaceEfficient"):
                 assert os.environ.get(name, "1") == "1", (name, os.environ.get(name))
         prove_accept_pressure(state)
-        # Two execution slots need one steady population(5) plus the
-        # serial Bash spawn peak(10).
         fixed_host = os_semantics.HOST_FIXED_DESCRIPTORS
         execution = 5 + 10
-        # The supported burst is 100 ordinary exchanges (socket + up to
-        # four content aliases each), two controls and one discovery.
-        # This preflight is a resource estimate, not a runtime admission cap.
         clients = 100 * 5 + 3
         fixed = fixed_host + clients + execution + 0 + 2
         minimum_required = fixed - clients + 10 * 5 + 3 + 3
@@ -844,8 +805,6 @@ def main():
         sessions = [configure(state, store, ordinal) for ordinal in range(4)]
         message(state, store, sessions[0], 0)
         message(state, store, sessions[1], 1)
-        # At capacity two both streams share one connection and are held by
-        # the peer at once, each Attempt with its own custody.
         endpoint.wait_for("requests", 2)
         assert endpoint.requests == 2, endpoint.requests
         assert host.poll() is None, diagnostics.tail()

@@ -56,8 +56,6 @@ pub fn output(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8
     return result.stdout;
 }
 
-/// At most the existing 4096-byte child stderr capture, owned by one run.
-/// Only a failed download transfers it; successful probes retain nothing.
 pub const DownloadDiagnostic = struct {
     stderr: ?[]u8 = null,
 
@@ -78,8 +76,6 @@ pub const DownloadDiagnostic = struct {
     }
 };
 
-/// Curl failures are download failures, not archive validation failures.
-/// Preserve stderr before unwinding so shell and restored TUI reports agree.
 pub fn downloadOutput(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, cancellation: ?*const client.Cancellation, limit: usize, diagnostic: ?*DownloadDiagnostic) ![]u8 {
     const result = try run(allocator, io, argv, cancellation, limit);
     errdefer allocator.free(result.stdout);
@@ -123,7 +119,6 @@ test "upgrade process download diagnostic handles empty CRLF and hostile termina
         try diagnostic.write(&writer);
         try std.testing.expectEqualStrings(case[1], writer.buffered());
     }
-    // A later failed download replaces (and frees) the previous capture.
     try std.testing.expectError(error.ReleaseDownloadFailed, downloadOutput(allocator, std.testing.io, &.{ "sh", "-c", "printf replacement >&2; exit 1" }, null, 1024, &diagnostic));
     try std.testing.expectEqualStrings("replacement", diagnostic.stderr.?);
 }

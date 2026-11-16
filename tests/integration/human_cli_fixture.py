@@ -1,5 +1,3 @@
-"""Terminal screen helpers that PTY fixtures share: read and step a terminal, wait
-for screens and frames, and the Overview and consent prompts they match."""
 import errno
 import fcntl
 import json
@@ -17,23 +15,16 @@ import terminal_process as terminal_process_module
 from terminal_process import answers_to
 
 
-# The approval's input row sits between the composer's rules, below the
-# borderless request. Its buttons " Allow once " and " Deny " are two cells
-# apart; the highlighted one uses reverse video only (see `highlighted`).
-# Enter answers with the highlighted button, Allow once at first.
 CHOICE = "Allow once    Deny"
 
 
 ALLOW = b"\r"
 
 
-# The input prompt is omitted when the choice has only a few cells.
 CHOICE_ROW = re.compile(r"^(?: [›>])? Allow", re.M)
 
 
 def highlighted(capture):
-    """The button the latest committed frame's choice row draws in reverse
-    video, or None when no choice row is shown."""
     rows = capture.completed.split("\n")
     for index, row in enumerate(rows):
         if CHOICE_ROW.match(row):
@@ -46,8 +37,6 @@ def highlighted(capture):
 
 
 def pick_deny(master):
-    """Move the card's highlight to Deny; return the first frame that shows
-    it. The card answers the request it drew, so no new readiness follows."""
     capture = terminal_capture(master)
     return keyed_frame(master, b"\x1b[C", lambda screen, x, y: highlighted(capture) == "Deny")
 
@@ -66,7 +55,6 @@ CAPTURE_NOTICE = re.compile(r"request: (\S+) \(wait: rui request wait \1; if unc
 
 
 def admit(home, *args, expect=0, environment=None, input=None, cwd=None):
-    """Generated capture: stderr names the pre-send handle; stdout is the saved answer."""
     env = {**os.environ, "HOME": str(home), **(environment or {})}
     result = subprocess.run([str(fixture.RUI), *map(str, args)], env=env, capture_output=True,
         text=True, timeout=20, input=input, cwd=cwd)
@@ -82,13 +70,11 @@ _captures = terminal_process_module.CAPTURES
 
 
 def terminal_capture(master, *, fresh=False, silent=False):
-    """The committed-screen observer for one PTY master, at its current size.
-    It answers queries on that master unless `silent`."""
     from terminal_screen import ScreenCapture
     try:
         rows, columns = struct.unpack("HHHH", fcntl.ioctl(master, termios.TIOCGWINSZ, b"\0" * 8))[:2]
     except OSError:
-        rows, columns = 24, 80  # Self-test pipes and sockets have no geometry.
+        rows, columns = 24, 80  
     rows, columns = rows or 24, columns or 80
     capture = None if fresh else _captures.get(master)
     if capture is None:
@@ -100,10 +86,6 @@ def terminal_capture(master, *, fresh=False, silent=False):
 
 
 def draining(master, observe, feed=None):
-    """`observe`, after reading ready terminal output: a fixture waiting on
-    the Host still drains the PTY as a terminal does. Darwin's holds 1 KiB, so
-    a screen that stopped being read blocks mid-frame and runs no new work.
-    `feed` takes the bytes; by default the master's registered capture."""
     feed = feed or terminal_capture(master).feed
 
     def drained():
@@ -113,7 +95,6 @@ def draining(master, observe, feed=None):
 
 
 def current_screen(master):
-    """The latest committed frame: what the user sees now."""
     return terminal_capture(master).completed
 
 
@@ -123,16 +104,6 @@ def shown(text, screen):
 
 
 def command_frame(master, command, accept, timeout=15, *, end="\r"):
-    """Send `command` and `end`; return the first committed frame after it
-    that `accept`s with the composer ready in that same frame. Page identity,
-    readiness and any absence check then describe one shown frame.
-
-    A command that ends with Enter is typed first, and Enter follows the
-    frame that shows it in the composer. The reply is then a frame whose
-    composer the command has left. That typed frame must not `accept`: a
-    page stays shown while the next command runs, so a wait it already
-    satisfies would return before the reply. Such a caller names what the
-    reply changes, or leaves the page first."""
     capture = terminal_capture(master)
     found = []
     state = {"typed": end != "\r"}
@@ -163,25 +134,15 @@ def command_frame(master, command, accept, timeout=15, *, end="\r"):
 
 
 def chat_content_row(row):
-    """Remove exactly the feed's one-column gutter, preserving text indentation.
-
-    Use on transcript, page and activity rows, not composer/facts/status rows:
-    those keep their own margins and physical cursor/width assertions.
-    """
     return row.removeprefix(" ")
 
 
 def conversation_text(frame):
-    """Chat-column text without the wide list/divider or one feed gutter.
-
-    A semantic text projection, not a screen for cursor/column assertions.
-    """
     return "\n".join(chat_content_row(row.partition("│")[2] if "│" in row else row)
                      for row in frame.split("\n"))
 
 
 def composer_line(screen, y):
-    """The cursor row inside its pane, excluding a drawn list and divider."""
     lines = screen.split("\n")
     line = lines[y] if y < len(lines) else ""
     if not line.startswith((" ›", " >")) and "│" in line:
@@ -190,46 +151,29 @@ def composer_line(screen, y):
 
 
 def composer_bounds(screen):
-    """The input's last two rules, measured in the rendered compose pane.
-
-    Short replies replace the footer's keys, never changing input or feed
-    geometry. Persistent state can still take rows below the chat footer.
-    Return None while no complete input is drawn.
-    """
     rules = [index for index in range(len(screen.split("\n")))
              if set(composer_line(screen, index)) == {"─"}]
     return tuple(rules[-2:]) if len(rules) >= 2 else None
 
 
 def chat_footer_row(screen):
-    """The chat's one facts/keys row follows the input's lower rule.
-
-    While quiet (including a transient reply or modal info) it is the last
-    row; persistent send/recovery state below it reduces the feed capacity.
-    """
     bounds = composer_bounds(screen)
     assert bounds is not None, ("composer rules", screen)
     return bounds[1] + 1
 
 
 def composer_empty(screen, y):
-    """No draft: the cursor row is a bare mark or the empty-chat placeholder."""
     return composer_line(screen, y) in (" ›", " >", " › Type a task", " > Type a task")
 
 
 def composer_ready(screen, x, y):
-    """Input is accepted at the composer: the cursor sits on its prompt row."""
     if "Opening…" in screen:
         return False
     line = composer_line(screen, y)
-    # The composer's mark follows the screen's one-column margin.
     return x >= 3 and any(line == " " + mark or line.startswith(" " + mark + " ") for mark in ("›", ">"))
 
 
 def keyed_frame(master, keys, accept, timeout=15):
-    """Write `keys`; return the first committed frame after them that
-    `accept`s, given the frame and its cursor. With no keys, the frame shown
-    now counts."""
     capture = terminal_capture(master)
     found = []
 
@@ -257,36 +201,26 @@ def keyed_frame(master, keys, accept, timeout=15):
 
 
 def overview_title(frame):
-    """The overview's list and pinned Settings row, without a title band."""
     return "  + New Session" in frame and "  Settings" in frame and "Type a task" not in frame
 
 
 def overview_frame(master, accept, keys=b"", timeout=15, *, ready=True):
-    """The first committed list frame after `keys` that `accept`s.
-
-    Overview has no editor or cursor-readiness condition; its pinned rows
-    and bottom action footer identify the screen instead. A known retained
-    reply can replace the action: opt out of readiness and accept that reply.
-    """
     return keyed_frame(master, keys, lambda screen, x, y: accept(screen) and overview_title(screen)
                        and (not ready or "enter open" in screen)
                        and not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", screen), timeout)
 
 
 def open_new_chat(master, timeout=15):
-    """Open the pinned New Session row, then wait for its focused editor."""
     return keyed_frame(master, b"\x1b[H\r", lambda screen, x, y: "Type a task" in screen
                        and composer_ready(screen, x, y), timeout)
 
 
 
 def panel_frame(master, accept, keys=b"", timeout=15):
-    """A committed panel frame; panel focus need not leave a composer cursor."""
     return keyed_frame(master, keys, lambda screen, x, y: accept(screen), timeout)
 
 
 def assert_chat_info_layout(screen, *, context=None):
-    """One substituted footer below input; facts stay separate from actions."""
     rows = screen.split("\n")
     contents = [row.rpartition("│")[2] if "│" in row else row for row in rows]
     footers = [index for index, row in enumerate(contents) if " · info" in row]
@@ -304,14 +238,11 @@ def assert_chat_info_layout(screen, *, context=None):
 
 
 def chat_info_geometry(screen):
-    """Visible natural-height body, measured independently of the feed widget."""
     content = [row.rpartition("│")[2] if "│" in row else row for row in screen.split("\n")]
     effort = next(index for index, row in enumerate(content) if row.startswith("   Effort"))
     composer = next(index for index, row in enumerate(content) if row.rstrip() in (" ›", " >") or row.startswith((" › ", " > ")))
     actions = [index for index, row in enumerate(content)
                if row.strip().startswith(("Rename", "Archive", "Copy last answer"))]
-    # The body's rule and title precede Effort. One deliberate ground row
-    # follows the last action, then the input's upper rule and prompt.
     assert actions and actions[-1] == composer - 3, screen
     return {"top": effort - 2, "input": composer, "footer": len(content) - 1,
             "feed": content[:effort - 2], "rows": content}
@@ -319,7 +250,6 @@ def chat_info_geometry(screen):
 
 
 def footer_click(screen, *, column=None, marker=None):
-    """An SGR mouse click in the visible Session identity/footer line."""
     content = screen.split("\n")
     row = chat_footer_row(screen)
     line = content[row]
@@ -330,7 +260,6 @@ def footer_click(screen, *, column=None, marker=None):
 
 
 def chat_info_open(master, timeout=15):
-    """Open ready chat info through the footer; Context is optional."""
     screen = panel_frame(master, lambda screen: "unavailable" not in screen and all(word in screen for word in
                          ("Effort", "Permissions", "Tools", "Folder", "Model", "Rename", "Archive", "Copy last answer")),
                          b"\x1bi", timeout)
@@ -339,14 +268,12 @@ def chat_info_open(master, timeout=15):
 
 
 def chat_info_frame(master, timeout=15):
-    """Inspect chat info, then restore chat focus for the next interaction."""
     screen = chat_info_open(master, timeout)
     panel_frame(master, lambda frame: "Copy last answer" not in frame, b"\x1b", timeout)
     return screen
 
 
 def app_settings_open(master):
-    """Select the pinned Settings row with End, then open its panel."""
     overview_frame(master, lambda screen: "Settings" in screen, b"\x1b[F")
     return panel_frame(master, lambda screen: any("Rui" in row and "settings" in row
                        for row in screen.splitlines()), b"\r")
@@ -354,7 +281,6 @@ def app_settings_open(master):
 
 
 def model_choice_details(screen):
-    """Read the inline Model field and its indented, bounded visible matches."""
     rows = [row.rpartition("│")[2] if "│" in row else row for row in screen.split("\n")]
     field = next((index for index, row in enumerate(rows) if row.startswith("   Model")), None)
     matches = []
@@ -380,7 +306,6 @@ def model_choice_shown(screen, query=None):
 
 
 def assert_model_choice(screen, *, query=None, more=None):
-    """No separate Filter row; matches follow Model at the shared indent."""
     choice = model_choice_details(screen)
     assert "Filter:" not in screen, screen
     assert not any(re.match(r"^   ↑(?: |$)", row) for row in choice["rows"]), screen
@@ -403,7 +328,6 @@ def model_choice_frame(master, keys=b"", *, query=None, more=None):
 
 
 class AppModelCatalog:
-    """Hold the first catalog reply so initial-choice invalidation is ordered."""
 
     def __init__(self, host):
         from canonical_fixture import ReplyProxy
@@ -425,7 +349,6 @@ class AppModelCatalog:
 
 
 def app_model_open(master, query=b"", *, catalog=None):
-    """Open settings Model; an ordered initial catalog replaces its fallback."""
     app_settings_open(master)
     shown = model_choice_frame(master, b"\r", query="")
     if catalog is not None:
@@ -440,20 +363,7 @@ def app_model_open(master, query=b"", *, catalog=None):
 
 
 def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False, redraw=False, initial=b"", fresh=False):
-    """Wait until the conversation column shows `marker`; return the frames shown.
-
-    The wide Session list can show the same answer before the conversation
-    reads it; only `conversation_text` owns the response marker. Plain output
-    after leaving the screen still counts.
-    The renderer replaces whole frames, so each committed frame is checked as
-    it arrives, not only the last. `composer` also requires a later (or the
-    same) frame whose cursor is at the composer: the reply has been drawn and
-    input is accepted again. The "› " marker alone waits for that composer.
-    The result joins distinct frames seen during this wait, oldest first,
-    bounded to the newest MiB; use current_screen for what is shown now.
-    `fresh` requires a frame observed after this call, for repeated commands.
-    """
-    del preserve_colour, redraw  # Frames are cells, not a byte transcript.
+    del preserve_colour, redraw  
     capture = terminal_capture(master)
     limit = 1024 * 1024
     assert len(marker.encode()) < limit, "terminal marker exceeds retained output bound"
@@ -507,8 +417,6 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
             received += len(chunk)
             raw.extend(chunk[-limit:])
             del raw[:-limit]
-            # The response budget excludes observer work on long combining
-            # cells; this is not a native wall-response performance claim.
             before = time.monotonic()
             capture.feed(chunk)
             deadline += time.monotonic() - before
@@ -522,7 +430,6 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
 
 
 def terminal_exit(caller, master, timeout=5):
-    """Own both output streams until exit, including a late rendering prefix."""
     errors_fd = caller.stderr.fileno()
     streams = {master: bytearray(), errors_fd: bytearray()}
     pending = set(streams)
@@ -550,7 +457,6 @@ def terminal_exit(caller, master, timeout=5):
 
 
 def terminal_gate(caller, master, reached, context, timeout=10):
-    """Own startup output until the public metadata gate, not a silent wait."""
     capture = terminal_capture(master)
     errors_fd = caller.stderr.fileno()
     streams = {master: bytearray(), errors_fd: bytearray()}
@@ -568,7 +474,7 @@ def terminal_gate(caller, master, reached, context, timeout=10):
             if data:
                 streams[fd].extend(data)
                 if fd == master:
-                    capture.feed(data)  # Later screen oracles continue from here.
+                    capture.feed(data)  
                 assert sum(map(len, streams.values())) < 1024 * 1024, "unexpected unbounded startup output"
             else:
                 pending.remove(fd)
@@ -580,10 +486,6 @@ def terminal_gate(caller, master, reached, context, timeout=10):
 
 
 def next_frame(master, timeout=3):
-    """Wait for the next committed frame; return it, or None if none came.
-
-    An unchanged frame writes nothing, so a quiet wait is an answer here.
-    """
     capture = terminal_capture(master)
     generation = capture.generation
     deadline = time.monotonic() + timeout
@@ -603,9 +505,6 @@ def next_frame(master, timeout=3):
 
 
 def await_screen(master, marker, *, composer=False, timeout=15):
-    """The current frame if it already shows `marker` (at the composer when
-    asked), else the frames until one does. A frame already shown is not
-    redrawn, so a wait must not depend on seeing it again."""
     capture = terminal_capture(master)
     shown = capture.completed
     if marker in conversation_text(shown) and (not composer or composer_ready(shown, capture.screen.cursor.x, capture.screen.cursor.y)):
@@ -614,25 +513,14 @@ def await_screen(master, marker, *, composer=False, timeout=15):
 
 
 def return_to_live(master, live, key=b"\x1b", timeout=15):
-    """Leave a page with `key`; return the first frame after it that shows
-    the composer ready and that `live(screen)` accepts.
-
-    App draws no page heading, so the key is always sent; the caller names
-    what the live view shows. Esc at the live view would leave the Session.
-    """
     return keyed_frame(master, key,
         lambda screen, x, y: composer_ready(screen, x, y) and live(screen), timeout)
 
 
-# The clock that ends a live line ("⠹ Thinking · 12s") redraws every second
-# while work runs; it is not a change of what the screen says.
 LIVE_CLOCK = re.compile(r"^([⠹◌?] .+ · )(?:retry \d+ in )?\d+[hms](?: \d+[ms])?$", re.M)
 
 
 def settle_screen(master, quiet=1.0, timeout=15):
-    """Drain frames until none but a live clock's tick arrives for `quiet`
-    seconds; return the screen. A ticking clock never goes quiet for a full
-    second, so ticks alone must not keep the screen unsettled."""
     deadline = time.monotonic() + timeout
     still = LIVE_CLOCK.sub(r"\1", current_screen(master))
     quiet_until = time.monotonic() + quiet
@@ -645,12 +533,6 @@ def settle_screen(master, quiet=1.0, timeout=15):
 
 
 def terminal_step(master, command, marker, *, composer=False):
-    """Send one command and wait for its response boundary.
-
-    Callers choose the response marker. `composer` returns the one fresh
-    committed frame that shows the marker with input accepted again, so every
-    check on the result describes that shown frame.
-    """
     if composer:
         return command_frame(master, command, lambda frame: marker in conversation_text(frame))
     os.write(master, (command + "\r").encode())
@@ -658,22 +540,11 @@ def terminal_step(master, command, marker, *, composer=False):
 
 
 def drop_spent_readiness(descriptor):
-    """Discard notifications already queued, so the next wait reads one made
-    after the input sent next: the card notifies once per request it draws,
-    and a byte left from an earlier request would pass for this one."""
     while select.select([descriptor], [], [], 0)[0]:
         assert os.read(descriptor, 1) == b"x", "Action caller exited before readiness"
 
 
 def action_ready(descriptor, master, timeout=15, *, shows=None, send=None):
-    """Supply normal terminal credit until the card has drawn its request.
-
-    Read exactly one notification, never a future request's byte. Return the
-    distinct committed frames shown meanwhile. Deliberately withheld-credit
-    controls must select the pipe directly. `shows` names the frame awaited
-    when it is not the choice. `send` is input written first, after dropping
-    notifications already queued, so the one read follows that input.
-    """
     if send is not None:
         drop_spent_readiness(descriptor)
         os.write(master, send)
@@ -698,14 +569,11 @@ def action_ready(descriptor, master, timeout=15, *, shows=None, send=None):
                 capture.feed(os.read(master, 65536))
             if descriptor in ready:
                 assert os.read(descriptor, 1) == b"x", "Action caller exited before readiness"
-                # The notification follows the final write/flush. Collect its
-                # remaining queued bytes too, without waiting for another prompt.
                 while select.select([master], [], [], 0)[0]:
                     assert time.monotonic() < deadline, "Action transcript exceeded readiness deadline"
                     chunk = os.read(master, 65536)
                     assert chunk, "Action terminal closed at readiness"
                     capture.feed(chunk)
-                # Readiness is the drawn card with its choice.
                 shown = capture.completed
                 if shows(shown) if shows else CHOICE_ROW.search(shown):
                     return "\n".join(frames)

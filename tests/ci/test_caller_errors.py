@@ -43,8 +43,6 @@ class CallerErrors(unittest.TestCase):
                                 "return error.OldFailure; return error.Contextual;"}), [])
 
     def test_new_unmapped_caller_error_fails_after_anyerror_widening(self):
-        # The compile-time closed-set check cannot recover this name once a
-        # legacy owner has widened it to anyerror. Inventory the source too.
         failures = check({CATALOG: catalog(), "src/cli.zig":
                           "fn legacy() anyerror!void {\n    return error.NewCallerError;\n}\n"})
         self.assertEqual(failures, [
@@ -56,7 +54,6 @@ class CallerErrors(unittest.TestCase):
             with self.subTest(path=path):
                 failures = check({CATALOG: catalog(), path: "\n@errorName // a comment\n (err);"})
                 self.assertEqual(failures, [f"{path}:2: raw @errorName is forbidden on the caller surface"])
-        # Internal legacy owners may still log names; their errors are inventoried.
         self.assertEqual(check({CATALOG: catalog(), "src/client.zig": "@errorName(err);"}), [])
 
     def test_declared_error_set_names_cannot_bypass_cli_coverage(self):
@@ -121,7 +118,6 @@ fn live() anyerror!void { return error.NewCallerError; }
             with self.subTest(replacement=replacement):
                 with self.assertRaises(ValueError):
                     mapped_names(catalog().replace("error.Classified => .classified", replacement))
-        # A test that mentions an error does not classify it.
         source = catalog() + 'test "not a mapping" { _ = error.NewCallerError; }'
         self.assertEqual(mapped_names(source), {"Classified"})
 
@@ -221,7 +217,6 @@ class TrustedPending(unittest.TestCase):
         self.assertEqual(check(read_sources(self.root)), [])
         self.write(CATALOG, catalog(("OldFailure", "NestedOwnerFailure", "NewCallerError", "TestOnly")))
         self.write("src/cli.zig", "return error.NewCallerError;")
-        # Even a committed candidate cannot bootstrap arbitrary new names.
         self.commit("candidate grows bootstrap")
         self.assertEqual(allowance_growth(self.root, bootstrap_names=set()), [
             f"{CATALOG}: pending error NestedOwnerFailure exceeds the trusted allowance",

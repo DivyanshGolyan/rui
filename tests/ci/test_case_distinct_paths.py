@@ -1,4 +1,3 @@
-"""Tracked paths stay distinct on a case-insensitive filesystem."""
 from collections import defaultdict
 from pathlib import Path
 import subprocess

@@ -1,6 +1,3 @@
-"""Codex managed-H2 cases that codex_h2_integration.py runs and
-transport_h2_integration_test.py checks: the Codex run, the OpenAI base URL run
-and the managed descriptor refusal."""
 import json
 import os
 import pathlib
@@ -28,13 +25,10 @@ def assert_managed_descriptor_rejection(rejected, limit):
     assert rejected.returncode != 0 and "descriptor capacity insufficient" in rejected.stderr, rejected.stderr
     assert not rejected.stdout.startswith("ready "), rejected.stdout
     fields = {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", rejected.stderr)}
-    # As in descriptor_capacity_integration, macOS libmalloc can open one
-    # inherited socket. Validate every Host-owned population independently.
     inherited = fields["inherited"]
     assert inherited in os_semantics.INHERITED_DESCRIPTORS, fields
     fixed_host = os_semantics.HOST_FIXED_DESCRIPTORS
     authentication = os_semantics.AUTHENTICATION_DESCRIPTORS
-    # 100 ordinary exchanges at five descriptors, two controls and discovery.
     required = inherited + fixed_host + DEFAULT_CLIENT_DESCRIPTORS + 10 + authentication + 2
     expected = dict(active_capacity=1, required=required, soft_limit=limit,
                     inherited=inherited, fixed_host=fixed_host, clients=DEFAULT_CLIENT_DESCRIPTORS,
@@ -68,10 +62,6 @@ def run(*, observed=False, intake=100):
     complete = False
     store = root / "store"
     try:
-        # These totals describe default intake100, not the refusal boundary.
-        # Ten ordinary clients remain viable after dropping 90 * 5 descriptors.
-        # Three inherited, fixed Host, 100 ordinary exchanges at five, two
-        # controls and discovery, authentication, and the intake wake pair.
         default_required = 3 + os_semantics.HOST_FIXED_DESCRIPTORS + DEFAULT_CLIENT_DESCRIPTORS + 10 + os_semantics.AUTHENTICATION_DESCRIPTORS + 2
         minimum_required = default_required - ORDINARY_EXCHANGE_DESCRIPTORS * (100 - 10)
         serve = [fixture.RUI, "host", "serve", "--store", store, "--set", 'execution.activeCapacity=1',
@@ -89,9 +79,6 @@ def run(*, observed=False, intake=100):
             rejected = subprocess.run(limited(actual_minimum - 1), capture_output=True, text=True, timeout=15)
             assert assert_managed_descriptor_rejection(rejected, actual_minimum - 1) == required, rejected.stderr
             assert not store.exists(), "managed capacity rejection created Store files"
-        # Execute the same complete workload at the exact production limit
-        # at default and minimum intake; retain the separate default-intake
-        # native channel run accounting for its two inherited descriptors.
         limit = required - ORDINARY_EXCHANGE_DESCRIPTORS * (100 - intake) + (2 if observed else 0)
         host, _ = start_ready_process(
             limited(limit), observations="managed" if observed else None,
@@ -109,7 +96,6 @@ def run(*, observed=False, intake=100):
         observations = []
         for index in range(3):
             if index == 2:
-                # Replace only after the previous lease/custody retired.
                 codex.credentials(path, fedramp=True)
             key = "federal" if index == 2 else f"message-{index}"
             text = "managed-federal" if index == 2 else f"managed-{index}"
@@ -142,8 +128,6 @@ def run(*, observed=False, intake=100):
             request = json.loads(body)
             assert request["text"] == {"verbosity": "low"}, request
             assert request["parallel_tool_calls"] is True, request
-        # The codec's headers follow h2's and content-type, ahead of the
-        # credential path's fields.
         for index, headers in enumerate(endpoint.request_headers):
             regular = [name for name in headers if not name.startswith(b":")]
             assert regular == [b"content-length", b"accept-encoding", b"content-type",
@@ -164,7 +148,6 @@ def run(*, observed=False, intake=100):
         assert endpoint.request_headers[2][b"originator"] == b"rui"
         if observed:
             assert len(observations) == 3, observations
-            # One connection opened by the first transfer, reused by the next two.
             assert [row["new_connections"] for row in observations] == ["1", "0", "0"], observations
             assert [row["replays"] for row in observations] == ["0", "0", "0"], observations
         print(f"codex synthetic TLS/H2 production transfers passed: intake_capacity={intake}, descriptor_limit={limit}, native_receipts={observed}, ALPN h2, one connection, three streams, conditional FedRAMP header")
@@ -182,8 +165,6 @@ def run(*, observed=False, intake=100):
             if complete and observed and diagnostics is not None:
                 assert len(diagnostics.matching("codex_transfer")) == 3, diagnostics.records
                 assert len(diagnostics.matching("preparation_completed")) == 3, diagnostics.records
-                # This Host has no injected before-launch delay, so it emits
-                # no delayed-handoff receipts. Both endpoints are mandatory.
                 assert len(diagnostics.records) == 6, diagnostics.records
         except BaseException as error:
             diagnostics.snapshot_failure(lambda: {"case": "codex_h2_final_population"})
@@ -202,10 +183,6 @@ def run(*, observed=False, intake=100):
 
 
 def openai_base_url_run(*, catalog_available=False):
-    """RUI_OPENAI_BASE_URL sends the OpenAI key to the Responses endpoint
-    under that base, over TLS, and nowhere else. The model list holds a
-    stream of its own: with one execution place and a peer allowing one
-    stream per connection, a message completes while the list is held."""
     root = pathlib.Path(tempfile.mkdtemp(prefix="rui-openai-base.")).resolve()
     private = root / "private"
     private.mkdir(mode=0o700)
@@ -236,7 +213,6 @@ def openai_base_url_run(*, catalog_available=False):
     complete = False
     try:
         catalog_url = f"https://localhost:{endpoint.server_address[1]}/api.json" if catalog_available else "https://127.0.0.1:1/api.json"
-        # A served provider uses system trust, which this certificate joins.
         host, ready = start_ready_process([fixture.RUI, "host", "serve", "--store", store, "--set", 'providers={"openai":{}}', "--set", 'execution.activeCapacity=1',
             "--test-models-dev-url", catalog_url], env={
             **os.environ, "RUI_OPENAI_KEY_FILE": str(key_file), **os_semantics.system_trust(root / "cert.pem"),
@@ -245,8 +221,6 @@ def openai_base_url_run(*, catalog_available=False):
         def model_list():
             return h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
         assert model_list()[0]["source"] == "pending", model_list()
-        # Pending is Host state, not proof the peer received discovery. Order
-        # the POST after the recorded GET while its response remains held.
         def models_received():
             with endpoint.lock:
                 return any(headers[b":method"] == b"GET" and headers[b":path"] == b"/custom/v1/models"
@@ -262,10 +236,7 @@ def openai_base_url_run(*, catalog_available=False):
         observation, answer, _ = fixture.wait_for_result_release(store, "custom-base", session, time.monotonic() + 20)
         assert observation["result"]["status"] == "completed", observation
         assert answer == b"answer-custom-base", answer
-        # Listing requests while the initial GET is held do not start another.
         assert model_list()[0]["source"] == "pending", model_list()
-        # Record the simultaneous held population before releasing either
-        # discovery response. Later refreshes may retire/reopen connections.
         assert len(endpoint.connections) == (3 if catalog_available else 2), endpoint.connections
         endpoint.models_release.set()
         listed = fixture.wait_for(
@@ -278,7 +249,6 @@ def openai_base_url_run(*, catalog_available=False):
         fixture.wait_for(
             lambda: len(provider_headers()) >= 3,
             "a model-list request refreshes the provider list again", timeout=20)
-        # The key goes only to the list and Responses endpoint beside it.
         paths = [(headers[b":method"], headers[b":path"]) for headers in provider_headers()]
         assert paths[:2] == [(b"GET", b"/custom/v1/models"), (b"POST", b"/custom/v1/responses")], paths
         assert all(path == (b"GET", b"/custom/v1/models") for path in paths[2:]), paths
@@ -288,8 +258,6 @@ def openai_base_url_run(*, catalog_available=False):
             assert b"chatgpt-account-id" not in headers, headers
         assert b"content-length" not in provider_headers()[0], provider_headers()[0]
         if catalog_available:
-            # The raw catalog is saved, then used conditionally by the next
-            # refresh. The test only observes the network owner boundary.
             def revalidated():
                 model_list()
                 return next((headers for headers in endpoint.request_headers
@@ -302,7 +270,6 @@ def openai_base_url_run(*, catalog_available=False):
                     assert headers[b"accept-encoding"] == b"identity", headers
         print("openai base URL passed: a message completes beside held discovery GETs; repeated model-list requests refresh again; "
               + ("models.dev saves its ETag and revalidates without credentials" if catalog_available else "unreachable models.dev does not block Host readiness or the model list"))
-        # A new Host whose list response is invalid publishes the catalog fallback.
         fixture.stop_host(host)
         host = None
         endpoint.models = b'{"error":"model list unavailable"}'
@@ -326,7 +293,6 @@ def openai_base_url_run(*, catalog_available=False):
             assert not thread.is_alive(), "OpenAI base URL endpoint thread did not retire"
         cleaned = False
         try:
-            # Every disposal runs; a body failure stays primary.
             dispose_all(lambda: fixture.stop_host(host) if host is not None else None,
                         endpoint.shutdown, endpoint.server_close, retire)
             cleaned = True
@@ -338,7 +304,6 @@ def openai_base_url_run(*, catalog_available=False):
 
 
 def saved_catalog_run():
-    """Production Host reads one saved generation, not a shipped/Host copy."""
     from product_defaults import CATALOG, DEFAULTS, EFFORTS
 
     root = pathlib.Path(tempfile.mkdtemp(prefix="rui-saved-catalog.")).resolve()
@@ -404,15 +369,13 @@ def saved_catalog_run():
 
     def await_response(status, etag):
         def observed():
-            listed()  # The public operation requests refresh; no test scheduler authority.
+            listed()
             with endpoint.lock:
                 return next((reply for reply in endpoint.catalog_responses
                              if reply["status"] == status and reply["etag"] == etag), None)
         return fixture.wait_for(observed, f"catalog {status} {etag}", timeout=30)
 
     def change_catalog(payload, etag):
-        # Gate the next refresh before changing its inputs. An existing held
-        # request reads these values only when explicitly released below.
         with endpoint.lock:
             endpoint.catalog_release.clear()
             endpoint.catalog = payload
@@ -423,9 +386,6 @@ def saved_catalog_run():
         listed()
         if not already_held:
             def requested():
-                # A prior fetch can still be in flight when the first hint is
-                # consumed. Keep requesting through the public operation until
-                # that fetch retires and a new controlled GET is observed.
                 listed()
                 return len(catalog_requests()) > before
             fixture.wait_for(requested, "held catalog refresh", timeout=20)
@@ -437,8 +397,6 @@ def saved_catalog_run():
         endpoint.catalog_release.set()
         first = expected("catalog_fallback", sorted([saved, shipped]))
         await_list(first, "saved-only ID replaces shipped fallback and removed IDs")
-        # A source-only read must retain a successfully published generation
-        # on conditional refresh, including its changed capability facts.
         conditional = await_response("304", '"catalog-v1"')
         assert conditional["headers"][b"if-none-match"] == b'"catalog-v1"', conditional
         assert listed() == first
@@ -460,8 +418,6 @@ def saved_catalog_run():
             )
             assert refused["answer"]["code"] == code, refused
 
-        # A live provider's IDs and order are independent of catalog membership;
-        # non-OpenAI facts still mark a live ID known.
         live_ids = [other, saved, shipped, "provider-only-d237"]
         with endpoint.lock:
             endpoint.models = json.dumps({"data": [{"id": model} for model in live_ids]}).encode()
@@ -473,14 +429,12 @@ def saved_catalog_run():
             assert listed() == live_first, "an in-flight refresh changed selected facts"
         endpoint.catalog_release.set()
         live_second = expected("live", live_ids, {"provider-only-d237"})
-        # Every read across publication must be a whole old or new generation.
         def coherent_publication():
             value = listed()
             assert value in (live_first, live_second), value
             return value if value == live_second else None
         fixture.wait_for(coherent_publication, "one-generation live known flags", timeout=30)
 
-        # Malformed refreshes leave the published source authoritative.
         change_catalog(b'{"openai":{"models":', '"catalog-invalid"')
         endpoint.catalog_release.set()
         await_response("200", '"catalog-invalid"')
@@ -495,15 +449,12 @@ def saved_catalog_run():
         assert listed() == live_second
         fixture.stop_host(host)
         host = None
-        # Hold discovery on restart: saved facts are visible before any fetch
-        # can complete; the live provider starts its own pending/fetch lifecycle.
         endpoint.catalog_release.clear()
         with endpoint.lock:
             endpoint.models = b'{"error":"unavailable"}'
         host, ready = start_ready_process(arguments, env=env)
         await_list(expected("catalog_fallback", ["provider-only-d237"]), "saved facts survive restart and malformed refresh")
 
-        # A valid empty source is authoritative, not absence of a source.
         change_catalog(body({}), '"catalog-empty"')
         endpoint.catalog_release.set()
         await_list(expected("catalog_fallback", []), "empty saved generation suppresses shipped IDs")
@@ -513,8 +464,6 @@ def saved_catalog_run():
         endpoint.catalog_release.clear()
         host, ready = start_ready_process(arguments, env=env)
         await_list(expected("catalog_fallback", []), "empty saved generation survives restart")
-        # An absent ID in a saved source is genuinely unlisted for admission:
-        # neither its old saved window nor its shipped window may reappear.
         absent = fixture.command(
             "session", "configure", "--store", store, "--session", session,
             "--record", root / "absent.json", "--key", "absent",
@@ -523,8 +472,6 @@ def saved_catalog_run():
         )
         assert absent["answer"]["status"] == "accepted", absent
 
-        # This complete semantic reply exceeds the former shipped-derived
-        # static bound, not just the small resident JSON buffer.
         large_ids = [f"saved-{index:04d}-" + "x" * 160 for index in range(4096)]
         change_catalog(body({model: {} for model in reversed(large_ids)}), '"catalog-large"')
         endpoint.catalog_release.set()

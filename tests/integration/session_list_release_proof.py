@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Opt-in Linux owner-boundary negatives: RUI CLIENT [--charge-negative]."""
 
 import copy
 import hashlib
@@ -37,8 +36,6 @@ def oracle_controls(platform="linux"):
         if charge is not None:
             result["scratch_used_bytes"] = charge
         return result
-    # The selected call releases first, while an earlier owner retains charge.
-    # Zero must come from the latest release, not the selected request's record.
     records = [record("connection_request_configure", 1, 0),
                record("connection_request_list_sessions", 2, 1),
                record("connection_resources_released", 3, 1, "63"),
@@ -48,8 +45,6 @@ def oracle_controls(platform="linux"):
     census = {"census": "observed"} if platform == "linux" else None
     with os_semantics.simulate(platform), \
          patch.object(fixture, "linux_resources", return_value={"census": "observed"}):
-        # Neither the selected release nor an earlier owner's release may be
-        # skipped before teardown, even without a platform resource census.
         for missing in (2, 3):
             diagnostics.records = records[:missing] + records[missing + 1:]
             expect_failure(lambda: fixture.released_resources(1, diagnostics, (102, 102, time.monotonic())), "missing exchange release")
@@ -68,7 +63,6 @@ def oracle_controls(platform="linux"):
         diagnostics.records = copy.deepcopy(records)
         for item in diagnostics.records[1:]:
             item["trace_lost"] = True
-        # An unrelated lost diagnostic does not remove required endpoints.
         diagnostics.records[-1]["sequence"] = "6"
         assert fixture.released_resources(1, diagnostics, invocation) == census
         diagnostics.records[-1]["trace_lost"] = False
@@ -110,8 +104,6 @@ def listing(client, store):
 
 
 def retained_report(process, diagnostics, store, request, mode, invocation):
-    # The interposed fixture's bounded FD receipt is not a Host milestone.
-    # Native cleanup evidence comes only from the private owner channel.
     def receipts_now():
         receipts = []
         for line in diagnostics.tail().splitlines():
@@ -143,8 +135,6 @@ def case(binary, client, probe, mode):
         env.update(LD_PRELOAD=str(probe), RUI_CENSUS_PROBE_MODE="leak" if mode == "leak" else "hold",
                    RUI_CENSUS_PROBE_PARENT=str(store / "scratch"), RUI_CENSUS_PROBE_REQUEST=str(request))
         original_popen = subprocess.Popen
-        # Only Host launch gets interception and replaces its existing stdin.
-        # Reuse readiness; do not add a second stderr reader or shared helper API.
         def popen(*args, **kwargs):
             kwargs.update(env=env, stdin=subprocess.PIPE)
             return original_popen(*args, **kwargs)
@@ -170,12 +160,12 @@ def case(binary, client, probe, mode):
                 receipt, held = retained_report(process, diagnostics, store, 0, "held", invocation)
                 assert not diagnostics.matching("connection_resources_released", subject="0")
                 if mode == "premature":
-                    baseline = held  # Content-Length completion is deliberately the wrong witness.
+                    baseline = held  
                 else:
                     waiting = threading.Event()
                     original_wait = diagnostics.condition.wait
                     def wait(timeout=None):
-                        waiting.set()  # Under the oracle's condition lock, immediately before its real wait.
+                        waiting.set()  
                         return original_wait(timeout)
                     def census():
                         try:
@@ -220,7 +210,6 @@ def case(binary, client, probe, mode):
                     diagnostics._read_error = "proof Host disposed"
                     diagnostics.condition.notify_all()
                 worker.join(timeout=10)
-                # The artificial wake is cleanup only, never a passing witness.
                 diagnostics._read_error = original_error
                 assert not worker.is_alive(), "proof census worker retained"
             diagnostics.close()
@@ -229,8 +218,6 @@ def case(binary, client, probe, mode):
 
 
 def charge_negative(binary, client):
-    # Use a disposable binary whose release sample alone is actual charge + 1.
-    # This is separate from schema rejection and requires real native Client I/O.
     with tempfile.TemporaryDirectory(prefix="rui-list-charge-") as directory:
         store = pathlib.Path(directory) / "store"
         store.mkdir(mode=0o700)

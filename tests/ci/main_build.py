@@ -1,19 +1,4 @@
 #!/usr/bin/env python3
-"""Keep one `ci-red` issue open while the main build is red, naming the PRs that crossed.
-
-No check runs on `main` after a merge, and PRs need no up-to-date base, so two
-PRs green alone can break `main` together (#1410). main-build.yml compiles
-`main` after every push. A red build files, or updates and comments on, one open
-issue naming each PR merged since the last green main build; the next green
-build comments on it and closes it. Only a build of the SHA `main` is at now
-speaks for `main`: a rerun of an older run describes a past `main` and changes
-nothing, and the last green build is the nearest green first-parent ancestor,
-not the newest green run. The revert of the later crossing PR is the
-fast fix (docs/agents/landing.md, "CI failures").
-
-Unlike report_issue.py's per-signature issues, this one tracks a state of
-`main`, so green alone closes it; its cause label is still the closer's.
-"""
 import argparse
 from dataclasses import dataclass
 import json
@@ -27,7 +12,6 @@ from report_issue import LABEL, gh, run_jobs
 WORKFLOW = "main-build.yml"
 TITLE = "Main build red"
 MARKER = "<!-- main-build-red -->"
-# A squash merge's subject ends with its PR number.
 PR_NUMBER = re.compile(r"\(#([1-9][0-9]*)\)$")
 
 
@@ -43,11 +27,6 @@ def git(*args, cwd=None):
 
 
 def crossing(green, head, cwd=None):
-    """The first-parent commits after the last green build up to head, oldest first.
-
-    Without a green ancestor (no green build yet, or one off this history) only
-    head is named, and the second value says the range is unknown.
-    """
     known = green is not None and subprocess.run(
         ["git", "merge-base", "--is-ancestor", green, head], cwd=cwd, capture_output=True).returncode == 0
     span = [f"{green}..{head}"] if known else ["-1", head]
@@ -61,12 +40,6 @@ def crossing(green, head, cwd=None):
 
 
 def decide(result, issue, current):
-    """What a finished build does to the open issue: create, update, close, nothing or stale.
-
-    current says whether the build's SHA is still main's head. A build of an
-    older SHA (a rerun of a past run) describes a past main, so it is stale and
-    changes nothing whatever its result.
-    """
     if result not in ("success", "failure"):
         raise ValueError(f"A main build result is success or failure, not {result!r}")
     if not current:
@@ -77,8 +50,7 @@ def decide(result, issue, current):
 
 
 def plain(text):
-    """A subject cannot mention anyone in the issue."""
-    return text.replace("@", "@\u200b")  # a zero-width space after each @
+    return text.replace("@", "@\u200b")
 
 
 def named(commit):
@@ -105,7 +77,6 @@ def render(repository, commits, known, green, head, url, failed):
 
 
 def open_issue(repository):
-    """The open main-build issue with the lowest number, or None."""
     rows = json.loads(gh("issue", "list", "--repo", repository, "--state", "open", "--label", LABEL,
                          "--limit", "1000", "--json", "number,body"))
     numbers = sorted(row["number"] for row in rows if MARKER in (row["body"] or ""))
@@ -113,16 +84,10 @@ def open_issue(repository):
 
 
 def main_head(repository):
-    """The SHA main is at now."""
     return json.loads(gh("api", f"repos/{repository}/git/ref/heads/main"))["object"]["sha"]
 
 
 def nearest_green(greens, head, cwd=None):
-    """The nearest first-parent ancestor of head, head excluded, among the green SHAs, or None.
-
-    Ranked by history, not by when a run finished, so a rerun of an old run
-    that turns green does not move the range back.
-    """
     if not greens:
         return None
     ancestors = git("rev-list", "--first-parent", "--skip=1", head, cwd=cwd).split()
@@ -130,7 +95,6 @@ def nearest_green(greens, head, cwd=None):
 
 
 def last_green(repository, head, cwd=None):
-    """The SHA of the last green main build before head, or None."""
     runs = json.loads(gh("api", f"repos/{repository}/actions/workflows/{WORKFLOW}/runs"
                                 "?branch=main&status=success&per_page=100"))["workflow_runs"]
     return nearest_green({run["head_sha"] for run in runs}, head, cwd)

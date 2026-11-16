@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Native Host wire proof for configured-only Session discovery (no local records)."""
 
 import json
 import os
@@ -69,12 +68,10 @@ def main():
             assert initial[0] == 200, initial
             assert_empty_full(initial[1])
             baseline = released_resources(process.pid, diagnostics, latest_invocation)
-            # A rejected configuration creates a request fact but no Session.
             def configure(key, reference, workspace, model="gpt-6-sol", label=None):
                 config = {
                     "workspace": workspace, "provider": "codex", "model": model,
                     "tools": ["bash", "web_search"], "permissionMode": "bypass", "compactAt": 100000,
-                    # D111: a model the catalog does not list states no effort.
                     "effort": "low" if model == "gpt-6-sol" else None,
                 }
                 if label is not None:
@@ -89,9 +86,7 @@ def main():
                 assert len(reference) == 6 and all(character in "0123456789abcdefghjkmnpqrstvwxyz" for character in reference), result
                 return reference
 
-            # An empty model is a domain rejection, answered without a Session.
             assert configure("rejected", "", str(root), model="")[1]["answer"]["status"] == "rejected"
-            # Keep allocation order independently of the random IDs' lexical order.
             names = [create(f"created-{i}", str(other) if i == 3 else str(root)) for i in range(10)]
             first_status, first = listing(str(root))
             assert first_status == 200 and [item["reference"] for item in first["sessions"]] == [names[i] for i in (0, 1, 2, 4, 5, 6, 7, 8)], first
@@ -104,8 +99,6 @@ def main():
             assert {name: row[name] for name in ("reference", "workspace", "provider", "model", "tools", "permission_mode")} == {
                 "reference": names[9], "workspace": str(root), "provider": "codex", "model": "gpt-6-sol", "tools": ["bash", "web_search"],
                 "permission_mode": "bypass"}, row
-            # Configured and never messaged: idle since its creation, with no
-            # Label, first Message or person's Message.
             assert int(row["created_at"]) > 0 and row["label"] is None and row["revision"] == "1" and row["end"] == "0", row
             assert row["first_message"] is None and row["peers"] == {"from_person_at": None}, row
             assert row["work"] == {"state": {"kind": "idle", "since": row["created_at"]}, "turn": None, "operation": None,
@@ -116,7 +109,6 @@ def main():
             current = subprocess.run([binary, "session", "list", "--store", store],
                 cwd=root, capture_output=True, text=True, timeout=10)
             assert current.returncode == 0, current.stderr
-            # Every page streams into exactly one JSON value.
             current_list = json.loads(current.stdout)
             assert current_list["version"] == host_process.WIRE_VERSION and current_list["type"] == "session_list" and current_list["next"] is None, current_list
             assert [row["reference"] for row in current_list["sessions"]] == [
@@ -129,7 +121,6 @@ def main():
             assert "Bash runs without approval" not in all_workspaces.stdout
             assert [row["permission_mode"] for row in all_list["sessions"]] == ["bypass"] * 11, all_list
             assert sorted(row["reference"] for row in all_list["sessions"]) == sorted(names + [later]), all_list
-            # --since answers nothing new, only what changed, or everything.
             assert current_list["delta"] == "full" and all_list["delta"] == "full", all_list
             def since_listing(token):
                 result = subprocess.run([binary, "session", "list", "--store", store, "--all", "--since", token],
@@ -144,30 +135,21 @@ def main():
             assert changed["delta"] == "changed" and changed["since"] != token, changed
             assert [(row["reference"], row["label"]) for row in changed["sessions"]] == [(later, "Watched")], changed
             assert since_listing(changed["since"])["delta"] == "not_modified"
-            # Another Host's token (this one never issued it) lists everything.
             everything = since_listing("0" * 32 + "." + token.split(".")[1])
             assert everything["delta"] == "full" and len(everything["sessions"]) == 11, everything
             refused = subprocess.run([binary, "session", "list", "--store", store, "--since", "nope"],
                 cwd=root, capture_output=True, text=True, timeout=10)
             assert refused.returncode != 0 and refused.stdout == "" and "--since" in refused.stderr, refused
             assert exchange(address, "list-sessions", {**base("list_sessions"), "workspace": None, "after": "12", "ceiling": "11"})[0] == 400
-            # IDs cannot carry controls; retain the escaped-string round trip in
-            # the caller-controlled model, associated with its allocated Session.
             long_model = "x" * 126 + "\x01\x00"
             escaped = create("long-model", str(root), model=long_model)
             dormant = [create(f"dormant-{index}", str(root)) for index in range(88)]
             after_growth = listing(str(root))
             assert after_growth[0] == 200 and len(after_growth[1]["sessions"]) == 8
-            # Preserve the pre-archive 4 KiB budget plus added wire fields per row.
-            # The independent archive-state contract's longest value is archiving.
             archive_field_bytes = len(', "archive_state": "archiving"'.encode())
-            # These never-pinned rows carry one pin_order field in its null form.
             assert all(row["pin_order"] is None for row in after_growth[1]["sessions"])
             pin_field_bytes = len(', "pin_order": null'.encode())
-            # Each dormant row carries one last_line field in its null form.
             last_line_field_bytes = len(', "last_line": null'.encode())
-            # Retain the same facts budget, adding only the actual bounded
-            # read-version field each row now carries (not unrelated slack).
             read_version_bytes = sum(len(', "read_version": ' + json.dumps(row["read_version"]))
                                      for row in after_growth[1]["sessions"])
             assert len(json.dumps(after_growth[1]).encode()) < 4096 + 8 * (archive_field_bytes + pin_field_bytes + last_line_field_bytes) + read_version_bytes

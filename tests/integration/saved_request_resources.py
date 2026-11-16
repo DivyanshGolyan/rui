@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""Comparable Linux CLI-only capture/retained-reader observations, not qualification.
-
-Usage: python3 tests/integration/saved_request_resources.py BASELINE CANDIDATE
-Both executables should be uninstrumented ReleaseSafe builds. The unchanged
-baseline Host serves the same Store to both PTYs; no provider work is submitted.
-"""
 import hashlib
 import json
 import os
@@ -32,7 +26,6 @@ def capture(state, binary, label, size, repetition):
         for offset in range(0, size, 4096):
             output.write(b"x" * min(4096, size - offset))
     gate = home / "gate"
-    # Keep the historical baseline's original syntax; migrate only the candidate.
     send = (["message", "--store", str(state / "offline-store"), "--session", "resources/original",
         "--text", str(source), "--json"] if label == "baseline" else ["session", "send", "--store",
         str(state / "offline-store"), "--to", "k7m2qx"])
@@ -50,7 +43,6 @@ def capture(state, binary, label, size, repetition):
             handle = json.loads(output)["request"]
         else:
             assert process.returncode == 6 and "[host_not_serving]" in errors, (output, errors)
-            # The candidate announces its generated capture on stderr only.
             assert output == "", output
             announced = re.search(r"^request: (\S+) \(wait: rui request wait \1; "
                 r"if unconfirmed: rui request recover \1\)$", errors, re.MULTILINE)
@@ -85,7 +77,6 @@ def retained(state, binary, label):
     for number in range(100):
         (records / f"01234567-89ab-4cde-8012-{number:012x}.json").write_text("invalid but enumerable")
     master, slave = open_pty()
-    # Keep the historical baseline's original entry; migrate only the candidate.
     entry = (["session", "--store", str(state / "live-store"), "--session", "resources/original"]
         if label == "baseline" else ["session", "resume", "--store", str(state / "live-store"), "--", "resources/original"])
     process = spawn([str(binary), *entry], env={**os.environ, "HOME": str(home)},
@@ -98,7 +89,6 @@ def retained(state, binary, label):
         for _ in range(3):
             for _ in range(10):
                 if label == "baseline":
-                    # Historical binary evidence deliberately retains its own UI.
                     assert "Configured." in cli.terminal_step(master, "/configure --model gpt-6-sol", prompt)
                 else:
                     cli.chat_info_open(master)
@@ -116,8 +106,6 @@ def retained(state, binary, label):
             samples.append(sample(process.pid))
         cli.terminal_step(master, "\x03", "Detached.")
         assert process.wait(timeout=5) == 0
-        # Legacy baselines own stdio; the sole frontend additionally owns its
-        # unlinked render scratch. A single polling reader may own one socket.
         assert samples[0]["retained_fds"] in (3, 4), samples
         assert all(value["retained_fds"] == samples[0]["retained_fds"] and value["sockets"] <= 1 for value in samples), samples
         return {"binary": label, "retained_samples": samples, "configuration_cycles": 30, "invalid_records": 100}

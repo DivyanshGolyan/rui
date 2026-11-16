@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""Bounded renderer protection removals, never a mutation-score waiver.
-
-Each check first executes against an unchanged source copy. Each mutant then
-gets its own source copy and must fail its named behavioral assertion. Build
-errors, crashes, missing tests, timeouts, drift and survivors fail the gate.
-Compiler/package caches may be shared; test acceptance is always executed.
-"""
 import argparse
 import dataclasses
 import difflib
@@ -56,13 +49,7 @@ def native(name):
     return Check("test", name)
 
 
-# Exact anchors intentionally fail closed when the protection changes. Add or
-# revise a mutation alongside its maintained owning test, not a copied oracle.
 MUTATIONS = (
-    # Retired mark-collision and mark-eviction-edge: session_transcript's
-    # byte-offset Marks no longer exist. Replacing a same-offset seam mark and
-    # accepting a mark exactly at the retained byte origin have no keyed-feed
-    # equivalent; keyed suffix replacement and trimming are not those rules.
     Mutation("conversation-cursor", "inclusive Activity replay starts before its ordinal-zero row", "a68b4c76",
              "src/session_reads.zig", "cursor.position = from.position -| 1;",
              "cursor.position = from.position;",
@@ -86,8 +73,6 @@ MUTATIONS = (
              "src/session_reading.zig", "return asked.place != .elsewhere and std.meta.eql(asked, now);",
              "return asked.place != .elsewhere or std.meta.eql(asked, now);",
              logic("a Message page shows only over the place, sends and requests it was asked over")),
-    # Edge attachment now owns rejection of delayed older pages; transcript
-    # generations disappeared with the byte-offset transcript.
     Mutation("stale-transcript", "a delayed older fill attaches only at its unchanged low edge", "4d5cf8ba",
              "src/feed_reads.zig", ".fill_above => std.meta.eql(started_from, edge_now),",
              ".fill_above => true or std.meta.eql(started_from, edge_now),",
@@ -127,7 +112,6 @@ MUTATIONS = (
              "self.dropMessageRequest();\n    try self.jumpToEnd();\n}",
              "self.dropMessageRequest();\n}",
              native("sending a Message from a browsed page returns the screen to the latest conversation")),
-    # 1f52ba94 split the paused draft: typing beside a shown Action is its reason.
     Mutation("paused-draft-submission", "paused approval cannot submit the retained draft", "52e9055d",
              "src/session_consent.zig", "return (consent == null or reason) and !blockers.opening",
              "return (consent == null or reason or true) and !blockers.opening",
@@ -193,7 +177,6 @@ def apply(root, mutation):
 
 
 def execute(command, root, log, timeout, environment):
-    """Own and reap the process group even on timeout or interrupted capture."""
     start = time.monotonic()
     with log.open("wb") as output:
         process = subprocess.Popen(command, cwd=root, env=environment,
@@ -249,8 +232,6 @@ def classify(result, output, check):
         return "timeout"
     if result["returncode"] not in (0, 1):
         return "build-or-process-error"
-    # A named assertion is necessary but not sufficient: reject an accompanying
-    # compile failure or abnormal child exit. Never accept a generic nonzero.
     if re.search(r"compilation errors?|error: (?:the following command|unable to)|terminated by signal", output):
         return "build-or-process-error"
     if result["returncode"] == 0:
@@ -263,8 +244,6 @@ def classify(result, output, check):
         if record[1] != check.name and not record[1].endswith("." + check.name):
             continue
         end = records[index + 1].start() if index + 1 < len(records) else len(output)
-        # Assertions print expected/found diagnostics before their FAIL record.
-        # Never borrow a failure from the next test's record.
         errors = re.findall(r"(?:^|\n)FAIL \(([^)\n]+)\)(?=\n|$)", output[record.end():end])
         assertion = bool(errors and re.fullmatch(r"TestExpected\w*|TestUnexpectedResult", errors[-1]))
     if named_failure and assertion and result.get("assertion", {}).get("returncode") == 1:
@@ -285,7 +264,6 @@ def run(source, output, selected, timeout):
     original = manifest(source, paths)
     write_json(output / "source.json", original)
     environment = dict(os.environ)
-    # Packages are immutable compilation inputs, not source overlays or tests.
     environment["ZIG_LOCAL_PKG_DIR"] = str(Path(environment.get("ZIG_LOCAL_PKG_DIR", source / "zig-pkg")).resolve())
     zig = Path(shutil.which("zig") or "missing-zig").resolve()
     report = {"revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip(),
@@ -300,7 +278,6 @@ def run(source, output, selected, timeout):
     try:
         with tempfile.TemporaryDirectory(prefix="rui-mutations-") as temporary:
             scratch = Path(temporary)
-            # Sharing compiler objects does not reuse Run-step acceptance.
             environment["ZIG_LOCAL_CACHE_DIR"] = str(scratch / "cache")
             checks = list(dict.fromkeys(mutation.check for mutation in selected))
             baseline = scratch / "baseline"

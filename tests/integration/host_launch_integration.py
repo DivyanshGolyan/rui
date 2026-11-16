@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Public-CLI evidence for detached Host launch and convergence."""
 
 import errno
 from contextlib import closing, contextmanager
@@ -35,10 +34,7 @@ import os_semantics
 from host_launch_fixture import COMMAND_TIMEOUT, RUI, dispose_provider_case, forced_crash_cleanup, matching_processes, run_start
 
 
-# The format this build supports; older formats are refused, never migrated.
 SCHEMA = STORE_SCHEMA
-# Every unflagged start path (bare rui, host start, host serve) must resolve
-# the module's capacity; the fixture budgets below follow the same values.
 DEFAULT_ACTIVE_CAPACITY = DEFAULTS.active_capacity
 INTAKE = DEFAULTS.intake_capacity
 PTY_OUTPUT_LIMIT = 1024 * 1024
@@ -126,8 +122,6 @@ int main(int argc, char **argv) {
 
 
 def assert_launch_adapter(root, env):
-    # Link the production adapter, including Darwin's early same-executable
-    # helper, without adding application policy or a production test hook.
     source, actor = root / "launch-probe.c", root / "launch-probe"
     source.write_text(LAUNCH_PROBE)
     adapter = pathlib.Path(__file__).resolve().parents[2] / "src/host_launch.c"
@@ -168,15 +162,12 @@ def status(store, env):
         text=True,
         timeout=5,
     )
-    # Save the actual observation before the caller tests readiness. A later
-    # probe cannot reconstruct the status that failed under intake pressure.
     observation = json.dumps(dict(store=str(store), returncode=result.returncode,
                                   stdout=result.stdout, stderr=result.stderr)) + "\n"
     assert len(observation.encode()) <= 1024 * 1024, "status observation exceeds artifact bound"
     root = next((parent for parent in store.parents if parent.name.startswith("rui-host-launch-")), store.parent)
     (root / "probe.log").write_text(observation)
     assert result.returncode == 0, result.stderr
-    # Metadata is exactly one JSON value on stdout.
     value = json.loads(result.stdout)
     assert value["version"] == host_process.WIRE_VERSION and value["type"] == "host_status", result
     return value
@@ -215,11 +206,10 @@ def lower_descriptor_limit():
 
 
 def assert_configure_defaults(root, store, env):
-    """Fresh CLI and Store first-configuration defaults follow the module; saved values win."""
     home = root / "configure-defaults-home"
     home.mkdir(mode=0o700)
     home = home.resolve(strict=True)
-    env = {**env, "HOME": str(home)}  # No saved preferences: module defaults apply.
+    env = {**env, "HOME": str(home)}  
 
     def configure(*arguments):
         result = subprocess.run([RUI, "session", "configure", "--store", store, *arguments],
@@ -237,18 +227,15 @@ def assert_configure_defaults(root, store, env):
         return current["model"], current["tools"], current["permission_mode"]
 
     module = (DEFAULTS.recommended_model, DEFAULTS.tools.split(","), DEFAULTS.permission_mode)
-    assert settings(configure()) == module  # Fresh CLI capture resolves every omitted value.
-    # A fresh explicitly bound configuration receives the same product defaults.
+    assert settings(configure()) == module  
     addressed = configure("--workspace", root, "--provider", "codex", "--model", "gpt-6-sol")
     assert settings(addressed) == ("gpt-6-sol", *module[1:])
-    # Explicit values save; a later sparse update preserves them, not defaults.
     configure("--session", addressed, "--tools", "none", "--permission-mode", "ask")
     configure("--session", addressed, "--compaction-trigger", "12345")
     assert settings(addressed) == ("gpt-6-sol", [], "ask")
 
 
 def managed_descriptor_rejection(store, env, limit):
-    """Start a managed Host with soft and hard RLIMIT_NOFILE at limit; require refusal."""
     def limits():
         resource.setrlimit(resource.RLIMIT_NOFILE, (limit, limit))
     before = time.monotonic()
@@ -259,21 +246,16 @@ def managed_descriptor_rejection(store, env, limit):
         assert text in failed.stderr, (text, failed.stderr)
     line = next(line for line in failed.stderr.splitlines() if "descriptor capacity insufficient:" in line)
     fields = {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", line)}
-    # Independent budget at the default capacity: macOS libmalloc may add one
-    # inherited socket; the h2 waker and authentication differ by platform.
     inherited = fields["inherited"]
     assert inherited in os_semantics.INHERITED_DESCRIPTORS, fields
     fixed_host = os_semantics.HOST_FIXED_DESCRIPTORS
     authentication = os_semantics.AUTHENTICATION_DESCRIPTORS
-    # Other occupied slots at five descriptors plus the serial ten-descriptor
-    # Bash spawn; ordinary exchanges at five, two controls and discovery.
     execution, clients = (DEFAULT_ACTIVE_CAPACITY - 1) * 5 + 10, INTAKE * 5 + 3
     expected = dict(active_capacity=DEFAULT_ACTIVE_CAPACITY, soft_limit=limit, inherited=inherited,
                     fixed_host=fixed_host, clients=clients, execution=execution,
                     authentication=authentication, self_wake=2,
                     required=inherited + fixed_host + clients + execution + authentication + 2)
     assert fields == expected, (fields, expected)
-    # Refusal precedes the lease and diagnostic writer: no ready Host remains.
     assert not (store / "host.lock").exists() and not (store / "diagnostics").exists(), store
     assert status(store, env)["status"] != "ready"
     assert not matching_processes(store)
@@ -281,17 +263,13 @@ def managed_descriptor_rejection(store, env, limit):
 
 
 def startup_limits(root, env):
-    # The default capacity cannot fit within macOS's default hard-capped 256
-    # descriptors. Refuse with the existing diagnostic instead of clamping.
     required = managed_descriptor_rejection(root / "hard-256", env, 256)
     minimum = required - 5 * (INTAKE - 10)
     observed = managed_descriptor_rejection(root / "hard-below-minimum", env, minimum - 1)
-    if observed != required:  # A different macOS inherited count moves the boundary.
+    if observed != required:  
         required, minimum = observed, observed - 5 * (INTAKE - 10)
         assert managed_descriptor_rejection(root / "hard-below-minimum-again", env, minimum - 1) == required
     print(f"default capacity refused below {minimum} descriptors (default intake needs {required})", flush=True)
-    # macOS default soft 256 below a higher hard limit, a typical Linux
-    # 1024/1024 session (which may reduce intake), then exactly the minimum as both limits.
     for name, hard in (("soft-256", None), ("linux-1024", 1024), ("hard-minimum", minimum)):
         store = root / name
         def limits():
@@ -309,10 +287,8 @@ def startup_limits(root, env):
                 expected_capacity = INTAKE - max(0, (required - 1024 + 4) // 5)
                 assert capacity == expected_capacity and reported["descriptor_limit"] == "1024", reported
             elif hard:
-                # Exactly the minimum admits only the ten-client intake floor.
                 assert capacity == 10 and reported["descriptor_limit"] == str(hard), reported
             else:
-                # The raise from a soft 256 admits default intake without reduction.
                 assert capacity == INTAKE and int(reported["descriptor_limit"]) >= required, reported
             if hard == minimum:
                 socket_path = f"/tmp/rui-{os.getuid()}/{hashlib.sha256(str(store).encode()).hexdigest()[:32]}.sock"
@@ -324,8 +300,6 @@ def startup_limits(root, env):
                         peer.settimeout(3)
                         peer.connect(socket_path)
                         peer.sendall(b"POST /v1/configure HTTP/1.1\r\n")
-                    # Discovery is prepared by intake after reading preceding
-                    # borrowers, so its reply establishes their classification.
                     assert status(store, env)["status"] == "ready"
                     with os_semantics.unix_stream() as peer:
                         peer.settimeout(3)
@@ -380,8 +354,6 @@ def startup_limits(root, env):
                     assert status(store, env)["status"] == "ready", "unknown route blocked reserved discovery"
                     for _ in range(3):
                         borrowers.pop().close()
-                    # One stalled discovery must not borrow either control
-                    # place. Exercise both request-line and body stalls.
                     fields = b"Content-Type: application/json\r\nX-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\nContent-Length: 2\r\n\r\n"
                     for tail in (b"", fields + b"{"):
                         discovery = os_semantics.unix_stream()
@@ -407,9 +379,6 @@ def startup_limits(root, env):
                             control.settimeout(3)
                             control.connect(socket_path)
                             control.sendall(b"POST /v1/control/session-stop HTTP/1.1\r\n" + tail)
-                        # Finish both controls independently while the discovery
-                        # body is still held. Their invalid envelopes must be
-                        # decoded, not rejected as capacity or left unaccepted.
                         for control in borrowers[-2:]:
                             control.sendall(fields + b"{}" if not tail else b"}")
                             response = bytearray()
@@ -445,8 +414,6 @@ def startup_limits(root, env):
     assert "RLIMIT_NOFILE" in failed.stderr and "minimum intake" in failed.stderr, failed.stderr
     assert not (store / "host.lock").exists()
 
-    # A genuine prior-format Store is covered by upgrade CI. This counterexample
-    # independently drives refusal before schema reads on the real artifact.
     store = root / "soft-256"
     database = next(store.glob("*.sqlite*"))
     with sqlite3.connect(database) as connection:
@@ -459,7 +426,6 @@ def startup_limits(root, env):
     assert "back up" in failed.stderr and "[internal_unexpected]" in failed.stderr, failed.stderr
     with sqlite3.connect(database) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 21
-    # At the current format, a missing or other saved format is refused too.
     for saved_format in (None, "future"):
         with sqlite3.connect(database) as connection:
             connection.execute(f"PRAGMA user_version={SCHEMA}")
@@ -476,7 +442,6 @@ def startup_limits(root, env):
         assert str(store) in failed.stderr and "back up" in failed.stderr and "No migration" in failed.stderr, failed.stderr
         assert hashlib.sha256(database.read_bytes()).digest() == original
 
-    # ASCII controls are refused as Store path grammar, before Host startup.
     parent = root / ("\x01" * 150)
     parent.mkdir(mode=0o700)
     hostile = parent / ("\x01" * 150 + "\nforged\x1b[2J\r\u202e\\\"")
@@ -485,9 +450,6 @@ def startup_limits(root, env):
     assert failed.returncode == 2 and "[store_path_malformed]" in failed.stderr, failed
     assert "\\x01" in failed.stderr and "detached Host startup failed" not in failed.stderr, failed.stderr
     assert str(hostile) not in failed.stderr and "\x1b" not in failed.stderr, failed.stderr
-    # Allowed Unicode paths still need complete, terminal-safe startup
-    # diagnostics beyond stderr.print's 1-KiB buffer. Each component fits the
-    # filesystem's byte limit, and the canonical path fits the Store limit.
     parent = root / ("\u0080" * 100)
     parent.mkdir(mode=0o700)
     hostile = parent / ("\u0080" * 100 + "\u202e\\\"")
@@ -498,8 +460,6 @@ def startup_limits(root, env):
     assert failed.returncode == 1 and "[internal_unexpected]" in failed.stderr, failed
     assert f"startup failed for Store {escaped}:\n" in failed.stderr, failed.stderr
     assert str(hostile) not in failed.stderr and "\x1b" not in failed.stderr, failed.stderr
-    # Clone only the stopped fixture DB. Version validation precedes selector
-    # identity, so no relocation or metadata rebinding is needed for refusal.
     hostile_database = hostile / database.name
     with sqlite3.connect(database) as source, sqlite3.connect(hostile_database) as destination:
         source.backup(destination)
@@ -582,19 +542,12 @@ def host_command(env, *arguments):
 
 
 def host_ok(env, *arguments):
-    """A host command that must succeed; a failure shows its own report."""
     completed = host_command(env, *arguments)
     assert completed.returncode == 0, (arguments, completed.returncode, completed.stderr)
     return completed
 
 
 def new_host_provider_policy(root, env):
-    """New-Host omission is automatic at every settings intake, never on replay.
-
-    Expected route maps are the accepted policy, not derived from provider facts.
-    A route advertised while signed out is not proof of a usable credential or
-    a successful model call. No case here submits a model request.
-    """
     import http.client
     import http.server
     import threading
@@ -665,8 +618,6 @@ def new_host_provider_policy(root, env):
             for selection, providers, expected in (("omitted", None, automatic),
                                                     ("empty", {}, none),
                                                     ("exact", {"chatgpt": {}}, exact)):
-                # Exact selection uses a usable local sign-in. Missing or invalid
-                # explicit credentials belong to the credential-owner tests.
                 if selection == "exact" and state not in ("browser", "both"):
                     continue
                 for door in ("serve", "start", "file", "stdin", "saved"):
@@ -743,7 +694,6 @@ def new_host_provider_policy(root, env):
 
 
 def saved_settings(root, env):
-    """DIR/host.json reaches the Host that the shared starter (bare rui and host start) launches."""
     store = root / "saved-settings"
     for path, value in (("execution.activeCapacity", "3"), ("execution.paused", "true"),
                         ("tools.bash.timeoutMs", "1234")):
@@ -751,14 +701,13 @@ def saved_settings(root, env):
         assert saved.returncode == 0 and not saved.stdout, saved
     document = store / "host.json"
     assert document.stat().st_mode & 0o777 == 0o600, oct(document.stat().st_mode)
-    # Sparse: only what was set, never a defaults snapshot.
     assert json.loads(document.read_text()) == {
         "execution": {"activeCapacity": 3, "paused": True}, "tools": {"bash": {"timeoutMs": 1234}}}, document.read_text()
     shown = host_command(env, "settings", "--store", store)
     assert shown.returncode == 0, shown
     effective = json.loads(shown.stdout)
     assert effective["tools"]["bash"]["timeoutMs"] == 1234 and effective["execution"]["paused"] is True, effective
-    assert "codex" in effective["providers"], effective  # Derived defaults are shown when none are saved.
+    assert "codex" in effective["providers"], effective  
     check = host_command(env, "settings", "--store", store, "--check")
     assert check.returncode == 0 and not check.stdout, check
     try:
@@ -772,14 +721,12 @@ def saved_settings(root, env):
     assert unset.returncode == 0, unset
     assert "paused" not in json.loads(document.read_text())["execution"], document.read_text()
 
-    # Literal secrets are refused from the saved file, and never echoed.
     literal = host_command(env, "set", "--store", store, "providers.openai.key", '{"value":"never-print-this"}')
     assert literal.returncode != 0 and "never-print-this" not in literal.stdout + literal.stderr, literal
     assert '"code":"settings_invalid"' in literal.stdout and "providers.openai.key" in literal.stdout, literal
     unknown = host_command(env, "set", "--store", store, "tools.bash.timeoutMS", "5")
     assert unknown.returncode != 0 and "nearest leaf: tools.bash.timeoutMs" in unknown.stdout, unknown
 
-    # Order of application: defaults, saved, --settings FILE, then --set in order.
     private = root / "saved-settings-files"
     private.mkdir(mode=0o700)
     override = private / "settings.json"
@@ -799,10 +746,7 @@ def saved_settings(root, env):
     piped = run_start(root / "saved-pipe", env, "--settings", "-")
     assert piped.returncode != 0 and "rui host serve --settings -" in piped.stderr, piped
 
-    # Settings that move the Host out of its directory are refused before any launch.
     moved = root / "saved-moved"
-    # An interface directory holds the socket, so its path is bounded (94
-    # bytes); a sibling of root can exceed that under a long TMPDIR.
     elsewhere = pathlib.Path(tempfile.mkdtemp(prefix="rui-if-", dir="/tmp")).resolve()
     try:
         host_ok(env, "set", "--store", moved, "interface.dir", elsewhere)
@@ -814,9 +758,6 @@ def saved_settings(root, env):
     assert refused.returncode != 0 and "interface.dir: bare rui and rui host start reach only" in refused.stderr, refused
     assert "[settings_invalid]" in refused.stderr and not matching_processes(moved), refused
 
-    # A started Host runs in `/`: a path typed relative is taken from the
-    # caller's directory, and a relative path saved in host.json, which has no
-    # such directory, is refused before launch, like the stdin lifetime.
     typed = root / "saved-typed-relative"
     try:
         started = run_start(typed, env, "--set", f"store.sqlite.dir={typed.name}", cwd=root)
@@ -824,8 +765,6 @@ def saved_settings(root, env):
         assert (typed / "rui.sqlite3").is_file() and not pathlib.Path("/" + typed.name).exists(), started
     finally:
         forced_crash_cleanup(typed)
-    # The caller's directory is looked up only for a relative typed value: a
-    # start from a deleted directory with absolute values still starts.
     def deleted_cwd(name):
         gone = root / name
         gone.mkdir()
@@ -848,8 +787,6 @@ def saved_settings(root, env):
         assert refused.returncode == 2 and leaf in refused.stderr and '"settings_invalid"' in refused.stdout, refused
         assert not matching_processes(unrooted), refused
 
-    # Start failures outside the document keep the child's own report: no
-    # stdout line, no settings refusal, and no Host left behind.
     proxy_dir = root / "saved-proxy"
     for path, value in (("providers.openai.endpoint", "http://127.0.0.1:9/responses"),
                         ("providers.openai.unauthenticated", "true")):
@@ -864,7 +801,6 @@ def saved_settings(root, env):
         assert failed.returncode != 0 and not failed.stdout and report in failed.stderr, failed
         assert "settings_invalid" not in failed.stderr and not matching_processes(directory), failed
 
-    # A deleted serve flag names its replacement path.
     for flag, value, replacement in (("--bash-timeout-ms", "1000", "--set tools.bash.timeoutMs=1000"),
                                      ("--active-capacity", "4", "--set execution.activeCapacity=4")):
         retired = host_command(env, "serve", "--store", root / "retired", flag, value)
@@ -874,14 +810,6 @@ def saved_settings(root, env):
 
 
 def saved_settings_served(root, env):
-    """A Host the starter launches serves saved MCP, preset, CA file and Bash timeout values.
-
-    Each is observed through what the Host already exposes, with the fixtures
-    the owning suites use: the loopback MCP server and its tool-name collision
-    refusal, a preset Session creation, a TLS provider whose self-signed
-    certificate only the saved CA file trusts, and a fixture Bash call that
-    outlives the saved timeout.
-    """
     import bash_fixture
     import h2_fixture
     import model_fixture
@@ -897,12 +825,9 @@ def saved_settings_served(root, env):
         saved = host_command(env, "set", "--store", store, path, value)
         assert saved.returncode == 0, saved
 
-    # MCP: the Host asks every saved server for its tools before it serves.
-    # A saved server that offers the built-in name bash is refused by name.
     docs, clash = mcp_server(["search"]), mcp_server(["bash"])
     mcp_store = root / "saved-mcp"
     try:
-        # A saved file holds only a secret's source; the Host reads the token.
         token_env = {**env, "RUI_TEST_MCP_TOKEN": "t"}
         for name, server in (("docs", docs), ("clash", clash)):
             save(mcp_store, f"tools.mcp.{name}.url", f"http://127.0.0.1:{server.server_port}/mcp")
@@ -919,7 +844,6 @@ def saved_settings_served(root, env):
             server.shutdown()
             server.server_close()
 
-    # Preset and Bash timeout: one Host on a plain fixture provider.
     responses = []
     bash_fixture.add_exchange(responses, "timeout", "printf before; sleep 30")
     endpoint = model_fixture.SuccessEndpoint(responses)
@@ -957,7 +881,6 @@ def saved_settings_served(root, env):
         endpoint.shutdown()
         endpoint.server_close()
 
-    # CA file: the provider's certificate is self-signed; only the saved file trusts it.
     tls_root = root / "saved-tls"
     tls_root.mkdir(mode=0o700)
     subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
@@ -995,7 +918,6 @@ def saved_settings_served(root, env):
 
 
 def wait_for_terminal_exit(caller, master, output, deadline):
-    """Drain output through reap, including a retained slave without EOF."""
     while True:
         exited = caller.poll() is not None
         remaining = deadline - time.monotonic()
@@ -1008,7 +930,6 @@ def wait_for_terminal_exit(caller, master, output, deadline):
         try:
             chunk = os.read(master, 65536)
         except OSError as error:
-            # Linux PTYs report EOF as EIO; Darwin returns an empty read.
             if error.errno != errno.EIO:
                 raise
             chunk = b""
@@ -1046,8 +967,6 @@ def launch_fixture_root():
             copy_failure_diagnostics(root, destination)
             print(f"bounded fixture failure destination: {destination}", file=sys.stderr, flush=True)
 
-        # Select only this executable's Hosts beneath the private root, even
-        # before a nested default Store or its ownership lock exists.
         dispose_all(lambda: forced_crash_cleanup(root, descendants=True), retain,
                     lambda: print(f"retained native observation failure state: {root}", file=sys.stderr, flush=True))
         raise
@@ -1083,7 +1002,6 @@ def main():
             return
         assert_launch_adapter(root, env)
 
-        # A held lease is attached, not replaced or reconfigured.
         held_store = root / "held-store"
         held, _ = start_ready_process(
             [RUI, "host", "serve", "--store", held_store, "--set", 'execution.activeCapacity=3'],
@@ -1094,19 +1012,16 @@ def main():
             before = instance(first, 3)
             attached = run_start(held_store, env)
             assert attached.returncode == 0, attached.stderr
-            # Attachment reports the existing Host, not the launcher's default.
             reported = json.loads(attached.stdout)
             assert instance(reported, 3) == before, reported
             assert reported["diagnostics"] == f"{held_store.resolve()}/diagnostics", reported
             later = status(held_store, env)
             assert instance(later, 3) == before
-            # One Host keeps one start time, and holds no custody while idle.
             assert reported["started_at"] == later["started_at"] == first["started_at"], (first, later)
             assert later["custody_occupied"] == "0", later
             same = run_start(held_store, env, "--set", 'execution.activeCapacity=3')
             assert same.returncode == 0 and "--set assignments apply only to a new Host" in same.stderr, same
             assert instance(json.loads(same.stdout), 3) == before, same
-            # Explicit overrides are reported, never applied to the running Host.
             differing = run_start(held_store, env, "--set", 'execution.activeCapacity=7')
             assert differing.returncode == 0, differing.stderr
             assert instance(json.loads(differing.stdout), 3) == before, differing
@@ -1124,7 +1039,6 @@ def main():
 
         unparsed_store = root / "unparsed-capacity"
         unparsed = run_start(unparsed_store, env, "--set", 'execution.activeCapacity=-1')
-        # Refused before any launch, it is reported as host serve reports it.
         assert unparsed.returncode == 2 and '"code":"settings_invalid"' in unparsed.stdout, unparsed
         assert not unparsed_store.exists(), "unparsed capacity created a candidate Store"
         sized_store = root / "sized-store"
@@ -1136,8 +1050,6 @@ def main():
         finally:
             forced_crash_cleanup(sized_store)
 
-        # A saved OpenAI key file that holds no key is not ready: the Host
-        # starts and serves ChatGPT by device code instead of failing on the optional provider.
         key_dir = root / "openai-private"
         key_dir.mkdir(mode=0o700)
         key_file = key_dir / "openai.key"
@@ -1152,8 +1064,6 @@ def main():
             assert providers == {"codex": "chatgpt_device", "openai": "unserved", "chatgpt": "unserved"}, providers
         finally:
             forced_crash_cleanup(invalid_store)
-        # A saved OpenAI key adds openai to an auto-started Host. A bad base
-        # URL is OpenAI's alone to fail: the Host starts and serves ChatGPT by device code.
         key_file.write_text("sk-host-launch\n")
         for base, served, message in (("https://proxy.example/v1", "key_file", None),
                                       ("http://proxy.example/v1", "unserved", "this Host starts without OpenAI")):
@@ -1170,8 +1080,6 @@ def main():
             finally:
                 forced_crash_cleanup(openai_store)
 
-        # Concurrent spelling aliases may launch candidates, but exactly one
-        # default-capacity owner becomes ready and all callers converge on it.
         store = root / "detached-store"
         store.mkdir(mode=0o700)
         alias = root / "detached-alias"
@@ -1202,9 +1110,6 @@ def main():
             assert pids[0] not in launcher_pids, "Host remained the CLI launcher process"
             if os_semantics.PROC_FS:
                 assert os.readlink(f"/proc/{pids[0]}/fd/0") == "/dev/null"
-                # The private startup report (stdout) and error (stderr) channels
-                # are not retained caller pipes: all launchers already drained
-                # their own output to EOF.
                 for descriptor in (1, 2):
                     assert os.readlink(f"/proc/{pids[0]}/fd/{descriptor}").startswith("pipe:[")
                 assert os.readlink(f"/proc/{pids[0]}/cwd") == "/", "detached Host retained launcher cwd"
@@ -1231,10 +1136,6 @@ def main():
         finally:
             forced_crash_cleanup(ignored_child_store)
 
-        # A descriptor opened before lowering the soft limit is still owned
-        # by the launcher; the detached Host must not hold its pipe open.
-        # Keep the inherited fd above the launcher's soft limit; the Host
-        # raises its own limit for the default-capacity budget.
         inherited_store = root / "inherited-fd"
         read_fd, write_fd = os.pipe()
         inherited_fd = fcntl.fcntl(write_fd, fcntl.F_DUPFD, 768)
@@ -1256,12 +1157,8 @@ def main():
                 os.close(read_fd)
                 forced_crash_cleanup(inherited_store)
 
-        # An initially open readiness pipe whose reader disconnects during
-        # startup must fail the handshake rather than claim ready.
         clean_env = {key: value for key, value in env.items()
             if key not in ("MallocMaxMagazines", "MallocSpaceEfficient", "RUI_HOST_MALLOC_DEFAULTS")}
-        # Unflagged serve uses the shared default. Its descriptor admission
-        # runs before the lease/diagnostic writer, so rejection creates no Store.
         rejected_store = root / "default-capacity-rejected"
         rejected = subprocess.run([RUI, "host", "serve", "--store", rejected_store, "--set", "providers={}"],
             env=clean_env, preexec_fn=lower_descriptor_limit,
@@ -1272,8 +1169,6 @@ def main():
         assert fields["active_capacity"] == DEFAULT_ACTIVE_CAPACITY and fields["soft_limit"] == 64, fields
         assert fields["required"] > fields["soft_limit"], fields
         assert not rejected.stdout and not rejected_store.exists(), rejected
-        # From macOS's default soft 256, unflagged serve raises its own limit
-        # and becomes ready at the same default as managed starts.
         default_store = root / "default-capacity-serve"
         served, _ = start_ready_process(
             ["sh", "-c", 'ulimit -Sn 256; exec "$@"', "rui-soft-256", RUI, "host", "serve", "--store", default_store],
@@ -1281,8 +1176,6 @@ def main():
         )
         stop_process(served)
 
-        # Capacity 8 is the existing desktop profile. Admit this child so the
-        # disconnected pipe exercises readiness output, not pre-lease refusal.
         disconnected_store = root / "disconnected-stdout"
         disconnected = subprocess.Popen([RUI, "host", "serve", "--store", disconnected_store, "--set", 'execution.activeCapacity=8', "--set", "providers={}"],
             env=clean_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -1302,12 +1195,8 @@ def main():
             disconnected.stderr.close()
             forced_crash_cleanup(disconnected_store)
 
-        # Bare terminal entry starts the same managed Host and opens the
-        # overview without any separate serve terminal. It creates nothing.
         bare_home = root / "bare-home"
         bare_home.mkdir(mode=0o700)
-        # macOS's temporary root may have symlink ancestors. Supply canonical
-        # fixture HOME without relaxing the credential owner's no-symlink rule.
         bare_home = bare_home.resolve(strict=True)
         bare_store = bare_home / ".local/share/rui/store"
         bare_credential_dir = bare_home / ".config/rui"
@@ -1324,7 +1213,6 @@ def main():
             output = bytearray()
             screen = ScreenCapture(COLUMNS, ROWS, reply=answers_to(master))
             until = time.monotonic() + COMMAND_TIMEOUT
-            # The overview commits its pinned actions and footer, not an editor.
             while not all(marker in screen.completed for marker in ("+ New Session", "Settings", "enter open")):
                 remaining = until - time.monotonic()
                 assert remaining > 0 and select.select([master], [], [], remaining)[0], (screen.completed, output)
@@ -1333,8 +1221,6 @@ def main():
                 assert len(output) + len(chunk) < PTY_OUTPUT_LIMIT, "unexpected unbounded terminal output"
                 output.extend(chunk)
                 screen.feed(chunk)
-            # Automatic success is quiet; readiness is established separately
-            # through protected status and the accepted Session below.
             assert all(noise not in screen.completed for noise in ("Provider:", "Model:", "Permission:", "request:", "Session:", "Workspace:")), screen.completed
             assert "Type a task" not in screen.completed, screen.completed
             assert not screen.plain, ("bypass notice left the frame", screen.plain)
@@ -1343,8 +1229,6 @@ def main():
             assert len(wait_for_processes(bare_store, 1)) == 1
             assert status(bare_store, bare_env)["capabilities"]["providers"] == {
                 "codex": "chatgpt_device", "chatgpt": "unserved", "openai": "unserved"}
-            # Transfer this thread's reader from prompt to exit without
-            # withholding output credit or discarding any transcript bytes.
             os.set_blocking(master, False)
             deadline = time.monotonic() + 5
             assert os.write(master, b"\x03") == 1, "incomplete Ctrl-C input"
@@ -1375,8 +1259,6 @@ def main():
                     finally:
                         forced_crash_cleanup(bare_store)
 
-        # A detached Host that cannot satisfy its inherited descriptor budget
-        # exits; the CLI bounds uncertainty and points at owner diagnostics.
         failure_store = root / "capacity-failure"
         started = time.monotonic()
         failed = run_start(failure_store, env, preexec_fn=lower_descriptor_limit)

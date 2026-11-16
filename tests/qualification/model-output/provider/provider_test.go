@@ -19,7 +19,6 @@ import (
 	"rui.local/qualification/measurement"
 )
 
-// Share context prose; envelope fields and history expectations stay independent.
 func testRequestEnvelope(session string) string {
 	return `{"model":"gpt-6-luna","parallel_tool_calls":true,"store":false,"stream":true,"include":["reasoning.encrypted_content"],"reasoning":{"effort":"medium"},"instructions":` +
 		measurement.JSONString(measurement.ModelInstructions("/workspace", session, "gpt-6-luna")) + `,"tools":[],"text":{"verbosity":"low"},`
@@ -675,7 +674,6 @@ func TestHoldAcceptsWithoutHeadersForFullWindowAndCancels(t *testing.T) {
 				done := make(chan struct{})
 				go func() {
 					defer close(done)
-					// The real HTTP server consumes this sentinel without writing headers.
 					defer func() {
 						if value := recover(); value != nil && value != http.ErrAbortHandler {
 							t.Errorf("unexpected handler panic: %v", value)
@@ -691,7 +689,6 @@ func TestHoldAcceptsWithoutHeadersForFullWindowAndCancels(t *testing.T) {
 					if _, err := server.StartOffer(); err != nil {
 						t.Fatal(err)
 					}
-					// StartOffer's existing 500 ms lead plus the full 120 s HOLD.
 					time.Sleep(120*time.Second + 499*time.Millisecond)
 				}
 				synctest.Wait()

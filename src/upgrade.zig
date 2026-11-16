@@ -72,7 +72,6 @@ pub const Check = struct {
     hosts: restart_all.Batch = .{},
     home: []const u8,
     store: []const u8,
-    /// As `executablePathAlloc` allocates it, so `deinit` frees all of it.
     running_executable: [:0]const u8,
     path: installation_path.Observation = .{ .state = .unavailable },
 
@@ -128,8 +127,6 @@ pub fn canInstall(checked: *const Check) bool {
     return checked.selected == .released;
 }
 
-/// The selected build already is the release, or newer: an install
-/// reselects it and prepares nothing.
 pub fn holdsRelease(checked: *const Check) bool {
     return checked.selected == .released and checked.selected.released.version.order(checked.candidate.version) != .lt;
 }
@@ -156,7 +153,6 @@ pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *c
     var installation: Installation.InstallationOutcome = undefined;
     const selected = checked.selected.released;
     if (holdsRelease(checked)) {
-        // Reselecting the installed build publishes too.
         Progress.send(progress, .publishing);
         try process.check(cancellation);
         installation = try Installation.publishExistingWithReporter(allocator, init.io, checked.home, selected.build, .released_upgrade, cancellation, cleanup.reporter(.publication));
@@ -171,15 +167,8 @@ pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *c
     errdefer installation.deinit(allocator);
     var activation_progress: ActivationProgress = .{ .progress = progress };
     const receipt = installation.receipt();
-    // Once publication succeeds, every restart failure belongs to the receipt,
-    // never the pre-publication error path. Discover again to include Hosts
-    // started during preparation, and pin the receipt rather than following PATH.
-    // Publication owns both the selected path and its validated identity.
-    // Do not inspect PATH or invent a version from the discovered candidate.
     var hosts: restart_all.Batch = hosts: {
         waitAfterPublication(init, cancellation) catch |err| break :hosts .{ .failure = err };
-        // Revalidate availability/identity, not a second selection or forecast.
-        // A vanished target is a restart failure, not an unsupported Host skip.
         var target = restart_all.Target.init(init, allocator, checked.home, receipt.selected_after, cancellation) catch |err| break :hosts .{ .failure = err };
         defer target.deinit(allocator);
         if (target.version.order(receipt.selected_version.?) != .eq) break :hosts .{ .failure = error.ReleaseExecutableVersionMismatch };
@@ -190,7 +179,6 @@ pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *c
             .progress = .{ .context = &activation_progress, .report = ActivationProgress.report },
         }) catch |err| .{ .failure = err };
     };
-    // Even cancellation or a failed coordinator handoff retains the target.
     hosts.version = receipt.selected_version;
     Progress.send(progress, .finished);
     return .{ .installation = installation, .hosts = hosts, .store = store };
@@ -245,9 +233,6 @@ pub fn writeCheck(writer: *std.Io.Writer, checked: *const Check) !void {
     if (!canInstall(checked)) try writer.writeAll("Upgrade cannot replace this destination. Use the existing manual release installer or application owner.\n");
 }
 
-/// Whether the result receipt contains instructions that a TUI relaunch must
-/// not swallow. Installation and activation are independent: a published Rui
-/// can still leave an unresolved or application-owned Host behind.
 pub fn hasGuidance(result: *const Result) bool {
     return result.hosts.hasGuidance();
 }
@@ -351,8 +336,6 @@ test "upgrade restart results retain unknown failures and other Store guidance w
     try std.testing.expect(compatible(&result));
     try std.testing.expect(hasGuidance(&result));
     try std.testing.expectEqual(@as(usize, 1), result.hosts.totals().failed);
-    // An unidentified socket may belong to this Store; known selected facts
-    // remain usable, but its missing identity can never become an absence.
     entries[0].store = null;
     entries[0].state = .{ .failed = .{ .stage = .discovery, .cause = "ConnectionRefused" } };
     try std.testing.expect(compatible(&result));

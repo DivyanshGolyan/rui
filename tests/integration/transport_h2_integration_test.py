@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Transcript-oracle counterexamples; same h2 dependency and binary arg as fixture."""
 import copy
 import contextlib
 import http.client
@@ -93,7 +92,6 @@ class RoundTripHistoryTests(unittest.TestCase):
             mutations[name] = changed
         for name, items in mutations.items():
             with self.subTest(name=name):
-                # Every mutation passes the former latest-user oracle.
                 latest = next(item["content"][0]["text"] for item in reversed(items) if item.get("role") == "user")
                 self.assertEqual(latest, self.streams[-1][2])
                 corrupted = list(self.streams)
@@ -134,7 +132,7 @@ class ShapedWorkTests(unittest.TestCase):
 
         def request(socket_path, store, kind, **fields):
             calls.append(kind)
-            reports.append(kind)  # EOF can precede disposal of any caller's report.
+            reports.append(kind)  
             if kind == "message" and calls.count(kind) == 2:
                 raise RuntimeError("wave 2 failed")
             if kind == "read_result":
@@ -285,8 +283,6 @@ class ManagedDescriptorTests(unittest.TestCase):
                         if (resource, operation) == ("session", "configure"):
                             return {"answer": {"status": "accepted", "session": "abc123"}}
                         if (resource, operation) == ("request", "inspect"):
-                            # Observation has its own 15-second command cap;
-                            # leave the cumulative crossing to read or release.
                             clock[0] += 14.9
                             identity = identities[observation_index[0]]
                             observation_index[0] += 1
@@ -316,8 +312,6 @@ class ManagedDescriptorTests(unittest.TestCase):
                         return SimpleNamespace(returncode=0, stdout=answer.encode(), stderr=b"")
 
                     def start(args, **kwargs):
-                        # Derive the launch contract independently for all
-                        # three native inherited populations and both intakes.
                         full = (533 if platform == "linux" else 535) + inherited - 3
                         limit = full - (450 if intake == 10 else 0) + (2 if observed else 0)
                         self.assertEqual(int(args[4]), limit)
@@ -483,7 +477,6 @@ class HeldPopulationCleanupTests(unittest.TestCase):
         def message(root, store, key, session, text):
             if fail_body:
                 raise primary
-            # Every stream arrives at once; only the first response is held.
             endpoint.requests.append((text, b""))
             endpoint.connections.append(text)
 
@@ -527,15 +520,12 @@ class HeldPopulationCleanupTests(unittest.TestCase):
                 value = {"answer": {"status": "accepted", "session": "abc123"}}
             if not eof_oracle:
                 return value
-            # Body and EOF are separate recv events, including the final
-            # inspection. A later request cannot release an earlier caller.
             reply = HostReply(body=value if isinstance(value, bytes) else json.dumps(value).encode(),
                               content_type=b"text/plain" if kind == "read_result" else b"application/json")
             reply.report_released = kind != held_report
             replies.append((kind, reply))
             with patch.object(os_semantics, "unix_stream", return_value=reply):
                 if kind == omitted_eof:
-                    # Model the old Content-Length-only completion boundary.
                     _, body = control_fixture.read_http_response(reply)
                     return body if kind == "read_result" else json.loads(body)
                 return real_request(socket_path, store, kind, **fields)
@@ -664,8 +654,6 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
         def start(*args, **kwargs):
             if fail_start:
                 raise primary
-            # Each Host fetches once. The fallback leg changes the endpoint
-            # payload and starts a new Host, not the first Host's cached list.
             host = SimpleNamespace(pid=len(host_models) + 1)
             socket = f"/fixture/socket/{host.pid}"
             payload = json.loads(endpoint.models)
@@ -704,12 +692,10 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
 
         def model_list(socket, *args):
             if endpoint.models_release.is_set():
-                requests.append(get.copy())  # A model-list request refreshes again.
+                requests.append(get.copy())  
                 if catalog_available:
                     requests.append({b":method": b"GET", b":path": b"/api.json",
                                      b"if-none-match": b'"catalog-v1"', b"accept-encoding": b"identity"})
-                # Reply for the addressed Host, including the restarted Host's
-                # failed fetch; never reuse the first Host's live list.
                 return host_models[socket]
             if delay_get:
                 phases.append("pending")
@@ -722,8 +708,6 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
             self.assertEqual(phases, ["pending"])
             phases.append("wait")
             self.assertFalse(predicate(), "pending does not prove discovery GET receipt")
-            # Neither catalog discovery nor the wrong method/path credits the
-            # provider GET. None of these probes remains in the request log.
             for method, path in ((b"GET", b"/api.json"), (b"POST", b"/custom/v1/models"),
                                  (b"GET", b"/custom/v1/other")):
                 with endpoint.lock:
@@ -738,8 +722,6 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
                     requests.append(get)
                 phases.append("GET")
 
-            # The real shared waiter drains this registered hook before its
-            # observation; no local waiting loop or preseeded GET can pass.
             hooks = [*host_process.WAIT_HOOKS, (receive_get, lambda: [])]
             with patch.object(host_process, "WAIT_HOOKS", hooks):
                 observed = original_wait(predicate, description, *args, **kwargs)
@@ -749,7 +731,6 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
             return observed
 
         with tempfile.TemporaryDirectory() as parent, contextlib.ExitStack() as stack:
-            # Resolved as the fixture resolves it: Darwin's temp root is a link.
             root = pathlib.Path(parent) / "root"
             root.mkdir()
             root = root.resolve()
@@ -772,8 +753,6 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
                     (codex_h2, "retain_failure_state", lambda label, state: retained.append(state)),
                     (codex_h2.shutil, "rmtree", lambda path: removed.append(path))):
                 stack.enter_context(patch.object(owner, name, value))
-            # The real run is Linux-only (SSL_CERT_FILE_TRUST); the mocked Host
-            # reads no trust, so its cleanup order is checked on every platform.
             stack.enter_context(os_semantics.simulate("linux"))
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             expected = primary if fail_body or fail_start else secondary if fail_shutdown else None
@@ -809,9 +788,8 @@ class ObservationDeadlineTests(unittest.TestCase):
             for late in (None, *phases):
                 for boundary in (0, 0.1) if late else (0,):
                     with self.subTest(caller=name, late=late, boundary=boundary), tempfile.TemporaryDirectory() as temporary:
-                        clock = [100.0]  # Readiness/setup are outside the result budget.
+                        clock = [100.0]  
                         observations = [0]
-                        # Only this caller withholds its result until the test releases it.
                         released = [name != "isolated_terminal_stream"]
                         start = 100.0
                         clean = {"custody_occupied": "0", "scratch_used_bytes": "0", "dispatch_fenced": False}
@@ -890,7 +868,7 @@ class ObservationDeadlineTests(unittest.TestCase):
 
                         def drain(inspect, deadline):
                             real_drain(inspect, deadline)
-                            raise Released()  # Stop before unrelated native Store/FD audits.
+                            raise Released()  
 
                         diagnostics = SimpleNamespace(observations=SimpleNamespace(plan="transport"),
                             wait=lambda *args, **kwargs: [{}],
@@ -960,8 +938,6 @@ class ObservationDeadlineTests(unittest.TestCase):
                             transport.dispatch.wait_for_result_release(pathlib.Path("/fixture"), "key", "abc123", 1)
 
     def test_native_final_population_cannot_arrive_after_original_deadline(self):
-        # Host diagnostics uses this same wait after result/read/release. A
-        # complete population is not a replacement for timely observation.
         for arrival in (0.9, 1.0, 1.2):
             with self.subTest(arrival=arrival):
                 clock = [0.7]

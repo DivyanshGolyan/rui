@@ -29,8 +29,6 @@ AVAILABLE = set(build_files.steps())
 
 
 def named_paths(patterns):
-    """Each path a rule's patterns name: a literal pattern itself, and every
-    tracked file a glob matches, less the rule's "!" exclusions."""
     tracked = subprocess.run(["git", "ls-files"], capture_output=True, text=True, check=True).stdout.split()
     included = [pattern for pattern in patterns if not pattern.startswith("!")]
     named = {pattern for pattern in included if not any(char in pattern for char in "*?[")}
@@ -39,7 +37,6 @@ def named_paths(patterns):
 
 
 def covered(target, targets):
-    """`target` runs when `targets` are selected, directly or inside check or check-full."""
     return (target in targets or target in CHECK_COVERS and bool(targets & {"check", "check-full"})
             or target in {"test-native", "test-store"} and "test" in targets
             or any(target in cases and broad in targets for broad, cases in FIXTURE_COVERS.items())
@@ -71,7 +68,6 @@ class AssertedTextSelectionTest(unittest.TestCase):
             graph.python = {"fixture.py": {"helper.py"}, "helper.py": {"nested.py"}}
             with (patch("select_tests.ROOT", root), patch("select_tests.FIXTURES", fixtures),
                   patch("select_tests.tree_graph", return_value=graph)):
-                # Bypass the cache so the miniature tree cannot poison the real reader.
                 literals = tree_fixture_literals.__wrapped__()
             python = {"A plain Python literal", "Waiting for session:", "has finished drawing",
                       "A helper waits for this message", "A nested helper checks this message"}
@@ -94,8 +90,6 @@ class AssertedTextSelectionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "src").mkdir()
-            # Multiple occurrences count once; test-code files do not count.
-            # Per-domain test folders are test code too.
             test_code = ["src/source_test.zig", "src/other_tests.zig",
                          "src/store/tests/session.zig", "src/store/sqlite_tests/retry.zig"]
             for name in test_code:
@@ -124,9 +118,6 @@ class AssertedTextSelectionTest(unittest.TestCase):
                 self.assertFalse(matches(path, TEST_CODE))
 
     def test_store_test_copies_leave_fixture_text_uncommon(self):
-        # Store tests repeat the text a fixture waits for; only production
-        # files count toward its prevalence, so a change to its owner still
-        # selects the fixture.
         path = "src/action_text.zig"
         text = (Path(__file__).resolve().parents[2] / path).read_text()
         self.assertIn('"Cancelled by Session stop."', text)
@@ -166,7 +157,6 @@ class AssertedTextSelectionTest(unittest.TestCase):
             ("f-string constant", path, 'f"Waiting for session: {session_id}"',
              ("Waiting for session: ", ""), True, True),
         ]
-        # Exercise the exact bound, including whitespace that must not count.
         cases += [(f"length {length}", path, repr("  " + "x" * (length - 2) + " y  "),
                    ("x" * (length - 2) + " y", ""), True, length >= 12) for length in range(3, 14)]
         cases += [(f"test code {name}", name, repr(text), (text, ""), True, False)
@@ -223,7 +213,6 @@ class AssertedTextSelectionTest(unittest.TestCase):
                 select([path], "review", AVAILABLE, graph)
                 scripts.assert_not_called()
                 prevalence.assert_not_called()
-        # Shared prose may match a changed file but cannot grant ownership.
         with (patch("select_tests.tree_fixture_literals", return_value=table),
               patch("select_tests.tree_uncommon_texts", return_value=set())):
             result = select(["src/render.zig"], "review", AVAILABLE, graph,
@@ -300,7 +289,6 @@ class BinarySourceSelectionTest(unittest.TestCase):
         return self.git("rev-parse", "HEAD").decode().strip()
 
     def plan(self, base):
-        # Run the real CLI and Git readers against this small committed tree.
         module = str(Path(__file__).resolve().parent)
         command = ("import sys; from pathlib import Path; "
                    f"sys.path.insert(0, {module!r}); import select_tests; "
@@ -317,7 +305,6 @@ class BinarySourceSelectionTest(unittest.TestCase):
         name = "src/fixtures/all octets.bin"
         self.write(name, raw)
         head = self.commit()
-        # revision_text resolves revisions relative to the CLI's cwd.
         previous = Path.cwd()
         try:
             os.chdir(self.root)
@@ -346,7 +333,6 @@ class BinarySourceSelectionTest(unittest.TestCase):
                         if operation == "delete":
                             (self.root / name).unlink()
                         else:
-                            # Editing removes the old prose; it must still select its fixture.
                             self.write(name, (prose if operation == "add" else b"edited") + octets)
                         self.commit()
                         result = self.plan(base)
@@ -398,9 +384,6 @@ class WorkflowEntrypointsTest(unittest.TestCase):
 
 class RuleMatchTest(unittest.TestCase):
     def test_a_lone_change_to_any_path_a_rule_names_selects_that_rule(self):
-        # A shortcut in select() may add to a path's selection but never skip
-        # its rules: the tests/ci shortcut once dropped live_engine_step.py's
-        # live rules (Codex P2 on #873), as the draft cut once dropped `test`.
         failures = []
         rules = [(rule, None) for rule in RULES[:len(RULES) - len(LIVE_RULES)]] + [(rule[:4], rule[4]) for rule in LIVE_RULES]
         for (patterns, checks, _, reason), served_by in rules:
@@ -419,8 +402,6 @@ class RuleMatchTest(unittest.TestCase):
 
 
 class BuildModuleTest(unittest.TestCase):
-    """build.zig selects the full gate; a module under build/ selects only its
-    BUILD_MODULES entry, which must name every target the module defines."""
 
     def test_every_build_module_is_mapped(self):
         modules = {path.relative_to(build_files.ROOT).as_posix()
@@ -444,11 +425,11 @@ class BuildModuleTest(unittest.TestCase):
         new_row = row.replace("login-signal-integration", "new-integration")
         for name, after, expected, native in (
                 ("one row", before.replace(row, row.replace("loader witness", "loader check")),
-                 {"login-signal-integration"}, set()),  # Linux-only: Mac never runs it.
+                 {"login-signal-integration"}, set()),
                 ("added row", before.replace(row, row + new_row), {"new-integration"}, {"new-integration"}),
                 ("removed row", before.replace(row, ""), set(), set()),
                 ("outside the rows", before.replace("run.addArgs(fixture.args);", "run.addArgs(fixture.args);\n        run.has_side_effects = true;"),
-                 everything, everything - {"login-signal-integration"})):  # Mac never runs Linux-only fixtures.
+                 everything, everything - {"login-signal-integration"})):
             with self.subTest(name):
                 self.assertNotEqual(before, after)
                 result = select([table], "review", AVAILABLE | {"new-integration"}, contents={table: (before, after)})
@@ -458,14 +439,11 @@ class BuildModuleTest(unittest.TestCase):
                 self.assertTrue(result["typecheck_macos"])
 
     def test_checks_read_every_build_file(self):
-        # A read of build.zig alone misses the targets and calls build/ modules hold.
         read = re.compile(r"""build\.zig["']\)\.read_text\(""")
         readers = [path.name for path in Path(__file__).parent.glob("*.py") if read.search(path.read_text())]
         self.assertEqual(readers, [], "read the build with build_files.steps() or build_files.source()")
 
     def test_a_module_edit_selects_the_targets_it_defines(self):
-        # Targets some selection can name. A module that defines one and does
-        # not select it would let an edit to that target's wiring skip it.
         selectable = ({target for _, checks, native, _ in RULES for target in (*checks, *native)}
                       | UNIT_ROOTS.keys() | FIXTURES.keys() | CHECK_COVERS | {"check", "check-full", "stack-frames", "test-full"})
         defined = build_files.steps()
@@ -473,8 +451,6 @@ class BuildModuleTest(unittest.TestCase):
             with self.subTest(module=module):
                 result = select([module], "review", AVAILABLE)
                 selected = set(result["targets"])
-                # An edit to the build always type-checks it for Darwin, and
-                # selects a target whenever the module defines one a PR runs.
                 self.assertEqual(result["typecheck_macos"], module.endswith(".zig"))
                 owned = {step for step, owner in defined.items() if owner == module}
                 self.assertEqual(bool(selected), bool(owned & selectable) or bool(targets), module)
@@ -586,8 +562,6 @@ class SelectionTest(unittest.TestCase):
         self.assertFalse(fixture["mysql_dialect"])
 
     def test_real_host_status_change_has_a_live_mysql_shard(self):
-        # One real-repo boundary check for #1260; owner combinations above
-        # use tiny fixtures and never rebuild or repeatedly select the repo.
         graph = tree_graph()
         result = select(["tests/integration/host_status_integration.py", "tests/integration/check.sh"],
                         "review", AVAILABLE, graph)
@@ -621,11 +595,6 @@ class SelectionTest(unittest.TestCase):
         self.assertNotIn("test-store", store)
 
     def test_upgrade_owners_select_standalone_fixture_in_both_phases(self):
-        # Expectations independent of the rule's tables: the other paths by
-        # hand, each with whether a PR also runs the previous-release check,
-        # and the Upgrade's own files by their names in the tree, so a new
-        # one is covered here without being listed and a path dropped from
-        # a table fails.
         others = {"src/installation_path.zig": True, "src/TerminalEditor.zig": False, "src/Installation.zig": True,
                   "src/release_candidate.zig": True, "src/HostLifecycle.zig": True, "src/host_identity.zig": True,
                   "src/host_identity.c": True, "src/stderr.zig": False, "src/host_launch.c": True,
@@ -637,7 +606,6 @@ class SelectionTest(unittest.TestCase):
         own = {f"src/{path.name}" for path in source.glob("*.zig") if path.name.lower().startswith("upgrade")}
         self.assertLessEqual({"src/upgrade.zig", "src/upgrade_process.zig", "src/UpgradeJob.zig", "src/upgrade_status.zig"}, own)
         self.assertEqual(own, {path for path in tree_graph().owners["upgrade-integration"] if "pgrade" in path})
-        # A file that does not exist yet, under either spelling.
         expected = others | dict.fromkeys(own | {"src/upgrade_new.zig", "src/UpgradeNew.zig"}, True)
         for path, upgrade_required in expected.items():
             for phase in ("development", "review"):
@@ -686,17 +654,14 @@ class SelectionTest(unittest.TestCase):
                     self.assertNotIn("check", targets)
 
     def test_development_runs_the_reached_unit_roots_on_linux_only(self):
-        # A frontend file reaches the native root alone: no fixture, no Store, no Mac.
         result = select(["src/SessionFrontend.zig"], "development", AVAILABLE)
         self.assertIn("human-cli-integration", select(["src/SessionFrontend.zig"], "review", AVAILABLE)["targets"])
         self.assertEqual(result["targets"], ["test-logic", "test-native", "upgrade-integration"])
         self.assertFalse(result["native_required"])
-        # A source both roots reach runs them as `test`, with its live MySQL.
         result = select(["src/bash_platform.c", "src/store.zig"], "development", AVAILABLE)
         self.assertEqual(result["targets"], ["test", "test-logic"])
         self.assertEqual(result["server_targets"], ["test"])
         self.assertFalse(result["native_required"])
-        # A path no unit root reaches keeps the cheap root alone.
         self.assertEqual(select(["tests/integration/human_cli_integration.py"], "development", AVAILABLE)["targets"],
                          ["test-logic"])
 
@@ -739,15 +704,12 @@ class SelectionTest(unittest.TestCase):
         self.assertNotIn("check", result["targets"])
 
     def test_host_frame_inputs_select_the_linux_frame_gate(self):
-        # src/preferences.zig reaches the Host only through stack_frames.json's
-        # host_modules; #975's 8 KiB frame was caught there.
         for path in ("src/request_encoding.zig", "src/h2/Engine.zig", "src/bash_platform.c", "build.zig",
                      "src/preferences.zig", "src/store.zig", "tests/ci/stack_frames.json", "tests/ci/stack_frames.py"):
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE)
                 self.assertIn("stack-frames", result["targets"])
                 self.assertNotIn("stack-frames", result["native_targets"])
-        # Zig the Host never compiles has no Host frame.
         for path in ("src/SessionFrontend.zig", "src/tests.zig", "src/logic_tests.zig", "src/store/wire/pg.zig"):
             with self.subTest(path=path):
                 self.assertNotIn("stack-frames", select([path], "review", AVAILABLE)["targets"])
@@ -759,13 +721,11 @@ class SelectionTest(unittest.TestCase):
     def test_native_unit_aggregate_selects_its_root_not_check(self):
         alone = select(["src/tests.zig"], "review", AVAILABLE)
         self.assertEqual((alone["targets"], alone["native_targets"]), (["test-native"], ["test-native"]))
-        # What it newly lists selects what reaches that file, not check.
         owned = select(["src/tests.zig", "src/mcp/Running.zig"], "review", AVAILABLE)["targets"]
         self.assertTrue({"settings-integration", "test-native"} <= set(owned))
         self.assertNotIn("check", owned)
 
     def test_shared_context_text_keeps_all_request_oracle_consumers(self):
-        # The Host embeds both texts in requests; fixtures and Go request oracles read them.
         request = {"test-native", "dispatch-integration", "transport-h2-integration"}
         for path, readers in (("src/model_instructions.txt", {"codex-h2-integration", "current-facts-integration",
                                                                "server-delivery-integration", "peer-integration",
@@ -797,10 +757,6 @@ class SelectionTest(unittest.TestCase):
                 self.assertIn("test-logic", select([f"src/{core}"], "review", AVAILABLE)["targets"])
 
     def test_store_tests_reach_no_store_caller(self):
-        # The Store's tests cross only the Store's interface. A file that
-        # imports store.zig tests its own behavior over a Store in its own
-        # file; a Store test importing it would make every change to its
-        # callers rerun the Store's tests.
         graph = tree_graph()
         store = [name for name in graph.every if name.startswith("src/store/")]
         callers = sorted(name for name in graph.closure(graph.every, store)
@@ -809,15 +765,11 @@ class SelectionTest(unittest.TestCase):
                          "import them into the callers")
 
     def test_store_tests_reach_no_client_reply_decoder(self):
-        # Store/decoder round trips belong to protocol_reply_store_tests.zig,
-        # not Store's root: the decoder can reach caller-only presentation.
         graph = tree_graph()
         self.assertNotIn("src/protocol_reply.zig", graph.reached["test-store"],
                          "Move Store/client decoder contracts to protocol_reply_store_tests.zig")
 
     def test_store_code_imports_no_protocol(self):
-        # The Store reads and writes plain values; the Host translates
-        # between them and the wire, so a wire change does not reach it.
         graph = tree_graph()
         importers = sorted(name for name, imported in graph.production.items()
                            if name.startswith("src/store/") and not matches(name, TEST_CODE)
@@ -826,14 +778,11 @@ class SelectionTest(unittest.TestCase):
                          "value, and translate wire types where the Host calls the Store")
 
     def test_registered_cores_reach_only_unit_roots_unless_a_fixture_names_them(self):
-        # A core's value tests own its decisions. A fixture that asserts one
-        # names it as an owner, and keeps it.
         graph = tree_graph()
         self.assertTrue(graph.cores)
         for core in sorted(graph.cores):
             with self.subTest(core=core):
                 reached = graph.targets(core) or set()
-                # What compiles the core or reads it, as fixtures read owned values.
                 compiled = {target for target, files in graph.reached.items() if core in files}
                 named = {target for target, owners in graph.owners.items() if core in owners}
                 self.assertTrue(named <= reached)
@@ -880,7 +829,6 @@ class SelectionTest(unittest.TestCase):
         self.assertTrue(result["native_required"])
 
     def test_test_full_runs_beside_a_full_native_suite(self):
-        # test-full holds only the real-time witness; test, check or check-full runs the rest.
         for path in ("src/client.zig", "src/ResponseTiming.zig", "build.zig", "build.zig.zon",
                      "install.sh", ".github/actions/setup/action.yml"):
             with self.subTest(path=path):
@@ -896,7 +844,6 @@ class SelectionTest(unittest.TestCase):
                 for family in ("targets", "native_targets"):
                     self.assertIn("human-cli-integration", result[family])
                     self.assertNotIn("check", result[family])
-        # The human CLI gate runs the PTY cases it composes; they are not selected twice.
         result = select(["src/SessionFrontend.zig", "tests/integration/terminal_restoration_cases.py"],
                         "review", AVAILABLE)
         self.assertNotIn("terminal-restoration-integration", result["targets"])
@@ -917,7 +864,6 @@ class SelectionTest(unittest.TestCase):
         result = select(["src/serve_grammar.zig"], "review", AVAILABLE)
         for target in ("host-launch-integration", "request-wait-integration"):
             self.assertTrue(covered(target, set(result["targets"])), target)
-        # The grammar engine keeps every gate that cli_args.zig selected.
         for path in ("src/cli_grammar.zig", "src/cli_option_names.zig"):
             targets = set(select([path], "review", AVAILABLE)["targets"])
             for target in ("human-cli-integration", "request-wait-integration", "admission-debug-integration",
@@ -925,7 +871,6 @@ class SelectionTest(unittest.TestCase):
                 self.assertTrue(covered(target, targets), (path, target))
 
     def test_strict_paths_never_retry(self):
-        # Each of these selected retryable suites before strictness decided retries.
         for paths in (["tests/integration/bash_integration.py"], ["src/store.zig"], ["src/server.zig"],
                       ["src/server_execution.zig"], ["src/server_host.zig"],
                       ["src/cli.zig", "build.zig.zon"]):
@@ -955,7 +900,7 @@ class SelectionTest(unittest.TestCase):
         expression = re.sub(r'!(?!=)', 'not ', expression.replace('&&', 'and').replace('||', 'or'))
         script = dedent(job.split('run: |\n', 1)[1].split('\n      - ', 1)[0])
         cases = []
-        for targets in ('[]', ''):  # Documentation and duplicate-push suppression.
+        for targets in ('[]', ''):
             cases.append((targets, 'success', 'success', 'skipped', 'skipped', False, 'success'))
             for result in ('failure', 'cancelled', 'skipped'):
                 cases.extend([
@@ -975,13 +920,11 @@ class SelectionTest(unittest.TestCase):
                 ('["test-logic"]', 'success', 'success', 'success', result, False, 'failure'),
             ])
         cases.append(('[]', 'skipped', 'skipped', 'skipped', 'skipped', True, 'skipped'))
-        # The macOS type-check runs exactly when the Linux build does.
         cases = [(*case, case[3]) for case in cases]
         for result in ('failure', 'cancelled', 'skipped'):
             cases.append(('["test-logic"]', 'success', 'success', 'success', 'success', False, 'failure', result))
         for result in ('success', 'failure'):
             cases.append(('[]', 'success', 'success', 'skipped', 'skipped', False, 'failure', result))
-        # The unit producer runs exactly when the plan splits the Linux build.
         cases = [(*case, 'false', 'skipped') for case in cases]
         green = ('["check"]', 'success', 'success', 'success', 'success', False)
         cases.append((*green, 'success', 'success', 'true', 'success'))
@@ -998,10 +941,7 @@ class SelectionTest(unittest.TestCase):
                                              ('false', 'success', 'failure')):
                 cases.append((targets, 'success', 'success', build, native, False, expected,
                               typecheck, 'false', 'skipped', codegen, result))
-        # Above, the plan selects the type-check exactly when it selects targets.
         cases = [(*case, 'false' if case[0] in ('', '[]') else 'true') for case in cases]
-        # A selection without compile inputs runs targets but no type-check,
-        # and a type-check the plan did not select must not have run.
         for typecheck, expected in (('skipped', 'success'), ('success', 'failure'), ('failure', 'failure')):
             cases.append(('["test-logic"]', 'success', 'success', 'success', 'success', False, expected,
                           typecheck, 'false', 'skipped', 'false', 'skipped', 'false'))
@@ -1016,8 +956,6 @@ class SelectionTest(unittest.TestCase):
                 github = SimpleNamespace(event=SimpleNamespace(repository=SimpleNamespace(private=private)))
                 admitted = eval(expression, {'__builtins__': {}, 'always': lambda: True,
                                              'needs': needs, 'github': github})
-                # Actions implicitly adds success() unless a status-check
-                # function appears; a skipped dependency otherwise skips us.
                 if not re.search(r'\b(?:always|success|failure|cancelled)\s*\(', expression):
                     admitted = admitted and all(value == 'success' for value in (plan, policy, build, native, typecheck))
                 actual = 'skipped'
@@ -1073,7 +1011,6 @@ class SelectionTest(unittest.TestCase):
         self.assertIn('needs: [plan, macos_build, macos_build_unit, macos_suites]', jobs['macos'])
         self.assertIn('UNIT_RESULT: ${{ needs.macos_build_unit.result }}', jobs['macos'])
         self.assertIn('SPLIT: ${{ needs.plan.outputs.macos_split }}', jobs['macos'])
-        # Admission cannot outrun the native unit producer.
         for name in ('admission',):
             self.assertRegex(jobs[name], r'needs: \[[^\n]*\bmacos\b')
 
@@ -1082,7 +1019,6 @@ class SelectionTest(unittest.TestCase):
         suites = re.search(r'(?ms)^  macos_suites:\n(.*?)(?=^  [a-z_]+:|\Z)', workflow)[1]
         gate = re.search(r'(?ms)^  macos:\n(.*?)(?=^  [a-z_]+:|\Z)', workflow)[1]
         expression = re.search(r'if: \$\{\{ (.*?) \}\}', suites)[1]
-        # cancelled() overrides Actions' implicit success(), including skipped needs.
         self.assertIn('!cancelled()', expression)
         expression = re.sub(r'!(?!=)', 'not ', expression.replace('&&', 'and').replace('||', 'or'))
         self.assertIn('always()', gate)
@@ -1133,8 +1069,6 @@ class SelectionTest(unittest.TestCase):
             self.assertTrue(result["native_required"])
 
     def test_store_sql_keeps_native_owner_without_unrelated_mac_suite(self):
-        # Both systems also run the bounded Debug failure-provenance subset;
-        # neither composed gate executes the Debug artifact through it.
         result = select(["src/store.zig"], "review", AVAILABLE)
         for family in ("targets", "native_targets"):
             self.assertTrue({"dispatch-debug-integration", "dispatch-integration", "test"} <= set(result[family]))
@@ -1162,7 +1096,6 @@ class SelectionTest(unittest.TestCase):
     def test_codex_credential_values_keep_portable_and_native_owner_checks(self):
         for path in ("src/codex_credential_policy.zig", "src/codex_token_wire.zig"):
             result = select([path], "review", AVAILABLE)
-            # The ChatGPT plan sign-in keeps its records in the same custody.
             native = sorted(["chatgpt-login-integration", "chatgpt-plan-integration", "codex-credential-integration",
                              "codex-h2-integration", "codex-integration", "test-native", "test-logic"])
             self.assertEqual(result["native_targets"], native)
@@ -1250,9 +1183,6 @@ class SelectionTest(unittest.TestCase):
                          [["current-facts-integration"], ["server-delivery-integration"]])
 
     def test_a_helper_reached_through_another_library_keeps_its_consumer(self):
-        # codex_h2_integration calls h2_fixture.closed_host_request, which calls
-        # control_fixture.read_http_response (Codex P2 on #1102). The fixtures
-        # those helpers came from no longer reach codex-h2.
         for path in ("tests/integration/control_fixture.py", "tests/integration/h2_fixture.py"):
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE)
@@ -1266,9 +1196,6 @@ class SelectionTest(unittest.TestCase):
             self.assertTrue({"dispatch-debug-integration", "dispatch-integration"} <= set(scenarios[family]))
 
     def test_helper_modules_select_the_fixtures_that_import_them(self):
-        # A helper selects every fixture that imports it, and check once it
-        # reaches every case check runs; a fixture script selects only the
-        # targets that run it.
         for path, owners in (("host_process.py", {"check", "settings-integration", "ts-client"}),
                              ("control_fixture.py", {"control-integration", "dispatch-integration",
                                                      "transport-h2-integration"}),
@@ -1343,7 +1270,6 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(len(filters), 1)
         for block in filters:
             harnesses = {p for p in re.findall(r"'([^']+)'", block) if p.startswith("tests/integration/")}
-            # The restoration fixture is also a blocking gate, so it keeps its own selection.
             self.assertEqual(harnesses - {"tests/integration/terminal_restoration_*"},
                              set(RENDERER_HARNESSES))
         for path in ("tests/integration/input_equivalence.py",):
@@ -1356,8 +1282,6 @@ class SelectionTest(unittest.TestCase):
             select(["src/bash.zig"], "review", AVAILABLE - {"bash-recovery-integration"})
 
     def test_new_session_policy_paths_keep_portable_and_original_native_gates(self):
-        # Select each path alone: a simultaneous CLI or logic-root edit must not
-        # mask missing coverage when a later change touches only the new owner.
         cases = {
             "src/new_session_selection.zig": {"admission-debug-integration", "human-cli-integration", "test-logic"},
             "src/preference_values.zig": {"admission-debug-integration", "admission-integration", "test-logic"},
@@ -1408,7 +1332,6 @@ class SelectionTest(unittest.TestCase):
                     self.assertTrue(({target} | covering | {"check", "check-full"}) & set(result["targets"]))
 
     def test_every_script_the_build_runs_is_a_declared_fixture(self):
-        # A script outside FIXTURES would reach no target through the graph.
         declared = {script for scripts, _, _ in FIXTURES.values() for script in scripts}
         named = set(re.findall(r'"(tests/integration/[\w]+\.(?:py|sh))"', build_files.source()))
         runners = {"tests/integration/check.sh", "tests/integration/host_process.py"}
@@ -1424,8 +1347,6 @@ class SelectionTest(unittest.TestCase):
             Graph(files, files.__getitem__)
 
     def test_h2_fixture_and_companion_keep_both_owning_targets(self):
-        # The transport oracle test checks codex-h2's cases; the transport cases
-        # and their companion test are the transport target's own.
         for path, expected in (("tests/integration/codex_h2_cases.py",
                                 ["codex-h2-integration", "transport-h2-integration"]),
                                ("tests/integration/transport_h2_cases.py", ["transport-h2-integration"]),
@@ -1486,7 +1407,6 @@ class SelectionTest(unittest.TestCase):
         self.assertLessEqual(imported, pinned)
 
     def test_screen_package_is_fetched_only_for_steps_that_run_the_observer(self):
-        # installer-integration runs install.sh, which must never fetch ghostty.
         for targets in ([], ["test-logic"], ["installer-integration"], ["ts-client"]):
             with self.subTest(targets=targets):
                 self.assertFalse(setup_requirements(targets)["screen"])
@@ -1495,8 +1415,6 @@ class SelectionTest(unittest.TestCase):
                 self.assertTrue(setup_requirements(targets)["screen"])
         build = build_files.source()
         self.assertLessEqual(SCREEN_TARGETS, set(build_files.steps()))
-        # Every fixture that reaches the observer runs with its library named,
-        # and setup fetches the package for it.
         observing = tree_graph().targets("tests/integration/terminal_screen.py")
         self.assertLessEqual(observing, SCREEN_TARGETS)
         for target in observing:
@@ -1510,8 +1428,6 @@ class SelectionTest(unittest.TestCase):
                 run = re.search(r'(\w+)\.addFileArg\(b\.path\("' + re.escape(fixture) + r'"\)\)', build)
                 self.assertIsNotNone(run, fixture)
                 self.assertIn(f"const {run[1]} = screen_module.screenCommand(", build, fixture)
-        # install.sh fetches the graph fetch_dependencies.sh walks from the root
-        # manifest; ghostty's path dependencies would also make it exit 1.
         root = Path(__file__).parents[2]
         script = (root / "src/fetch_dependencies.sh").read_text()
         self.assertEqual(re.findall(r'(?m)^prepare_dependencies "(.*)"$', script), ['$repo/build.zig.zon'])
@@ -1628,18 +1544,15 @@ fi
             with self.subTest(gates=gates):
                 rows = shards(sorted(gates + short))["include"]
                 packed = [row for row in rows if not LONG_GATES.intersection(row["targets"])]
-                # Each long gate keeps its own shard: a passenger lengthens the longest one.
                 alone = [name for gate in gates
                          for name in (("full-execution", "full-callers") if gate == "check-full" else (gate,))]
                 self.assertCountEqual([row["name"] for row in rows if row not in packed], alone)
                 self.assertEqual(len(packed), SHARDS_BESIDE_LONG_GATE)
                 self.assertCountEqual([target for row in packed for target in row["targets"]], short)
-        # Without a long gate the short suites set the run's length: every slot.
         rows = shards(short)["include"]
         self.assertEqual(len(rows), 10)
         self.assertCountEqual([target for row in rows for target in row["targets"]], short)
         self.assertEqual([row["targets"] for row in shards(["test", "test-logic"])["include"]], [["test"], ["test-logic"]])
-        # Qualification still isolates every suite.
         self.assertTrue(all(len(row["targets"]) == 1 for row in shards(["check", *short], limit=None)["include"]))
 
     def test_macos_native_work_fits_three_workers_without_losing_selected_checks(self):
@@ -1691,7 +1604,6 @@ fi
         self.assertTrue(all(row["targets"] == ["measure-model-output"] for row in rows))
 
     def test_requested_ref_cannot_publish_shared_caches(self):
-        # The server's scoped token, not requested-ref setup code, owns access.
         for name in ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml'):
             with self.subTest(workflow=name):
                 workflow = Path('.github/workflows', name).read_text()
@@ -1716,17 +1628,12 @@ fi
                     self.assertNotIn('persist-credentials: true', checkout)
                 if name == 'qualify-macos.yml':
                     self.assertIn('workflow_call:', workflow)
-                # A save the token refuses only warns; restore-only setup is quiet.
                 self.assertEqual(workflow.count("publish-caches: 'false'"),
                                  workflow.count('uses: ./.github/actions/setup'))
         for path in Path('.github/workflows').glob('*.yml'):
             if path.name not in ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml'):
                 workflow = path.read_text()
                 if path.name == 'check.yml':
-                    # Policy only needs a compiler for the first caller-error
-                    # inventory. Its conditional setup must not consume or
-                    # publish native build caches; every native setup still
-                    # uses the default publishing behavior below.
                     policy = re.search(r'(?ms)^  policy:\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow).group(1)
                     bootstrap_steps = re.findall(
                         r'(?m)^      - uses: \./\.github/actions/setup\n(?:        .*\n)*', policy)
@@ -1787,7 +1694,6 @@ fi
     def test_macos_type_check_runs_only_for_what_it_compiles(self):
         for path in ("src/TerminalText.zig", "build.zig", "build/darwin.zig", "build.zig.zon", "src/host_launch.c",
                      "src/vaxis-parser.patch", "src/fetch_dependencies.sh", ".github/actions/setup/action.yml",
-                     # Embedded, or a module build.zig adds and Zig embeds.
                      "src/model_instructions.txt", "src/store/migration_baseline_rows.sql", "openapi.json"):
             self.assertTrue(select([path], "review", AVAILABLE)["typecheck_macos"], path)
         for path in ("tests/integration/terminal_leader.py", "tests/ci/quarantine.json", "tests/ci/select_tests.py",
@@ -1804,7 +1710,6 @@ fi
         for path in CACHE_POLICY:
             self.assertTrue(Path(path).is_file(), path)
             self.assertTrue(cache(path), path)
-        # Without both revisions, a build or workflow file counts as cache policy.
         for path in ("build.zig", "build/darwin.zig", ".github/actions/setup/action.yml",
                      ".github/workflows/cache-maintenance.yml", ".github/workflows/qualify-macos.yml"):
             self.assertTrue(cache(path), path)
@@ -1827,14 +1732,12 @@ fi
         edited = check[:job.start(1)] + "21" + check[job.end(1):]
         self.assertNotEqual(edited, check)
         self.assertTrue(cache(".github/workflows/check.yml", check, edited))
-        # Comments, another tool's cache and a new build module without cache lines are not cache policy.
         comment = re.search(r"(?m)^  cache_execution:\n(    #.*\n)", check)[1]
         self.assertFalse(cache(".github/workflows/check.yml", check, check.replace(comment, comment.replace("#", "# Note:"), 1)))
         actionlint = "key: rui-actionlint-1.7.7-linux-amd64"
         self.assertIn(actionlint, check)
         self.assertFalse(cache(".github/workflows/check.yml", check, check.replace(actionlint, actionlint + "-2")))
         self.assertFalse(cache("build/new.zig", None, 'const std = @import("std");\n'))
-        # A value inside a cache step or input counts, though the line names no cache.
         deps = re.search(r"(?m)^\s+PREFIX: rui-build-v2-", caches)[0]
         self.assertTrue(cache(".github/actions/setup/caches/action.yml", caches, caches.replace(deps, deps.replace("v2", "v3"))))
         default = re.search(r"(?ms)^  publish-caches:\n.*?default: (.*?)$", action)
@@ -1864,7 +1767,6 @@ fi
             execution_batches(["test-logic"], "execution")
 
     def test_a_dispatch_selects_from_its_explicit_base(self):
-        # Manual diagnostic selection uses its explicit base.
         workflow = Path('.github/workflows/check.yml').read_text()
         prefix = dedent(re.search(
             r'(?s)        run: \|\n(          set -euo pipefail\n.*?)'
@@ -1879,8 +1781,6 @@ fi
 class FullCheckPartitionTest(unittest.TestCase):
     @staticmethod
     def wait_for_group_retirement(group, deadline):
-        # A delivered signal, leader reap and pipe EOF do not retire private
-        # peers with redirected captures. Zombies cannot create more files.
         def live_members():
             census = subprocess.run(["ps", "-axo", "pgid=,stat="], capture_output=True,
                                     text=True, check=True, timeout=max(0, deadline - time.monotonic()))
@@ -1912,8 +1812,6 @@ class FullCheckPartitionTest(unittest.TestCase):
                     failure.add_note(f"retained driver root: {root}")
 
             owner.push(dispose_root)
-            # Exercise the shell gate's public commands without launching product
-            # fixtures. A controlled clock checks elapsed reporting, not speed.
             command = '''#!/bin/sh
 if [ "$1" = - ]; then exec "$TEST_PYTHON" "$@"; fi
 if [ "$(basename "${1:-}")" = host_process.py ] && [ "$2" = exec ]; then shift 2; exec "$@"; fi
@@ -2009,9 +1907,6 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                     "time.monotonic_ns = lambda: int(Path(os.environ['GATE_DIR'], 'clock').read_text())\n")
                 env.update(PYTHONPATH=str(root), TMPDIR=str(root))
                 fixtures = ("human_cli_integration.py:callers", "preference_policy_integration.py")
-            # The serial driver starts 43 real interpreters, including its
-            # version check. This is a functional test, not a startup benchmark.
-            # One coarse deadline owns readiness, drainage and every child.
             deadline = time.monotonic() + timeout
             try:
                 if timing:
@@ -2038,8 +1933,6 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                                 clock.with_suffix(".next").write_text("13000000000")
                                 clock.with_suffix(".next").replace(clock)
                                 os.write(releases[1], b"r\n")
-                                # Completion timing belongs to the peer, not
-                                # the later inventory-order wait for it.
                                 def timing_recorded():
                                     self.assertIsNone(process.poll())
                                     return any(path.read_text().strip()
@@ -2057,24 +1950,17 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                                 wait_for(held_started, f"held {hold} to start", interval=.005, deadline=deadline)
                                 if fail_at == "held_ready":
                                     self.fail("injected failure at held_ready")
-                                # Held authority, not scheduler speed, prevents
-                                # isolated work during this observation.
                                 observation_deadline = time.monotonic() + .1
                                 while time.monotonic() < observation_deadline:
                                     self.assertFalse((root / "isolated.started").exists())
                                     time.sleep(.005)
                         finally:
-                            # Successful observation releases the test gates.
-                            # A failed observation retires the owned group below.
                             if sys.exception() is None:
                                 for release in releases:
                                     os.write(release, b"r\n")
                         stdout, stderr = process.communicate(timeout=max(0, deadline - time.monotonic()))
                     except BaseException as failure:
                         failure.add_note(f"driver_pid={process.pid}")
-                        # A timed-out shell may still own clock or mock peers
-                        # holding our pipes. Retire the entire private group,
-                        # then drain and reap before the fixture root disappears.
                         disposal_deadline = time.monotonic() + 5
                         try:
                             os.killpg(process.pid, signal.SIGKILL)
@@ -2119,8 +2005,6 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                           result.stdout + result.stderr, re.MULTILINE)
 
     def test_slow_interpreter_startup_is_not_a_driver_failure(self):
-        # At least 43 * .25 seconds of startup in this serial inventory exceeds
-        # the old ten-second limit without any blocked or incorrect fixture.
         result, lines = self.run_part("all", "host_allocator_test.py", python_delay=.25)
         self.assertEqual(result.returncode, 42, result.stdout + result.stderr)
         self.assertEqual(lines[-1], "host_allocator_test.py release")
@@ -2156,8 +2040,6 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                 )).splitlines())
                 for identity in held:
                     self.assertIn(identity, peers)
-                    # Grandchildren may briefly be zombies awaiting their OS
-                    # reaper, but cannot remain live or hold the capture pipes.
                     def peer_state(identity=identity):
                         observed = subprocess.run(["ps", "-o", "stat=", "-p", peers[identity]],
                                                   capture_output=True, text=True)
@@ -2191,9 +2073,6 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                     self.assertIn("injected diagnostic read failure" if fault == "diagnostic"
                                   else "driver group retirement unconfirmed", notes)
                 finally:
-                    # Injected group failure leaves the held descendant until
-                    # run_part closes its release FIFO; retirement is observed,
-                    # never signaled, before the retained root is removed.
                     if fault == "retirement" and rejected.exception.__notes__:
                         pid = int(rejected.exception.__notes__[0].split("=")[1])
                         self.wait_for_group_retirement(pid, time.monotonic() + 5)
@@ -2225,16 +2104,9 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                 def leader_only(pgid, sig):
                     nonlocal group
                     group = pgid
-                    # The held descendant has private log captures. Leader
-                    # reap and caller pipe EOF must not authorize root deletion.
                     peers = dict(line.split() for line in (root / "peer-pids").read_text().splitlines())
                     held = int(peers["dispatch_integration.py.release"])
 
-                    # A census misses members forked while it ran, such as a
-                    # peer that waits forever for a start the killed driver
-                    # never makes (#638). Signal each census until the held
-                    # descendant is the only live member; killed members
-                    # fork no more.
                     def signal_others():
                         census = run(["ps", "-axo", "pid=,pgid=,stat="], capture_output=True,
                                      text=True, check=True, timeout=5)
@@ -2290,10 +2162,6 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                         self.assertFalse(root.exists())
                 finally:
                     if group is not None:
-                        # Deliver the lost signal now that nothing needs the
-                        # held descendant. Closing its release FIFO is not
-                        # enough: one that opens the FIFO after the last
-                        # writer closed waits for a writer forever (#662).
                         try:
                             killpg(group, signal.SIGKILL)
                         except ProcessLookupError:
@@ -2366,9 +2234,6 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
             self.assertTrue(all(status == "0" for _, status, _ in records))
             outputs[part] = set(lines)
         self.assertEqual(outputs["all"], expected)
-        # The ordinary driver also owns the native binary; the full gate runs
-        # that binary in the build graph instead. Independent human CLI groups
-        # split; the unsplit serial invocation retains its original order.
         parallel_expected = expected - {"human_cli_integration.py release"} | {
             "human_cli_integration.py:callers release", "human_cli_integration.py:renderer release",
             "terminal_restoration_integration.py release", "canonical_failure_integration.py release",

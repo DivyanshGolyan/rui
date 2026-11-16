@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-"""Measure a Rui executable's Host memory in fixed scenarios, for release notes.
-
-    python3 tests/ci/host_memory.py RUI > host-memory.md
-
-Each scenario starts a fresh Host, brings it to one state with the
-tests/integration fixtures (no network), waits until the scenario's metric
-from /proc/PID/smaps_rollup stops changing, and reads it. Every scenario runs
-RUNS times; the Markdown printed reports the median and range in KiB. A
-feature adds a row by adding one entry to SCENARIOS.
-
-Nothing here fails a release. A scenario that cannot be measured prints
-"not measured" with its reason in its row, and a run that cannot start prints
-one "not measured" line; either way the exit status is 0.
-"""
 import contextlib
 import os
 from pathlib import Path
@@ -34,8 +20,6 @@ from product_defaults import compaction_trigger
 
 RUNS = 7
 AGENTS = 100
-# A reading is taken once the metric repeats this many reads in a row, a tenth
-# of a second apart: a Host's last start-up writes land after it is ready.
 STEADY_READS = 3
 COMPARABLE = ("Numbers are comparable only release to release on the same runner type; "
               "another machine, kernel or glibc reads other values.")
@@ -43,9 +27,7 @@ COMPARABLE = ("Numbers are comparable only release to release on the same runner
 
 class Scenario(NamedTuple):
     name: str
-    metric: str  # A /proc/PID/smaps_rollup field.
-    # (binary, root) -> a context manager that yields the Host's pid once the
-    # Host is in the state to read, and stops it on exit.
+    metric: str
     host: Callable
 
 
@@ -67,12 +49,10 @@ def steady(pid, metric):
 
 
 def h2_endpoint(root, requests=0):
-    # model_fixture, under h2_fixture, reads the binary from sys.argv[1] at import.
     import h2_fixture
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.load_cert_chain(root / "cert.pem", root / "key.pem")
     tls.set_alpn_protocols(["h2"])
-    # One more than the requests it will see, so it answers none of them.
     endpoint = h2_fixture.Endpoint(tls, requests + 1, sse=True)
     threading.Thread(target=endpoint.serve_forever, daemon=True).start()
     return endpoint
@@ -145,8 +125,6 @@ def model_listing(binary, root, store):
 
 @contextlib.contextmanager
 def mcp_listing(binary, root, store):
-    # As in settings_integration: a server that accepts and never answers
-    # holds the Host in its start-up tools/list.
     silent = socket.socket()
     try:
         silent.bind(("127.0.0.1", 0))
@@ -182,7 +160,6 @@ SCENARIOS = (
 
 
 def measure(binary, scenarios=SCENARIOS, runs=RUNS):
-    """{scenario name: [KiB per run]} or {scenario name: "reason"} when a run failed."""
     # smaps counts a mapped page that is dirty in the page cache as dirty, so a
     # binary just written or unpacked reads several MiB high until written back.
     descriptor = os.open(binary, os.O_RDONLY)
@@ -216,7 +193,6 @@ def reason(error):
 
 
 def runner():
-    """The machine facts a reader needs to compare releases, read before the fixture boundary clears them."""
     model = next((line.split(":", 1)[1].strip() for line in Path("/proc/cpuinfo").read_text().splitlines()
                   if line.startswith("model name")), "unknown CPU")
     image = " ".join(filter(None, (os.environ.get("ImageOS"), os.environ.get("ImageVersion")))) or "unknown image"
@@ -224,7 +200,6 @@ def runner():
 
 
 def summary(version, machine, readings, scenarios=SCENARIOS):
-    """The release-notes section for readings from measure()."""
     metrics = {scenario.name: scenario.metric for scenario in scenarios}
     lines = ["### Host memory", "",
              f"Measured on this release's linux-x86_64 executable ({version}), on a GitHub-hosted runner "

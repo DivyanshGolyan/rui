@@ -1,6 +1,3 @@
-//! The Postgres wire client's tests: decoding bytes captured from a real
-//! server, the startup machine against scripted answers, and live rounds
-//! against a server named by RUI_TEST_PG_PORT (CI runs postgres:15).
 const std = @import("std");
 const pg = @import("pg.zig");
 const required_engines = @import("required_engines.zig");
@@ -20,8 +17,6 @@ fn hex(comptime text: []const u8) []const u8 {
     }
 }
 
-/// A local-socket startup answered by Postgres 16 under `trust`: AuthenticationOk,
-/// fourteen ParameterStatus messages, BackendKeyData, ReadyForQuery.
 const captured_startup = hex(
     \\5200000008000000005300000017696e5f686f745f7374616e646279006f6666005300000019696e74656765725f6461
     \\746574696d6573006f6e00530000001554696d655a6f6e65004574632f55544300530000001b496e74657276616c5374
@@ -35,9 +30,6 @@ const captured_startup = hex(
     \\544638004b0000000c000009491e21816c5a0000000549
 );
 
-/// One pipelined round answered by Postgres 16: Parse, Describe, Bind and
-/// Execute of `SELECT $1::int8 + 1, 'x'::text, NULL::int4` with 41, then
-/// Parse, Bind and Execute of `SELECT 1/0`, then Sync.
 const captured_round = hex(
     \\3100000004740000000a000100000014540000004f00033f636f6c756d6e3f00000000000000000000140008ffffffff
     \\0000746578740000000000000000000019ffffffffffff0000696e743400000000000000000000170004ffffffff0000
@@ -46,9 +38,6 @@ const captured_round = hex(
     \\46696e742e63004c3837300052696e743464697600005a0000000549
 );
 
-/// Decodes `input` with the inbox discipline a real owner keeps: at most
-/// `chunk` new bytes per read, unconsumed bytes moved to the front, and a
-/// `receive_buffer_bytes` inbox. Writes one line per event.
 fn transcript(input: []const u8, chunk: usize, writer: *std.Io.Writer) !void {
     var inbox: [pg.receive_buffer_bytes]u8 = undefined;
     var start: usize = 0;
@@ -168,7 +157,6 @@ test "a column longer than the inbox arrives in parts that add up to it, and the
         \\ready idle
         \\
     , output.written());
-    // The longest whole value still arrives whole.
     output.clearRetainingCapacity();
     try transcript(comptime dataRow(&.{&@as([pg.max_inline_value_bytes]u8, @splat('y'))}), 4096, &output.writer);
     try std.testing.expectEqualStrings("row 1\nvalue 7979", output.written()[0..16]);
@@ -185,24 +173,15 @@ test "notices are skipped at any length and an error keeps its SQLSTATE, severit
 
 test "malformed messages are protocol violations, never misread" {
     const cases = [_][]const u8{
-        // A length below its own four bytes.
         comptime hex("5a00000003"),
-        // ReadyForQuery with an unknown status.
         comptime hex("5a0000000558"),
-        // A DataRow whose column runs past the row.
         comptime hex("440000000a0001000000ff4141"),
-        // A DataRow with bytes left after its last column.
         comptime hex("440000000b0001000000004141"),
-        // A message type Rui never asks for (CopyInResponse).
         comptime hex("470000000700000000"),
-        // An ErrorResponse whose field list is not terminated.
         comptime hex("450000000a43323230313200"),
-        // An ErrorResponse whose SQLSTATE is not five characters.
         comptime fieldMessage('E', "VERROR\x00C08\x00"),
         comptime fieldMessage('E', "VERROR\x00C080060\x00"),
-        // ParameterStatus missing its value's terminator.
         comptime hex("5300000007610062"),
-        // A non-row message larger than the inbox.
         comptime hex("5300004001"),
     };
     for (cases) |input| {
@@ -224,8 +203,6 @@ test "a command tag's row count is its last word, in digits only" {
 }
 
 test "fuzz postgres decoder: any bytes read alike in any split" {
-    // test-pg runs its seeds; a campaign is
-    // `zig build test-pg -Dtest-filter='fuzz postgres' --fuzz=1K`.
     try std.testing.fuzz({}, struct {
         fn one(_: void, smith: *std.testing.Smith) !void {
             var buffer: [1024]u8 = undefined;
@@ -247,13 +224,10 @@ test "fuzz postgres decoder: any bytes read alike in any split" {
     } });
 }
 
-/// A seed as `Smith.slice` reads one: a little-endian length, then the bytes.
 fn fuzzSeed(comptime bytes: []const u8) []const u8 {
     return comptime &std.mem.toBytes(std.mem.nativeToLittle(u32, bytes.len)) ++ bytes;
 }
 
-/// `transcript` for any bytes: a column's parts are joined, since where they
-/// split depends on the reads, and the error that ended decoding comes last.
 fn fuzzTranscript(input: []const u8, chunk: usize, writer: *std.Io.Writer) !void {
     var inbox: [pg.receive_buffer_bytes]u8 = undefined;
     var start: usize = 0;
@@ -272,7 +246,6 @@ fn fuzzTranscript(input: []const u8, chunk: usize, writer: *std.Io.Writer) !void
                 try writer.writeAll(event.value_part);
                 continue;
             }
-            // A long column's parts add up to its length before the next event.
             if (part_left) |left| try std.testing.expectEqual(@as(u32, 0), left);
             part_left = if (event == .value_begin) event.value_begin else null;
             try writer.writeAll("\n");
@@ -305,8 +278,6 @@ test "SQLSTATEs map to the Store's classes" {
     for (cases) |case| try std.testing.expectEqual(case[1], pg.classify(case[0][0..5].*));
 }
 
-// ------------------------------------------------------------ startup
-
 const zero_nonce: [18]u8 = @splat(0);
 
 fn localStartup() !pg.Startup {
@@ -319,7 +290,6 @@ test "a captured local startup reaches ready with the server's version and key" 
     var out: pg.Outbox = .{ .buffer = &buffer };
     try startup.begin(&out);
     try std.testing.expectEqualSlices(u8, comptime hex("00000029 00030000") ++ "user\x00postgres\x00database\x00postgres\x00\x00", out.bytes());
-    // Every split point gives the same outcome.
     for (1..captured_startup.len) |split| {
         var again = try localStartup();
         var scratch: [64]u8 = undefined;
@@ -352,8 +322,6 @@ test "TLS startup: a refused or stuffed SSL answer fails before any credential i
     try std.testing.expectError(error.ProtocolViolation, scriptedTls("SR"));
 }
 
-/// The outcome of a TLS startup whose server, after the handshake,
-/// answers the StartupMessage with `answer`.
 fn afterHandshake(answer: []const u8, binding: ?tls.ChannelBinding) pg.StartupError!pg.Step {
     var startup = try pg.Startup.init(.{ .user = "u", .database = "d", .password = "p", .security = .tls, .nonce = zero_nonce });
     var buffer: [512]u8 = undefined;
@@ -425,8 +393,6 @@ test "encoders refuse a message that does not fit and write nothing" {
     try std.testing.expectEqual(@as(usize, 5), out.len);
 }
 
-// ------------------------------------------------------------ live
-
 const Live = struct {
     fd: std.c.fd_t,
     context: tls.Context,
@@ -463,7 +429,6 @@ const Live = struct {
         errdefer _ = std.c.close(self.fd);
         var address: std.c.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, cfg.port), .addr = std.mem.nativeToBig(u32, 0x7f000001) };
         if (std.c.connect(self.fd, @ptrCast(&address), @sizeOf(std.c.sockaddr.in)) != 0) return error.Connect;
-        // A stalled exchange fails the test instead of hanging it.
         const timeout: std.c.timeval = .{ .sec = 10, .usec = 0 };
         _ = std.c.setsockopt(self.fd, std.c.SOL.SOCKET, std.c.SO.RCVTIMEO, @ptrCast(&timeout), @sizeOf(std.c.timeval));
         self.context = try tls.Context.init(.{ .ca_file = cfg.ca_file });
@@ -531,7 +496,6 @@ const Live = struct {
         self.cipher_len += @intCast(count);
     }
 
-    /// Sends what OpenSSL wrote and drops the ciphertext it read.
     fn settle(self: *Live, wire: *const tls.Wire) !void {
         try self.sendRaw(wire.out[0..wire.out_used]);
         if (wire.in_used == 0) return;
@@ -567,7 +531,6 @@ const Live = struct {
         }
     }
 
-    /// Reads more plaintext behind the unconsumed bytes, moved to the front.
     fn fill(self: *Live) !void {
         if (self.in_start > 0) {
             std.mem.copyForwards(u8, &self.inbox, self.inbox[self.in_start..self.in_end]);
@@ -599,7 +562,6 @@ const Live = struct {
         }
     }
 
-    /// Flushes and reads to ReadyForQuery, one line per event.
     fn round(self: *Live, writer: *std.Io.Writer) !void {
         try self.flush();
         while (true) {
@@ -614,8 +576,6 @@ fn liveConfig() !?Live.Config {
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
     const cfg = try Live.config(&environ) orelse return null;
-    // The map's strings die with it; tests only need them while it lives,
-    // so keep copies in static storage.
     const static = struct {
         var password: [128]u8 = undefined;
         var ca_file: [std.posix.PATH_MAX]u8 = undefined;

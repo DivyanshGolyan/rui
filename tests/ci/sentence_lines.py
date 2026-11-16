@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-"""Optional Markdown source formatting for cleaner diffs.
-
-Putting each sentence on its own source line can reduce merge conflicts when
-PRs edit different sentences in the same paragraph. This is source formatting,
-not a prose quality rule or a required repository layout.
-
-A CommonMark parser finds the paragraphs, so tables, code, HTML and headings
-are never touched. A paragraph's line breaks at a sentence end only where the
-paragraph still renders exactly as before, so a break can never open a list,
-end a link or land inside code.
-
-  python3 tests/ci/sentence_lines.py          # rewrite the documents in place
-  python3 tests/ci/sentence_lines.py --check  # name each document to rewrite
-"""
 import argparse
 from pathlib import Path
 import re
@@ -21,16 +7,12 @@ from markdown_it import MarkdownIt
 
 ROOT = Path(__file__).resolve().parents[2]
 MARKDOWN = MarkdownIt("commonmark").enable("table")
-# A sentence ends at . ! or ?, with any closing quotes or brackets, before a
-# space and a word that starts with a capital, a digit, code or a link.
 SENTENCE_END = re.compile(r"[.!?][\"')\]]* +(?=[A-Z0-9`\[])")
 LIST_MARKER = re.compile(r"[-+*]|\d+[.)]")
-# A code span on one line: a backtick run, then the same run closing it.
 CODE_SPAN = re.compile(r"(`+).+?(?<!`)\1(?!`)")
 
 
 def documents(root=ROOT):
-    """The documents lanes edit together: the top-level ones and docs/."""
     return sorted([path for path in root.glob("*.md") if path.name != "THIRD_PARTY_NOTICES.md"]
                   + list(root.glob("docs/**/*.md")))
 
@@ -40,14 +22,13 @@ def rendered(text):
 
 
 def split_paragraph(lines):
-    """Each line of a paragraph as its sentences, breaking only where the paragraph renders the same."""
     expected = rendered("\n".join(lines))
     pieces = [[line] for line in lines]
     for index in range(len(pieces)):
         code = [span.span() for span in CODE_SPAN.finditer(lines[index])]
         for match in reversed(list(SENTENCE_END.finditer(lines[index]))):
             if any(start < match.start() < end for start, end in code):
-                continue  # Rendering joins a code span's lines again, but a reader would not.
+                continue
             last, cut = pieces[index][0], match.end()
             head, tail = last[:cut].rstrip(" "), last[cut:]
             candidate = pieces[:index] + [[head, tail] + pieces[index][1:]] + pieces[index + 1:]
@@ -74,7 +55,6 @@ def reflow(source):
     for start, end, prefixes, content in reversed(paragraphs):
         out = []
         for prefix, pieces in zip(prefixes, split_paragraph(content)):
-            # A continuation sits under its line's text: list markers become spaces, quote markers stay.
             follow = LIST_MARKER.sub(lambda marker: " " * len(marker[0]), prefix)
             out += [prefix + pieces[0]] + [follow + piece for piece in pieces[1:]]
         lines[start:end] = out
@@ -82,7 +62,6 @@ def reflow(source):
 
 
 def findings(paths):
-    """Each document that is not at one sentence per line, with its first such line."""
     for path in paths:
         source = path.read_text().split("\n")
         result = reflow("\n".join(source)).split("\n")

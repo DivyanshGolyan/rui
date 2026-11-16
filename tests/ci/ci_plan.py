@@ -1,4 +1,3 @@
-"""Value-only routing from selector obligations and candidate facts to CI plans."""
 
 from dataclasses import dataclass
 
@@ -10,17 +9,15 @@ from select_tests import CHECK_COVERS, live_mysql_suites
 @dataclass(frozen=True)
 class Plan:
     outputs: dict
-    selection: dict  # Transformed selector details for the step summary.
+    selection: dict
 
 
 def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
          change_kind: ChangeKind, compile_only: bool = False) -> Plan:
-    """Derive output values and summary without I/O or changing the input."""
     if promotion and compile_only:
         raise ValueError('A promotion runs its suites; a compile-only build runs none')
     p = dict(selection)
     kind = change_kind if event_name == 'pull_request' else ChangeKind.NORMAL
-    # Future selector obligations must not be erased by the path allowlist.
     if any(p[key] for key in ('targets', 'native_targets', 'native_required', 'mac_required', 'upgrade_required',
                               'server_targets', 'cache_execution_checks', 'typecheck_macos', 'linux_memory_checks',
                               'manual_checks')) or p.get('unit_compile_required', False):
@@ -29,8 +26,6 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
     draft_run = event_name == 'pull_request' and draft
     p['draft_run'] = draft_run
     ready_pr = event_name == 'pull_request' and not draft_run
-    # Listed flakes (quarantine.json) never excuse a strict change; promotion
-    # still blocks on a listed flake's second consecutive failure.
     quarantine = ('promotion' if promotion
                   else 'admission' if p['retry'] else 'off')
     if draft_run or kind == ChangeKind.DOCUMENTATION:
@@ -43,10 +38,6 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
         p['retry'] = False
         quarantine = 'off' if draft_run else quarantine
     elif compile_only:
-        # The main build after each merge (main-build.yml): every gate, every
-        # unit root and the macOS type-check compile, whatever the push
-        # changed; outside the PR backend that includes ReleaseSmall. No test
-        # runs, so no suite, policy or Mac producer is selected.
         p['targets'] = ['check', 'test-logic']
         p['native_targets'] = []
         p['server_targets'] = []
@@ -56,34 +47,22 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
         p['retry'] = False
         quarantine = 'off'
     elif promotion:
-        # The batch's full suite on both systems, plus the selected
-        # standalone targets. check-full omits the portable logic root,
-        # the frame gate and the Debug recovery, so they run beside it.
         core = {'check-full', 'test-logic', 'admission-debug-integration'}
         p['targets'] = sorted((set(p['targets']) - CHECK_COVERS - {'check'}) | core | {'stack-frames'})
         p['targets'] = sorted(set(p['targets']) | live_mysql_suites(p['targets'], p['mysql_suites']))
         p['native_targets'] = sorted((set(p['native_targets']) - CHECK_COVERS - {'check'}) | core)
         p['retry'] = False
     elif ready_pr:
-        # Qualify the tested source tree, not the later final squash SHA.
-        # Linux predicts Mac except where code may differ by platform;
-        # promotion runs Mac for every batch.
         p['native_targets'] = (p['native_targets'] or ['check']) if p['mac_required'] else []
         p['retry'] = False
     else:
-        # Manual non-promotion runs retain Linux-only feedback.
         p['native_targets'] = []
-    # PR integration codegen is fast; the LLVM stack oracle remains a
-    # required, independent job rather than a dependency of every shard.
     p['linux_codegen'] = (event_name == 'pull_request'
                           and bool({'check', 'stack-frames'} & set(p['targets'])))
     if p['linux_codegen']:
         p['targets'] = [t for t in p['targets'] if t != 'stack-frames']
     p['native_required'] = bool(p['native_targets'])
     p['upgrade_required'] = ready_pr and kind == ChangeKind.NORMAL and p['upgrade_required']
-    # Widen compilation, not execution. `test` reaches both native and Store
-    # partitions; test-native/test-store alone do not. Existing check/test
-    # producers already cover them, so keep a single artifact pair.
     compile_targets = list(p['targets'])
     if ready_pr and kind == ChangeKind.NORMAL and p.get('unit_compile_required', False):
         if not {'test', 'check', 'check-full'} & set(compile_targets):

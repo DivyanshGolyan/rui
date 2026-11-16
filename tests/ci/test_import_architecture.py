@@ -116,11 +116,9 @@ class ImportArchitectureTest(unittest.TestCase):
             (root / "c.zig").write_text('const a = @import("a.zig");')
             baseline.write_text(json.dumps({"cyclic_edges": [["a.zig", "b.zig"], ["b.zig", "a.zig"]]}))
             check(root, baseline, ("a.zig",))
-            # A return edge only in a test must not make c a production cycle.
             with (root / "a.zig").open("a") as output:
                 output.write('\ntest "nested { braces }" { if (true) { _ = @import("c.zig"); } }')
             check(root, baseline, ("a.zig",))
-            # Extending an existing cycle through another module is a regression.
             with (root / "a.zig").open("a") as output:
                 output.write('\nconst c = @import("c.zig");')
             with self.assertRaisesRegex(ValueError, "new production cyclic imports"):
@@ -175,8 +173,6 @@ const c = @import("c.zig");'''
                     subprocess.run(git + ["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
                                           "commit", "-qm", "candidate grows allowance"], check=True)
                     candidate = subprocess.check_output(git + ["rev-parse", "HEAD"], text=True).strip()
-                    # CI sees a committed candidate, not edits on the trusted HEAD.
-                    # Main advances independently: neither tip is the review base.
                     subprocess.run(git + ["checkout", "-q", "--detach", trusted], check=True)
                     (root / "main.txt").write_text("independent main change\n")
                     subprocess.run(git + ["add", "."], check=True)
@@ -272,7 +268,6 @@ const y = @import("after.zig");
         def tests(*listings):
             return "".join(scan.format(name, text) for name, text in zip(names, listings))
 
-        # The writer scan also reads the Store's test files.
         with_tests = listing.replace("};", '@embedFile("tests.zig") };')
 
         with tempfile.TemporaryDirectory() as directory:
@@ -309,7 +304,6 @@ const y = @import("after.zig");
         listing = '    const sources = .{ @embedFile("../Store.zig"), @embedFile("../domain/a.zig") };'
         names = ("Store entry points queue and fence only through canonical access",
                  "every function that enters the Store has a round budget")
-        # The writer scan also reads the Store's test files, these per-domain ones included.
         with_tests = listing.replace("};", '@embedFile("../tests.zig"), @embedFile("access_rules.zig"), '
                                      '@embedFile("round_budget.zig"), @embedFile("../sqlite_tests/schema.zig") };')
         with tempfile.TemporaryDirectory() as directory:
@@ -323,7 +317,6 @@ const y = @import("after.zig");
                 "src/store/sqlite_tests/schema.zig": "test {}",
             })
             store_access_sources(root)
-            # The writer scan reads every per-domain test file as well.
             (root / "src/store/tests/access_rules.zig").write_text(
                 scan.format(names[0], with_tests.replace('@embedFile("../sqlite_tests/schema.zig")', "")))
             with self.assertRaisesRegex(ValueError, "queue and fence.*the Store's files are"):

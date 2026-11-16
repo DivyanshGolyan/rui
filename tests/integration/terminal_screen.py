@@ -1,9 +1,3 @@
-"""Bounded committed-screen observer for the explicitly selected renderer suite.
-
-libghostty-vt owns terminal cells and answers the program's queries; frame
-delimiters establish repaint completion, not submission or consent readiness.
-Exact input is checked at the Host separately.
-"""
 import codecs
 import collections
 import ctypes
@@ -22,25 +16,16 @@ PLAIN_CONTROL = re.compile(r"\x1b\[[0-9;?$]*[A-Za-z~]|\x1b[()][A-Z0-9]|\r(?!\n)"
 PLAIN_UNFINISHED = re.compile(r"\x1b(?:\[[0-9;?$]*|[()])?")
 RESTORE = b"\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?25h\x1b[?1049l"
 
-# One drawn cell. `data` is its grapheme in NFC, " " where nothing was drawn
-# and "" for a wide character's second cell; `fg` is None for the default
-# foreground, a palette index, or "rrggbb". `reverse`: drawn in reverse
-# video, the only mark of a highlighted button.
 Cell = collections.namedtuple(
     "Cell", "data fg bold reverse bg italic faint underline strike invisible blink overline fg_rgb underline_rgb",
     defaults=(False, None, False, False, 0, False, False, False, False, None, None))
 Cursor = collections.namedtuple("Cursor", "x y")
-# The screen as it stands outside a synchronized frame: `display` holds one
-# string per row, a character per drawn cell.
 Screen = collections.namedtuple("Screen", "columns lines cursor display")
 
-# The profile the observer's terminal answers queries with: Ghostty's default
-# dark background, reported to OSC 11 and as a dark scheme to CSI ? 996 n.
 BACKGROUND = (0x28, 0x2c, 0x34)
 
 
 class Frame(collections.namedtuple("Frame", "columns lines cursor visible cells background foreground cursor_color")):
-    """Immutable committed cells and terminal colors, independent of future output."""
     __slots__ = ()
 
     @property
@@ -53,14 +38,10 @@ class Frame(collections.namedtuple("Frame", "columns lines cursor visible cells 
 
 
 def shown(text, screen):
-    """`text` appears on `screen` even where rows broke it: inside a long word
-    the frame breaks between characters; at a space, word wrap drops it. A
-    row continued under an indented line's text starts with that indent."""
     pattern = "(?:\n *)?".join("(?: |\n *)" if c == " " else re.escape(c) for c in text)
     return re.search(pattern, screen) is not None
 
 
-# libghostty-vt 1.0's C ABI, as include/ghostty/vt/*.h declares it.
 Handle = ctypes.c_void_p
 WRITE_PTY = ctypes.CFUNCTYPE(None, Handle, Handle, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t)
 COLOR_SCHEME = ctypes.CFUNCTYPE(ctypes.c_bool, Handle, Handle, ctypes.POINTER(ctypes.c_int))
@@ -105,7 +86,6 @@ _library = None
 
 
 def library():
-    """The shared library build.zig names in RUI_TEST_GHOSTTY_VT."""
     global _library
     if _library is None:
         path = os.environ.get("RUI_TEST_GHOSTTY_VT")
@@ -148,9 +128,6 @@ def library():
     return _library
 
 
-# Each live capture, by the userdata its terminal passes to callbacks. The
-# registry does not own them: a capture nobody holds is collected, and its
-# finalizer frees its native terminal.
 _terminals = weakref.WeakValueDictionary()
 _keys = itertools.count(1)
 
@@ -174,8 +151,6 @@ def _color_scheme(terminal, userdata, scheme):
 
 
 class ScreenCapture:
-    """`reply` takes each answer the terminal gives a query, to write to the
-    PTY the query came from; None drops them, for a silent terminal."""
 
     def __init__(self, columns=80, rows=24, *, reply=None, background=None, foreground=None, color_scheme="dark"):
         if color_scheme not in ("dark", "light"):
@@ -203,31 +178,25 @@ class ScreenCapture:
         self.grapheme = ctypes.create_string_buffer(64)
         self.columns, self.lines = columns, rows
         self.cells_by_row = [()] * rows
-        self.view = None  # The Screen, until the terminal next changes.
+        self.view = None  
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.pending = b""
-        self.text = ""  # Decoded output not yet routed to `plain`.
+        self.text = ""  
         self.completed = ""
-        # Cells of the latest committed frame, for style oracles.
         self.completed_cells = []
         self.frame = None
         self.synchronized = False
         self.generation = 0
-        # Optional observer of every committed frame, not only the latest:
-        # a frame can be replaced within the same read.
         self.listener = None
-        self.received_bytes = 0  # Output volume, for repaint-cost oracles.
+        self.received_bytes = 0  
         self.alternate = False
         self.plain = ""
         self.plain_total = 0
-        # Each complete OSC 52 sequence, as written: the copy oracles check
-        # its exact bytes, which the terminal's clipboard effect decodes.
         self.clipboard = []
         self.clipboard_pending = b""
 
     @property
     def screen(self):
-        """The screen outside a frame; within one, as the frame found it."""
         if self.view is None:
             self.view = self.snapshot()
         return self.view
@@ -255,14 +224,13 @@ class ScreenCapture:
         return Screen(self.columns, self.lines, Cursor(x.value, y.value), display)
 
     def row(self):
-        """The cells of the row the render state's cell iterator holds."""
         lib = library()
         get = lib.ghostty_render_state_row_cells_get
         cells, style, raw, wide = [], Style(), ctypes.c_uint64(), ctypes.c_int()
         def resolved(option):
             rgb = Rgb()
             result = get(self.row_cells, option, ctypes.byref(rgb))
-            assert result in (0, -4), result  # SUCCESS or NO_VALUE
+            assert result in (0, -4), result  
             return bytes(rgb).hex() if result == 0 else None
 
         while lib.ghostty_render_state_row_cells_next(self.row_cells):
@@ -299,7 +267,6 @@ class ScreenCapture:
         return tuple(cells)
 
     def plain_since(self, total):
-        """Main-screen text written after `plain_total` was `total`."""
         return self.plain[max(0, len(self.plain) - (self.plain_total - total)):]
 
     def resize(self, columns, rows):
@@ -317,12 +284,10 @@ class ScreenCapture:
                 self.reply(data)
 
     def cells(self, data):
-        """Write `data` to the terminal; route main-screen text to `plain`."""
         library().ghostty_terminal_vt_write(self.terminal, data, len(data))
         if not self.synchronized:
             self.view = None
         self.answer()
-        # A control split across writes completes in the next one.
         self.text += self.decoder.decode(data)
         cut = self.text.rfind("\x1b")
         if cut < 0 or not PLAIN_UNFINISHED.fullmatch(self.text[cut:]):
@@ -335,8 +300,6 @@ class ScreenCapture:
             elif part == "\x1b[?1049l":
                 self.alternate = False
             elif not self.alternate:
-                # Main-screen text (before entry or after restoration),
-                # such as diagnostics and detach notices, is a stream.
                 visible = PLAIN_CONTROL.sub("", part).replace("\r\n", "\n")
                 self.plain = (self.plain + visible)[-LIMIT // 4:]
                 self.plain_total += len(visible)
@@ -361,7 +324,6 @@ class ScreenCapture:
             pass
 
     def feed_frames(self, data):
-        """Feed bytes, yielding each commit before consuming the next frame."""
         self.received_bytes += len(data)
         self.collect_clipboard(data)
         self.pending += data
@@ -369,8 +331,6 @@ class ScreenCapture:
         while True:
             match = BOUNDARY.search(self.pending)
             if match is None:
-                # Hold back only a frame mark's start: a complete query
-                # must reach the terminal, which answers it, now.
                 cut = self.pending.rfind(b"\x1b")
                 if cut < 0 or not any(mark.startswith(self.pending[cut:]) for mark in MARKS):
                     cut = len(self.pending)
@@ -400,7 +360,6 @@ class ScreenCapture:
                 yield self.frame
 
     def commit(self):
-        """Commit a synchronized close, or the quiescent final screen at PTY EOF."""
         assert not self.synchronized, "cannot commit an incomplete synchronized update"
         self.view = self.snapshot()
         lib = library()
@@ -421,11 +380,6 @@ class ScreenCapture:
             self.listener(self.completed, self.view.cursor.x, self.view.cursor.y)
 
     def mouse(self, action, col, row, button="left", *, pressed=False):
-        """Encode a zero-based cell position using the terminal's current mouse modes.
-
-        The caller owns held-button state across steps. No reporting mode means
-        no bytes, not a synthetic SGR report the terminal would never send.
-        """
         lib, encoder, event = library(), Handle(), Handle()
         assert lib.ghostty_mouse_encoder_new(None, ctypes.byref(encoder)) == 0
         try:
@@ -451,10 +405,8 @@ class ScreenCapture:
             lib.ghostty_mouse_encoder_free(encoder)
 
     def style(self, text, offset=0):
-        """Committed cell `offset` characters into the first `text`, or None."""
         text = unicodedata.normalize("NFC", text)
         for row in self.completed_cells:
-            # A wide character's trailing cell is empty; index drawn cells.
             drawn = [cell for cell in row if cell.data]
             starts, position = {}, 0
             for cell in drawn:
@@ -477,24 +429,17 @@ class ScreenCapture:
                 and unicodedata.normalize("NFC", marker) in self.completed)
 
     def draft(self, text, caret, *, prompt="› "):
-        """Check the caret row; an empty chat may draw its placeholder there."""
         if self.synchronized or self.generation == 0:
             return False
         cursor = self.screen.cursor
         cells = self.completed_cells[cursor.y]
-        # A wide shell draws the composer after the list's divider. Locate
-        # that boundary in cells, not string offsets (the list may be Unicode).
         origin = 0
         if "".join(cell.data for cell in cells[:2]) not in (" ›", " >"):
             origin = next((at + 1 for at, cell in enumerate(cells[:cursor.x]) if cell.data == "│"), 0)
         line = "".join(cell.data for cell in cells[origin:]).rstrip()
-        # `caret` counts from the mark, after the pane's one-column margin.
         margin = 1 if line.startswith(" ") and not prompt.startswith(" ") else 0
         matches = line[margin:] == (prompt + unicodedata.normalize("NFC", text)).rstrip()
         if not text and prompt in ("› ", "> ") and line[margin:] == prompt + "Type a task":
-            # The empty-chat hint is quiet, unlike literal text parked at Home.
-            # Compare drawn styles instead of pinning a theme's colour. Without
-            # a visible distinction, these cells cannot prove an empty editor.
             mark = cells[origin + margin]
             start = origin + margin + len(prompt)
             matches = caret == len(prompt) and all(

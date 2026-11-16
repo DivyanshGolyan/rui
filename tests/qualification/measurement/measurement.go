@@ -28,7 +28,6 @@ import (
 	"github.com/shirou/gopsutil/v4/process"
 )
 
-// WireVersion is the Host's src/wire_version.zig wire_version; tests/ci checks they agree.
 const WireVersion = "20"
 
 const (
@@ -173,8 +172,6 @@ func hostArguments(store, endpoint string, capacity int, extra []string) []strin
 }
 
 func startHost(cmd *exec.Cmd, stderrPath string, deadline Deadline) (*Host, error) {
-	// Tunable comparisons affect only the Host. Probe activation and collection
-	// belong to the separate linux-memory diagnostic, not qualification.
 	if value, set := os.LookupEnv("RUI_MEASURE_GLIBC_TUNABLES"); set {
 		cmd.Env = append(os.Environ(), "GLIBC_TUNABLES="+value)
 	}
@@ -266,9 +263,6 @@ func startHost(cmd *exec.Cmd, stderrPath string, deadline Deadline) (*Host, erro
 	return host, nil
 }
 
-// CanonicalStore is the Host's exclusive Store selector from readiness.
-// Unix JSON must send this exact string; a CLI alias that the OS resolves to
-// the same directory is not identity on the wire.
 func (h *Host) CanonicalStore() (string, error) {
 	if h == nil {
 		return "", errors.New("Host readiness omitted Store")
@@ -379,8 +373,6 @@ func RunJSONInput(deadline Deadline, input io.Reader, destination any, command s
 	return nil
 }
 
-// EnvironmentHeader frames a Message with an empty client environment; other
-// routes carry none.
 func EnvironmentHeader(route string) string {
 	if route == "/v1/message" {
 		return "X-Rui-Environment-Bytes: 0\r\n"
@@ -443,7 +435,6 @@ func TimedExchangeUnix(deadline Deadline, socketPath string, route string, value
 	return float64(time.Since(started).Microseconds()) / 1000, err
 }
 
-// DatabaseSize includes the WAL, which holds committed pages until checkpoint.
 func DatabaseSize(store string) (map[string]uint64, error) {
 	logical, allocated := uint64(0), uint64(0)
 	for _, name := range []string{"rui.sqlite3", "rui.sqlite3-wal"} {
@@ -526,9 +517,6 @@ func (v SampleValidity) Status() string {
 	return "diagnostic"
 }
 
-// CollectCompletedRounds retains a nonnil completed row even when a later
-// observation failed. It stops further load; the caller still owns reap/audit.
-// Round numbers are one-based. Initial failures return no completed row.
 func CollectCompletedRounds(count int, run func(int) (map[string]any, error)) ([]map[string]any, error) {
 	rounds := make([]map[string]any, 0, count)
 	for round := 1; round <= count; round++ {
@@ -543,8 +531,6 @@ func CollectCompletedRounds(count int, run func(int) (map[string]any, error)) ([
 	return rounds, nil
 }
 
-// QualificationStatus reduces required evidence only. Optional diagnostic rows
-// must stay outside this boundary; missing or unknown verdicts cannot pass.
 func QualificationStatus(rowFamilies ...[]map[string]any) string {
 	precedence := map[string]int{"passed": 0, "target_miss": 1, "incomplete": 2, "failed": 3}
 	status := "passed"
@@ -653,8 +639,6 @@ type ProcessSample struct {
 	FootprintCapture        *FootprintCapture `json:"footprint_capture,omitempty"`
 }
 
-// FootprintCapture brackets one external scan, not an atomic process snapshot.
-// Start identity is gopsutil's millisecond Unix epoch; it is not a native tick.
 type FootprintCapture struct {
 	Command            []string `json:"command"`
 	PID                int32    `json:"pid"`
@@ -731,8 +715,6 @@ func sampleProcessCore(target processCounters) (result ProcessSample, sampleErro
 func SamplePortableProcess(target *process.Process) (PortableProcessSample, error) {
 	core, err := sampleProcessCore(target)
 	if err != nil {
-		// Periodic portable callers accept only complete snapshots. Per-counter
-		// partial evidence is exposed by SampleProcess, not this compact format.
 		return PortableProcessSample{}, err
 	}
 	return core.Portable(), nil
@@ -743,8 +725,6 @@ func SampleProcess(target *process.Process, rawFootprintPath string) (result Pro
 		if sampleError != nil {
 			result.SamplingError = sampleError.Error()
 		}
-		// Preserve initial and partial observations even when a caller must abort
-		// before it can publish a workload row. This file shares the raw lifetime.
 		encoded, writeError := json.MarshalIndent(result, "", "  ")
 		if writeError == nil {
 			writeError = os.WriteFile(rawFootprintPath+".json", encoded, 0o600)
@@ -1025,8 +1005,6 @@ func WriteJSON(path string, value any) error {
 	return os.Rename(temporary, path)
 }
 
-// PublishQualification writes the complete verdict before its caller
-// decides the process exit status.
 func PublishQualification(path string, result map[string]any) error {
 	if path != "" {
 		return WriteJSON(path, result)
@@ -1034,9 +1012,6 @@ func PublishQualification(path string, result map[string]any) error {
 	return EncodeJSON(os.Stdout, result)
 }
 
-// QualificationExitCode keeps process success as strict as the published
-// qualification reducers. Smoke-only runners use their established success
-// vocabulary; every missing or non-success verdict fails the process.
 func QualificationExitCode(result map[string]any) int {
 	status, ok := result["status"].(string)
 	if ok && (status == "passed" || status == "smoke_passed") {
@@ -1087,8 +1062,6 @@ func EncodeJSON(writer io.Writer, value any) error {
 	return encoder.Encode(value)
 }
 
-// LoopbackProtocols lets a plain-http fixture serve HTTP/1.1 and HTTP/2 by
-// prior knowledge (h2c) on one listener.
 func LoopbackProtocols() *http.Protocols {
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)

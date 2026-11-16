@@ -1,17 +1,4 @@
 #!/usr/bin/env python3
-"""Report, per ISO week, the share of closed `ci-red` issues that were real bugs.
-
-Every CI failure files one `ci-red` issue per cause (report_issue.py). Whoever
-closes it adds exactly one cause label, so this counts what CI caught rather
-than what it cost. A week is the ISO week the issue was last closed in.
-
-    strict = real / labelled          a product bug or regression
-    broad  = (real + compile) / labelled
-
-Unlabelled and multiply-labelled issues stay out of both rates and are listed
-by number, so a gap in labelling shows instead of skewing the rate.
---create-labels creates or updates the cause labels themselves.
-"""
 import argparse
 from collections import defaultdict
 import datetime
@@ -21,7 +8,6 @@ import sys
 
 LABEL = "ci-red"
 PREFIX = "cause:"
-# The classes of the CI report's failure ledgers, in the order its table uses.
 CAUSES = {
     "real": ("B60205", "CI red: the fix changed product behavior (a bug or regression)"),
     "compile": ("D93F0B", "CI red: a compile, type-check or format error"),
@@ -34,20 +20,17 @@ CAUSES = {
 
 
 def week(closed_at):
-    """The ISO week, as 2026-W45, an RFC 3339 UTC time falls in."""
     year, number, _ = datetime.datetime.fromisoformat(closed_at.replace("Z", "+00:00")).isocalendar()
     return f"{year}-W{number:02d}"
 
 
 def cause(issue):
-    """The one cause label's name, or None when it has none or several."""
     found = [label["name"][len(PREFIX):] for label in issue["labels"]
              if label["name"].startswith(PREFIX) and label["name"][len(PREFIX):] in CAUSES]
     return found[0] if len(found) == 1 else None
 
 
 def weeks(issues):
-    """Per-week counts, oldest first, from `gh issue list --json number,closedAt,labels`."""
     rows = defaultdict(lambda: {"closed": 0, "unlabelled": [], **{name: 0 for name in CAUSES}})
     for issue in issues:
         if not issue.get("closedAt"):

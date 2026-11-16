@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""Select existing build targets for fresh execution.
-
-A changed file selects the unit roots and process fixtures that reach it
-through literal imports (`Graph`), plus the targets its path rules name and
-fixtures that assert text found in the changed production source.
-"""
 import argparse
 import ast
 import difflib
@@ -33,8 +27,6 @@ CALLER = "src/client.zig"
 FUNCTIONAL_CORES = "src/logic_tests.zig"
 STACK_FRAMES_GATE = "tests/ci/stack_frames.json"
 
-# build.zig's named modules that are repository files. Every other named
-# import must be a package or generated module, or the graph refuses it.
 MODULES = {
     "url": "src/url.zig",
     "test_poll": "src/testing/poll.zig", "h2": "src/h2/h2.zig", "tls_client": "src/tls_client/tls_client.zig", "rui_client": CALLER, "client": CALLER,
@@ -45,7 +37,6 @@ MODULES = {
 PACKAGES = {"std", "builtin", "vaxis", "terminal_width", "terminal_unicode", "h2_c", "openssl_c", "posix",
             "transport_options", "yaml", "sqlite", "unit_test_options", "unit_test_partition"}
 
-# Unit test executables: a change runs each one whose build compiles it.
 UNIT_ROOTS = {
     "test-native": ("src/tests.zig", "src/unit_test_partition.zig", "src/signal_stack_probe.zig",
                     "tests/integration/answer_renderer_allocation.zig"),
@@ -56,24 +47,11 @@ UNIT_ROOTS = {
     "mysql-wire-integration": ("tests/integration/mysql_wire_test.zig",),
 }
 
-# Process fixtures: build target -> (its scripts, the test executables it runs
-# besides Rui, and the Rui owners whose behavior it asserts). Only fixtures
-# that assert caller behavior name the caller (`CALLER`); admission owns the
-# common caller-to-Host path every other fixture also takes. A Rui file
-# reaches a fixture when an owner imports it, or when it is Host code (or
-# Rui's root) that imports an owner: the Host's dispatch into the driven
-# path. Registered functional cores reach only unit roots: their value tests
-# own their decisions. Promotion runs every fixture, so an owner missing here
-# surfaces there; add it. Long witnesses and Debug twins outside check name no
-# owners: RULES map the files they qualify, and promotion runs them.
 I = "tests/integration/"
 BASH = ("src/bash.zig", "src/BashLifecycle.zig", "src/deadline.zig")
-# Model admission: what dispatch and the managed H2 transport assert about a request.
 MODEL = ("src/provider.zig", "src/transport_policy.zig", "src/output_decode.zig", "src/history_memo.zig",
          "src/model_capability.zig", "src/failed_responses.zig")
 CREDENTIALS = ("src/codex_credential_policy.zig", "src/codex_token_wire.zig")
-# The Upgrade's own files, by name. An owner may be a pattern: a new file it
-# matches owns the fixture, and selects it, without being listed anywhere.
 UPGRADE = "src/[Uu]pgrade*.zig"
 FIXTURES = {
     "admission-integration": ((I + "admission_integration.sh",), (), (CALLER, HOST)),
@@ -144,30 +122,18 @@ FIXTURES = {
                               (CALLER, "src/SessionFrontend.zig", "src/Overview.zig", "src/request_wait.zig",
                                "src/cli_args.zig", "src/slash_commands.zig")),
 }
-# Fixtures a broader target runs in full.
 FIXTURE_COVERS = {"human-cli-integration": {"canonical-failure-integration", "terminal-restoration-integration"}}
-# Test code under src/: it reaches the unit roots and test executables that
-# compile it, never Rui's behavior. A module's tests live in one file
-# (`*tests.zig`) or in a folder of per-domain files (`*tests/`).
 TEST_CODE = ("src/*tests.zig", "src/*tests/*", "src/*_test.zig", "src/*testing.zig", "src/*testing/*", "src/mcp/test_server.zig",
              "src/socket_fixture.zig", "src/store/mysql_dialect_check.zig")
-# Targets that need a Linux runner; Mac Selected never runs them.
 LINUX_ONLY = {"login-signal-integration", "mysql-wire-integration"}
 
 EMBED = re.compile(r'@embedFile\(\s*"([^"]+)"\s*\)')
 PYTHON_IMPORT = re.compile(r"^\s*(?:from\s+([A-Za-z_]\w*)\S*\s+import\b|import\s+([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*))", re.M)
-# A fixture that reads a source file names it relative to the repository,
-# or joins it under the repository's "src" path.
 SOURCE_READ = re.compile(r"\b(src/[\w./-]+)")
 SOURCE_JOIN = re.compile(r'/\s*"src"\s*/\s*"([\w./-]+)"')
 
 
 def uses_live_mysql(source, *, entry):
-    """Find server inputs, not environment forwarding or server provisioning.
-
-    Imported helpers do not execute their main blocks: mysql_server's CLI
-    reads a provisioning password there, but its Docker fixture callers do not.
-    """
     if "MYSQL_" not in source:
         return False
     tree = ast.parse(source)
@@ -191,7 +157,6 @@ def uses_live_mysql(source, *, entry):
         if (in_input and isinstance(node, ast.Constant) and isinstance(node.value, str)
             and node.value.startswith("RUI_TEST_MYSQL_")):
             return True
-        # Walk each subtree once, rather than rewalking every nested call.
         in_input = in_input or isinstance(node, (ast.Call, ast.Subscript))
         pending.extend((child, in_input) for child in ast.iter_child_nodes(node))
     return False
@@ -199,12 +164,6 @@ def uses_live_mysql(source, *, entry):
 
 
 class Graph:
-    """Literal import edges of one source tree and the targets each file reaches.
-
-    Zig edges are `@import` and `@embedFile`; `production` leaves out imports
-    only test declarations use. Python edges join tests/integration modules,
-    including those a shell script runs, and the source files they read.
-    """
 
     def __init__(self, names, read):
         names = set(names)
@@ -219,7 +178,6 @@ class Graph:
                 if (uses_live_mysql(source, entry=name in entries) if name.endswith(".py")
                     else "RUI_TEST_MYSQL_" in source):
                     mysql_cases.add(name)
-                # Python names a file it reads in a string; shell, anywhere.
                 strings = (" ".join(token.string for token in tokenize.generate_tokens(io.StringIO(source).readline)
                                     if token.type == tokenize.STRING) if name.endswith(".py") else source)
                 self.python[name] = ({f"{I}{module}.py" for match in PYTHON_IMPORT.finditer(source)
@@ -227,22 +185,14 @@ class Graph:
                                      | set(SOURCE_READ.findall(strings))
                                      | {"src/" + joined for joined in SOURCE_JOIN.findall(source)}) & names - {name}
             elif name in entries and name.endswith(".ts"):
-                # Explicit client fixture entries execute under Node rather than
-                # importing Python helpers; keep their live server use visible.
                 self.python[name] = set()
                 if "RUI_TEST_MYSQL_" in read(name):
                     mysql_cases.add(name)
-        # Every file a Zig compilation reads: sources, and what they import
-        # or embed that is not Zig (openapi.json, SQL baselines, prompt text).
         self.compiled = set(self.every).union(*self.every.values())
         self.cores = {"src/" + core for core in re.findall(
             r'\.\{ "([^"]+\.zig)", @import', read(FUNCTIONAL_CORES).split("const cores = .{", 1)[1].split("\n};", 1)[0])}
-        # Rui's code: its production imports, less test code that a
-        # top-level alias names but only tests use.
         self.tests = {name for name in self.production if matches(name, TEST_CODE)}
         product = {source: targets - self.tests for source, targets in self.production.items() if source not in self.tests}
-        # The Host is what stack_frames.py walks: server.zig and the modules
-        # it names, which the Host also reaches through function pointers.
         modules = json.loads(read(STACK_FRAMES_GATE))["host_modules"] if STACK_FRAMES_GATE in names else []
         host = [HOST, *(name for module in modules for name in self.production
                         if f"/{name}".endswith("/" + module.replace(".", "/") + ".zig"))]
@@ -252,12 +202,7 @@ class Graph:
         for source, targets in product.items():
             for target in targets:
                 callers.setdefault(target, set()).add(source)
-        # Each target's files: those its unit roots compile and its scripts
-        # use or read, and those it reaches only through the code it runs (the
-        # owners it drives and its test executables), which cores do not reach.
         self.reached = {target: self.closure(self.every, roots) for target, roots in UNIT_ROOTS.items()}
-        # Native tests outside Store can exercise every Store engine too. A
-        # change they reach must retain the composed run and its live MySQL.
         conformance = [name for name in self.reached["test-native"]
                        if name.startswith("src/") and not name.startswith("src/store/")
                        and name.endswith(".zig") and name in names
@@ -288,16 +233,11 @@ class Graph:
                                  "or list it in PACKAGES")
             return {os.path.normpath(directory / imported)}
 
-        # An embed names a file, or a module build.zig adds (`MODULES`).
         embedded = {MODULES.get(path) or os.path.normpath(directory / path) for path in EMBED.findall(source)}
         self.production[name] = embedded.union(*map(resolve, production))
         self.every[name] = self.production[name].union(*map(resolve, tested))
 
     def scripts(self, scripts):
-        """The modules and source files fixture scripts use, transitively: a
-        library a fixture imports may import other libraries. No fixture
-        imports another (test_harness_contracts.FixtureImportTest), so a
-        change to one fixture's script selects only the targets that run it."""
         return self.closure(self.python, scripts)
 
     @staticmethod
@@ -311,9 +251,6 @@ class Graph:
         return reached
 
     def targets(self, path):
-        """The unit roots and fixtures that reach `path`, None when no graph
-        edge names it. A functional core or test code reaches fixtures only
-        through their scripts and test executables, or as a named owner."""
         if not (path in self.production or path in self.python
                 or any(path in edges for graph in (self.every, self.python) for edges in graph.values())):
             return None
@@ -329,7 +266,6 @@ def tree_graph():
 
 
 def script_literals(source, suffix):
-    """Literal text, including f-string constant parts, without executing scripts."""
     if suffix == ".py":
         return {node.value for node in ast.walk(ast.parse(source))
                 if isinstance(node, ast.Constant) and isinstance(node.value, str)}
@@ -338,13 +274,11 @@ def script_literals(source, suffix):
 
 
 def fixture_text(literal):
-    """Screen prose, rather than short fragments or identifier-like literals."""
     text = literal.strip()
     return text if len(text) >= 12 and " " in text else ""
 
 
 def source_strings(source):
-    """String bodies drawn by source: quoted strings and Zig multiline lines."""
     tokens = re.finditer(r'//[^\n]*|"(?:\\.|[^"\\])*"|\\\\[^\n]*', source)
     return "\n".join(token[1:-1] if token.startswith('"') else token[2:]
                      for match in tokens if not (token := match.group()).startswith("//"))
@@ -361,11 +295,6 @@ def tree_fixture_literals():
 
 @cache
 def tree_uncommon_texts(candidates):
-    """Count only prose found in changed source, once per production file.
-
-    Like the import graph, prevalence comes from the selector's working tree.
-    Stop searching for each candidate once three files contain it.
-    """
     if not candidates:
         return frozenset()
     counts = dict.fromkeys(candidates, 0)
@@ -380,12 +309,8 @@ def tree_uncommon_texts(candidates):
     return frozenset(text for text, count in counts.items() if count < 3)
 
 
-# The option grammar cli_args.zig used to hold: rules that name cli_args.zig
-# name these too. Path rules, not fixture owners, so the Host importing them
-# does not dispatch into the human CLI.
 CLI_GRAMMAR = ("src/cli_grammar.zig", "src/cli_option_names.zig", "src/serve_grammar.zig")
 
-# The upgrade fixture is standalone, including when a composed gate is selected.
 UPGRADE_PATHS = (UPGRADE, "src/installation_path.zig", "src/TerminalEditor.zig", "src/Installation.zig", "src/release_candidate.zig",
                  "src/HostLifecycle.zig", "src/host_identity.zig",
                  "src/host_identity.c", "src/stderr.zig", "src/host_launch.c",
@@ -393,8 +318,6 @@ UPGRADE_PATHS = (UPGRADE, "src/installation_path.zig", "src/TerminalEditor.zig",
                  "src/Overview.zig", "src/overview_view.zig", "src/SessionFrontend.zig",
                  "tests/integration/upgrade_integration.py", "release/*", "install.sh", "build.zig")
 
-# The source and release installers exercise real publication and PATH decisions.
-# Keep this standalone even beside check, which does not run the installer driver.
 INSTALLER_PATHS = ("tests/integration/installer_integration.py", "tests/ci/fake_rui.py",
                    "tests/ci/test_install.py", "tests/ci/test_installer_boundary.py", "tests/ci/test_release.py",
                    "tests/ci/release.py", "tests/ci/release_publication.py", "tests/ci/git_command.py", "tests/ci/test_release_publication.py", "tests/ci/release_numbers.py", "tests/ci/qualification.py",
@@ -402,10 +325,6 @@ INSTALLER_PATHS = ("tests/integration/installer_integration.py", "tests/ci/fake_
                    "src/cli.zig", "src/cli_args.zig", *CLI_GRAMMAR, "src/store/schema.zig",
                    "src/fetch_dependencies.sh", "release/*", "install.sh", "build.zig", "build.zig.zon")
 
-# Ready PRs run the previous installed-release upgrade only when they change
-# what it exercises: installation, the upgrade and Host lifecycle owners, the
-# Store format (`store_format`), the build or the check itself. Its own unit
-# test runs in policy. Promotion runs it for every batch.
 UPGRADE_CHECK_PATHS = (UPGRADE, "src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig",
                        "src/HostLifecycle.zig", "src/host_identity.*", "src/host_launch.c",
                        "src/store/migration_*", "install.sh", "release/*", "build.zig", "build.zig.zon",
@@ -413,8 +332,6 @@ UPGRADE_CHECK_PATHS = (UPGRADE, "src/Installation.zig", "src/installation_path.z
 
 
 def store_format(source):
-    """What an installed release's Store meets in schema.zig: the version, each
-    version's digest and the forward steps. Imports and comments are not it."""
     return schema_version(source), digest_rows(source), migration_steps(source)
 
 
@@ -422,22 +339,15 @@ def store_format_changed(path, before, after):
     return before is None or after is None or store_format(before) != store_format(after)
 
 
-# Build and workflow files whose changed lines can alter what a warm cache
-# replays: Zig cache paths, keys and steps, and the build's has_side_effects
-# runs. Every cache the setup action restores is a build cache; elsewhere
-# only Zig build-cache lines count, not other tools' caches (actionlint).
-# The cache_execution job's own definition counts too (`cache_policy_changed`).
 CACHE_CONFIG = ("build.zig", "build/*.zig", ".github/actions/*", ".github/workflows/*.yml")
 SETUP_CACHE_LINE = re.compile(r"cache", re.IGNORECASE)
 CACHE_LINE = re.compile(r"zig[-_ ]?cache|\.cache/zig|cache[-_]dir|cache_root|has_side_effects|ci-compiled|build-cache"
                         r"|publish-caches|cache-execution", re.IGNORECASE)
-# Files that are cache policy, or the proof that it never caches acceptance.
 CACHE_POLICY = (".github/actions/setup/caches/save-keys.cjs", ".github/scripts/prune-caches.cjs", "tests/ci/cache_execution.py", "tests/ci/zig_cache_restat.c",
                 "tests/ci/run_selected.py")
 
 
 def code_lines(source):
-    """Lines that are not blank or comments (YAML `#`, Zig `//`)."""
     return [line for line in (source or "").splitlines() if line.strip() and not line.lstrip().startswith(("#", "//"))]
 
 
@@ -447,8 +357,6 @@ def workflow_job(source, name):
 
 
 def yaml_context(lines, index):
-    """A YAML line with what gives it meaning: each less-indented line above
-    it (its keys) and the whole list item (workflow step) it sits in."""
     def indent(line):
         return len(line) - len(line.lstrip())
     context, level, item = [lines[index]], indent(lines[index]), index if lines[index].lstrip().startswith("- ") else None
@@ -467,8 +375,6 @@ def yaml_context(lines, index):
 
 
 def cache_policy_changed(path, before, after):
-    """Whether a changed line, or for YAML its keys and step, names a build
-    cache. An added or removed file counts by its own lines."""
     pattern = SETUP_CACHE_LINE if path.startswith(".github/actions/") else CACHE_LINE
     old, new = code_lines(before), code_lines(after)
     changed = []
@@ -480,21 +386,13 @@ def cache_policy_changed(path, before, after):
             or workflow_job(before, "cache_execution") != workflow_job(after, "cache_execution"))
 
 
-# Paths selection judges by content: rule -> (its paths, whether a
-# (before, after) text pair changes what the rule's check exercises).
-# `main` reads both sides of each matching path.
 CONTENT_RULES = {
     "store_format": ((STORE_SCHEMA,), store_format_changed),
     "cache_policy": (CACHE_CONFIG, cache_policy_changed),
 }
 
-# Nonblocking renderer harnesses; renderer-contracts.yml filters on these paths.
 RENDERER_HARNESSES = ("tests/integration/input_equivalence.py",)
 
-# What the import graph cannot see: inputs no literal import names (C
-# sources, generators, non-Zig consumers) and owners whose checks a test
-# reaches by other means. The graph selects everything else; a source file
-# neither names selects check.
 RULES = (
     (INSTALLER_PATHS, ("installer-integration",), ("installer-integration",),
      "Installer: real publication and PATH boundary"),
@@ -528,8 +426,6 @@ RULES = (
     (("src/os/*",), ("codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),
      ("codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),
      "Platform boundary: the managed transport and credential store it serves on each OS"),
-    # The managed H2 fixtures probe the Host's descriptor refusal without
-    # importing its owners (08b23a01).
     (("src/descriptor*", "src/os/descriptor_limit.zig", "src/server*.zig", "src/platform.zig", "src/cli.zig",
       "tests/integration/descriptor*", "tests/integration/host_launch*", "src/product_defaults.zig",
       "tests/integration/product_defaults.py"),
@@ -577,17 +473,9 @@ RULES = (
      "Installer report reads the CLI's defaults and Host status JSON"),
 )
 
-# Targets that execute the Store dialect check; shard provisioning owns
-# whether their selected part runs that check (callers does not).
 LIVE_MYSQL_DIALECT_TARGETS = frozenset({"test", "test-store", "check", "check-full"})
-# check.yml's Postgres step condition: the Linux targets whose shards start
-# postgres:15 for test-pg's live rounds.
 LIVE_POSTGRES_TARGETS = frozenset({"test-pg", "check", "check-full"})
 
-# Rules whose reason names a live server, each with the targets that start
-# it in CI. A matched rule must leave one of those targets selected, in
-# development too, or its green would say nothing about that server.
-# Development keeps the rule's own targets among them.
 LIVE_RULES = (
     (("src/host_settings.zig", "src/host_start.zig", "src/server_mcp_settings.zig", "src/mysql_url.zig", "tests/integration/settings*", "tests/integration/mysql_launch_admin.zig"),
      ("test", "settings-integration"), ("settings-integration",),
@@ -602,8 +490,6 @@ LIVE_RULES = (
      ("test-logic", "mysql-wire-integration"), ("test-logic",),
      "MySQL wire client: replayed exchanges and a real MySQL 8.4 server (Docker, Linux only)",
      frozenset({"mysql-wire-integration"})),
-    # Every Store statement, the schema, the fixtures and the wire client
-    # can change what MySQL refuses.
     (("src/store.zig", "src/store/*", "!src/store/wire/pg*.zig", "!src/store/wire/scram.zig",
       "!src/store/wire/tls.zig", "tests/integration/mysql_server.py",
       "tests/integration/live_engines.py", "tests/ci/live_engine_step.py"),
@@ -612,20 +498,11 @@ LIVE_RULES = (
      LIVE_MYSQL_DIALECT_TARGETS),
 )
 RULES += tuple(rule[:4] for rule in LIVE_RULES)
-# The Store's MySQL round-trip budget runs against the live MySQL that
-# settings-integration requires; development skips it.
 RULES += ((("src/store.zig", "src/store/*", "!src/store/wire/*", "src/server_execution.zig", "src/execution_turn.zig",
             "src/model_adapter.zig", "tests/integration/store_rounds_cases.py"),
            ("settings-integration",), (),
            "The Store's MySQL round trips per model operation and while idle stay within their budget"),)
 
-# build.zig wires every target, and the setup action installs the compiler and
-# fetches the packages, so an edit to either selects the full gate (RULES
-# above). A hub module is build.zig's code split out for size, and an edit to
-# it selects what a build.zig edit does. Any other module under build/, or a
-# part of the setup action, selects only what it can change: the targets it
-# defines and those that use what it builds. test_selection.BuildModuleTest
-# holds every module and every target a module defines to this map.
 BUILD_HUB = "build.zig"
 SETUP_PARTS = ".github/actions/setup/*/action.yml"
 FIXTURE_TABLE = "build/fixtures.zig"
@@ -633,8 +510,6 @@ FIXTURE_ROW = re.compile(r'^ *\.\{ \.step = "([a-z0-9-]+)",.*\},\n', re.M)
 
 
 def fixture_rows(before, after):
-    """The fixtures whose FIXTURE_TABLE row changed, or None when the edit
-    also changed something outside the rows. A removed row selects nothing."""
     before, after = before or "", after or ""
     if FIXTURE_ROW.sub("", before) != FIXTURE_ROW.sub("", after):
         return None
@@ -643,35 +518,16 @@ def fixture_rows(before, after):
 
 
 BUILD_MODULES = {
-    # The Rui every target builds or runs, and the libraries it links.
     "build/product.zig": BUILD_HUB,
-    # How every CI producer hands executables to the shards that run them.
     "build/ci.zig": BUILD_HUB,
-    # The PTY screen observer: what check-full and these fixtures load to read
-    # the terminal. Its renderer harnesses are nonblocking (renderer-contracts.yml).
     "build/screen.zig": ("check-full", "skills-integration", "upgrade-integration"),
-    # The unit roots, their runners and filters, the deadline witness and the
-    # portable logic root, plus the transport roots named by its registry.
-    # check and check-full run the same unit binaries; test runs native/Store.
     "build/unit.zig": ("test", "test-full", "test-logic", "test-h2", "test-pg", "mysql-wire-integration"),
-    # The Go measurement packages and the macOS measure-* campaigns, which no PR runs.
     "build/measurement.zig": ("measurement-check",),
-    # The table of simple process fixtures: an edit to one row selects that
-    # fixture alone (fixture_rows), any other edit every fixture it defines.
     FIXTURE_TABLE: tuple(sorted(step for step, owner in build_files.steps().items() if owner == FIXTURE_TABLE)),
-    # Cross-compiles and the Darwin type-check. The typecheck-macos job runs it
-    # on every Zig edit (TYPECHECK_INPUTS); promotion builds every cross target.
     "build/cross.zig": (),
-    # Darwin linking, the screen library's name and the Mac unit-root limits.
-    # The unit roots and one screen fixture link and load what it names; it is
-    # a Mac path, so ready PRs run these on Mac too.
     "build/darwin.zig": ("test", "host-launch-integration"),
-    # Every job restores and saves through it, and a key or path error fails
-    # its setup. Zig's cache is content-addressed and acceptance runs are never
-    # cached (cache_execution checks that), so a restore cannot pass a stale test.
     ".github/actions/setup/caches/action.yml": ("test-logic",),
     ".github/actions/setup/caches/save-keys.cjs": ("test-logic",),
-    # One target for each tool it installs: Python packages, Go, Node and tmux.
     ".github/actions/setup/fixtures/action.yml":
         ("dispatch-integration", "measurement-check", "ts-client", "upgrade-integration"),
 }
@@ -680,9 +536,6 @@ RULES += tuple(((module,), targets, tuple(target for target in targets if target
                for module, targets in BUILD_MODULES.items() if targets != BUILD_HUB)
 
 
-# Inputs to the Host's ReleaseSafe frames or to their gate: Zig source the
-# Host imports (`Graph.host`), and anything else under src/. check runs
-# stack-frames; check-full does not.
 STACK_FRAMES = ("src/*", "build.zig", "build.zig.zon", "tests/ci/stack_frames.py", "tests/ci/stack_frames.json")
 
 CHECK_COVERS = {
@@ -694,25 +547,16 @@ CHECK_COVERS = {
     "activity-integration", "preference-policy-integration", "session-list-integration",
     "peer-integration", "sender-identity-integration", "conversation-page-integration",
     "host-allocator-integration", "host-process-test", "human-cli-integration", "model-picker-integration",
-    "canonical-failure-integration",  # human_cli_integration.main executes all cases.
-    "terminal-restoration-integration",  # Same full fixture in the human CLI gate.
+    "canonical-failure-integration",
+    "terminal-restoration-integration",
 }
 
 
 
-# What `zig build typecheck-macos` compiles: Zig and C sources, the build
-# and its pinned packages, and the patches and scripts that prepare them.
-# Files Zig imports or embeds count too (`Graph.compiled`). No other change can alter
-# whether Rui type-checks for Apple Silicon.
 TYPECHECK_INPUTS = ("*.zig", "*.zon", "*.c", "*.h", "src/*.patch", "src/*.sh", ".github/actions/setup/action.yml")
 
 
-# tests/ci units that read no repository file outside their inputs (traced).
-# The policy job skips a unit whose inputs the diff leaves unchanged; every
-# other tests/ci test always runs.
 POLICY_SELF_CHECKS = (
-    # The check.sh driver tests run the real driver and host_process.py, which
-    # imports live_engines.py and h2 and reads the wire version.
     ("test_selection.FullCheckPartitionTest",
      ("tests/ci/*", "build.zig", "tests/integration/check.sh", "tests/integration/host_process.py",
       "tests/integration/live_engines.py", "tests/integration/requirements.txt", "src/wire_version.zig")),
@@ -722,9 +566,6 @@ POLICY_SELF_CHECKS = (
 )
 
 
-# Steps that run the PTY screen observer, whose libghostty-vt comes from the
-# test-only package in screen-emulator: setup fetches its packages for these only.
-# A step missing here still builds, fetching them on demand.
 SCREEN_TARGETS = frozenset({"check", "check-full", "terminal-restoration-integration", "canonical-failure-integration",
                             "host-launch-integration", "upgrade-integration", "human-cli-integration", "overview-integration",
                             "model-picker-integration",
@@ -734,14 +575,10 @@ SCREEN_TARGETS = frozenset({"check", "check-full", "terminal-restoration-integra
 
 
 def setup_requirements(targets):
-    # Every runner installs the same fixture packages (tests/integration/requirements.txt)
-    # for any target, so no fixture's import depends on a hand-kept target list.
     return {"go": bool(({"measurement-check"} | set(RESOURCES)).intersection(targets)), "node": bool({"ts-client", "settings-integration", "check", "check-full"}.intersection(targets)), "python": bool(targets), "screen": bool(SCREEN_TARGETS.intersection(targets)), "tmux": "upgrade-integration" in targets}
 
 
 def execution_batches(targets, check_part="all"):
-    # Share compilation and graph execution only among independent owner suites.
-    # Composed gates and latency-sensitive/long witnesses keep isolated execution.
     if check_part != "all" and "check-full" not in targets:
         raise ValueError("A full-check part requires check-full in the selection")
     if check_part == "execution":
@@ -759,13 +596,11 @@ def execution_batches(targets, check_part="all"):
 
 
 def matches(path, patterns):
-    """A path matches a rule's patterns unless a "!" pattern excludes it."""
     included = any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns if not pattern.startswith("!"))
     return included and not any(fnmatch.fnmatchcase(path, pattern[1:]) for pattern in patterns if pattern.startswith("!"))
 
 
 def mysql_provisioning(targets, part, platform, mysql_suites):
-    """Provisioning and dialect evidence for one shard, from its requirements."""
     targets = set(targets)
     dialect = platform == "linux" and bool(
         targets & (LIVE_MYSQL_DIALECT_TARGETS - {"check-full"})
@@ -775,24 +610,13 @@ def mysql_provisioning(targets, part, platform, mysql_suites):
 
 
 def live_mysql_suites(targets, mysql_suites):
-    """Standalone fixtures that must also run with CI's live MySQL server."""
     targets = set(targets)
-    # check-full's callers shard has no MySQL. Keep each selected live
-    # fixture standalone too, even when that composed gate absorbed it.
-    # check runs every part together with MySQL, so needs no duplicate.
     selected = targets | (CHECK_COVERS if "check-full" in targets else set())
     suites = selected & set(mysql_suites)
     return suites
 
 
 def select(paths, phase, available, graph=None, contents=None, fixture_literals=None):
-    """`contents` maps source and content-rule paths to (before, after) text.
-
-    Missing content counts as changed throughout for CONTENT_RULES, but cannot
-    establish asserted-text ownership. `fixture_literals` maps targets to script
-    literals already filtered for prevalence; when omitted, tree readers find
-    the scripts and count only prose present in the changed source texts.
-    """
     graph = graph or tree_graph()
     paths = [BUILD_HUB if BUILD_MODULES.get(path) == BUILD_HUB else path for path in paths]
     contents = contents or {}
@@ -802,7 +626,6 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
                               for path in paths)}
     targets, native_targets, reasons = set(), set(), set()
     live_targets, live_reasons = set(), set()
-    # Each live need as (the one target that runs only its tests, or None, reason).
     live_needs = set()
     manual_checks = set()
     linux_memory_checks = False
@@ -810,8 +633,6 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
         if path == FIXTURE_TABLE and rows is not None:
             continue
         reached = graph.targets(path)
-        # A shortcut only adds its reason, and stops the fallbacks below; every
-        # rule, LIVE_RULES included, still matches the path.
         shortcut = False
         if path.endswith(".md") or path.startswith(("docs/", "research/")):
             reasons.add("Documentation: references and diff whitespace, no runtime change")
@@ -840,7 +661,6 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
             targets.add("test")
             native_targets.add("test")
             live_targets.add("test")
-            # These tests sit among the native root's others: no root runs only them.
             live_needs.add((None, "Native Store conformance tests require live MySQL"))
             live_reasons.add(("Native Store conformance tests require live MySQL", LIVE_MYSQL_DIALECT_TARGETS))
             reasons.add("Native Store conformance tests require live MySQL")
@@ -874,7 +694,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
             native_targets.add("check")
             reasons.add("Source no import or rule reaches: full fallback")
         if path in ("src/client.zig", "src/ResponseTiming.zig"):
-            targets.add("test-full")  # Response wait/inactivity owner.
+            targets.add("test-full")
             native_targets.add("test-full")
     if rows:
         targets.update(rows)
@@ -896,8 +716,6 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
             targets.update(asserted)
             native_targets.update(asserted - LINUX_ONLY)
             reasons.add("Asserted text: a fixture waits for text this file draws")
-    # The unit roots review runs on Linux, before `check` absorbs them: drafts
-    # run these too. Process fixtures among UNIT_ROOTS keep their own rules.
     unit_roots = targets & ({"test"} | UNIT_ROOTS.keys()) - FIXTURES.keys()
     for checks in (targets, native_targets):
         if "test" in checks or {"test-native", "test-store"} <= checks:
@@ -905,7 +723,6 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
             checks.add("test")
         covered = {case for broad, cases in FIXTURE_COVERS.items() if broad in checks for case in cases}
         checks -= covered
-        # Every case check runs is selected: run them as one gate.
         if CHECK_COVERS - UNIT_ROOTS.keys() - {"test"} <= checks | covered:
             checks.add("check")
         if "check-full" in checks:
@@ -914,7 +731,6 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
             checks -= CHECK_COVERS
         if "check" in checks:
             checks.discard("stack-frames")
-    # Linux predicts Mac except where code may differ by platform.
     mac_required = phase == "review" and any(mac_path(path) for path in paths)
     if mac_required:
         reasons.add("Mac-specific path: PR runs Mac Selected (tests/ci/platform_boundary.py)")
@@ -923,9 +739,6 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
     if upgrade_required:
         reasons.add("Upgrade, installer or Store-format path: PR runs the previous installed-release upgrade")
     if phase == "development":
-        # Development does not replace final boundary/native acceptance, but
-        # keeps the Linux unit roots the change reaches and each matched live
-        # rule's own targets (`LIVE_RULES`). No fixture, long suite or Mac.
         targets = ({"test-logic"} | unit_roots | live_targets |
                    ({"upgrade-integration"} if any(matches(path, UPGRADE_PATHS) for path in paths) else set()) |
                    ({"installer-integration"} if any(matches(path, INSTALLER_PATHS) for path in paths) else set())
@@ -950,17 +763,13 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
         raise ValueError(f"Selected targets absent from the build: {sorted(missing)}")
     return {"phase": phase, "targets": sorted(targets),
             "mysql_suites": sorted(graph.live_mysql),
-            # The selected targets that start a live server in CI (`LIVE_RULES`).
             "server_targets": sorted((targets & live_targets) | ({"test"} if "test" in targets and "test-store" in live_targets else set())),
-            # Each live need: [the target that runs only its tests, or null, reason].
             "live_needs": sorted(([root, reason] for root, reason in live_needs), key=lambda need: (need[0] or "", need[1])),
             "native_targets": sorted(native_targets), "native_required": bool(native_targets),
             "mac_required": mac_required, "upgrade_required": upgrade_required,
             "unit_compile_required": "src/store/schema.zig" in paths,
-            # Store, recovery and upgrade changes fail for real; never rerun them.
             "retry": not strict(paths),
             "cache_execution_checks": cache_execution_checks,
-            # Whether the change can alter what `typecheck-macos` compiles.
             "typecheck_macos": typecheck_macos,
             "linux_memory_checks": linux_memory_checks, "manual_checks": sorted(manual_checks),
             "policy_skips": [unit for unit, inputs in POLICY_SELF_CHECKS
@@ -974,14 +783,12 @@ def changed_paths(base, head):
             ["git", "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}"],
             text=True, stderr=subprocess.PIPE).strip()
     head_commit, base_commit = commit(head), commit(base)
-    # No rename inference: both deleted and added owners select their checks.
     raw = subprocess.check_output(["git", "diff", "--no-renames", "--name-only", "-z",
                                    base_commit, head_commit])
     return [p.decode("utf-8", "surrogateescape") for p in raw.split(b"\0") if p], base_commit
 
 
 def merged_base(base, ref, head="HEAD"):
-    """Whether branch history since base merges a commit reachable from ref."""
     merges = subprocess.check_output(["git", "rev-list", "--merges", "--parents", f"{base}..{head}"], text=True)
     for line in merges.splitlines():
         for parent in line.split()[2:]:
@@ -991,7 +798,6 @@ def merged_base(base, ref, head="HEAD"):
 
 
 def revision_text(commit, path):
-    """The path's text at commit, or None where the commit has no such file."""
     shown = subprocess.run(["git", "show", f"{commit}:{path}"], capture_output=True, text=True,
                            encoding="utf-8", errors="surrogateescape")
     return shown.stdout if shown.returncode == 0 else None

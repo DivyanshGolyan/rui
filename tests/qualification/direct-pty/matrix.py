@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Synthetic primary key matrix, not physical-human qualification."""
 import argparse
 import concurrent.futures
 import hashlib
@@ -49,15 +48,12 @@ def inventory():
         row("ctrl-d-nonempty", b"abc\x1b[D\x04Z\r", "abZ"),
         row("backspace-grapheme", "A中é🧑‍🌾\x7fZ\r".encode(), "A中éZ"),
         row("alt-unbound", b"ab\x1bzQ\r", "abQ"),
-        # docs/contracts/session-ui.md: Alt-Enter (ESC CR, Ghostty Shift-Enter) adds a line.
         row("alt-enter", b"ab\x1b\rQ\r", "ab\nQ"),
         row("alt-unicode", "ab\x1béQ\r".encode(), "abQ"),
         row("kitty-alt", b"ab\x1b[122;3uQ\r", "abQ"),
         row("kitty-shift-enter", b"one t\x1b[13;2uZwo!\r", "one t\nZwo!"),
         row("kitty-ctrl-a-e", b"bc\x1b[97;5ua\x1b[101;5uZ\r", "abcZ"),
         row("kitty-alt-j", b"one\x1b[106;3utwo\r", "onetwo"),
-        # rxvt's Alt-Left (ESC before the Left sequence) moves a word left;
-        # plain Left would give "one tXw", and a leaked tail "one tw[DX".
         row("double-esc-arrow", b"one tw\x1b\x1b[DX\r", "one Xtw"),
         row("double-esc-paste", b"a\x1b\x1b[200~b\x1b[201~\r", "ab"),
         row("paste", b"\x1b[200~line1\nline2\x1b[201~\r", "line1\nline2"),
@@ -89,9 +85,6 @@ def inventory():
                        ("malformed-utf8", b"bad\xc3(\r")):
         rows.append({"name": name, "scenario": "rejection", "chunks": [chunk(data)]})
     rows.append({"name": "recovery-raw", "scenario": "recovery", "chunks": [chunk(b"\x12")]})
-    # Expected movement is relative to the rendered feed capacity, not a
-    # particular footer height. The reserved chip row never changes that
-    # capacity. End, Esc and Ctrl-G return to the live anchor.
     for name, enter, leave, pages, lines in (
         ("key-pgup", b"\x1b[5~", b"\x07", 1, 0),
         ("key-pgdn", b"\x1b[5~" * 2, b"\x1b[6~", 2, 0),
@@ -123,7 +116,6 @@ def sha256(path):
 
 
 def interrupted(number, frame):
-    # A second signal cannot interrupt mandatory cleanup of owned children.
     for selected in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(selected, signal.SIG_IGN)
     raise SystemExit(128 + number)
@@ -142,15 +134,12 @@ def cancel(number, frame):
 
 
 def worker(binary, output, vector):
-    # No preexec_fn in a threaded parent. Every worker sets its own limit before
-    # launching any fixture, and children inherit it with the hard limit intact.
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     if hard < 256:
         raise RuntimeError(f"hard NOFILE {hard} cannot provide required soft 256")
     resource.setrlimit(resource.RLIMIT_NOFILE, (256, hard))
     for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(number, interrupted)
-    # Imported here: model_fixture reads its binary from this process's argv at import.
     from scenarios import Fixture, SCENARIOS
     result = {"row": vector["name"], "status": "setup", "soft_nofile": 256,
               "pid": os.getpid(), "binary_sha256": sha256(binary), "vector": vector}

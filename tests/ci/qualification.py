@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Shard existing targets without changing their assertions or build graph."""
 import argparse
 import json
 
@@ -16,17 +15,9 @@ NATIVE = (
     "current-facts-integration", "server-delivery-integration", "test-full",
     "measurement-check", "installer-integration",
 )
-# Selected Linux suites run at most this many shards, all concurrently.
 LINUX_SHARDS = 10
-# The gates that run for minutes (stack-frames compiles the product with
-# LLVM); every other packed suite runs for seconds to two minutes.
 LONG_GATES = frozenset(("check", "check-full", "test", "stack-frames"))
-# Beside a long gate the short suites share this many shards: they still end
-# well inside the gate's run, so more shards would only repeat setup.
 SHARDS_BESIDE_LONG_GATE = 3
-# Targets whose graph compiles the unit test roots (src/tests.zig). Their
-# producer compiles them in parallel, separately from the remaining gates.
-# build.zig refuses a split producer whose selection does not reach it.
 UNIT_TARGETS = frozenset(("test", "test-native", "test-store", "check", "check-full"))
 FULL_PARTS = ("execution", "callers")
 
@@ -36,18 +27,15 @@ def matrix_name(target, part="all"):
 
 
 def matrix_targets(name):
-    """Recover actual build targets/parts from this owner's Linux matrix names."""
     aliases = {matrix_name("check-full", part): ("check-full", part) for part in FULL_PARTS}
     return tuple(aliases.get(member, (member, "all")) for member in name.split("+") if member)
 
 
 def split_build(targets):
-    # A selection of the unit tests alone leaves the rest producer nothing to compile.
     return bool(UNIT_TARGETS & set(targets)) and set(targets) not in ({"test"}, {"test-native"}, {"test-store"})
 
 
 def shards(targets, platform="linux", limit=LINUX_SHARDS, *, mysql_suites=None):
-    # Lazy import: selection also uses this module's resource target names.
     from select_tests import mysql_provisioning, tree_graph
     if mysql_suites is None:
         mysql_suites = tree_graph().live_mysql if platform == "linux" and targets else set()
@@ -59,8 +47,6 @@ def shards(targets, platform="linux", limit=LINUX_SHARDS, *, mysql_suites=None):
         return {"include": rows}
 
     if platform == "macos":
-        # The standard account cap is five Macs shared by all workflows. Use
-        # three workers, leaving room for another PR; never queue ten compilers.
         rows = []
         if "check-full" in targets:
             for part in FULL_PARTS:
@@ -76,8 +62,6 @@ def shards(targets, platform="linux", limit=LINUX_SHARDS, *, mysql_suites=None):
     rows, packed = [], []
     for target in targets:
         if target == "measure-model-output":
-            # Preserve both rounds at every capacity, plus all growth/spill cases.
-            # Eight minutes of offer work alone does not fit one short CI job.
             for scenario in ("growth", "1", "8", "16", "100"):
                 args = ["--growth-only"] if scenario == "growth" else ["--capacity", scenario]
                 rows.append(dict(name=f"{target}-{scenario}", targets=[target],
@@ -89,10 +73,6 @@ def shards(targets, platform="linux", limit=LINUX_SHARDS, *, mysql_suites=None):
             rows.append(dict(name=target, targets=[target], part="all", resource=True, args=[]))
         else:
             packed.append(target)
-    # Short Selected suites mostly pay setup, so pack them into the remaining
-    # concurrent slots. A long gate runs alone: a suite packed with it would
-    # only lengthen the run's longest shard. Qualification keeps one isolated
-    # job per suite.
     long = [target for target in packed if target in LONG_GATES]
     short = [target for target in packed if target not in LONG_GATES]
     for target in long:
@@ -114,7 +94,6 @@ def qualification(suite, platform):
     targets = []
     if suite in ("footprint", "resources", "all"):
         resources = RESOURCES[:1] if suite == "footprint" else RESOURCES
-        # These four entry points call RequireRuntime, which rejects Linux.
         macos_only = {"measure-admission", "measure-message-admission",
                       "measure-model-dispatch", "measure-model-retry"}
         targets.extend(target for target in resources
@@ -122,7 +101,6 @@ def qualification(suite, platform):
     if suite in ("native", "all"):
         targets.extend(NATIVE)
         if platform == "linux":
-            # check-full replaces check here, so the Linux-only frame gate runs beside it.
             targets.extend(("login-signal-integration", "mysql-wire-integration", "stack-frames"))
     return shards(targets, platform, limit=None)
 

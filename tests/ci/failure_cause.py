@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-"""Name why a Selected checks run failed, and rerun it once when only infrastructure failed.
-
-A job failed for infrastructure when no runner ran it or the runner was lost,
-or when a step that only fetches or installs stopped: cancelled, or failed with
-a network error in that step's own log. Every other failed or cancelled job is
-a check failure, including a timeout in a step that builds or tests.
-
-`explain` runs in an aggregate whose requirement failed and prints each failed
-job of the run attempt with its cause. `retry` runs after the run completes:
-on a pull request's first attempt whose every failure was infrastructure, and
-while that run still tests the PR's head, it reruns the failed jobs once. A
-rerun job never repeats a test that ran: its tests were skipped or never
-started.
-"""
 import argparse
 import json
 import os
@@ -21,12 +7,7 @@ import subprocess
 
 from report_issue import gh, job_log
 
-# Aggregates restate their needs; their own failure is never a cause.
 AGGREGATES = frozenset({"linux", "macos", "admission"})
-# Steps that only fetch, install or start services. A test or build step is
-# never infrastructure, whatever its log says: a Host crash also resets
-# connections (#915). Restoring the producer artifact is not listed: a failed
-# download falls back to compiling locally, so its failure is a compile failure.
 INFRA_STEPS = frozenset({
     "Set up job",
     "Install the pinned packages tests/ci imports",
@@ -38,19 +19,15 @@ INFRA_STEPS = frozenset({
     "Restore the pinned previous release's compilation",
 })
 INFRA_ACTIONS = ("actions/checkout", "actions/setup-node", "actions/upload-artifact", "./.github/actions/setup")
-# A network failure as curl, gh, pip, npm, Docker and Zig's fetch report it.
 NETWORK = re.compile(
     r"returned error: 5\d\d|HTTP 5\d\d|\b5\d\d (?:Internal Server Error|Bad Gateway|Service Unavailable|"
     r"Gateway Time-?out)|error: connection-failed|Could not resolve host|Temporary failure in name resolution|"
     r"NameResolutionError|Connection reset by peer|Connection timed out|ETIMEDOUT|ECONNRESET|EAI_AGAIN|"
     r"TLS handshake timeout|toomanyrequests|Operation timed out")
-# GitHub's own annotations when it never ran or lost the job's runner.
 RUNNER_LOST = re.compile(
     r"was not acquired by Runner|received a shutdown signal|lost communication with the server|"
     r"hosted runner encountered an error")
 STAMP = re.compile(r"^\ufeff?(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)")
-# The error that stopped a step is among its last lines; an earlier network
-# error that a retry overcame is not the cause.
 TAIL_LINES = 25
 
 
@@ -60,11 +37,6 @@ def infra_step(name):
 
 
 def step_log(log, step):
-    """The step's last lines up to its final error, from the job log's timestamps.
-
-    Steps that end in the same second share lines, so the step's own error
-    line, not its end time, closes the window.
-    """
     start, end = step["started_at"][:19], step["completed_at"][:19]
     lines, inside = [], False
     for line in log.splitlines():
@@ -79,10 +51,6 @@ def step_log(log, step):
 
 
 def cause(job, annotations, log):
-    """(kind, why) for a job that neither passed nor was skipped; kind is infra or check.
-
-    log is None when it could not be read; a network failure then stays unproven.
-    """
     if job["status"] != "completed":
         return "infra", "no runner took the job"
     if lost := next((note for note in annotations if RUNNER_LOST.search(note)), None):
@@ -105,11 +73,6 @@ def cause(job, annotations, log):
 
 
 def causes(jobs, annotations_of, log_of, finished=True):
-    """(job name, kind, why) for each failed, cancelled or, in a finished run, unrun job; aggregates aside.
-
-    An aggregate explains its run while other jobs still run or wait, so only a
-    finished run counts a job without a conclusion as a failure.
-    """
     found = []
     for job in jobs:
         if job["name"] in AGGREGATES or job["conclusion"] in ("success", "skipped", "neutral"):
@@ -126,11 +89,6 @@ def needs_log(job):
 
 
 def retry_refusal(run, found, head):
-    """Why the run must not be retried, or None to rerun its failed jobs once.
-
-    head is the PR's current head, or None without an open PR. Rerunning an
-    older head would join the PR's concurrency group and cancel its newer run.
-    """
     if run["conclusion"] != "failure":
         return f"the run concluded {run['conclusion']}"
     if run["event"] != "pull_request":
