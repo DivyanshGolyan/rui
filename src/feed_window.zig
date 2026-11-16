@@ -34,7 +34,9 @@ pub const Text = struct {
         return .{ .bytes = bytes, .styles = document.styles[0..bytes.len] };
     }
 };
+pub const QuoteBody = viewport.QuoteBody;
 pub const Entry = struct {
+    quote_body: QuoteBody = .none,
     key: Key,
     text: Text,
     tight: bool = false,
@@ -161,11 +163,14 @@ pub const Window = struct {
         length: usize,
         tight: bool,
         provisional: bool,
+        quote_body: QuoteBody = .none,
+        body_length: usize = 0,
     };
 
     document: Document = .{ .dirty = false, .sidenotes = true, .quotes = true },
     entries: [entry_capacity]Stored = undefined,
     count: usize = 0,
+    revision: u64 = 0,
     opened: Opened = .{},
     // Page cursors are facts, not aliases for rendered row keys: filtered or
     // empty pages can advance them without adding any rendered text.
@@ -206,7 +211,7 @@ pub const Window = struct {
     pub fn replace(self: *Window, key: Key, new_text: Text) Error!void {
         const index = self.indexOf(key) orelse unreachable;
         const old = self.entries[index];
-        try self.splice(index, 1, &.{.{ .key = key, .text = new_text, .tight = old.tight, .provisional = old.provisional }});
+        try self.splice(index, 1, &.{.{ .key = key, .text = new_text, .tight = old.tight, .provisional = old.provisional, .quote_body = old.quote_body }});
     }
 
     /// Forward reads restart at the first provisional row. The replacement may
@@ -224,6 +229,7 @@ pub const Window = struct {
     }
 
     pub fn trim(self: *Window, drop_front: usize, drop_back: usize) void {
+        if (drop_front != 0 or drop_back != 0) self.revision +%= 1;
         std.debug.assert(drop_front + drop_back <= self.count);
         const end = self.count - drop_back;
         const start_byte = if (drop_front < self.count) self.entries[drop_front].offset else self.document.length;
@@ -252,6 +258,32 @@ pub const Window = struct {
         self.target_count = kept;
         // Open keys deliberately survive both sides, including an empty window.
     }
+
+    /// A monotonic extraction pass caches only its current row and line.
+    pub const QuoteFilter = struct {
+        window: *const Window,
+        entry: usize = 0,
+        next_line: usize = 0,
+        start: usize = 0,
+        end: usize = 0,
+
+        pub fn includes(self: *QuoteFilter, at: usize) bool {
+            if (at >= self.next_line) {
+                const document = &self.window.document;
+                while (self.entry < self.window.count and at >= self.window.entries[self.entry].offset + self.window.entries[self.entry].length) self.entry += 1;
+                if (self.entry == self.window.count) return false;
+                const row = self.window.entries[self.entry];
+                var line = at;
+                while (line > row.offset and document.bytes[line - 1] != '\n') : (line -= 1) {}
+                self.next_line = @min(document.lineEnd(at) + 1, row.offset + row.length);
+                const end = @min(self.next_line, row.offset + row.body_length);
+                const bounds = if (line < end) document.quoteBounds(row.quote_body, line, end) else null;
+                self.start = if (bounds) |body| body.start else self.next_line;
+                self.end = if (bounds) |body| body.end else self.next_line;
+            }
+            return at >= self.start and at < self.end and !self.window.document.summaryByte(at);
+        }
+    };
 
     /// Text borrows the window and is invalidated by any edit, not by heights.
     pub fn text(self: *const Window, key: Key) Text {
@@ -631,7 +663,7 @@ pub const Window = struct {
                 const last = offset + p.length - 1;
                 self.document.styles[last] = viewport.seamStyle(self.document.styles[last]);
             }
-            self.entries[first + i] = .{ .key = entry.key, .offset = offset, .length = p.length, .tight = entry.tight, .provisional = entry.provisional };
+            self.entries[first + i] = .{ .key = entry.key, .offset = offset, .length = p.length, .tight = entry.tight, .provisional = entry.provisional, .quote_body = entry.quote_body, .body_length = if (p.marker_length == 0) p.length else p.head };
             for (entry.messages) |target| {
                 // Oversized rows are capped; targets in omitted text disappear
                 // with their summaries. Capacity was checked before mutation.
@@ -643,6 +675,7 @@ pub const Window = struct {
         }
         self.document.length = length;
         self.count = count;
+        self.revision +%= 1;
     }
 };
 
@@ -1178,4 +1211,93 @@ test "feed_window rows answer positionAtWith for every screen row from every fir
     try testing.expect(total > 400);
     var rows = tall.rowsWith(.{ .first = 0 }, narrow, .{});
     for (0..total + 1) |screen_row| try testing.expectEqual(tall.positionAt(.{ .first = 0 }, @intCast(screen_row), narrow), rows.next() orelse null);
+}
+
+test "quote body extraction denies chrome and retains shown Unicode indentation" {
+    const gpa = std.testing.allocator;
+    const window = try gpa.create(Window);
+    defer gpa.destroy(window);
+    window.* = .{};
+    var user: viewport.Sized(1024, true) = .{};
+    try user.append("› " ++ View.Mark.body ++ "雪e\u{301}\n    body\n\n" ++ View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n");
+    try user.prepare();
+    var answer: viewport.Sized(1024, true) = .{};
+    try answer.append("answer\n\n  indented\n" ++ View.Mark.summary ++ "┄ 7 more lines" ++ View.Mark.reset ++ "\n");
+    try answer.prepare();
+    try window.append(&.{
+        .{ .key = .{ .position = 1 }, .text = .{ .bytes = "Finished\n" } },
+        .{ .key = .{ .position = 2 }, .text = Text.fromDocument(&user), .quote_body = .user },
+        .{ .key = .{ .position = 3 }, .text = Text.fromDocument(&answer), .quote_body = .answer },
+    });
+    const result = try @import("transcript_selection.zig").copyBody(gpa, window, .{ .from = 0, .to = window.document.length });
+    defer gpa.free(result.text.bytes);
+    try std.testing.expectEqualStrings("雪e\u{301}\n  body\n\nanswer\n\n  indented\n", result.text.bytes);
+    const normal = try @import("transcript_selection.zig").copy(gpa, &window.document, .{ .from = 0, .to = window.document.length });
+    defer gpa.free(normal.text.bytes);
+    try std.testing.expect(std.mem.startsWith(u8, normal.text.bytes, "Finished\n› "));
+    try std.testing.expect(std.mem.indexOf(u8, normal.text.bytes, "┄ 9 more lines") != null);
+}
+
+test "quote body extraction omits tool UI and hidden links without losing authored spaces" {
+    const gpa = std.testing.allocator;
+    const window = try gpa.create(Window);
+    defer gpa.destroy(window);
+    window.* = .{};
+    const fold = @import("tool_fold.zig");
+    const terminal = @import("TerminalText.zig");
+    var document: viewport.Sized(2048, true) = .{};
+    try document.append(fold.heading_marker ++ "✓ Bash succeeded\n" ++ fold.output_marker ++ "        actual indent\n" ++ fold.output_marker ++ "    \n" ++ fold.output_marker ++ "    literal ┄ authored\n" ++ fold.more_marker ++ "    … 17 more lines\n");
+    try document.prepare();
+    try window.append(&.{.{ .key = .{ .position = 1 }, .text = Text.fromDocument(&document), .quote_body = .tool }});
+    document.clear();
+    try document.append(terminal.link_open ++ "https://example.test/private-hidden-address" ++ terminal.link_end ++ "shown label" ++ terminal.link_close ++ "\n");
+    try document.prepare();
+    try window.append(&.{.{ .key = .{ .position = 2 }, .text = Text.fromDocument(&document), .quote_body = .answer }});
+    const result = try @import("transcript_selection.zig").copyBody(gpa, window, .{ .from = 0, .to = window.document.length });
+    defer gpa.free(result.text.bytes);
+    try std.testing.expectEqualStrings("    actual indent\n\nliteral ┄ authored\nshown label\n", result.text.bytes);
+}
+
+test "quote body extraction keeps actual UserBody preview prefixes beside inline ellipses" {
+    const gpa = std.testing.allocator;
+    const Sink = struct {
+        writer: *std.Io.Writer,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.writer.writeAll(bytes);
+        }
+    };
+    var source_storage: [2048]u8 = undefined;
+    var source_writer = std.Io.Writer.fixed(&source_storage);
+    const phrase = "Konstantin Oberhauser-Wettstein reviewed the Unicode selection boundary. ";
+    for (0..2) |_| {
+        for (0..8) |_| try source_writer.writeAll(phrase);
+        try source_writer.writeByte('\n');
+    }
+    try source_writer.writeAll("private hidden remainder must not be quoted\n");
+    const source = source_writer.buffered();
+    var rendered: std.Io.Writer.Allocating = .init(gpa);
+    defer rendered.deinit();
+    var sink: Sink = .{ .writer = &rendered.writer };
+    try View.userPrefix(&sink, false, 0);
+    var body: View.UserBody(*Sink) = undefined;
+    try body.init(&sink, source.len, false);
+    try body.feed(source);
+    try std.testing.expect(try body.finish());
+    try sink.feed("\n");
+    var document: viewport.Sized(2048, true) = .{};
+    try document.append(rendered.written());
+    try document.prepare();
+    const window = try gpa.create(Window);
+    defer gpa.destroy(window);
+    window.* = .{};
+    try window.append(&.{.{ .key = .{ .position = 1 }, .text = Text.fromDocument(&document), .quote_body = .user }});
+    const first = std.mem.indexOf(u8, window.document.text(), "Konstantin").?;
+    const partial = try @import("transcript_selection.zig").copyBody(gpa, window, .{ .from = first, .to = first + 100 });
+    defer gpa.free(partial.text.bytes);
+    try std.testing.expectEqualStrings(source[0..100], partial.text.bytes);
+    const whole = try @import("transcript_selection.zig").copyBody(gpa, window, .{ .from = 0, .to = window.document.length });
+    defer gpa.free(whole.text.bytes);
+    const expected = try std.mem.concat(gpa, u8, &.{ source[0..200], "\n", source[0..200], "\n" });
+    defer gpa.free(expected);
+    try std.testing.expectEqualStrings(expected, whole.text.bytes);
 }

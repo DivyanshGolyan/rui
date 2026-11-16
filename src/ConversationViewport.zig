@@ -106,6 +106,13 @@ pub const Colours = struct {
 /// newline, so even an empty line and an evicted prefix need no side storage.
 /// Two foreground indexes no colour uses mark an OSC 8 link: its address,
 /// kept in the text but never drawn, and right after it the text it links.
+pub const QuoteBody = enum { none, user, answer, tool };
+const AllText = struct {
+    pub fn includes(_: *@This(), _: usize) bool {
+        return true;
+    }
+};
+
 const foreground_mask: u8 = 0b111 << 3;
 const code_index: u8 = 5;
 const linked_index: u8 = 6;
@@ -318,22 +325,56 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         /// right-margin times and hidden link addresses are left out, and a
         /// tab, shown as a space, copies as one. Null past `most` bytes.
         pub fn shownText(self: *const Self, gpa: std.mem.Allocator, from: usize, to: usize, most: usize) !?[]u8 {
+            return self.shownTextWhere(gpa, from, to, most, AllText{});
+        }
+
+        /// The same displayed extraction, restricted by a body provenance owner.
+        pub fn shownTextWhere(self: *const Self, gpa: std.mem.Allocator, from: usize, to: usize, most: usize, eligibility: anytype) !?[]u8 {
             comptime std.debug.assert(styled);
             const end = @min(to, self.text().len);
             const start = @min(from, end);
             var length: usize = 0;
+            var filter = eligibility;
             for (start..end) |index| {
-                if (!isSidenote(self.styles[index]) and !self.hidden(index)) length += 1;
+                if (filter.includes(index) and !isSidenote(self.styles[index]) and !self.hidden(index)) length += 1;
             }
             if (length > most) return null;
             const out = try gpa.alloc(u8, length);
             length = 0;
+            filter = eligibility;
             for (start..end) |index| {
-                if (isSidenote(self.styles[index]) or self.hidden(index)) continue;
+                if (!filter.includes(index) or isSidenote(self.styles[index]) or self.hidden(index)) continue;
                 out[length] = if (self.bytes[index] == '\t') ' ' else self.bytes[index];
                 length += 1;
             }
             return out;
+        }
+
+        /// Authored body bounds on one retained logical line. Synthetic role,
+        /// fold and status text never grants body provenance by resemblance.
+        pub fn quoteBounds(self: *const Self, kind: QuoteBody, start: usize, end: usize) ?struct { start: usize, end: usize } {
+            if (kind == .none or self.summaryAt(start) != null) return null;
+            var first = start;
+            switch (kind) {
+                .none => unreachable,
+                .answer => {},
+                .user => {
+                    while (first < end and self.styles[first] & (user_bit | summary_bit) != user_bit) : (first += 1) {}
+                    if (first == end) return null;
+                    if (first == start and std.mem.startsWith(u8, self.text()[first..end], "  ")) first += 2;
+                },
+                .tool => {
+                    const marker = self.lineMarker(start) orelse return null;
+                    if (!std.mem.eql(u8, marker.uri, tool_fold.output_uri)) return null;
+                    first = marker.end;
+                    if (std.mem.startsWith(u8, self.text()[first..end], "    ")) first += 4;
+                },
+            }
+            return .{ .start = first, .end = end };
+        }
+
+        pub fn summaryByte(self: *const Self, position: usize) bool {
+            return self.styles[position] & (user_bit | summary_bit) == user_bit | summary_bit;
         }
 
         /// Whether a drawn cell's text at `position` belongs to the body:

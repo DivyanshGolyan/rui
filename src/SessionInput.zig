@@ -90,6 +90,44 @@ pub fn replace(self: *Self, change: Editor.Replacement) Editor.KeyOutcome {
     return self.tracked(Editor.KeyOutcome, Editor.replace, .{change});
 }
 
+/// A press names this draft and caret, not whichever draft is active later.
+pub const Insertion = struct { owner: *const Self, revision: u64, bank: u1, caret: usize };
+
+pub fn insertionTarget(self: *const Self) ?Insertion {
+    const editor = &self.editors[self.active];
+    if (editor.rejected != null or editor.pasting() or editor.area.partial_length != 0) return null;
+    return .{ .owner = self, .revision = self.revision, .bank = self.active, .caret = editor.cursor() };
+}
+
+/// Quotes displayed body text without touching a loaned submission or replacing
+/// the draft. The temporary Markdown belongs to this call only.
+pub fn insertQuote(self: *Self, gpa: std.mem.Allocator, target: Insertion, body: []const u8) !Editor.KeyOutcome {
+    if (!std.meta.eql(self.insertionTarget(), @as(?Insertion, target)) or body.len == 0) return .none;
+    const draft = self.composition();
+    const leading = target.caret != 0 and draft.bytes[target.caret - 1] != '\n';
+    var length: usize = @intFromBool(leading);
+    var lines = std.mem.splitScalar(u8, body, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0 and lines.index == null and std.mem.endsWith(u8, body, "\n")) break;
+        if (line.len > capacity or length > capacity - line.len) return .{ .refused = .overflow };
+        length += line.len + 2 + @intFromBool(line.len != 0);
+        if (length > capacity - draft.bytes.len) return .{ .refused = .overflow };
+    }
+    const markdown = try gpa.alloc(u8, length);
+    defer gpa.free(markdown);
+    var out = std.Io.Writer.fixed(markdown);
+    if (leading) try out.writeByte('\n');
+    lines.reset();
+    while (lines.next()) |line| {
+        if (line.len == 0 and lines.index == null and std.mem.endsWith(u8, body, "\n")) break;
+        try out.writeByte('>');
+        if (line.len != 0) try out.writeByte(' ');
+        try out.writeAll(line);
+        try out.writeByte('\n');
+    }
+    return self.tracked(std.mem.Allocator.Error!Editor.KeyOutcome, Editor.insertMultiline, .{ gpa, out.buffered() });
+}
+
 /// Runs `method` on the active draft with `args`, and marks the draft
 /// changed when the call edited it.
 fn tracked(self: *Self, comptime Outcome: type, comptime method: anytype, args: anytype) Outcome {
@@ -567,4 +605,58 @@ test "SessionInput retry loan preserves the whole active editor and recall even 
         try std.testing.expectEqualDeep(editor, self.editors[self.active]);
         try std.testing.expectEqualDeep(recall, self.recall);
     }
+}
+
+test "quote insertion preserves draft banks revision and caret ownership" {
+    const gpa = std.testing.allocator;
+    const self = try gpa.create(Self);
+    defer gpa.destroy(self);
+    self.init();
+    const ticket = self.submitText("loaned original");
+    _ = self.append("leftRIGHT");
+    self.editors[self.active].setCursor(4);
+    const target = self.insertionTarget().?;
+    const revision = self.revision;
+    try std.testing.expectEqual(Editor.KeyOutcome.redraw, try self.insertQuote(gpa, target, "雪e\u{301}\n\n  indented"));
+    try std.testing.expectEqualStrings("left\n> 雪e\u{301}\n>\n>   indented\nRIGHT", self.composition().bytes);
+    try std.testing.expectEqual(@as(usize, "left\n> 雪e\u{301}\n>\n>   indented\n".len), self.composition().cursor);
+    try std.testing.expectEqual(revision + 1, self.revision);
+    try std.testing.expectEqualStrings("loaned original", try self.message(ticket));
+    const after = self.composition();
+    try std.testing.expectEqual(Editor.KeyOutcome.none, try self.insertQuote(gpa, target, "stale"));
+    try std.testing.expectEqualStrings(after.bytes, self.composition().bytes);
+    const moved = self.insertionTarget().?;
+    self.editors[self.active].setCursor(0);
+    try std.testing.expectEqual(Editor.KeyOutcome.none, try self.insertQuote(gpa, moved, "stale caret"));
+    try std.testing.expectEqual(@as(usize, 0), self.composition().cursor);
+}
+
+test "quote insertion overflow leaves the draft usable and untouched" {
+    const gpa = std.testing.allocator;
+    const self = try gpa.create(Self);
+    defer gpa.destroy(self);
+    self.init();
+    var text: [capacity - 1]u8 = @splat('a');
+    _ = self.append(&text);
+    self.editors[self.active].setCursor(3);
+    const target = self.insertionTarget().?;
+    const revision = self.revision;
+    try std.testing.expectEqual(Editor.KeyOutcome{ .refused = .overflow }, try self.insertQuote(gpa, target, "a"));
+    try std.testing.expectEqualStrings(&text, self.composition().bytes);
+    try std.testing.expectEqual(@as(usize, 3), self.composition().cursor);
+    try std.testing.expectEqual(revision, self.revision);
+    try std.testing.expectEqual(null, self.editors[self.active].rejected);
+    try std.testing.expect(self.typed("\r") == .message);
+}
+
+test "quote insertion never moves an existing regional indicator suffix into the quote" {
+    const gpa = std.testing.allocator;
+    const self = try gpa.create(Self);
+    defer gpa.destroy(self);
+    self.init();
+    _ = self.append("🇧 original suffix");
+    self.editors[self.active].setCursor(0);
+    try std.testing.expectEqual(Editor.KeyOutcome.redraw, try self.insertQuote(gpa, self.insertionTarget().?, "🇦"));
+    try std.testing.expectEqualStrings("> 🇦\n🇧 original suffix", self.composition().bytes);
+    try std.testing.expectEqual(@as(usize, "> 🇦\n".len), self.composition().cursor);
 }

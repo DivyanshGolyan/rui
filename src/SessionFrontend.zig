@@ -423,7 +423,7 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []
     self.* = .{ .init = init, .home = init.environ_map.get("HOME") orelse "", .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .screen = screen, .interrupted = interrupted, .lender = lender, .colour = screen.colour };
     self.startInput();
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
-    self.app_content = .{ .window = &screen.feed, .anchor = &screen.anchor, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appClick, .on_retry = appRetry } };
+    self.app_content = .{ .window = &screen.feed, .anchor = &screen.anchor, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appClick, .on_retry = appRetry, .quote = .{ .begin = appQuoteBegin, .insert = appQuoteInsert } } };
     self.app_input = .{ .composer = .{ .editor = &self.input.editors[self.input.active] } };
     self.app_document = .{ .document = &screen.browsing, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll } };
     self.app_body = .{ .shown = self.app_content.widget() };
@@ -726,6 +726,27 @@ fn appNotice(raw: *anyopaque, ctx: *vxfw.EventContext, text: []const u8) !void {
     ctx.redraw = true;
 }
 
+fn quoteReady(self: *const Self) bool {
+    return self.leaving == null and self.screen.view == .feed and !self.info_open and !self.app_info.standaloneOpen() and self.app_consent.request == null and !self.app_hooks.root.input.pasting;
+}
+
+fn appQuoteBegin(raw: *anyopaque) ?Input.Insertion {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return if (self.quoteReady()) self.input.insertionTarget() else null;
+}
+
+fn appQuoteInsert(raw: *anyopaque, ctx: *vxfw.EventContext, target: Input.Insertion, body: []const u8) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (!self.quoteReady()) return;
+    const outcome = try self.input.insertQuote(ctx.alloc, target, body);
+    if (outcome == .refused) try appNotice(raw, ctx, "Quote could not be inserted; draft unchanged");
+    if (outcome == .redraw) {
+        self.dirty = true;
+        try ctx.requestFocus(self.app_input.composer.widget());
+    }
+    try self.afterInput(ctx);
+}
+
 /// A click on a peer's name: leave for that Session where Esc would leave,
 /// else say what keeps this one open. The draft and Session stay as they are.
 fn appOpen(raw: *anyopaque, ctx: *vxfw.EventContext, id: []const u8) !void {
@@ -867,6 +888,13 @@ pub fn keyOwner(self: *Self) Root.Keys {
 fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery: @import("app_input.zig").Effects.Delivery) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.leaving != null) return;
+    if (self.app_content.cancelQuote()) {
+        ctx.redraw = true;
+        if (event == .key_press and event.key_press.matches(vaxis.Key.escape, .{})) {
+            ctx.consumeEvent();
+            return;
+        }
+    }
     self.shown_notice.dismiss();
     const input: session_keys.Input = .{ .key = sessionKey(event), .pasted = delivery.pasted };
     // Only Enter takes a row, so only Enter reads the list.
@@ -1064,6 +1092,7 @@ fn depart(self: *Self, ctx: *vxfw.EventContext) !void {
 fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const screen = self.screen;
+    if (!self.quoteReady()) _ = self.app_content.cancelQuote();
     const normal = style.of(self.app_caps, .{});
     const quiet = style.of(self.app_caps, .{ .colour = .quiet });
     const attention = style.of(self.app_caps, .{ .colour = .attention });
@@ -3207,7 +3236,7 @@ fn showStaged(self: *Self) !void {
                 target_count += 1;
             }
         }
-        const entry: feed_window.Entry = .{ .key = row.key, .text = feed_window.Text.fromDocument(document), .tight = row.tight, .provisional = row.provisional, .messages = targets[0..target_count] };
+        const entry: feed_window.Entry = .{ .quote_body = row.quote_body, .key = row.key, .text = feed_window.Text.fromDocument(document), .tight = row.tight, .provisional = row.provisional, .messages = targets[0..target_count] };
         if (!self.insertFeed(entry, backward)) {
             complete = false;
             break;
@@ -10282,4 +10311,45 @@ test "conversation slash pin and unpin share organization admission without mode
         try overview_view.writeDeparture(&overview.state, null, &writer);
         try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "rui request recover saved-pin-handle") != null);
     };
+}
+
+test "App Session quote gesture preserves the caret and cancels under Escape modal and footer input" {
+    const Pointer = @import("testing/app_events.zig");
+    const Case = enum { insert, escape, modal, footer, input };
+    for (std.enums.values(Case)) |case| {
+        var fixture: ChromeFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const self = fixture.self;
+        self.screen.feed.trim(self.screen.feed.count, 0);
+        try self.screen.feed.append(&.{.{ .key = .{ .position = 1 }, .text = .{ .bytes = "quoted source\n" }, .quote_body = .answer }});
+        self.screen.anchor.follow();
+        _ = self.input.append("leftRIGHT");
+        self.input.editors[self.input.active].setCursor(4);
+        const rows = try fixture.rows();
+        const row = ChromeFixture.find(&rows, "quoted source").?;
+        const frame = try fixture.draw();
+        const start_row = switch (case) {
+            .footer => 23,
+            .input => 22,
+            else => row,
+        };
+        try Pointer.mouse(&fixture.ctx, frame, .{ .row = @intCast(start_row), .col = 1, .type = .press, .button = .left, .mods = .{ .alt = true } });
+        try Pointer.mouse(&fixture.ctx, frame, .{ .row = @intCast(row), .col = 13, .type = .drag, .button = .left, .mods = .{ .alt = true } });
+        switch (case) {
+            .escape => try fixture.press(.{ .codepoint = vaxis.Key.escape }),
+            .modal => {
+                self.info_open = true;
+                _ = try fixture.draw();
+            },
+            else => {},
+        }
+        try Pointer.mouse(&fixture.ctx, frame, .{ .row = @intCast(row), .col = 13, .type = .release, .button = .left, .mods = .{ .alt = true } });
+        try std.testing.expectEqualStrings(if (case == .insert) "left\n> quoted source\nRIGHT" else "leftRIGHT", self.input.composition().bytes);
+        try std.testing.expectEqual(null, self.input.submitted);
+        try std.testing.expectEqual(null, self.submission.intent);
+        try std.testing.expectEqual(null, self.leaving);
+        for (fixture.ctx.cmds.items) |command| try std.testing.expect(command != .copy_to_clipboard);
+        if (case == .insert) try std.testing.expectEqual(@as(usize, "left\n> quoted source\n".len), self.input.composition().cursor);
+    }
 }
