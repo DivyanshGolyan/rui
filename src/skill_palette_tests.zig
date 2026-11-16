@@ -1,6 +1,7 @@
 const std = @import("std");
 const vxfw = @import("vaxis").vxfw;
 const Palette = @import("Palette.zig");
+const slash_menu = @import("slash_menu.zig");
 const skill_completion = @import("skill_completion.zig");
 const widget_style = @import("widget_style.zig");
 const skill_suggestions = @import("skill_suggestions.zig");
@@ -24,10 +25,10 @@ test "the Palette draws a /word's skill rows with their descriptions" {
     var reads: skill_completion.Reads = .{};
     _ = reads.ask("re").?;
     _ = reads.answer(1, .{ .entries = &entries, .total = entries.len }, "rev");
-    var rows: skill_completion.Rows = .{};
     const draft = "please /rev this";
-    var shown = reads.shown(&rows, draft, "please /rev".len, 1, .{}, null).?;
-    var palette: Palette = .{ .shown = &shown };
+    var menu: slash_menu.Menu = .{};
+    const shown = menu.frame(.{ .draft = .{ .bytes = draft, .caret = "please /rev".len, .revision = 1, .skills = &reads } }).?;
+    var palette: Palette = .{ .menu = &menu };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} };
@@ -38,7 +39,7 @@ test "the Palette draws a /word's skill rows with their descriptions" {
     try std.testing.expectEqualStrings("/review  Review a change", rowText(surface, 1, &text));
     try std.testing.expectEqual(widget_style.of(palette.caps, .{ .background = .selection }), surface.readCell(2, 1).style);
     try std.testing.expectEqual(widget_style.of(palette.caps, .{ .bold = true, .background = .selection }), surface.readCell(11, 1).style);
-    shown = reads.shown(&rows, "please /re this", "please /re".len, 2, .{}, shown).?;
+    _ = menu.frame(.{ .draft = .{ .bytes = "please /re this", .caret = "please /re".len, .revision = 2, .skills = &reads } });
     const wider = try palette.widget().draw(ctx);
     try std.testing.expectEqual(@as(u16, 5), wider.size.height);
     try std.testing.expectEqualStrings("/recap    Summarise", rowText(wider, 1, &text));
@@ -56,9 +57,9 @@ test "the Palette bolds each row's match, in both its name and its description, 
             const caps: view.Caps = .{ .background = terminal, .depth = depth };
             var reads: skill_completion.Reads = .{};
             _ = reads.answer(reads.ask("").?.read, .{ .entries = &entries, .total = entries.len }, "");
-            var rows: skill_completion.Rows = .{};
-            var shown = reads.shown(&rows, "/help", 5, 1, .{}, null).?;
-            var palette: Palette = .{ .shown = &shown };
+            var menu: slash_menu.Menu = .{};
+            const shown = menu.frame(.{ .draft = .{ .bytes = "/help", .caret = 5, .revision = 1, .skills = &reads } }).?;
+            var palette: Palette = .{ .menu = &menu };
             palette.setCaps(caps);
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
@@ -126,11 +127,11 @@ test "the Palette maps description matches through normalization and clipping wi
                     };
                     var reads: skill_completion.Reads = .{};
                     _ = reads.answer(reads.ask("verify").?.read, .{ .entries = &entries, .total = entries.len }, "verify");
-                    var rows: skill_completion.Rows = .{};
                     const draft = "use /verify";
-                    var shown = reads.shown(&rows, draft, draft.len, 1, .{}, null).?;
+                    var menu: slash_menu.Menu = .{};
+                    const shown = menu.frame(.{ .draft = .{ .bytes = draft, .caret = draft.len, .revision = 1, .skills = &reads } }).?;
                     shown.highlight = selected;
-                    var palette: Palette = .{ .shown = &shown };
+                    var palette: Palette = .{ .menu = &menu };
                     palette.setCaps(caps);
                     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
                     defer arena.deinit();
