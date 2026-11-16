@@ -775,10 +775,21 @@ pub fn storeKind(settings: *const hs.Settings) start_report.Store {
     return if (settings.store == .mysql) .mysql else .sqlite;
 }
 
-/// Shared --check/serve intake: every source, then provider credentials. The
-/// caller checks process-environment preconditions before `admitSelected`.
-pub fn intake(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []const u8, settings: *hs.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure) !void {
-    try fillAt(init, parsed, dir, settings, fixtures, failure);
+pub const Admission = enum { foreground, detached };
+
+/// Shared --check/serve intake: detached checks use the starter's read and
+/// placement admission, without rebasing a running Host's argv. Both doors
+/// finish provider selection and resolve before the caller's proxy precondition
+/// and `admitSelected` anchor/seal. No Store or Host is opened here.
+pub fn intake(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []const u8, settings: *hs.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure, admission: Admission) !void {
+    switch (admission) {
+        .foreground => try fillAt(init, parsed, dir, settings, fixtures, failure),
+        .detached => {
+            const intent = try readStart(init, .{ .dir = dir, .settings_file = parsed.get("settings"), .assignments = parsed.all("set") }, settings, failure);
+            try finishSources(init, settings, intent, failure);
+            try fixtureInputs(init, parsed, settings, fixtures, failure);
+        },
+    }
     try resolveProviders(init, settings, fixtures.*, failure);
 }
 
@@ -1547,7 +1558,7 @@ fn anchorAssignment(gpa: std.mem.Allocator, cwd: *Cwd, assignment: []const u8, f
 /// `/` without stdin: a stdin or relative --settings, a relative @FILE, any
 /// relative path or `file:` source in any layer, and the stdin lifetime. The
 /// Host directory itself is the anchored default, never relative.
-fn readDetached(init: std.process.Init, request: Spawn, settings: *hs.Settings, failure: *start_report.Failure) !void {
+fn readDetached(init: std.process.Init, request: Spawn, settings: *hs.Settings, failure: *start_report.Failure) !ProviderIntent {
     if (request.settings_file) |file| {
         if (std.mem.eql(u8, file, "-")) return invalid(failure, "settings", "a Host started by bare rui or rui host start has no stdin; pass a document on stdin with rui host serve --settings -");
         if (!std.fs.path.isAbsolute(file)) return invalid(failure, "settings", relative);
@@ -1557,7 +1568,7 @@ fn readDetached(init: std.process.Init, request: Spawn, settings: *hs.Settings, 
         const value = assignment[equals + 1 ..];
         if (std.mem.startsWith(u8, value, "@") and !std.fs.path.isAbsolute(value[1..])) return invalid(failure, "settings", "@FILE " ++ relative);
     }
-    _ = try readSources(init, request, settings, failure);
+    const intent = try readSources(init, request, settings, failure);
     if (settings.interface.lifetime.value == .stdin) return invalid(failure, "interface.lifetime", "a Host started by bare rui or rui host start has no stdin; use detached, or run rui host serve");
     var name: LeafName = .{};
     if (relativeLeaf(hs.Settings, settings, &name)) {
@@ -1566,6 +1577,7 @@ fn readDetached(init: std.process.Init, request: Spawn, settings: *hs.Settings, 
         failure.* = .init(.settings_invalid, message);
         return error.SettingsInvalid;
     }
+    return intent;
 }
 
 const relative = "a Host started in / has no base for a relative path; give an absolute path";
@@ -1640,7 +1652,7 @@ pub fn replayable(init: std.process.Init, request: Spawn) error{OutOfMemory}!boo
     settings.* = .{};
     defer settings.deinit();
     var failure: start_report.Failure = undefined;
-    readDetached(init, request, settings, &failure) catch |err| {
+    _ = readDetached(init, request, settings, &failure) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
         return false;
     };
@@ -1655,10 +1667,17 @@ pub fn checkStart(init: std.process.Init, request: Spawn, failure: *start_report
     defer init.gpa.destroy(settings);
     settings.* = .{};
     defer settings.deinit();
-    try readDetached(init, request, settings, failure);
+    _ = try readStart(init, request, settings, failure);
+}
+
+/// One detached source/placement owner for spawn and settings --check. Keep
+/// provider finishing/resolution out of this read-only phase: attachment and
+/// saved connection editing do not eagerly need another provider's login.
+fn readStart(init: std.process.Init, request: Spawn, settings: *hs.Settings, failure: *start_report.Failure) !ProviderIntent {
+    const intent = try readDetached(init, request, settings, failure);
     try anchorPlacement(init, settings, request.dir, failure);
     // Only overridden sources need a comparison with the saved placement.
-    if (request.settings_file == null and request.assignments.len == 0) return;
+    if (request.settings_file == null and request.assignments.len == 0) return intent;
     // Only saved placement is discoverable by subsequent directory clients.
     const saved_settings = try init.gpa.create(hs.Settings);
     defer init.gpa.destroy(saved_settings);
@@ -1679,6 +1698,7 @@ pub fn checkStart(init: std.process.Init, request: Spawn, failure: *start_report
             return error.SettingsInvalid;
         }
     }
+    return intent;
 }
 
 pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: ?Progress, result: *HostLaunchResult) void {
@@ -1955,7 +1975,7 @@ test "Host start detached first provider assignment selects an exact ordered set
         settings.* = .{};
         defer settings.deinit();
         var failure: start_report.Failure = undefined;
-        try readDetached(init, .{ .dir = dir, .assignments = case.assignments }, settings, &failure);
+        _ = try readDetached(init, .{ .dir = dir, .assignments = case.assignments }, settings, &failure);
         try std.testing.expectEqual(case.openai, settings.providers.entries.openai != null);
         try std.testing.expectEqual(case.codex, settings.providers.entries.codex != null);
         try std.testing.expectEqual(case.chatgpt, settings.providers.entries.chatgpt != null);
@@ -2105,7 +2125,7 @@ test "Host start placement agrees across Store interface and every door without 
                 },
                 .starter => result: {
                     try checkStart(init, .{ .dir = dir }, &failure);
-                    try readDetached(init, .{ .dir = dir }, settings, &failure);
+                    _ = try readDetached(init, .{ .dir = dir }, settings, &failure);
                     try anchorPlacement(init, settings, dir, &failure);
                     break :result try platform.placementPaths(init.io, settings);
                 },
@@ -2618,4 +2638,62 @@ test "Host start guided recheck separates supersession from publication durabili
         try std.testing.expect(try api_key.present(first.saved.key_file.slice()));
         if (state == .matching) try std.testing.expect((try confirmConnection(init, dir, &first.saved)) == .saved);
     };
+}
+
+test "Host detached check shares source admission then resolves and seals without opening a Store" {
+    const gpa = std.testing.allocator;
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    try environment.put("CHECK_MYSQL_URL", "mysql://user:password@127.0.0.1:9/database");
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = try testHostDir(&tmp, &root);
+    const settings = try gpa.create(hs.Settings);
+    defer gpa.destroy(settings);
+    const cases = [_]struct { args: []const []const u8, foreground: bool = true, detached: bool = true }{
+        .{ .args = &.{} },
+        .{ .args = &.{ "--set", "execution.activeCapacity=3" } },
+        .{ .args = &.{ "--set", "interface.lifetime=stdin" }, .detached = false },
+        .{ .args = &.{ "--set", "tools.bash.path=relative/bash" }, .detached = false },
+        .{ .args = &.{ "--set", "tools.bash.path=relative/bash", "--set", "tools.bash.path=/bin/bash" } },
+        .{ .args = &.{ "--set", "interface.dir=/tmp/unsaved-check-interface" }, .detached = false },
+        .{ .args = &.{ "--set", "execution.activeCapacity=0" }, .foreground = false, .detached = false },
+        .{ .args = &.{ "--set", "providers.openai.key=env:CHECK_ABSENT_KEY" }, .foreground = false, .detached = false },
+    };
+    for (cases) |case| for (std.enums.values(Admission)) |door| {
+        settings.* = .{};
+        defer settings.deinit();
+        var failure: start_report.Failure = undefined;
+        var fixtures: providers.Fixtures = .{};
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.appendSlice(gpa, &.{ "--set", "providers={}" });
+        try args.appendSlice(gpa, case.args);
+        const parsed = try parseForTest(arena.allocator(), args.items);
+        const admitted: anyerror!void = admit: {
+            intake(init, &parsed, dir, settings, &fixtures, &failure, door) catch |err| break :admit err;
+            _ = admitSelected(init, dir, settings, fixtures, &failure) catch |err| break :admit err;
+        };
+        if (if (door == .foreground) case.foreground else case.detached) {
+            try admitted;
+        } else {
+            try std.testing.expectError(error.SettingsInvalid, admitted);
+            try std.testing.expectEqual(start_report.StartError.settings_invalid, failure.code);
+        }
+    };
+    // Check resolves/seals MySQL input, but never dials or locks it.
+    try tmp.dir.writeFile(init.io, .{ .sub_path = "host.json", .data = "{\"providers\":{},\"store\":{\"mysql\":{\"url\":{\"env\":\"CHECK_MYSQL_URL\"}}}}" });
+    try tmp.dir.setFilePermissions(init.io, "host.json", .fromMode(0o600), .{});
+    settings.* = .{};
+    defer settings.deinit();
+    var failure: start_report.Failure = undefined;
+    var fixtures: providers.Fixtures = .{};
+    const parsed = try parseForTest(arena.allocator(), &.{});
+    try intake(init, &parsed, dir, settings, &fixtures, &failure, .detached);
+    _ = try admitSelected(init, dir, settings, fixtures, &failure);
+    try std.testing.expectEqual(.mysql, std.meta.activeTag(settings.store));
 }

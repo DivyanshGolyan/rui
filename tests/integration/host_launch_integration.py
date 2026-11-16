@@ -742,6 +742,59 @@ def new_host_provider_policy(root, env):
           "no authorization headers or forwarding", flush=True)
 
 
+def detached_settings_checks(root, env):
+    """--check uses detached admission, resolves/seals, and never starts/stops a Host."""
+    directory = root / "detached-checks"
+    host_ok(env, "set", "--store", directory, "providers", "{}")
+    sources = directory / "document.json"
+    cases = (
+        ("bare", {}, (), None),
+        ("nonplacement", {"execution": {"activeCapacity": 3}}, (), None),
+        ("stdin-lifetime", {"interface": {"lifetime": "stdin"}}, (), "no stdin"),
+        ("relative-path", {"tools": {"bash": {"path": "relative/bash"}}}, (), "absolute path"),
+        ("relative-secret", {"providers": {"openai": {"key": {"file": "relative/key"}}}}, (), "absolute path"),
+        ("unsaved-placement", {"interface": {"dir": str(root / "elsewhere")}}, (), "unsaved Store or interface"),
+        ("unknown-leaf", {"unknown": True}, (), "unknown"),
+        ("seal", {"execution": {"activeCapacity": 0}}, (), "execution.activeCapacity"),
+        ("resolve", {"providers": {"openai": {"key": {"env": "DETACHED_CHECK_ABSENT_KEY"}}}}, (), "providers.openai.key"),
+    )
+    for name, document, assignments, reason in cases:
+        sources.write_text(json.dumps(document))
+        sources.chmod(0o600)
+        checked = host_command(env, "settings", "--check", "--store", directory,
+                               "--settings", sources, *assignments)
+        if reason is None:
+            assert checked.returncode == 0 and not checked.stdout, (name, checked)
+        else:
+            assert checked.returncode == 2, (name, checked)
+            failure = json.loads(checked.stdout)["rui_start_error"]
+            assert failure["code"] == "settings_invalid" and reason in failure["message"], (name, failure)
+        assert not matching_processes(directory), (name, checked)
+    for arguments, reason in (
+            (("--settings", "-"), "no stdin"),
+            (("--settings", "relative.json"), "absolute path"),
+            (("--set", "tools.bash=@relative.json"), "@FILE"),
+            (("--set", "interface.lifetime=stdin"), "no stdin")):
+        checked = host_command(env, "settings", "--check", "--store", directory, *arguments)
+        assert checked.returncode == 2, (arguments, checked)
+        failure = json.loads(checked.stdout)["rui_start_error"]
+        assert failure["code"] == "settings_invalid" and reason in failure["message"], failure
+    # No database, diagnostics or lease was created by a check.
+    assert {path.name for path in directory.iterdir()} == {"host.json", "document.json"}
+    started = run_start(directory, env)
+    assert started.returncode == 0, started
+    try:
+        before = status(directory, env)
+        checked = host_command(env, "settings", "--check", "--store", directory,
+                               "--set", "interface.lifetime=stdin")
+        assert checked.returncode == 2, checked
+        after = status(directory, env)
+        assert before["instance"] == after["instance"] and after["status"] == "ready", (before, after)
+    finally:
+        forced_crash_cleanup(directory)
+    print("detached settings check passed: sources, detached refusal, placement, resolution/seal, no Store effects, live Host unchanged", flush=True)
+
+
 def saved_settings(root, env):
     """DIR/host.json reaches the Host that the shared starter (bare rui and host start) launches."""
     store = root / "saved-settings"
@@ -1145,6 +1198,7 @@ def main():
             stop_process(held)
 
         new_host_provider_policy(root, env)
+        detached_settings_checks(root, env)
         saved_settings(root, env)
         saved_settings_served(root, env)
 

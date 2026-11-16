@@ -132,6 +132,7 @@ The order is defaults, saved settings, `--settings FILE|-`, then repeatable `--s
 Use `rui host set --store PATH SETTING @FILE` to read a JSON value from a file.
 `settings` fills in defaults and shows secret sources, not secret bytes; saved literal secrets are refused.
 `unset` removes the saved assignment, restoring its default when no later source overrides it.
+`settings --check` checks a detached start without opening or locking a Store: it reads and applies every source, refuses stdin lifetime and unrooted paths, checks saved placement, resolves credentials, anchors and seals. Pass absolute `--settings FILE`, `@FILE` and path/secret sources; unlike a newly typed `host start`, this check does not rebase argv. It does not prove database availability or lock acquisition.
 Changes apply to the next Host; they do not reconfigure a running one.
 `rui host start` takes `--settings FILE` but not `-`, because a started Host has no stdin; pass a document on stdin with `rui host serve --settings -`.
 Clients given `--store PATH` read that directory's saved placement, including MySQL, a moved `interface.dir`, or a different `store.sqlite.dir`.
