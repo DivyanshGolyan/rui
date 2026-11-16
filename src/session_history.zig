@@ -1,7 +1,5 @@
-//! The command that exports one saved conversation row.
 const std = @import("std");
 
-/// The command that exports one conversation row's exact bytes.
 pub fn writeExport(sink: anytype, store: []const u8, session: []const u8, position: u64, ordinal: u64) !void {
     var buffer: [64]u8 = undefined;
     try sink.feed("Raw export: rui session read-conversation --store-hex ");
@@ -37,9 +35,7 @@ test "historical export preserves hex Store escaping and canonical Session IDs" 
     };
     var sink: Sink = .{};
     try writeExport(&sink, "/tmp/a'$(false)\x1b[2J\né\u{202e}", "09azvw", 2, 0);
-    // Independent UTF-8 byte-to-hex oracle for Store controls and directional text.
     try std.testing.expectEqualStrings("Raw export: rui session read-conversation --store-hex 2f746d702f6127242866616c7365291b5b324a0ac3a9e280ae --session 09azvw --position 2 --ordinal 0", sink.bytes[0..sink.length]);
-    // A Store path longer than one hex window keeps every byte, in order.
     sink = .{};
     const long: [200]u8 = @splat('a');
     try writeExport(&sink, &long, "09azvw", 7, 2);

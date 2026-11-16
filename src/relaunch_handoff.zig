@@ -1,5 +1,3 @@
-//! One-shot, cross-version TUI drafts. The Store never owns this transient
-//! file: only the departing and replacement clients can read it.
 const std = @import("std");
 const c = @import("posix");
 const Input = @import("SessionInput.zig");
@@ -21,23 +19,17 @@ pub const Payload = struct {
 
 const directory_name = ".rui-relaunch";
 const name_bytes = 32 + ".json".len;
-// Sparse drafts have no population limit below the Session ID domain. Do not
-// impose a smaller arbitrary cap and silently lose an otherwise valid draft.
 const max_drafts = std.math.pow(usize, session_id.alphabet.len, session_id.bytes);
-// JSON escaping needs at most six bytes per input byte. The remaining space
-// covers field names, punctuation, three maximum-width integers and refusal.
 const max_snapshot_bytes = 6 * Input.capacity + 256;
 const max_entry_bytes = max_snapshot_bytes + 6 * session_id.bytes + 64;
 pub const max_encoded_bytes = (max_drafts + 1) * max_entry_bytes +
     6 * (protocol.max_store_bytes + upgrade_status.max_line_bytes) + 256;
 
-/// Caller owns the returned bytes. Field order and defaults are a wire contract.
 pub fn encode(gpa: std.mem.Allocator, payload: Payload) ![]u8 {
     try validate(gpa, payload, payload.store);
     return std.json.Stringify.valueAlloc(gpa, payload, .{});
 }
 
-/// Owns every decoded string, independently of `bytes`; caller must deinit.
 pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, store: []const u8) !std.json.Parsed(Payload) {
     if (bytes.len > max_encoded_bytes) return error.HandoffTooLarge;
     var scanner = std.json.Scanner.initCompleteInput(gpa, bytes);
@@ -79,13 +71,10 @@ fn validate(gpa: std.mem.Allocator, payload: Payload, store: []const u8) !void {
 fn validateSnapshot(snapshot: Input.Snapshot) !void {
     if (snapshot.bytes.len > Input.capacity or snapshot.cursor > snapshot.bytes.len or
         !std.unicode.utf8ValidateSlice(snapshot.bytes)) return error.InvalidHandoffDraft;
-    // An editor cursor is a byte position, but never inside a UTF-8 codepoint.
     if (snapshot.cursor < snapshot.bytes.len and snapshot.bytes[snapshot.cursor] & 0xc0 == 0x80)
         return error.InvalidHandoffDraft;
 }
 
-/// Publishes an exclusively created random 0600 file in HOME/.rui-relaunch
-/// (0700). The caller owns its path, and deletes the file if exec fails.
 pub fn writeEncoded(init: std.process.Init, home: []const u8, bytes: []const u8) ![]const u8 {
     if (bytes.len > max_encoded_bytes) return error.HandoffTooLarge;
     var directory = try openDirectory(init.io, home, true);
@@ -104,17 +93,11 @@ pub fn writeEncoded(init: std.process.Init, home: []const u8, bytes: []const u8)
     errdefer _ = discardAt(init, directory, name, path);
     try validateFile(init.io, file);
     try file.writeStreamingAll(init.io, bytes);
-    // This is an exec handoff, not durable Store state; no power-loss promise.
     return path;
 }
 
-/// Consumes the environment entry even when it names a malformed, missing or
-/// wrong-Store handoff. Untrusted paths outside our private directory are not
-/// opened or deleted. All read/parse failures intentionally mean no handoff.
 pub fn read(init: std.process.Init, home: []const u8, store: []const u8) ?std.json.Parsed(Payload) {
     const slot = init.environ_map.getPtr("RUI_RELAUNCH") orelse return null;
-    // Transfer the old owned value out of the map without allocating, so even
-    // allocation failure cannot leave an inherited handoff reusable by a child.
     const path = slot.*;
     slot.* = "";
     defer init.environ_map.allocator.free(path);
@@ -130,8 +113,6 @@ fn readFile(init: std.process.Init, home: []const u8, path: []const u8, store: [
     if (!validName(name)) return error.InvalidHandoffPath;
     var directory = try openDirectory(init.io, home, false);
     defer directory.close(init.io);
-    // Once the location is authenticated, consume even unreadable/malformed
-    // entries. A symlink is unlinked here, never followed to its target.
     const fd = std.posix.openat(directory.handle, name, .{
         .ACCMODE = .RDONLY,
         .NONBLOCK = true,
@@ -147,14 +128,9 @@ fn readFile(init: std.process.Init, home: []const u8, path: []const u8, store: [
         _ = discardAt(init, directory, name, path);
         return err;
     };
-    // Never restore drafts while their named plaintext file remains behind.
-    // Malformed payloads are also one-shot: unlink before parsing.
     if (!discardAt(init, directory, name, path)) return error.HandoffCleanupFailed;
     const stat = try file.stat(init.io);
     if (stat.size > max_encoded_bytes) return error.HandoffTooLarge;
-    // Parse from the descriptor: no second full-file allocation beside the
-    // decoded drafts, and a sparse malformed file cannot demand its stat size
-    // in resident memory. The limit also bounds a file that grows while read.
     var buffer: [1024]u8 = undefined;
     // The JSON scanner peeks into the bounded reader, so that outer reader
     // owns the buffer. Its file source streams directly into that one buffer.
@@ -168,8 +144,6 @@ fn readFile(init: std.process.Init, home: []const u8, path: []const u8, store: [
     return parsed;
 }
 
-/// Remove an unconsumed handoff after failed exec. Cleanup failures retain
-/// one safe receipt naming the private data, rather than silently abandoning it.
 pub fn discard(init: std.process.Init, path: []const u8) void {
     _ = discardAt(init, std.Io.Dir.cwd(), path, path);
 }
@@ -382,8 +356,6 @@ test "handoff refuses nonprivate directories and never follows symlinks" {
     defer gpa.free(encoded);
     const path = try writeEncoded(fixture.init(), fixture.home, encoded);
     defer gpa.free(path);
-    // The target outside the handoff directory must survive both kinds of
-    // symlink, and an arbitrary inherited path must not be deleted either.
     const target = try fixture.tmp.dir.createFile(io, "target", .{ .permissions = .fromMode(0o600) });
     target.close(io);
     try std.Io.Dir.cwd().deleteFile(io, path);
@@ -411,8 +383,6 @@ test "handoff refuses nonprivate directories and never follows symlinks" {
 
 test "handoff sparse drafts have no arbitrary small population cap" {
     const gpa = std.testing.allocator;
-    // Exceeds common fixed slot counts without reserving one full-size editor
-    // per Session. IDs are independent values in the owner's alphabet.
     const count = 1025;
     const ids = try gpa.alloc([session_id.bytes]u8, count);
     defer gpa.free(ids);
@@ -436,8 +406,6 @@ test "handoff sparse drafts have no arbitrary small population cap" {
 }
 
 test "handoff descriptor checks reject wrong owner when privileged" {
-    // Ownership cannot be forged by an ordinary user. The same checks run
-    // everywhere; root-only fixtures can manufacture the negative case.
     if (c.geteuid() != 0) return error.SkipZigTest;
     const io = std.testing.io;
     const gpa = std.testing.allocator;

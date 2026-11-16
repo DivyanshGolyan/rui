@@ -1,4 +1,3 @@
-//! Writes the wire contract (openapi.zig) to the path in its one argument.
 const std = @import("std");
 const openapi = @import("openapi.zig");
 

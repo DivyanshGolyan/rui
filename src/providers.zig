@@ -1,8 +1,3 @@
-//! The providers a Host serves: where each one's requests go, and the sign-in
-//! source behind the credential they carry there. Core asks a `Credential`
-//! what it needs (`leased`, `validate`, `fields`, `rejection`,
-//! `routingOwner`) and never which kind it is; what a ChatGPT sign-in or an
-//! API key writes, and where it may go, lives here.
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const h2 = @import("h2");
@@ -17,23 +12,16 @@ const turn_states = @import("turn_states.zig");
 
 const Provider = protocol.Provider;
 
-/// The ChatGPT subscription's Responses endpoint, the only one a signed-in
-/// account's token goes to (a fixture's loopback aside).
 pub const managed_endpoint = @import("provider_name.zig").managed_endpoint;
 
-/// OpenAI's own Responses endpoint: an API key's default, and where a
-/// ChatGPT plan sign-in's token goes (a fixture's loopback aside).
 pub const api_endpoint = @import("provider_name.zig").api_endpoint;
 
-/// Test-only transport facts. Never serialized into Host settings.
 pub const Fixtures = struct {
     openai: bool = false,
     codex: bool = false,
     chatgpt_token_endpoint: ?[]const u8 = null,
 };
 
-/// Borrow resolved credentials, paths and full endpoints for the Host's life.
-/// The provider enum owns this projection's exhaustive credential dispatch.
 pub fn fromSettings(settings: *const @import("host_settings.zig").Settings, fixtures: Fixtures) Providers {
     var result: Providers = .{ .ca_file = if (settings.network.ca_file) |*ca| ca.slice() else null };
     inline for (std.enums.values(Provider)) |named| {
@@ -59,18 +47,10 @@ pub fn fromSettings(settings: *const @import("host_settings.zig").Settings, fixt
     return result;
 }
 
-/// The model list beside `api_endpoint`: the only other place a ChatGPT
-/// plan sign-in's token goes.
 pub const api_models_endpoint = responsesBase(api_endpoint).? ++ "/models";
 
-/// A sign-in the Host serves: its credential file, the token wire its
-/// refresh speaks and where that refresh goes. The Host's sign-in worker runs
-/// each job for the source the job names: a launch lease, or the one forced
-/// refresh after a model 401.
 pub const Authentication = codex_auth.Source;
 
-/// A sign-in file a Host serves, and where its refresh goes. The
-/// `Credential` arm that holds it names the wire its refresh speaks.
 pub const SignIn = struct {
     path: []const u8,
     refresh: Authentication.RefreshTarget = .issuer,
@@ -80,24 +60,18 @@ pub const SignIn = struct {
     }
 };
 
-/// The storage an acquisition reads through, which the worker keeps.
 pub const Work = codex_auth.Work;
 
-/// Leases `source`'s current token into `lease`, refreshing it first when due.
 pub fn acquire(source: Authentication, io: std.Io, work: *Work, lease: *Lease) !void {
     try codex_auth.acquireInto(io, source, work, lease);
 }
 
-/// Refreshes `source`'s token a 401 rejected at `generation`; false when
-/// another refresh already replaced it.
 pub fn refresh(source: Authentication, io: std.Io, generation: u64) !bool {
     return codex_auth.forceRefresh(io, source, generation);
 }
 
-/// A sign-in's current token, which the Host's sign-in worker leases.
 pub const Lease = codex_credentials.Lease;
 
-/// The failure a sign-in worker's lease or refresh error settles under.
 pub fn leaseFailureCode(err: anyerror) []const u8 {
     return codex_auth.failureCode(err);
 }
@@ -108,73 +82,41 @@ pub fn acceptsOutputSchema(route: protocol.Route) bool {
     return route != .chatgpt_device;
 }
 
-/// A provider's own endpoint, the only one its credential is sent to.
 pub fn endpoint(provider: Provider) []const u8 {
     return provider.facts().endpoint;
 }
 
-/// The environment variable naming an OpenAI-compatible base URL, such as
-/// `https://example.openai.azure.com/openai/v1`, in place of OpenAI's own.
 pub const openai_base_url_variable = "RUI_OPENAI_BASE_URL";
 
-/// Where a served `openai` sends its key: OpenAI's endpoint, or the one
-/// under the base URL `environ` names, allocated with `allocator`.
 pub fn openAiEndpoint(environ: *const std.process.Environ.Map, allocator: std.mem.Allocator) ![]const u8 {
     const base = environ.get(openai_base_url_variable) orelse return endpoint(.openai);
     return endpointUnder(allocator, base);
 }
 
-/// The Responses endpoint under `base`, allocated with `allocator`, which
-/// both endpoint and key rules admit. Trailing slashes are dropped.
 pub const endpointUnder = @import("endpoint_value.zig").endpointUnder;
 
-/// The base a Responses endpoint sits under (`BASE` of `BASE/responses`),
-/// whose model list (`BASE/models`) its key may also reach, or null when
-/// the endpoint is not one.
 pub fn responsesBase(responses: []const u8) ?[]const u8 {
     return std.mem.cutSuffix(u8, responses, "/responses");
 }
 
-/// The sign-in source behind a provider's requests: a closed set, since
-/// each holds a secret. Each answers for itself where it may go, what it
-/// writes, what a rejection of it means and who a routing value belongs to.
 pub const Credential = union(enum) {
-    /// A development endpoint, which takes no credential.
     none,
-    /// A ChatGPT device sign-in to the Codex backend, whose token the Host's
-    /// sign-in worker leases.
     chatgpt_device: SignIn,
-    /// A ChatGPT plan sign-in to OpenAI's API, leased the same way. Its
-    /// token goes only to `api_endpoint` and the model list beside it
-    /// (`api_models_endpoint`), as a bearer alone.
     chatgpt_plan: SignIn,
-    /// An API key, borrowed for the Host's life. It goes only to its entry's
-    /// endpoint, over https; `fixture` admits a loopback endpoint instead.
     key_file: struct { key: []const u8, fixture: bool = false },
 
-    /// What a 401 from the model endpoint means for the credential a
-    /// transfer presented.
     pub const Rejection = union(enum) {
-        /// The answer settles as it is.
         settle,
-        /// The Operation may spend its one forced refresh of the lease
-        /// generation the transfer presented, from the sign-in that leased it.
         refresh_once: Refresh,
-        /// The answer saves `failure_class.api_key_rejected`: only a new
-        /// key resolves it.
         key_rejected,
     };
 
-    /// A forced refresh: which sign-in, and the generation a 401 rejected.
     pub const Refresh = struct { source: Authentication, generation: u64 };
 
-    /// Whether a request waits for the sign-in worker's lease before it
-    /// launches, and its launch then passes that lease to `fields`.
     pub fn leased(self: Credential) bool {
         return self.signIn() != null;
     }
 
-    /// The sign-in the worker leases this credential from, if it is one.
     pub fn signIn(self: Credential) ?Authentication {
         return switch (self) {
             .none, .key_file => null,
@@ -183,7 +125,6 @@ pub const Credential = union(enum) {
         };
     }
 
-    /// Refuses an endpoint this credential may not go to, at Host start.
     pub fn validate(self: Credential, served_endpoint: []const u8, ca_file: ?[]const u8) !void {
         switch (self) {
             .none => {},
@@ -192,9 +133,6 @@ pub const Credential = union(enum) {
         }
     }
 
-    /// Writes this credential's fields into `headers`, sharing the secret
-    /// through `shared`. A leased credential takes its `lease`; the others
-    /// take none.
     pub fn fields(self: Credential, served_endpoint: []const u8, ca_file: ?[]const u8, lease: ?*const Lease, shared: *provider_transport.Credentials, headers: *Headers) !void {
         std.debug.assert(self.leased() == (lease != null));
         switch (self) {
@@ -205,9 +143,6 @@ pub const Credential = union(enum) {
         }
     }
 
-    /// What a 401 means for a transfer that presented this credential and
-    /// `lease`: a sign-in may refresh once, a key names its own remedy, and
-    /// no credential settles as answered.
     pub fn rejection(self: Credential, lease: ?*const Lease) Rejection {
         return switch (self) {
             .none => .settle,
@@ -216,12 +151,6 @@ pub const Credential = union(enum) {
         };
     }
 
-    /// Who a Turn's routing value belongs to (`turn_states`): a signed-in
-    /// account's values go back only to that account. A sign-in owner is
-    /// its account and FedRAMP binding, which a refresh keeps, read from
-    /// `lease`: a plan sign-in's account is its ID token's subject, never
-    /// FedRAMP. A key or no credential is fixed for the Host's life, so it
-    /// is one owner.
     pub fn routingOwner(self: Credential, lease: ?*const Lease) turn_states.TurnStates.Owner {
         return switch (self) {
             .none, .key_file => @splat(0),
@@ -257,15 +186,10 @@ pub const Credential = union(enum) {
     }
 };
 
-/// The shape of a route's model list answer, which names the IDs it offers.
 pub const Listing = enum {
-    /// `{"data":[{"id":...},...]}`, every entry offered.
     openai,
-    /// `{"models":[{"slug":...,"visibility":...},...]}`, only listed entries.
     chatgpt_plan,
 
-    /// The IDs `body` offers, in its order, under `model_list`'s bounds,
-    /// written to `out`. `scratch` holds the parse.
     pub fn parse(self: Listing, scratch: std.mem.Allocator, body: []const u8, out: *model_list.IdBuffer) !model_list.Ids {
         return switch (self) {
             .openai => model_list.parseOpenAi(scratch, body, out),
@@ -276,8 +200,6 @@ pub const Listing = enum {
 
 const fixtureEndpoint = @import("endpoint_value.zig").fixtureEndpoint;
 
-/// A fixture sign-in goes only to loopback: its requests, and the token
-/// endpoint that stands in for its issuer.
 fn validateAuthenticationEndpoint(target: []const u8, ca_file: ?[]const u8, authentication: Authentication) !void {
     if (authentication.fixture() and !fixtureEndpoint(target, ca_file))
         return error.InvalidCodexFixtureEndpoint;
@@ -289,21 +211,12 @@ fn validateAuthenticationEndpoint(target: []const u8, ca_file: ?[]const u8, auth
 
 const validateKeyEndpoint = @import("endpoint_value.zig").validateKeyEndpoint;
 
-/// The fields the Host writes after the codec's headers: the credential's,
-/// which its sign-in source writes (`Credential.fields`), and user-agent,
-/// each named in `provider.host_request_fields` so no codec header can name
-/// it. `provider.Transfer.start` adds the Turn's routing value after them.
 pub const Headers = struct {
     entries: [4]h2.Field = undefined,
     length: usize = 0,
     credentials: *provider_transport.Credentials = undefined,
-    /// A use of the Reactor's copy of this credential, owned until
-    /// `takeCredential` hands it to the Transfer.
     credential: ?*provider_transport.SharedCredential = null,
 
-    /// Initialize in final stack storage. The fields are borrowed only until
-    /// Transfer.start, whose stream copies the per-request ones; h2 borrows
-    /// the credential (its Transfer then holds the use) and the literals.
     fn initDevice(self: *Headers, target: []const u8, ca_file: ?[]const u8, sign_in: SignIn, credential: *const Lease, shared_credentials: *provider_transport.Credentials) !void {
         const access = credential.record.access_token.slice();
         const account_id = credential.record.account_id.slice();
@@ -320,7 +233,6 @@ pub const Headers = struct {
         const shared = try shared_credentials.share(access, account_id);
         self.credentials = shared_credentials;
         self.credential = shared;
-        // Borrowed where two addresses (16 bytes) are smaller than a copy.
         self.entries[0..3].* = .{
             .{ .name = "authorization", .value = shared.authorization(), .sensitive = true, .borrowed = true },
             .{ .name = "chatgpt-account-id", .value = shared.accountId(), .sensitive = true, .borrowed = true },
@@ -357,8 +269,6 @@ pub const Headers = struct {
         self.length = 2;
     }
 
-    /// An API key's fields: the key and user-agent. The key goes only over
-    /// https, or for a fixture to a loopback target.
     fn initKey(self: *Headers, target: []const u8, ca_file: ?[]const u8, key: []const u8, fixture: bool, shared_credentials: *provider_transport.Credentials) !void {
         try validateKeyEndpoint(target, ca_file, fixture);
         if (!api_key.valid(key)) return error.InvalidCredentialHeader;
@@ -372,10 +282,6 @@ pub const Headers = struct {
         self.length = 2;
     }
 
-    /// The Turn's routing value under the codec's routing header, last and
-    /// only when the Turn has one: whatever credential the request carries,
-    /// a provider that never sent the header is never sent one. Borrowed
-    /// until Transfer.start, like the others.
     pub fn fields(self: *const Headers) []const h2.Field {
         return self.entries[0..self.length];
     }
@@ -396,29 +302,21 @@ pub const Served = struct {
     credential: Credential,
 };
 
-/// A Host that serves no provider.
 pub const none: Providers = .{};
 
-/// What this Host serves, fixed at startup.
 pub const Providers = struct {
     table: std.EnumArray(Provider, ?Served) = .initFill(null),
-    /// Trust for every served endpoint; null is the system's.
     ca_file: ?[]const u8 = null,
 
     pub fn get(self: *const Providers, provider: Provider) ?*const Served {
         return if (self.table.getPtrConst(provider).*) |*served| served else null;
     }
 
-    /// Whether any provider is served, so the Host makes model requests.
     pub fn any(self: *const Providers) bool {
         for (self.table.values) |served| if (served != null) return true;
         return false;
     }
 
-    /// Why the environment's HTTPS proxy, which every served provider's
-    /// transport uses, cannot be used; null when it can or none is served.
-    /// The Host starts the transport only after readiness, so startup asks
-    /// first. A provider-free Host needs it only for optional discovery.
     pub fn proxyRefusal(self: *const Providers, allocator: std.mem.Allocator) error{ OutOfMemory, SystemResources }!?[]const u8 {
         if (!self.any()) return null;
         const proxy = h2.proxyFromEnvironment() orelse return null;
@@ -430,8 +328,6 @@ pub const Providers = struct {
         return null;
     }
 
-    /// Whether any served provider signs in, so this Host runs the sign-in
-    /// worker that leases and refreshes every served sign-in.
     pub fn anySignIn(self: *const Providers) bool {
         for (self.table.values) |served| if (served) |value| if (value.credential.leased()) return true;
         return false;
@@ -444,10 +340,6 @@ pub const Providers = struct {
         return out;
     }
 
-    /// `provider`, when the Host fetches its live list: its list is live
-    /// (`Facts.model_list`), it is served over a route that has one
-    /// (`Credential.listing`), and its Responses endpoint has the list beside
-    /// it. Otherwise its picker shows the catalog.
     pub fn liveList(self: *const Providers, provider: Provider) ?*const Served {
         if (provider.facts().model_list != .live) return null;
         const served = self.get(provider) orelse return null;
@@ -455,14 +347,12 @@ pub const Providers = struct {
         return served;
     }
 
-    /// How many live lists the Host fetches, each on its own socket.
     pub fn liveLists(self: *const Providers) usize {
         var count: usize = 0;
         for (std.enums.values(Provider)) |provider| count += @intFromBool(self.liveList(provider) != null);
         return count;
     }
 
-    /// Whether a Session of `provider` can be admitted here.
     pub fn serves(self: *const Providers, provider: Provider) bool {
         return self.get(provider) != null;
     }
@@ -530,14 +420,9 @@ test "ChatGPT headers carry the credential, user-agent and FedRAMP fields" {
                 if (std.mem.eql(u8, entry.name, "x-openai-fedramp")) fedramp_found = std.mem.eql(u8, entry.value, "true");
                 if (std.mem.eql(u8, entry.name, "authorization"))
                     try std.testing.expectEqualStrings("Bearer " ++ codex_auth.fixture_access_token, entry.value);
-                // No codec header names it.
                 try std.testing.expect(provider_transport.hostField(entry.name));
             }
-            // The credential is the Reactor's one copy, which h2 borrows;
-            // only the per-request values are copied into each stream.
             for (entries) |entry| try std.testing.expectEqual(entry.name.len + entry.value.len > 16, entry.borrowed);
-            // They follow the codec's headers: the credential, user-agent,
-            // FedRAMP. The Transfer adds the Turn's routing value last.
             const shared = headers.credential.?;
             try std.testing.expectEqualStrings("authorization", entries[0].name);
             try std.testing.expectEqual(shared.authorization().ptr, entries[0].value.ptr);
@@ -558,16 +443,13 @@ test "each sign-in source says whether it waits for a lease and what a 401 means
     const signed_in: Credential = .{ .chatgpt_device = .{ .path = "/c", .refresh = .synthetic } };
     const keyed: Credential = .{ .key_file = .{ .key = "sk-test" } };
     try std.testing.expect(signed_in.leased() and !keyed.leased() and !Credential.leased(.none));
-    // A sign-in may refresh the generation it presented; a key names its remedy.
     try std.testing.expectEqual(Credential.Rejection{ .refresh_once = .{ .source = source, .generation = 7 } }, signed_in.rejection(&lease));
     try std.testing.expectEqual(Credential.Rejection.key_rejected, keyed.rejection(null));
     try std.testing.expectEqual(Credential.Rejection.settle, Credential.rejection(.none, null));
-    // Each refuses an endpoint it may not go to.
     try signed_in.validate("http://127.0.0.1:9/responses", null);
     try std.testing.expectError(error.InvalidCodexFixtureEndpoint, signed_in.validate(managed_endpoint, null));
     try std.testing.expectError(error.InsecureKeyEndpoint, keyed.validate("http://127.0.0.1:9/responses", null));
     try Credential.validate(.none, "http://127.0.0.1:9/responses", null);
-    // No credential writes no fields.
     var shared: provider_transport.Credentials = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     var headers: Headers = .{};
     defer headers.deinit();
@@ -590,10 +472,8 @@ test "a Host's routes name each provider it serves and its credential" {
     providers.table.set(.chatgpt, .{ .endpoint = endpoint(.chatgpt), .credential = .{ .chatgpt_plan = .{ .path = "/p" } } });
     try std.testing.expectEqual(protocol.Route.chatgpt_plan, providers.routes().chatgpt);
     try std.testing.expectEqual(protocol.Route.unserved, providers.routes().openai);
-    // Each sign-in's jobs speak its own wire.
     try std.testing.expectEqual(Authentication{ .path = "/c", .wire = .codex_device }, providers.get(.codex).?.credential.signIn().?);
     try std.testing.expectEqual(Authentication{ .path = "/p", .wire = .chatgpt_plan }, providers.get(.chatgpt).?.credential.signIn().?);
-    // The ChatGPT backend refuses structured output; OpenAI's API takes it.
     try std.testing.expect(!acceptsOutputSchema(.chatgpt_device) and acceptsOutputSchema(.chatgpt_plan));
 }
 
@@ -616,7 +496,6 @@ test "a ChatGPT plan sign-in sends a bearer and user-agent, only to OpenAI's API
         for (entries) |entry| try std.testing.expect(provider_transport.hostField(entry.name));
     }
     {
-        // The model list beside it takes the same bearer.
         var headers: Headers = .{};
         defer headers.deinit();
         try plan.fields(api_models_endpoint, null, &lease, &credentials, &headers);
@@ -624,15 +503,12 @@ test "a ChatGPT plan sign-in sends a bearer and user-agent, only to OpenAI's API
         try std.testing.expectEqualStrings("Bearer plan-access", headers.fields()[0].value);
     }
     var refused: Headers = .{};
-    // Not to the Codex backend, a base URL's endpoint or list, another path
-    // of OpenAI's API or a loopback.
     for ([_][]const u8{
         managed_endpoint,                  "https://proxy.example/v1/responses", "https://proxy.example/v1/models",
         "https://api.openai.com/v1/files", "https://api.openai.com/v1/models/x", "http://api.openai.com/v1/models",
         "http://127.0.0.1:9/responses",
     }) |target|
         try std.testing.expectError(error.ManagedEndpointMismatch, plan.fields(target, null, &lease, &credentials, &refused));
-    // A fixture takes only a record issued to the fixture client, at loopback.
     const fixture: Credential = .{ .chatgpt_plan = .{ .path = "/p", .refresh = .{ .fixture_endpoint = "http://127.0.0.1:9/token" } } };
     try std.testing.expectError(error.InvalidManagedFixture, fixture.fields("http://127.0.0.1:9/responses", null, &lease, &credentials, &refused));
     try lease.record.client_id.set(credential_policy.fixture_client_id);
@@ -647,7 +523,6 @@ test "a ChatGPT plan sign-in sends a bearer and user-agent, only to OpenAI's API
     try std.testing.expectError(error.InvalidCodexFixtureEndpoint, fixture.validate(api_endpoint, null));
     const remote_token: Credential = .{ .chatgpt_plan = .{ .path = "/p", .refresh = .{ .fixture_endpoint = "https://auth.example/token" } } };
     try std.testing.expectError(error.InvalidCodexFixtureEndpoint, remote_token.validate("http://127.0.0.1:9/responses", null));
-    // A 401 refreshes the plan sign-in once, over its own wire.
     try std.testing.expectEqual(Credential.Rejection{ .refresh_once = .{ .source = .{ .path = "/p", .wire = .chatgpt_plan }, .generation = 4 } }, plan.rejection(&lease));
     try std.testing.expectEqual(@as(?*provider_transport.SharedCredential, null), credentials.head);
 }
@@ -662,7 +537,6 @@ test "a sign-in's routing owner is its account and FedRAMP binding, which a refr
         try lease.record.access_token.set(access);
         owner.* = signed_in.routingOwner(&lease);
     }
-    // A refreshed token is the same owner; another account or FedRAMP is not.
     try std.testing.expectEqualSlices(u8, &owners[0], &owners[1]);
     try std.testing.expect(!std.mem.eql(u8, &owners[0], &owners[2]));
     try std.testing.expect(!std.mem.eql(u8, &owners[0], &owners[3]));
@@ -728,7 +602,6 @@ test "each route says how its model list reads, and a provider's list is live on
     try std.testing.expectEqual(@as(?Listing, .openai), keyed.listing());
     try std.testing.expectEqual(@as(?Listing, null), device.listing());
     try std.testing.expectEqual(@as(?Listing, null), Credential.listing(.none));
-    // Each reads its own shape: a plan offers only listed entries.
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var out: model_list.IdBuffer = undefined;
@@ -745,12 +618,10 @@ test "each route says how its model list reads, and a provider's list is live on
     providers.table.set(.codex, .{ .endpoint = endpoint(.codex), .credential = device });
     providers.table.set(.openai, .{ .endpoint = endpoint(.openai), .credential = keyed });
     providers.table.set(.chatgpt, .{ .endpoint = endpoint(.chatgpt), .credential = plan });
-    // The device sign-in's list is the catalog's; the key's and the plan's are live.
     try std.testing.expect(providers.liveList(.codex) == null);
     try std.testing.expectEqual(providers.get(.openai).?, providers.liveList(.openai).?);
     try std.testing.expectEqual(providers.get(.chatgpt).?, providers.liveList(.chatgpt).?);
     try std.testing.expectEqual(@as(usize, 2), providers.liveLists());
-    // No credential, or an endpoint with no list beside it, has none.
     providers.table.set(.openai, .{ .endpoint = "http://127.0.0.1:9/responses", .credential = .none });
     providers.table.set(.chatgpt, .{ .endpoint = "http://127.0.0.1:9/chat", .credential = plan });
     try std.testing.expect(providers.liveList(.openai) == null and providers.liveList(.chatgpt) == null);

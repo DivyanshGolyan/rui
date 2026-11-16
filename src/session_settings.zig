@@ -1,5 +1,3 @@
-//! Session setting facts shared by the wire, Store and caller adapters.
-//! Representation and setting-specific behavior stay with those adapters.
 const std = @import("std");
 
 pub const Kind = union(enum) { text: usize, choice: usize, content, tools, decimal_policy };
@@ -14,7 +12,6 @@ pub const Entry = struct {
     spec: []const u8,
     kind: Kind,
     nullable: bool = false,
-    /// A streamed JSON object rather than a streamed text string.
     json_object: bool = false,
     create: Create = .optional,
     changeable: bool = true,
@@ -23,8 +20,6 @@ pub const Entry = struct {
     column: []const u8,
 };
 
-/// Configuration declaration order is also the legacy digest order, except
-/// loaded_tools: its compatibility extension is hashed after require_model.
 pub const entries = [_]Entry{
     .{ .field = "workspace", .spec = "workspace", .kind = .{ .text = 4096 }, .changeable = false, .cli = .{ .name = "workspace" }, .column = "workspace" },
     .{ .field = "provider", .spec = "provider", .kind = .{ .choice = 16 }, .changeable = false, .cli = .{ .name = "provider", .group = .binding }, .column = "provider" },
@@ -40,16 +35,11 @@ pub const entries = [_]Entry{
     .{ .field = "label", .spec = "label", .kind = .{ .text = 100 }, .nullable = true, .cli = .{ .name = "label" }, .column = "label" },
 };
 
-/// Create-only relations share the spec grammar, not settings/revision tags.
 pub const relations = [_]Entry{
     .{ .field = "parent", .spec = "parent", .kind = .{ .text = 6 }, .changeable = false, .cli = null, .digest = .unless_omitted, .column = "parent_ref" },
 };
 pub const spec_entries = entries ++ relations;
 
-/// Workspace is not revisioned. Provider remains in the persisted tag domain
-/// even though changing it is refused; removing it would change Store format.
-/// A refusal is an appended revision fact, not a configurable setting: it
-/// belongs only to this tag domain, never to `entries` or its adapters.
 pub const revision_fields = blk: {
     var names: []const []const u8 = &.{};
     for (entries) |entry| if (!std.mem.eql(u8, entry.field, "workspace")) {

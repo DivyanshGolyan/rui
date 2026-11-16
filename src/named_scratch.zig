@@ -3,7 +3,6 @@ const Bounded = @import("bounded.zig").Bounded;
 const ScratchBudget = @import("ScratchBudget.zig");
 
 pub const NumericName = enum {
-    // Ingress exchanges and model Operations have independent counters.
     request,
     @"provider-request",
     response,
@@ -226,8 +225,6 @@ test "an already absent name reclaims handles and accounting" {
         _ = owner.reclaim(root) catch {};
     };
 
-    // Path absence alone is not completed cleanup: reclaim must still
-    // close both owned aliases and release the reservation exactly once.
     const absent = try owner.reclaim(root);
     reclaimed = true;
     try std.testing.expectEqual(Reclamation.already_absent, absent);
@@ -267,7 +264,6 @@ test "injected removal failure retains ownership until the same owner can retry"
         error.InjectedScratchRemovalFailure,
         owner.reclaim(root),
     );
-    // The same owner retains its resources and full outstanding charge.
     try std.testing.expect(owner.resources != null);
     try std.testing.expectEqualStrings("owned", owner.resources.?.name.slice());
     try std.testing.expectEqual(baseline + charge, used.load(.acquire));

@@ -1,9 +1,3 @@
-//! Name lookup for connection setups: getaddrinfo on a `job.Job` thread.
-//! Internal.
-//!
-//! Bound: each origin keeps at most one lookup, shared by its setups and
-//! kept across a setup that timed out, so at most `max_endpoints` lookup
-//! threads run per Client even while the resolver stalls.
 const std = @import("std");
 const h2 = @import("h2.zig");
 const Waker = @import("Waker.zig");
@@ -12,7 +6,6 @@ const Resolver = @This();
 
 pub const Job = job.Job(Resolver);
 
-/// Addresses tried per connection.
 pub const max_addresses = 8;
 
 port: u16,
@@ -20,13 +13,11 @@ host: [h2.max_host_bytes + 1]u8,
 count: u8,
 addresses: [max_addresses]Address,
 
-/// A socket address, IPv4 or IPv6.
 pub const Address = struct {
     storage: std.c.sockaddr.in6,
     length: std.c.socklen_t,
     family: c_uint,
 
-    /// The address an IP literal names, or null for a DNS name.
     pub fn literal(host: []const u8, port: u16) ?Address {
         if (std.Io.net.Ip4Address.parse(host, port)) |ip4| {
             var address: Address = .{ .storage = std.mem.zeroes(std.c.sockaddr.in6), .length = @sizeOf(std.c.sockaddr.in), .family = std.c.AF.INET };
@@ -57,8 +48,6 @@ pub const Address = struct {
     }
 };
 
-/// Starts a lookup of `host` and returns the owner's reference, or null
-/// when no thread could be started.
 pub fn start(waker: *Waker, host: []const u8, port: u16) ?*Job {
     std.debug.assert(host.len <= h2.max_host_bytes);
     var lookup: Resolver = .{ .port = port, .host = undefined, .count = 0, .addresses = undefined };
@@ -67,8 +56,6 @@ pub fn start(waker: *Waker, host: []const u8, port: u16) ?*Job {
     return Job.start(waker, lookup);
 }
 
-/// A finished lookup that found `addresses`, in this order: a test's
-/// stand-in for a name it cannot make resolve this way.
 pub fn answered(waker: *Waker, addresses: []const Address) ?*Job {
     std.debug.assert(addresses.len <= max_addresses);
     var lookup: Resolver = .{ .port = 0, .host = @splat(0), .count = @intCast(addresses.len), .addresses = undefined };
@@ -76,8 +63,6 @@ pub fn answered(waker: *Waker, addresses: []const Address) ?*Job {
     return Job.finished(waker, lookup);
 }
 
-/// The addresses found, in the order to try them; empty when the lookup
-/// failed.
 pub fn found(self: *const Resolver) []const Address {
     return self.addresses[0..self.count];
 }
@@ -88,8 +73,6 @@ pub fn run(self: *Resolver) void {
     var hints = std.mem.zeroes(std.c.addrinfo);
     hints.family = std.c.AF.UNSPEC;
     hints.socktype = std.c.SOCK.STREAM;
-    // Only families this host has an address in, so a host without IPv6
-    // never waits on an IPv6 attempt.
     hints.flags = .{ .NUMERICSERV = true, .ADDRCONFIG = true };
     var list: ?*std.c.addrinfo = null;
     const status = std.c.getaddrinfo(@ptrCast(&self.host), service, &hints, &list);
@@ -146,7 +129,6 @@ test "a lookup of an IP literal returns it, and a released lookup frees itself" 
     try std.testing.expectEqual(@as(c_uint, std.c.AF.INET), addresses[0].family);
     lookup.release();
 
-    // Released while it may still run: the thread frees the job alone.
     const abandoned = start(&waker, "localhost", 443) orelse return error.SkipZigTest;
     abandoned.release();
 }
@@ -170,12 +152,9 @@ test "families alternate, the first answer's family leading, and both fit" {
     try std.testing.expectEqual(@as(usize, max_addresses), count);
     const families = [_]c_uint{ std.c.AF.INET6, std.c.AF.INET, std.c.AF.INET6, std.c.AF.INET, std.c.AF.INET6, std.c.AF.INET6, std.c.AF.INET6, std.c.AF.INET6 };
     for (out, families) |address, family| try std.testing.expectEqual(family, address.family);
-    // Within a family, getaddrinfo's order stays. The port sits at the same
-    // offset in both sockaddr layouts.
     try std.testing.expectEqual(@as(u16, 1), std.mem.bigToNative(u16, out[2].storage.port));
     try std.testing.expectEqual(@as(u16, 101), std.mem.bigToNative(u16, out[3].storage.port));
 
-    // IPv4 first when getaddrinfo answered IPv4 first; one family alone is unchanged.
     try std.testing.expectEqual(@as(usize, 4), interleave(&four, six[0..2], &out));
     try std.testing.expectEqual(@as(c_uint, std.c.AF.INET), out[0].family);
     try std.testing.expectEqual(@as(c_uint, std.c.AF.INET6), out[1].family);

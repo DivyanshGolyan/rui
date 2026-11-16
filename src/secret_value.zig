@@ -1,10 +1,7 @@
-//! Bounded credential storage and header-safe value validation.
 const std = @import("std");
 
-/// The longest key Rui accepts. OpenAI keys are about 170 bytes.
 pub const max_key_bytes = 1024;
 
-/// One key, held for a Host's life in its caller's storage.
 pub const Key = struct {
     bytes: [max_key_bytes]u8 = undefined,
     len: usize = 0,
@@ -19,7 +16,6 @@ pub const Key = struct {
     }
 };
 
-/// Visible ASCII only, so the key is a valid header value as it stands.
 pub fn valid(key: []const u8) bool {
     if (key.len == 0 or key.len > max_key_bytes) return false;
     for (key) |byte| if (byte < 0x21 or byte > 0x7e) return false;
@@ -57,7 +53,6 @@ pub fn wipeAndFree(allocator: std.mem.Allocator, bytes: []u8, alignment: std.mem
     allocator.rawFree(bytes, alignment, ret);
 }
 
-/// Wipes every backing allocation before freeing; temporary arenas never move.
 pub const WipingAllocator = struct {
     backing: std.mem.Allocator,
 

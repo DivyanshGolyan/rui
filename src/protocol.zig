@@ -27,12 +27,9 @@ const activity_facts = @import("activity_facts.zig");
 
 pub const wire_version = @import("wire_version.zig").wire_version;
 
-/// Host-owned lifecycle state of a Message request.
 pub const MessageRequestState = message_observation.MessageRequestState;
 
-/// Maximum recovery Actions retained in one Message observation.
 pub const message_recovery_limit = message_observation.message_recovery_limit;
-/// Versions a newer and an older Host speak, for tests that refuse them.
 pub const next_wire_version = std.fmt.comptimePrint("{d}", .{wire_number + 1});
 pub const previous_wire_version = std.fmt.comptimePrint("{d}", .{wire_number - 1});
 const wire_number = std.fmt.parseInt(u32, wire_version, 10) catch unreachable;
@@ -41,8 +38,6 @@ pub const reserved_key_prefix = idempotency_key.reserved_prefix;
 pub const max_session_bytes = session_id.max_reference_bytes;
 pub const max_store_bytes = store_path.max_bytes;
 pub const max_workspace_bytes = workspace_path.max_bytes;
-/// Content values one request carries at most: a configure command's
-/// instructions and output schema, plus a creating Message's text.
 const spec_content_count = count: {
     var total: usize = 0;
     for (session_settings.entries) |entry| {
@@ -50,10 +45,8 @@ const spec_content_count = count: {
     }
     break :count total;
 };
-/// A creating Message carries its text and every spec content setting.
 pub const max_request_contents = 1 + spec_content_count;
 pub const max_sender_handle_bytes = command_input.max_sender_handle_bytes;
-/// Most bytes of client environment entries one Message carries.
 pub const max_environment_bytes = 64 * 1024;
 pub const max_model_bytes = model_capability.max_model_bytes;
 pub const max_code_bytes = outcome_code.max_bytes;
@@ -62,7 +55,6 @@ pub const max_tool_description_bytes = tool_presentation.max_description_bytes;
 pub const max_tool_name_bytes = tool_name.max_bytes;
 pub const max_tools = tool_name.max_tools;
 pub const max_tool_list_name_bytes = tool_name.max_list_name_bytes;
-/// A preset name passed at connect or named at Session creation.
 pub const max_preset_name_bytes = command_input.max_preset_name_bytes;
 pub const max_label_bytes = tool_presentation.max_label_bytes;
 pub const validLabel = tool_presentation.validLabel;
@@ -75,8 +67,6 @@ pub const servesModel = provider_route.servesModel;
 
 pub const Codec = provider_name.Codec;
 pub const ReasoningEffort = model_capability.ReasoningEffort;
-// Like permission-mode selectors, retain bounded unsupported names so admission
-// can save their rejection. This is an ingress bound, not a provider registry.
 pub const max_provider_bytes = command_input.max_provider_bytes;
 pub const max_header_bytes = 16 * 1024;
 pub const content_window_bytes = conversation_read.content_window_bytes;
@@ -96,10 +86,6 @@ pub const Address = command_input.Address;
 pub const FieldState = command_input.FieldState;
 pub const OptionalBounded = command_input.OptionalBounded;
 
-/// The request types that hold content, and their Parser, over one custody:
-/// `Custody.File` holds a value's sealed bytes, `Custody.Budget` is the
-/// scratch it charges, and `Custody.release` gives both back through a
-/// `Custody.Io`. wire_request.zig supplies the Host's custody.
 pub fn Requests(comptime Custody: type) type {
     return struct {
         pub const ContentField = command_input.Commands(Custody).ContentField;
@@ -119,7 +105,6 @@ pub const max_tool_names_json_bytes = tool_name.max_names_json_bytes;
 pub const BuiltInTool = built_in_tool.BuiltInTool;
 pub const ToolSelection = built_in_tool.Selection;
 
-/// The built-in tool `name` names, or null.
 pub fn builtInTool(name: []const u8) ?BuiltInTool {
     return std.meta.stringToEnum(BuiltInTool, name);
 }
@@ -174,8 +159,6 @@ pub const ModelInterruptionCommand = command_input.ModelInterruptionCommand;
 
 pub const PermissionDecision = mutation_answer.PermissionDecision;
 
-// Reply and observation vocabulary. The Store produces these values and the
-// Host renders their tag names, so each reply's JSON shape can bound them.
 pub const ConfigurationRejection = configuration_admission.Rejection;
 pub const MessageRejection = message_admission.Rejection;
 pub const CommandKind = cli_value.CommandKind;
@@ -192,7 +175,6 @@ pub const SessionPinRejection = mutation_answer.SessionPinRejection;
 pub const ModelInterruptionRejection = mutation_answer.ModelInterruptionRejection;
 pub const PermissionDecisionRejection = mutation_answer.PermissionDecisionRejection;
 pub const MessageProgressStatus = WorkState.Progress;
-/// A hosted call has no content: its presentation is the whole item.
 pub const ConversationItemKind = conversation_read.ConversationItemKind;
 
 pub const PermissionDecisionCommand = command_input.PermissionDecisionCommand;
@@ -231,7 +213,6 @@ pub const InspectSession = struct {
     failed_response: ?FailedResponseExport = null,
 };
 
-// Random per serving lifetime; not a PID, Store identity, or recovery token.
 pub const InstanceId = [16]u8;
 
 pub fn parseInstanceId(text: []const u8) !InstanceId {
@@ -246,8 +227,6 @@ pub fn parseInstanceId(text: []const u8) !InstanceId {
 
 pub const HostInfo = HostInfoWith(Routes);
 
-/// The `host_info` reply whose `capabilities.providers` is `Providers`: a
-/// released Host's names only the providers its build knew.
 pub fn HostInfoWith(comptime Providers: type) type {
     return struct {
         version: []const u8,
@@ -257,14 +236,9 @@ pub fn HostInfoWith(comptime Providers: type) type {
         active_capacity: []const u8,
         intake_capacity: []const u8 = "100",
         descriptor_limit: []const u8 = "unlimited",
-        /// Host Unix seconds, fixed before the execution thread starts.
         started_at: []const u8,
-        /// Slots in use: held custody records, including detached cleanup. The
-        /// value Current reports as `execution.custody_occupied`.
         custody_occupied: []const u8,
-        /// Whether the Host holds every new Turn until resumed (D193).
         paused: bool,
-        /// MySQL engine diagnostic (D200); absent on SQLite.
         innodb_doublewrite: ?[]const u8 = null,
         capabilities: struct {
             bash: bool,
@@ -275,16 +249,12 @@ pub fn HostInfoWith(comptime Providers: type) type {
 
 pub const ListSessions = session_list.ListSessions;
 
-/// What a list reply answers relative to its request's `since`.
 pub const ListDelta = session_list.ListDelta;
 
-// Positions are immutable within a Session. The zero end/cursor requests the
-// first (newest) page; subsequent requests carry the returned fixed end.
 pub const ConversationPage = conversation_read.ConversationPage;
 pub const ConversationContent = conversation_read.ConversationContent;
 
 pub const ProposalField = tool_proposal.Field;
-/// One certified call field: its decoded length and content digest.
 pub const ProposalFieldReference = activity_read.ProposalFieldReference;
 pub const ProposalRejection = tool_proposal.Rejection;
 pub const ProposalMetadata = activity_read.ProposalMetadata;
@@ -296,12 +266,10 @@ pub const ActivitySearchFacts = activity_facts.Search;
 
 pub const ToolPresentation = tool_presentation.ToolPresentation;
 
-/// A ToolPresentation as JSON.
 pub const ToolPresentationJson = struct {
     value: ToolPresentation,
 
     pub const openapi_name = "ToolPresentation";
-    /// Holes: description, code, publication position.
     pub const json_shape = .{ "{\"description\":", Hole{ .optional_string = max_tool_description_bytes }, ",\"code\":\"", Hole{ .tag = ToolPresentation.Code }, "\",\"publication_position\":", Hole.optional_id, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
@@ -311,7 +279,6 @@ pub const ToolPresentationJson = struct {
     }
 };
 
-/// A peer Session named on a Message, in the same Store.
 pub const Peer = struct {
     session: Bounded(max_session_bytes),
 
@@ -325,7 +292,6 @@ pub const Peer = struct {
 
 pub const NamedPeer = activity_facts.NamedPeer;
 
-/// A NamedPeer as JSON.
 pub const NamedPeerJson = struct {
     value: NamedPeer,
 
@@ -343,13 +309,10 @@ pub const NamedPeerJson = struct {
     }
 };
 
-/// A Session setting a revision can change, named on the wire as in a
-/// configuration.
 pub const SessionField = session_settings.SessionField;
 
 pub const ActivityItem = activity_facts.Item;
 
-/// A content reference as activity rows and reports write it.
 pub const ContentJson = struct {
     value: ActivityItem.Content,
 
@@ -379,7 +342,6 @@ pub const Queued = activity_facts.Queued;
 pub const session_work = @import("session_work.zig");
 pub const WorkState = session_work.WorkState;
 pub const change_ring = @import("change_ring.zig");
-/// A list reply's opaque change token.
 pub const SinceToken = change_ring.Token;
 
 comptime {
@@ -387,17 +349,11 @@ comptime {
     std.debug.assert(session_work.max_description_bytes == max_tool_description_bytes);
 }
 
-/// The wire form of a `WorkState`: `kind` and `since`, then the kind's own
-/// facts. Every reader writes it here, so they cannot drift apart.
 pub const WorkStateJson = struct {
     state: WorkState,
 
-    /// Holes: kind, since. The kinds that own no other fact.
     pub const plain_shape = .{ "{\"kind\":\"", Hole{ .tag = session_work.Kind }, "\",\"since\":\"", Hole.decimal, "\"}" };
-    /// Holes: since, then the listed facts.
     pub const retrying_shape = .{ "{\"kind\":\"retrying\",\"since\":\"", Hole.decimal, "\",\"due_at_ms\":\"", Hole.decimal, "\",\"cause\":", Hole{ .string = max_code_bytes }, ",\"attempt\":\"", Hole.decimal, "\"}" };
-    /// A running Host survives a Rui upgrade, so a reader still meets this
-    /// form, from a Host that predates `call`.
     pub const older_bash_shape = .{ "{\"kind\":\"bash\",\"since\":\"", Hole.decimal, "\",\"description\":", Hole{ .optional_string = session_work.max_description_bytes }, ",\"running\":\"", Hole.decimal, "\",\"approvals\":\"", Hole.decimal, "\"}" };
     pub const bash_shape = .{ "{\"kind\":\"bash\",\"since\":\"", Hole.decimal, "\",\"call\":\"", Hole.decimal, "\",\"description\":", Hole{ .optional_string = session_work.max_description_bytes }, ",\"running\":\"", Hole.decimal, "\",\"approvals\":\"", Hole.decimal, "\"}" };
     pub const failed_shape = .{ "{\"kind\":\"failed\",\"since\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"resets_at\":", Hole.optional_id, "}" };
@@ -418,17 +374,12 @@ pub const WorkStateJson = struct {
     }
 };
 
-/// A Session's work, as list rows, activity pages and Current carry it: the
-/// derived state, the latest Turn and Operation, and the earliest Action
-/// awaiting permission.
 pub const SessionWork = struct {
     state: WorkState = .{ .idle = .{ .since = 0 } },
     turn: ?u64 = null,
     operation: ?u64 = null,
     first_action: ?u64 = null,
 
-    /// Holes: state, turn, operation, first action. Readers that add facts
-    /// beside the work write these inside their own object.
     pub const fields = .{ "\"state\":", Hole{ .json = WorkStateJson }, ",\"turn\":", Hole.optional_id, ",\"operation\":", Hole.optional_id, ",\"first_action\":", Hole.optional_id };
     pub const json_shape = .{"{"} ++ fields ++ .{"}"};
     pub const max_json_bytes = shapeBytes(json_shape);
@@ -452,9 +403,6 @@ pub const SessionWork = struct {
 
 pub const PageWork = activity_facts.PageWork;
 
-/// Who reached this Session from outside its peers: when the latest Message
-/// with no Session sender (a person or a script; Rui cannot tell them apart)
-/// was admitted, or null if none was.
 pub const PeerFacts = struct {
     from_person_at: ?u64 = null,
 
@@ -466,17 +414,13 @@ pub const PeerFacts = struct {
     }
 };
 
-/// The Session's first admitted Message, whatever happened to it. It never
-/// changes once it exists.
 pub const FirstMessage = struct {
     position: u64,
     admission: u64,
     admitted_at: u64,
-    /// The Session that sent it, or null for a person or a script.
     sender: ?Peer,
     content: ActivityItem.Content,
 
-    /// Holes: position, admission, admitted at, sender, content.
     pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = Peer }, ",\"content\":", Hole{ .json = ContentJson }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
@@ -495,7 +439,6 @@ pub const FirstMessage = struct {
     }
 };
 
-/// The last thing a Session said to its person, derived by the Host.
 pub const LastLine = struct {
     position: u64,
     text: ?Bounded(session_list.max_last_line_bytes),
@@ -503,7 +446,6 @@ pub const LastLine = struct {
     pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"text\":", Hole{ .optional_string = session_list.max_last_line_bytes }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
-    /// Borrowed form used while the Store's list-row visitor is running.
     pub const Fields = struct {
         position: u64,
         text: ?[]const u8,
@@ -526,8 +468,6 @@ pub const LastLine = struct {
 
 pub const PermissionMode = cli_value.PermissionMode;
 
-/// One `list-sessions` row. Every fact comes from the Store read that
-/// produced its page.
 pub const SessionRow = struct {
     read_version: change_ring.Token = .{ .instance = @splat(0), .generation = 0 },
     archive_state: SessionArchiveState = .active,
@@ -542,8 +482,6 @@ pub const SessionRow = struct {
     label: ?Bounded(max_label_bytes) = null,
     created_at: u64 = 0,
     revision: u64 = 0,
-    /// The last activity position: a forward activity read from an earlier
-    /// `end` shows what changed since.
     end: u64 = 0,
     first_message: ?FirstMessage = null,
     last_line: ?LastLine = null,
@@ -557,15 +495,11 @@ pub const SessionRow = struct {
         ",\"last_line\":",      Hole{ .optional_json = LastLine.Fields },    ",\"work\":",              Hole{ .json = SessionWork },        ",\"peers\":",        Hole{ .json = PeerFacts },                 "}",
     };
     pub const max_json_bytes = shapeBytes(json_shape);
-    /// A row may never exceed this, whatever its fields hold: a new field that
-    /// would grow every page's scratch charge past it fails the build.
     pub const budget_bytes = 36 * 1024;
     comptime {
         std.debug.assert(max_json_bytes <= budget_bytes);
     }
 
-    /// A row's fields borrowed from wherever they are held, such as a Store
-    /// read's row: the one place that orders them into `json_shape`.
     pub const Fields = struct {
         read_version: change_ring.Token = .{ .instance = @splat(0), .generation = 0 },
         archive_state: SessionArchiveState = .active,
@@ -574,7 +508,6 @@ pub const SessionRow = struct {
         workspace: []const u8,
         provider: Provider,
         model: []const u8,
-        /// Already-rendered JSON borrowed from the Store read.
         tools: []const u8,
         permission_mode: PermissionMode,
         parent: ?[]const u8,
@@ -635,17 +568,11 @@ pub const SessionRow = struct {
     }
 };
 
-/// A `list-sessions` reply: up to eight rows, what they answer relative to
-/// the request's `since`, the next token, then the continuation.
 pub const session_list_reply = struct {
     pub const head = .{"{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_list\",\"sessions\":["};
-    /// Holes: delta, token.
     const facts = .{ "],\"delta\":\"", Hole{ .tag = ListDelta }, "\",\"since\":\"", Hole{ .text = SinceToken.max_bytes }, "\",\"next\":" };
-    /// Holes: delta, token, after, ceiling.
     pub const full_tail = facts ++ .{ "{\"after\":\"", Hole.decimal, "\",\"ceiling\":\"", Hole.decimal, "\"}}" };
-    /// Holes: delta, token, through, after reference.
     pub const changed_tail = facts ++ .{ "{\"through\":\"", Hole.decimal, "\",\"after_reference\":", Hole{ .string = session_id_bytes }, "}}" };
-    /// Holes: delta, token.
     pub const last_tail = facts ++ .{"null}"};
     pub const max_bytes = shapeBytes(head) + jsonListBytes(session_list_page_size, SessionRow.max_json_bytes) + maxShapeBytes(.{ full_tail, changed_tail, last_tail });
 };
@@ -660,7 +587,6 @@ fn RequestOf(comptime Custody: type) type {
 
         host_info: struct { store: Bounded(max_store_bytes) = .{} },
         host_stop: struct { store: Bounded(max_store_bytes) = .{} },
-        /// Sets whether the Host holds every new Turn (D193).
         host_pause: struct { store: Bounded(max_store_bytes) = .{}, paused: bool = false },
         configure: ConfigureCommand,
         message: MessageCommand,
@@ -693,7 +619,6 @@ fn RequestOf(comptime Custody: type) type {
             }
         }
 
-        /// Borrows the active payload's Store bytes until this Request is replaced.
         pub fn store(self: *const Request) []const u8 {
             return switch (self.*) {
                 inline else => |*request| request.store.slice(),
@@ -705,8 +630,6 @@ fn RequestOf(comptime Custody: type) type {
 pub const contentHasher = content_string.hasher;
 pub const contentDigest = content_string.digest;
 
-/// The metadata an Ingress has received so far, the Parser's only input.
-/// Content bodies never reach it: the Ingress captures them.
 pub const MetadataSource = struct {
     input: []const u8,
     start: usize = 0,
@@ -733,11 +656,9 @@ fn ParserOf(comptime Custody: type) type {
         const Parser = @This();
 
         source: *MetadataSource,
-        /// The Kind the request's route names, when it names one.
         expected_kind: ?Kind = null,
         content_ordinal: u8 = 0,
         captured: []const ContentField = &.{},
-        /// Last spec member, for bounded caller diagnostics.
         spec_field: Bounded(32) = .{},
 
         /// Members of every request object may come in any order, as JSON
@@ -880,11 +801,6 @@ fn ParserOf(comptime Custody: type) type {
 
         const Header = struct { kind: Kind, store: Bounded(max_store_bytes) };
 
-        /// The first pass. It passes over every member but the header, except
-        /// that it counts a content string where a Message's text or a
-        /// configuration's instructions or output schema holds one, so the
-        /// Ingress captures it whatever the order. Once `kind` is known, content
-        /// the kind cannot carry fails before any capture.
         fn scanHeader(self: *Parser) !Header {
             const Field = enum { version, kind, store, text, configuration };
             try self.expectByte('{');
@@ -941,8 +857,6 @@ fn ParserOf(comptime Custody: type) type {
                     inline else => |tag| {
                         const entry = session_settings.spec_entries[@backingInt(tag)];
                         if (entry.kind == .content) {
-                            // Suspend at the colon, before the first content
-                            // byte. Ingress may resume with a quote or null.
                             self.skipWhitespace() catch |err| return if (err == error.NeedInput and self.content_ordinal >= self.captured.len) (if (entry.json_object) error.NeedSchema else error.NeedContent) else err;
                             if (!try self.readNull()) {
                                 if (self.content_ordinal == max_request_contents) return error.UnexpectedField;
@@ -968,18 +882,15 @@ fn ParserOf(comptime Custody: type) type {
                 if (value) return error.UnexpectedField;
                 if (!content) return error.InvalidFieldState;
                 value = true;
-                // Content beyond the creating-Message maximum has no capture.
                 if (self.content_ordinal == max_request_contents) return error.UnexpectedField;
                 var counted: ContentField = .{};
                 try self.readContentString(&counted);
             }
         }
 
-        /// Walks one object's members after its opening brace.
         const Members = struct {
             started: bool = false,
 
-            /// Reads the next member's key and colon, or the closing brace.
             fn next(self: *Members, parser: *Parser, key: *Bounded(32)) !bool {
                 if (try parser.consumeIf('}')) return false;
                 if (self.started) try parser.expectByte(',');
@@ -994,15 +905,12 @@ fn ParserOf(comptime Custody: type) type {
             }
         };
 
-        /// The next member of an object whose keys are `Field`'s names, each at
-        /// most once, in any order.
         fn nextField(self: *Parser, comptime Field: type, members: *Members, seen: *std.enums.EnumSet(Field)) !?Field {
             var key: Bounded(32) = .{};
             if (!try members.next(self, &key)) return null;
             return try fieldOf(Field, &key, seen);
         }
 
-        /// The command's next member, passing over the header the first pass read.
         fn nextCommandField(self: *Parser, comptime Field: type, members: *Members, seen: *std.enums.EnumSet(Field)) !?Field {
             var key: Bounded(32) = .{};
             while (try members.next(self, &key)) {
@@ -1015,7 +923,6 @@ fn ParserOf(comptime Custody: type) type {
             return null;
         }
 
-        /// Finishes a command that has no members beyond its header.
         fn endCommand(self: *Parser, members: *Members) !void {
             var key: Bounded(32) = .{};
             while (try members.next(self, &key)) {
@@ -1074,7 +981,6 @@ fn ParserOf(comptime Custody: type) type {
             try require(Field, seen, &.{.key});
         }
 
-        /// Each parser fills its command `out`, whose Store is already set.
         fn parseConfigure(self: *Parser, out: *ConfigureCommand, members: *Members) !void {
             const Field = enum { key, session, configuration, preset, require_model, reload_skills };
             var seen: std.enums.EnumSet(Field) = .empty;
@@ -1105,8 +1011,6 @@ fn ParserOf(comptime Custody: type) type {
             return error.UnexpectedField;
         }
 
-        /// The one plain agent-spec grammar. Strings are written directly into
-        /// the caller's Configuration; content uses the caller's capture custody.
         pub fn parseConfiguration(self: *Parser, out: *Configuration) !void {
             try self.expectByte('{');
             var members: Members = .{};
@@ -1191,9 +1095,6 @@ fn ParserOf(comptime Custody: type) type {
                 .require_model => out.require_model = try self.readBoolean(),
             };
             try require(Field, seen, &.{ .key, .session, .sender, .sender_handle, .text });
-            // Only a creating Message, one with no Session yet, carries a
-            // configuration and a capability condition, and it must carry the
-            // configuration.
             if (out.session.len == 0 and out.configuration == null) return error.MissingField;
             if (out.session.len == 0) try validateCreatingConfiguration(&out.configuration.?);
             if (out.session.len != 0 and out.configuration != null) return error.UnexpectedField;
@@ -1358,8 +1259,6 @@ fn ParserOf(comptime Custody: type) type {
             };
             try require(Field, seen, &.{.session});
             if (seen.contains(.since) and (seen.contains(.profile) or seen.contains(.failed_response))) return error.UnexpectedField;
-            // A report profile or one failed response stream, never both; the
-            // stream is named by its Operation and attempt.
             const selected = part orelse {
                 if (seen.contains(.operation) or seen.contains(.attempt)) return error.UnexpectedField;
                 return;
@@ -1399,8 +1298,6 @@ fn ParserOf(comptime Custody: type) type {
                 },
             };
             try require(Field, seen, &.{ .workspace, .after, .ceiling });
-            // A changed continuation names both its generation and its last
-            // Session, and only follows a `since` token.
             if (seen.contains(.through) or seen.contains(.after_reference)) {
                 if (!seen.contains(.through) or !seen.contains(.after_reference) or out.since == null) return error.InvalidCursor;
                 out.changed = .{ .through = through, .after_reference = reference.bytes[0..session_id_bytes].* };
@@ -1463,7 +1360,6 @@ fn ParserOf(comptime Custody: type) type {
                 },
                 .kinds => {
                     try self.expectByte('[');
-                    // Each kind at most once, in tag order, so one set has one spelling.
                     out.kinds = .empty;
                     var last: ?ActivityItem.Kind = null;
                     if (!try self.consumeIf(']')) while (true) {
@@ -1497,7 +1393,6 @@ fn ParserOf(comptime Custody: type) type {
                 },
                 .kinds => {
                     try self.expectByte('[');
-                    // Each kind at most once, in tag order, so one set has one spelling.
                     out.kinds = .empty;
                     var last: ?ActivityItem.Kind = null;
                     if (!try self.consumeIf(']')) while (true) {
@@ -1529,11 +1424,8 @@ fn ParserOf(comptime Custody: type) type {
             if (out.position == 0 or out.position > std.math.maxInt(i64) or out.ordinal > std.math.maxInt(i64)) return error.InvalidCursor;
         }
 
-        /// The members of a `{"state":…,"value":…}` envelope.
         const Envelope = enum { state, value };
 
-        /// An envelope's state, once its members are read: a value is present
-        /// exactly when the state says so.
         fn envelopeState(state: *const Bounded(16), seen: std.enums.EnumSet(Envelope), allow_null: bool) !FieldState {
             if (!seen.contains(.state)) return error.MissingField;
             const result: FieldState = if (state.eql("omitted"))
@@ -1563,15 +1455,12 @@ fn ParserOf(comptime Custody: type) type {
             field.state = try envelopeState(&state, seen, allow_null);
         }
 
-        /// Reads a literal null, or leaves the input where it was.
         fn readNull(self: *Parser) !bool {
             if (!try self.consumeIf('n')) return false;
             for ("ull") |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
             return true;
         }
 
-        /// Passes over one value nested at most `max_skipped_depth` objects or
-        /// arrays deep, without recursion.
         fn skipValue(self: *Parser) !void {
             const max_skipped_depth = 4;
             var closers: [max_skipped_depth]u8 = undefined;
@@ -1610,8 +1499,6 @@ fn ParserOf(comptime Custody: type) type {
                     },
                     else => return error.InvalidJsonShape,
                 }
-                // A value ended: close each container it finished, then step to
-                // the next element of the innermost open one.
                 while (depth > 0) {
                     if (try self.consumeIf(closers[depth - 1])) {
                         depth -= 1;
@@ -1630,8 +1517,6 @@ fn ParserOf(comptime Custody: type) type {
             try self.expectByte(':');
         }
 
-        /// A command's key. Keys under `reserved_key_prefix` are Rui's own
-        /// commands', so a client command cannot take one first.
         fn readCommandKey(self: *Parser, key: *Bounded(max_key_bytes)) !void {
             try self.readSmallString(key);
             if (std.mem.startsWith(u8, key.slice(), reserved_key_prefix)) return error.ReservedCommandKey;
@@ -1643,8 +1528,6 @@ fn ParserOf(comptime Custody: type) type {
             if (!std.unicode.utf8ValidateSlice(destination.slice())) return error.InvalidUtf8;
         }
 
-        /// Schema custody is out of band. Only the ingress/DOM adapter writes
-        /// this array marker; a wire schema is always an object, never an array.
         fn readSchema(self: *Parser, field: *ContentField) !void {
             self.content_ordinal += 1;
             if (self.content_ordinal > self.captured.len) return error.NeedSchema;
@@ -1657,14 +1540,12 @@ fn ParserOf(comptime Custody: type) type {
             field.borrowed = original.borrowed;
         }
 
-        /// Reads the empty placeholder the Ingress left for a captured string.
         fn readContentString(self: *Parser, field: *ContentField) !void {
             self.content_ordinal += 1;
             if (self.content_ordinal > self.captured.len) return error.NeedContent;
             try self.expectByte('"');
             if (try self.source.readByte() != '"') return error.InvalidJsonShape;
             const original = self.captured[self.content_ordinal - 1];
-            // Speculative request disposal has no resource authority.
             field.length = original.length;
             field.digest = original.digest;
             field.capture = self.content_ordinal;
@@ -1725,8 +1606,6 @@ fn ParserOf(comptime Custody: type) type {
     };
 }
 
-/// Creation completeness belongs to the same table for every spec door.
-/// A child alone inherits its Workspace rather than naming one.
 pub fn missingCreatingSetting(configuration: anytype, inherits_parent: bool) ?[]const u8 {
     inline for (session_settings.entries) |entry| {
         const name = entry.field;
@@ -1746,10 +1625,6 @@ pub fn missingCreatingSetting(configuration: anytype, inherits_parent: bool) ?[]
     return null;
 }
 
-/// Adapter for bounded, already-decoded model calls and launch presets. It
-/// borrows content from their arena, substitutes the same empty placeholders
-/// Ingress uses, and calls the wire parser. No content body is copied into the
-/// metadata JSON, and no path-sized spec string is returned by value.
 pub fn parseAgentSpec(comptime Custody: type, arena: std.mem.Allocator, spec: std.json.ObjectMap, configuration: *Requests(Custody).Configuration) error{OutOfMemory}!?[]const u8 {
     const ContentField = Requests(Custody).ContentField;
     var captured: [spec_content_count]ContentField = @splat(.{});
@@ -1793,9 +1668,6 @@ pub fn parseAgentSpec(comptime Custody: type, arena: std.mem.Allocator, spec: st
 
 pub const Utf8State = @import("utf8_validation.zig").State;
 
-// Shared by the synchronous metadata grammar and suspended content ingestion.
-// The opening quote belongs to the caller; feed consumes through the closing
-// quote and never consumes subsequent syntax.
 pub const StringDecoder = struct {
     state: enum { plain, escape, hex, surrogate_slash, surrogate_u } = .plain,
     digits: u3 = 0,
@@ -1891,32 +1763,18 @@ pub fn maximumJsonStringBytes(input_bytes: usize) usize {
     return 2 + 6 * input_bytes;
 }
 
-/// A placeholder in a JSON shape: the argument type it renders and the most
-/// bytes that argument can produce.
 pub const Hole = union(enum) {
-    /// A `bool`.
     boolean,
-    /// A `u64` in decimal.
     decimal,
-    /// A `?u64` as a quoted decimal or `null`, the spelling of an optional ID.
     optional_id,
-    /// A value of this enum, as its bare tag name.
     tag: type,
-    /// A `?E` for this enum `E`, as a JSON string of its tag name or `null`.
     optional_tag: type,
-    /// A `std.enums.EnumSet(E)`, as a JSON array of its tag names in tag order.
     tag_set: type,
-    /// At most this many bytes, as a JSON string.
     string: usize,
-    /// A `?[]const u8` of at most this many bytes, as a JSON string or `null`.
     optional_string: usize,
-    /// At most this many bytes, written unchanged.
     text: usize,
-    /// A `[N]u8` of this length, as lowercase hex.
     hex: usize,
-    /// A value of, or pointer to, this type, which has `max_json_bytes` and `writeJson`.
     json: type,
-    /// A `?T` for this type `T`, as `T` would render it or `null`.
     optional_json: type,
 
     pub fn maxBytes(comptime hole: Hole) usize {
@@ -1947,24 +1805,18 @@ pub const Hole = union(enum) {
     }
 };
 
-/// A JSON shape is a tuple of literal JSON text and `Hole`s, in output order.
-/// Its renderer writes it with `writeShape` and its bound is `shapeBytes`, so
-/// a reply's text and its maximum size have one source.
 pub fn shapeBytes(comptime shape: anytype) usize {
     comptime var bytes = 0;
     inline for (shape) |part| bytes += if (comptime isLiteral(part)) part.len else (comptime Hole.maxBytes(part));
     return bytes;
 }
 
-/// The largest of a tuple of shapes, for a reply with alternative variants.
 pub fn maxShapeBytes(comptime shapes: anytype) usize {
     comptime var bytes = 0;
     inline for (shapes) |shape| bytes = @max(bytes, comptime shapeBytes(shape));
     return bytes;
 }
 
-/// Writes `shape` with one argument per hole, in order. A string or text
-/// argument longer than its hole is a programmer error.
 pub fn writeShape(out: *std.Io.Writer, comptime shape: anytype, args: anytype) !void {
     comptime var next = 0;
     inline for (shape) |part| {
@@ -2019,16 +1871,11 @@ fn isLiteral(comptime part: anytype) bool {
     return @typeInfo(@TypeOf(part)) == .pointer;
 }
 
-// Request shapes. The client writes each request with `writeShape` and each
-// bound is `shapeBytes` of the same shape. Store, key and Session holes take
-// fully escaped strings because the Host accepts any JSON spelling of them.
 const store_hole = Hole{ .string = max_store_bytes };
 const key_hole = Hole{ .string = max_key_bytes };
 const session_hole = Hole{ .string = max_session_bytes };
 
-/// Holes: Store, key, Session.
 pub const session_stop_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"session_stop\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, "}" };
-/// Holes: Store, key, Session, archived.
 pub const session_archive_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"session_archive\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole };
     pub const archived = .{ ",\"archived\":", Hole.boolean };
@@ -2041,21 +1888,16 @@ pub const session_pin_request = struct {
     pub const tail = .{"}"};
     pub const all = head ++ pinned ++ tail;
 };
-/// Holes: Store, key, Session, turn, operation.
 pub const model_interruption_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"model_interruption\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"target\":{\"session\":", session_hole, ",\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\"}}" };
-/// Holes: Store, key, Session, Action, decision.
 pub const permission_decision_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"permission_decision\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\",\"decision\":\"", Hole{ .tag = PermissionDecision }, "\"}" };
 pub const action_background_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"action_background\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
-/// Holes: Store, key.
 pub const observe_command_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"observe_command\",\"store\":", store_hole, ",\"key\":", key_hole };
     pub const since = .{ ",\"since\":", Hole{ .optional_string = change_ring.SessionToken.max_bytes } };
     pub const tail = .{"}"};
     pub const all = head ++ since ++ tail;
 };
-/// Holes: Store.
 pub const host_info_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_info\",\"store\":", store_hole, "}" };
-/// Holes: Store.
 pub const skill_suggestions_session_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"skill_suggestions\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"prefix\":", Hole{ .string = 64 }, "}" };
 pub const skill_suggestions_workspace_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"skill_suggestions\",\"store\":", store_hole, ",\"workspace\":", Hole{ .string = max_workspace_bytes }, ",\"prefix\":", Hole{ .string = 64 }, "}" };
 pub const skill_suggestions_reply = struct {
@@ -2065,16 +1907,12 @@ pub const skill_suggestions_reply = struct {
     pub const max_bytes = shapeBytes(head) + jsonListBytes(24, shapeBytes(entry)) + tail.len;
 };
 pub const model_list_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"model_list\",\"store\":", store_hole, "}" };
-/// Holes: Store, paused.
 pub const host_pause_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_pause\",\"store\":", store_hole, ",\"paused\":", Hole.boolean, "}" };
-/// Holes: Store.
 pub const host_stop_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_stop\",\"store\":", store_hole, "}" };
-/// Holes: Store, key.
 pub const read_result_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_result\",\"store\":", store_hole, ",\"key\":", key_hole, "}" };
 pub const inspect_session_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"inspect_session\",\"store\":", store_hole, ",\"session\":", session_hole };
     pub const since = .{ ",\"since\":", Hole{ .optional_string = change_ring.SessionToken.max_bytes } };
-    // These are exclusive targets: a full report, or one failed response.
     pub const profile = .{",\"profile\":\"full\""};
     pub const failed_response = .{ ",\"failed_response\":\"", Hole{ .tag = FailedResponsePart }, "\",\"operation\":\"", Hole.decimal, "\",\"attempt\":\"", Hole.decimal, "\"" };
     pub const tail = .{"}"};
@@ -2090,7 +1928,6 @@ pub const list_sessions_request = struct {
     pub const tail = .{"}"};
     pub const all = head ++ archive ++ cursor ++ since ++ through ++ after_reference ++ tail;
 };
-/// Holes: Store, Session, Action, offset.
 pub const read_action_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"" };
     pub const offset = .{ ",\"offset\":\"", Hole.decimal, "\"" };
@@ -2099,19 +1936,14 @@ pub const read_action_request = struct {
 };
 
 pub const read_action_arguments_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action_arguments\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
-/// Holes: Store, Session, Action.
 pub const read_action_call_id_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action_call_id\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
-/// Holes: Store, Session, position, ordinal. The client always streams from
-/// the start.
 pub const conversation_content_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"start\":\"0\"" };
     pub const stream = .{",\"stream\":true"};
     pub const tail = .{"}"};
     pub const all = head ++ stream ++ tail;
 };
-/// Holes: Store, Session, end, before position, before ordinal.
 pub const conversation_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":\"", Hole.decimal, "\",\"before_position\":\"", Hole.decimal, "\",\"before_ordinal\":\"", Hole.decimal, "\"}" };
-/// Holes: Store, Session, end, position, ordinal, direction, kinds, limit.
 pub const activity_search_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_search\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"query\":", Hole{ .string = 256 } };
     pub const kinds = .{ ",\"kinds\":", Hole{ .tag_set = ActivityItem.Kind } };
@@ -2128,30 +1960,21 @@ pub const activity_page_request = struct {
     pub const tail = .{"}"};
     pub const all = head ++ since ++ tail;
 };
-/// Holes: Store, Session, position, ordinal.
 pub const activity_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"}" };
-/// Configure and Message carry content of unbounded size, so only their
-/// metadata has a shape. The variable parts are written between these.
 pub const configure_request = struct {
-    /// Holes: Store, key, Session. The configuration object follows.
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"configuration\":" };
     pub const reload_skills = .{",\"reload_skills\":true"};
     pub const require_model = .{",\"require_model\":true"};
     pub const preset = .{ ",\"preset\":", Hole{ .string = max_preset_name_bytes } };
     pub const tail = .{"}"};
-    /// Excludes the streamed configuration object, which has no whole-body
-    /// shape. Every optional metadata member may be present together.
     pub const max_metadata_bytes = shapeBytes(head ++ reload_skills ++ require_model ++ preset ++ tail);
 };
 pub const message_request = struct {
-    /// Holes: Store, key, Session. The nullable sender follows.
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"sender\":" };
     pub const sender = .{ "{\"store\":", store_hole, ",\"session\":", session_hole, "}" };
     pub const no_sender = .{"null"};
     pub const sender_handle = .{ ",\"sender_handle\":", Hole{ .optional_string = max_sender_handle_bytes } };
-    /// The configuration object of a creating Message follows.
     pub const configuration = .{",\"configuration\":"};
-    /// The text, as a JSON string, follows.
     pub const text = .{",\"text\":{\"state\":\"value\",\"value\":"};
     pub const text_tail = .{"}"};
     pub const require_model = .{",\"require_model\":true"};
@@ -2180,8 +2003,6 @@ pub const max_conversation_content_request_bytes = shapeBytes(conversation_conte
 pub const max_conversation_page_request_bytes = shapeBytes(conversation_page_request);
 pub const max_activity_page_request_bytes = shapeBytes(activity_page_request.all);
 pub const max_activity_content_request_bytes = shapeBytes(activity_content_request);
-/// Every request the client writes into a `RequestBuffer`. Control requests
-/// are captured to a record file instead.
 pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
     observe_command_request.all,         host_info_request,             host_stop_request,
     host_pause_request,                  read_result_request,           list_sessions_request.all,
@@ -2191,23 +2012,18 @@ pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, max
     skill_suggestions_workspace_request, model_list_request,
 }));
 
-/// Separated by commas, `count` JSON values of at most `item_bytes` each.
 pub fn jsonListBytes(comptime count: usize, comptime item_bytes: usize) usize {
     return count * item_bytes + count -| 1;
 }
 
-/// A Message or answer's content reference in an observation. Holes: length, digest.
 pub const content_reference_shape = .{ "{\"type\":\"text\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
 
 pub const configuration_reply = struct {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":";
     const execution = "},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}";
-    /// Holes: replayed, Session, revision, created.
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"revision\":\"", Hole.decimal, "\",\"created\":", Hole.boolean, execution };
     pub const accepted_skills = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"revision\":\"", Hole.decimal, "\",\"created\":false,\"skills\":\"", Hole{ .tag = SkillsReloadStatus }, "\"" ++ execution };
-    /// Holes: replayed, Session, code, advisory message.
     pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = ConfigurationRejection }, "\",\"message\":", Hole{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }, execution };
-    /// Hole: Session.
     pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"" ++ execution };
     pub const max_bytes = maxShapeBytes(.{ accepted, accepted_skills, rejected, conflict });
 };
@@ -2215,35 +2031,26 @@ pub const configuration_reply = struct {
 pub const message_reply = struct {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":";
     const execution = ",\"execution\":{\"status\":\"queued\"}}";
-    /// Holes: replayed, Session, admission, input length and digest, admission.
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"admission\":\"", Hole.decimal, "\"},\"input\":" } ++
         content_reference_shape ++ .{ ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" ++ execution };
-    /// Holes: replayed, Session, code, advisory message, input length and digest.
     pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = MessageRejection }, "\",\"message\":", Hole{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }, "},\"input\":" } ++
         content_reference_shape ++ .{execution};
-    /// Hole: Session.
     pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"}" ++ execution };
     pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
 };
 
 pub const session_stop_reply = struct {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":";
-    /// Holes: replayed, Session, selected Turn, admission cutoff, completion.
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"selection\":{\"turn\":", Hole.optional_id, ",\"admission_cutoff\":\"", Hole.decimal, "\"}},\"completion\":{\"status\":\"", Hole{ .tag = SessionStopCompletion }, "\"}}" };
-    /// Holes: replayed, Session, code.
     pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = SessionStopRejection }, "\"},\"completion\":{\"status\":\"unavailable\"}}" };
-    /// Hole: Session.
     pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"},\"completion\":{\"status\":\"unavailable\"}}" };
     pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
 };
 
 pub const session_archive_reply = struct {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_archive_reply\",\"answer\":{\"status\":";
-    /// Holes: replayed, Session, archived, completion.
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"archived\":", Hole.boolean, "},\"completion\":{\"status\":\"", Hole{ .tag = SessionStopCompletion }, "\"}}" };
-    /// Holes: replayed, Session, code.
     pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = SessionArchiveRejection }, "\"},\"completion\":{\"status\":\"unavailable\"}}" };
-    /// Hole: Session.
     pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"},\"completion\":{\"status\":\"unavailable\"}}" };
     pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
 };
@@ -2256,16 +2063,12 @@ pub const session_pin_reply = struct {
     pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
 };
 
-/// Holes: Session, Turn, Operation.
 pub const model_interruption_target_shape = .{ "{\"session\":", Hole{ .string = max_session_bytes }, ",\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\"}" };
 
 pub const model_interruption_reply = struct {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"model_interruption_reply\",\"answer\":{\"status\":";
-    /// Holes: replayed, then the target's.
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"target\":" } ++ model_interruption_target_shape ++ .{"}}"};
-    /// Holes: replayed, the target's, code.
     pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"target\":" } ++ model_interruption_target_shape ++ .{ ",\"code\":\"", Hole{ .tag = ModelInterruptionRejection }, "\"}}" };
-    /// Holes: the target's.
     pub const conflict = .{head ++ "\"conflict\",\"replayed\":false,\"target\":"} ++ model_interruption_target_shape ++ .{",\"code\":\"idempotency_key_conflict\"}}"};
     pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
 };
@@ -2273,11 +2076,8 @@ pub const model_interruption_reply = struct {
 pub const permission_decision_reply = struct {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"permission_decision_reply\",\"answer\":{\"status\":";
     const target = .{ ",\"session\":", Hole{ .string = max_session_bytes }, ",\"action\":\"", Hole.decimal, "\",\"decision\":\"", Hole{ .tag = PermissionDecision }, "\"" };
-    /// Holes: replayed, Session, Action, decision.
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean } ++ target ++ .{"}}"};
-    /// Holes: replayed, Session, Action, decision, code.
     pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean } ++ target ++ .{ ",\"code\":\"", Hole{ .tag = PermissionDecisionRejection }, "\"}}" };
-    /// Holes: Session, Action, decision.
     pub const conflict = .{head ++ "\"conflict\",\"replayed\":false"} ++ target ++ .{",\"code\":\"idempotency_key_conflict\"}}"};
     pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
 };
@@ -2299,10 +2099,8 @@ pub const action_read_reply = struct {
     pub const max_bytes = maxShapeBytes(.{ head ++ pending, head ++ final });
 };
 
-/// One saved indeterminate Action, newest first within its bound Turn.
 pub const MessageUnknownOutcome = message_observation.MessageUnknownOutcome;
 
-/// Borrowed recovery metadata; no history-sized response storage.
 pub const MessageRecoveryJson = struct {
     calls: []const MessageUnknownOutcome,
     more: bool,
@@ -2323,39 +2121,25 @@ pub const MessageRecoveryJson = struct {
     }
 };
 
-/// One command's observation. A reply is `absent`, or `head`, then `code`
-/// when the command has one, then its kind's parts, then `tail`.
 pub const command_observation_reply = struct {
     const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"command_observation\",\"key\":";
-    /// Hole: key.
     pub const absent = .{ prefix, Hole{ .string = max_key_bytes }, ",\"delta\":\"full\",\"since\":null,\"observation\":{\"status\":\"absent\"}}" };
-    /// Holes: key, Session token.
     pub const not_modified = .{ prefix, Hole{ .string = max_key_bytes }, ",\"delta\":\"not_modified\",\"since\":", Hole{ .string = change_ring.SessionToken.max_bytes }, "}" };
-    /// Holes: key, nullable token, status, target Session.
     pub fn head(comptime kind: CommandKind) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8, Hole } {
         return .{ prefix, .{ .string = max_key_bytes }, ",\"delta\":\"full\",\"since\":", .{ .optional_string = change_ring.SessionToken.max_bytes }, ",\"observation\":{\"status\":\"", .{ .tag = CommandObservationStatus }, "\",\"kind\":\"" ++ @tagName(kind) ++ "\",\"target\":", .{ .string = max_session_bytes } };
     }
-    /// Hole: code.
     pub const code = .{ ",\"code\":", Hole{ .string = max_code_bytes } };
-    /// An accepted configuration. Holes: revision, created.
     pub const revision = .{ ",\"revision\":\"", Hole.decimal, "\",\"created\":", Hole.boolean };
-    /// A Message's input reference. Holes: its length and digest.
     pub const input = .{",\"input\":"} ++ content_reference_shape;
-    /// The Host's Message request lifecycle state.
     pub const state = .{ ",\"state\":\"", Hole{ .tag = MessageRequestState }, "\"" };
-    /// Holes: admission, admitted at.
     pub const queue = .{ ",\"queue\":{\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\"}" };
-    /// Holes: Turn, Operation, Attempt. Kept on terminal bound Messages.
     pub const binding = .{ ",\"binding\":{\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"attempt\":\"", Hole.decimal, "\"}" };
     pub const completed = .{",\"result\":{\"status\":\"completed\",\"text\":"} ++ content_reference_shape ++ .{"}"};
     pub const cancelled = .{ ",\"result\":{\"status\":\"cancelled\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
     pub const failed = .{ ",\"result\":{\"status\":\"failed\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
-    /// Holes: Session work state, earliest Action awaiting permission.
     pub const work = .{ ",\"work\":{\"state\":", Hole{ .json = WorkStateJson }, ",\"first_action\":", Hole.optional_id, "}" };
     pub const recovery = .{ ",\"recovery\":", Hole{ .json = MessageRecoveryJson } };
 
-    /// Every Message body the Host writes. OpenAPI and byte bounds consume
-    /// this same list; recovery belongs to a bound Turn and survives its end.
     const queued_state = .{",\"state\":\"queued\""};
     const processing_state = .{",\"state\":\"processing\""};
     const permission_state = .{",\"state\":\"waiting_for_permission\""};
@@ -2363,8 +2147,6 @@ pub const command_observation_reply = struct {
     const completed_state = .{",\"state\":\"completed\""};
     const failed_state = .{",\"state\":\"failed\""};
     const cancelled_state = .{",\"state\":\"cancelled\""};
-    // The permission case refines the shared writer's state shape. Only the
-    // Session's approval state has waiting_for_permission progress.
     const permission_work = .{ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"", Hole.decimal, "\"},\"first_action\":", Hole.optional_id, "}" };
     pub const message_variants = .{
         rejected_state,
@@ -2383,21 +2165,15 @@ pub const command_observation_reply = struct {
         failed_state ++ input ++ queue ++ binding ++ failed,
         failed_state ++ input ++ queue ++ binding ++ failed ++ recovery,
     };
-    /// Holes: selected Turn, admission cutoff, completion.
     pub const session_stop = .{ ",\"selection\":{\"turn\":", Hole.optional_id, ",\"admission_cutoff\":\"", Hole.decimal, "\"},\"completion\":{\"status\":\"", Hole{ .tag = SessionStopCompletion }, "\"}" };
-    /// Holes: pinned.
     pub const session_pin = .{ ",\"pinned\":", Hole.boolean };
-    /// Holes: archived, completion.
     pub const session_archive = .{ ",\"archived\":", Hole.boolean, ",\"completion\":{\"status\":\"", Hole{ .tag = SessionStopCompletion }, "\"}" };
-    /// Holes: the interruption target's.
     pub const model_interruption = .{",\"interruption_target\":"} ++ model_interruption_target_shape;
-    /// Holes: Action, decision.
     pub const permission_decision = .{ ",\"permission_target\":{\"action\":\"", Hole.decimal, "\",\"decision\":\"", Hole{ .tag = PermissionDecision }, "\"}" };
     pub const action_target = .{ ",\"action_target\":{\"action\":\"", Hole.decimal, "\"}" };
     pub const action_selection = action_background_reply.selection;
     pub const tail = .{"}}"};
 
-    /// The largest observation of this kind.
     pub fn maxBytes(comptime kind: CommandKind) usize {
         @setEvalBranchQuota(30_000);
         const body = switch (kind) {
@@ -2420,8 +2196,6 @@ pub const command_observation_reply = struct {
     };
 };
 
-/// Holes: error type and code.
-/// The `type` of an error reply: what kind of failure its code names.
 pub const ErrorType = enum { invocation_error, observation_error, busy, unsupported, host_unavailable, result_unavailable, action_unavailable, conversation_unavailable, activity_unavailable, failed_response_unavailable };
 pub const error_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"", Hole{ .tag = ErrorType }, "\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
 pub const max_control_error_response_bytes = shapeBytes(error_reply);
@@ -2431,9 +2205,6 @@ pub const max_mutation_response_bytes = @max(
     @max(session_pin_reply.max_bytes, @max(session_archive_reply.max_bytes, @max(action_background_reply.max_bytes, @max(permission_decision_reply.max_bytes, max_control_error_response_bytes)))),
 );
 
-/// Holes: Store, instance, Active and intake capacity, descriptor limit
-/// (decimal or `unlimited`), start time, slots in use, whether new Turns
-/// are paused, and each provider's Route.
 pub const host_info_reply = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"paused\":", Hole.boolean };
     pub const doublewrite = .{ ",\"innodb_doublewrite\":", Hole{ .string = 32 } };
@@ -2447,13 +2218,9 @@ comptime {
 }
 pub const max_host_info_response_bytes: usize = host_info_reply.max_bytes;
 
-/// Each served provider's models: `model_list.writeProviders` follows the
-/// head, then the tail.
 pub const model_list_reply = struct {
     pub const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"model_list\",\"providers\":";
     pub const tail = "}";
-    /// Offline fixtures use the shipped bound. A Host sizes from the selected
-    /// generation: saved catalogs are not bounded by the snapshot's ID count.
     pub const max_bytes = maxBytes(@import("model_catalog.zig").shipped);
 
     pub fn maxBytes(facts: []const @import("model_catalog.zig").Entry) usize {
@@ -2461,31 +2228,20 @@ pub const model_list_reply = struct {
     }
 };
 pub const host_stop_ack = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
-/// Hole: whether new Turns are now paused.
 pub const host_pause_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_pause_reply\",\"paused\":", Hole.boolean, "}" };
-// Only bounded replies and errors use this resident buffer. Complete reports
-// and result content use their independent streamed delivery paths.
-/// The fixed small reply/Host trace buffer. Message recovery is rendered into
-/// its exchange-owned writer instead of growing every Host trace stack.
 pub const max_response_bytes = @max(@max(max_mutation_response_bytes, max_host_info_response_bytes), @max(host_stop_ack.len, shapeBytes(host_pause_reply)));
 
 pub const conversation_page_reply = struct {
-    /// Hole: the page end.
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"", Hole.decimal, "\",\"items\":[" };
-    /// Holes: position, ordinal, content length and digest.
     pub fn item(comptime kind: ConversationItemKind) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8 } {
         comptime std.debug.assert(kind != .hosted_call);
         return .{ "{\"position\":\"", .decimal, "\",\"ordinal\":\"", .decimal, "\",\"kind\":\"" ++ @tagName(kind) ++ "\",\"content\":{\"bytes\":\"", .decimal, "\",\"sha256\":\"", .{ .hex = 32 }, "\",\"display\":\"omitted\"}" };
     }
-    /// A Hosted Call item, which has no content. Holes: position, ordinal.
     pub const hosted_call = .{ "{\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"kind\":\"hosted_call\"" };
-    /// A User item's admission. Holes: second, sending peer.
     pub const admission = .{ ",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = NamedPeerJson } };
-    /// A Tool Result or Hosted Call item's presentation. Hole: it.
     pub const presentation = .{ ",\"presentation\":", Hole{ .json = ToolPresentationJson } };
     pub const item_end = .{"}"};
 
-    /// The largest item of this kind, with what only that kind carries.
     pub fn itemBytes(comptime kind: ConversationItemKind) usize {
         const extra = switch (kind) {
             .user => shapeBytes(admission),
@@ -2496,7 +2252,6 @@ pub const conversation_page_reply = struct {
         return shapeBytes(item(kind)) + extra + shapeBytes(item_end);
     }
     pub const last = .{"],\"more\":false}"};
-    /// Holes: the last item's position and ordinal.
     pub const more = .{ "],\"more\":true,\"before_position\":\"", Hole.decimal, "\",\"before_ordinal\":\"", Hole.decimal, "\"}" };
 };
 
@@ -2507,9 +2262,6 @@ pub const max_conversation_page_response_bytes = blk: {
     break :blk shapeBytes(page.head) + jsonListBytes(public_conversation_page_items, item) + maxShapeBytes(.{ page.last, page.more });
 };
 
-/// The one JSON rendering vocabulary, over any writer. A writer that runs out
-/// of room is `BufferTooLarge`, so a renderer reads the same whether it writes
-/// into a Host reply's heap body or a client's fixed buffer.
 pub const JsonOut = struct {
     writer: *std.Io.Writer,
 
@@ -2535,8 +2287,6 @@ pub fn FixedJsonBuffer(comptime capacity: usize) type {
         bytes: [capacity]u8 = undefined,
         len: usize = 0,
 
-        /// Calls `renderer(out, args...)` over the unused bytes. A failed
-        /// render keeps nothing it wrote.
         pub fn render(self: *@This(), comptime renderer: anytype, args: anytype) !void {
             var writer = std.Io.Writer.fixed(self.bytes[self.len..]);
             try @call(.auto, renderer, .{JsonOut{ .writer = &writer }} ++ args);
@@ -2569,8 +2319,6 @@ pub const RequestBuffer = FixedJsonBuffer(max_client_request_bytes);
 pub const ResponseBuffer = FixedJsonBuffer(max_response_bytes);
 pub const CommandObservationBuffer = FixedJsonBuffer(command_observation_reply.max_bytes);
 
-/// Value-only custody for this file's tests: a parsed Request's content
-/// holds no file until wire_request.zig's ingress hands it one.
 const TestCustody = struct {
     pub const File = struct {};
     pub const Budget = struct {};
@@ -2695,7 +2443,6 @@ test "an activity page names its kinds once each, in order, and a limit from 1 t
     const cases = [_]struct { body: []const u8, failure: ?anyerror = null }{
         .{ .body = "[\"admission\"],\"limit\":\"1\"" },
         .{ .body = "[\"admission\",\"received\"],\"limit\":\"16\"" },
-        // The longest kind name.
         .{ .body = "[\"received\",\"approval_requested\"],\"limit\":\"1\"" },
         .{ .body = "[\"received\",\"admission\"],\"limit\":\"1\"", .failure = error.InvalidJsonShape },
         .{ .body = "[\"user\",\"user\"],\"limit\":\"1\"", .failure = error.InvalidJsonShape },
@@ -2726,7 +2473,6 @@ test "configuration token heuristics and effort parse sparsely and bind idempote
         .{ .fields = "" },
         .{ .fields = "\"compactAt\":100000", .field = "compaction_trigger", .value = "100000" },
         .{ .fields = "\"outputReservation\":16384", .field = "output_reservation", .value = "16384" },
-        // Numeric meaning belongs to atomic Store admission, not parsing.
         .{ .fields = "\"compactAt\":0", .field = "compaction_trigger", .value = "0" },
         .{ .fields = "\"outputReservation\":9223372036854775808", .field = "output_reservation", .value = "9223372036854775808" },
         .{ .fields = "\"compactAt\":null", .field = "compaction_trigger" },
@@ -2777,7 +2523,6 @@ test "configuration provider value preserves exact spelling and omission" {
         .{ .field = "\"codex\"", .expected = "codex" },
         .{ .field = "\"c\\u006fdex\"", .expected = "codex" },
         .{ .field = "\"codex\"", .expected = "codex", .suffix = ",\"require_model\":true" },
-        // Admission, not parsing, rejects bounded unsupported spellings.
         .{ .field = "\"Codex\"", .expected = "Codex" },
         .{ .field = "\"other\"", .expected = "other" },
         .{ .field = "\"anthropic\"", .expected = "anthropic" },
@@ -2821,7 +2566,6 @@ test "configuration tools and loaded tools are tool names, sorted, each once" {
         .{ .value = "[\"web_search\"]", .names = "web_search", .count = 1 },
         .{ .value = "[\"bash\",\"web_search\"]", .names = "bash web_search", .count = 2 },
         .{ .value = "[\"b\\u0061sh\"]", .names = "bash", .count = 1 },
-        // Whether the Host offers a name is configure's to say.
         .{ .value = "[\"edit\"]", .names = "edit", .count = 1 },
         .{ .value = "[\"Bash\",\"bash\"]", .names = "Bash bash", .count = 2 },
         .{ .value = "[\"bash\",\"edit\"]", .names = "bash edit", .count = 2 },
@@ -2860,7 +2604,6 @@ test "a tools list holds at most 128 names and 4096 name bytes" {
     }
     try std.testing.expectEqual(@as(u8, max_tools), many.count);
 
-    // 64 names of 64 bytes fill the name bytes; the separators do not count.
     var long: ToolsField = .{ .state = .value };
     var name: [max_tool_name_bytes]u8 = @splat('a');
     for (0..max_tool_list_name_bytes / max_tool_name_bytes) |index| {
@@ -2929,13 +2672,9 @@ test "Session listing wire distinguishes all, exact workspace, continuation, sin
         .{ .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":\"/a\\u0001b\",\"after\":\"8\",\"ceiling\":\"12\"}", .workspace = "/a\x01b", .after = 8, .ceiling = 12 },
         .{ .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"12\"}", .failure = error.InvalidCursor },
         .{ .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"13\",\"ceiling\":\"12\"}", .failure = error.InvalidCursor },
-        // A token's first page, and a changed continuation through the
-        // first page's generation after the last reference it gave.
         .{ .json = head ++ since ++ "}", .since = 42 },
         .{ .json = head ++ since ++ ",\"through\":\"48\",\"after_reference\":\"k7m2qx\"}", .since = 42, .through = 48 },
         .{ .json = head ++ since ++ ",\"through\":\"42\",\"after_reference\":\"k7m2qx\"}", .since = 42, .through = 42 },
-        // A full continuation carries no token; a changed one never ends
-        // before its token, and names a Session.
         .{ .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"8\",\"ceiling\":\"12\"" ++ since ++ "}", .failure = error.InvalidCursor },
         .{ .json = head ++ since ++ ",\"through\":\"41\",\"after_reference\":\"k7m2qx\"}", .failure = error.InvalidCursor },
         .{ .json = head ++ since ++ ",\"through\":\"48\",\"after_reference\":\"k7m2qX\"}", .failure = error.InvalidCursor },
@@ -3002,7 +2741,6 @@ test "protocol peer Store address wire parsing accepts opaque ids and preserves 
         var buffer: [512]u8 = undefined;
         const json = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{ prefix, case.store, suffix });
         var source: MetadataSource = .{ .input = json };
-        // Ingress has replaced its captured content with an empty placeholder.
         var parser = Tested.Parser{ .source = &source, .captured = &.{.{}} };
         if (case.valid) {
             const request = try parseForTest(&parser);
@@ -3029,8 +2767,6 @@ test "peer wire rejects old sender strings, malformed addresses and missing hand
 }
 
 test "omitted loaded tools preserve pre-T4a Configure and creating Message digests" {
-    // Golden bytes of the pre-T4a hash stream, not recomputed by the
-    // implementation under test. Keys are deliberately outside identity.
     var configure: Tested.ConfigureCommand = .{};
     try std.testing.expectEqualStrings("e983bd4a7dce4a1ec777d065815928f654ac824dc57a57b397b8f78e7a4ede3a", &std.fmt.bytesToHex(configure.semanticDigest(), .lower));
     var message: Tested.MessageCommand = .{ .configuration = .{} };
@@ -3100,7 +2836,6 @@ test "protocol creation requires five explicit settings independent of field ord
             if (skip < fields.len) {
                 try std.testing.expectError(error.MissingField, parseForTest(&parser));
             } else if (comptime std.mem.eql(u8, kind, "message")) {
-                // Configuration passed without workspace or provider; only text is invalid.
                 try std.testing.expectError(error.InvalidMessage, parseForTest(&parser));
             } else {
                 _ = try parseForTest(&parser);
@@ -3141,10 +2876,8 @@ test "the request parser refuses what each command's grammar forbids" {
     const content = v ++ "\"kind\":\"activity_content\",\"store\":\"s\",\"session\":\"peer\",";
     const configure = v ++ "\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{";
     const since = "\"since\":\"abababababababababababababababab.42.k7m2qx\"";
-    // The Ingress leaves an empty placeholder where it captured content.
     const value = "{\"state\":\"value\",\"value\":\"\"}";
     const i64_past = "\"9223372036854775808\"";
-    // Each refusal sits beside the nearest request the grammar accepts.
     const cases = [_]struct { json: []const u8, failure: ?anyerror = null, route: ?Kind = null }{
         .{ .json = "{\"version\":\"" ++ previous_wire_version ++ "\",\"kind\":\"host_info\",\"store\":\"s\"}", .failure = error.WrongWireVersion },
         .{ .json = "{\"version\":\"" ++ next_wire_version ++ "\",\"kind\":\"host_info\",\"store\":\"s\"}", .failure = error.WrongWireVersion },
@@ -3154,20 +2887,14 @@ test "the request parser refuses what each command's grammar forbids" {
         .{ .json = v ++ "\"store\":\"s\"}", .failure = error.MissingField },
         .{ .json = v ++ "\"kind\":\"host_info\",\"store\":\"s\"}", .failure = error.RouteKindMismatch, .route = .host_stop },
         .{ .json = v ++ "\"kind\":\"host_info\",\"store\":\"s\"}", .route = .host_info },
-        // Content can arrive before the kind, but configure cannot carry text.
         .{ .json = "{\"text\":" ++ value ++ ",\"configuration\":{\"instructions\":\"\"" ++ ",\"outputSchema\":[]" ++ "}," ++ "\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\"}", .failure = error.UnexpectedField },
         .{ .json = configure ++ "\"instructions\":\"\"" ++ ",\"outputSchema\":[]" ++ "}}" },
         .{ .json = configure ++ "\"instructions\":\"\"" ++ ",\"instructions\":\"\"" ++ "}}", .failure = error.UnexpectedField },
-        // A Message to an existing Session carries no configuration and no
-        // capability condition.
         .{ .json = message ++ "\"text\":" ++ value ++ "}" },
         .{ .json = message ++ "\"text\":" ++ value ++ ",\"configuration\":{}}", .failure = error.UnexpectedField },
         .{ .json = message ++ "\"text\":" ++ value ++ ",\"require_model\":true}", .failure = error.InvalidMessage },
-        // Skills are named only as `/name` words in the text.
         .{ .json = message ++ "\"skill\":\"review\"}", .failure = error.UnexpectedField },
         .{ .json = message ++ "\"sender_handle\":null}", .failure = error.UnexpectedField },
-        // An inspection reads from a token, or selects a profile or one
-        // failed response stream named by positive i64 identities.
         .{ .json = inspect ++ since ++ "}" },
         .{ .json = inspect ++ since ++ ",\"profile\":\"full\"}", .failure = error.UnexpectedField },
         .{ .json = inspect ++ since ++ ",\"failed_response\":\"body\",\"operation\":\"1\",\"attempt\":\"1\"}", .failure = error.UnexpectedField },
@@ -3178,12 +2905,10 @@ test "the request parser refuses what each command's grammar forbids" {
         .{ .json = inspect ++ "\"failed_response\":\"body\",\"operation\":\"1\",\"attempt\":" ++ i64_past ++ "}", .failure = error.InvalidTarget },
         .{ .json = inspect ++ "\"operation\":\"1\"}", .failure = error.UnexpectedField },
         .{ .json = inspect ++ "\"profile\":\"full\",\"failed_response\":\"body\",\"operation\":\"1\",\"attempt\":\"1\"}", .failure = error.UnexpectedField },
-        // An activity item is at a positive i64 position.
         .{ .json = content ++ "\"position\":\"1\",\"ordinal\":\"0\"}" },
         .{ .json = content ++ "\"position\":\"0\",\"ordinal\":\"0\"}", .failure = error.InvalidCursor },
         .{ .json = content ++ "\"position\":" ++ i64_past ++ ",\"ordinal\":\"0\"}", .failure = error.InvalidCursor },
         .{ .json = content ++ "\"position\":\"1\",\"ordinal\":" ++ i64_past ++ "}", .failure = error.InvalidCursor },
-        // Legacy wrappers are refused, not silently treated as omitted.
         .{ .json = configure ++ "\"model\":\"m\"}}" },
         .{ .json = configure ++ "\"model\":{\"state\":\"value\"}}}", .failure = error.InvalidJsonShape },
         .{ .json = configure ++ "\"model\":{\"state\":\"omitted\",\"value\":\"m\"}}}", .failure = error.InvalidJsonShape },
@@ -3313,8 +3038,6 @@ test "skills native wire preserves explicit reload intent and has no skill reque
     var plain = request.configure;
     plain.reload_skills = false;
     try std.testing.expect(!std.mem.eql(u8, &digest, &plain.semanticDigest()));
-    // A Message names skills only as `/name` words in its text; the Host
-    // binds them. No request field lists skills.
     const message = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,";
     for ([_][]const u8{ message ++ "\"skill\":\"demo\"}", message ++ "\"skills\":[\"demo\"]}" }) |removed| {
         source = .{ .input = removed };
@@ -3326,7 +3049,6 @@ test "skills native wire preserves explicit reload intent and has no skill reque
 test "inline skills leave every existing canonical mutation digest unchanged" {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"store\":\"s\",\"key\":\"old\",";
     const Case = struct { body: []const u8, digest: []const u8 };
-    // Independent SHA-256 expectations over the grammars without a skills vector.
     const cases = [_]Case{
         .{ .body = head ++ "\"kind\":\"configure\",\"session\":\"k7m2qx\",\"configuration\":{}}", .digest = "db4015965f28197d8bfae4b13f61edb8b1047904643d764a7cc8ce10f9680e30" },
         .{ .body = head ++ "\"kind\":\"configure\",\"session\":\"k7m2qx\",\"configuration\":{},\"reload_skills\":true}", .digest = "14764e8bb9e20125961c2b950bac15e919dfc6653fe2cc7359b027faa0ee89b5" },
@@ -3355,7 +3077,6 @@ test "inline skills leave every existing canonical mutation digest unchanged" {
     }
 }
 
-// Captured from the hand-written configureDigest before table derivation.
 test "Session settings configure digest golden" {
     var command: Tested.ConfigureCommand = .{};
     try command.session.set("k7m2qx");
@@ -3384,9 +3105,7 @@ test "Session settings configure digest golden" {
     try std.testing.expectEqualStrings("46c2a9eafbd26d33d6584f2758bad73383b642adf2b6d1655dea294136399522", &std.fmt.bytesToHex(command.semanticDigest(), .lower));
 }
 
-// Expectations are the pre-table wire grammar, not facts read from the table.
 test "Session settings preserve omitted and nullable wire states for every field" {
-    // Independent expected field names and nullability, not read from the table.
     inline for (.{
         .{ "workspace", "workspace", false },
         .{ "provider", "provider", false },

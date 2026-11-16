@@ -1,5 +1,3 @@
-//! Static image container validation. This checks framing and metadata, not
-//! whether a pixel decoder can decode the compressed entropy stream.
 const std = @import("std");
 
 pub const Format = enum(u8) {
@@ -27,8 +25,6 @@ pub const Limits = struct {
 
 pub const Error = error{ UnsupportedImage, MalformedImage, TruncatedImage, ImageMimeMismatch, ImageResourceLimit };
 
-/// One image's resumable scanner. Its memory does not depend on image size,
-/// dimensions, chunk lengths or the number of images in an input.
 pub const Scanner = struct {
     length: u64,
     assertion: ?Format,
@@ -47,8 +43,6 @@ pub const Scanner = struct {
         return .{ .length = length, .assertion = assertion, .limits = limits };
     }
 
-    /// Consumes no more than `allowance` bytes. Cancellation belongs to the
-    /// request owner, which can stop between these bounded calls.
     pub fn advance(self: *Scanner, bytes: []const u8, allowance: *usize) Error!usize {
         const count = @min(bytes.len, allowance.*);
         if (count > self.length - self.position) return error.MalformedImage;
@@ -457,7 +451,6 @@ const png_fixture = "\x89PNG\r\n\x1a\n" ++
     "\x00\x00\x00\x0dIDAT\x08\xd7\x63\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x72\x9c\x52\x67" ++
     "\x00\x00\x00\x00IEND\xae\x42\x60\x82";
 
-// This is a framed JPEG scanner fixture, not a claim that its entropy decodes.
 const jpeg_tables = "\xff\xdb\x00\x43\x00" ++ "\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01" ++
     "\xff\xc4\x00\x26\x00\x01" ++ "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" ++ "\x00\x10\x01" ++ "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" ++ "\x00";
 const jpeg_fixture = "\xff\xd8" ++ jpeg_tables ++ "\xff\xc0\x00\x0b\x08\x00\x02\x00\x03\x01\x01\x11\x00" ++

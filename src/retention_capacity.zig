@@ -1,4 +1,3 @@
-//! Retention's fixed orchestration population and its value-only entry layout.
 const Bounded = @import("bounded.zig").Bounded;
 
 pub const orchestration_bytes: usize = 64 * 1024;

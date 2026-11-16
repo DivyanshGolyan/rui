@@ -1,5 +1,3 @@
-//! Live model-attempt timing conformance, isolated from Host dispatch so its
-//! multi-engine checks depend only on custody, transport and the Store.
 const std = @import("std");
 const execution = @import("execution.zig");
 const provider = @import("provider.zig");
@@ -14,8 +12,6 @@ test "model resolution owner captures timings for success failure interruption s
         var on_cutoff: ?*provider.Transfer = null;
         var callbacks: usize = 0;
 
-        // Inject the transport callback at the read boundary, without a
-        // scheduler or sleeps. Return the cutoff sampled before preemption.
         fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
             if (clock != .awake) return std.testing.io.vtable.now(userdata, clock);
             const cutoff = std.Io.Timestamp.fromNanoseconds(@as(i96, milliseconds) * std.time.ns_per_ms);
@@ -60,8 +56,6 @@ test "model resolution owner captures timings for success failure interruption s
             for (std.enums.values(Phase)) |phase| for (std.enums.values(Outcome)) |outcome| for (std.enums.values(Observation)) |observation| {
                 if ((phase == .backoff_attached or phase == .backoff_retired) and (outcome == .success or outcome == .failure)) continue;
                 if (phase != .live and (observation == .during_capture or observation == .after_capture)) continue;
-                // Completed transfers are retired before settlement; controls
-                // alone retain a live callback source while resolving.
                 if ((observation == .during_capture or observation == .after_capture) and (outcome == .success or outcome == .failure)) continue;
                 Clock.milliseconds = 100;
                 Clock.on_cutoff = null;
@@ -139,8 +133,6 @@ test "model resolution owner captures timings for success failure interruption s
                         try custody.detach(token);
                         try custody.cleanupComplete(token);
                         attached = false;
-                        // Destroy even the retired slot's bytes: neither custody
-                        // nor the Store's live-source registration can retain them.
                         const retired = custody.reserve().?;
                         try custody.releaseUnused(retired);
                         try storage.close();
@@ -148,8 +140,6 @@ test "model resolution owner captures timings for success failure interruption s
                         try fixture.testingStore(case, &storage, &tmp, io);
                         storage_open = true;
                     }
-                    // Even an old live source now reports 400 ms: backoff
-                    // must keep the 23-ms pair frozen by schedule_retry.
                     Clock.milliseconds = 500;
                     if (phase == .replacement_prelaunch) {
                         try fixture.exec(&storage, "UPDATE model_operation SET retry_due_at_ms=1 WHERE operation_id=?1", .{binding.operation_id});
@@ -157,8 +147,6 @@ test "model resolution owner captures timings for success failure interruption s
                         token = custody.reserve().?;
                         binding = try custody.attach(token, &admitted.permit);
                         attached = true;
-                        // Admission, not the next resolution, must clear the
-                        // previous attempt's saved pair before any new launch.
                         try std.testing.expectEqual(@as(u64, 1), try fixture.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND latency_ms IS NULL AND first_event_ms IS NULL", .{binding.operation_id}));
                         transfer.stream = .idle;
                         transfer.reactor = &reactor;
@@ -176,8 +164,6 @@ test "model resolution owner captures timings for success failure interruption s
                         storage.modelTimingSource().* = .{ .context = &capture, .read = Clock.Capture.read };
                     }
                 }
-                // Completion retires the Transfer before interpretation; controls
-                // retire it after their immutable transaction commits.
                 if (outcome == .success or outcome == .failure) {
                     reactor.client.cancel(&transfer.stream);
                     transfer.stream.deinit();
@@ -204,7 +190,6 @@ test "model resolution owner captures timings for success failure interruption s
                         try std.testing.expect(storage.archiveSession(&command, .{}) == .accepted);
                     },
                 }
-                // Existing owner budgets: capturing metrics adds no Store round.
                 if (!case.rerun) try std.testing.expectEqual(@as(u32, 2), storage.testing_content_work.rounds - before);
                 const request: protocol.ActivityPage = .{ .session = session, .kinds = .initOne(.model_call) };
                 const page = try std.testing.allocator.create(protocol.ActivityFacts);
@@ -213,8 +198,6 @@ test "model resolution owner captures timings for success failure interruption s
                 try std.testing.expectEqual(@as(usize, 1), page.count);
                 const call = page.items[0].value.model_call;
                 const raced = observation == .during_capture or observation == .after_capture;
-                // A forced MySQL transaction rerun captures again after the
-                // single callback; its later coherent pair must keep the event.
                 const recaptured = raced and case.rerun;
                 try std.testing.expectEqual(if (phase == .replacement_prelaunch or observation == .prelaunch) @as(?u64, null) else if (recaptured) @as(u64, 28) else 23, call.latency_ms);
                 try std.testing.expectEqual(if (phase == .replacement_prelaunch) @as(?u64, null) else if (observation == .response) @as(?u64, 5) else if (recaptured) @as(?u64, 28) else null, call.first_event_ms);

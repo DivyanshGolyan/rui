@@ -1,6 +1,3 @@
-//! What a durable mutation's reply establishes: its answer, bound to the
-//! request that produced it, or why the reply confirms nothing. Decisions over
-//! a parsed reply; protocol_reply.zig bounds and parses the bytes.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const CommandKind = @import("cli_value.zig").CommandKind;
@@ -11,7 +8,6 @@ const JsonEnum = wire_field.JsonEnum;
 const OmittableJson = wire_field.OmittableJson;
 const decimalId = wire_field.decimalId;
 
-// The protocol's sizes; protocol_reply.zig asserts they match.
 pub const max_code_bytes = 96;
 pub const max_session_bytes = 128;
 
@@ -22,8 +18,6 @@ pub const SessionPinObservation = struct { pinned: bool };
 pub const SessionPinRejection = enum { invalid_session_reference, unknown_session, session_archiving, session_archived };
 pub const SessionArchiveObservation = struct { archived: bool, completion: SessionStopCompletion };
 
-// Why the Host refuses each mutation. The Store saves the code and the Host
-// renders its tag name.
 pub const SessionStopRejection = enum { invalid_session_reference, unknown_session };
 pub const SessionArchiveRejection = enum { invalid_session_reference, unknown_session, archive_pending };
 pub const ModelInterruptionRejection = enum {
@@ -44,8 +38,6 @@ pub const PermissionDecisionRejection = enum {
 };
 pub const ContentReference = struct { bytes: u64, digest: [32]u8 };
 
-/// The durable mutations. Tag names are the captured-record and
-/// observation spelling; `rui request recover --kind` uses the hyphenated spelling.
 pub const Target = union(CommandKind) {
     configure,
     message: struct { bytes: u64, digest: [32]u8, creates_session: bool = false },
@@ -58,7 +50,6 @@ pub const Target = union(CommandKind) {
 };
 
 pub const Answer = struct {
-    /// Validated Host-owned input identity, including captured native skills.
     input: ?ContentReference = null,
     result: union(enum) {
         accepted: union(enum) {
@@ -82,10 +73,8 @@ pub const InvocationDiagnostic = struct {
     code: Bounded(max_code_bytes),
 };
 
-/// An answer error is unconfirmed, never rejection or noncommit.
 pub const Error = error{ CanonicalStoreFailure, HostInvocationFailed, InvalidResponse, RequestBindingMismatch };
 
-/// A mutation reply's fields, as the decoder parses them.
 pub const Wire = struct {
     version: JsonString(8),
     type: JsonString(32),
@@ -113,11 +102,6 @@ pub const Wire = struct {
     completion: OmittableJson(struct { status: JsonString(16) }) = .{},
 };
 
-/// The answer `wire` gives to `target` on `session` with HTTP `status`, when
-/// the Host speaks `current_version` of the wire. A
-/// diagnostic reply sets `diagnostic`; an accepted creation sets
-/// `resolved_session` to the Session the Host created. No workflow,
-/// terminal, retry or certainty transition is made here.
 pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []const u8, target: Target, diagnostic: *?InvocationDiagnostic, resolved_session: *Bounded(max_session_bytes)) Error!Answer {
     if (wire.code.value) |code| {
         if (wire.answer.value != null or wire.input.value != null or wire.queue.value != null or wire.execution.value != null or wire.completion.value != null) return error.InvalidResponse;
@@ -257,21 +241,16 @@ pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []c
     };
 }
 
-// Shared authority rule for operation replies and static read/error envelopes.
-/// `version` is the reply's; `current_version` is the protocol's.
 pub fn validateInvocationDiagnostic(current_version: []const u8, status: u16, version: []const u8, diagnostic: InvocationDiagnostic) error{InvalidResponse}!void {
     if (status == 200 or !std.mem.eql(u8, version, current_version) or diagnostic.type.len == 0 or diagnostic.code.len == 0) return error.InvalidResponse;
     if (diagnostic.code.eql("canonical_store_failure") and (status != 500 or !diagnostic.type.eql("invocation_error"))) return error.InvalidResponse;
 }
 
-/// Any version: the decisions compare against the one they are given. The
-/// protocol's own lives in protocol.zig alone.
 const current = "7";
 const stale = "6";
 
 const Decoded = struct { answer: Error!Answer, diagnostic: ?InvocationDiagnostic = null, session: Bounded(max_session_bytes) = .{} };
 
-/// Parses `body` as protocol_reply.zig's decoder does, without its byte bound.
 fn decodeForTest(status: u16, body: []const u8, session: []const u8, target: Target) Decoded {
     var storage: [16 * 1024]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&storage);
@@ -402,7 +381,6 @@ test "skills reload reply facts apply only to accepted existing Configure mutati
             }
         }
     }
-    // Ordinary creation remains valid; a reload cannot also create a Session.
     for ([_][]const u8{ "false", "true" }) |created| {
         for (reload_fields) |reload| {
             const body = try std.fmt.bufPrint(&buffer, "{{\"version\":\"{s}\",\"type\":\"configuration_reply\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"31\",\"created\":{s}{s}}}{s}}}", .{ current, created, reload.bytes, cases[0].accepted_tail });
@@ -485,8 +463,6 @@ test "a diagnostic reply confirms nothing, and only an authoritative one names a
         try std.testing.expectError(error.InvalidResponse, value.answer);
         try std.testing.expect(value.diagnostic == null);
     }
-    // A diagnostic needs the current version, and only an invocation
-    // error with status 500 claims a canonical Store failure.
     for ([_][]const u8{
         "{\"version\":\"" ++ stale ++ "\",\"type\":\"invocation_error\",\"code\":\"busy\"}",
         "{\"version\":\"" ++ current ++ "\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}",
@@ -508,7 +484,6 @@ test "a reply carrying another mutation's fields, or the wrong version, confirms
         "{\"version\":\"" ++ stale ++ archive["{\"version\":\"".len + current.len ..] ++ ",\"completion\":{\"status\":\"completed\"}}",
     }, [_]Target{ .session_stop, target }) |invalid, expected|
         try std.testing.expectError(error.InvalidResponse, decodeForTest(200, invalid, "k7m2qx", expected).answer);
-    // An interruption binds the Turn and operation it names.
     const interruption: Target = .{ .model_interruption = .{ .turn = 3, .operation = 4 } };
     for ([_][]const u8{ "\"3\",\"operation\":\"4\"", "\"3\",\"operation\":\"5\"", "\"2\",\"operation\":\"4\"" }, 0..) |echoed, index| {
         var buffer: [256]u8 = undefined;
@@ -516,7 +491,6 @@ test "a reply carrying another mutation's fields, or the wrong version, confirms
         const answer = decodeForTest(200, body, "k7m2qx", interruption).answer;
         if (index == 0) _ = try answer else try std.testing.expectError(error.RequestBindingMismatch, answer);
     }
-    // A conflict is never a replay.
     const conflict = "{\"version\":\"" ++ current ++ "\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":\"conflict\",\"replayed\":";
     const tail = ",\"session\":\"k7m2qx\",\"code\":\"idempotency_key_conflict\"},\"completion\":{\"status\":\"unavailable\"}}";
     try std.testing.expect((try decodeForTest(409, conflict ++ "false" ++ tail, "k7m2qx", .session_stop).answer).result == .conflict);

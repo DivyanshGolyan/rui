@@ -1,6 +1,3 @@
-//! Message admission: why a Message is refused. The Store saves the code
-//! and the Host renders its tag name.
-
 pub const Rejection = enum {
     session_archiving,
     invalid_session_reference,
@@ -32,7 +29,6 @@ pub const Rejection = enum {
     invalid_workspace,
     workspace_is_immutable,
     provider_is_immutable,
-    /// Historical saved rejection only; fresh model revisions are allowed.
     model_is_immutable,
     revision_exhausted,
     skills_unavailable,

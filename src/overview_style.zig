@@ -1,4 +1,3 @@
-//! Shared presentation values for overview rows.
 pub const Colour = enum {
     strong,
     ink,
@@ -16,7 +15,6 @@ pub const Background = enum { ground, bar, input_surface, selection, hover, band
 pub const Style = struct {
     colour: Colour = .normal,
     background: Background = .ground,
-    /// Low-priority text; selection and hover remove the dim attribute.
     dim: bool = false,
     bold: bool = false,
     reverse: bool = false,

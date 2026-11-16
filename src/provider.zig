@@ -1,12 +1,3 @@
-//! Rui's provider transport over its own HTTP/2 client. h2 is the
-//! mechanism; this file is Rui's policy about it, and the only Rui file
-//! that names h2's Client. What lives here and nowhere else:
-//! - which response header fields are evidence (request id, models,
-//!   Retry-After, turn state) and the rules that make a block invalid;
-//! - the response capture: its scratch file, the budget charge per body
-//!   event, and the seal; the request scratch file until h2 retires it;
-//! - the fault hooks, each injected through a production path;
-//! - mapping an h2 ending plus capture facts to `transport_policy`.
 const std = @import("std");
 const h2 = @import("h2");
 const named_scratch = @import("named_scratch.zig");
@@ -19,25 +10,17 @@ const codecs = @import("codecs.zig");
 pub const nghttp2_version = h2.nghttp2_version;
 pub const openssl_version = h2.openssl_version;
 pub const max_endpoint_bytes = @import("endpoint_value.zig").max_endpoint_bytes;
-/// The linked nghttp2 and OpenSSL are exactly the pinned versions.
 pub const checkLibraries = h2.checkLibraries;
 
 pub const ScratchBudget = @import("ScratchBudget.zig");
 
-/// A sealed request. It may sit in an execution slot, so it keeps no io or
-/// budget: its owner passes them when it releases the request.
 pub const PreparedRequest = struct {
     file: std.Io.File,
     length: u64,
     charged: u64,
     structured_output: bool,
-    /// The Session's provider, whose endpoint the request goes to.
     provider: protocol.Provider,
-    /// The codec the Session pinned, which also classifies the answer's
-    /// error body.
     codec: protocol.Codec,
-    /// The codec's headers, which `Transfer.start` sends ahead of the
-    /// Host's own and copies, so the Transfer does not keep them.
     headers: codec_abi.Headers,
 
     pub fn deinit(self: *PreparedRequest, io: std.Io, budget: ScratchBudget) void {
@@ -47,12 +30,8 @@ pub const PreparedRequest = struct {
     }
 };
 
-/// The field every Transfer sends first, ahead of the codec's headers.
 const content_type: h2.Field = .{ .name = "content-type", .value = "application/json", .borrowed = true };
 
-/// The request fields the Host writes itself, which no codec header names:
-/// `content_type`, providers.Headers' credential, user-agent and FedRAMP
-/// fields, and every codec's routing header, which the Host echoes.
 pub const host_request_fields = [_][]const u8{ content_type.name, "authorization", "chatgpt-account-id", "user-agent", "x-openai-fedramp" } ++ routing_fields;
 
 const routing_fields = fields: {
@@ -64,7 +43,6 @@ const routing_fields = fields: {
     break :fields names[0..names.len].*;
 };
 
-/// Whether the Host or h2 writes a field of this name itself.
 pub fn hostField(name: []const u8) bool {
     for (host_request_fields ++ h2.owned_fields) |owned| {
         if (std.mem.eql(u8, name, owned)) return true;
@@ -74,60 +52,40 @@ pub fn hostField(name: []const u8) bool {
 
 pub const max_turn_state_bytes = 4096;
 
-/// The Turn routing table, reached only under the Reactor's lock: `capture`
-/// takes a value while its header block is decoded, so a Transfer keeps no
-/// copy, and `replay` reads a Turn's value as its Transfer starts, so a
-/// capture cannot free it before h2 copies it.
 pub const TurnStateSink = struct {
     context: *anyopaque,
-    /// The value is borrowed for the call only.
     capture: *const fn (context: *anyopaque, key: TurnStateKey, value: []const u8) void,
-    /// The launch epoch and the Turn's value, borrowed until the next call.
     replay: *const fn (context: *anyopaque, served: protocol.Provider, turn_id: u64, owner: RoutingOwner) Replay,
 
     pub const Replay = struct { epoch: u64, value: []const u8 };
 };
 
-/// An opaque digest of the credential identity a Transfer presents
-/// (`providers.Credential.routingOwner`).
 pub const RoutingOwner = [32]u8;
 
-/// What a starting Transfer asks the routing table for.
 pub const Routing = struct { turn_id: u64, owner: RoutingOwner };
 
-/// The one transfer-specific part of turn-state delivery: its provider and
-/// Turn, and the epoch selected at launch.
 pub const TurnStateKey = struct {
     provider: protocol.Provider,
     turn_id: u64,
     epoch: u64,
 };
 
-/// One per Reactor, so a Transfer holds a pointer instead of copies.
 pub const HeaderObservation = struct {
     names: codec_abi.ObservedHeaders = .{},
     turn_state: ?TurnStateSink = null,
 };
 
 pub const Options = struct {
-    /// Each served provider's endpoint.
     endpoints: std.EnumArray(protocol.Provider, ?[]const u8),
     ca_file: ?[]const u8 = null,
-    /// The most Transfers alive at once.
     capacity: usize,
     inactivity_seconds: i64,
     observation: HeaderObservation = .{},
     scratch_path: []const u8,
-    /// The scratch account every request and response of this Host charges.
     budget: ScratchBudget,
-    /// Independent discovery endpoints, if configured.
     listing_urls: std.EnumArray(ListingKind, ?[]const u8) = .initFill(null),
 };
 
-/// Independent discovery streams beyond Active Capacity: the models.dev
-/// catalog, and one live model list for each provider whose list is live
-/// (`Facts.model_list`), named for that provider. Each has one owner, no
-/// response file or request scratch charge, and at most one live GET.
 pub const ListingKind = blk: {
     var count = 1;
     for (std.enums.values(protocol.Provider)) |served| count += @intFromBool(served.facts().model_list == .live);
@@ -143,15 +101,12 @@ pub const ListingKind = blk: {
     break :blk @Enum(u8, .exhaustive, &names, &values);
 };
 
-/// The listing that fetches `served`'s live list, or null when its list is
-/// the catalog.
 pub fn providerListing(served: protocol.Provider) ?ListingKind {
     return switch (served) {
         inline else => |name| if (@hasField(ListingKind, @tagName(name))) @field(ListingKind, @tagName(name)) else null,
     };
 }
 
-/// The provider whose live list `kind` fetches, or null for the catalog.
 pub fn listedProvider(kind: ListingKind) ?protocol.Provider {
     return switch (kind) {
         .catalog => null,
@@ -164,41 +119,24 @@ pub const ListingFetch = struct {
     etag: ?protocol.Bounded(512) = null,
 };
 
-/// Per-launch fault hooks, each through a production path.
 pub const Faults = struct {
-    /// The body is declared one byte longer than its file, so h2's read
-    /// comes up short and the stream ends `.body_failed`.
     request_read: bool = false,
-    /// The capture file is never created, so the Transfer never starts.
     response_acquire: bool = false,
-    /// The capture's name is not unlinked; its owner retains it for cleanup.
     response_unlink: bool = false,
-    /// The sink is the read-only alias, so the first write fails.
     response_write: bool = false,
 };
 
-/// What `nextCompletion` hands the execution owner: the finished Transfer,
-/// whose slot it finds by address, and its outcome, already sealed.
 pub const Completion = struct {
     transfer: *Transfer,
     outcome: transport_policy.TransferOutcome,
-    /// Finished transfers still waiting after this one.
     queued_after: usize,
 };
 
-/// Payload-free connection facts for the codex_transfer test trace.
 pub const ProtocolObservation = struct {
-    /// 1 when this stream was the first on a connection opened for it.
     new_connections: u1,
     replays: u8,
 };
 
-/// One copy of each credential's request fields, however many Transfers
-/// present it. h2 borrows the copy (see `h2.Field.borrowed`), so a stream
-/// holds two addresses for it instead of the bytes. A Transfer holds one use
-/// from `start` until its first response head, when h2 is done with its
-/// fields, or `deinit`; the last release wipes and frees the copy, so a
-/// credential stays in memory no longer than a per-stream copy did.
 pub const SharedCredential = struct {
     next: ?*SharedCredential,
     users: u32,
@@ -207,8 +145,6 @@ pub const SharedCredential = struct {
 
     const scheme = "Bearer ";
 
-    /// The `authorization` value. Like `accountId`, borrowed until the
-    /// caller's use is released, and invalid once the last one is.
     pub fn authorization(self: *SharedCredential) []const u8 {
         return self.bytes()[0..self.authorization_len];
     }
@@ -227,18 +163,12 @@ pub const SharedCredential = struct {
     }
 };
 
-/// At most one copy per distinct token and account in use, so a handful at
-/// most (a refresh overlaps the old token's last Transfers); each lookup is
-/// a scan of that short list. The execution thread takes uses and the
-/// transport thread releases them at a first response head, so the list
-/// has its own lock.
 pub const Credentials = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     mutex: std.Io.Mutex = .init,
     head: ?*SharedCredential = null,
 
-    /// A use of the copy of these bytes, made now if none is live.
     pub fn share(self: *Credentials, access_token: []const u8, account_id: []const u8) error{OutOfMemory}!*SharedCredential {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -285,12 +215,6 @@ pub const Credentials = struct {
     }
 };
 
-/// The Host's provider transport. Its own thread (`serve`) drives the h2
-/// Client, so streams, PING answers and flow control keep moving while the
-/// execution thread waits on the Store. The execution thread still makes
-/// every decision: it starts, launches and cancels Transfers and takes their
-/// completions, each a short call under `mutex`, and it never holds `mutex`
-/// across anything else. The transport thread never touches the Store.
 pub const Reactor = struct {
     comptime {
         const required_endpoints = std.enums.values(protocol.Provider).len + std.enums.values(ListingKind).len;
@@ -307,22 +231,12 @@ pub const Reactor = struct {
     credentials: Credentials,
     listing_endpoints: std.EnumArray(ListingKind, ?h2.Endpoint),
     catalog_endpoint_error: ?h2.EndpointError,
-    /// Written only by the execution thread, under `mutex`; the transport
-    /// thread reads it under `mutex` as it observes.
     listings: std.EnumArray(ListingKind, ?*ListingFetch),
-    /// Guards the Client, every live Transfer and the routing table.
     mutex: std.Io.Mutex = .init,
-    /// Under `mutex`. Set by `stop`; `serve` returns at its next pass.
     stopping: bool = false,
-    /// Under `mutex`. The failure that ended `serve`.
     failure: ?h2.DriveError = null,
-    /// Set by `serve` when a stream has finished or it failed, when given
-    /// before `serve` starts: the execution thread waits on it between
-    /// passes and resets it.
     wake: ?*std.Io.Event = null,
 
-    /// In final storage: h2's Client is pointer-stable. Host startup has
-    /// already run `checkLibraries` and `validateEndpoint`.
     pub fn init(self: *Reactor, allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
         if (options.inactivity_seconds <= 0) return error.InvalidTransportTimeout;
         const interval_ns = std.math.mul(u64, @intCast(options.inactivity_seconds), std.time.ns_per_s) catch
@@ -359,15 +273,12 @@ pub const Reactor = struct {
         for (options.listing_urls.values, &self.listing_endpoints.values, std.enums.values(ListingKind)) |url, *endpoint, kind| {
             if (url) |value| endpoint.* = self.client.addEndpoint(value) catch |err| {
                 if (kind != .catalog) return err;
-                // Optional discovery owns setup failures too: keep the
-                // Reactor, disable this endpoint, and let the Host report once.
                 self.catalog_endpoint_error = err;
                 continue;
             };
         }
     }
 
-    /// Fields are copied by prepare; response is borrowed until endListing.
     pub fn startListing(self: *Reactor, kind: ListingKind, fetch: *ListingFetch, fields: []const h2.Field, response: []u8) !void {
         self.mutex.lockUncancelable(self.io);
         defer self.unlockWaking();
@@ -384,8 +295,6 @@ pub const Reactor = struct {
         self.client.launch(&fetch.stream);
     }
 
-    /// A finished fetch is the execution thread's: only `nextCompletion`
-    /// marks it.
     pub fn finishedListing(self: *Reactor, kind: ListingKind) ?*ListingFetch {
         const fetch = self.listings.get(kind) orelse return null;
         return if (fetch.finished) fetch else null;
@@ -406,14 +315,12 @@ pub const Reactor = struct {
         if (kind == .catalog) self.client.retireConnections(self.listing_endpoints.get(kind).?);
     }
 
-    /// After `serve` has returned.
     pub fn deinit(self: *Reactor) void {
         std.debug.assert(self.credentials.head == null and !self.listingPending());
         self.client.deinit();
         self.* = undefined;
     }
 
-    /// Infallible, and no request byte exists before it returns.
     pub fn launch(self: *Reactor, transfer: *Transfer) void {
         self.mutex.lockUncancelable(self.io);
         defer self.unlockWaking();
@@ -421,19 +328,12 @@ pub const Reactor = struct {
         self.client.launch(&transfer.stream);
     }
 
-    /// The transport thread, until `stop`: drives the Client under `mutex`
-    /// and polls with it released, and wakes the execution thread whenever
-    /// a stream has finished. A drive or poll failure ends it; the
-    /// execution thread finds it with `failed` and fences. Noinline: the
-    /// stack-frame gate names this thread by it.
     pub noinline fn serve(self: *Reactor) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         while (!self.stopping) {
             self.client.drive(self) catch |err| return self.fail(err);
             if (self.client.finishedCount() != 0) self.signalFinished();
-            // Only the engine's own deadlines bound the poll: every other
-            // thread's call that gives the Client work wakes it.
             const armed = self.client.armWait(std.math.maxInt(u32));
             self.mutex.unlock(self.io);
             const blocked = armed.block();
@@ -451,22 +351,18 @@ pub const Reactor = struct {
         if (self.wake) |wake| wake.set(self.io);
     }
 
-    /// Ends `serve` at its next pass; the caller then joins its thread.
     pub fn stop(self: *Reactor) void {
         self.mutex.lockUncancelable(self.io);
         defer self.unlockWaking();
         self.stopping = true;
     }
 
-    /// The failure that ended `serve`, if one did.
     pub fn failed(self: *Reactor) ?h2.DriveError {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.failure;
     }
 
-    /// Releases `mutex` after a call that gave the Client work, so `serve`
-    /// stops polling and takes it up.
     fn unlockWaking(self: *Reactor) void {
         self.mutex.unlock(self.io);
         self.client.wake();
@@ -478,18 +374,12 @@ pub const Reactor = struct {
         return self.client.finishedCount();
     }
 
-    /// A connection with no Transfer left still needs driving: the reset
-    /// of a cancelled stream, PING answers and the idle close.
     pub fn hasConnections(self: *Reactor) bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.client.hasConnections();
     }
 
-    /// At most one finished Transfer per call. A retained response is sealed
-    /// here, synchronously, before its outcome is known to the caller.
-    /// A finished stream with an impossible status is an error: the
-    /// caller fences, since no settlement can be derived from it.
     pub fn nextCompletion(self: *Reactor, fail_seal: bool) error{InvalidHttpEvidence}!?Completion {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -515,7 +405,6 @@ pub const Reactor = struct {
         return .{ .transfer = transfer, .outcome = outcome, .queued_after = self.client.finishedCount() };
     }
 
-    /// h2's receiver, inside `drive` on the transport thread.
     pub fn observe(self: *Reactor, stream: *h2.Stream, event: h2.Event) h2.Verdict {
         for (self.listings.values, std.enums.values(ListingKind)) |listing, kind| {
             if (listing) |fetch| if (stream == &fetch.stream) {
@@ -550,8 +439,6 @@ pub const Reactor = struct {
                 return .accept;
             },
             .body => |length| {
-                // A refusal here is the only way a Rui stream ends
-                // `.sink_refused`, so that cause means scratch exhausted.
                 if (!self.budget.allocate(length)) return .refuse;
                 transfer.response.charged += length;
                 return .accept;
@@ -564,16 +451,10 @@ pub const Reactor = struct {
     }
 };
 
-/// A response being captured in its Transfer's slot. Like PreparedRequest
-/// it keeps no io or budget; its Transfer's Reactor holds both.
 pub const ResponseCapture = struct {
-    /// The writer until `seal`, then the read-only alias.
     file: std.Io.File,
-    /// The read-only alias until `seal` moves it into `file`; null once sealed.
     readonly: ?std.Io.File,
     length: u64 = 0,
-    /// Bytes charged by accepted body events, so a failed write's charge is
-    /// still released.
     charged: u64 = 0,
 
     pub fn init(
@@ -615,12 +496,10 @@ pub const ResponseCapture = struct {
         return .{ .file = file, .readonly = readonly };
     }
 
-    /// The sink h2 writes, positionally at the response length.
     fn sink(self: *const ResponseCapture, fail_write: bool) h2.Sink {
         return .{ .file = if (fail_write) self.readonly.?.handle else self.file.handle };
     }
 
-    /// Check the length h2 wrote, then keep only the read-only alias.
     pub fn seal(self: *ResponseCapture, io: std.Io, fail: bool, written: u64) !void {
         std.debug.assert(self.readonly != null);
         self.length = written;
@@ -639,8 +518,6 @@ pub const ResponseCapture = struct {
     }
 };
 
-/// A sealed response moved out of its Transfer. It lives on its completing
-/// owner's stack, so it keeps the io and budget that release it.
 pub const SealedResponse = struct {
     io: std.Io,
     file: std.Io.File,
@@ -655,25 +532,15 @@ pub const SealedResponse = struct {
     }
 };
 
-/// The response header rules, applied to each decoded block in turn. The
-/// Reactor's one HeaderObservation comes with each field, so no Transfer
-/// keeps a copy of its address.
 const HeaderContext = struct {
     observed: Observed = .{},
-    /// Where the observation's sink files the first caller-named routing
-    /// value of a successful final block; none for a transfer that files
-    /// nothing. A routing hint never fails the transfer: an unusable first
-    /// value is dropped, and later values are ignored.
     turn_state: ?TurnStateKey = null,
     turn_state_seen: bool = false,
     successful_block: bool = false,
-    /// The largest Retry-After of each form, valid once its flag is set;
-    /// flags rather than optionals keep the pair at 16 bytes per Transfer.
     retry_after_ms: u64 = 0,
     retry_after_deadline_ms: i64 = 0,
     has_retry_after_ms: bool = false,
     has_retry_after_deadline_ms: bool = false,
-    /// A refused block was refused for want of memory, not for its values.
     local_failure: bool = false,
 
     fn retryAfterMs(self: *const HeaderContext) ?u64 {
@@ -688,7 +555,6 @@ const HeaderContext = struct {
         self.successful_block = kind == .final and status >= 200 and status < 300;
     }
 
-    /// An error refuses the block: an invalid value, or no memory for it.
     fn field(self: *HeaderContext, observation: *const HeaderObservation, name: []const u8, raw: []const u8, now_seconds: i64) error{ InvalidValue, OutOfMemory }!void {
         const value = std.mem.trim(u8, raw, " \t");
         // h2 delivers field names lowercase (RFC 9113 8.2.1, enforced by nghttp2).
@@ -726,9 +592,6 @@ const HeaderContext = struct {
     }
 };
 
-/// The caller-named response values, each at its real length, back to back
-/// in one buffer the Transfer owns. A transfer whose headers have not
-/// arrived owns none.
 const Observed = struct {
     const Name = enum { request_id, model, alternate_model };
     const capacity = std.EnumArray(Name, usize).init(.{
@@ -746,8 +609,6 @@ const Observed = struct {
         return self.bytes[span.start..][0..span.len];
     }
 
-    /// A value is non-empty UTF-8 within its capacity, and a repeated name
-    /// must repeat its value.
     fn put(self: *Observed, name: Name, value: []const u8) error{ InvalidValue, OutOfMemory }!void {
         if (value.len == 0 or value.len > capacity.get(name) or !std.unicode.utf8ValidateSlice(value)) return error.InvalidValue;
         if (self.spans.get(name).len != 0)
@@ -766,15 +627,11 @@ const Observed = struct {
 
 pub const AttemptTiming = @import("model_timing.zig").Attempt;
 
-/// Embedded in an execution slot and built there: h2 holds the stream's
-/// address from launch until `nextCompletion` or `cancel`.
 pub const Transfer = struct {
-    /// Borrowed custody-owned storage; outlives this Transfer and its cleanup.
     timing: ?*AttemptTiming = null,
     stream: h2.Stream,
     reactor: *Reactor,
     request: RetainedRequest,
-    /// Until h2 retires the request body or the Transfer ends.
     request_open: bool = true,
     response: ResponseCapture,
     response_owned: bool = true,
@@ -782,22 +639,13 @@ pub const Transfer = struct {
     credential: ?*SharedCredential,
 
     pub const StartOptions = struct {
-        /// Lowercase names. Borrowed until `start` returns, since h2 copies
-        /// them, except a borrowed field, which must be a literal or bytes
-        /// of `credential`.
         fields: []const h2.Field = &.{},
-        /// A use of the Reactor's `credentials`, which the Transfer releases:
-        /// at its first response head, in `deinit`, or in `start` when it
-        /// fails.
         credential: ?*SharedCredential = null,
-        /// Echo the Turn's routing value and file the one this Transfer
-        /// receives; null for neither.
         routing: ?Routing = null,
         faults: Faults = .{},
         timing: ?*AttemptTiming = null,
     };
 
-    /// What a Transfer keeps of its request.
     const RetainedRequest = struct {
         file: std.Io.File,
         charged: u64,
@@ -805,12 +653,6 @@ pub const Transfer = struct {
         codec: protocol.Codec,
     };
 
-    /// Opens the response capture, then prepares the stream with
-    /// `content-type: application/json`, the request's codec headers, the
-    /// options' fields and the Turn's routing value, in that order. Takes
-    /// the request's file and charge. Touches no socket; `Reactor.launch`
-    /// is the handoff. Unlink failure still hands back the named owner
-    /// through `retained_response`.
     pub fn start(
         self: *Transfer,
         reactor: *Reactor,
@@ -821,7 +663,6 @@ pub const Transfer = struct {
     ) !void {
         errdefer if (options.credential) |shared| reactor.credentials.release(shared);
         var count = 1 + request.headers.count + options.fields.len;
-        // The routing value takes one more field when the Turn has one.
         if (count + @intFromBool(options.routing != null) > h2.max_fields) return error.TooManyProviderHeaders;
         var fields: [h2.max_fields]h2.Field = undefined;
         fields[0] = content_type;
@@ -850,16 +691,11 @@ pub const Transfer = struct {
             self.response.deinit(reactor.io, reactor.budget);
             self.* = undefined;
         }
-        // The replayed value is borrowed until the next capture, which only
-        // runs under this lock, and h2 copies it before the lock is released.
         reactor.mutex.lockUncancelable(reactor.io);
         defer reactor.mutex.unlock(reactor.io);
         if (options.routing) |routing| if (reactor.observation.turn_state) |table| {
             const replay = table.replay(table.context, request.provider, routing.turn_id, routing.owner);
             self.headers.turn_state = .{ .provider = request.provider, .turn_id = routing.turn_id, .epoch = replay.epoch };
-            // Every request echoes its Turn's routing value, whatever its
-            // provider: one that never sends the codec's routing header has
-            // none to echo.
             const name = reactor.observation.names.turn_state;
             if (name.len != 0 and replay.value.len != 0) {
                 fields[count] = .{ .name = name, .value = replay.value };
@@ -877,9 +713,6 @@ pub const Transfer = struct {
         });
     }
 
-    /// At any point after `start`. Cancels the stream if it is still live
-    /// (a reset for an open one, sent by the next drive), then closes every
-    /// file still held and releases both charges.
     pub fn deinit(self: *Transfer) void {
         const reactor = self.reactor;
         reactor.mutex.lockUncancelable(reactor.io);
@@ -889,7 +722,6 @@ pub const Transfer = struct {
         self.retireRequest();
         self.headers.observed.deinit();
         if (self.response_owned) self.response.deinit(reactor.io, reactor.budget);
-        // After the cancel, so h2 no longer holds the borrowed bytes.
         self.releaseCredential();
         self.* = undefined;
     }
@@ -900,12 +732,9 @@ pub const Transfer = struct {
         self.reactor.credentials.release(shared);
     }
 
-    /// h2 will not read the request again: close it and release its charge
-    /// now, not at completion, since an answer can stream for minutes.
     fn retireRequest(self: *Transfer) void {
         if (!self.request_open) return;
         self.request_open = false;
-        // Its other facts outlive its file.
         self.request.file.close(self.reactor.io);
         self.reactor.budget.release(self.request.charged);
     }
@@ -921,7 +750,6 @@ pub const Transfer = struct {
         });
     }
 
-    /// The sealed answer, success or HTTP error.
     pub fn takeResponse(self: *Transfer) SealedResponse {
         std.debug.assert(self.response_owned);
         std.debug.assert(self.response.readonly == null);
@@ -935,8 +763,6 @@ pub const Transfer = struct {
         };
     }
 
-    /// The unsealed bytes h2 wrote before an unanswered failure, borrowed
-    /// from the capture this Transfer still owns.
     pub fn partialResponse(self: *const Transfer) struct { file: std.Io.File, length: u64 } {
         std.debug.assert(self.response_owned);
         return .{ .file = self.response.file, .length = self.stream.responseLength() };
@@ -977,11 +803,9 @@ fn policyCause(cause: h2.Cause) transport_policy.Cause {
 }
 
 comptime {
-    // The converse of `policyCause`: no policy tag lacks an h2 cause.
     for (std.meta.fieldNames(transport_policy.Cause)) |name| _ = @field(h2.Cause, name);
 }
 
-/// Rui's endpoint rule, which h2's own URL rule must also accept.
 pub const validateEndpoint = @import("endpoint_value.zig").validateEndpoint;
 
 test "idle reactor reports zero finished transfers and no completion" {
@@ -995,8 +819,6 @@ test "idle reactor reports zero finished transfers and no completion" {
         .budget = .{ .used = &used, .limit = 1 },
     });
     defer reactor.deinit();
-    // With nothing to drive, the transport thread blocks with no deadline
-    // until `stop` wakes it.
     const transport = try std.Thread.spawn(.{}, Reactor.serve, .{&reactor});
     try std.testing.expectEqual(@as(usize, 0), reactor.finishedCount());
     try std.testing.expectEqual(@as(?Completion, null), try reactor.nextCompletion(false));
@@ -1073,22 +895,18 @@ test "catalog endpoint setup failure leaves HTTP provider and listing usable" {
         defer reactor.endListing(.openai);
         try std.testing.expectEqual(@as(?Completion, null), try reactor.nextCompletion(false));
     }
-    // A served HTTPS provider still requires working trust; only the optional
-    // catalog's endpoint setup is allowed to fail independently.
     var required = options;
     required.endpoints.set(.openai, "https://example.com/responses");
     try std.testing.expectError(error.InvalidCaFile, reactor.init(std.testing.allocator, std.testing.io, required));
 }
 
 test "Transfers presenting one credential share one copy, freed with the last use" {
-    // The testing allocator fails the test on a leak or a double free.
     var credentials: Credentials = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     const first = try credentials.share("token-a", "account");
     const second = try credentials.share("token-a", "account");
     try std.testing.expectEqual(first, second);
     try std.testing.expectEqualStrings("Bearer token-a", first.authorization());
     try std.testing.expectEqualStrings("account", first.accountId());
-    // A refreshed token, or another account, is a separate copy.
     const refreshed = try credentials.share("token-b", "account");
     const other = try credentials.share("token-a", "other");
     try std.testing.expect(refreshed != first and other != first and other != refreshed);
@@ -1113,7 +931,6 @@ test "a Transfer's credential use ends at its first response head, once" {
     transfer.timing = &timing;
     transfer.headers = .{};
     transfer.credential = try reactor.credentials.share("token", "account");
-    // A sibling Transfer still presenting the same credential.
     const sibling = try reactor.credentials.share("token", "account");
     try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&transfer.stream, .{ .head = .{ .kind = .interim, .status = 100, .fields = &.{} } }));
     try std.testing.expectEqual(@as(?*SharedCredential, null), transfer.credential);
@@ -1190,7 +1007,6 @@ test "response observations use caller-selected names and reject contradictions"
     try std.testing.expectEqualStrings("alpha", context.observed.get(.model));
     try std.testing.expectEqualStrings("beta", context.observed.get(.alternate_model));
     try std.testing.expectEqualStrings("ref-1", context.observed.get(.request_id));
-    // A later block (trailers) must repeat a value, not contradict it.
     try observeLines(&context, &observation, &.{"served-model: alpha"});
     try std.testing.expectError(error.InvalidValue, observeLines(&context, &observation, &.{"served-model: gamma"}));
 }
@@ -1239,7 +1055,6 @@ test "turn state observation keeps only the first value of a successful final bl
         try std.testing.expectEqual(@intFromBool(case.expected.len != 0), record.captures);
         if (record.captures != 0) try std.testing.expectEqual(TurnStateKey{ .provider = .openai, .turn_id = 7, .epoch = 3 }, record.key.?);
     }
-    // A value in trailers, after a successful final block, is not routing.
     var record: TurnStateRecord = .{};
     const observation: HeaderObservation = .{ .names = .{ .turn_state = name }, .turn_state = record.sink() };
     const key: TurnStateKey = .{ .provider = .codex, .turn_id = 1, .epoch = 1 };
@@ -1248,12 +1063,10 @@ test "turn state observation keeps only the first value of a successful final bl
     trailers.block(.trailers, 0);
     try trailers.field(&observation, name, "late", 0);
     try std.testing.expectEqual(@as(usize, 0), record.captures);
-    // Unnamed callers observe nothing.
     const unnamed_observation: HeaderObservation = .{ .turn_state = record.sink() };
     var unnamed: HeaderContext = .{ .turn_state = key };
     try observeLines(&unnamed, &unnamed_observation, &.{ ":status 200", "x-codex-turn-state: value" });
     try std.testing.expectEqual(@as(usize, 0), record.captures);
-    // A transfer launched with no key files nothing.
     var unkeyed: HeaderContext = .{};
     try observeLines(&unkeyed, &observation, &.{ ":status 200", "x-codex-turn-state: value" });
     try std.testing.expectEqual(@as(usize, 0), record.captures);
@@ -1355,8 +1168,6 @@ test "model timings start at handoff and capture only the first HTTP response ev
     transfer.response.charged = 0;
     var sink: [1]u8 = undefined;
     try std.testing.expectEqual(@as(?u64, null), transfer.timing.?.elapsedMs(.fromNanoseconds(99)));
-    // Reuse the timing storage deliberately: each real launch must erase its
-    // predecessor's start/event, even when the final retry has no event.
     for (0..4) |ordinal| {
         Clock.awake_ns = @as(i96, @intCast(ordinal + 1)) * std.time.ns_per_s;
         try reactor.client.prepare(&transfer.stream, .{
@@ -1381,8 +1192,6 @@ test "model timings start at handoff and capture only the first HTTP response ev
                 _ = reactor.observe(&transfer.stream, .{ .head = .{ .kind = .interim, .status = 100, .fields = &.{} } });
                 Clock.awake_ns = sent_at + 9 * std.time.ns_per_ms;
                 _ = reactor.observe(&transfer.stream, .{ .head = .{ .kind = .final, .status = 200, .fields = &.{} } });
-                // Even a body refused by the scratch budget is an event;
-                // it must not overwrite the earlier interim response head.
                 try std.testing.expectEqual(h2.Verdict.refuse, reactor.observe(&transfer.stream, .{ .body = 1 }));
                 try std.testing.expectEqual(@as(?u64, 5), transfer.timing.?.firstEventMs());
             },
@@ -1394,7 +1203,6 @@ test "model timings start at handoff and capture only the first HTTP response ev
                 try std.testing.expectEqual(@as(?u64, 7), transfer.timing.?.firstEventMs());
             },
             2 => {
-                // Same-millisecond arrival is a real zero, not absence.
                 Clock.awake_ns = sent_at;
                 _ = reactor.observe(&transfer.stream, .{ .head = .{ .kind = .final, .status = 200, .fields = &.{} } });
                 Clock.awake_ns = sent_at + 3 * std.time.ns_per_ms;
