@@ -456,15 +456,11 @@ pub const AppHooks = struct {
     on_open: *const fn (*anyopaque, *vxfw.EventContext, *const [session_id.bytes]u8) anyerror!void,
 };
 
-fn focusField(raw: *anyopaque, set: ?@import("app_input.zig").Field) @import("app_input.zig").Field {
+fn focusChanged(raw: *anyopaque) void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (set) |field| {
-        self.footer.focus = field;
-        self.footer.pending = null;
-        self.shown_notice.dismiss();
-        self.dirty = true;
-    }
-    return self.footer.focus;
+    self.footer.pending = null;
+    self.shown_notice.dismiss();
+    self.dirty = true;
 }
 
 fn modalFocus(raw: *anyopaque) bool {
@@ -474,7 +470,7 @@ fn modalFocus(raw: *anyopaque) bool {
 
 fn acceptsTab(raw: *anyopaque) bool {
     const self: *Self = @ptrCast(@alignCast(raw));
-    return self.footer.focus == .input and self.app_consent.request == null and self.input.composition().bytes.len != 0 and self.shownRow(self.app_palette.drawn) != null;
+    return self.app_hooks.root.input.field == .input and self.app_consent.request == null and self.input.composition().bytes.len != 0 and self.shownRow(self.app_palette.drawn) != null;
 }
 
 fn focusCandidates(raw: *anyopaque, items: *[std.enums.values(@import("app_input.zig").Target).len]Root.Candidate) Root.Projection {
@@ -496,7 +492,7 @@ fn focusCandidates(raw: *anyopaque, items: *[std.enums.values(@import("app_input
 
 pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widget {
     self.app_hooks = hooks;
-    hooks.root.session_focus = .{ .context = self, .field = focusField, .accepts_tab = acceptsTab, .modal = modalFocus, .candidates = focusCandidates };
+    hooks.root.session_focus = .{ .context = self, .changed = focusChanged, .accepts_tab = acceptsTab, .modal = modalFocus, .candidates = focusCandidates };
     self.app_info = .{ .backend = self.infoBackend(), .home = self.home };
     if (hooks.drafts) |drafts| if (drafts.take(self.init.gpa, self.session)) |draft| {
         defer draft.deinit(self.init.gpa);
@@ -523,7 +519,7 @@ fn openInfo(self: *Self, _: *vxfw.EventContext) !void {
 
 /// A drawn footer click steps the footer as its key does (`session_keys.footer`).
 fn requestFooterChoice(self: *Self, field: ?session_chrome.FooterField) void {
-    if (session_keys.footer(&self.footer, self.footerKeyFacts(), .{ .click = field }) == .open_choice) self.prepareFooterChoice();
+    if (session_keys.footer(&self.footer, &self.app_hooks.root.input, self.footerKeyFacts(), .{ .click = field }) == .open_choice) self.prepareFooterChoice();
     self.dirty = true;
 }
 
@@ -557,7 +553,7 @@ fn startFooterChoice(self: *Self, ctx: *vxfw.EventContext) !void {
 /// The application owner also calls this before showing Settings/sign-in.
 pub fn closePresentation(self: *Self) void {
     self.app_info.closeStandaloneChoice();
-    _ = self.footer.step(false, .escape);
+    _ = self.footer.step(&self.app_hooks.root.input, false, .escape);
     self.info_open = false;
 }
 
@@ -755,7 +751,7 @@ fn nowMs(self: *const Self) u64 {
 }
 
 pub fn widget(self: *Self) vxfw.Widget {
-    return .{ .userdata = self, .captureHandler = appCapture, .eventHandler = appEvent, .drawFn = appDraw };
+    return .{ .userdata = self, .eventHandler = appEvent, .drawFn = appDraw };
 }
 
 /// What a drag in the Transcript did, on the status bar.
@@ -781,7 +777,7 @@ fn appQuoteInsert(raw: *anyopaque, ctx: *vxfw.EventContext, target: Input.Insert
     if (outcome == .refused) try appNotice(raw, ctx, "Quote could not be inserted; draft unchanged");
     if (outcome == .redraw) {
         self.dirty = true;
-        try ctx.requestFocus(self.app_input.composer.widget());
+        try self.app_hooks.root.focusInput(ctx);
     }
     try self.afterInput(ctx);
 }
@@ -875,7 +871,7 @@ fn appDecision(raw: *anyopaque, ctx: *vxfw.EventContext, decision: ConsentPolicy
         .allow_once => .allow_once,
         .deny => .deny,
     } } });
-    try ctx.requestFocus(self.app_input.composer.widget());
+    try self.app_hooks.root.focusInput(ctx);
 }
 
 pub fn hostStartKey(key: vaxis.Key) bool {
@@ -892,15 +888,6 @@ fn hostFailure(self: *Self) bool {
     host.lost(host.context);
     self.dirty = true;
     return true;
-}
-
-/// A press anywhere off the footer's words moves its focus back to the
-/// input before the pressed widget acts.
-fn appCapture(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
-    const self: *Self = @ptrCast(@alignCast(raw));
-    if (event == .mouse and event.mouse.button == .left and event.mouse.type == .press and !self.info_open and !self.app_info.standaloneOpen()) {
-        try self.footerClick(ctx, null);
-    }
 }
 
 /// A palette click chooses the drawn row, then uses the input's Enter path:
@@ -943,7 +930,7 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
         null;
     const previous = self.app_consent.row;
     const consent: ?*ActionConsent = if (self.app_consent.request != null) &self.app_consent else null;
-    const take = session_keys.step(.{ .footer = &self.footer, .consent = consent }, .{
+    const take = session_keys.step(.{ .footer = &self.footer, .focus = &self.app_hooks.root.input, .consent = consent }, .{
         .info_open = self.info_open,
         .info_choice = self.app_info.hasChoice(),
         .choice = if (self.app_info.standaloneField() == null) .closed else if (self.app_info.standaloneOpen()) .shown else .pending,
@@ -1151,7 +1138,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     };
     const facts_style = quiet;
     self.app_screen.style = normal;
-    self.app_input.composer.caret = self.app_hooks.root.input.mainFocused() and !self.info_open and !self.app_info.standaloneOpen() and self.footer.focus == .input;
+    self.app_input.composer.caret = self.app_hooks.root.input.mainFocused() and !self.info_open and !self.app_info.standaloneOpen() and self.app_hooks.root.input.field == .input;
     self.app_input.composer.setCaps(self.app_caps);
     self.app_input.composer.placeholder = if (self.line.read != null and self.line.folder != null) "Type a task" else "";
     self.app_input.composer.editor = &self.input.editors[self.input.active];
@@ -1207,7 +1194,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     chrome.facts.method = self.app_caps.width;
     chrome.facts.style = facts_style;
     chrome.facts.selected = style.of(self.app_caps, .{ .colour = .normal, .background = .selection });
-    chrome.facts.focus = if (self.app_hooks.root.input.mainFocused()) self.footer.focus else null;
+    chrome.facts.focus = if (self.app_hooks.root.input.mainFocused()) self.app_hooks.root.input.field else null;
     chrome.marker.method = self.app_caps.width;
     chrome.marker.style = .{ .reverse = true };
     const held = self.heldOriginal();
@@ -1243,7 +1230,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_preview.size = .{};
     self.app_content.size = .{};
     self.app_screen.host = if (self.app_hooks.host) |host| host.notice(host.context) else null;
-    const focused = @import("app_input.zig").currentFocus(self.app_hooks.root.input, self.footer.focus);
+    const focused = @import("app_input.zig").currentFocus(self.app_hooks.root.input);
     self.chrome.facts.back.focused = focused == .back;
     self.chrome.info.focused = focused == .info;
     self.chrome.marker.focused = focused == .latest;
@@ -4424,7 +4411,7 @@ test "Tab accepts the drawn slash row exactly as Enter without submitting a Mess
         try held.keys(key);
         try std.testing.expectEqualStrings(case.draft, self.input.composition().bytes);
         try std.testing.expectEqual(case.cursor orelse case.draft.len, self.input.composition().cursor);
-        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.app_hooks.root.input.field);
         try std.testing.expect(self.submission.intent == null);
         if (case.command) |command| {
             try std.testing.expectEqualStrings(command, self.input.takeCommand().?);
@@ -4469,7 +4456,7 @@ test "Tab accepts drawn skill names and arguments at the caret exactly as Enter"
         try held.keys(key);
         try std.testing.expectEqualStrings(case.draft, self.input.composition().bytes);
         try std.testing.expectEqual(case.cursor, self.input.composition().cursor);
-        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.app_hooks.root.input.field);
         try std.testing.expect(self.submission.intent == null);
         try std.testing.expect(self.input.queuedCommand() == null);
     };
@@ -4503,7 +4490,7 @@ test "Tab cannot take a stale row after draft caret or skill source changes" {
         try held.keys("\t");
         try std.testing.expectEqualStrings(expected, self.input.composition().bytes);
         try std.testing.expectEqual(draft.cursor, self.input.composition().cursor);
-        try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
+        try std.testing.expectEqual(session_chrome.FooterFocus.model, self.app_hooks.root.input.field);
         try std.testing.expect(self.submission.intent == null);
         try std.testing.expect(self.input.queuedCommand() == null);
     }
@@ -4526,7 +4513,7 @@ test "Tab takes the highlighted skill actually drawn while Enter retains pending
         try held.keys(key);
         try std.testing.expectEqualStrings(if (key[0] == '\r') "Use /review " else "Use /recap ", self.input.composition().bytes);
         try std.testing.expect(self.submission.intent == null);
-        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.app_hooks.root.input.field);
     }
 }
 
@@ -4550,7 +4537,7 @@ test "Tab and pointer refuse effort rows from the previous model until repaint" 
         try std.testing.expect(self.input.queuedCommand() == null);
         try std.testing.expect(self.info_edit == null);
         try std.testing.expect(self.submission.intent == null);
-        self.footer.focus = .input;
+        self.app_hooks.root.input.field = .input;
         _ = try held.draw();
         const fresh = self.app_palette.drawn;
         try std.testing.expectEqualStrings("default", self.screen.commands.?.list.entries[fresh.index].word);
@@ -4586,7 +4573,7 @@ test "Tab outside a drawn slash row retains footer navigation and the draft" {
         try held.keys("\t");
         try std.testing.expectEqualStrings(case.text, self.input.composition().bytes);
         try std.testing.expectEqual(case.text.len, self.input.composition().cursor);
-        try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
+        try std.testing.expectEqual(session_chrome.FooterFocus.model, self.app_hooks.root.input.field);
         try std.testing.expect(self.submission.intent == null);
         try std.testing.expect(self.input.queuedCommand() == null);
     }
@@ -4600,7 +4587,7 @@ test "pasted Tab beside a drawn row stays in the draft" {
     try std.testing.expect(held.self.shownRow(null) != null);
     try held.keys("\x1b[200~\t\x1b[201~");
     try std.testing.expectEqualStrings("/eff\t", held.self.input.composition().bytes);
-    try std.testing.expectEqual(session_chrome.FooterFocus.input, held.self.footer.focus);
+    try std.testing.expectEqual(session_chrome.FooterFocus.input, held.root.input.field);
     try std.testing.expect(held.self.submission.intent == null);
     try std.testing.expect(held.self.input.queuedCommand() == null);
 }
@@ -4632,7 +4619,7 @@ test "a fresh Session draws its own command list after the first frame" {
     try held.keys("\t");
     try std.testing.expectEqualStrings("/setup", self.input.takeCommand().?);
     try std.testing.expectEqualStrings("", self.input.composition().bytes);
-    try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+    try std.testing.expectEqual(session_chrome.FooterFocus.input, self.app_hooks.root.input.field);
 }
 
 test "Esc closes the command list first only when the latest frame drew it" {
@@ -4719,7 +4706,7 @@ test "the /requests page lists its rows over an empty draft, Enter takes a row a
     try held.keys("\t\t");
     try std.testing.expectEqual(@as(usize, 1), held.screen.commands.?.highlight);
     try std.testing.expectEqualStrings("", self.input.composition().bytes);
-    try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
+    try std.testing.expectEqual(session_chrome.FooterFocus.model, self.app_hooks.root.input.field);
     try held.keys("\x07\r");
     try std.testing.expectEqualStrings("/result " ++ newer, self.input.takeCommand().?);
     try held.settle();
@@ -4741,7 +4728,7 @@ test "the /requests page lists its rows over an empty draft, Enter takes a row a
     try held.frame();
     try held.keys("\t\t");
     try std.testing.expectEqualStrings("", self.input.composition().bytes);
-    try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
+    try std.testing.expectEqual(session_chrome.FooterFocus.model, self.app_hooks.root.input.field);
 }
 
 test "a pending decision, or a Message that carries one, has no /recover row, and Enter on the page sends nothing" {
@@ -9835,17 +9822,17 @@ test "chat footer navigation opens existing standalone choices and preserves dra
         // Root's drawn order at this narrow width: input, ‹, Model, Effort.
         try held.frame();
         try held.keys("\t\t");
-        try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
+        try std.testing.expectEqual(session_chrome.FooterFocus.model, self.app_hooks.root.input.field);
         try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
         try std.testing.expectEqual(cursor, self.input.composition().cursor);
         try held.keys("\x1b[Z\x1b[Z");
-        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.app_hooks.root.input.field);
         if (effort != null) {
             try held.keys("\t\t\t");
-            try std.testing.expectEqual(session_chrome.FooterFocus.effort, self.footer.focus);
+            try std.testing.expectEqual(session_chrome.FooterFocus.effort, self.app_hooks.root.input.field);
         }
         try held.keys("\x07");
-        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.app_hooks.root.input.field);
         try std.testing.expect(held.left == null);
         try held.keys("\t\t\r");
         try std.testing.expect(!self.info_open and self.app_info.standaloneOpen() and self.app_info.model_choice.active);
@@ -9862,11 +9849,11 @@ test "chat footer navigation opens existing standalone choices and preserves dra
         }
         // Printable input leaves the focused button and is edited exactly once.
         try held.keys("\t!");
-        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.app_hooks.root.input.field);
         try std.testing.expectEqualStrings("kept dra!ft", self.input.composition().bytes);
         // Marked paste keeps literal tabs instead of navigating the footer.
         try held.keys("\t\x1b[200~\t\x1b[201~");
-        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.app_hooks.root.input.field);
         try std.testing.expectEqualStrings("kept dra!\tft", self.input.composition().bytes);
     }
 }
@@ -10012,7 +9999,7 @@ test "chat footer model waits for the borrowed source readiness and Escape cance
         try std.testing.expectEqual(!cancel, self.app_info.standaloneOpen());
         try std.testing.expectEqual(!cancel, self.app_info.model_choice.active);
         try std.testing.expectEqual(@as(?session_chrome.FooterField, null), self.footer.pending);
-        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.app_hooks.root.input.field);
         try std.testing.expectEqualStrings("draft", self.input.composition().bytes);
         try std.testing.expectEqual(cursor, self.input.composition().cursor);
     }
@@ -10091,7 +10078,19 @@ test "chat footer deferred model choice is cancelled by text paste tab or backgr
                 try held.frame();
                 try held.keys("\t\t");
             },
-            else => try self.widget().captureEvent(&ctx, .{ .mouse = .{ .row = 0, .col = 0, .button = .left, .type = .press, .mods = .{} } }),
+            else => {
+                // Pointer ownership belongs to Root, not a Session capture
+                // handler. Exercise the real drawn background hit path.
+                for ([_]u16{ 46, 140 }) |width| {
+                    held.size = .{ .width = width, .height = 24 };
+                    try self.footerClick(&ctx, .model);
+                    try std.testing.expectEqual(@as(?session_chrome.FooterField, .model), self.footer.pending);
+                    const frame = try held.root.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
+                    try @import("testing/app_events.zig").mouse(&ctx, frame, .{ .row = 10, .col = if (width >= Root.split_at) 60 else 10, .button = .left, .type = .press, .mods = .{} });
+                    try std.testing.expectEqual(@as(?session_chrome.FooterField, null), self.footer.pending);
+                    try std.testing.expectEqual(@import("app_input.zig").Target.input, @import("app_input.zig").currentFocus(held.root.input));
+                }
+            },
         }
         try std.testing.expectEqual(@as(?session_chrome.FooterField, null), self.footer.pending);
         source.ready = true;
@@ -10102,7 +10101,7 @@ test "chat footer deferred model choice is cancelled by text paste tab or backgr
             1 => "draft!\t",
             else => "draft",
         }, self.input.composition().bytes);
-        try std.testing.expectEqual(if (interaction == 2) session_chrome.FooterFocus.model else .input, self.footer.focus);
+        try std.testing.expectEqual(if (interaction == 2) session_chrome.FooterFocus.model else .input, self.app_hooks.root.input.field);
     }
 }
 
@@ -10209,7 +10208,7 @@ test "chat standalone footer close clicks match Escape preserve paste and preser
             self.app_hooks.root.input.pasting = false;
             for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind });
             try std.testing.expect(!self.app_info.standaloneOpen() and !self.info_open);
-            try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+            try std.testing.expectEqual(session_chrome.FooterFocus.input, self.app_hooks.root.input.field);
             try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
             try std.testing.expectEqual(cursor, self.input.composition().cursor);
             try std.testing.expect(self.info_edit == null);
@@ -10508,12 +10507,12 @@ test "App Session Tab projection visits only drawn input and chrome controls at 
         try std.testing.expectEqual(width == 46, std.mem.indexOfScalar(focus.Target, order, .back) != null);
         for ([_]bool{ false, true }) |reverse| {
             held.root.input.area = .main;
-            held.self.footer.focus = .input;
+            held.root.input.field = .input;
             var index = std.mem.indexOfScalar(focus.Target, order, .input).?;
             for (0..order.len) |_| {
                 try held.keys(if (reverse) "\x1b[Z" else "\t");
                 index = (index + (if (reverse) order.len - 1 else @as(usize, 1))) % order.len;
-                try std.testing.expectEqual(order[index], focus.currentFocus(held.root.input, held.self.footer.focus));
+                try std.testing.expectEqual(order[index], focus.currentFocus(held.root.input));
                 _ = try held.root.widget().draw(ctx);
                 try std.testing.expectEqual(order[index] == .input, held.self.app_input.composer.caret);
                 try std.testing.expectEqualStrings("draft", held.self.input.composition().bytes);
@@ -10530,6 +10529,102 @@ test "App Session Tab projection visits only drawn input and chrome controls at 
         try held.keys("\x1b[Z");
         try std.testing.expectEqual(selected, held.self.app_info.panel.selected);
         try std.testing.expectEqualStrings("draft", held.self.input.composition().bytes);
+    }
+}
+
+test "App Session composer click recovers submission from every drawn focus target at both widths" {
+    const focus = @import("app_input.zig");
+    const Pointer = @import("testing/app_events.zig");
+    const Locate = struct {
+        const Point = struct { row: i16, col: i16 };
+
+        fn composer(surface: vxfw.Surface, widget_: vxfw.Widget) ?Point {
+            if (surface.widget.eql(widget_)) return .{ .row = 0, .col = 0 };
+            for (surface.children) |child| {
+                if (composer(child.surface, widget_)) |point| return .{
+                    .row = point.row + @as(i16, @intCast(child.origin.row)),
+                    .col = point.col + @as(i16, @intCast(child.origin.col)),
+                };
+            }
+            return null;
+        }
+    };
+    for ([_]u16{ 46, 140 }) |width| {
+        var visited: focus.Frame = .{};
+        // A fresh owner for each target keeps a successful send from blocking
+        // the next case. Exercise every identity, distinguishing drawn Tab
+        // traversal from explicitly seeded retained-owner domain coverage.
+        for (std.enums.values(focus.Target)) |target| {
+            const held = try HeldFrontend.create();
+            defer held.destroy();
+            // The default fixture's empty sidebar occupies no cells. Supply
+            // visible list content so wide list focus is genuinely projected.
+            var list_text: vxfw.Text = .{ .text = "Session list" };
+            held.root.list = list_text.widget();
+            held.size = .{ .width = width, .height = 30 };
+            try captureInfo(held, "Chat");
+            held.self.line.read = .{ .revision = 1, .end = 0 };
+            try held.self.line.model.set("gpt-5.5");
+            held.self.line.effort = .high;
+            held.self.hint = .absent;
+            held.self.line.folder = .{};
+            try held.self.line.folder.?.set("/work");
+            _ = held.self.input.append("click recovered draft");
+            const draw_ctx: vxfw.DrawContext = .{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} };
+            _ = try held.root.widget().draw(draw_ctx);
+            const drawn = std.mem.indexOfScalar(focus.Target, held.root.focus_frame.slice(), target) != null;
+            if (drawn) {
+                visited.append(target);
+                // Drawn controls are reached through captured Tab, not by
+                // assigning their field or Root's button/list state directly.
+                var steps: usize = 0;
+                while (focus.currentFocus(held.root.input) != target) : (steps += 1) {
+                    try std.testing.expect(steps < held.root.focus_frame.len);
+                    try held.keys("\t");
+                }
+            }
+            const frame = try held.root.widget().draw(draw_ctx);
+            if (!drawn) {
+                // Separate domain coverage for retained focus identities whose
+                // controls are absent in this frame (e.g. a resolved needs/stop
+                // state, or the list after narrowing). The frame is the normal
+                // sendable chat; only its old semantic owner is seeded. These
+                // cases do not claim that Tab can reach an undrawn control.
+                switch (target) {
+                    .list => held.root.input.area = .list,
+                    .settings_row => held.root.input.area = .settings_row,
+                    .input, .model, .effort => return error.TestUnexpectedResult,
+                    else => held.root.input.area = .{ .button = target },
+                }
+            }
+            try std.testing.expectEqual(target, focus.currentFocus(held.root.input));
+            const at = Locate.composer(frame, held.self.app_input.composer.widget()) orelse return error.TestUnexpectedResult;
+            var ctx = held.context();
+            // Hit testing includes Root capture, as App does, even when its
+            // semantic focus still belongs to a sidebar or chrome button.
+            for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| {
+                try Pointer.mouse(&ctx, frame, .{ .row = at.row, .col = at.col, .button = .left, .type = kind, .mods = .{} });
+            }
+            try std.testing.expectEqual(focus.Target.input, focus.currentFocus(held.root.input));
+            try std.testing.expectEqualStrings("click recovered draft", held.self.input.composition().bytes);
+            try std.testing.expect(held.self.submission.intent == null);
+            _ = try held.root.widget().draw(draw_ctx);
+            try std.testing.expect(held.self.app_input.composer.caret);
+            try held.keys("\r");
+            try std.testing.expect(held.self.submission.intent != null);
+            try std.testing.expect(held.self.submission.intent.? == .message);
+            try std.testing.expectEqualStrings("click recovered draft", try held.self.input.message(held.self.submission.intent.?.message));
+            try std.testing.expectEqual(@as(u64, 1), held.self.admission.sent);
+            // Enter sent the draft, rather than activating the old control.
+            try std.testing.expect(held.left == null);
+            try std.testing.expect(!modalFocus(&held.self));
+            try std.testing.expect(held.root.input.layer == .main);
+        }
+        for ([_]focus.Target{ .input, .model, .effort, .info }) |target| {
+            try std.testing.expect(std.mem.indexOfScalar(focus.Target, visited.slice(), target) != null);
+        }
+        try std.testing.expectEqual(width == 46, std.mem.indexOfScalar(focus.Target, visited.slice(), .back) != null);
+        try std.testing.expectEqual(width == 140, std.mem.indexOfScalar(focus.Target, visited.slice(), .list) != null);
     }
 }
 
@@ -10695,7 +10790,7 @@ test "Session modal custody changes before a new focus projection is drawn" {
         held.self.line.effort = .high;
         try held.frame();
         held.root.input.area = .main;
-        held.self.footer.focus = .input;
+        held.root.input.field = .input;
         var events = held.context();
         if (footer_choice) {
             try chromeClick(.{ .footer = .effort })(&held.self, &events);
@@ -10705,19 +10800,19 @@ test "Session modal custody changes before a new focus projection is drawn" {
         try std.testing.expect(modalFocus(&held.self));
         try std.testing.expect(!held.root.focus_frame.modal);
         const area = held.root.input.area;
-        const field = held.self.footer.focus;
+        const field = held.root.input.field;
         // Open then Tab without drawing: no background target may take it.
         try held.keys("\t");
         try std.testing.expectEqual(area, held.root.input.area);
-        try std.testing.expectEqual(field, held.self.footer.focus);
+        try std.testing.expectEqual(field, held.root.input.field);
         try held.frame();
         try std.testing.expect(held.root.focus_frame.modal);
         // Close then Tab in one batch: stale modal projection cannot retain custody.
         try held.keys("\x07");
         try std.testing.expect(!modalFocus(&held.self));
-        const current = focus.currentFocus(held.root.input, held.self.footer.focus);
+        const current = focus.currentFocus(held.root.input);
         const expected = focus.tabNext(held.root.focus_frame.slice(), current, false).?;
         try held.keys("\t");
-        try std.testing.expectEqual(expected, focus.currentFocus(held.root.input, held.self.footer.focus));
+        try std.testing.expectEqual(expected, focus.currentFocus(held.root.input));
     }
 }

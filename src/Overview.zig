@@ -7837,7 +7837,7 @@ test "App overview Tab projection is list then Settings and Settings Enter uses 
         defer shown.deinit();
         try std.testing.expectEqualSlices(@import("app_input.zig").Target, &.{ .list, .settings_row }, rig.overview.root.focus_frame.slice());
         try std.testing.expect(try rig.press("\t") == null);
-        try std.testing.expectEqual(@import("app_input.zig").Target.settings_row, @import("app_input.zig").currentFocus(rig.overview.root.input, .input));
+        try std.testing.expectEqual(@import("app_input.zig").Target.settings_row, @import("app_input.zig").currentFocus(rig.overview.root.input));
         try std.testing.expect(try rig.press("\x1b[Z") == null);
         try std.testing.expect(rig.overview.root.input.listFocused());
         try std.testing.expect(try rig.press("\t\r") == null);

@@ -41,6 +41,32 @@ pub const Layer = union(enum) {
 /// controls that actually occupied cells; no viewport predicates live here.
 pub const Target = enum { list, settings_row, input, back, model, effort, info, latest, details, needs, stop };
 pub const Field = enum { input, model, effort };
+pub const FooterField = enum { model, effort };
+pub const FooterFocus = Field;
+/// Root and Session core submit field interactions to this owner; no shell
+/// retains a second field value.
+pub const FooterInput = union(enum) { enter, escape, text, click: ?FooterField, other };
+pub const FooterDecision = struct {
+    focus: FooterFocus,
+    open_choice: ?FooterField = null,
+    forward: bool = false,
+};
+
+/// Drawn clicks carry their identity even if newer facts removed the field.
+pub fn footerInput(focus: FooterFocus, has_effort: bool, input: FooterInput) FooterDecision {
+    return switch (input) {
+        .click => |field| .{ .focus = .input, .open_choice = field, .forward = field == null },
+        .enter => switch (focus) {
+            .input => .{ .focus = .input, .forward = true },
+            .model => .{ .focus = .input, .open_choice = .model },
+            .effort => .{ .focus = .input, .open_choice = if (has_effort) .effort else null },
+        },
+        .escape => .{ .focus = .input, .forward = focus == .input },
+        .text => .{ .focus = .input, .forward = true },
+        .other => .{ .focus = focus, .forward = true },
+    };
+}
+
 pub const Frame = struct {
     items: [std.enums.values(Target).len]Target = undefined,
     len: usize = 0,
@@ -134,6 +160,8 @@ pub const ChoiceFocus = union(enum) {
 
 pub const State = struct {
     layer: Layer = .main,
+    /// The sole composer/footer field; shells only project this value.
+    field: Field = .input,
     /// Keyboard navigation is in the list, while a wide chat stays drawn.
     area: union(enum) { main, list, settings_row, button: Target } = .main,
 
@@ -156,9 +184,10 @@ pub const Facts = struct {
     settings: Settings = .{},
     wide: bool = false,
     frame: Frame = .{},
-    field: Field = .input,
     /// The drawn slash list owns Tab before focus traversal.
     accepts_tab: bool = false,
+    /// Semantic identity hit in the most recently drawn frame.
+    mouse_target: ?Target = null,
 
     pub const Settings = struct {
         /// The Keys reference is open over the page.
@@ -177,6 +206,9 @@ pub const Facts = struct {
 /// One terminal event, or a navigation request from the screen's owner.
 pub const Input = union(enum) {
     key: Key,
+    /// A core requests a footer interaction through this same transition.
+    footer: struct { has_effort: bool, input: FooterInput },
+    footer_tab: struct { has_effort: bool, reverse: bool },
     paste_start,
     paste_end,
     mouse: Mouse,
@@ -190,6 +222,8 @@ pub const Input = union(enum) {
     session_closed,
     /// Keyboard focus returns from the list to the open chat it shows.
     focus_chat,
+    /// Return to the composer after a pointer action or consent decision.
+    focus_input,
     open_settings,
     /// Show the main pane: close settings, keeping any sign-in over it.
     show_main,
@@ -217,6 +251,7 @@ pub const Effects = struct {
     redraw: bool = false,
     field: ?Field = null,
     activate: ?Target = null,
+    footer: ?FooterDecision = null,
 
     pub const Page = enum {
         keep,
@@ -282,10 +317,34 @@ fn navigated(layer: Layer, page: Effects.Page) Effects {
 /// Root reloads the settings page before it sends `open_settings`, so a
 /// failed reload never reaches this state.
 pub fn step(state: *State, facts: Facts, input: Input) Effects {
+    const effects = stepInner(state, facts, input);
+    if (effects.field) |field| state.field = field;
+    return effects;
+}
+
+fn stepInner(state: *State, facts: Facts, input: Input) Effects {
     // Under main, resuming the chat only moves keys, as a chat-pane click
     // does. A page over main is left first, exactly as showing main leaves it.
     if (input == .focus_chat and state.layer == .main) return if (facts.session_open) focusChat(state) else .{};
     switch (input) {
+        .footer => |interaction| {
+            const decision = footerInput(state.field, interaction.has_effort, interaction.input);
+            state.field = decision.focus;
+            if (interaction.input != .other) state.area = .main;
+            return .{ .footer = decision };
+        },
+        .footer_tab => |interaction| {
+            const order = [_]Target{ .input, .model, .effort };
+            const target = tabNext(order[0..if (interaction.has_effort) @as(usize, 3) else 2], currentFocus(state.*), interaction.reverse).?;
+            var effect: Effects = .{};
+            chooseFocus(state, target, &effect);
+            return effect;
+        },
+        .focus_input => {
+            if (state.layer != .main) return .{};
+            state.area = .main;
+            return .{ .field = .input, .focus = .main, .redraw = true };
+        },
         .back_to_list => {
             if (!facts.wide or !facts.session_open or state.layer != .main) return .{};
             state.area = .list;
@@ -353,15 +412,15 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
     if (state.layer == .sign_in) return .{ .route = .sign_in };
     if (input == .key and state.layer == .settings) return settingsKey(state, facts.settings, input.key);
     if (input == .key and !state.pasting and !facts.frame.modal) {
-        const move = if (facts.accepts_tab and state.area == .main and facts.field == .input and input.key.named == .tab) null else if (input.key.named) |name| keys.get(name) else null;
-        if (move) |direction| if (tabNext(facts.frame.slice(), currentFocus(state.*, facts.field), direction == .previous)) |target| {
+        const move = if (facts.accepts_tab and state.area == .main and state.field == .input and input.key.named == .tab) null else if (input.key.named) |name| keys.get(name) else null;
+        if (move) |direction| if (tabNext(facts.frame.slice(), currentFocus(state.*), direction == .previous)) |target| {
             var effect: Effects = .{ .route = .swallow, .redraw = true };
             chooseFocus(state, target, &effect);
             return effect;
         };
         switch (state.area) {
             .settings_row, .button => {
-                if (input.key.enter) return .{ .activate = currentFocus(state.*, facts.field), .route = .swallow, .redraw = true };
+                if (input.key.enter) return .{ .activate = currentFocus(state.*), .route = .swallow, .redraw = true };
                 if (input.key.named == .escape or input.key.named == .ctrl_g) {
                     state.area = .main;
                     return .{ .field = .input, .focus = .main, .route = .swallow, .redraw = true };
@@ -373,12 +432,27 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
         }
     }
 
-    if (state.layer == .main and input == .mouse and facts.session_open and facts.wide) switch (input.mouse) {
+    if (state.layer == .main and input == .mouse and !facts.frame.modal and facts.mouse_target != null and (input.mouse == .click or input.mouse == .list_click or input.mouse == .chat_click)) {
+        var effect: Effects = .{ .redraw = true };
+        // A pointer activates the drawn control through its normal widget
+        // path. Focus is decided here first, never by the shell callback.
+        const target = facts.mouse_target.?;
+        chooseFocus(state, if (target == .model or target == .effort) .input else target, &effect);
+        return effect;
+    }
+    if (state.layer == .main and input == .paste_start and !facts.frame.modal and (state.area == .button or state.area == .settings_row)) {
+        state.area = .main;
+        return .{ .field = .input, .focus = .main, .redraw = true, .route = if (facts.session_open) .{ .session = .{ .under = .main, .pasted = true } } else .{ .overview = .{ .under = .main, .pasted = true } } };
+    }
+    if (state.layer == .main and input == .mouse and facts.session_open and !facts.frame.modal) switch (input.mouse) {
         .list_click => {
             state.area = .list;
             return .{ .focus = .list, .redraw = true };
         },
-        .chat_click => return focusChat(state),
+        .chat_click => {
+            state.area = .main;
+            return .{ .field = .input, .focus = .main, .redraw = true };
+        },
         else => {},
     };
     // The main pane's core takes every key and paste mark:
@@ -397,12 +471,12 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
     return .{ .route = if (facts.session_open) .{ .session = delivery } else .{ .overview = .{ .under = .main, .pasted = state.pasting, .wide = facts.wide } } };
 }
 
-pub fn currentFocus(state: State, field: Field) Target {
+pub fn currentFocus(state: State) Target {
     return switch (state.area) {
         .list => .list,
         .settings_row => .settings_row,
         .button => |target| target,
-        .main => switch (field) {
+        .main => switch (state.field) {
             .input => .input,
             .model => .model,
             .effort => .effort,
@@ -732,7 +806,12 @@ test "App input list activation and chat-pane click share one focus transition t
         try std.testing.expectEqual(if (session_open) @as(?Effects.Focus, .main) else null, resume_effects.focus);
         if (!session_open or !wide) continue;
         var clicked: State = .{ .layer = layer, .area = if (list_focused) .list else .main };
-        try std.testing.expectEqualDeep(resume_effects, step(&clicked, facts, .{ .mouse = .chat_click }));
+        const click_effects = step(&clicked, facts, .{ .mouse = .chat_click });
+        // A pointer into chat additionally chooses the composer; resuming
+        // by keyboard preserves the existing footer field.
+        try std.testing.expectEqual(@as(?Field, .input), click_effects.field);
+        try std.testing.expectEqual(resume_effects.focus, click_effects.focus);
+        try std.testing.expectEqual(resume_effects.page, click_effects.page);
         try std.testing.expectEqualDeep(activated, clicked);
     };
 }
@@ -774,7 +853,8 @@ test "App input Tab order follows each drawn frame at wide and narrow widths and
             var state: State = .{ .layer = if (shown == .settings or shown == .keys) .settings else .main };
             var initial: Effects = .{};
             chooseFocus(&state, target, &initial);
-            const facts: Facts = .{ .wide = wide, .session_open = session_open, .frame = frame, .field = initial.field orelse .input, .settings = .{ .takes_key = true, .keys_open = shown == .keys } };
+            state.field = initial.field orelse .input;
+            const facts: Facts = .{ .wide = wide, .session_open = session_open, .frame = frame, .settings = .{ .takes_key = true, .keys_open = shown == .keys } };
             const result = step(&state, facts, .{ .key = .{ .named = if (reverse) .shift_tab else .tab } });
             if (shown == .settings or shown == .keys) {
                 // The page owns its fields; the read-only Keys reference has no stops.
@@ -782,10 +862,10 @@ test "App input Tab order follows each drawn frame at wide and narrow widths and
                 try std.testing.expect(result.focus == null and result.activate == null);
             } else if (shown == .info) {
                 try std.testing.expect(result.route == .session);
-                try std.testing.expectEqual(target, currentFocus(state, facts.field));
+                try std.testing.expectEqual(target, currentFocus(state));
             } else {
                 const expected = frame.slice()[(index + (if (reverse) frame.len - 1 else @as(usize, 1))) % frame.len];
-                try std.testing.expectEqual(expected, currentFocus(state, result.field orelse facts.field));
+                try std.testing.expectEqual(expected, currentFocus(state));
                 try std.testing.expectEqual(Effects.Route.swallow, result.route);
             }
         };
@@ -798,13 +878,13 @@ test "App input Tab never activates or edits and paste cannot traverse" {
     var state: State = .{ .area = .list };
     const facts: Facts = .{ .session_open = true, .wide = true, .frame = frame };
     _ = step(&state, facts, .{ .key = .{ .named = .tab } });
-    try std.testing.expectEqual(Target.settings_row, currentFocus(state, .input));
+    try std.testing.expectEqual(Target.settings_row, currentFocus(state));
     const activate = step(&state, facts, .{ .key = .{ .named = null, .enter = true } });
     try std.testing.expectEqual(@as(?Target, .settings_row), activate.activate);
     state.pasting = true;
     const pasted = step(&state, facts, .{ .key = .{ .named = .tab } });
     try std.testing.expect(pasted.activate == null and pasted.focus == null);
-    try std.testing.expectEqual(Target.settings_row, currentFocus(state, .input));
+    try std.testing.expectEqual(Target.settings_row, currentFocus(state));
 }
 
 test "App input model choice Tab domain retains its candidate in the filter and excludes hidden rows" {
@@ -909,8 +989,8 @@ test "drawn slash Tab exemption does not trap sidebar or footer focus" {
     try std.testing.expectEqual(@as(?Field, .input), into_input.field);
     try std.testing.expect(sidebar.area == .main);
 
-    var footer: State = .{};
-    const into_effort = step(&footer, .{ .session_open = true, .frame = frame, .field = .model, .accepts_tab = true }, .{ .key = .{ .named = .tab } });
+    var footer: State = .{ .field = .model };
+    const into_effort = step(&footer, .{ .session_open = true, .frame = frame, .accepts_tab = true }, .{ .key = .{ .named = .tab } });
     try std.testing.expect(into_effort.route == .swallow);
     try std.testing.expectEqual(@as(?Field, .effort), into_effort.field);
 }

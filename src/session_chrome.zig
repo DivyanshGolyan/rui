@@ -11,43 +11,21 @@ pub const Method = session_line.Method;
 
 // --- Footer focus ----------------------------------------------------------
 
-pub const FooterField = enum { model, effort };
+pub const FooterField = @import("app_input.zig").FooterField;
 pub const FooterFocus = @import("app_input.zig").Field;
-/// Focus moves between the input and its model and effort through Root's
-/// drawn order (`app_input`), which sets `Footer.focus`; none moves it here.
-pub const FooterInput = union(enum) { enter, escape, text, click: ?FooterField, other };
-pub const FooterDecision = struct {
-    focus: FooterFocus,
-    open_choice: ?FooterField = null,
-    forward: bool = false,
-};
+pub const FooterInput = @import("app_input.zig").FooterInput;
+pub const FooterDecision = @import("app_input.zig").FooterDecision;
+pub const footerInput = @import("app_input.zig").footerInput;
 
-/// Drawn clicks carry their identity even if newer facts removed the field.
-pub fn footerInput(focus: FooterFocus, has_effort: bool, input: FooterInput) FooterDecision {
-    return switch (input) {
-        .click => |field| .{ .focus = .input, .open_choice = field, .forward = field == null },
-        .enter => switch (focus) {
-            .input => .{ .focus = .input, .forward = true },
-            .model => .{ .focus = .input, .open_choice = .model },
-            .effort => .{ .focus = .input, .open_choice = if (has_effort) .effort else null },
-        },
-        .escape => .{ .focus = .input, .forward = focus == .input },
-        .text => .{ .focus = .input, .forward = true },
-        .other => .{ .focus = focus, .forward = true },
-    };
-}
-
-/// Focus and the not-yet-applied open effect belong to the chat's core.
-/// A new interaction supersedes a deferred effect; only a visible choice
+/// Only the not-yet-applied open effect belongs to the chat's core.
+/// Focus belongs to app_input.State; only a visible choice
 /// is modal. Read completion itself never goes through this transition.
 pub const Footer = struct {
-    focus: FooterFocus = .input,
     pending: ?FooterField = null,
 
-    pub fn step(self: *Footer, has_effort: bool, input: FooterInput) FooterDecision {
+    pub fn step(self: *Footer, focus: *@import("app_input.zig").State, has_effort: bool, input: FooterInput) FooterDecision {
         const waiting = self.pending != null;
-        var decision = footerInput(self.focus, has_effort, input);
-        self.focus = decision.focus;
+        var decision = @import("app_input.zig").step(focus, .{}, .{ .footer = .{ .has_effort = has_effort, .input = input } }).footer.?;
         self.pending = decision.open_choice;
         if (waiting and input == .escape) decision.forward = false;
         return decision;
@@ -670,14 +648,16 @@ test "footer spans identify only whole model and effort words across widths effo
 test "deferred footer effect is superseded by interaction without making invisible content modal" {
     const inputs: []const FooterInput = &.{ .escape, .text, .other, .{ .click = null }, .enter };
     for (std.enums.values(FooterField)) |field| for (inputs) |input| {
+        var owner: @import("app_input.zig").State = .{};
         var footer: Footer = .{ .pending = field };
-        const decision = footer.step(true, input);
+        const decision = footer.step(&owner, true, input);
         try std.testing.expectEqual(@as(?FooterField, null), footer.pending);
         try std.testing.expectEqual(@as(?FooterField, null), decision.open_choice);
         try std.testing.expectEqual(input == .text or input == .other or input == .click or input == .enter, decision.forward);
     };
+    var owner: @import("app_input.zig").State = .{};
     var footer: Footer = .{ .pending = .model };
-    const decision = footer.step(true, .{ .click = .effort });
+    const decision = footer.step(&owner, true, .{ .click = .effort });
     try std.testing.expectEqual(@as(?FooterField, .effort), footer.pending);
     try std.testing.expectEqual(@as(?FooterField, .effort), decision.open_choice);
 }

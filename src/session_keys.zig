@@ -271,10 +271,11 @@ pub const Facts = struct {
     };
 };
 
-/// The state `step` moves: the footer's focus and the Action's choice,
+/// The state `step` routes: app-owned focus and the Action's choice,
 /// present only while an Action waits for a decision.
 pub const State = struct {
     footer: *session_chrome.Footer,
+    focus: *@import("app_input.zig").State,
     consent: ?*ActionConsent = null,
 };
 
@@ -325,30 +326,18 @@ pub fn step(state: State, facts: Facts, input: Input) Take {
         if (input.closes()) return if (facts.info_choice) .cancel_panel_choice else .close_info;
         return .panel;
     }
-    if (input.key == .named and input.key.named == .tab and !input.pasted and facts.shown_row and !facts.draft_empty and state.footer.focus == .input and state.consent == null) return .take_row;
+    if (input.key == .named and input.key.named == .tab and !input.pasted and facts.shown_row and !facts.draft_empty and state.focus.field == .input and state.consent == null) return .take_row;
     // Root normally takes traversal. With no drawn target, use that same
     // order owner over the footer fields rather than a second cycle policy.
     if (!input.pasted and input.key == .named) {
         const focus = @import("app_input.zig");
         if (focus.keys.get(input.key.named)) |move| {
-            const order = [_]focus.Target{ .input, .model, .effort };
-            const current: focus.Target = switch (state.footer.focus) {
-                .input => .input,
-                .model => .model,
-                .effort => .effort,
-            };
-            const target = focus.tabNext(order[0..if (facts.has_effort) @as(usize, 3) else 2], current, move == .previous).?;
-            state.footer.focus = switch (target) {
-                .input => .input,
-                .model => .model,
-                .effort => .effort,
-                else => unreachable,
-            };
+            _ = focus.step(state.focus, .{}, .{ .footer_tab = .{ .has_effort = facts.has_effort, .reverse = move == .previous } });
             state.footer.pending = null;
             return .taken;
         }
     }
-    switch (footer(state.footer, .{ .has_effort = facts.has_effort, .opens = !facts.info_open and !facts.saving }, footerKey(input))) {
+    switch (footer(state.footer, state.focus, .{ .has_effort = facts.has_effort, .opens = !facts.info_open and !facts.saving }, footerKey(input))) {
         .open_choice => return .open_choice,
         .taken => return .taken,
         .forward => {},
@@ -373,7 +362,7 @@ pub fn step(state: State, facts: Facts, input: Input) Take {
         .blocked => if (input.key == .enter) .needs_decision else .taken,
         .draft => .consent_draft,
     };
-    const draft_key: @import("app_input.zig").DraftKey = if (input.key == .named and input.key.named == .left and state.footer.focus == .input) .left else .other;
+    const draft_key: @import("app_input.zig").DraftKey = if (input.key == .named and input.key.named == .left and state.focus.field == .input) .left else .other;
     if (!input.pasted and @import("app_input.zig").draftKey(facts.draft_empty, draft_key) == .list) return .back_to_list;
     if (input.key == .enter and !input.pasted and facts.shown_row) return .take_row;
     return .{ .edit = .{ .send = facts.send.allowed() } };
@@ -412,8 +401,8 @@ pub const FooterFacts = struct {
 
 /// Steps footer focus, for a key or a click: a choice it opens while none
 /// may opens nothing.
-pub fn footer(focus: *session_chrome.Footer, facts: FooterFacts, input: session_chrome.FooterInput) FooterTake {
-    const decision = focus.step(facts.has_effort, input);
+pub fn footer(focus: *session_chrome.Footer, owner: *@import("app_input.zig").State, facts: FooterFacts, input: session_chrome.FooterInput) FooterTake {
+    const decision = focus.step(owner, facts.has_effort, input);
     if (decision.open_choice != null) {
         if (facts.opens) return .open_choice;
         focus.pending = null;
@@ -583,16 +572,17 @@ test "every key Root hands the Session means one thing in each Session state" {
         const row = rows[matched.?];
         used[matched.?] = true;
 
-        var footer_state: session_chrome.Footer = .{ .focus = if (setup == .footer_focused) .model else .input };
-        const focus = footer_state.focus;
+        var focus_owner: @import("app_input.zig").State = .{ .field = if (setup == .footer_focused) .model else .input };
+        var footer_state: session_chrome.Footer = .{};
+        const focus = focus_owner.field;
         var consent: ActionConsent = .{};
         consent.adopt(17);
         if (setup == .draft_row) consent.row = .draft;
         const before = consent.row;
         const waits = setup == .selector or setup == .draft_row;
-        const take = step(.{ .footer = &footer_state, .consent = if (waits) &consent else null }, Case.facts(setup), Case.input(pressed));
+        const take = step(.{ .footer = &footer_state, .focus = &focus_owner, .consent = if (waits) &consent else null }, Case.facts(setup), Case.input(pressed));
         try std.testing.expectEqual(row.take, take);
-        try std.testing.expectEqual(row.focus orelse focus, footer_state.focus);
+        try std.testing.expectEqual(row.focus orelse focus, focus_owner.field);
         try std.testing.expectEqual(row.row orelse before, consent.row);
         // Only the footer's own Enter leaves an opening for its read.
         try std.testing.expectEqual(@as(?session_chrome.FooterField, if (take == .open_choice) .model else null), footer_state.pending);
@@ -625,17 +615,18 @@ test "drawn slash Tab acceptance preserves modal consent paste and footer focus 
         .{ .key = .{ .named = .shift_tab }, .expected = .taken, .after = .effort },
         .{ .pasted = true, .expected = .{ .edit = .{ .send = true } }, .after = .input },
     }) |case| {
-        var footer_state: session_chrome.Footer = .{ .focus = case.focus };
+        var focus_owner: @import("app_input.zig").State = .{ .field = case.focus };
+        var footer_state: session_chrome.Footer = .{};
         var consent: ActionConsent = .{};
         consent.adopt(17);
         consent.row = case.consent orelse .selector;
-        try std.testing.expectEqualDeep(case.expected, step(.{ .footer = &footer_state, .consent = if (case.consent != null) &consent else null }, .{
+        try std.testing.expectEqualDeep(case.expected, step(.{ .footer = &footer_state, .focus = &focus_owner, .consent = if (case.consent != null) &consent else null }, .{
             .info_open = case.info,
             .draft_empty = case.empty,
             .choice = case.choice,
             .has_effort = true,
             .shown_row = true,
         }, .{ .key = case.key, .pasted = case.pasted }));
-        try std.testing.expectEqual(case.after, footer_state.focus);
+        try std.testing.expectEqual(case.after, focus_owner.field);
     }
 }

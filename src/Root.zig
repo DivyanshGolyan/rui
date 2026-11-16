@@ -8,6 +8,7 @@ const AppSettings = @import("app_settings.zig");
 const TerminalApp = @import("TerminalApp.zig");
 const app_input = @import("app_input.zig");
 const Self = @This();
+const FocusRect = struct { row: i32, col: i32, width: i32, height: i32 };
 
 pub const list_width = 40;
 pub const split_at = 100;
@@ -24,8 +25,8 @@ pub const Candidate = struct { target: app_input.Target, widget: vxfw.Widget, ac
 pub const Projection = struct { len: usize, modal: bool = false };
 pub const FocusOwner = struct {
     context: *anyopaque,
-    /// Read or apply the existing footer's leaf focus. No navigation policy.
-    field: *const fn (*anyopaque, ?app_input.Field) app_input.Field,
+    /// Non-focus side effects of app navigation (pending choice, notices).
+    changed: *const fn (*anyopaque) void,
     accepts_tab: ?*const fn (*anyopaque) bool = null,
     /// Live event custody; unlike the candidate order this is not draw state.
     modal: ?*const fn (*anyopaque) bool = null,
@@ -51,6 +52,7 @@ settings_activate: ?Activate = null,
 settings_activate_context: ?*anyopaque = null,
 focus_frame: app_input.Frame = .{},
 drawn_focus: [std.enums.values(app_input.Target).len]Candidate = undefined,
+focus_rects: [std.enums.values(app_input.Target).len]?FocusRect = @splat(null),
 list: vxfw.Widget,
 divider: Split.Divider = .{},
 session: ?vxfw.Widget = null,
@@ -117,6 +119,11 @@ pub fn focusChat(self: *Self, ctx: *vxfw.EventContext) !void {
     try self.navigate(ctx, .focus_chat);
 }
 
+/// A completed pointer action returns to the composer through the app owner.
+pub fn focusInput(self: *Self, ctx: *vxfw.EventContext) !void {
+    try self.navigate(ctx, .focus_input);
+}
+
 /// Settings takes the place of the main pane; it is no content of a feed.
 /// The page reloads first, so a failed reload leaves the layer as it was.
 pub fn openSettings(self: *Self, ctx: *vxfw.EventContext) !void {
@@ -153,8 +160,7 @@ fn facts(self: *const Self, key: ?vaxis.Key) app_input.Facts {
     const session_open = self.session != null;
     var frame = self.focus_frame;
     frame.modal = if (self.focusOwner()) |owner| if (owner.modal) |modal| modal(owner.context) else frame.modal else false;
-    const field = if (self.focusOwner()) |owner| owner.field(owner.context, null) else .input;
-    if (!self.input.layer.settingsOpen()) return .{ .session_open = session_open, .wide = self.size.width >= split_at, .frame = frame, .field = field, .accepts_tab = if (self.focusOwner()) |owner| if (owner.accepts_tab) |accepts| accepts(owner.context) else false else false };
+    if (!self.input.layer.settingsOpen()) return .{ .session_open = session_open, .wide = self.size.width >= split_at, .frame = frame, .accepts_tab = if (self.focusOwner()) |owner| if (owner.accepts_tab) |accepts| accepts(owner.context) else false else false };
     const page = &self.settings_page;
     return .{ .session_open = session_open, .settings = .{
         .keys_open = page.keys_open,
@@ -178,12 +184,10 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, route
             self.settings_page.keys_open = false;
         },
     }
-    if (effects.field) |field| if (self.focusOwner()) |owner| {
-        _ = owner.field(owner.context, field);
-    };
-    if (effects.field == null and effects.focus != null and routed != null and routed.? == .key_press) if (self.focusOwner()) |owner| {
-        _ = owner.field(owner.context, owner.field(owner.context, null));
-    };
+    // The retained Session must also retire a pending footer read when the
+    // transition hides it (for example Tab/click to a narrow list). A mouse
+    // motion, wheel, modal click or pasted click has no focus effect.
+    if (effects.field != null or (effects.focus != null and routed != null)) if (self.session_focus) |owner| owner.changed(owner.context);
     if (effects.activate) |target| for (self.drawn_focus[0..self.focus_frame.len]) |candidate| {
         if (candidate.target == target) {
             if (candidate.activate) |activate| try activate(candidate.activation_context orelse candidate.widget.userdata, ctx);
@@ -250,14 +254,21 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
         .paste_end => .paste_end,
         .mouse => |mouse| .{ .mouse = switch (mouse.button) {
             .wheel_up, .wheel_down, .wheel_left, .wheel_right => .wheel,
-            else => if (mouse.type == .motion) .motion else if (mouse.type != .press or mouse.button != .left or mouse.mods.alt or self.size.width < split_at) .click else if (mouse.col < list_width) .list_click else .chat_click,
+            else => if (mouse.type == .motion) .motion else if (mouse.type != .press or mouse.button != .left or mouse.mods.alt or mouse.row < 0 or mouse.col < 0 or mouse.row >= self.size.height or mouse.col >= self.size.width) .click else if ((self.size.width >= split_at and mouse.col < list_width) or self.chooseLayout().pane == .overview) .list_click else .chat_click,
         } },
         .key_release => .key_release,
         .color_report, .color_scheme => .colors,
         else => .other,
     };
     const key = if (routed == .key_press) routed.key_press else null;
-    try self.apply(ctx, app_input.step(&self.input, self.facts(key), input), routed);
+    var input_facts = self.facts(key);
+    if (routed == .mouse and routed.mouse.button == .left and routed.mouse.type == .press and !routed.mouse.mods.alt) {
+        // Later candidates are deeper controls inside a pane-sized target.
+        for (self.focus_frame.slice(), 0..) |target, i| if (self.focus_rects[i]) |rect| {
+            if (routed.mouse.row >= rect.row and routed.mouse.row < rect.row + rect.height and routed.mouse.col >= rect.col and routed.mouse.col < rect.col + rect.width) input_facts.mouse_target = target;
+        };
+    }
+    try self.apply(ctx, app_input.step(&self.input, input_facts, input), routed);
 }
 
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
@@ -308,32 +319,15 @@ fn focusOwner(self: *const Self) ?FocusOwner {
     return if (self.chooseLayout().pane == .session) self.session_focus else null;
 }
 
-fn contains(surface: vxfw.Surface, target: vxfw.Widget) bool {
-    if (surface.size.width == 0 or surface.size.height == 0) return false;
-    if (surface.widget.eql(target)) return true;
-    for (surface.children) |child| if (contains(child.surface, target)) return true;
-    return false;
-}
-
-const Point = struct { row: i32, col: i32 };
-fn position(surface: vxfw.Surface, target: vxfw.Widget) ?Point {
-    if (surface.size.width == 0 or surface.size.height == 0) return null;
-    if (surface.widget.eql(target)) return .{ .row = 0, .col = 0 };
-    for (surface.children) |child| {
-        if (child.origin.row >= surface.size.height or child.origin.col >= surface.size.width) continue;
-        if (position(child.surface, target)) |point| return .{ .row = child.origin.row + point.row, .col = child.origin.col + point.col };
-    }
-    return null;
-}
-
 /// One projection from the cells just drawn. Candidates supply semantic
 /// identities, never width/visibility decisions or an independent focus.
 fn projectFocus(self: *Self, surface: vxfw.Surface, layout: Layout) void {
     self.focus_frame = .{};
+    self.focus_rects = @splat(null);
     if (layout.split or layout.pane == .overview) {
         const list = if (layout.split) self.list else self.overview;
-        if (contains(surface, list)) self.appendFocus(.{ .target = .list, .widget = list });
-        if (self.settings_control) |control| if (contains(surface, control)) self.appendFocus(.{ .target = .settings_row, .widget = control, .activate = self.settings_activate, .activation_context = self.settings_activate_context });
+        if (focusRect(surface, list, 0, 0, surface.size.width, surface.size.height) != null) self.appendFocus(.{ .target = .list, .widget = list });
+        if (self.settings_control) |control| if (focusRect(surface, control, 0, 0, surface.size.width, surface.size.height) != null) self.appendFocus(.{ .target = .settings_row, .widget = control, .activate = self.settings_activate, .activation_context = self.settings_activate_context });
     }
     if (self.focusOwner()) |owner| {
         var candidates: [std.enums.values(app_input.Target).len]Candidate = undefined;
@@ -344,8 +338,8 @@ fn projectFocus(self: *Self, surface: vxfw.Surface, layout: Layout) void {
         const Placed = struct { candidate: Candidate, row: i32, col: i32 };
         var placed: [std.enums.values(app_input.Target).len]Placed = undefined;
         var count: usize = 0;
-        for (candidates[0..projection.len]) |candidate| if (position(surface, candidate.widget)) |point| {
-            placed[count] = .{ .candidate = candidate, .row = point.row, .col = point.col };
+        for (candidates[0..projection.len]) |candidate| if (focusRect(surface, candidate.widget, 0, 0, surface.size.width, surface.size.height)) |rect| {
+            placed[count] = .{ .candidate = candidate, .row = rect.row, .col = rect.col };
             count += 1;
         };
         const Order = struct {
@@ -356,6 +350,25 @@ fn projectFocus(self: *Self, surface: vxfw.Surface, layout: Layout) void {
         std.mem.sort(Placed, placed[0..count], {}, Order.less);
         for (placed[0..count]) |item| self.appendFocus(item.candidate);
     }
+    for (self.drawn_focus[0..self.focus_frame.len], 0..) |candidate, i| self.focus_rects[i] = focusRect(surface, candidate.widget, 0, 0, surface.size.width, surface.size.height);
+}
+
+fn focusRect(surface: vxfw.Surface, target: vxfw.Widget, row: i32, col: i32, width: i32, height: i32) ?FocusRect {
+    return clippedFocusRect(surface, target, row, col, .{ .row = row, .col = col, .width = width, .height = height });
+}
+
+fn clippedFocusRect(surface: vxfw.Surface, target: vxfw.Widget, row: i32, col: i32, clip: FocusRect) ?FocusRect {
+    const top = @max(row, clip.row);
+    const left = @max(col, clip.col);
+    const bottom = @min(row + surface.size.height, clip.row + clip.height);
+    const right = @min(col + surface.size.width, clip.col + clip.width);
+    if (bottom <= top or right <= left) return null;
+    const rect: FocusRect = .{ .row = top, .col = left, .width = right - left, .height = bottom - top };
+    if (surface.widget.eql(target)) return rect;
+    for (surface.children) |child| {
+        if (clippedFocusRect(child.surface, target, row + child.origin.row, col + child.origin.col, rect)) |found| return found;
+    }
+    return null;
 }
 
 fn appendFocus(self: *Self, candidate: Candidate) void {
@@ -1168,4 +1181,61 @@ test "App root hands list activation unchanged to its one core" {
         try root.widget().captureEvent(&ctx, .{ .mouse = mouse });
         try std.testing.expect(root.input.listFocused());
     }
+}
+
+test "Root focus projection excludes nested clipped controls and clips negative origins" {
+    const Fixture = struct {
+        identity: u8 = 0,
+        fn widget(self: *@This()) vxfw.Widget {
+            return .{ .userdata = self, .drawFn = @This().draw };
+        }
+        fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return .{ .widget = self.widget(), .size = ctx.max.size(), .buffer = &.{}, .children = &.{} };
+        }
+    };
+    const Owner = struct {
+        controls: [3]vxfw.Widget,
+        fn changed(_: *anyopaque) void {}
+        fn candidates(raw: *anyopaque, out: *[std.enums.values(app_input.Target).len]Candidate) Projection {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            out[0] = .{ .target = .input, .widget = self.controls[0] };
+            out[1] = .{ .target = .model, .widget = self.controls[1] };
+            out[2] = .{ .target = .effort, .widget = self.controls[2] };
+            return .{ .len = 3 };
+        }
+    };
+    var fixtures: [5]Fixture = @splat(.{});
+    var owner: Owner = .{ .controls = .{ fixtures[2].widget(), fixtures[3].widget(), fixtures[4].widget() } };
+    var root: Self = .{
+        .overview = fixtures[0].widget(),
+        .list = fixtures[0].widget(),
+        .session = fixtures[1].widget(),
+        .size = .{ .width = 46, .height = 10 },
+        .session_focus = .{ .context = &owner, .changed = Owner.changed, .candidates = Owner.candidates },
+    };
+    const leaf_size: vxfw.Size = .{ .width = 4, .height = 2 };
+    var controls = [_]vxfw.SubSurface{
+        // In the outer viewport, but entirely beyond its immediate parent.
+        .{ .origin = .{ .row = 1, .col = 4 }, .surface = .{ .widget = fixtures[2].widget(), .size = leaf_size, .buffer = &.{}, .children = &.{} } },
+        // Entirely above the parent's clipped top edge.
+        .{ .origin = .{ .row = -3, .col = 1 }, .surface = .{ .widget = fixtures[3].widget(), .size = leaf_size, .buffer = &.{}, .children = &.{} } },
+        .{ .origin = .{ .row = 1, .col = 1 }, .surface = .{ .widget = fixtures[4].widget(), .size = leaf_size, .buffer = &.{}, .children = &.{} } },
+    };
+    var parents = [_]vxfw.SubSurface{.{ .origin = .{ .row = -1, .col = -1 }, .surface = .{
+        .widget = fixtures[1].widget(),
+        .size = leaf_size,
+        .buffer = &.{},
+        .children = &controls,
+    } }};
+    const surface: vxfw.Surface = .{ .widget = root.widget(), .size = root.size, .buffer = &.{}, .children = &parents };
+    root.projectFocus(surface, .{ .split = false, .pane = .session });
+    try std.testing.expectEqualSlices(app_input.Target, &.{.effort}, root.focus_frame.slice());
+    try std.testing.expectEqual(FocusRect{ .row = 0, .col = 0, .width = 3, .height = 1 }, root.focus_rects[0].?);
+    // Sidebar and settings candidates use the same clipped admission.
+    root.list = fixtures[2].widget();
+    root.settings_control = fixtures[3].widget();
+    root.session_focus = null;
+    root.projectFocus(surface, .{ .split = true, .pane = .session });
+    try std.testing.expectEqual(@as(usize, 0), root.focus_frame.len);
 }
