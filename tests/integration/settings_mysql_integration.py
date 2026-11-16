@@ -16,6 +16,7 @@ import live_engines
 import os_semantics
 import settings_fixture as frame_host
 import store_rounds_cases
+from request_routing_cases import capture_routing
 
 
 def main():
@@ -221,6 +222,7 @@ def main():
                 assert receipt["context"]["store"] == store_id, receipt
                 command("request", "inspect", "--store", directory, "--key", "directory-start")
                 command("request", "recover", "--store", directory, "--record", record, "--kind", "message")
+                capture_routing(rui, directory, root, client_env)
             finally:
                 if started is not None:
                     command("host", "pause", "--store", directory, "--instance", started["instance"])
