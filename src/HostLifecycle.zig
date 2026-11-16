@@ -93,7 +93,7 @@ pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, store
     // Current activation waits for SQLite Store-lock retirement. A MySQL
     // runtime lease proves endpoint retirement, not release of GET_LOCK on
     // the database; retain the refusal until that transition has an owner.
-    const paths = platform.resolveClientPaths(io, store) catch return .{ .unsupported = .inaccessible };
+    const paths = client.resolveClientPaths(io, store) catch return .{ .unsupported = .inaccessible };
     if (paths.kind == .mysql) return .{ .unsupported = .application_owned };
     const observed = client.observeHostForUpgrade(io, store, null) catch return .{ .unsupported = .ownership_unconfirmed };
     var snapshot = identity.snapshot(allocator, observed.pid) catch return .{ .unsupported = .configuration_unavailable };

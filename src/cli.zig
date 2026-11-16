@@ -417,7 +417,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
     if (parsed.get("model")) |model| try admitModel(model);
     var fallback_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const prospective_store: ?[]const u8 = if (values.store.len != 0) values.store.slice() else preferences.defaultStore(home, &fallback_buffer) catch null;
-    const available_store: ?platform.Paths = if (prospective_store) |path| platform.resolveClientPaths(init.io, path) catch null else null;
+    const available_store: ?platform.Paths = if (prospective_store) |path| client.resolveClientPaths(init.io, path) catch null else null;
     // Preferences live in HOME, so a saved Store redirects every Workspace.
     if (reader == .command_line and edit.store != .keep) notice: {
         var bytes: [4 * std.Io.Dir.max_path_bytes + 256]u8 = undefined;
@@ -1149,7 +1149,7 @@ fn storeFailure(err: anyerror) anyerror {
 fn readTransportFailure(io: std.Io, store: []const u8, err: anyerror) anyerror {
     holdStore(store);
     if (!client.hostUnreachable(err)) return err;
-    const paths = platform.resolveClientPaths(io, store) catch |store_err| return storeFailure(store_err);
+    const paths = client.resolveClientPaths(io, store) catch |store_err| return storeFailure(store_err);
     holdStore(paths.store.slice());
     return hostTransportFailure(io, paths.store.slice(), err);
 }
@@ -1212,7 +1212,7 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
         return startHostForTerminal(init, selected, false, parsed.get("settings"), parsed.all("set"), null);
     }
     if (command == .host_pause) return pauseHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null);
-    const paths: ?platform.Paths = platform.resolveClientPaths(init.io, selected) catch |err| switch (err) {
+    const paths: ?platform.Paths = client.resolveClientPaths(init.io, selected) catch |err| switch (err) {
         error.FileNotFound => null,
         else => {
             try writeHostStatus(init.io, .access_failure, null);
@@ -1270,7 +1270,7 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
         .incompatible => return error.IncompatibleHost,
         .access_failure => return error.StoreAccessFailed,
     };
-    const paths = try platform.resolveClientPaths(io, selected);
+    const paths = try client.resolveClientPaths(io, selected);
     const hex = std.fmt.bytesToHex(target, .lower);
     var notice_bytes: [4 * protocol.max_store_bytes + 256]u8 = undefined;
     var notice = std.Io.Writer.fixed(&notice_bytes);
@@ -1923,7 +1923,7 @@ const RelaunchStartup = struct {
             if (handoff.read(init, home, "")) |value| value.deinit();
             return null;
         };
-        const paths = try platform.resolveClientPaths(init.io, destination);
+        const paths = try client.resolveClientPaths(init.io, destination);
         return .{ .paths = paths, .handoff = handoff.read(init, home, paths.store.slice()) orelse return null };
     }
 };
@@ -2166,7 +2166,7 @@ fn startSelectedOverviewHost(init: std.process.Init, store: []const u8, binding:
 fn preflightNewSession(io: std.Io, destination: []const u8, saved: bool) !void {
     holdStore(destination);
     if (saved) {
-        _ = platform.resolveClientPaths(io, destination) catch |err| return storeFailure(err);
+        _ = client.resolveClientPaths(io, destination) catch |err| return storeFailure(err);
     } else platform.validateStoreDestination(io, destination) catch |err| return storeFailure(err);
     // Host observation and classification belong to the launch owner, so
     // callers retain the same structured outcome for terminal or screen.
@@ -2572,7 +2572,7 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
             return error.InvalidRuiAddress;
         }
         const elsewhere = if (parsed.get("store")) |override|
-            !(try platform.resolveClientPaths(io, override)).store.eql((try platform.resolveClientPaths(io, sender_store.?)).store.slice())
+            !(try client.resolveClientPaths(io, override)).store.eql((try client.resolveClientPaths(io, sender_store.?)).store.slice())
         else
             false;
         if (!elsewhere) {
@@ -2814,7 +2814,7 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     try requireInteractiveTerminal(init, "to resume a Session");
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const destination = try selectedStore(init, parsed.get("store"), &fallback);
-    _ = try platform.resolveClientPaths(init.io, destination);
+    _ = try client.resolveClientPaths(init.io, destination);
     return openExistingOverview(init, destination, reference[0..protocol.session_id_bytes].*, .{ .store = parsed.get("store") }, null);
 }
 
@@ -3168,7 +3168,7 @@ fn decodeInteractive(input: []u8, tokens: [][]const u8, split: bool) !usize {
 
 pub fn sessionRequests(init: std.process.Init, read: client.ReadContext, store: []const u8, session_ref: []const u8, out: *std.Io.Writer, picks: *session_reads.SavedRequests) anyerror!void {
     const requester = read.requests();
-    const canonical = try platform.resolveClientPaths(init.io, store);
+    const canonical = try client.resolveClientPaths(init.io, store);
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const directory = try requestDirectory(init, &path);
     try out.writeAll("Rui: Local recovery handles (not Host work status):\n");

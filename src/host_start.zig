@@ -8,8 +8,6 @@ const protocol = @import("protocol.zig");
 const api_key = @import("api_key.zig");
 const provider_login = @import("provider_login.zig");
 const credentials = @import("codex_credentials.zig");
-const core_tools = @import("core_tools.zig");
-const wire_request = @import("wire_request.zig");
 const platform = @import("platform.zig");
 const stderr = @import("stderr.zig");
 
@@ -18,18 +16,7 @@ const codex_auth = @import("codex_auth.zig");
 const start_report = @import("start_report.zig");
 pub const ShutdownPolicy = hs.Interface.Lifetime;
 
-fn checkPreset(gpa: std.mem.Allocator, spec: std.json.ObjectMap) error{OutOfMemory}!?[]const u8 {
-    const configuration = try gpa.create(wire_request.Configuration);
-    defer {
-        std.crypto.secureZero(u8, std.mem.asBytes(configuration));
-        gpa.destroy(configuration);
-    }
-    configuration.* = .{};
-    return switch (try core_tools.parseAgentSpec(gpa, spec, configuration)) {
-        .accepted => null,
-        .rejected => |reason| reason,
-    };
-}
+const checkPreset = @import("host_settings_file.zig").checkPreset;
 
 fn assign(settings: *hs.Settings, gpa: std.mem.Allocator, path: []const u8, value: []const u8, failure: *start_report.Failure) !void {
     try hs.assign(settings, gpa, path, value, checkPreset, failure);
@@ -135,24 +122,9 @@ fn savedPath(init: std.process.Init, gpa: std.mem.Allocator, dir: []const u8) ![
 }
 
 fn saved(init: std.process.Init, gpa: std.mem.Allocator, dir: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !std.json.Value {
-    const path = try savedPath(init, gpa, dir);
-    // Absence is not a private-file admission. Legacy or not-yet-created Host
-    // directories need no settings permissions until a document exists.
-    _ = std.Io.Dir.cwd().statFile(init.io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
-        error.FileNotFound => return .{ .object = .{} },
-        else => return invalid(failure, "settings", "host.json must be a readable private file within the document byte bound"),
-    };
-    const buffer = try gpa.alloc(u8, hs.max_document_bytes + 1);
-    defer {
-        std.crypto.secureZero(u8, buffer);
-        gpa.free(buffer);
-    }
-    const bytes = credentials.readPrivate(path, buffer) catch return invalid(failure, "settings", "host.json must be a readable private file within the document byte bound");
-    if (bytes) |document| {
-        try hs.apply(settings, init.gpa, document, .file, checkPreset, failure);
-        return parse(gpa, document, failure);
-    }
-    return .{ .object = .{} };
+    var canonical: [protocol.max_store_bytes]u8 = undefined;
+    const host = try platform.canonicalStoreDestination(init.io, dir, &canonical);
+    return @import("host_settings_file.zig").read(init.io, init.gpa, gpa, host, settings, failure);
 }
 
 /// Edit the sparse document, never a materialized defaults snapshot. Temporary
@@ -587,18 +559,7 @@ pub fn fillAt(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []con
 /// One placement owner for serving, starting and directory-based client lookup.
 /// Reading placement never resolves a secret or inspects provider credentials.
 pub fn anchorPlacement(init: std.process.Init, settings: *hs.Settings, dir: []const u8, failure: *start_report.Failure) !void {
-    var canonical: [protocol.max_store_bytes]u8 = undefined;
-    const host = try platform.canonicalStoreDestination(init.io, dir, &canonical);
-    if (settings.store == .mysql and settings.interface.dir.anchored) {
-        var runtime: [platform.max_socket_path_bytes]u8 = undefined;
-        try text(settings, init.gpa, "interface.dir", try platform.defaultMysqlInterface(host, &runtime), failure);
-    }
-    hs.anchor(settings, host) catch return invalid(failure, "store.sqlite.dir", "Host directory exceeds the path byte bound");
-    if (settings.store == .sqlite) {
-        var selected: [protocol.max_store_bytes]u8 = undefined;
-        const directory = try platform.canonicalStoreDestination(init.io, settings.store.sqlite.dir.slice(), &selected);
-        try settings.store.sqlite.dir.text.set(directory);
-    }
+    return platform.anchorPlacement(init.io, settings, dir, failure);
 }
 
 fn existingPlacement(io: std.Io, dir: []const u8) !platform.Paths {
@@ -606,20 +567,7 @@ fn existingPlacement(io: std.Io, dir: []const u8) !platform.Paths {
     return savedPlacement(io, dir);
 }
 
-pub fn savedPlacement(io: std.Io, dir: []const u8) !platform.Paths {
-    var wiping: secret_value.WipingAllocator = .{ .backing = std.heap.c_allocator };
-    var arena: std.heap.ArenaAllocator = .init(wiping.allocator());
-    defer arena.deinit();
-    var env: std.process.Environ.Map = .init(arena.allocator());
-    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = arena.allocator(), .io = io, .environ_map = &env, .preopens = .empty };
-    const settings = try init.gpa.create(hs.Settings);
-    settings.* = .{};
-    defer settings.deinit();
-    var failure: start_report.Failure = undefined;
-    _ = try readSources(init, .{ .dir = dir }, settings, &failure);
-    try anchorPlacement(init, settings, dir, &failure);
-    return platform.placementPaths(io, settings);
-}
+pub const savedPlacement = platform.savedPlacement;
 
 /// A private, empty Host directory: tests must not read the checkout's cwd.
 fn testHostDir(tmp: *std.testing.TmpDir, buffer: *[std.Io.Dir.max_path_bytes]u8) ![]const u8 {

@@ -5,6 +5,8 @@ const store_path = @import("store_path.zig");
 /// Store ids are distinct from SQLite's canonical absolute paths.
 const validStoreId = @import("store_id.zig").valid;
 const c = @import("posix");
+const hs = @import("host_settings.zig");
+const start_report = @import("start_report.zig");
 
 pub const database_suffix = store_path.database_suffix;
 pub const scratch_suffix = "/scratch";
@@ -23,6 +25,8 @@ pub const Kind = @import("store_target.zig").Kind;
 
 pub const Paths = struct {
     kind: Kind = .sqlite,
+    /// A directory lookup retains the Host selector until client resolution
+    /// replaces it with MySQL's opaque wire identity. Never send it unresolved.
     store: protocol.Bounded(protocol.max_store_bytes) = .{},
     database: protocol.Bounded(max_database_path_bytes) = .{},
     scratch: protocol.Bounded(max_scratch_path_bytes) = .{},
@@ -63,7 +67,7 @@ pub const StoreLease = struct {
         const selection = resolveClientSelection(supplied_path);
         const paths = (switch (selection) {
             .mysql => selection.paths(io),
-            .sqlite => @import("host_start.zig").savedPlacement(io, supplied_path),
+            .sqlite => savedPlacement(io, supplied_path),
         }) catch return .access_failure;
         const mysql = paths.kind == .mysql;
         var store_dir = std.Io.Dir.cwd().openDir(io, if (mysql) paths.runtimeHint().? else paths.store.slice(), .{}) catch |err| return switch (err) {
@@ -251,7 +255,7 @@ pub const StoreLease = struct {
         const selected = resolveClientSelection(supplied_path);
         const paths = (switch (selected) {
             .mysql => selected.paths(io),
-            .sqlite => @import("host_start.zig").savedPlacement(io, supplied_path),
+            .sqlite => savedPlacement(io, supplied_path),
         }) catch return .unknown;
         const directory = if (paths.kind == .mysql) paths.runtimeHint().? else paths.store.slice();
         var dir = std.Io.Dir.cwd().openDir(io, directory, .{}) catch return .unknown;
@@ -316,9 +320,11 @@ pub const ClientSelection = union(Kind) {
             .mysql => |value| mysqlClientPaths(io, value.store, value.runtime),
             .sqlite => |path| blk: {
                 // Preserve the directory's admission before reading its saved placement.
-                _ = try sqliteClientPaths(io, path);
-                var result = try @import("host_start.zig").savedPlacement(io, path);
-                if (result.kind == .mysql) try @import("client.zig").resolveMysqlIdentity(io, &result);
+                const host = try sqliteClientPaths(io, path);
+                var result = try savedPlacement(io, host.store.slice());
+                // Until client lookup learns MySQL's opaque identity, retain
+                // its directory selector for consumers saving a selection.
+                if (result.kind == .mysql) result.store = host.store;
                 break :blk result;
             },
         };
@@ -366,6 +372,42 @@ fn interfacePaths(kind: Kind, store: []const u8, runtime: []const u8) !Paths {
     paths.socket.len = (try std.fmt.bufPrint(&paths.socket.bytes, "{s}/rui.sock", .{runtime})).len;
     paths.scratch.len = (try std.fmt.bufPrint(&paths.scratch.bytes, "{s}/scratch", .{runtime})).len;
     return paths;
+}
+
+pub fn anchorPlacement(io: std.Io, settings: *hs.Settings, dir: []const u8, failure: *start_report.Failure) !void {
+    var canonical: [protocol.max_store_bytes]u8 = undefined;
+    const host = try canonicalStoreDestination(io, dir, &canonical);
+    if (settings.store == .mysql and settings.interface.dir.anchored) {
+        var runtime: [max_socket_path_bytes]u8 = undefined;
+        try settings.interface.dir.text.set(try defaultMysqlInterface(host, &runtime));
+        settings.interface.dir.anchored = false;
+    }
+    hs.anchor(settings, host) catch {
+        failure.* = .init(.settings_invalid, "store.sqlite.dir: Host directory exceeds the path byte bound");
+        return error.SettingsInvalid;
+    };
+    if (settings.store == .sqlite) {
+        var selected: [protocol.max_store_bytes]u8 = undefined;
+        const directory = try canonicalStoreDestination(io, settings.store.sqlite.dir.slice(), &selected);
+        try settings.store.sqlite.dir.text.set(directory);
+    }
+}
+
+/// Read saved placement without a login or a running Host. A MySQL result has
+/// no identity yet; the client learns it through the existing host-info door.
+pub fn savedPlacement(io: std.Io, dir: []const u8) !Paths {
+    var wiping: @import("secret_value.zig").WipingAllocator = .{ .backing = std.heap.c_allocator };
+    var arena: std.heap.ArenaAllocator = .init(wiping.allocator());
+    defer arena.deinit();
+    const settings = try arena.allocator().create(hs.Settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var canonical: [protocol.max_store_bytes]u8 = undefined;
+    const host = try canonicalStoreDestination(io, dir, &canonical);
+    var failure: start_report.Failure = undefined;
+    _ = try @import("host_settings_file.zig").read(io, arena.allocator(), arena.allocator(), host, settings, &failure);
+    try anchorPlacement(io, settings, host, &failure);
+    return placementPaths(io, settings);
 }
 
 pub fn placementPaths(io: std.Io, settings: *const @import("host_settings.zig").Settings) !Paths {
