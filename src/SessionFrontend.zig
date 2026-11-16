@@ -3236,7 +3236,7 @@ fn showStaged(self: *Self) !void {
                 target_count += 1;
             }
         }
-        const entry: feed_window.Entry = .{ .quote_body = row.quote_body, .key = row.key, .text = feed_window.Text.fromDocument(document), .tight = row.tight, .provisional = row.provisional, .messages = targets[0..target_count] };
+        const entry: feed_window.Entry = .{ .key = row.key, .text = feed_window.Text.fromDocument(document), .tight = row.tight, .provisional = row.provisional, .messages = targets[0..target_count] };
         if (!self.insertFeed(entry, backward)) {
             complete = false;
             break;
@@ -10322,7 +10322,10 @@ test "App Session quote gesture preserves the caret and cancels under Escape mod
         defer fixture.deinit();
         const self = fixture.self;
         self.screen.feed.trim(self.screen.feed.count, 0);
-        try self.screen.feed.append(&.{.{ .key = .{ .position = 1 }, .text = .{ .bytes = "quoted source\n" }, .quote_body = .answer }});
+        var document: viewport.Sized(128, true) = .{};
+        try document.append(TerminalText.body_on ++ "quoted source\n" ++ TerminalText.body_off);
+        try document.prepare();
+        try self.screen.feed.append(&.{.{ .key = .{ .position = 1 }, .text = feed_window.Text.fromDocument(&document) }});
         self.screen.anchor.follow();
         _ = self.input.append("leftRIGHT");
         self.input.editors[self.input.active].setCursor(4);

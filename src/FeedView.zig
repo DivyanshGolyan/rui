@@ -1087,7 +1087,7 @@ test "FeedView quote gesture latches decoded Alt and never copies or submits" {
     const gpa = std.testing.allocator;
     const window = try testWindow();
     defer gpa.destroy(window);
-    try window.append(&.{.{ .key = .{ .position = 1 }, .text = .{ .bytes = "雪e\u{301}\n\nlast\n" }, .quote_body = .answer }});
+    try appendQuoteTestRow(window, 1, "雪e\u{301}\n\nlast\n");
     const input = try gpa.create(SessionInput);
     defer gpa.destroy(input);
     var anchor: Feed = .{};
@@ -1144,7 +1144,7 @@ test "FeedView quote gesture cancels stale content reflow leave and outside rele
         _ = input.append("leftRIGHT");
         input.editors[input.active].setCursor(4);
         window.trim(window.count, 0);
-        try window.append(&.{.{ .key = .{ .position = 1 }, .text = .{ .bytes = "first\nsecond\nthird\n" }, .quote_body = .answer }});
+        try appendQuoteTestRow(window, 1, "first\nsecond\nthird\n");
         anchor.follow();
         _ = try testFrame(&view, arena.allocator(), 16, 3);
         try quoteReport(&view, &ctx, "\x1b[<8;1;1M");
@@ -1160,7 +1160,7 @@ test "FeedView quote gesture cancels stale content reflow leave and outside rele
                 _ = try testFrame(&view, arena.allocator(), 8, 3);
             },
             .replace => try window.replace(.{ .position = 1 }, .{ .bytes = "unrelated\n" }),
-            .append => try window.append(&.{.{ .key = .{ .position = 2 }, .text = .{ .bytes = "stream\n" }, .quote_body = .answer }}),
+            .append => try appendQuoteTestRow(window, 2, "stream\n"),
             .evict => window.trim(window.count, 0),
             .draft => {
                 _ = input.append("!");
@@ -1189,7 +1189,7 @@ test "FeedView quote gesture keeps emoji combining CJK and long wrapped body tex
     const window = try testWindow();
     defer gpa.destroy(window);
     const words = "👩🏽‍💻 王秀英 e\u{301}\n\nbartholomew.fitzgerald@northwind-industries-holdings.example.com\n";
-    try window.append(&.{.{ .key = .{ .position = 1 }, .text = .{ .bytes = words }, .quote_body = .answer }});
+    try appendQuoteTestRow(window, 1, words);
     const input = try gpa.create(SessionInput);
     defer gpa.destroy(input);
     var anchor: Feed = .{};
@@ -1211,4 +1211,13 @@ test "FeedView quote gesture keeps emoji combining CJK and long wrapped body tex
         try std.testing.expectEqualStrings("> 👩🏽‍💻 王秀英 e\u{301}\n>\n> bartholomew.fitzgerald@northwind-industries-holdings.example.com\n", input.composition().bytes);
         try std.testing.expectEqual(@as(usize, 0), clipboardCommands(&ctx));
     }
+}
+
+fn appendQuoteTestRow(window: *Window, position: u64, bytes: []const u8) !void {
+    var document: viewport.Sized(1024, true) = .{};
+    try document.append(@import("TerminalText.zig").body_on);
+    try document.append(bytes);
+    try document.append(@import("TerminalText.zig").body_off);
+    try document.prepare();
+    try window.append(&.{.{ .key = .{ .position = position }, .text = resident.Text.fromDocument(&document) }});
 }

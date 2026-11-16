@@ -35,7 +35,6 @@ pub const LatestEnding = feed_reads.Ending(Key);
 /// Independent raw rendering in inspection. The shell prepares the text and
 /// pairs summary markers with the retained targets in emission order.
 pub const RenderedRow = struct {
-    quote_body: feed_window.QuoteBody = .none,
     key: Key,
     offset: u64,
     length: u64,
@@ -650,13 +649,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         // Hidden pending rows need replay too: the next idle page can make
         // an Admission visible without adding another Activity row.
         const pending = item.value == .admission and item.value.admission.state == .queued;
-        var row: RenderedRow = .{ .quote_body = switch (item.value) {
-            .assistant => .answer,
-            .admission, .received, .user => |message_| if (message_.sender == null) .user else .none,
-            .stop => .user,
-            .tool_result => .tool,
-            else => .none,
-        }, .key = key, .offset = offset, .length = 0, .tight = false, .provisional = pending };
+        var row: RenderedRow = .{ .key = key, .offset = offset, .length = 0, .tight = false, .provisional = pending };
         if (toggled != null and toggled.?.key.order(key) != .eq) continue;
         const open = if (toggled) |one| one.open else job.opened.has(key);
         var capture: RowCapture = .{ .task = task, .file = job.files.inspection, .start = offset, .row = &row, .cap_target = switch (item.value) {
@@ -754,15 +747,16 @@ const DisplayCapture = struct {
 /// source even when full. Cuts end outside UTF-8 scalars and controls; the
 /// marker closes any hyperlink and resets presentation before its notice.
 const RowCapture = struct {
-    const more = TerminalText.link_close ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ More — Ctrl-O for whole message" ++ View.Mark.reset ++ "\n";
+    const more = TerminalText.body_off ++ TerminalText.link_close ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ More — Ctrl-O for whole message" ++ View.Mark.reset ++ "\n";
     const notice_capacity = 128;
-    const unkeyed_more = TerminalText.link_close ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ More content omitted" ++ View.Mark.reset ++ "\n";
+    const unkeyed_more = TerminalText.body_off ++ TerminalText.link_close ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ More content omitted" ++ View.Mark.reset ++ "\n";
     task: *Task,
     file: std.Io.File,
     row: *RenderedRow,
     start: u64,
     length: u64 = 0,
     cut: bool = false,
+    in_body: bool = false,
     cap_target: ?View.Collapsed = null,
     omitted_summaries: u64 = 0,
     boundary: u64 = 0,
@@ -770,6 +764,14 @@ const RowCapture = struct {
     control: enum { none, escape, csi, osc, osc_escape } = .none,
 
     pub fn feed(self: *@This(), raw: []const u8) !void {
+        if (self.in_body) {
+            try self.write(TerminalText.body_off);
+            self.in_body = false;
+        }
+        try self.write(raw);
+    }
+
+    fn write(self: *@This(), raw: []const u8) !void {
         if (self.task.cancellation.stopped.load(.acquire)) return error.Cancelled;
         if (raw.len == 0 or self.cut) return;
         const bytes = raw;
@@ -812,6 +814,15 @@ const RowCapture = struct {
         self.cut = fit.len != bytes.len;
     }
 
+    pub fn body(self: *@This(), bytes: []const u8) !void {
+        if (bytes.len == 0) return;
+        if (!self.in_body) {
+            try self.write(TerminalText.body_on);
+            self.in_body = true;
+        }
+        try self.write(bytes);
+    }
+
     pub fn excluding(_: *@This(), _: u64) void {}
 
     /// One bounded admission for complete summary bytes and their target.
@@ -827,19 +838,21 @@ const RowCapture = struct {
     }
 
     pub fn collapsedSummary(self: *@This(), value: View.Collapsed, bytes: []const u8) !void {
+        try self.feed("");
         if (self.cut) return;
         if (try self.retainSummary(value, bytes, feed_window.row_capacity - notice_capacity)) return;
         if (self.row.collapsed_count == self.row.collapsed_targets.len) self.omitted_summaries += 1 else self.cut = true;
     }
 
     fn finish(self: *@This()) !void {
+        try self.feed("");
         var aggregate: [notice_capacity]u8 = undefined;
         if (!self.cut and self.omitted_summaries == 0) return;
         if (self.cut) self.length = self.boundary;
         // Both cap and count notices use the same admission decision as every
         // other summary. The final aggregate has no per-Message action.
         const notice = if (self.omitted_summaries != 0)
-            try std.fmt.bufPrint(&aggregate, TerminalText.link_close ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ {d} more summar{s}{s}" ++ View.Mark.reset ++ "\n", .{ self.omitted_summaries, if (self.omitted_summaries == 1) "y" else "ies", if (self.cut) "; more content omitted" else "" })
+            try std.fmt.bufPrint(&aggregate, TerminalText.body_off ++ TerminalText.link_close ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ {d} more summar{s}{s}" ++ View.Mark.reset ++ "\n", .{ self.omitted_summaries, if (self.omitted_summaries == 1) "y" else "ies", if (self.cut) "; more content omitted" else "" })
         else if (self.cap_target) |target| keyed: {
             if (try self.retainSummary(target, more, feed_window.row_capacity)) {
                 try self.file.setLength(self.task.io, self.start + self.length);
@@ -1642,6 +1655,13 @@ test "activity golden stop with interrupted ending draws one line across pages" 
         pub fn feed(self: *@This(), bytes: []const u8) !void {
             try self.out.writeAll(bytes);
         }
+        pub fn body(self: *@This(), bytes: []const u8) !void {
+            if (bytes.len == 0) return;
+            try self.feed(TerminalText.body_on);
+            try self.feed(bytes);
+            try self.feed(TerminalText.body_off);
+        }
+
         pub fn excluding(_: *@This(), _: u64) void {}
     };
     var session: protocol.Bounded(6) = .{};
@@ -1702,6 +1722,13 @@ test "session_reads rendered row kinds keep their own text and feed_window draws
         pub fn feed(self: *@This(), bytes: []const u8) !void {
             try self.document.append(bytes);
         }
+        pub fn body(self: *@This(), bytes: []const u8) !void {
+            if (bytes.len == 0) return;
+            try self.feed(TerminalText.body_on);
+            try self.feed(bytes);
+            try self.feed(TerminalText.body_off);
+        }
+
         pub fn excluding(_: *@This(), _: u64) void {}
     };
     var peer: protocol.NamedPeer = .{ .session = .{} };
@@ -2443,7 +2470,6 @@ test "quote body extraction follows rendered person and peer provenance through 
         try host.read(&job);
         try std.testing.expectEqual(@as(usize, 1), job.result.row_count);
         const row = &job.result.rows[0];
-        try std.testing.expectEqual(if (case == .peer) feed_window.QuoteBody.none else .user, row.quote_body);
         const document = try gpa.create(Viewport.Sized(feed_window.row_capacity, true));
         defer gpa.destroy(document);
         document.* = .{};
@@ -2452,13 +2478,45 @@ test "quote body extraction follows rendered person and peer provenance through 
         const window = try gpa.create(feed_window.Window);
         defer gpa.destroy(window);
         window.* = .{};
-        try window.append(&.{.{ .key = row.key, .text = feed_window.Text.fromDocument(document), .quote_body = row.quote_body }});
+        try window.append(&.{.{ .key = row.key, .text = feed_window.Text.fromDocument(document) }});
         const result = try @import("transcript_selection.zig").copyBody(gpa, window, .{ .from = 0, .to = window.document.length });
         if (case == .peer) {
             try std.testing.expect(result == .nothing);
         } else {
             defer gpa.free(result.text.bytes);
             try std.testing.expectEqualStrings(FakeHost.text ++ "\n", result.text.bytes);
+        }
+    }
+}
+
+test "quote body extraction clears provenance at bounded capture notices and split controls" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "quote-cap", .{ .read = true });
+    defer file.close(io);
+    var task: Task = .{ .io = io };
+    const bytes = try std.testing.allocator.alloc(u8, feed_window.row_capacity + 128);
+    defer std.testing.allocator.free(bytes);
+    const document = try std.testing.allocator.create(Viewport.Sized(feed_window.row_capacity + 128, true));
+    defer std.testing.allocator.destroy(document);
+    for ([_][]const u8{ "é", "\x1b[1m", TerminalText.link_open ++ "https://example.test/" ++ TerminalText.link_end, TerminalText.body_off }) |piece| {
+        for (0..piece.len + 1) |remaining| {
+            try file.setLength(io, 0);
+            @memset(bytes, 'x');
+            var row: RenderedRow = .{ .key = .{ .position = 1 }, .offset = 0, .length = 0, .tight = false, .provisional = false };
+            var capture: RowCapture = .{ .task = &task, .file = file, .start = 0, .row = &row };
+            try capture.body(bytes[0 .. feed_window.row_capacity - RowCapture.notice_capacity - TerminalText.body_on.len - remaining]);
+            for (piece) |byte| try capture.body(&.{byte});
+            try capture.body("exceeds the cap");
+            try capture.finish();
+            const shown = bytes[0..try file.readPositionalAll(io, bytes, 0)];
+            document.* = .{};
+            try document.append(shown);
+            try document.prepare();
+            const notice = std.mem.indexOf(u8, document.text(), "More").?;
+            try std.testing.expect(document.bodyAt(0));
+            for (notice..document.length) |at| try std.testing.expect(!document.bodyAt(at));
         }
     }
 }

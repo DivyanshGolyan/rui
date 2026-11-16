@@ -26,7 +26,7 @@ pub const Feed = @import("widgets/Feed.zig").Feed(Key);
 /// this window neither parses SGR nor implements text layout a second time.
 pub const Text = struct {
     bytes: []const u8,
-    styles: []const u8 = &.{},
+    styles: []const viewport.RetainedStyle = &.{},
 
     pub fn fromDocument(document: anytype) Text {
         std.debug.assert(!document.dirty);
@@ -34,9 +34,7 @@ pub const Text = struct {
         return .{ .bytes = bytes, .styles = document.styles[0..bytes.len] };
     }
 };
-pub const QuoteBody = viewport.QuoteBody;
 pub const Entry = struct {
-    quote_body: QuoteBody = .none,
     key: Key,
     text: Text,
     tight: bool = false,
@@ -163,8 +161,6 @@ pub const Window = struct {
         length: usize,
         tight: bool,
         provisional: bool,
-        quote_body: QuoteBody = .none,
-        body_length: usize = 0,
     };
 
     document: Document = .{ .dirty = false, .sidenotes = true, .quotes = true },
@@ -211,7 +207,7 @@ pub const Window = struct {
     pub fn replace(self: *Window, key: Key, new_text: Text) Error!void {
         const index = self.indexOf(key) orelse unreachable;
         const old = self.entries[index];
-        try self.splice(index, 1, &.{.{ .key = key, .text = new_text, .tight = old.tight, .provisional = old.provisional, .quote_body = old.quote_body }});
+        try self.splice(index, 1, &.{.{ .key = key, .text = new_text, .tight = old.tight, .provisional = old.provisional }});
     }
 
     /// Forward reads restart at the first provisional row. The replacement may
@@ -236,7 +232,7 @@ pub const Window = struct {
         const end_byte = if (end < self.count) self.entries[end].offset else self.document.length;
         const length = end_byte - start_byte;
         std.mem.copyForwards(u8, &self.document.bytes, self.document.bytes[start_byte..end_byte]);
-        std.mem.copyForwards(u8, &self.document.styles, self.document.styles[start_byte..end_byte]);
+        std.mem.copyForwards(viewport.RetainedStyle, &self.document.styles, self.document.styles[start_byte..end_byte]);
         std.mem.copyForwards(Stored, &self.entries, self.entries[drop_front..end]);
         self.count = end - drop_front;
         for (self.entries[0..self.count]) |*entry| entry.offset -= start_byte;
@@ -259,29 +255,11 @@ pub const Window = struct {
         // Open keys deliberately survive both sides, including an empty window.
     }
 
-    /// A monotonic extraction pass caches only its current row and line.
+    /// Quote extraction consumes the renderer's retained semantic provenance.
     pub const QuoteFilter = struct {
         window: *const Window,
-        entry: usize = 0,
-        next_line: usize = 0,
-        start: usize = 0,
-        end: usize = 0,
-
         pub fn includes(self: *QuoteFilter, at: usize) bool {
-            if (at >= self.next_line) {
-                const document = &self.window.document;
-                while (self.entry < self.window.count and at >= self.window.entries[self.entry].offset + self.window.entries[self.entry].length) self.entry += 1;
-                if (self.entry == self.window.count) return false;
-                const row = self.window.entries[self.entry];
-                var line = at;
-                while (line > row.offset and document.bytes[line - 1] != '\n') : (line -= 1) {}
-                self.next_line = @min(document.lineEnd(at) + 1, row.offset + row.length);
-                const end = @min(self.next_line, row.offset + row.body_length);
-                const bounds = if (line < end) document.quoteBounds(row.quote_body, line, end) else null;
-                self.start = if (bounds) |body| body.start else self.next_line;
-                self.end = if (bounds) |body| body.end else self.next_line;
-            }
-            return at >= self.start and at < self.end and !self.window.document.summaryByte(at);
+            return self.window.document.bodyAt(at);
         }
     };
 
@@ -634,10 +612,10 @@ pub const Window = struct {
         const tail = self.document.length - old_end;
         if (new_end > old_end) {
             std.mem.copyBackwards(u8, self.document.bytes[new_end..][0..tail], self.document.bytes[old_end..][0..tail]);
-            std.mem.copyBackwards(u8, self.document.styles[new_end..][0..tail], self.document.styles[old_end..][0..tail]);
+            std.mem.copyBackwards(viewport.RetainedStyle, self.document.styles[new_end..][0..tail], self.document.styles[old_end..][0..tail]);
         } else {
             std.mem.copyForwards(u8, self.document.bytes[new_end..][0..tail], self.document.bytes[old_end..][0..tail]);
-            std.mem.copyForwards(u8, self.document.styles[new_end..][0..tail], self.document.styles[old_end..][0..tail]);
+            std.mem.copyForwards(viewport.RetainedStyle, self.document.styles[new_end..][0..tail], self.document.styles[old_end..][0..tail]);
         }
         const rest = self.count - first - remove;
         if (incoming.len > remove) {
@@ -663,7 +641,7 @@ pub const Window = struct {
                 const last = offset + p.length - 1;
                 self.document.styles[last] = viewport.seamStyle(self.document.styles[last]);
             }
-            self.entries[first + i] = .{ .key = entry.key, .offset = offset, .length = p.length, .tight = entry.tight, .provisional = entry.provisional, .quote_body = entry.quote_body, .body_length = if (p.marker_length == 0) p.length else p.head };
+            self.entries[first + i] = .{ .key = entry.key, .offset = offset, .length = p.length, .tight = entry.tight, .provisional = entry.provisional };
             for (entry.messages) |target| {
                 // Oversized rows are capped; targets in omitted text disappear
                 // with their summaries. Capacity was checked before mutation.
@@ -1213,59 +1191,89 @@ test "feed_window rows answer positionAtWith for every screen row from every fir
     for (0..total + 1) |screen_row| try testing.expectEqual(tall.positionAt(.{ .first = 0 }, @intCast(screen_row), narrow), rows.next() orelse null);
 }
 
-test "quote body extraction denies chrome and retains shown Unicode indentation" {
+const QuoteTestSink = struct {
+    writer: *std.Io.Writer,
+    in_body: bool = false,
+    pub fn feed(self: *@This(), bytes: []const u8) !void {
+        if (self.in_body) try self.writer.writeAll(@import("TerminalText.zig").body_off);
+        self.in_body = false;
+        try self.writer.writeAll(bytes);
+    }
+    pub fn body(self: *@This(), bytes: []const u8) !void {
+        if (!self.in_body) try self.writer.writeAll(@import("TerminalText.zig").body_on);
+        self.in_body = true;
+        try self.writer.writeAll(bytes);
+    }
+};
+
+test "quote body extraction consumes user renderer provenance and denies lookalike chrome" {
     const gpa = std.testing.allocator;
+    var rendered: std.Io.Writer.Allocating = .init(gpa);
+    defer rendered.deinit();
+    var sink: QuoteTestSink = .{ .writer = &rendered.writer };
+    try sink.feed("Finished\n");
+    try View.userPrefix(&sink, false, 0);
+    const source = "  雪e\u{301}\n  body\n\nlast";
+    var user: View.UserBody(*QuoteTestSink) = undefined;
+    try user.init(&sink, source.len, false);
+    try user.feed(source);
+    try std.testing.expect(!try user.finish());
+    try sink.body("\n");
+    try sink.feed(View.Mark.body ++ "unknown lookalike body\n" ++ View.Mark.reset);
+    var document: viewport.Sized(2048, true) = .{};
+    try document.append(rendered.written());
+    try document.prepare();
     const window = try gpa.create(Window);
     defer gpa.destroy(window);
     window.* = .{};
-    var user: viewport.Sized(1024, true) = .{};
-    try user.append("› " ++ View.Mark.body ++ "雪e\u{301}\n    body\n\n" ++ View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n");
-    try user.prepare();
-    var answer: viewport.Sized(1024, true) = .{};
-    try answer.append("answer\n\n  indented\n" ++ View.Mark.summary ++ "┄ 7 more lines" ++ View.Mark.reset ++ "\n");
-    try answer.prepare();
-    try window.append(&.{
-        .{ .key = .{ .position = 1 }, .text = .{ .bytes = "Finished\n" } },
-        .{ .key = .{ .position = 2 }, .text = Text.fromDocument(&user), .quote_body = .user },
-        .{ .key = .{ .position = 3 }, .text = Text.fromDocument(&answer), .quote_body = .answer },
-    });
+    try window.append(&.{.{ .key = .{ .position = 1 }, .text = Text.fromDocument(&document) }});
     const result = try @import("transcript_selection.zig").copyBody(gpa, window, .{ .from = 0, .to = window.document.length });
     defer gpa.free(result.text.bytes);
-    try std.testing.expectEqualStrings("雪e\u{301}\n  body\n\nanswer\n\n  indented\n", result.text.bytes);
+    try std.testing.expectEqualStrings(source ++ "\n", result.text.bytes);
     const normal = try @import("transcript_selection.zig").copy(gpa, &window.document, .{ .from = 0, .to = window.document.length });
     defer gpa.free(normal.text.bytes);
     try std.testing.expect(std.mem.startsWith(u8, normal.text.bytes, "Finished\n› "));
-    try std.testing.expect(std.mem.indexOf(u8, normal.text.bytes, "┄ 9 more lines") != null);
+    try std.testing.expect(std.mem.indexOf(u8, normal.text.bytes, "unknown lookalike body") != null);
 }
 
-test "quote body extraction omits tool UI and hidden links without losing authored spaces" {
+test "quote body extraction consumes tool output provenance and keeps linked answer text" {
     const gpa = std.testing.allocator;
+    const fold = @import("tool_fold.zig");
+    var rendered: std.Io.Writer.Allocating = .init(gpa);
+    defer rendered.deinit();
+    var sink: QuoteTestSink = .{ .writer = &rendered.writer };
+    try sink.feed(fold.heading_marker ++ "✓ Bash succeeded\n");
+    var output: fold.Output = .{};
+    try output.feed("    actual indent\n\nliteral ┄ authored\n");
+    for (0..fold.max_lines) |_| try output.feed("tail\n");
+    try output.finish(&sink);
+    try sink.feed("Finished\n");
+    var answer: View.Answer(*QuoteTestSink) = undefined;
+    answer.init(&sink, "", false, .{ .viewport = .unicode });
+    const linked = "[shown label](https://example.test/private-hidden-address)\n";
+    // Force writer chunks across every control/address byte.
+    for (linked) |byte| try answer.feed(&.{byte});
+    try answer.finish();
+    try sink.body("\n");
+    try sink.feed("");
+    var document: viewport.Sized(4096, true) = .{};
+    try document.append(rendered.written());
+    try document.prepare();
     const window = try gpa.create(Window);
     defer gpa.destroy(window);
     window.* = .{};
-    const fold = @import("tool_fold.zig");
-    const terminal = @import("TerminalText.zig");
-    var document: viewport.Sized(2048, true) = .{};
-    try document.append(fold.heading_marker ++ "✓ Bash succeeded\n" ++ fold.output_marker ++ "        actual indent\n" ++ fold.output_marker ++ "    \n" ++ fold.output_marker ++ "    literal ┄ authored\n" ++ fold.more_marker ++ "    … 17 more lines\n");
-    try document.prepare();
-    try window.append(&.{.{ .key = .{ .position = 1 }, .text = Text.fromDocument(&document), .quote_body = .tool }});
-    document.clear();
-    try document.append(terminal.link_open ++ "https://example.test/private-hidden-address" ++ terminal.link_end ++ "shown label" ++ terminal.link_close ++ "\n");
-    try document.prepare();
-    try window.append(&.{.{ .key = .{ .position = 2 }, .text = Text.fromDocument(&document), .quote_body = .answer }});
+    try window.append(&.{.{ .key = .{ .position = 1 }, .text = Text.fromDocument(&document) }});
     const result = try @import("transcript_selection.zig").copyBody(gpa, window, .{ .from = 0, .to = window.document.length });
     defer gpa.free(result.text.bytes);
-    try std.testing.expectEqualStrings("    actual indent\n\nliteral ┄ authored\nshown label\n", result.text.bytes);
+    try std.testing.expect(std.mem.startsWith(u8, result.text.bytes, "    actual indent\n\nliteral ┄ authored\n"));
+    try std.testing.expect(std.mem.indexOf(u8, result.text.bytes, "more lines") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.text.bytes, "succeeded") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.text.bytes, "private-hidden-address") == null);
+    try std.testing.expect(std.mem.endsWith(u8, result.text.bytes, "shown label\n"));
 }
 
 test "quote body extraction keeps actual UserBody preview prefixes beside inline ellipses" {
     const gpa = std.testing.allocator;
-    const Sink = struct {
-        writer: *std.Io.Writer,
-        pub fn feed(self: *@This(), bytes: []const u8) !void {
-            try self.writer.writeAll(bytes);
-        }
-    };
     var source_storage: [2048]u8 = undefined;
     var source_writer = std.Io.Writer.fixed(&source_storage);
     const phrase = "Konstantin Oberhauser-Wettstein reviewed the Unicode selection boundary. ";
@@ -1277,20 +1285,21 @@ test "quote body extraction keeps actual UserBody preview prefixes beside inline
     const source = source_writer.buffered();
     var rendered: std.Io.Writer.Allocating = .init(gpa);
     defer rendered.deinit();
-    var sink: Sink = .{ .writer = &rendered.writer };
+    var sink: QuoteTestSink = .{ .writer = &rendered.writer };
     try View.userPrefix(&sink, false, 0);
-    var body: View.UserBody(*Sink) = undefined;
+    var body: View.UserBody(*QuoteTestSink) = undefined;
     try body.init(&sink, source.len, false);
     try body.feed(source);
     try std.testing.expect(try body.finish());
-    try sink.feed("\n");
+    try sink.body("\n");
+    try sink.feed("");
     var document: viewport.Sized(2048, true) = .{};
     try document.append(rendered.written());
     try document.prepare();
     const window = try gpa.create(Window);
     defer gpa.destroy(window);
     window.* = .{};
-    try window.append(&.{.{ .key = .{ .position = 1 }, .text = Text.fromDocument(&document), .quote_body = .user }});
+    try window.append(&.{.{ .key = .{ .position = 1 }, .text = Text.fromDocument(&document) }});
     const first = std.mem.indexOf(u8, window.document.text(), "Konstantin").?;
     const partial = try @import("transcript_selection.zig").copyBody(gpa, window, .{ .from = first, .to = first + 100 });
     defer gpa.free(partial.text.bytes);
