@@ -2166,7 +2166,8 @@ test "Host start placement agrees across Store interface and every door without 
         }
     };
     // Long default placement remains short, unlike an explicit interface.
-    const long = try std.fs.path.join(arena.allocator(), &.{ tmp.root[0..tmp.root_len], "d" ** 150 });
+    const component: [150]u8 = @splat('d');
+    const long = try std.fs.path.join(arena.allocator(), &.{ tmp.root[0..tmp.root_len], &component });
     var failure: start_report.Failure = undefined;
     try savedEdit(init, long, "providers", "{}", &failure);
     const sqlite = try savedPlacement(init.io, long);
