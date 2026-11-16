@@ -89,7 +89,7 @@ class UpgradeEmptyChatTest(unittest.TestCase):
         return self.screen.empty_overview(self.case, self.session)
 
     def test_hidden_empty_overview_requires_real_list_and_no_editor_or_chat(self):
-        frame = "+ New Session\nSettings\nenter open"
+        frame = "+ New Session\nSettings"
         self.assertEqual(frame, self.hidden(frame))
         for extra in (self.session, "alt+i info"):
             with self.subTest(extra=extra), self.assertRaises(AssertionError):
@@ -97,14 +97,14 @@ class UpgradeEmptyChatTest(unittest.TestCase):
         for extra in ("Type a task", "› hidden draft"):
             with self.subTest(extra=extra), self.assertRaises(NotReady):
                 self.hidden(frame + "\n" + extra)
-        for wrong in ("Settings\nenter open", "+ New Session\nenter open", "Notifications"):
+        for wrong in ("Settings", "+ New Session", "Notifications"):
             with self.subTest(wrong=wrong), self.assertRaises(NotReady):
                 self.hidden(wrong)
 
     def test_overview_waits_past_sidebar_controls_for_the_full_list(self):
         sidebar = "  + New Session                Archived │\n  Settings │ gpt-6-luna · low\n"
         frames = [sidebar + "│ › Type a task", sidebar + "│ › unsent draft",
-                  "+ New Session                Archived\nSettings\nenter open"]
+                  "+ New Session                Archived\nSettings"]
         self.screen.observe = Mock(side_effect=frames)
         self.case.json.side_effect = [copy.deepcopy(self.report), copy.deepcopy(self.listing)]
         readiness = []
@@ -123,7 +123,7 @@ class UpgradeEmptyChatTest(unittest.TestCase):
         self.assertEqual(self.screen.observe.call_count, 3)
 
     def test_hidden_projection_does_not_weaken_stored_identity_or_zero_messages(self):
-        frame = "+ New Session\nSettings\nenter open"
+        frame = "+ New Session\nSettings"
         self.case.json.reset_mock()
         self.hidden(frame)
         self.assertEqual(self.case.json.call_args_list, [

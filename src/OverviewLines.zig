@@ -109,6 +109,13 @@ pub const Settings = struct {
         return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
     }
 
+    /// Runs the semantic Settings action selected by the screen focus owner.
+    pub fn activate(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
+        const self: *Settings = @ptrCast(@alignCast(raw));
+        try self.on_click(self.userdata, ctx, .settings);
+        ctx.consumeAndRedraw();
+    }
+
     fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!void {
         const self: *Settings = @ptrCast(@alignCast(raw));
         try self.hover.handleEvent(ctx, input);

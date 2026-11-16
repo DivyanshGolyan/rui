@@ -33,6 +33,7 @@ test {
     _ = @import("DocumentView.zig");
     _ = @import("FeedView.zig");
     _ = @import("Root.zig");
+    _ = @import("root_focus_owner_tests.zig");
     _ = @import("Chip.zig");
     _ = @import("StatusRow.zig");
     _ = @import("FactsRow.zig");
@@ -84,6 +85,7 @@ test {
     _ = @import("mcp/Listing.zig");
     _ = @import("mcp/offered.zig");
     _ = @import("mcp/Request.zig");
+    _ = @import("command_spec.zig");
     _ = @import("protocol.zig");
     _ = @import("wire_request.zig");
     _ = @import("session_skills.zig");

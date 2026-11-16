@@ -1359,7 +1359,7 @@ def main():
             output = bytearray()
             screen = ScreenCapture(COLUMNS, ROWS, reply=answers_to(master))
             until = time.monotonic() + COMMAND_TIMEOUT
-            while not all(marker in screen.completed for marker in ("+ New Session", "Settings", "enter open")):
+            while not all(marker in screen.completed for marker in ("+ New Session", "Settings")):
                 remaining = until - time.monotonic()
                 assert remaining > 0 and select.select([master], [], [], remaining)[0], (screen.completed, output)
                 chunk = os.read(master, 65536)
@@ -1368,7 +1368,7 @@ def main():
                 output.extend(chunk)
                 screen.feed(chunk)
             assert all(noise not in screen.completed for noise in ("Provider:", "Model:", "Permission:", "request:", "Session:", "Workspace:")), screen.completed
-            assert "Type a task" not in screen.completed, screen.completed
+            assert "Type a task" not in screen.completed and "enter open" not in screen.completed, screen.completed
             assert not screen.plain, ("bypass notice left the frame", screen.plain)
             assert "Bash commands can run without asking you" not in screen.completed, screen.completed
             assert not list((bare_home / ".config/rui/requests").glob("*.json")), "the overview captured a request"

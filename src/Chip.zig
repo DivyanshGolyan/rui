@@ -1,3 +1,8 @@
+//! A clickable label on one row: `‹`, `↓ 3 new`, `ctrl+x stop`, `ctrl+r
+//! retries`, `+2 more running · info`. A press and release on it runs
+//! `on_click`, the same action as its key; moving off before release
+//! cancels. Hover changes only its look and the pointer shape. Mouse events never
+//! take keyboard focus; the screen focus owner invokes `activate`.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -12,6 +17,8 @@ userdata: *anyopaque,
 on_click: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
 pressed: bool = false,
 hovered: bool = false,
+/// Derived style fact from the screen focus owner, never changed by events.
+focused: bool = false,
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
@@ -19,6 +26,13 @@ pub fn widget(self: *Self) vxfw.Widget {
 
 pub fn width(self: *const Self) u16 {
     return @intCast(@min(vaxis.gwidth.gwidth(self.label, self.method), std.math.maxInt(u16)));
+}
+
+/// Runs the semantic action selected by the screen focus owner.
+pub fn activate(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    ctx.consumeAndRedraw();
+    try self.on_click(self.userdata, ctx);
 }
 
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
@@ -55,7 +69,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const max = ctx.max.size();
     const size: vxfw.Size = .{ .width = @min(self.width(), max.width), .height = @min(1, max.height) };
     const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
-    const style = if (self.hovered) self.hover else self.style;
+    var style = if (self.hovered) self.hover else self.style;
+    if (self.focused) style.reverse = true;
     @memset(surface.buffer, .{ .style = style });
     _ = print(surface, self.method, 0, 0, self.label, style, size.width);
     return surface;

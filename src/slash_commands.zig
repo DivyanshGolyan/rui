@@ -407,25 +407,10 @@ pub const Shown = struct {
         return .{ .list = built, .revision = revision, .source = source, .highlight = @min(kept.highlight, built.count - 1), .seen = kept.seen };
     }
 
-    pub fn drawnNow(stored: *?Shown, current: ?Shown) ?*Shown {
-        stored.* = current orelse return null;
-        const kept = &stored.*.?;
-        return if (kept.seen == .drawn) kept else null;
-    }
-
     pub const Pick = struct { index: usize, revision: u64, source: u64 };
 
     pub fn pick(self: *const Shown, index: usize) Pick {
         return .{ .index = index, .revision = self.revision, .source = self.source };
-    }
-
-    pub fn pickedNow(stored: *?Shown, current: ?Shown, pressed: Pick) ?*Shown {
-        const now = current orelse return null;
-        if (now.revision != pressed.revision or now.source != pressed.source) return null;
-        const shown = drawnNow(stored, now) orelse return null;
-        if (pressed.index >= shown.list.count) return null;
-        shown.highlight = pressed.index;
-        return shown;
     }
 
     pub fn rows(self: *const Shown) usize {
@@ -564,20 +549,6 @@ test "a /requests list keeps the newest saved Messages, after the original's /re
     try std.testing.expectEqual(Saved.capacity, without.count);
     try std.testing.expectEqualStrings("/result " ++ key, without.entries[0].word);
     try std.testing.expectEqualStrings("read this Message's saved answer", without.entries[0].description);
-}
-
-test "rows from elsewhere than the draft that change are a new list, which no key acts on until a frame draws it" {
-    var requests: Requests(8) = .{};
-    requests.offer(.{ .nanoseconds = 1 }, null, "older");
-    requests.offer(.{ .nanoseconds = 2 }, null, "newer");
-    var stored = Shown.nextOf(null, 1, 7, requests.list(null));
-    stored.?.drew(true);
-    Shown.drawnNow(&stored, Shown.nextOf(stored, 1, 7, requests.list(null))).?.move(true);
-    try std.testing.expectEqualStrings("/result older", Shown.drawnNow(&stored, Shown.nextOf(stored, 1, 7, requests.list(null))).?.completion());
-    try std.testing.expect(Shown.drawnNow(&stored, Shown.nextOf(stored, 1, 8, requests.list(null))) == null);
-    try std.testing.expectEqual(@as(usize, 0), stored.?.highlight);
-    stored.?.drew(true);
-    try std.testing.expectEqualStrings("/result newer", Shown.drawnNow(&stored, Shown.nextOf(stored, 1, 8, requests.list(null))).?.completion());
 }
 
 test "a /requests list takes only keys the parser reads back as one word the list can draw" {
@@ -766,32 +737,6 @@ test "/setup lists its options and every effort for any model" {
     }
     try std.testing.expectEqualStrings("--provider ", conversation.suggest("/setup --model gpt-5.5 --p", .{}).?.shown()[0].word);
     try std.testing.expect(conversation.suggest("/setup --model \"a ", .{}) == null);
-}
-
-test "a key's list is the draft's own, and counts as drawn when the latest frame drew a list" {
-    const c = conversation.suggest("/copy ", .{}).?;
-    const co = conversation.suggest("/copy f", .{}).?;
-    var stored: ?Shown = Shown.next(null, 1, c);
-    stored.?.drew(true);
-    Shown.drawnNow(&stored, Shown.next(stored, 1, c)).?.move(true);
-    try std.testing.expectEqualStrings(c.completion(1), Shown.next(stored, 1, c).?.completion());
-    const changed = Shown.drawnNow(&stored, Shown.next(stored, 2, co)).?;
-    try std.testing.expectEqual(@as(usize, 0), changed.highlight);
-    try std.testing.expectEqualStrings(co.completion(0), changed.completion());
-    changed.close();
-    stored = Shown.next(stored, 2, co);
-    stored.?.drew(true);
-    try std.testing.expectEqual(@as(usize, 0), stored.?.rows());
-    try std.testing.expect(Shown.drawnNow(&stored, Shown.next(stored, 2, co)) == null);
-    try std.testing.expectEqualStrings(co.completion(0), Shown.next(stored, 2, co).?.completion());
-    try std.testing.expect(Shown.drawnNow(&stored, Shown.next(stored, 3, c)) == null);
-    stored = Shown.next(stored, 3, c);
-    stored.?.drew(false);
-    try std.testing.expect(Shown.drawnNow(&stored, Shown.next(stored, 4, c)) == null);
-    stored.?.drew(true);
-    try std.testing.expect(Shown.drawnNow(&stored, Shown.next(stored, 4, c)) != null);
-    try std.testing.expect(Shown.drawnNow(&stored, Shown.next(stored, 5, null)) == null);
-    try std.testing.expectEqual(@as(u64, 4), stored.?.revision);
 }
 
 test "the list order is the names' order and usage retains argument shapes" {
