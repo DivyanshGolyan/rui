@@ -529,7 +529,7 @@ pub fn anchorPlacement(init: std.process.Init, settings: *hs.Settings, dir: []co
 }
 
 fn existingPlacement(io: std.Io, dir: []const u8) !platform.Paths {
-    return (platform.ClientSelection{ .sqlite = dir }).paths(io);
+    return (platform.ClientSelection{ .directory = dir }).paths(io);
 }
 
 pub const savedPlacement = platform.savedPlacement;
@@ -1372,7 +1372,8 @@ pub fn launchFailure(result: *HostLaunchResult, kind: HostLaunchResult.Cause.Kin
 }
 
 pub fn launchReady(result: *HostLaunchResult, ready: @import("protocol_reply.zig").HostInfoFacts, paths: *const platform.Paths, adopted: bool) void {
-    result.outcome = .{ .ready = .{ .facts = ready, .diagnostics_directory = .{ .len = 0 }, .adopted = adopted } };
+    result.outcome = .{ .ready = .{ .facts = ready, .selector = .{ .len = 0 }, .diagnostics_directory = .{ .len = 0 }, .adopted = adopted } };
+    result.outcome.ready.selector.set(paths.selector()) catch unreachable;
     result.outcome.ready.diagnostics_directory.set(paths.diagnosticsDirectory()) catch unreachable;
 }
 
@@ -1619,13 +1620,13 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
     dir.close(io);
     const paths = resolved orelse (savedPlacement(io, selected) catch |err| return launchFailure(result, .store_access, err, null));
     var executable_buffer: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
-    const length = std.process.executablePath(io, &executable_buffer) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
-    if (length == executable_buffer.len) return launchFailure(result, .setup, error.ExecutablePathTooLong, paths.store.slice());
+    const length = std.process.executablePath(io, &executable_buffer) catch |err| return launchFailure(result, .setup, err, paths.selector());
+    if (length == executable_buffer.len) return launchFailure(result, .setup, error.ExecutablePathTooLong, paths.selector());
     executable_buffer[length] = 0;
     const gpa = std.heap.c_allocator;
     const first: usize = if (request.settings_file == null) 5 else 7;
     const argc = first + 2 * request.assignments.len;
-    const argv = gpa.allocSentinel(?[*:0]const u8, argc, null) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
+    const argv = gpa.allocSentinel(?[*:0]const u8, argc, null) catch |err| return launchFailure(result, .setup, err, paths.selector());
     defer gpa.free(argv);
     argv[0] = @ptrCast(&executable_buffer);
     argv[1] = "host";
@@ -1633,10 +1634,10 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
     argv[3] = "--store";
     var host_buffer: [protocol.max_store_bytes]u8 = undefined;
     const host_dir = platform.canonicalStoreDestination(io, selected, &host_buffer) catch |err| return launchFailure(result, .setup, err, null);
-    const directory = gpa.dupeSentinel(u8, host_dir, 0) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
+    const directory = gpa.dupeSentinel(u8, host_dir, 0) catch |err| return launchFailure(result, .setup, err, paths.selector());
     defer gpa.free(directory);
     argv[4] = directory.ptr;
-    const settings_file = if (request.settings_file) |file| gpa.dupeSentinel(u8, file, 0) catch |err| return launchFailure(result, .setup, err, paths.store.slice()) else null;
+    const settings_file = if (request.settings_file) |file| gpa.dupeSentinel(u8, file, 0) catch |err| return launchFailure(result, .setup, err, paths.selector()) else null;
     defer if (settings_file) |file| gpa.free(file);
     if (settings_file) |file| {
         argv[5] = "--settings";
@@ -1650,7 +1651,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
     };
     for (request.assignments, 0..) |assignment, index| {
         argv[first + index * 2] = "--set";
-        const value = gpa.dupeSentinel(u8, assignment, 0) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
+        const value = gpa.dupeSentinel(u8, assignment, 0) catch |err| return launchFailure(result, .setup, err, paths.selector());
         argv[first + 1 + index * 2] = value.ptr;
         owned += 1;
     }
@@ -1669,7 +1670,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
         _ = std.c.close(startup_read);
     };
     if (launched != 0) {
-        launchFailure(result, .os_launch, error.HostLaunchFailed, paths.store.slice());
+        launchFailure(result, .os_launch, error.HostLaunchFailed, paths.selector());
         result.outcome.failed.os_error = launched;
         return;
     }
@@ -1683,7 +1684,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
             while (lines.next()) |line_bytes| {
                 const end = offset + line_bytes.len + 1;
                 if (end > report_len) break;
-                if (start_report.parseLine(gpa, report_bytes[offset..end]) catch |err| return launchFailure(result, .setup, err, paths.store.slice())) |failure| {
+                if (start_report.parseLine(gpa, report_bytes[offset..end]) catch |err| return launchFailure(result, .setup, err, paths.selector())) |failure| {
                     refusal = failure;
                     break;
                 }
@@ -1699,15 +1700,15 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
         if ((refusal != null and refusal.?.code != .store_locked) or count == 0 or result.startup_len == HostLaunchResult.max_startup_bytes or report_len == report_bytes.len) {
             if (ops.observe(ops.context, io, &paths, until) != .ready) {
                 if (refusal) |failure| {
-                    launchFailure(result, if (failure.code == .store_schema_behind) .store_format else if (failure.code == .store_fenced) .store_identity else .child_refused, if (failure.code == .store_fenced) error.StoreIdentityMismatch else error.HostStartupFailed, paths.store.slice());
+                    launchFailure(result, if (failure.code == .store_schema_behind) .store_format else if (failure.code == .store_fenced) .store_identity else .child_refused, if (failure.code == .store_fenced) error.StoreIdentityMismatch else error.HostStartupFailed, paths.selector());
                     result.outcome.failed.refusal = failure;
                     result.outcome.failed.cause.refusal_code = failure.code;
                     return;
                 }
-                if (result.startup_len == HostLaunchResult.max_startup_bytes or report_len == report_bytes.len) return launchFailure(result, .startup_full, error.HostReadinessUnconfirmed, paths.store.slice());
-                if (std.mem.endsWith(u8, result.startup(), "[store_identity_mismatch]\n")) return launchFailure(result, .store_identity, error.StoreIdentityMismatch, paths.store.slice());
-                if (std.mem.endsWith(u8, result.startup(), "[store_format_unsupported]\n")) return launchFailure(result, .store_format, error.HostStartupFailed, paths.store.slice());
-                return launchFailure(result, if (result.startup_len == 0) .child_closed else .child_refused, error.HostStartupFailed, paths.store.slice());
+                if (result.startup_len == HostLaunchResult.max_startup_bytes or report_len == report_bytes.len) return launchFailure(result, .startup_full, error.HostReadinessUnconfirmed, paths.selector());
+                if (std.mem.endsWith(u8, result.startup(), "[store_identity_mismatch]\n")) return launchFailure(result, .store_identity, error.StoreIdentityMismatch, paths.selector());
+                if (std.mem.endsWith(u8, result.startup(), "[store_format_unsupported]\n")) return launchFailure(result, .store_format, error.HostStartupFailed, paths.selector());
+                return launchFailure(result, if (result.startup_len == 0) .child_closed else .child_refused, error.HostStartupFailed, paths.selector());
             }
         }
         switch (ops.observe(ops.context, io, &paths, until)) {
@@ -1722,14 +1723,14 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
                 const exact = !lost and ops.verify(ops.context, io, &paths, launched_pid, launched_started, executable_buffer[0..length], until, &facts);
                 return launchReady(result, facts, &paths, !exact);
             },
-            .incompatible => return launchFailure(result, .incompatible, error.IncompatibleHost, paths.store.slice()),
-            .access_failure => return launchFailure(result, .store_access, error.StoreAccessFailed, paths.store.slice()),
+            .incompatible => return launchFailure(result, .incompatible, error.IncompatibleHost, paths.selector()),
+            .access_failure => return launchFailure(result, .store_access, error.StoreAccessFailed, paths.selector()),
             .unavailable, .owned_unavailable => {},
         }
         const remaining = until - ops.now(ops.context, io);
-        if (remaining > 0) ops.pause(ops.context, io, @intCast(@min(remaining, 100 * std.time.ns_per_ms))) catch |err| return launchFailure(result, .interrupted, err, paths.store.slice());
+        if (remaining > 0) ops.pause(ops.context, io, @intCast(@min(remaining, 100 * std.time.ns_per_ms))) catch |err| return launchFailure(result, .interrupted, err, paths.selector());
     }
-    return launchFailure(result, .readiness_timeout, error.HostReadinessUnconfirmed, paths.store.slice());
+    return launchFailure(result, .readiness_timeout, error.HostReadinessUnconfirmed, paths.selector());
 }
 
 test "Host start source provider intent distinguishes omission empty and exact sets in every layer" {
@@ -1991,14 +1992,14 @@ test "Host start placement agrees across Store interface and every door without 
             };
             if (expected) |first| {
                 try std.testing.expectEqual(first.kind, paths.kind);
-                try std.testing.expectEqualStrings(first.store.slice(), paths.store.slice());
+                try std.testing.expectEqualStrings(first.store_identity.slice(), paths.store_identity.slice());
                 try std.testing.expectEqualStrings(first.socket.slice(), paths.socket.slice());
             } else expected = paths;
             if (explicit) try std.testing.expectEqualStrings(try std.fs.path.join(arena.allocator(), &.{ interface, "rui.sock" }), paths.socket.slice());
             if (store == .mysql) {
                 try std.testing.expectEqual(platform.Kind.mysql, paths.kind);
-                try std.testing.expectEqual(@as(usize, 0), paths.store.len);
-            } else try std.testing.expectEqualStrings(if (store == .here) dir else elsewhere, paths.store.slice());
+                try std.testing.expectEqual(@as(usize, 0), paths.store_identity.len);
+            } else try std.testing.expectEqualStrings(if (store == .here) dir else elsewhere, paths.store_identity.slice());
         }
     };
     // Long default placement remains short, unlike an explicit interface.

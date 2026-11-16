@@ -1435,7 +1435,7 @@ fn admitBashAttempt(
         host.allocator,
         arguments,
         input,
-        host.lease.paths.store.slice(),
+        host.lease.paths.selector(),
         host.bash_path,
         action_binding.action_id,
         host.hooks.bashFaults(),

@@ -89,10 +89,12 @@ fn readEvents(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, progr
                 errdefer allocator.free(socket);
                 const store = if (entry.store) |path| try allocator.dupe(u8, path) else null;
                 errdefer if (store) |path| allocator.free(path);
+                const directory = if (entry.directory) |path| try allocator.dupe(u8, path) else null;
+                errdefer if (directory) |path| allocator.free(path);
                 var state = entry.state;
                 if (state == .failed) state.failed.cause = try allocator.dupe(u8, state.failed.cause);
                 errdefer if (state == .failed) allocator.free(state.failed.cause);
-                try entries.append(allocator, .{ .socket = socket, .store = store, .state = state });
+                try entries.append(allocator, .{ .socket = socket, .directory = directory, .store = store, .state = state });
             },
             .done => {
                 result.entries = try entries.toOwnedSlice(allocator);

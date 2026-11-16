@@ -79,6 +79,7 @@ pub const Result = struct {
     pub const Cause = Summary.Failure;
     pub const Ready = struct {
         facts: protocol_reply.HostInfoFacts,
+        selector: @import("host_settings.zig").OsBytes(protocol.max_store_bytes) = .{ .len = 0 },
         diagnostics_directory: @import("host_settings.zig").OsBytes(protocol.max_store_bytes) = .{ .len = 0 },
         /// The serving Host was already running or won a launch race, so it
         /// did not start with this command's settings.

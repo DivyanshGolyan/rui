@@ -115,7 +115,7 @@ pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []cons
     const owned_home = try allocator.dupe(u8, home);
     errdefer allocator.free(owned_home);
     const paths = platform.resolveClientPaths(init.io, store) catch null;
-    const owned_store = try allocator.dupe(u8, if (paths) |value| value.store.slice() else store);
+    const owned_store = try allocator.dupe(u8, if (paths) |value| value.selector() else store);
     errdefer allocator.free(owned_store);
     const executable = try std.process.executablePathAlloc(init.io, allocator);
     errdefer allocator.free(executable);

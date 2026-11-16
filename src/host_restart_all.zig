@@ -70,6 +70,7 @@ pub const Failure = struct {
 };
 pub const Entry = struct {
     socket: []const u8,
+    directory: ?[]const u8 = null,
     store: ?[]const u8 = null,
     state: union(enum) {
         observed: client.HostControlObservation,
@@ -79,6 +80,7 @@ pub const Entry = struct {
 
     pub fn deinit(self: Entry, allocator: std.mem.Allocator) void {
         allocator.free(self.socket);
+        if (self.directory) |directory| allocator.free(directory);
         if (self.store) |store| allocator.free(store);
         if (self.state == .failed) allocator.free(self.state.failed.cause);
     }
@@ -98,7 +100,7 @@ pub const Batch = struct {
     pub fn selectedOutcome(self: *const Batch, store: []const u8) HostLifecycle.ActivationOutcome {
         var unknown = self.failure != null;
         for (self.entries) |entry| {
-            const path = entry.store orelse {
+            const path = entry.directory orelse entry.store orelse {
                 unknown = true;
                 continue;
             };
@@ -141,7 +143,7 @@ pub const Batch = struct {
         for (self.entries) |entry| switch (entry.state) {
             .observed => unreachable,
             .failed => |failure| try writeEntryFailure(writer, &entry, failure),
-            .outcome => |outcome| _ = try writeOutcome(writer, entry.store.?, outcome, self.version),
+            .outcome => |outcome| _ = try writeOutcome(writer, entry.directory orelse entry.store.?, outcome, self.version),
         };
         try self.totals().write(writer);
     }
@@ -151,10 +153,10 @@ pub const Batch = struct {
         try writer.print("Upgrade restarts every running Host it can safely activate, interrupting work across ALL Sessions in those Stores. Discovered {d} Hosts:\n", .{self.entries.len});
         for (self.entries) |entry| switch (entry.state) {
             .observed => {
-                try field(writer, entry.store.?);
+                try field(writer, entry.directory orelse entry.store.?);
                 try writer.writeAll(": running; will restart on the selected installed build\n");
             },
-            .outcome => |outcome| _ = try writeOutcome(writer, entry.store.?, outcome, self.version),
+            .outcome => |outcome| _ = try writeOutcome(writer, entry.directory orelse entry.store.?, outcome, self.version),
             .failed => |failure| try writeEntryFailure(writer, &entry, failure),
         };
     }
@@ -184,6 +186,8 @@ pub fn discover(init: std.process.Init, allocator: std.mem.Allocator, home: []co
         errdefer allocator.free(path);
         const store = try allocator.dupe(u8, facts.facts.store.slice());
         errdefer allocator.free(store);
+        const directory = try allocator.dupe(u8, facts.directory());
+        errdefer allocator.free(directory);
         const state: @FieldType(Entry, "state") = state: {
             var observation = HostLifecycle.observe(allocator, init.io, home, facts.directory(), cancellation) catch |err| break :state .{ .failed = try .of(allocator, .observation, err) };
             defer observation.deinit(allocator);
@@ -193,7 +197,7 @@ pub fn discover(init: std.process.Init, allocator: std.mem.Allocator, home: []co
                 .managed => .{ .observed = facts },
             };
         };
-        entries.appendAssumeCapacity(.{ .socket = path, .store = store, .state = state });
+        entries.appendAssumeCapacity(.{ .socket = path, .directory = directory, .store = store, .state = state });
     }
     return .{ .entries = try entries.toOwnedSlice(allocator) };
 }

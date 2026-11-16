@@ -185,7 +185,7 @@ fn apply(saved: Values, edit: Edit, readiness: *const Readinesses) !Values {
     var values = saved;
     if (edit.store == .set) {
         const paths = try resolveStore(edit.store.set);
-        values.store.set(paths.store.slice()) catch return error.InvalidPreferenceStore;
+        values.store.set(paths.selector()) catch return error.InvalidPreferenceStore;
     }
     if (edit.provider == .set) {
         const chosen = std.meta.stringToEnum(protocol.Provider, edit.provider.set).?;

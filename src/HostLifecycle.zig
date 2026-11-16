@@ -150,7 +150,7 @@ pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, store
 fn replayPlacementRefusal(actual: platform.Paths, ordinary: ?platform.Paths) ?Limitation {
     if (actual.kind == .mysql) return .application_owned;
     const baseline = ordinary orelse return .configuration_unavailable;
-    if (!std.mem.eql(u8, actual.store.slice(), baseline.store.slice()) or
+    if (!std.mem.eql(u8, actual.store_identity.slice(), baseline.store_identity.slice()) or
         !std.mem.eql(u8, actual.socket.slice(), baseline.socket.slice())) return .configuration_unavailable;
     return null;
 }
@@ -894,12 +894,12 @@ test "upgrade replay keeps the provider set a previous release's Host served" {
 
 test "upgrade replay eligibility covers the complete placement domain before retirement" {
     var ordinary: platform.Paths = .{};
-    try ordinary.store.set("/host");
+    try ordinary.store_identity.set("/host");
     try ordinary.socket.set("/default.sock");
     for ([_]bool{ false, true }) |mysql| for ([_]bool{ false, true }) |moved_store| for ([_]bool{ false, true }) |moved_interface| {
         var actual = ordinary;
         if (mysql) actual.kind = .mysql;
-        if (moved_store) try actual.store.set("/data");
+        if (moved_store) try actual.store_identity.set("/data");
         if (moved_interface) try actual.socket.set("/explicit/rui.sock");
         const expected: ?Limitation = if (mysql) .application_owned else if (moved_store or moved_interface) .configuration_unavailable else null;
         try std.testing.expectEqual(expected, replayPlacementRefusal(actual, ordinary));

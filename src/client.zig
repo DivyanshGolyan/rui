@@ -110,7 +110,7 @@ pub const Requests = struct {
         const carried: ?Environment = if (captured.target == .message) environment else null;
         if (carried) |value| if (value.bytes() > protocol.max_environment_bytes) return .fail(null, error.EnvironmentTooLarge);
         const paths = captured.paths orelse (resolveClientPaths(self.io, captured.saved.store.slice()) catch |err| return .fail(.store, err));
-        if (!paths.store.eql(captured.saved.store.slice())) return .fail(.store, error.RequestBindingMismatch);
+        if (!paths.store_identity.eql(captured.saved.store.slice())) return .fail(.store, error.RequestBindingMismatch);
         const reply = switch (sendSource(self, &paths, std.meta.activeTag(captured.target).route(), self.mutation_timing, captured.length, &captured.file, null, null, carried, reply_buffer, null)) {
             .done => |reply| reply,
             .failed => |failure| return .fail(failure.step, failure.err),
@@ -133,7 +133,7 @@ pub const Requests = struct {
         const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
         var token_buffer: [protocol_reply.SessionToken.max_bytes]u8 = undefined;
-        try body.appendShape(protocol.observe_command_request.head, .{ paths.store.slice(), key });
+        try body.appendShape(protocol.observe_command_request.head, .{ paths.store_identity.slice(), key });
         if (since) |token| try body.appendShape(protocol.observe_command_request.since, .{@as(?[]const u8, token.format(&token_buffer))});
         try body.appendShape(protocol.observe_command_request.tail, .{});
         const reply = try sendSource(self, &paths, "/v1/observe-command", .{}, body.len, null, body.slice(), null, null, reply_buffer, until).get();
@@ -165,8 +165,8 @@ pub const Requests = struct {
         const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
         switch (profile) {
-            .current => try body.appendShape(protocol.inspect_session_request.head ++ protocol.inspect_session_request.tail, .{ paths.store.slice(), session }),
-            .full => try body.appendShape((protocol.inspect_session_request.head ++ protocol.inspect_session_request.profile ++ protocol.inspect_session_request.tail), .{ paths.store.slice(), session }),
+            .current => try body.appendShape(protocol.inspect_session_request.head ++ protocol.inspect_session_request.tail, .{ paths.store_identity.slice(), session }),
+            .full => try body.appendShape((protocol.inspect_session_request.head ++ protocol.inspect_session_request.profile ++ protocol.inspect_session_request.tail), .{ paths.store_identity.slice(), session }),
         }
         const fd = try openRead(self, &paths, "/v1/inspect-session", body.slice());
         defer closeSocket(self.io, fd);
@@ -179,7 +179,7 @@ pub const Requests = struct {
         if (selection.operation == 0 or selection.operation > std.math.maxInt(i64) or selection.attempt == 0 or selection.attempt > std.math.maxInt(i64)) return error.InvalidTarget;
         const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape((protocol.inspect_session_request.head ++ protocol.inspect_session_request.failed_response ++ protocol.inspect_session_request.tail), .{ paths.store.slice(), session, selection.part, selection.operation, selection.attempt });
+        try body.appendShape((protocol.inspect_session_request.head ++ protocol.inspect_session_request.failed_response ++ protocol.inspect_session_request.tail), .{ paths.store_identity.slice(), session, selection.part, selection.operation, selection.attempt });
         const fd = try openRead(self, &paths, "/v1/inspect-session", body.slice());
         defer closeSocket(self.io, fd);
         const head = try readResponseHeadUntil(self, fd, .{}, null);
@@ -206,7 +206,7 @@ pub const Requests = struct {
         try cursor.validate();
         const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try appendListSessions(&body, paths.store.slice(), workspace, archive, cursor);
+        try appendListSessions(&body, paths.store_identity.slice(), workspace, archive, cursor);
         const fd = try openRead(self, &paths, "/v1/list-sessions", body.slice());
         defer closeSocket(self.io, fd);
         return readReportResponse(self, fd, sink, reply_buffer);
@@ -218,7 +218,7 @@ pub const Requests = struct {
         if (!protocol.validSessionId(session) or action_id == 0 or action_id > std.math.maxInt(i64) or offset > protocol.max_sqlite_content_bytes) return error.InvalidTarget;
         const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.read_action_request.all, .{ paths.store.slice(), session, action_id, offset });
+        try body.appendShape(protocol.read_action_request.all, .{ paths.store_identity.slice(), session, action_id, offset });
         const fd = try openRead(self, &paths, "/v1/read-action", body.slice());
         defer closeSocket(self.io, fd);
         return readReportResponse(self, fd, sink, reply_buffer);
@@ -238,7 +238,7 @@ pub const Requests = struct {
         try cursor.validate();
         const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.conversation_page_request, .{ paths.store.slice(), session, cursor.end, cursor.before_position, cursor.before_ordinal });
+        try body.appendShape(protocol.conversation_page_request, .{ paths.store_identity.slice(), session, cursor.end, cursor.before_position, cursor.before_ordinal });
         const fd = try openRead(self, &paths, "/v1/conversation-page", body.slice());
         defer closeSocket(self.io, fd);
         const Sink = struct {
@@ -261,7 +261,7 @@ pub const Requests = struct {
         if (position == 0 or position > std.math.maxInt(i64) or ordinal > std.math.maxInt(i64)) return error.InvalidTarget;
         const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.conversation_content_request.all, .{ paths.store.slice(), session, position, ordinal });
+        try body.appendShape(protocol.conversation_content_request.all, .{ paths.store_identity.slice(), session, position, ordinal });
         const fd = try openRead(self, &paths, "/v1/conversation-content", body.slice());
         defer closeSocket(self.io, fd);
         return readPublicContentResponse(self, fd, expected, sink);
@@ -273,7 +273,7 @@ pub const Requests = struct {
         try cursor.validate();
         const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape((protocol.activity_page_request.head ++ protocol.activity_page_request.tail), .{ paths.store.slice(), session, cursor.end, cursor.position, cursor.ordinal, cursor.direction, cursor.kinds, cursor.limit });
+        try body.appendShape((protocol.activity_page_request.head ++ protocol.activity_page_request.tail), .{ paths.store_identity.slice(), session, cursor.end, cursor.position, cursor.ordinal, cursor.direction, cursor.kinds, cursor.limit });
         const fd = try openRead(self, &paths, "/v1/activity-page", body.slice());
         defer closeSocket(self.io, fd);
         const Sink = struct {
@@ -294,7 +294,7 @@ pub const Requests = struct {
         try self.check();
         const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.model_list_request, .{paths.store.slice()});
+        try body.appendShape(protocol.model_list_request, .{paths.store_identity.slice()});
         const fd = try openRead(self, &paths, "/v1/model-list", body.slice());
         defer closeSocket(self.io, fd);
         return readModelListResponse(self, fd, gpa);
@@ -313,10 +313,10 @@ pub const Requests = struct {
         body.len = 0;
         switch (scope) {
             .session => |session| {
-                try body.appendShape(protocol.skill_suggestions_session_request, .{ paths.store.slice(), session, prefix });
+                try body.appendShape(protocol.skill_suggestions_session_request, .{ paths.store_identity.slice(), session, prefix });
             },
             .workspace => |workspace| {
-                try body.appendShape(protocol.skill_suggestions_workspace_request, .{ paths.store.slice(), workspace, prefix });
+                try body.appendShape(protocol.skill_suggestions_workspace_request, .{ paths.store_identity.slice(), workspace, prefix });
             },
         }
         const fd = try openRead(self, &paths, "/v1/skill-suggestions", body.slice());
@@ -348,7 +348,7 @@ pub const Requests = struct {
         if (position == 0 or position > std.math.maxInt(i64) or ordinal > std.math.maxInt(i64)) return error.InvalidTarget;
         const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.activity_content_request, .{ paths.store.slice(), session, position, ordinal });
+        try body.appendShape(protocol.activity_content_request, .{ paths.store_identity.slice(), session, position, ordinal });
         const fd = try openRead(self, &paths, "/v1/activity-content", body.slice());
         defer closeSocket(self.io, fd);
         return readPublicContentResponse(self, fd, expected, sink);
@@ -360,7 +360,7 @@ pub const Requests = struct {
         if (position == 0 or position > std.math.maxInt(i64)) return error.InvalidTarget;
         const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.activity_content_request, .{ paths.store.slice(), session, position, 0 });
+        try body.appendShape(protocol.activity_content_request, .{ paths.store_identity.slice(), session, position, 0 });
         const fd = try openRead(self, &paths, "/v1/activity-content", body.slice());
         defer closeSocket(self.io, fd);
         return readFirstLine(self, fd, buffer);
@@ -500,7 +500,7 @@ pub fn stopHost(io: std.Io, input: HostStopInput, reply_buffer: *ReplyBuffer) !H
     reply_buffer.len = 0;
     const paths = try resolveClientPaths(io, input.store);
     var body: protocol.RequestBuffer = .{};
-    try body.appendShape(protocol.host_stop_request, .{paths.store.slice()});
+    try body.appendShape(protocol.host_stop_request, .{paths.store_identity.slice()});
     const reply = sendSource(.{ .io = io, .drop_reply = input.drop_reply }, &paths, "/v1/control/host-stop", ResponseTiming.mutation, body.len, null, body.slice(), &input.instance, null, reply_buffer, null).get();
     const result = reply catch |err| return if (err == error.FileNotFound or err == error.ConnectionRefused)
         .unavailable
@@ -529,7 +529,7 @@ pub fn hostStatus(io: std.Io, store_path: []const u8) protocol_reply.HostStatus 
 /// on the same Paths value before any mutation is encoded.
 pub fn resolveClientPaths(io: std.Io, supplied: []const u8) !platform.Paths {
     var paths = try platform.resolveClientPaths(io, supplied);
-    if (paths.kind == .mysql and !@import("store_id.zig").valid(paths.store.slice())) try resolveMysqlIdentity(io, &paths);
+    if (paths.kind == .mysql and !@import("store_id.zig").valid(paths.store_identity.slice())) try resolveMysqlIdentity(io, &paths);
     return paths;
 }
 
@@ -565,7 +565,7 @@ pub fn observeHostProcess(io: std.Io, store_path: []const u8, deadline: ?i128) !
 
 pub fn observeHostProcessAt(io: std.Io, paths: *const platform.Paths, deadline: ?i128) !ObservedHost {
     var identified = paths.*;
-    if (identified.kind == .mysql and !@import("store_id.zig").valid(identified.store.slice())) try resolveMysqlIdentity(io, &identified);
+    if (identified.kind == .mysql and !@import("store_id.zig").valid(identified.store_identity.slice())) try resolveMysqlIdentity(io, &identified);
     return switch (try readHostControlAt(io, &identified, .current, deadline, .strict)) {
         .compatible => |observed| .{ .ready = observed.facts, .pid = observed.pid },
         .incompatible => error.WrongWireVersion,
@@ -703,7 +703,7 @@ fn readHostControlAt(io: std.Io, paths: *const platform.Paths, profile: protocol
     const fd = try connectRequest(requests, address, until);
     defer closeSocket(io, fd);
     const pid = try @import("host_identity.zig").peer(fd);
-    try uploadHostInfoRequest(requests, fd, paths.store.slice(), profile, until);
+    try uploadHostInfoRequest(requests, fd, paths.store_identity.slice(), profile, until);
     var reply_buffer: ReplyBuffer = .{};
     const envelope = try readResponseEnvelopeForProfileUntil(requests, fd, .{}, until, profile);
     if (!envelope.wire_matches and mode == .strict) return error.WrongWireVersion;
@@ -712,13 +712,14 @@ fn readHostControlAt(io: std.Io, paths: *const platform.Paths, profile: protocol
     if (!envelope.wire_matches and head.status != 200 and head.status != 400) return error.InvalidHostInfo;
     const reply = try readCommandBodyUntil(requests, fd, head, &reply_buffer, .{}, until);
     if (!envelope.wire_matches) {
-        if (!hostProtocolMismatch(envelope, reply.body, paths.store.slice())) return error.InvalidHostInfo;
+        if (!hostProtocolMismatch(envelope, reply.body, paths.store_identity.slice())) return error.InvalidHostInfo;
         return .{ .incompatible = pid };
     }
     if (reply.status != 200) return error.InvalidHostInfo;
     return .{ .compatible = .{
         .profile = profile,
-        .facts = try protocol_reply.parseHostInfoForProfile(reply.body, paths.store.slice(), profile),
+        .host_directory = paths.host_directory,
+        .facts = try protocol_reply.parseHostInfoForProfile(reply.body, paths.store_identity.slice(), profile),
         .pid = pid,
     } };
 }
@@ -1003,7 +1004,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                     listener.deinit(io);
                     std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
                 }
-                var peer: Peer = .{ .listener = &listener, .store = paths.store.slice(), .mode = mode };
+                var peer: Peer = .{ .listener = &listener, .store = paths.store_identity.slice(), .mode = mode };
                 Clock.nanoseconds.store(0, .release);
                 Clock.observation_finished.reset();
                 phase.* = .peer_spawn;
@@ -1065,7 +1066,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                         };
                         try std.testing.expectEqual(expected_profile, observed.profile);
                         try std.testing.expectEqual(std.c.getpid(), observed.pid);
-                        try std.testing.expect(observed.facts.store.eql(paths.store.slice()));
+                        try std.testing.expect(observed.facts.store.eql(paths.store_identity.slice()));
                         try std.testing.expectEqual(@as(usize, 17), observed.facts.active_capacity);
                         try std.testing.expectEqual(@as(usize, 10), observed.facts.intake_capacity);
                         try std.testing.expectEqual(@as(?usize, 256), observed.facts.descriptor_limit);
@@ -1113,7 +1114,7 @@ pub fn hostLockState(io: std.Io, store_path: []const u8) HostLockState {
 }
 
 fn lockState(io: std.Io, paths: *const platform.Paths) HostLockState {
-    var store_dir = std.Io.Dir.cwd().openDir(io, paths.store.slice(), .{}) catch |err| return if (err == error.FileNotFound) .free else .failure;
+    var store_dir = std.Io.Dir.cwd().openDir(io, paths.store_identity.slice(), .{}) catch |err| return if (err == error.FileNotFound) .free else .failure;
     defer store_dir.close(io);
     const fd = std.posix.openat(store_dir.handle, "host.lock", .{
         .ACCMODE = .RDONLY,
@@ -1195,8 +1196,8 @@ test "SQLite Host lock evidence preserves free held and failed probes" {
 
 fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) protocol_reply.HostStatus {
     var body: protocol.RequestBuffer = .{};
-    const unknown = paths.kind == .mysql and !@import("store_id.zig").valid(paths.store.slice());
-    body.appendShape(protocol.host_info_request, .{if (unknown) "" else paths.store.slice()}) catch unreachable;
+    const unknown = paths.kind == .mysql and !@import("store_id.zig").valid(paths.store_identity.slice());
+    body.appendShape(protocol.host_info_request, .{if (unknown) "" else paths.store_identity.slice()}) catch unreachable;
     var reply_buffer: ReplyBuffer = .{};
     const until = hostObservationDeadline(io, deadline);
     const reply = sendSource(.{ .io = io }, paths, "/v1/host-info", .{}, body.len, null, body.slice(), null, null, &reply_buffer, until).get() catch |err| return switch (err) {
@@ -1206,7 +1207,7 @@ fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) proto
     };
     if (reply.status == 503) return if (protocol_reply.validHostUnavailable(reply.body)) .owned_unavailable else .incompatible;
     if (reply.status != 200) return .incompatible;
-    if (paths.kind == .mysql and !@import("store_id.zig").valid(paths.store.slice())) {
+    if (paths.kind == .mysql and !@import("store_id.zig").valid(paths.store_identity.slice())) {
         // Empty-Store host-info already exists for MySQL discovery. Learn only
         // a shaped identity and validate the entire existing response grammar.
         var memory: [protocol.max_host_info_response_bytes * 2]u8 = undefined;
@@ -1215,13 +1216,13 @@ fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) proto
         if (!@import("store_id.zig").valid(hint.store)) return .incompatible;
         return protocol_reply.parseHostInfo(reply.body, hint.store) catch .incompatible;
     }
-    return protocol_reply.parseHostInfo(reply.body, paths.store.slice()) catch .incompatible;
+    return protocol_reply.parseHostInfo(reply.body, paths.store_identity.slice()) catch .incompatible;
 }
 
 /// Resolve an opaque identity through the existing private socket, never a login.
 pub fn resolveMysqlIdentity(io: std.Io, paths: *platform.Paths) !void {
     switch (hostStatusAt(io, paths, null)) {
-        .ready => |ready| paths.store = ready.store,
+        .ready => |ready| paths.store_identity = ready.store,
         .unavailable, .owned_unavailable => return error.FileNotFound,
         .incompatible => return error.WrongWireVersion,
         .access_failure => return error.AccessDenied,
@@ -1243,7 +1244,7 @@ pub fn captureSessionArchive(io: std.Io, input: SessionArchiveInput, target: Cap
     var key_buffer: [36]u8 = undefined;
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     try protocol_reply.validateIdentityInputs(location.key, input.session);
-    return runCapture(io, &paths, &location, input.session, .session_archive, null, Capture.writeRequest, .{ protocol.session_archive_request.all, .{ paths.store.slice(), location.key, input.session, input.archived } });
+    return runCapture(io, &paths, &location, input.session, .session_archive, null, Capture.writeRequest, .{ protocol.session_archive_request.all, .{ paths.store_identity.slice(), location.key, input.session, input.archived } });
 }
 
 pub fn captureSessionPin(io: std.Io, input: SessionPinInput, target: CaptureTarget) !CapturedRecord {
@@ -1252,7 +1253,7 @@ pub fn captureSessionPin(io: std.Io, input: SessionPinInput, target: CaptureTarg
     var key_buffer: [36]u8 = undefined;
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     try protocol_reply.validateIdentityInputs(location.key, input.session);
-    return runCapture(io, &paths, &location, input.session, .session_pin, null, Capture.writeRequest, .{ protocol.session_pin_request.all, .{ paths.store.slice(), location.key, input.session, input.pinned } });
+    return runCapture(io, &paths, &location, input.session, .session_pin, null, Capture.writeRequest, .{ protocol.session_pin_request.all, .{ paths.store_identity.slice(), location.key, input.session, input.pinned } });
 }
 
 pub fn captureModelInterruption(io: std.Io, input: ModelInterruptionInput, target: CaptureTarget) !CapturedRecord {
@@ -1384,7 +1385,7 @@ fn readResultWithSink(
     if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
     const paths = try resolveClientPaths(io, store_path);
     var body: protocol.RequestBuffer = .{};
-    try body.appendShape(protocol.read_result_request, .{ paths.store.slice(), key });
+    try body.appendShape(protocol.read_result_request, .{ paths.store_identity.slice(), key });
     const fd = try openRead(requests, &paths, "/v1/read-result", body.slice());
     defer closeSocket(io, fd);
     return switch (try readResultResponseSink(requests, fd, sink, reply_buffer)) {
@@ -1480,7 +1481,7 @@ fn readActionContent(
     if (!protocol.validSessionId(session) or action_id == 0) return error.InvalidTarget;
     const paths = try resolveClientPaths(io, store_path);
     var body: protocol.RequestBuffer = .{};
-    try body.appendShape(shape, .{ paths.store.slice(), session, action_id });
+    try body.appendShape(shape, .{ paths.store_identity.slice(), session, action_id });
     const fd = try openRead(requests, &paths, route, body.slice());
     defer closeSocket(io, fd);
     return readResultResponseSink(requests, fd, destination, reply_buffer);
@@ -1586,7 +1587,7 @@ pub fn openCaptured(io: std.Io, saved: SavedRecord) !CapturedRecord {
         },
         .explicit => |explicit| blk: {
             paths = try resolveClientPaths(io, explicit.store);
-            expected.store = paths.store.slice();
+            expected.store = paths.store_identity.slice();
             expected.kind = explicit.kind;
             break :blk explicit.record;
         },
@@ -1784,7 +1785,7 @@ fn writeConfigureCapture(io: std.Io, paths: *const platform.Paths, input: Config
     };
     if (location.key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(location.key)) return error.InvalidKey;
     if (input.session == .named and !protocol.validSessionId(session)) return error.InvalidSession;
-    return runCapture(io, paths, &location, session, .configure, input_failure, writeConfigureRequest, .{ paths.store.slice(), location.key, session, input });
+    return runCapture(io, paths, &location, session, .configure, input_failure, writeConfigureRequest, .{ paths.store_identity.slice(), location.key, session, input });
 }
 
 fn writeConfigureRequest(capture: *Capture, store: []const u8, key: []const u8, session: []const u8, input: ConfigureInput) !void {
@@ -1810,7 +1811,7 @@ fn runCapture(
     capture.input_failure = input_failure;
     errdefer capture.abort();
     try @call(.auto, write, .{&capture} ++ args);
-    var record = try finishCapture(io, &capture, location, paths.store.slice(), session, kind);
+    var record = try finishCapture(io, &capture, location, paths.store_identity.slice(), session, kind);
     record.paths = paths.*;
     return record;
 }
@@ -1837,7 +1838,7 @@ fn writeMessageCapture(io: std.Io, paths: *const platform.Paths, input: MessageI
     if (input.configuration != null) {
         if (input.session.len != 0 or location.key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(location.key)) return error.InvalidSession;
     } else try protocol_reply.validateIdentityInputs(location.key, input.session);
-    return runCapture(io, paths, &location, input.session, .message, input_failure, writeMessageRequest, .{ paths.store.slice(), location.key, input });
+    return runCapture(io, paths, &location, input.session, .message, input_failure, writeMessageRequest, .{ paths.store_identity.slice(), location.key, input });
 }
 
 fn writeMessageRequest(capture: *Capture, store: []const u8, key: []const u8, input: MessageInput) !void {
@@ -1864,7 +1865,7 @@ fn writeMessageRequest(capture: *Capture, store: []const u8, key: []const u8, in
 }
 
 fn writeSessionStopCapture(io: std.Io, paths: *const platform.Paths, input: SessionStopInput, location: CaptureTarget.Location) !CapturedRecord {
-    return runCapture(io, paths, &location, input.session, .session_stop, null, Capture.writeRequest, .{ protocol.session_stop_request, .{ paths.store.slice(), location.key, input.session } });
+    return runCapture(io, paths, &location, input.session, .session_stop, null, Capture.writeRequest, .{ protocol.session_stop_request, .{ paths.store_identity.slice(), location.key, input.session } });
 }
 
 fn writeModelInterruptionCapture(
@@ -1873,7 +1874,7 @@ fn writeModelInterruptionCapture(
     input: ModelInterruptionInput,
     location: CaptureTarget.Location,
 ) !CapturedRecord {
-    return runCapture(io, paths, &location, input.session, .model_interruption, null, Capture.writeRequest, .{ protocol.model_interruption_request, .{ paths.store.slice(), location.key, input.session, input.turn_id, input.operation_id } });
+    return runCapture(io, paths, &location, input.session, .model_interruption, null, Capture.writeRequest, .{ protocol.model_interruption_request, .{ paths.store_identity.slice(), location.key, input.session, input.turn_id, input.operation_id } });
 }
 
 pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, target: CaptureTarget) !CapturedRecord {
@@ -1883,17 +1884,17 @@ pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, tar
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     try protocol_reply.validateIdentityInputs(location.key, input.session);
     if (input.action_id == 0) return error.InvalidTarget;
-    return runCapture(io, &paths, &location, input.session, .permission_decision, null, Capture.writePermissionDecision, .{ paths.store.slice(), location.key, input });
+    return runCapture(io, &paths, &location, input.session, .permission_decision, null, Capture.writePermissionDecision, .{ paths.store_identity.slice(), location.key, input });
 }
 
 pub fn captureActionBackground(io: std.Io, input: ActionBackgroundInput, target: CaptureTarget) !CapturedRecord {
-    const paths = try platform.resolveClientPaths(io, input.store);
+    const paths = try resolveClientPaths(io, input.store);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     try protocol_reply.validateIdentityInputs(location.key, input.session);
     if (input.action_id == 0 or input.action_id > std.math.maxInt(i64)) return error.InvalidTarget;
-    return runCapture(io, paths.store.slice(), &location, input.session, .action_background, null, Capture.writeRequest, .{ protocol.action_background_request, .{ paths.store.slice(), location.key, input.session, input.action_id } });
+    return runCapture(io, &paths, &location, input.session, .action_background, null, Capture.writeRequest, .{ protocol.action_background_request, .{ paths.store_identity.slice(), location.key, input.session, input.action_id } });
 }
 
 fn finishCapture(io: std.Io, capture: *Capture, location: *const CaptureTarget.Location, store: []const u8, session: []const u8, kind: protocol.CommandKind) !CapturedRecord {
@@ -4218,7 +4219,7 @@ test "control captures attain escaped key and canonical Session request bounds" 
     const session = "k7m2qx";
     const session_encoding_slack = 6 * protocol.max_session_bytes - session.len;
     var paths: platform.Paths = .{};
-    try paths.store.set(&escaped_store);
+    try paths.store_identity.set(&escaped_store);
 
     var stop_path_buffer: [protocol.max_store_bytes + "/records/stop-record".len]u8 = undefined;
     const stop_path = try std.fmt.bufPrint(
@@ -4267,7 +4268,7 @@ test "control captures attain escaped key and canonical Session request bounds" 
     var permission_buffer: [protocol.content_window_bytes]u8 = undefined;
     var permission_capture = try Capture.open(std.testing.io, permission_path, &permission_buffer);
     defer permission_capture.abort();
-    try permission_capture.writePermissionDecision(paths.store.slice(), &escaped_key, .{
+    try permission_capture.writePermissionDecision(paths.store_identity.slice(), &escaped_key, .{
         .store = "unused",
         .session = session,
         .action_id = std.math.maxInt(u64),

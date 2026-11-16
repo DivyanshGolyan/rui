@@ -881,6 +881,7 @@ noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem
 pub noinline fn serve(
     io: std.Io,
     allocator: std.mem.Allocator,
+    host_directory: []const u8,
     prepared: host_settings.Prepared,
     tuning: Tuning,
     failure: *?start_report.Failure,
@@ -969,6 +970,7 @@ pub noinline fn serve(
         lease.* = try platform.StoreLease.acquire(io, settings.store.sqlite.dir.slice());
     defer lease.release();
     if (mysql_url == null and !settings.interface.dir.anchored) try lease.useRuntimeDirectory(settings.interface.dir.slice(), socket_path);
+    lease.paths.retainReachableDirectory(io, host_directory);
     if (!stderr.tryExclude()) return error.HostReadinessOutputUnavailable;
     var readiness_owned = true;
     defer if (readiness_owned) stderr.release();
@@ -1209,19 +1211,19 @@ noinline fn openStoreForHost(
         .{ .mysql = url.options() }
     else
         .{ .sqlite = lease.paths.database.slice() };
-    const selector = if (mysql_url) |url| url.database.slice() else lease.paths.store.slice();
+    const selector = if (mysql_url) |url| url.database.slice() else lease.paths.store_identity.slice();
     storage.openTarget(io, target, selector, store_options) catch |err| {
         if (mysql_url == null) {
             if (err == error.WrongStoreVersion) {
-                try reportWrongStoreVersion(lease.paths.store.slice(), found_schema_version);
+                try reportWrongStoreVersion(lease.paths.store_identity.slice(), found_schema_version);
                 if (diagnostics) |writer| writer.record("failed", "unsupported_store_version");
             } else if (err == error.StoreIdentityMismatch) {
-                try reportStoreIdentityMismatch(identity_mismatch.saved_selector.slice(), lease.paths.store.slice());
+                try reportStoreIdentityMismatch(identity_mismatch.saved_selector.slice(), lease.paths.store_identity.slice());
             }
         }
         return err;
     };
-    lease.paths.store.set(storage.storeId()) catch unreachable;
+    lease.paths.store_identity.set(storage.storeId()) catch unreachable;
 }
 
 const StartupMigration = struct {
@@ -1340,7 +1342,7 @@ noinline fn writeReadiness(
     const instance_hex = std.fmt.bytesToHex(instance, .lower);
     try ready.appendFmt("ready instance={s} store={s} socket={s} active_capacity={d} intake_capacity={d} descriptor_requirement={d} descriptor_limit={s} custody_record_bytes={d} execution_slot_bytes={d} model_preparation_bytes={d} scratch_limit_bytes={d} retention_entry_bytes={d} retention_capacity={d} bash_execution=enabled execution={s}", .{
         &instance_hex,
-        paths.store.slice(),
+        paths.store_identity.slice(),
         paths.socket.slice(),
         active_capacity,
         intake_capacity,
@@ -1625,7 +1627,7 @@ test "settings readiness discovers the canonical Store only through host info" {
 }
 
 fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *wire_request.Request, client_environment: ?*SessionEnvironments.Offer) !void {
-    if (!matchesStore(std.meta.activeTag(request.*), request.store(), host.lease.paths.store.slice())) {
+    if (!matchesStore(std.meta.activeTag(request.*), request.store(), host.lease.paths.store_identity.slice())) {
         return respondStatic(fd, 409, .invocation_error, "wrong_store_identity");
     }
     if (header.instance) |instance| {
@@ -1645,7 +1647,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .host_info => {
             if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
             try fd.json(200, protocol.max_host_info_response_bytes, host_reply.renderHostInfo, .{host_reply.HostInfo{
-                .store = host.lease.paths.store.slice(),
+                .store = host.lease.paths.store_identity.slice(),
                 .instance = host.instance,
                 .active_capacity = host.custody.records.len,
                 .intake_capacity = host.intake_capacity,
@@ -3609,7 +3611,7 @@ test "shutdown fences every unhanded route while preserving request and reply cu
 
     var lease: platform.StoreLease = undefined;
     lease.paths = .{};
-    try lease.paths.store.set("s");
+    try lease.paths.store_identity.set("s");
     host.lease = &lease;
     host.instance = @splat(17);
     for ([_]?protocol.InstanceId{ @splat(0), host.instance, host.instance, null }, [_][]const u8{
@@ -3631,7 +3633,7 @@ test "shutdown fences every unhanded route while preserving request and reply cu
             .header = .{ .route = .host_stop, .content_length = 0, .instance = instance_id },
         };
         defer std.debug.assert(retry.cleanup());
-        try adoptRequestForTest(&retry, .{ .host_stop = .{ .store = lease.paths.store } });
+        try adoptRequestForTest(&retry, .{ .host_stop = .{ .store = lease.paths.store_identity } });
         retry.retireUnhanded();
         try std.testing.expectEqual(.ready, retry.state);
         try retry.prepare();
@@ -3860,7 +3862,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
             .store_dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{}),
             .lock_file = undefined,
         };
-        try lease.paths.store.set("s");
+        try lease.paths.store_identity.set("s");
         try lease.paths.scratch.set(root);
         try lease.paths.socket.set(socket_path);
         defer lease.store_dir.close(std.testing.io);
@@ -4165,7 +4167,7 @@ test "only a fresh Message changes its Session's environment; a replay or a reje
     var lease: platform.StoreLease = undefined;
     lease.paths = .{};
     try lease.paths.scratch.set(root);
-    try lease.paths.store.set("s");
+    try lease.paths.store_identity.set("s");
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     var storage: store_module.Store = undefined;
     try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
@@ -4534,7 +4536,7 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
     try std.testing.expect(configured == .accepted);
     var lease: platform.StoreLease = undefined;
     lease.paths = .{};
-    try lease.paths.store.set(root);
+    try lease.paths.store_identity.set(root);
     try lease.paths.scratch.set(root);
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
     const text = "prompt /demo";
@@ -4608,7 +4610,7 @@ test "inline skills suggestions answer heap exhaustion as busy, not a catalog re
     var lease: platform.StoreLease = undefined;
     lease.paths = .{};
     try lease.paths.scratch.set(root);
-    try lease.paths.store.set("s");
+    try lease.paths.store_identity.set("s");
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     var storage: store_module.Store = undefined;
     try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
@@ -4749,7 +4751,7 @@ test "configure parent inherits the Host environment only after a fresh creation
     var lease: platform.StoreLease = undefined;
     lease.paths = .{};
     try lease.paths.scratch.set(root);
-    try lease.paths.store.set("s");
+    try lease.paths.store_identity.set("s");
     var storage: store_module.Store = undefined;
     try store_module.testing.testingSqliteStore(&storage, &tmp, io);
     defer storage.close() catch unreachable;
