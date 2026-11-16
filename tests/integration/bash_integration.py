@@ -960,7 +960,7 @@ def prove_model_action_read(state, *, deadline=None):
 
     deadline = time.monotonic() + 180 if deadline is None else deadline
     case = state / "model-action-read"
-    case.mkdir()
+    case.mkdir(mode=0o700)
     workspace = case / "workspace"
     workspace.mkdir()
     store = case / "store"
