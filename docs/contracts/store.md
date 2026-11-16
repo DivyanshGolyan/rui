@@ -222,7 +222,16 @@ When departure guidance prevents relaunch, a terminal client that cannot speak t
 `src/Installation.zig` is the sole final publication owner; source and release shell installers invoke the same staged native helper.
 A `release_candidate` follows the HTTPS redirect chain from `https://ruicode.com/releases/latest` and reads curl's effective URL, requiring the exact `https://github.com/DivyanshGolyan/rui/releases/tag/v` prefix and a canonical stable version.
 It derives pinned SHA256SUMS and archive URLs on `https://ruicode.com/releases/download/vX.Y.Z/`, without GitHub's rate-limited JSON API. The archive must appear exactly once in SHA256SUMS; that membership and digest pin the candidate before archive download.
-A nonzero curl exit is a distinct download failure, not release validation or preparation failure; nothing has been published.
+`upgrade_process.Download` owns curl options for release discovery, checksums, and archives in both CLI and terminal upgrades.
+Each download has one 300-second deadline across at most two attempts, with a 10-second connection timeout on each attempt.
+The first attempt uses the system's normal address-family selection.
+An ordinary curl exit 6 or 28 permits one IPv4 retry only when at least 10 seconds remain on that same deadline.
+With curl configuration files disabled and no other curl timeouts enabled, an early exit 28 is a connection-phase timeout, including DNS stalls after redirects.
+An exhausted transfer deadline, cancellation, signals, HTTP errors, certificate errors, and other exit codes do not trigger a retry.
+After an IPv4 retry succeeds, later downloads in that upgrade use IPv4 once. A fresh upgrade starts with normal selection again.
+The retry replaces a partial archive rather than appending to it. SHA-256 verification and publication rules remain unchanged.
+Recovery changes neither system DNS settings nor certificate verification. The existing checking and preparation UI remains unchanged.
+A final nonzero curl exit is a distinct download failure, not release validation or preparation failure; nothing has been published.
 The native bootstrap can download pinned SHA256SUMS and archive assets for historical v0.56.4 using the current native publication owner, without executing its old uncooperative installer.
 A permanent prefix-scoped lock serializes participating writers, with final managed eligibility and numeric release-order checks under the lock.
 External historical installers do not participate and have no new serialization or no-downgrade guarantee.
