@@ -74,6 +74,20 @@ pub const Saving = struct {
         } };
     }
 
+    /// A retried transaction starts with fresh lookup and cursor state; the
+    /// sealed source and its already computed identity remain the same.
+    pub fn restart(self: *Saving) void {
+        self.stage = .start;
+        self.value.found = null;
+        self.cursor = switch (self.source) {
+            .captured => |loan| loan.cursor(),
+            .text => null,
+        };
+        self.selected = null;
+        self.content_id = 0;
+        self.ordinal = 0;
+    }
+
     /// Finish the existing lookup for a single borrowed Text without adding
     /// a round to its producer's text path.
     pub fn saveBytes(a: anytype, value: *content.Import, bytes: []const u8, faults: core.Faults) !u64 {

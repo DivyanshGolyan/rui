@@ -61,24 +61,14 @@ pub const Digest = struct {
     }
 
     pub fn append(self: *Digest, identity: *const Identity) error{TooManyInputParts}!void {
+        var entry: [Manifest.max_entry_bytes]u8 = undefined;
+        try self.appendEncoded(encodeEntry(identity, &entry));
+    }
+
+    fn appendEncoded(self: *Digest, entry: []const u8) error{TooManyInputParts}!void {
         self.count = std.math.add(u32, self.count, 1) catch return error.TooManyInputParts;
         var hash = self.hash;
-        hash.update(&.{switch (identity.kind) {
-            .text => 1,
-            .image => 2,
-        }});
-        number(&hash, identity.length);
-        hash.update(&identity.digest);
-        switch (identity.kind) {
-            .text => {},
-            .image => |image| {
-                hash.update(&.{@backingInt(image.media.format)});
-                number(&hash, image.media.width);
-                number(&hash, image.media.height);
-                hash.update(&.{@intFromBool(image.name != null)});
-                if (image.name) |*name| field(&hash, name.slice());
-            },
-        }
+        hash.update(entry);
         self.hash = hash;
     }
 
@@ -176,40 +166,12 @@ pub const Manifest = struct {
 
         pub fn append(self: *Encoder, part: *const Identity, out: *[max_entry_bytes]u8) error{TooManyInputParts}![]const u8 {
             if (self.digest.count >= max_parts) return error.TooManyInputParts;
-            var pos: usize = 0;
-            out[pos] = switch (part.kind) {
-                .text => 1,
-                .image => 2,
-            };
-            pos += 1;
-            std.mem.writeInt(u64, out[pos..][0..8], part.length, .big);
-            pos += 8;
-            @memcpy(out[pos..][0..32], &part.digest);
-            pos += 32;
-            switch (part.kind) {
-                .text => {
-                    if (self.digest.count == 0) self.single_text = .{ .length = part.length, .digest = part.digest };
-                },
-                .image => |image| {
-                    out[pos] = @backingInt(image.media.format);
-                    pos += 1;
-                    std.mem.writeInt(u64, out[pos..][0..8], image.media.width, .big);
-                    pos += 8;
-                    std.mem.writeInt(u64, out[pos..][0..8], image.media.height, .big);
-                    pos += 8;
-                    out[pos] = @intFromBool(image.name != null);
-                    pos += 1;
-                    if (image.name) |name| {
-                        std.mem.writeInt(u64, out[pos..][0..8], name.len, .big);
-                        pos += 8;
-                        @memcpy(out[pos..][0..name.len], name.slice());
-                        pos += name.len;
-                    }
-                },
-            }
-            try self.digest.append(part);
-            self.length += pos;
-            return out[0..pos];
+            const entry = encodeEntry(part, out);
+            if (self.digest.count == 0 and part.kind == .text)
+                self.single_text = .{ .length = part.length, .digest = part.digest };
+            try self.digest.appendEncoded(entry);
+            self.length += entry.len;
+            return entry;
         }
 
         pub fn finish(self: *const Encoder) error{EmptyInput}!Reference {
@@ -219,6 +181,41 @@ pub const Manifest = struct {
         }
     };
 };
+
+/// The entry is the single byte representation used for both stored manifests
+/// and ordered-input digests. The caller owns the bounded output buffer.
+fn encodeEntry(part: *const Identity, out: *[Manifest.max_entry_bytes]u8) []const u8 {
+    var pos: usize = 0;
+    out[pos] = switch (part.kind) {
+        .text => 1,
+        .image => 2,
+    };
+    pos += 1;
+    std.mem.writeInt(u64, out[pos..][0..8], part.length, .big);
+    pos += 8;
+    @memcpy(out[pos..][0..32], &part.digest);
+    pos += 32;
+    switch (part.kind) {
+        .text => {},
+        .image => |image| {
+            out[pos] = @backingInt(image.media.format);
+            pos += 1;
+            std.mem.writeInt(u64, out[pos..][0..8], image.media.width, .big);
+            pos += 8;
+            std.mem.writeInt(u64, out[pos..][0..8], image.media.height, .big);
+            pos += 8;
+            out[pos] = @intFromBool(image.name != null);
+            pos += 1;
+            if (image.name) |name| {
+                std.mem.writeInt(u64, out[pos..][0..8], name.len, .big);
+                pos += 8;
+                @memcpy(out[pos..][0..name.len], name.slice());
+                pos += name.len;
+            }
+        },
+    }
+    return out[0..pos];
+}
 
 fn number(hash: *std.crypto.hash.sha2.Sha256, value: u64) void {
     var bytes: [8]u8 = undefined;
@@ -415,6 +412,29 @@ test "manifest encoder matches every ordered input digest vector" {
         var expected: [32]u8 = undefined;
         _ = try std.fmt.hexToBytes(&expected, case.hex);
         try std.testing.expectEqual(expected, encoded.parts.digest);
+    }
+}
+
+test "manifest entry bytes feed both digest consumers for text and image variants" {
+    const text_digest = @import("content_string.zig").digest("x");
+    const named = try displayName("a\"b.jpeg");
+    const variants = [_]Identity{
+        .{ .length = 1, .digest = text_digest, .kind = .text },
+        .{ .length = 1, .digest = text_digest, .kind = .{ .image = .{ .media = .{ .format = .png, .width = 1, .height = 2 } } } },
+        .{ .length = 1, .digest = text_digest, .kind = .{ .image = .{ .media = .{ .format = .jpeg, .width = 42, .height = 73 }, .name = named } } },
+    };
+    for (variants) |variant| {
+        var digest = Digest.init();
+        var encoder: Manifest.Encoder = .{};
+        var entry: [Manifest.max_entry_bytes]u8 = undefined;
+        var bytes_hash = Form.parts.hasher();
+        try digest.append(&variant);
+        bytes_hash.update(try encoder.append(&variant, &entry));
+        var trailer: [Manifest.trailer_bytes]u8 = undefined;
+        std.mem.writeInt(u64, &trailer, 1, .big);
+        bytes_hash.update(&trailer);
+        try std.testing.expectEqual(try digest.finish(), bytes_hash.finalResult());
+        try std.testing.expectEqual(try digest.finish(), try encoder.digest.finish());
     }
 }
 

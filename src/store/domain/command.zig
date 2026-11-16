@@ -275,6 +275,7 @@ pub const SubmitMessage = struct {
             t.creation.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
         }
         const message = t.reads();
+        if (t.input.parts_saving) |saving| saving.restart();
         const identity = if (t.input.parts_saving) |saving| saving.reference.identity() else null;
         message.* = .{ .digest = if (t.input.parts_saving) |saving| command.semanticDigestForInput(saving.reference) else command.semanticDigest(), .text = if (identity) |value| .{ .digest = value.digest, .length = value.length, .private = false } else content_domain.sealedIdentity(&command.text) };
         if (t.input.parts_saving) |saving| {

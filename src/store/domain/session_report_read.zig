@@ -214,6 +214,7 @@ const actionable_permissions = rsql.Read(.{
 });
 
 pub const current_failures = .{
+    .{ report_domain.full_compound_value, error.SessionReadFailed },
     .{ archive_state, error.SessionReadFailed },
     .{ selected_active, error.TurnReadFailed },
     .{ selected_queued, error.MessageAdmissionReadFailed },
@@ -230,6 +231,7 @@ fn runCurrent(a: *ReadAccess) !void {
 
 const CurrentFacts = struct {
     archive: archive_state.Result = null,
+    compound: report_domain.full_compound_value.Result = null,
     instructions: content_domain.content_metadata.Row = undefined,
     output_schema: content_domain.content_metadata.Row = undefined,
     counts: SessionCounts,
@@ -276,6 +278,7 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
     a.read(metadata, .{ .content_id = @intCast(instructions_id) }, &facts.instructions);
     if (current.output_schema_id) |content_id| a.read(metadata, .{ .content_id = @intCast(content_id) }, &facts.output_schema);
     a.read(archive_state, .{ .session = session_ref }, &facts.archive);
+    if (profile == .full) a.read(report_domain.full_compound_value, .{ .session = session_ref }, &facts.compound);
     facts.counts.queue(a);
     _ = facts.compaction.queue(a);
     _ = facts.work.queue(a);
@@ -284,6 +287,7 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
     facts.first.queue(a, session_ref);
     a.readEach(selected_active, .{ .session = session_ref }, 1, &facts.active);
     try runCurrent(a);
+    if (facts.compound) |compound| try report_domain.verifyFullCompound(a, compound);
     try facts.compaction.advance();
     try facts.work.advance();
 

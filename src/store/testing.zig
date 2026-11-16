@@ -543,6 +543,9 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_operation WHERE background_content_id IS NOT NULL OR background_position IS NOT NULL OR background_at IS NOT NULL", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_stop WHERE action_cutoff<>0", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM message_admission WHERE source_action_id IS NOT NULL", .{}));
+    // Reject unrepresentable compound values before any dialect starts DDL.
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM content WHERE form<>0", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM content_part", .{}));
     const catalog = " FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.CONSTRAINT_TYPE='CHECK' AND tc.TABLE_NAME=";
     const checks = .{
         .{ "action_operation", "LOCATE('background_',cc.CHECK_CLAUSE)>0", 2 },

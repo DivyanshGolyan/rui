@@ -881,7 +881,7 @@ pub fn readWorks(a: *ReadAccess, works: []WorkRead) !void {
     }
 }
 
-const full_compound_value = rsql.Read(.{
+pub const full_compound_value = rsql.Read(.{
     .compound = true,
     .sql = "SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM message_admission m JOIN content c ON c.content_id=m.content_id WHERE m.session_ref=?1 AND c.form=1 " ++
         "UNION ALL SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM conversation_entry e JOIN content c ON c.content_id=e.content_id WHERE e.session_ref=?1 AND c.form=1 " ++
@@ -892,15 +892,13 @@ const full_compound_value = rsql.Read(.{
     .cardinality = .optional,
 });
 
+pub fn verifyFullCompound(a: *ReadAccess, row: full_compound_value.Row) !void {
+    const metadata: content_domain.content_metadata.Row = .{ .byte_length = row.byte_length, .digest = row.digest, .private = row.private, .form = row.form };
+    _ = try @import("content_parts.zig").publicMetadata(a, row.content_id.get(), &metadata);
+    return error.CorruptStore;
+}
+
 pub fn readFull(a: *ReadAccess, session_ref: []const u8, watched: anytype) !void {
-    var compound: full_compound_value.Result = null;
-    a.read(full_compound_value, .{ .session = session_ref }, &compound);
-    try store_access.runAs(a, error.SessionReadFailed);
-    if (compound) |row| {
-        const metadata: content_domain.content_metadata.Row = .{ .byte_length = row.byte_length, .digest = row.digest, .private = row.private, .form = row.form };
-        _ = try @import("content_parts.zig").publicMetadata(a, row.content_id.get(), &metadata);
-        return error.CorruptStore;
-    }
     try watched.call("fullOpen", .{session_report.FullList.session_revisions});
     try readRevisions(a, session_ref, watched);
     inline for (full_runs) |run| try readRun(a, run, session_ref, watched);
