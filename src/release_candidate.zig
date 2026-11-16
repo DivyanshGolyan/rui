@@ -73,10 +73,6 @@ fn fixtureOrigin(endpoint: []const u8) ![]const u8 {
     return error.InvalidReleaseEndpoint;
 }
 
-/// The curl transport every release download shares: no config file,
-/// failure on an HTTP error, quiet but for errors, redirects followed, and
-/// bounded connect and total time. Callers add their redirect and protocol
-/// bounds, any output, and `--` with the URL.
 const curl_transport = [_][]const u8{ "curl", "--disable", "--fail", "--silent", "--show-error", "--location", "--connect-timeout", "10", "--max-time", "300" };
 
 fn curlArgv(comptime n: usize, tail: [n][]const u8) [curl_transport.len + n][]const u8 {
@@ -97,8 +93,6 @@ pub fn discover(allocator: std.mem.Allocator, io: std.Io, endpoint: []const u8, 
     const fixture = !std.mem.eql(u8, endpoint, default_endpoint);
     const origin = if (fixture) try fixtureOrigin(endpoint) else download_origin;
     const target = try platform();
-    // Follow the whole chain: a future public endpoint may redirect through
-    // GitHub's latest page before reaching the tag. Never parse page HTML.
     const argv = curlArgv(12, .{ "--max-redirs", "5", "--proto", if (fixture) "=http" else "=https", "--proto-redir", if (fixture) "=http" else "=https", "--output", "/dev/null", "--write-out", "%{url_effective}", "--", endpoint });
     const effective = try process.downloadOutput(allocator, io, &argv, cancellation, 4096, diagnostic);
     defer allocator.free(effective);

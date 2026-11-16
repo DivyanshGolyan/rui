@@ -1,7 +1,3 @@
-//! Streaming object JSON normalization for spec output schemas. Member order
-//! and number spelling are preserved, as with std.json.Value serialization;
-//! whitespace and string escapes have one compact representation. No schema
-//! body or complete token is retained in memory.
 const std = @import("std");
 const max_depth = @import("json_limits.zig").max_depth;
 
@@ -22,8 +18,6 @@ pub const Encoder = struct {
         self.scanner.deinit();
     }
 
-    /// Consumes one byte, emitting canonical bytes to sink.write. True consumes
-    /// the root object's closing brace, never any subsequent request syntax.
     pub fn feed(self: *Encoder, byte: u8, sink: anytype) !bool {
         std.debug.assert(!self.done);
         self.scanner.feedInput(&.{byte});

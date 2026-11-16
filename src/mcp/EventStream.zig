@@ -1,13 +1,3 @@
-//! A `text/event-stream` body read as it arrives, as values (the WHATWG
-//! HTML "event stream interpretation"). Each event's data goes to the
-//! caller's writer, its `data` lines joined by LF, and `next` says when an
-//! event is complete; the caller reads the data as one JSON-RPC message and
-//! starts the next event with an empty writer. Comments, `event`, `id`,
-//! `retry` and unknown fields carry nothing an MCP client needs here: the
-//! 2026-07-28 transport has no resumption, and every event's data is a
-//! message.
-//!
-//! An event still open when the body ends is dropped, as the standard asks.
 const std = @import("std");
 
 const EventStream = @This();
@@ -15,44 +5,30 @@ const EventStream = @This();
 const bom = "\xef\xbb\xbf";
 
 pub const Error = error{
-    /// An event's data outgrew the caller's writer.
     EventTooLarge,
 };
 
 const State = enum {
-    /// At the first byte of a line.
     line_start,
-    /// Reading a field name; `name` holds its start.
     name,
-    /// Just after a field's colon: one space here is not part of the value.
     value_start,
     value,
-    /// The rest of a comment or of a field nobody reads.
     skip,
 };
 
 state: State = .line_start,
-/// Enough of a field name to tell `data` from every other name.
 name: [5]u8 = undefined,
 name_len: u8 = 0,
-/// The field being read is `data`.
 data_field: bool = false,
-/// A CR ended the last line, so an LF right after it ends nothing.
 after_cr: bool = false,
-/// The current event has a data line: a blank line then dispatches it.
 has_data: bool = false,
-/// How much of a leading UTF-8 byte order mark has been read; 3 once the
-/// stream is past where one may be.
 bom_read: u2 = 0,
 
 pub const Step = struct {
     used: usize,
-    /// An event is complete and its data is all in the writer.
     dispatched: bool,
 };
 
-/// Reads `input` up to and including the end of the next event, writing
-/// its data to `data`.
 pub fn next(self: *EventStream, input: []const u8, data: *std.Io.Writer) Error!Step {
     var at: usize = 0;
     while (at < input.len) {
@@ -115,8 +91,6 @@ fn isData(self: *const EventStream) bool {
     return self.name_len == 4 and std.mem.eql(u8, self.name[0..4], "data");
 }
 
-/// The field's name is complete: a data field after an earlier data line
-/// first gets the LF that joins them.
 fn startValue(self: *EventStream, data: *std.Io.Writer) std.Io.Writer.Error!void {
     self.data_field = self.isData();
     if (!self.data_field) {
@@ -132,8 +106,6 @@ fn addValue(self: *EventStream, data: *std.Io.Writer, byte: u8) Error!void {
     data.writeByte(byte) catch return error.EventTooLarge;
 }
 
-/// Ends a line; returns whether it was the blank line that dispatches an
-/// event.
 fn endLine(self: *EventStream, data: *std.Io.Writer) Error!bool {
     defer self.state = .line_start;
     switch (self.state) {
@@ -153,8 +125,6 @@ fn endLine(self: *EventStream, data: *std.Io.Writer) Error!bool {
     return false;
 }
 
-/// The events of `body` read in reads split at `split`; each event's data
-/// is appended to `out` followed by `|`.
 fn collect(body: []const u8, split: usize, out: *std.Io.Writer) !void {
     var stream: EventStream = .{};
     var data_buffer: [64]u8 = undefined;
@@ -191,7 +161,6 @@ test "comments, unknown fields and empty events carry nothing" {
     try expectEvents(": keep-alive\n\n:\r\n\r\nretry: 10\n\nfoo: data: no\n\ndata: yes\n\n", "yes|");
     try expectEvents("data\n\n", "|");
     try expectEvents("datum: x\ndata2: y\ndata: z\n\n", "z|");
-    // Part of a byte order mark is not one: it starts an unknown field.
     try expectEvents("\xefdata: x\n\ndata: y\n\n", "y|");
     try expectEvents("\xef\xbbdata: x\n\n\xef\xbb\xbfdata: y\n\n", "");
     try expectEvents("\xef\xbb\n\ndata: z\n\n", "z|");

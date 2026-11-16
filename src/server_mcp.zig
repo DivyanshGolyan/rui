@@ -1,5 +1,3 @@
-//! Execution-thread ownership of MCP calls. The Store owns admission and
-//! settlement; these bounded owners hold only a live socket and borrowed input.
 const std = @import("std");
 const execution = @import("execution.zig");
 const Host = @import("server_host.zig").Host;
@@ -12,8 +10,6 @@ const fenceDispatch = @import("server_host.zig").fenceDispatch;
 pub const Server = @import("mcp/servers.zig").Server;
 pub const Servers = @import("mcp/servers.zig").Servers;
 
-// Each live call reserves a 4 MiB answer buffer. Sixteen bounds that storage
-// at 64 MiB while allowing independent Sessions to make concurrent progress.
 pub const capacity = 16;
 
 pub const Active = struct {
@@ -71,8 +67,6 @@ pub const Calls = struct {
             break;
         };
         const entry = place orelse return .retry_later;
-        // Reserve the local owner before the durable attempt. After that
-        // commit every failure either settles or fences, never retries.
         const token = (if (call.background) host.custody.reserveLeaving(1) else host.custody.reserve()) orelse return .retry_later;
         const active = host.allocator.create(Active) catch {
             host.custody.releaseUnused(token) catch unreachable;
@@ -97,8 +91,6 @@ pub const Calls = struct {
         };
         active.binding = binding;
         prepare(host, active) catch |err| {
-            // A canonical read fault fences dispatch; a local resource failure
-            // is a definite not-sent outcome. Neither can launch a second try.
             if (host.store.isFenced()) fenceDispatch(host, "MCP input", err) else settle(host, active, .spawn_failed, "Failed, not run: the Host could not prepare this MCP call.");
             active.destroy(host);
             return .admitted;
@@ -111,8 +103,6 @@ pub const Calls = struct {
         return .admitted;
     }
 
-    /// Every loop services every ready call without blocking. Readiness is a
-    /// hint only; Running owns partial writes, parsing and its absolute timer.
     pub fn service(self: *Calls, host: *Host) bool {
         var progress = false;
         for (&self.entries) |*entry| if (entry.*) |active| {
@@ -132,16 +122,12 @@ pub const Calls = struct {
             if (fd >= 0 and now < active.running.deadlineMs()) {
                 var poll: std.c.pollfd = .{ .fd = fd, .events = active.running.events(), .revents = 0 };
                 const ready = std.c.poll(@ptrCast(&poll), 1, 0);
-                // Running owns socket errors; even a failed poll is serviced
-                // there rather than mistaking it for an empty readiness set.
                 if (ready == 0) continue;
             }
             var out: std.Io.Writer.Allocating = .init(host.allocator);
             defer out.deinit();
             var code: ?@import("mcp/result_text.zig").Code = null;
             if (!active.running.requestSent()) {
-                // Until the first byte, Store stop selection and the Host's
-                // launch gate must stay ordered before the external effect.
                 host.store.withActionDispatchHandoff(active.binding, .{ .host = host, .active = active, .now = now, .out = &out.writer, .code = &code }, struct {
                     fn handoff(context: anytype) !void {
                         try context.host.withEffectLaunch(context, send);
@@ -152,7 +138,6 @@ pub const Calls = struct {
                 }.handoff) catch |err| {
                     switch (err) {
                         error.SupersededByControl => cancel(host, active),
-                        // Like Bash, Host shutdown leaves the attempt uncertain.
                         error.HostDispatchSuppressed => {},
                         else => fenceDispatch(host, "MCP dispatch", err),
                     }
@@ -185,8 +170,6 @@ pub const Calls = struct {
         return progress;
     }
 
-    /// Like Bash shutdown, discard socket evidence and leave an unresolved
-    /// attempt for recovery, rather than inventing a semantic result.
     pub fn shutdown(self: *Calls, host: *Host) void {
         for (&self.entries) |*entry| if (entry.*) |active| {
             active.destroy(host);
@@ -208,8 +191,6 @@ fn settle(host: *Host, active: *Active, code: store.ActionResolutionCode, text: 
 
 noinline fn prepare(host: *Host, active: *Active) !void {
     const arena = active.arena.allocator();
-    // This input is canonical and potentially kilobytes; keep its one address
-    // with the call rather than copying it through the Host thread's frame.
     const input = try arena.create(store.ActionExecutionInput);
     try host.store.readActionExecutionInput(.mcp, active.binding, input);
     const config = for (host.mcp_servers.entries) |*server| {
@@ -220,8 +201,6 @@ noinline fn prepare(host: *Host, active: *Active) !void {
         return;
     };
     const arguments = try readContent(host, arena, input.arguments);
-    // The API writes Session references as their stored six-character string
-    // (protocol.SessionRow); Turn ids use its decimal Hole, without a prefix.
     var turn: std.Io.Writer.Allocating = .init(arena);
     try protocol.writeShape(&turn.writer, .{protocol.Hole.decimal}, .{active.binding.turn_id});
     try host.custody.consumeLaunchAuthority(active.token, .{ .action = active.binding });
@@ -237,8 +216,6 @@ noinline fn prepare(host: *Host, active: *Active) !void {
             .root_session_id = input.runner.mcp.root.slice(),
             .turn_id = turn.written(),
         },
-        // JSON-RPC only correlates one request on this private connection.
-        // It is not an action/call identity and never appears in _meta.
         .id = 1,
         .server_name = config.name,
         .timeout_ms = input.timeout_ms,
@@ -272,7 +249,6 @@ fn cancel(host: *Host, active: *Active) void {
     const text = @import("mcp/action_text.zig");
     var buffer: [@max(text.stop_unknown.len, text.stop_not_sent.len)]u8 = undefined;
     var out: std.Io.Writer = .fixed(&buffer);
-    // The only possible stop texts both fit this exactly derived buffer.
     const code = @import("mcp/result_text.zig").write(&out, .{ .server_name = "", .ended = .{ .stopped = sent } }) catch unreachable;
     settle(host, active, switch (code) {
         .cancelled => .cancelled,
@@ -285,8 +261,6 @@ test "MCP Host call bound refuses admission before touching the Store" {
     var active: Active = .{ .token = undefined, .binding = .{ .action_id = 1, .parent_operation_id = 1, .turn_id = 1 }, .arena = .init(std.testing.allocator) };
     defer active.arena.deinit();
     var calls: Calls = .{ .entries = @splat(&active) };
-    // There is deliberately no Host/Store to consult when every local place
-    // is occupied. A full scan cannot record a seventeenth attempt.
     try std.testing.expect(calls.full());
     try std.testing.expectEqual(@import("execution_turn.zig").Admission.retry_later, calls.admit(undefined, .{ .action_id = 17, .runner = .mcp, .server = .{} }));
     calls.entries[0] = null;
@@ -327,7 +301,6 @@ test "MCP full output hints follow the frozen Bash offer despite later settings"
         const session = (try storage.configure(&configure, .{})).accepted.session;
         try store_testing.submitTestMessage(&storage, &tmp, "task", "mcp-output-task", session.slice(), "fetch");
         const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        // Both adding and removing Bash after admission must be irrelevant.
         var update: wire_request.ConfigureCommand = .{ .session = session };
         try update.key.set("mcp-output-live-tools");
         update.configuration.tools = try .of(if (bash_offered) &.{"fetch_page"} else &.{ "bash", "fetch_page" });

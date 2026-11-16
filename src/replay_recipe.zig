@@ -1,4 +1,3 @@
-//! The opaque base and effective floor a request actually replays.
 const std = @import("std");
 const Kind = @import("output_item.zig").Kind;
 
@@ -9,7 +8,6 @@ pub const Base = struct {
 };
 
 pub const Recipe = struct {
-    /// A base is identified by its unique admission position within the Session.
     frontier: u64 = 0,
     floor: u64 = 0,
 
@@ -19,8 +17,6 @@ pub const Recipe = struct {
         return .{ .frontier = base.position, .floor = @max(own_floor, base.floor) };
     }
 
-    /// Relational projection of select for an admission's frozen request.
-    /// The caller supplies the raw newest base, never an older compatible one.
     pub fn floorSql(comptime model: []const u8, comptime base_model: []const u8, comptime base_floor: []const u8, comptime own_floor: []const u8) []const u8 {
         return "max(coalesce(" ++ own_floor ++ ",0),CASE WHEN " ++ base_model ++ "=" ++ model ++ " THEN coalesce(" ++ base_floor ++ ",0) ELSE 0 END)";
     }
@@ -29,7 +25,6 @@ pub const Recipe = struct {
         return "CASE WHEN " ++ base_model ++ "=" ++ model ++ " THEN coalesce(" ++ anchor ++ ",0) ELSE 0 END";
     }
 
-    /// Model identity is checked by the caller; usage covers only this recipe.
     pub fn measuredBy(recipe: Recipe, measured: Recipe) bool {
         return recipe.frontier == measured.frontier and recipe.floor == measured.floor;
     }

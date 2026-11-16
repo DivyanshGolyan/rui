@@ -1,41 +1,21 @@
-//! Each served provider's model list: the IDs its account can use, and
-//! whether Rui's catalog knows each one's facts. A provider whose list is
-//! live (an OpenAI key, a ChatGPT plan) has it fetched at Host start and on
-//! each model-list request (`GET BASE/models`) and kept; until it arrives,
-//! or when it fails, the catalog's OpenAI IDs stand in, as they do for a
-//! provider with no list (the ChatGPT device sign-in). A live list names
-//! IDs only: a model's facts come from the catalog, and one the catalog does
-//! not list runs with default limits (`product_defaults.unlisted_context_window`).
 const std = @import("std");
 const catalog = @import("model_catalog.zig");
 const model_capability = @import("model_capability.zig");
 const provider_name = @import("provider_name.zig");
 
-/// Where a provider's list came from.
 pub const Source = enum {
-    /// Catalog OpenAI IDs: the provider has no live list here.
     catalog,
-    /// Catalog OpenAI IDs while the fetch is still in flight; ask again later.
     pending,
-    /// Catalog OpenAI IDs because the fetch failed: offline, refused or too long.
     catalog_fallback,
-    /// The provider's own list for this account.
     live,
 };
 
-/// The most model IDs a live list keeps, and the most bytes they take
-/// together. A longer list falls back to the catalog rather than lose models
-/// without saying so.
 pub const max_live_models = 512;
 pub const max_live_id_bytes = 16 * 1024;
-/// The most bytes of a provider's `/models` answer Rui reads.
 pub const max_response_bytes = 512 * 1024;
 
-/// Room for a live list's IDs and their newlines.
 pub const IdBuffer = [max_live_id_bytes + max_live_models]u8;
 
-/// IDs kept for a live list, each followed by a newline. An ID is
-/// `model_capability.validModelSyntax`, so it holds no whitespace.
 pub const Ids = struct {
     bytes: []const u8,
 
@@ -44,18 +24,13 @@ pub const Ids = struct {
     }
 };
 
-/// A live list's IDs as a parser keeps them, in the order it gives them:
-/// an ID Rui cannot select is skipped, and a list past either bound is
-/// refused rather than cut. Every provider's list parser keeps through this.
 pub const Kept = struct {
     out: *IdBuffer,
-    /// Bytes written, a newline after each ID.
     len: usize = 0,
     count: usize = 0,
 
     pub fn keep(self: *Kept, id: []const u8) error{ModelListTooLarge}!void {
         if (!model_capability.validModelSyntax(id)) return;
-        // `len` counts the newlines too: one per ID kept so far.
         if (self.count + 1 > max_live_models or self.len - self.count + id.len > max_live_id_bytes) return error.ModelListTooLarge;
         @memcpy(self.out[self.len..][0..id.len], id);
         self.out[self.len + id.len] = '\n';
@@ -63,18 +38,12 @@ pub const Kept = struct {
         self.count += 1;
     }
 
-    /// Borrows `out`.
     pub fn ids(self: *const Kept) Ids {
         return .{ .bytes = self.out[0..self.len] };
     }
 };
 
-/// The IDs of an OpenAI-style list (`{"data":[{"id":...},...]}`) in the
-/// provider's order, written to `out`. An ID Rui cannot select is skipped.
-/// `scratch` holds the parse and is freed by the caller.
 pub fn parseOpenAi(scratch: std.mem.Allocator, body: []const u8, out: *IdBuffer) !Ids {
-    // A token walk, not a typed parse: other members are skipped unread,
-    // so no number is ever converted.
     var scanner: std.json.Scanner = .initCompleteInput(scratch, body);
     var kept: Kept = .{ .out = out };
     var data_seen = false;
@@ -110,7 +79,6 @@ pub fn parseOpenAi(scratch: std.mem.Allocator, body: []const u8, out: *IdBuffer)
     return kept.ids();
 }
 
-/// The next token of a list body; a malformed one is `InvalidModelList`.
 pub fn nextToken(scanner: *std.json.Scanner, scratch: std.mem.Allocator) !std.json.Token {
     return scanner.nextAlloc(scratch, .alloc_if_needed) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
@@ -118,7 +86,6 @@ pub fn nextToken(scanner: *std.json.Scanner, scratch: std.mem.Allocator) !std.js
     };
 }
 
-/// The next member's key, or null at the object's end.
 pub fn objectKey(scanner: *std.json.Scanner, scratch: std.mem.Allocator) !?[]const u8 {
     return switch (try nextToken(scanner, scratch)) {
         .object_end => null,
@@ -127,8 +94,6 @@ pub fn objectKey(scanner: *std.json.Scanner, scratch: std.mem.Allocator) !?[]con
     };
 }
 
-/// Bytes one model entry adds to a reply beyond its ID's: an ID is printable
-/// ASCII, so JSON escapes at most double it.
 const model_overhead = "{\"id\":\"\",\"known\":false},".len;
 const provider_overhead = ",{\"provider\":\"\",\"source\":\"catalog_fallback\",\"models\":[]}".len + max_provider_name_bytes;
 const max_provider_name_bytes = blk: {
@@ -138,8 +103,6 @@ const max_provider_name_bytes = blk: {
 };
 const provider_count = std.meta.fieldNames(provider_name.Provider).len;
 
-/// The most bytes `writeProviders` writes for these facts, at most one list
-/// per built-in provider. Live account lists retain their independent bounds.
 pub fn providersBytes(facts: []const catalog.Entry) usize {
     @setEvalBranchQuota(20000);
     var catalog_bytes: usize = 0;
@@ -149,10 +112,8 @@ pub fn providersBytes(facts: []const catalog.Entry) usize {
     return "[]".len + provider_count * (provider_overhead + @max(catalog_bytes, max_live_models * model_overhead + 2 * max_live_id_bytes));
 }
 
-/// Offline callers only; Host replies size against their selected facts.
 pub const max_providers_bytes = providersBytes(catalog.shipped);
 
-/// A provider's list: catalog OpenAI IDs, or the provider's own IDs.
 pub const List = union(Source) {
     catalog,
     pending,
@@ -160,14 +121,11 @@ pub const List = union(Source) {
     live: Ids,
 };
 
-/// One provider's list as the reply carries it.
 pub const Entry = struct {
     provider: provider_name.Provider,
     list: List,
 };
 
-/// `[{"provider":...,"source":...,"models":[{"id":...,"known":...},...]},...]`,
-/// where `known` says Rui's catalog holds the model's facts.
 pub fn writeProviders(out: *std.Io.Writer, facts: []const catalog.Entry, entries: []const Entry) !void {
     try out.writeByte('[');
     for (entries, 0..) |entry, index| {
@@ -211,7 +169,6 @@ test "an OpenAI list keeps the provider's order and skips IDs Rui cannot select"
     try std.testing.expectError(error.InvalidModelList, parseOpenAi(arena.allocator(), "{\"object\":\"list\"}", &out));
     try std.testing.expectError(error.InvalidModelList, parseOpenAi(arena.allocator(), "{\"data\":[{\"name\":\"x\"}]}", &out));
     try std.testing.expectError(error.InvalidModelList, parseOpenAi(arena.allocator(), "{\"data\":[]} {}", &out));
-    // A decoded non-ASCII ID is not one Rui can select.
     try std.testing.expectEqualStrings("", (try parseOpenAi(arena.allocator(), "{\"data\":[{\"id\":\"\\u00e9\"}]}", &out)).bytes);
     try std.testing.expectEqualStrings("a/b\n", (try parseOpenAi(arena.allocator(), "{\"data\":[{\"id\":\"a\\/b\",\"created\":1.5e3}]}", &out)).bytes);
 }
@@ -226,7 +183,6 @@ test "a list past either bound is refused, not cut" {
     try body.writer.writeAll("]}");
     try std.testing.expectError(error.ModelListTooLarge, parseOpenAi(arena.allocator(), body.written(), &out));
 
-    // Exactly the byte bound fits: 64 IDs of 256 bytes are 16 KiB.
     body.clearRetainingCapacity();
     try body.writer.writeAll("{\"data\":[");
     for (0..64) |index| try body.writer.print("{s}{{\"id\":\"{d:0>256}\"}}", .{ if (index == 0) "" else ",", index });

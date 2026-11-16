@@ -1,10 +1,6 @@
 const std = @import("std");
 const core_boundary = @import("core_boundary.zig");
 
-/// Functional cores: decisions over values that their shells interpret.
-/// `core_boundary.zig` defines what a core may name; the test below checks
-/// each one listed here and runs its tests, and selector tests require each
-/// to select test-logic. Add entries in alphabetical order by path, ignoring case.
 const cores = .{
     .{ "action_control.zig", @import("action_control.zig") },
     .{ "action_read.zig", @import("action_read.zig") },
@@ -191,7 +187,6 @@ test {
 
 test "functional cores stay within the core boundary" {
     inline for (cores) |core| {
-        // The checked source is the imported one.
         const path = comptime blk: {
             var name = @typeName(core[1]).*;
             std.mem.replaceScalar(u8, &name, '.', '/');
@@ -207,8 +202,6 @@ test "functional cores stay within the core boundary" {
     }
 }
 
-/// Every core as `importer` spells its import: relative within its own
-/// directory, else up to `src/` and down.
 fn importNames(comptime importer: []const u8) [cores.len][]const u8 {
     @setEvalBranchQuota(100_000);
     const directory = importer[0..if (std.mem.lastIndexOfScalar(u8, importer, '/')) |slash| slash + 1 else 0];
@@ -223,7 +216,6 @@ fn importNames(comptime importer: []const u8) [cores.len][]const u8 {
 }
 
 test "the HTTP/2 client's proxy logic stays within the core boundary" {
-    // A core of the self-contained h2 module, as its policy is.
     if (core_boundary.check(@embedFile("h2/proxy.zig"), &.{})) |violation| {
         std.debug.print("h2/proxy.zig:{d}: `{s}` is outside the core boundary; see src/core_boundary.zig\n", .{ violation.line, violation.text });
         return error.CoreBoundaryViolation;
@@ -231,8 +223,6 @@ test "the HTTP/2 client's proxy logic stays within the core boundary" {
 }
 
 test "the HTTP/2 client's policy stays within the core boundary" {
-    // A core of the self-contained h2 module: test-h2 runs its tests, and it
-    // may import no Rui core.
     if (core_boundary.check(@embedFile("h2/policy.zig"), &.{})) |violation| {
         std.debug.print("h2/policy.zig:{d}: `{s}` is outside the core boundary; see src/core_boundary.zig\n", .{ violation.line, violation.text });
         return error.CoreBoundaryViolation;
@@ -281,8 +271,6 @@ test "the overview core reads session list pages as the client decodes them" {
     try std.testing.expectEqualStrings("k7m2qx", &delegated.first.?.sender.?);
     try std.testing.expectEqual(@as(?u64, null), delegated.from_person_at);
 
-    // A changed listing whose next page is full starts over as that full
-    // listing: the core keeps only the full listing's rows and token.
     var state: overview_view.State = undefined;
     try state.init(std.testing.allocator, .{ .cwd = "/home/d/code/rui", .home = "/home/d" });
     defer state.deinit();
@@ -306,7 +294,6 @@ test "the overview core reads session list pages as the client decodes them" {
     try std.testing.expectEqual(full.since, state.token.?);
 }
 
-/// Counts the allocations made through it.
 const CountingAllocator = struct {
     child: std.mem.Allocator,
     count: usize = 0,
@@ -338,7 +325,6 @@ const CountingAllocator = struct {
     }
 };
 
-/// 10,000 Sessions in every kind, across 20 Workspaces.
 fn benchmarkRows(rows: []overview_view.Listed, now_s: u64, shift: u64) void {
     const alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
     const workspaces = comptime blk: {
@@ -379,8 +365,6 @@ fn benchmarkRows(rows: []overview_view.Listed, now_s: u64, shift: u64) void {
     }
 }
 
-/// Feeds `rows` to `state` as one full listing, eight per page. Returns the
-/// nanoseconds its last page took, the step that merges the listing.
 fn listAll(state: *overview_view.State, rows: []const overview_view.Listed, generation: u64) !u64 {
     var at: usize = 0;
     while (true) {
@@ -424,7 +408,6 @@ test "overview benchmark: batched initial and refreshed listings at 1,000 and 10
             _ = try overview_view.step(&state, .{ .tick = now_s * 1000 });
             benchmarkRows(rows, now_s, 0);
             initial_ns[run] = try listAll(&state, rows, 1);
-            // A full refresh: every row again, many changed.
             _ = try overview_view.step(&state, .{ .tick = (now_s + 1) * 1000 });
             benchmarkRows(rows, now_s, run + 1);
             counting.count = 0;
@@ -437,8 +420,6 @@ test "overview benchmark: batched initial and refreshed listings at 1,000 and 10
             _ = try overview_view.step(&state, .{ .resized = .{ .width = 200, .height = 60 } });
             counting.count = 0;
             const render_start = nanosecondsNow();
-            // What App's overview builds each frame: the header, the list's
-            // two-line rows on screen through GroupedList, and one Footer.
             var frame: std.heap.ArenaAllocator = .init(counting.allocator());
             _ = try overview_view.headerSegments(frame.allocator(), &state, 200, .{});
             const Source = struct {

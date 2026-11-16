@@ -1,15 +1,3 @@
-//! TLS for h2 connections. Internal. One `SSL_CTX` per Client, built by its
-//! first `https://` endpoint; each connection's `SSL` comes from it.
-//!
-//! Verification is never off: there is no option or code path that sets
-//! SSL_VERIFY_NONE. The handshake verifies the chain against the trust
-//! store and the host name or IP literal against the leaf, except for
-//! system trust on macOS, where Apple SecTrust verifies both after the
-//! handshake and before any application byte (`sec_trust.zig`).
-//!
-//! OpenSSL reaches the socket through a BIO of ours, so each send carries
-//! MSG_NOSIGNAL (SO_NOSIGPIPE on Darwin): a peer that went away is
-//! an error for one connection, never a SIGPIPE for the process.
 const std = @import("std");
 const builtin = @import("builtin");
 const tls_client = @import("tls_client");
@@ -21,13 +9,11 @@ const alpn_h2 = "\x02h2";
 
 pub const HostKind = tls_client.HostKind;
 
-/// For a socket send that must not raise SIGPIPE.
 pub const send_flags: c_int = if (builtin.os.tag == .linux) std.c.MSG.NOSIGNAL else 0;
 
 pub const Context = struct {
     ctx: *c.SSL_CTX,
     bio_method: *c.BIO_METHOD,
-    /// Sessions are verified by SecTrust after their handshake.
     deferred: bool,
 
     /// TLS 1.2 or later, with only the AEAD suites HTTP/2 allows on 1.2 and
@@ -54,9 +40,6 @@ pub const Context = struct {
         self.* = undefined;
     }
 
-    /// A client session on `fd`, verifying `host` (`Url.server_name`): SNI
-    /// and the name check for a DNS name, the IP check (and no SNI) for an
-    /// IP literal.
     pub fn newSession(self: *const Context, fd: std.posix.fd_t, host: []const u8, kind: HostKind) ?*c.SSL {
         var host_z: [h2.max_host_bytes + 1]u8 = undefined;
         @memcpy(host_z[0..host.len], host);
@@ -76,8 +59,6 @@ pub const Context = struct {
     }
 };
 
-// ------------------------------------------------------------ handshake
-
 pub const Progress = union(enum) {
     done,
     want_read,
@@ -85,10 +66,6 @@ pub const Progress = union(enum) {
     failed: @import("policy.zig").Cause,
 };
 
-/// One nonblocking handshake step. Done means verified, unless SecTrust
-/// verifies the session after it; whether the peer chose h2 is asked
-/// with `choseH2` once it is trusted, so a peer that is neither is
-/// untrusted on every platform.
 pub fn handshake(ssl: *c.SSL) Progress {
     c.ERR_clear_error();
     const result = c.SSL_do_handshake(ssl);
@@ -100,7 +77,6 @@ pub fn handshake(ssl: *c.SSL) Progress {
     };
 }
 
-/// Whether ALPN chose `h2`, after a done handshake.
 pub fn choseH2(ssl: *c.SSL) bool {
     var selected: [*c]const u8 = null;
     var selected_len: c_uint = 0;
@@ -129,7 +105,6 @@ pub fn write(ssl: *c.SSL, bytes: []const u8) Transfer {
     return status(ssl);
 }
 
-/// After a failed SSL_read_ex or SSL_write_ex, which return 0.
 fn status(ssl: *c.SSL) Transfer {
     return switch (c.SSL_get_error(ssl, 0)) {
         c.SSL_ERROR_WANT_READ => .want_read,
@@ -138,9 +113,6 @@ fn status(ssl: *c.SSL) Transfer {
     };
 }
 
-// ------------------------------------------------------------ socket BIO
-
-/// A source/sink BIO over a nonblocking socket. Also used by the test peer.
 pub fn newBioMethod() ?*c.BIO_METHOD {
     const method = c.BIO_meth_new(c.BIO_get_new_index() | c.BIO_TYPE_SOURCE_SINK, "h2 socket") orelse return null;
     if (c.BIO_meth_set_write(method, bioWrite) != 1 or
@@ -154,7 +126,6 @@ pub fn newBioMethod() ?*c.BIO_METHOD {
     return method;
 }
 
-/// The SSL owns the BIO from here; it never closes `fd`.
 pub fn attachSocket(ssl: *c.SSL, method: *c.BIO_METHOD, fd: std.posix.fd_t) bool {
     const bio = c.BIO_new(method) orelse return false;
     c.BIO_set_data(bio, @ptrFromInt(@as(usize, @intCast(fd)) + 1));
@@ -221,7 +192,6 @@ test "sessions checked by OpenSSL refuse partial-label wildcards" {
     var context = try Context.init(.system);
     defer context.deinit();
     if (context.deferred) return error.SkipZigTest;
-    // The descriptor is never used: no handshake runs.
     const ssl = context.newSession(0, "example.com", .dns_name).?;
     defer c.SSL_free(ssl);
     try std.testing.expectEqual(@as(c_uint, c.X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS), c.X509_VERIFY_PARAM_get_hostflags(c.SSL_get0_param(ssl)));

@@ -1,4 +1,3 @@
-//! Opaque model observations shared by the adapter writer and feed reader.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const max_model_bytes = @import("model_capability.zig").max_model_bytes;
@@ -6,8 +5,6 @@ const max_model_bytes = @import("model_capability.zig").max_model_bytes;
 pub const max_bytes = 1 + 3 * (2 + max_model_bytes);
 pub const Certificate = Bounded(max_bytes);
 
-/// Certificate v1 preserves body, OpenAI header and alternate header separately,
-/// including absence and disagreement. Inputs are adapter-validated model names.
 pub fn encode(out: *Certificate, body: []const u8, openai: []const u8, alternate: []const u8) void {
     out.bytes[0] = 1;
     out.len = 1;
@@ -20,8 +17,6 @@ pub fn encode(out: *Certificate, body: []const u8, openai: []const u8, alternate
     }
 }
 
-/// Prefer the body, then the headers in order. Absence never substitutes the
-/// requested model. Validate the entire certificate, including unused sources.
 pub fn servedModel(evidence: ?[]const u8) error{InvalidModelEvidence}!?Bounded(max_model_bytes) {
     const bytes = evidence orelse return null;
     if (bytes.len == 0 or bytes[0] != 1) return error.InvalidModelEvidence;
@@ -58,7 +53,6 @@ test "model evidence preserves sources and selects body then headers across ever
     }
     var evidence: Certificate = undefined;
     encode(&evidence, "body", "header", "other");
-    // Independent v1 bytes pin preservation of disagreement, not just roundtrip.
     try std.testing.expectEqualSlices(u8, "\x01\x04\x00body\x06\x00header\x05\x00other", evidence.slice());
     const maximum: [max_model_bytes]u8 = @splat('m');
     encode(&evidence, &maximum, &maximum, &maximum);

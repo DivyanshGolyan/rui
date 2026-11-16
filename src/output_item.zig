@@ -1,4 +1,3 @@
-//! Canonical output item kinds and their model replay rule.
 const std = @import("std");
 
 pub const Use = enum { history, selected_base };
@@ -10,9 +9,6 @@ pub const Kind = enum(u8) {
     compaction = 4,
     web_search_call = 5,
 
-    /// Opaque state belongs to the producing Operation's requested model,
-    /// never its served-model evidence. Visible output survives a switch;
-    /// only the selected compaction replaces history, never an older one.
     pub fn replayableTo(kind: Kind, producing_model: []const u8, requested_model: []const u8, use: Use) bool {
         return switch (kind) {
             .reasoning => std.mem.eql(u8, producing_model, requested_model),

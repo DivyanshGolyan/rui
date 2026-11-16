@@ -1,20 +1,3 @@
-//! Coverage-guided fuzz tests of the sans-I/O parsers that read bytes a peer
-//! sent: an HTTP/1 response, an MCP event stream and reply, a JSON document,
-//! a client request's metadata, MySQL server packets and an HTTPS proxy's
-//! answer and settings. Cores may not name `std.testing.fuzz`, so their
-//! harnesses live here, in test-logic, and reach them through the same
-//! interfaces their shells use. (The Postgres decoder's is in
-//! `store/wire/pg_tests.zig`: test-pg owns that module.)
-//!
-//! Each harness reads its input whole, a byte at a time and in reads the
-//! fuzzer picks, and requires one outcome: a parser that keeps state between
-//! reads must not depend on where a read happened to end. Each also checks
-//! what its parser promises: slices that point into the input, an
-//! independent reference where one exists, and no panic on any input.
-//!
-//! Without `--fuzz` each test runs only its seeds, as an ordinary unit test;
-//! test-logic runs them. A live campaign needs a root that links no C:
-//! `zig build fuzz-parsers -Dtest-filter='fuzz ' --fuzz=1K --summary all -j2`.
 const std = @import("std");
 const Http1Parser = @import("http1/Parser.zig");
 const EventStream = @import("mcp/EventStream.zig");
@@ -26,10 +9,8 @@ const proxy = @import("h2/proxy.zig");
 
 const Smith = std.testing.Smith;
 
-/// The longest input a harness reads; long enough to reach every state.
 const max_input = 1024;
 
-/// How a harness splits its input into reads.
 const Split = union(enum) {
     whole,
     bytes,
@@ -44,9 +25,6 @@ const Split = union(enum) {
     }
 };
 
-/// A seed as `Smith.slice` reads one, a little-endian length and the
-/// bytes, then `values` as `Smith.value` reads them. Values read past the
-/// seed take their least, so a seed's fuzzed reads are a byte each.
 inline fn seed(comptime bytes: []const u8, comptime values: []const u64) []const u8 {
     comptime {
         var out: []const u8 = &std.mem.toBytes(std.mem.nativeToLittle(u32, bytes.len)) ++ bytes;
@@ -55,8 +33,6 @@ inline fn seed(comptime bytes: []const u8, comptime values: []const u64) []const
     }
 }
 
-/// Runs `transcript` over the input whole, a byte at a time and in fuzzed
-/// reads, and expects the same text from each.
 fn expectSplitIndependent(
     comptime transcript: anytype,
     input: []const u8,
@@ -74,15 +50,12 @@ fn expectSplitIndependent(
     }
 }
 
-/// Whether `inner` lies within `outer`.
 fn within(inner: []const u8, outer: []const u8) bool {
     if (inner.len == 0) return true;
     const start = @intFromPtr(inner.ptr);
     const base = @intFromPtr(outer.ptr);
     return start >= base and start + inner.len <= base + outer.len;
 }
-
-// ------------------------------------------------------------ HTTP/1
 
 test "fuzz http1 response parser" {
     try std.testing.fuzz({}, struct {
@@ -99,8 +72,6 @@ test "fuzz http1 response parser" {
     } });
 }
 
-/// What the parser reads from `response`: the head, the body joined across
-/// reads, and how the response ended, then the end of the connection.
 fn http1Transcript(response: []const u8, _: void, split: Split, out: *std.Io.Writer) !void {
     var parser: Http1Parser = .{};
     var held_buffer: [max_input]u8 = undefined;
@@ -149,8 +120,6 @@ fn http1Transcript(response: []const u8, _: void, split: Split, out: *std.Io.Wri
     try out.writeAll("\nclosed\n");
 }
 
-// ------------------------------------------------------------ MCP
-
 test "fuzz mcp event stream against the WHATWG interpretation" {
     try std.testing.fuzz({}, struct {
         fn one(_: void, smith: *Smith) !void {
@@ -174,7 +143,6 @@ test "fuzz mcp event stream against the WHATWG interpretation" {
     } });
 }
 
-/// Each event's data and a `|`, then the error that stopped the stream.
 fn eventTranscript(body: []const u8, capacity: u8, split: Split, out: *std.Io.Writer) !void {
     var stream: EventStream = .{};
     var data_buffer: [64]u8 = undefined;
@@ -220,8 +188,6 @@ fn referenceEvents(body: []const u8, capacity: u8, out: *std.Io.Writer) !void {
         if (line.len == 0 or line[0] == ':') continue;
         const colon = std.mem.indexOfScalar(u8, line, ':');
         if (!std.mem.eql(u8, line[0 .. colon orelse line.len], "data")) continue;
-        // An unended line's data is read up to the end of the body: a name
-        // without its colon has none yet.
         if (end == null and colon == null) break;
         var value = if (colon) |at| line[at + 1 ..] else "";
         if (value.len != 0 and value[0] == ' ') value = value[1..];
@@ -229,7 +195,6 @@ fn referenceEvents(body: []const u8, capacity: u8, out: *std.Io.Writer) !void {
         data.writeAll(value) catch return out.writeAll("EventTooLarge");
         has_data = true;
     }
-    // An event the body ends inside is dropped.
 }
 
 test "fuzz mcp reply reading" {
@@ -239,7 +204,6 @@ test "fuzz mcp reply reading" {
             const bytes = buffer[0..smith.slice(&buffer)];
             const id = smith.valueRangeAtMost(u8, 0, 9);
             const message = reply.readMessage(bytes, id) catch return;
-            // What is read as a message is JSON, as std.json reads it.
             try std.testing.expect(try std.json.validate(std.testing.allocator, bytes));
             switch (message) {
                 .notification => {},
@@ -276,8 +240,6 @@ test "fuzz mcp reply reading" {
     } });
 }
 
-// ------------------------------------------------------------ JSON
-
 test "fuzz json reader against std.json" {
     try std.testing.fuzz({}, struct {
         fn one(_: void, smith: *Smith) !void {
@@ -293,7 +255,6 @@ test "fuzz json reader against std.json" {
             defer streamed.deinit();
             const read_source = reader.readSource(&source, &streamed);
 
-            // Both readers read one grammar, and hear the same document.
             try std.testing.expectEqual(read, read_source);
             if (read) |_| try std.testing.expectEqualStrings(whole.text.written(), streamed.text.written()) else |err| {
                 // std.json has no depth limit.
@@ -311,7 +272,6 @@ test "fuzz json reader against std.json" {
     } });
 }
 
-/// Every event a reader reports, as text.
 const JsonRecorder = struct {
     text: std.Io.Writer.Allocating,
 
@@ -352,7 +312,6 @@ const JsonRecorder = struct {
     }
 };
 
-/// The byte source `Reader.readSource` reads, over a slice.
 const ByteSource = struct {
     bytes: []const u8,
     at: usize = 0,
@@ -367,9 +326,6 @@ const ByteSource = struct {
     }
 };
 
-// ------------------------------------------------------------ requests
-
-/// Value-only custody: the metadata parser never touches content files.
 const NoCustody = struct {
     pub const File = struct {};
     pub const Budget = struct {};
@@ -387,9 +343,6 @@ test "fuzz protocol request metadata parser" {
             const metadata = buffer[0..smith.slice(&buffer)];
             const route: ?protocol.Kind = if (smith.value(bool)) smith.value(protocol.Kind) else null;
             parseRequest(metadata, route) catch return;
-            // The Ingress parses the metadata each time a token ends and
-            // waits on NeedInput, so no part of an accepted request may be
-            // accepted or refused on its own.
             for (0..metadata.len) |length| {
                 try std.testing.expectError(error.NeedInput, parseRequest(metadata[0..length], route));
             }
@@ -410,8 +363,6 @@ fn parseRequest(metadata: []const u8, route: ?protocol.Kind) !void {
     try parser.parse(&request);
 }
 
-// ------------------------------------------------------------ MySQL
-
 test "fuzz mysql client reading server packets" {
     try std.testing.fuzz({}, struct {
         fn one(_: void, smith: *Smith) !void {
@@ -422,23 +373,16 @@ test "fuzz mysql client reading server packets" {
         }
     }.one, .{
         .corpus = &.{
-            // A query's result set: one column, the rows "ab" and NULL, then
-            // its end.
             seed("\x01\x00\x00\x01\x01" ++
                 "\x17\x00\x00\x02\x03def\x00\x00\x00\x01a\x00\x0c\xff\x00\x10\x00\x00\x00\xfd\x00\x00\x00\x00\x00" ++
                 "\x03\x00\x00\x03\x02ab" ++ "\x01\x00\x00\x04\xfb" ++ "\x07\x00\x00\x05\xfe\x00\x00\x02\x00\x00\x00", &.{}),
-            // An OK with more results, then an error.
             seed("\x07\x00\x00\x01\x00\x01\x00\x0a\x00\x00\x00" ++ "\x09\x00\x00\x02\xff\x28\x04#42000x", &.{}),
         },
     });
 }
 
-/// Where the MySQL harness starts: a handshake over one transport, or a
-/// logged-in client whose query is out.
 const MysqlStart = enum(u8) { query, tcp, tcp_tls, unix_socket };
 
-/// Each event, a value's bytes joined to it, and the error that ended the
-/// exchange. A logged-in client sends a query whenever it is ready.
 fn mysqlTranscript(server: []const u8, start: MysqlStart, split: Split, out: *std.Io.Writer) !void {
     var client = try mysql.Client.init(.{
         .user = "rui",
@@ -482,7 +426,6 @@ fn mysqlTranscript(server: []const u8, start: MysqlStart, split: Split, out: *st
                 try out.writeAll(event.bytes);
                 continue;
             }
-            // A value's bytes add up to its length before the next event.
             if (value_left) |left| try std.testing.expectEqual(@as(u32, 0), left);
             value_left = if (event == .value) event.value else null;
             switch (event) {
@@ -497,8 +440,6 @@ fn mysqlTranscript(server: []const u8, start: MysqlStart, split: Split, out: *st
     }
 }
 
-// ------------------------------------------------------------ HTTPS proxy
-
 test "fuzz https proxy answer and settings" {
     try std.testing.fuzz({}, struct {
         fn one(_: void, smith: *Smith) !void {
@@ -506,7 +447,6 @@ test "fuzz https proxy answer and settings" {
             const bytes = buffer[0..smith.slice(&buffer)];
             try expectSplitIndependent(answerTranscript, bytes, {}, smith);
 
-            // The same bytes as settings: a proxy URL, NO_PROXY and a host.
             const host_end = std.mem.indexOfScalar(u8, bytes, '\n') orelse bytes.len;
             const host = bytes[0..@min(host_end, proxy.max_host_bytes)];
             _ = proxy.isLoopback(host);
@@ -526,7 +466,6 @@ test "fuzz https proxy answer and settings" {
     } });
 }
 
-/// The answer's outcome and where in the bytes it ended.
 fn answerTranscript(bytes: []const u8, _: void, split: Split, out: *std.Io.Writer) !void {
     var answer: proxy.Answer = .{};
     var fed: usize = 0;
@@ -544,7 +483,6 @@ fn answerTranscript(bytes: []const u8, _: void, split: Split, out: *std.Io.Write
     try out.writeAll("more");
 }
 
-/// An address the proxy core parses is one std parses to the same bytes.
 fn expectStdAddress(text: []const u8, address: proxy.Address) !void {
     switch (address.len) {
         4 => {

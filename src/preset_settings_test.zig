@@ -1,4 +1,3 @@
-//! Settings presets and direct configuration resolve the same offered tools.
 const std = @import("std");
 const hs = @import("host_settings.zig");
 const protocol = @import("protocol.zig");

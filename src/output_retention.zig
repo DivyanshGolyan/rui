@@ -43,8 +43,6 @@ pub const Queue = struct {
         entries: []Entry,
         removal: named_scratch.Removal,
     ) Queue {
-        // Entries start empty, as `.{}` or all zero bytes, so fresh pages need
-        // no initializing pass and an unused entry never becomes resident.
         for (entries) |entry| std.debug.assert(entry.state == .free);
         return .{
             .io = io,
@@ -96,11 +94,6 @@ pub const Queue = struct {
         try self.publish(&.{ pair.stdout, pair.stderr });
     }
 
-    /// Write optional output of a known rendered length, without a second
-    /// payload buffer. The callback must write exactly `length` bytes on success.
-    /// Once created, even a partial file belongs to this queue: failed writes
-    /// are not advertised, but keep their charge until ordinary cleanup confirms
-    /// removal. No producer handle survives publication and no fsync is needed.
     pub noinline fn writeFile(self: *Queue, name: []const u8, length: u64, context: anytype, write: anytype) bool {
         const tokens = (self.reserveEntries(1, .{name}, .{length}) catch return false) orelse return false;
         const token = tokens[0];
@@ -118,8 +111,6 @@ pub const Queue = struct {
         created = true;
         defer {
             file.close(self.io);
-            // This method alone owns the still-reserved token. Even a failed
-            // write hands its closed file to retention, never loses custody.
             self.publish(&.{token}) catch unreachable;
         }
         var buffer: [4096]u8 = undefined;
@@ -443,8 +434,6 @@ test "cancelling a reserved pair releases entry capacity without refunding produ
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    // Baseline B = 41 of unrelated usage stays stable; the producer owns
-    // 2 more bytes while its pair reservation is outstanding.
     var used = std.atomic.Value(u64).init(41);
     const budget = ScratchBudget{ .used = &used, .limit = 50 };
     var entries: [2]Entry = @splat(.{});
@@ -455,13 +444,10 @@ test "cancelling a reserved pair releases entry capacity without refunding produ
     try std.testing.expectEqual(@as(u64, 43), used.load(.acquire));
     const pair = (try queue.reservePair("stdout", 1, "stderr", 1)).?;
     try std.testing.expectEqual(@as(usize, 2), queue.occupied());
-    // reservePair creates protected entry reservations but acquires no
-    // second scratch charge.
     try std.testing.expectEqual(@as(u64, 43), used.load(.acquire));
     queue.releaseReservation(pair.stdout);
     queue.releaseReservation(pair.stderr);
     try std.testing.expectEqual(@as(usize, 0), queue.occupied());
-    // Releasing entry capacity does not release the producer's charge.
     try std.testing.expectEqual(@as(u64, 43), used.load(.acquire));
     budget.release(2);
     try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
@@ -483,9 +469,6 @@ test "zero-byte retained files occupy entries without occupying scratch bytes" {
     try std.testing.expect(try queue.retainPair("empty-out", 0, "empty-err", 0));
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 2), queue.occupied());
-    // Fill the byte budget with unrelated usage, then require eviction:
-    // evicting zero-byte entries frees entry capacity but no bytes, so the
-    // reservation still fails while occupancy drops.
     try std.testing.expect(budget.charge(2));
     try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
     const shared = queue.sharedBudget();
@@ -513,8 +496,6 @@ test "entry capacity evicts zero-byte output while byte capacity remains spare" 
     try std.testing.expectEqual(@as(usize, 2), queue.occupied());
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 
-    // A second protected pair needs entries, not bytes. It evicts both old
-    // zero-byte names even though all ten scratch bytes remain available.
     const replacement = (try queue.reservePair("new-out", 0, "new-err", 0)).?;
     try std.testing.expectEqual(@as(usize, 2), queue.occupied());
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
@@ -544,8 +525,6 @@ test "failed eviction retains its charge until the same queue retries successful
     try std.testing.expect(try queue.retainPair("stdout", 1, "stderr", 1));
     try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
 
-    // New retention cannot evict through the blocked removal: the oldest
-    // entry fails, retains its charge, and the queue stays occupied.
     try std.testing.expectEqual(
         @as(?Pair, null),
         try queue.reservePair("new-out", 0, "new-err", 0),
@@ -553,8 +532,6 @@ test "failed eviction retains its charge until the same queue retries successful
     try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 2), queue.occupied());
 
-    // Clearing the fault lets the same queue complete the retained cleanup
-    // and release the charge exactly once.
     gate.store(false, .release);
     queue.cleanupAll();
     try std.testing.expectEqual(@as(usize, 0), queue.occupied());
@@ -575,8 +552,6 @@ test "partial retained cleanup keeps only the exact residual owner and charge" {
     var queue = Queue.initialize(std.testing.io, root, budget, &entries);
     defer queue.cleanupAll();
 
-    // A directory at one retained pathname makes that removal unconfirmed,
-    // while the sibling is an ordinary file that can be reclaimed.
     try tmp.dir.createDir(std.testing.io, "blocked", .default_dir);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "removable", .data = "value" });
     try std.testing.expect(budget.charge(blocked_charge + removable_charge));
@@ -603,8 +578,6 @@ test "partial retained cleanup keeps only the exact residual owner and charge" {
         tmp.dir.statFile(std.testing.io, "removable", .{}),
     );
 
-    // Clearing the obstruction lets the same queue observe absence and
-    // release its one residual entry and charge exactly once.
     try tmp.dir.deleteDir(std.testing.io, "blocked");
     queue.cleanupAll();
     try std.testing.expectEqual(@as(usize, 0), queue.occupied());

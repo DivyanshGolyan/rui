@@ -5,7 +5,6 @@ const product_defaults = @import("product_defaults.zig");
 const protocol = @import("protocol.zig");
 const provider_selection = @import("provider_selection.zig");
 
-/// Explicit arguments borrow invocation-lifetime storage, never preference bytes.
 pub const Intent = struct {
     store: ?[]const u8 = null,
     provider: ?[]const u8 = null,
@@ -16,30 +15,20 @@ pub const Intent = struct {
     }
 };
 
-/// One observation of prospective defaults. Replace the whole snapshot after
-/// external choice/login; no selected slice survives that replacement.
 pub const Snapshot = struct {
     intent: Intent,
     defaults: preferences.Values,
 
-    /// Borrows explicit arguments, this snapshot in final storage, or fallback.
-    /// Native preflight must precede resolve; raw explicit paths stay unbounded
-    /// here so their validation and errors remain with the native owner.
     pub fn destination(self: *const Snapshot, home: []const u8, fallback: []u8) !struct { path: []const u8, saved: bool } {
         if (self.intent.store) |path| return .{ .path = path, .saved = false };
         if (self.defaults.store.len != 0) return .{ .path = self.defaults.store.slice(), .saved = true };
         return .{ .path = try preferences.defaultStore(home, fallback), .saved = false };
     }
 
-    /// Null requires choice/repair, not fallback. Readiness is advisory: the CLI
-    /// still checks the actual Host and captures its atomic require_model guard.
     pub fn resolve(self: *const Snapshot, readiness: *const provider_selection.Readinesses) !?Binding {
         return self.resolveWith(self.intent.provider, readiness);
     }
 
-    /// A caller that cannot ask: with no explicit or saved provider, a fresh
-    /// Session uses the product default. Credential readiness is the serving
-    /// Host's answer, so every provider counts as usable here.
     pub fn resolveUnprompted(self: *const Snapshot) !Binding {
         const provider = self.intent.provider orelse if (self.defaults.provider.len == 0) @as([]const u8, product_defaults.provider) else null;
         const usable: provider_selection.Readinesses = .initFill(.configured);
@@ -62,14 +51,11 @@ pub const Snapshot = struct {
     }
 };
 
-/// Owns bytes, including a saved model pin. Safe to move or retain after the
-/// snapshot changes; take slices only after placing the binding in final storage.
 pub const Binding = struct {
     provider: protocol.Bounded(16) = .{},
     model: protocol.Bounded(protocol.max_model_bytes) = .{},
 };
 
-/// Codex in `state` and every other provider missing.
 fn codexOnly(state: provider_selection.Readiness) provider_selection.Readinesses {
     var readiness: provider_selection.Readinesses = .initFill(.missing);
     readiness.set(.codex, state);
@@ -118,8 +104,6 @@ test "new Session refresh owns bindings and selects shorter and longer saved des
         try std.testing.expectEqual(@as(?Binding, null), try snapshot.resolve(&codexOnly(.missing)));
         const retained = (try snapshot.resolve(&codexOnly(.configured))).?;
 
-        // External work replaces defaults; the old snapshot and binding cannot
-        // borrow the load buffer, and the new selection must use the new bytes.
         try source.store.set(paths[1]);
         try source.model.set("after");
         try std.testing.expectEqualStrings(paths[0], (try snapshot.destination("/home/test", &fallback)).path);
@@ -165,8 +149,6 @@ test "new Session explicit choices bypass stale defaults without destination fal
     snapshot.intent.model = "bad model";
     try std.testing.expectError(error.UnsupportedSelectionModel, snapshot.resolve(&codexOnly(.configured)));
 
-    // Destination validation belongs to native preflight, even when the same
-    // invocation also has an unsupported provider/model or an invalid HOME.
     const long_raw_path = @as([std.Io.Dir.max_path_bytes + 1]u8, @splat('x'));
     snapshot.intent.store = &long_raw_path;
     try std.testing.expectEqualStrings(&long_raw_path, (try snapshot.destination("relative-home", &fallback)).path);

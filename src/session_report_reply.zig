@@ -1,7 +1,3 @@
-//! The `inspect-session` report: the Host writes the Session report the
-//! Store reads (`store/domain/session_report_read.zig`) with the shapes
-//! here, which also give the reply's schema (`openapi.zig`), the Full
-//! profile's history included.
 const std = @import("std");
 const built_in_tool = @import("built_in_tool.zig");
 const cli_value = @import("cli_value.zig");
@@ -20,10 +16,6 @@ const workspace_path = @import("workspace_path.zig");
 const wire_version = @import("wire_version.zig").wire_version;
 const H = protocol.Hole;
 
-/// The visitor that writes one report into `capture`, a Session report
-/// capture the caller created (`store.SessionReportCapture`), with the
-/// Host's `execution` counters. Its tools buffer is over 4 KiB, so a server
-/// allocates it and does not hold it on its stack.
 pub fn Reply(comptime Capture: type) type {
     return struct {
         capture: *Capture,
@@ -38,8 +30,6 @@ pub fn Reply(comptime Capture: type) type {
             try reply.capture.append(missing_text);
         }
 
-        /// The envelope, the saved Session and the Current facts, up to the
-        /// first list.
         pub fn current(reply: *@This(), profile: cli_value.ReportProfile, values: *const session_report.Current) !void {
             reply.actions = values.actions;
             reply.rejected_calls = values.rejected_calls;
@@ -85,7 +75,6 @@ pub fn Reply(comptime Capture: type) type {
             });
         }
 
-        /// Ends the list before `list`, if any, and opens `list`.
         pub fn open(reply: *@This(), list: session_report.List) !void {
             reply.first = true;
             switch (list) {
@@ -140,13 +129,10 @@ pub fn Reply(comptime Capture: type) type {
             }
         }
 
-        /// Ends the last list and the Current facts.
         pub fn end(reply: *@This()) !void {
             try reply.capture.append("]");
         }
 
-        /// Ends the list before `list`, if any, and opens `list` of the
-        /// Full profile's history.
         pub fn fullOpen(reply: *@This(), list: session_report.FullList) !void {
             reply.first = true;
             try reply.capture.append(switch (list) {
@@ -155,11 +141,6 @@ pub fn Reply(comptime Capture: type) type {
             });
         }
 
-        /// One row of the open Full list. `text` streams the row's whole
-        /// contents (`session_report.Text`) into a sink, `text.stream(value,
-        /// sink)`, calling `sink.write(bytes)` with each window as the Store
-        /// reads and checks it; the windows are valid only during that
-        /// call.
         pub fn fullRow(reply: *@This(), values: *const session_report.FullRow, text: anytype) !void {
             if (values.* != .revision_contents) {
                 if (!reply.first) try reply.capture.append(",");
@@ -181,7 +162,6 @@ pub fn Reply(comptime Capture: type) type {
             }
         }
 
-        /// Ends the last Full list and the Full history.
         pub fn fullEnd(reply: *@This()) !void {
             try reply.capture.append("]}");
         }
@@ -205,15 +185,12 @@ pub fn Reply(comptime Capture: type) type {
             try appendShape(reply.capture, shape.permission_mode, .{revision.permission_mode});
         }
 
-        /// The Host's execution counters, which close the report.
         pub fn tail(reply: *@This()) !void {
             const execution = reply.execution;
             try appendShape(reply.capture, shapes.tail_text ++ ExecutionJson.json_shape ++ .{"}"}, .{ execution.dispatch_fenced, execution.custody_occupied, execution.scratch_used_bytes });
         }
 
         fn envelope(reply: *@This(), profile: cli_value.ReportProfile) !void {
-            // Host-global execution counters and retry clocks are not
-            // Session-token facts.
             try reply.capture.append(switch (profile) {
                 .current => shapes.current_head[0],
                 .full => shapes.head[0],
@@ -229,9 +206,6 @@ pub fn Reply(comptime Capture: type) type {
     };
 }
 
-/// Writes `shape` straight into `capture` (`store.SessionReportCapture`),
-/// so a fact's maximum encoding never sits whole on the intake worker's
-/// stack. A failed write answers the capture's error.
 pub fn appendShape(capture: anytype, comptime shape: anytype, args: anytype) !void {
     var buffer: [256]u8 = undefined;
     var sink = capture.sink(&buffer);
@@ -239,7 +213,6 @@ pub fn appendShape(capture: anytype, comptime shape: anytype, args: anytype) !vo
     sink.interface.flush() catch return sink.failure.?;
 }
 
-/// A revision's contents, closing its row.
 fn writeRevisionContents(capture: anytype, contents: *const session_report.RevisionContents, text: anytype) !void {
     try capture.append(",\"instructions\":");
     try writeRevisionContent(capture, &contents.instructions, text);
@@ -248,20 +221,15 @@ fn writeRevisionContents(capture: anytype, contents: *const session_report.Revis
     try capture.append("}");
 }
 
-/// Inline, so streaming adds no frame between the Store's revisions and
-/// its content stream.
 inline fn writeRevisionContent(capture: anytype, content: *const session_report.RevisionContent, text: anytype) !void {
     const owner = content.owner orelse return writeText(capture, content.text, text);
     try writeOwnedReference(capture, content.text, owner);
 }
 
-/// Not inlined: its formatting takes no frame on the streaming chain.
 noinline fn writeOwnedReference(capture: anytype, value: session_report.Text, owner: session_report.Owner) !void {
     try appendShape(capture, FullJson.OwnedReference.json_shape, .{ value.length, value.digest, owner.revision, owner.field });
 }
 
-/// Shows `value` whole: its metadata, then its text, which `text` streams
-/// as the Store reads and checks it.
 fn writeText(capture: anytype, value: session_report.Text, text: anytype) !void {
     try appendShape(capture, FullJson.Inline.head, .{ value.length, value.digest });
     try text.stream(value, TextSink(@TypeOf(capture)){ .capture = capture });
@@ -272,7 +240,6 @@ fn writeOptionalText(capture: anytype, value: ?session_report.Text, text: anytyp
     if (value) |content| try writeText(capture, content, text) else try capture.append("null");
 }
 
-/// Writes a content window as JSON string characters.
 fn TextSink(comptime Capture: type) type {
     return struct {
         capture: Capture,
@@ -383,14 +350,10 @@ fn presentation(value: tool_presentation.ToolPresentation) protocol.ToolPresenta
 const session_text = "\",\"session\":";
 const missing_text = "\",\"session\":null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}";
 
-/// The Current facts between the saved Session and the work.
 const after_settings = .{ ",\"archive_state\":\"", H{ .tag = session_archive.State }, "\",\"pending_messages\":\"", H.decimal, "\",\"work\":" };
 
-/// The Current facts between the work and the first list.
 const after_work = .{ ",\"peers\":", H{ .json = protocol.PeerFacts }, ",\"first_message\":", H{ .optional_json = protocol.FirstMessage }, ",\"selected_message\":", H{ .optional_string = idempotency_key.max_bytes }, ",\"recent_messages\":" };
 
-/// Wire shapes of the report envelope. Full history is present only for
-/// the full profile.
 pub const shapes = struct {
     const head = .{"{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_report\",\"profile\":\""};
     const current_head = .{"{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\""};
@@ -410,7 +373,6 @@ fn ListOf(comptime T: type) type {
     };
 }
 
-/// Execution counters are supplied by the Host, not read from the Store.
 pub const ExecutionJson = struct {
     pub const openapi_name = "domainreportExecutionJson";
     pub const json_shape = .{ "{\"status\":\"partial\",\"dispatch_fenced\":", H.boolean, ",\"custody_occupied\":\"", H.decimal, "\",\"scratch_used_bytes\":\"", H.decimal, "\",\"unavailable\":[\"structured_output\"]}" };
@@ -418,7 +380,6 @@ pub const ExecutionJson = struct {
 
 const Reference = protocol.ContentJson;
 
-/// A content reference typed as text.
 pub const TextReference = struct {
     length: u64,
     digest: [32]u8,
@@ -436,7 +397,6 @@ pub const TextReference = struct {
     }
 };
 
-/// A tool's name (`tool_name.valid`), as a JSON string.
 pub const ToolName = struct {
     name: []const u8,
 
@@ -451,10 +411,6 @@ pub const ToolName = struct {
     }
 };
 
-/// The Current report's own parts. Shared work, peer, Message and
-/// presentation fields use their wire types' shapes rather than a second
-/// description here. The `openapi_name`s keep the schema names these had
-/// when the Store wrote them.
 pub const CurrentJson = struct {
     const ToolNames = struct {
         pub const openapi_tools = true;
@@ -502,8 +458,6 @@ pub const CurrentJson = struct {
         pub const openapi_name = "domainreportCurrentJsonRecent";
         pub const json_shape = .{ "{\"turn\":\"", H.decimal, "\",\"message\":", H{ .string = idempotency_key.max_bytes }, ",\"outcome\":", H{ .string = outcome_code.max_bytes }, "}" };
     };
-    /// A built-in call names its tool; an MCP call names an MCP tool and
-    /// its server.
     pub const Unresolved = struct {
         pub const openapi_name = "domainreportCurrentJsonUnresolved";
         const head = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"tool\":" };
@@ -517,8 +471,6 @@ pub const CurrentJson = struct {
     };
     pub const Resolved = struct {
         pub const openapi_name = "domainreportCurrentJsonResolved";
-        /// The Store checks that a resolved Action's code names a
-        /// presentation code.
         const max_code_bytes = maxTagBytes(tool_presentation.ToolPresentation.Code);
         pub const json_shape = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"code\":", H{ .string = max_code_bytes }, ",\"acceptance_position\":\"", H.decimal, "\",\"result\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentationJson }, "}" };
     };
@@ -546,9 +498,6 @@ fn maxTagBytes(comptime T: type) usize {
     return bytes;
 }
 
-/// The Full profile's history. Its row shapes are cut where a row's
-/// content is streamed (`writeText`). The `openapi_name`s keep the schema
-/// names these had when the Store wrote them.
 pub const FullJson = struct {
     pub const openapi_name = "domainreport_full_shapeFull";
     pub const json_shape = .{
@@ -614,7 +563,6 @@ pub const FullJson = struct {
         const tail = "}";
         pub const json_shape = head ++ .{ H{ .optional_json = Inline }, tail };
     };
-    /// A Message's exclusion: the stop that excluded it.
     pub const Exclusion = struct {
         command_key: []const u8,
 
