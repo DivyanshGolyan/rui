@@ -1,4 +1,18 @@
 #!/usr/bin/env python3
+"""Name why a Selected checks run failed, and rerun it once when only infrastructure failed.
+
+A job failed for infrastructure when no runner ran it or the runner was lost,
+or when a step that only fetches or installs stopped: cancelled, or failed with
+a network error in that step's own log. Every other failed or cancelled job is
+a check failure, including a timeout in a step that builds or tests.
+
+`explain` runs in an aggregate whose requirement failed and prints each failed
+job of the run attempt with its cause. `retry` runs after the run completes:
+on a pull request's first attempt whose every failure was infrastructure, and
+while that run still tests the PR's head, it reruns the failed jobs once. A
+rerun job never repeats a test that ran: its tests were skipped or never
+started.
+"""
 import argparse
 import json
 import os

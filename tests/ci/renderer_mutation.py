@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""Bounded renderer protection removals, never a mutation-score waiver.
+
+Each check first executes against an unchanged source copy. Each mutant then
+gets its own source copy and must fail its named behavioral assertion. Build
+errors, crashes, missing tests, timeouts, drift and survivors fail the gate.
+Compiler/package caches may be shared; test acceptance is always executed.
+"""
 import argparse
 import dataclasses
 import difflib

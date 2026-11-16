@@ -1,4 +1,17 @@
 #!/usr/bin/env python3
+"""Report, per ISO week, the share of closed `ci-red` issues that were real bugs.
+
+Every CI failure files one `ci-red` issue per cause (report_issue.py). Whoever
+closes it adds exactly one cause label, so this counts what CI caught rather
+than what it cost. A week is the ISO week the issue was last closed in.
+
+    strict = real / labelled          a product bug or regression
+    broad  = (real + compile) / labelled
+
+Unlabelled and multiply-labelled issues stay out of both rates and are listed
+by number, so a gap in labelling shows instead of skewing the rate.
+--create-labels creates or updates the cause labels themselves.
+"""
 import argparse
 from collections import defaultdict
 import datetime

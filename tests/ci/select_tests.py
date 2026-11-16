@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""Select existing build targets for fresh execution.
+
+A changed file selects the unit roots and process fixtures that reach it
+through literal imports (`Graph`), plus the targets its path rules name and
+fixtures that assert text found in the changed production source.
+"""
 import argparse
 import ast
 import difflib

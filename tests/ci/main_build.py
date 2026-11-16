@@ -1,4 +1,19 @@
 #!/usr/bin/env python3
+"""Keep one `ci-red` issue open while the main build is red, naming the PRs that crossed.
+
+No check runs on `main` after a merge, and PRs need no up-to-date base, so two
+PRs green alone can break `main` together (#1410). main-build.yml compiles
+`main` after every push. A red build files, or updates and comments on, one open
+issue naming each PR merged since the last green main build; the next green
+build comments on it and closes it. Only a build of the SHA `main` is at now
+speaks for `main`: a rerun of an older run describes a past `main` and changes
+nothing, and the last green build is the nearest green first-parent ancestor,
+not the newest green run. The revert of the later crossing PR is the
+fast fix (docs/agents/landing.md, "CI failures").
+
+Unlike report_issue.py's per-signature issues, this one tracks a state of
+`main`, so green alone closes it; its cause label is still the closer's.
+"""
 import argparse
 from dataclasses import dataclass
 import json

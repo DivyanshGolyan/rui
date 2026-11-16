@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+"""Name the code that may behave differently on macOS than on Linux.
+
+Linux CI predicts Mac CI only while platform differences stay where a reader,
+and the selector, can find them. Only a Mac path may name the platform
+(`builtin.os`, `sys.platform`) or call a syscall whose Linux and Darwin
+semantics diverge. Mac paths are the code Linux never executes the way a
+Mac does; PRs run Mac Selected only when they change one, and each promotion
+runs it before a release.
+"""
 import argparse
 import ast
 import fnmatch

@@ -1,4 +1,47 @@
 
+"""The Store's tests split by engine: a codemod and the rule it leaves behind.
+
+`rewrite` reads src/store/tests.zig as it stood before the split and writes
+two files. Tests that observe no SQLite mechanism stay in tests.zig, and
+those that open a Store run through `store_testing.forEachEngine`. Tests
+that observe a SQLite mechanism, and the helpers only they use, move to
+src/store/sqlite_tests.zig.
+
+Before it classifies anything, it rewrites raw SQL a test runs into the
+engine fixtures of src/store/testing.zig:
+- `sqlite.exec(S.database, T)` becomes `store_testing.exec(S, T)`;
+- `queryU64(S.database, T)` becomes `store_testing.queryU64(S, T)`;
+- a run of `sqlite.exec(S.database, T)` lines between `PRAGMA foreign_keys=OFF`
+  and `=ON`, with nothing else between them, becomes one
+  `store_testing.withoutForeignKeys(S, T)` per line;
+- `failAtStepForTesting(S.database, table)` becomes `store_testing.failReadsOf(S, table)`.
+T must be string literals joined by `++`, and must not name a SQLite
+mechanism (`store_testing.fixtureTextError`, whose word lists this
+reads). Any other form is left alone, so the item keeps
+its SQLite name and moves.
+
+An item is SQLite-only when, after those rewrites, its code outside strings
+and comments matches `SQLITE_CODE`, or it names an item that is. tests.zig's
+own `testingStore` is the exception: conformance tests call the fixture's.
+
+The per-domain split now keeps shared helpers in tests.zig and
+sqlite_tests.zig, with tests in tests/*.zig and sqlite_tests/*.zig.
+`check` is the placement rule for tests.zig and every tests/**/*.zig file:
+their code names nothing `SQLITE_CODE` matches and imports no SQLite
+module or SQLite test helper. SQLite mechanisms belong in the SQLite
+test files under src/store/sqlite_tests/.
+
+    python3 tests/ci/store_conformance.py rewrite <pre-split tests.zig>
+    python3 tests/ci/store_conformance.py table <pre-split tests.zig>
+    python3 tests/ci/store_conformance.py check
+
+`rewrite` leaves formatting to `zig fmt src/store/tests.zig src/store/sqlite_tests.zig`.
+It is a fixpoint on tests already split. It writes the two-file layout the
+per-domain split replaced, so it records how tests were classified rather
+than producing today's files: a test a base adds goes by hand into the
+domain file under tests/ or sqlite_tests/ that `check` admits.
+"""
+
 import re
 import sys
 from pathlib import Path

@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""Ratchet literal first-party imports reachable from Rui's production roots.
+
+This is a source architecture check, not Zig's lazy declaration analysis. Both
+platform branches count; test declarations, comments and string contents do not.
+addRui in build.zig owns the Zig executable root. Package imports are external.
+The Store's boundary is checked over every file under src/, tests included.
+"""
 import argparse
 import json
 import os

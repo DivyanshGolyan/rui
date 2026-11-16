@@ -1,4 +1,22 @@
 #!/usr/bin/env python3
+"""Run change-scoped local feedback before a push.
+
+Use --plan to inspect commands without running them. Paths come from the
+committed diff against --base; deleted paths still select their owning checks.
+File tools and tests read the working tree; unstaged and untracked-only edits
+do not select checks. GitHub CI owns review-phase acceptance.
+
+Default and --quick run the same cheap feedback. --full is an opt-in diagnostic
+that adds development builds, cross-compilation, all-unit compilation, stack
+frames and reachable live MySQL checks. UID-global Upgrade stays hosted.
+Generation runs only for the emitter's input closure or generated wire inputs.
+The hook reuses a passing receipt for the same tree and merge base.
+Receipts describe local feedback only. Hosted acceptance is never evaluated
+here, and cached output retains every recorded CI deferral.
+
+Run as a script, it re-executes itself in the caller's pinned Python 3.12
+environment when .agents/setup made one (tests/ci/fixture_user.py --venv).
+"""
 import argparse
 from contextlib import redirect_stdout
 import hashlib

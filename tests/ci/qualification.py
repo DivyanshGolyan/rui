@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Shard existing targets without changing their assertions or build graph."""
 import argparse
 import json
 

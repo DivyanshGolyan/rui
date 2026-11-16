@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+"""Say which Store schema number this branch should use, read from main as it is now.
+
+Each format PR appends one schema_version after main's (D226). Two open PRs
+that take the same next number race, and the second to land must renumber.
+CI compares a PR with its merge base; this compares the working tree with
+origin/main after fetching it, so a branch learns before CI or a conflict that
+main moved past it. --check exits 1 when the branch's number is not the one to
+use.
+"""
 import argparse
 from pathlib import Path
 import subprocess

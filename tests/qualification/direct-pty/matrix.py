@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Synthetic primary key matrix, not physical-human qualification."""
 import argparse
 import concurrent.futures
 import hashlib

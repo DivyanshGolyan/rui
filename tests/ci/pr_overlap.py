@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""List open PRs sharing files with the committed branch before opening a PR,
+and those whose added lines use a name the branch renames or removes."""
 import argparse
 import re
 import subprocess

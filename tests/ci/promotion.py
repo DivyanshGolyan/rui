@@ -1,4 +1,17 @@
 #!/usr/bin/env python3
+"""Find the commit in a promotion batch that turned a failing check red.
+
+A promotion qualifies main HEAD against the batch since `stable`, the last
+promoted release. When a job fails, each step it recorded as failed
+(steps.py, run_selected.py) is bisected on its own, on the same runner: its
+recorded command is replayed first at HEAD, to confirm the red reproduces,
+then by binary search over the batch's first-parent commits. `stable` is
+presumed good, since it passed promotion; it is replayed only when the first
+commit of the batch fails. A failure before any recorded step, such as setup,
+has nothing to replay. Replay output goes to files, not the job log, so the
+issue filer reads only the original failure. The verdict never turns a
+promotion green.
+"""
 import argparse
 import json
 import os

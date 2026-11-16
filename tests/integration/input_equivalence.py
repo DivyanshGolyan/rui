@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
 
+"""TD2 recovery equivalence through TD4's real, direct-PTY frontend driver.
+
+Run with a built Rui and --output FRESH_DIRECTORY. TD3 owns Linux CI wiring;
+TD4 owns the reusable harness. No parser or raw-Ctrl-R interception is copied
+here. An unchanged renderer is expected to FAIL encoded recovery, not xfail it.
+"""
+
 import argparse
 import json
 import os

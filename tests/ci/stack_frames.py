@@ -1,4 +1,24 @@
 #!/usr/bin/env python3
+"""Fail when a Host thread can reach a stack frame over the budget.
+
+ReleaseSafe probes every page of a frame on entry, so a big frame stays resident
+for the life of the thread that ran it. This reads the frames of a ReleaseSafe
+x86-64 Linux binary from its disassembly and walks the direct-call graph from
+each Host stack: the main thread from server.serve, and every thread whose entry
+a reachable function passes to spawn. Calls through function pointers and the
+std.Io vtable leave no direct call, so every function of a module named in
+host_modules is walked as well. The walk stops at the panic handlers, which run
+only as the thread dies.
+
+stack_frames.json holds the budget, each Host thread's anchor and chain ceiling,
+the functions that run others through a pointer (dispatches),
+the Host modules, and shrink-only exceptions. An exception's frame_bytes and a
+thread's chain_ceiling are ceilings in whole pages, the unit the probe makes
+resident, so CPU-model noise of a few bytes moves no verdict. A frame or chain
+past its ceiling fails, and one a whole page under it must lower it. An
+exception whose frame fits the budget or is gone must be deleted. Names drop
+Zig's __func_N/__struct_N/__union_N suffixes so they survive rebuilds.
+"""
 import argparse
 import json
 from pathlib import Path

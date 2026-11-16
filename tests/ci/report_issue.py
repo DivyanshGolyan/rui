@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+"""File each CI failure under its cause: one issue per signature, reopened when it recurs.
+
+A cause is a signature: the failing fixture and its raising line, a Zig test,
+or a gate's own error, read from the jobs' full logs. Each signature has one
+`ci-red` issue that recurrences comment on. A later green run never closes it;
+the commit that fixes the fixture or its owner says `Fixes #N`, and a failure
+on a commit containing that fix reopens the issue.
+"""
 import argparse
 from dataclasses import dataclass, field
 import json

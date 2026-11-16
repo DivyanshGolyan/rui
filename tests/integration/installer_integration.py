@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Source and release installer boundaries using an explicit production binary."""
 import argparse
 import hashlib
 import io

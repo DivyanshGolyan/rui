@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Execute the existing selected DAGs, without caching their acceptance."""
 import argparse
 import json
 import os

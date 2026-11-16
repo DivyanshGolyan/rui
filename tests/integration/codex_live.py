@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+"""Opt-in native public-caller qualification; never part of ordinary build gates."""
+
 import argparse
 import hashlib
 import json

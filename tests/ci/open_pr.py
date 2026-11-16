@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+"""Open a ready PR so selected CI and Codex review start together.
+
+Merge still requires current-candidate admission and the Codex evidence in
+CODING_STANDARDS.md. `ready` converts older drafts without another push.
+
+  open_pr.py open --title TITLE --body-file FILE [--base main]
+  open_pr.py ready
+"""
 import argparse
 import json
 import subprocess

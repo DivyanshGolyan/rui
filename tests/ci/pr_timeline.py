@@ -1,4 +1,45 @@
 #!/usr/bin/env python3
+"""Report where merged PRs spent their time (read-only, GitHub REST only).
+
+  python3 tests/ci/pr_timeline.py --since 2026-11-12 [--pr 1418] [--format json]
+
+Release source: published releases API, ordered by published_at, with REST
+compare proving that the release tag contains the merge commit (not merely a
+later date). No checkout, fetch, tag, or GitHub mutation is performed.
+Every review stage (first review, Codex-clean, rounds) derives from one list
+of review outcomes: formal Codex reviews (findings), Codex receipt comments (no
+findings), the mutable summary at its Code Review completion time (updated_at in
+its older format), and a maintainer's interim opus-review-state:v1 marker at its
+created_at (each interim review is a new comment; a later edit, even after the
+merge, does not move it). Rounds count reviews, receipts and interim markers; the summary is
+only a fallback for a head without a review or receipt. Codex-clean is the time
+of the last outcome before merge when it is clean, on any head: landing.md lets
+test-only fixes, merges of main and stacked heads merge without another review,
+and only a later outcome with findings revokes it. A malformed summary or
+interim marker (bad JSON, a missing field, a bad completion time) is dropped
+from that PR's outcomes with a stderr warning naming the PR and comment URL;
+the report carries on.
+Pushes include branch creation and subsequent pushes through merge, starting
+at the last creation before opening; missing creation/fork history is unknown.
+Adjacent durations are signed minutes: stages can occur out of the listed order,
+and a missing endpoint stays blank rather than bridging to a different stage.
+
+Red-main minutes read main_build.py's record instead of judging runs again:
+main is red while a "Main build red" issue (the ci-red label and
+main_build.MARKER in its body) is open: from its creation, through its own
+closed and reopened events in time order, and still red now while one is open.
+Main is red while any such issue is open, so red_main returns the union of
+every issue's open spans (overlapping or touching spans merged, still-open
+spans ending at the report time); two issues open at once count each minute
+once.
+main_build.py alone decides red and green (a stale rerun of an older SHA
+changes nothing; the build job, not the whole run, is the result), and a
+closed stretch counts green even when the issue is later reopened, so this
+report agrees with that issue's open/closed history by construction. Intervals split at UTC midnight
+and today's end at report time. The record starts with #1430's merge
+(RED_MAIN_KNOWN_FROM, 2026-11-13T11:56:38Z): a day that starts before it is
+unknown, never zero red minutes.
+"""
 import argparse
 from datetime import date, datetime, time, timedelta, timezone
 import html

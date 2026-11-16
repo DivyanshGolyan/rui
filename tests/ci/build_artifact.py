@@ -1,3 +1,4 @@
+"""Same-run compiled-output handoff, never a test-acceptance receipt."""
 import argparse
 import hashlib
 import json

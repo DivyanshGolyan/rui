@@ -1,4 +1,22 @@
 #!/usr/bin/env python3
+"""The one pinned MySQL 8.4 image Rui's tests run, and how they start it.
+
+mysql_wire_integration.py imports this file. check.yml runs it as a script
+for the unit binary's live dialect check:
+
+  mysql_server.py start NAME SOCKET_DIR STATUS_FILE
+      `docker run --detach` (the pull included), with root's password from
+      RUI_TEST_MYSQL_ROOT_PASSWORD; writes the exit status to STATUS_FILE.
+  mysql_server.py wait NAME STATUS_FILE
+      fails when `start` failed, else blocks until the server is ready.
+
+The server runs the image's own settings, durability included, apart from
+how it keeps optimizer statistics (UNIT_SERVER_COMMAND). Its Unix
+socket is SOCKET_DIR/mysqld.sock, a directory shared with the host.
+
+It also holds the one pinned ProxySQL image, which `start_proxy` runs in
+front of a server through that same directory (store_rounds_cases.py).
+"""
 import os
 import subprocess
 import sys

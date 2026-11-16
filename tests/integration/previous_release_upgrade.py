@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Gate stopped-Store compatibility and installer activation of a running release."""
 import argparse
 import contextlib
 import hashlib

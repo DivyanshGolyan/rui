@@ -1,4 +1,18 @@
 #!/usr/bin/env python3
+"""Optional Markdown source formatting for cleaner diffs.
+
+Putting each sentence on its own source line can reduce merge conflicts when
+PRs edit different sentences in the same paragraph. This is source formatting,
+not a prose quality rule or a required repository layout.
+
+A CommonMark parser finds the paragraphs, so tables, code, HTML and headings
+are never touched. A paragraph's line breaks at a sentence end only where the
+paragraph still renders exactly as before, so a break can never open a list,
+end a link or land inside code.
+
+  python3 tests/ci/sentence_lines.py          # rewrite the documents in place
+  python3 tests/ci/sentence_lines.py --check  # name each document to rewrite
+"""
 import argparse
 from pathlib import Path
 import re

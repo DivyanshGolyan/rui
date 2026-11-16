@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+"""Keep CLI-owned failures classified without exposing Zig error names.
+
+Inventory only src/cli.zig, src/cli_args.zig, src/cli_grammar.zig, src/client.zig,
+src/preferences.zig, the host_start.zig compatibility shell and root-level src/caller_*.zig. The same predicate selects
+candidate coverage and trusted bootstrap sources. Pending can only shrink from
+the trusted origin/main merge base; before that tuple existed, bootstrap from
+those trusted CLI sources and the pinned Zig standard library, never from the
+candidate's pending names. After rollout only the trusted tuple's names that
+occur in the trusted CLI inventory remain eligible.
+
+Closed error sets are also checked by caller_error.of at compile time. Errors
+from other owners that widen to anyerror remain internal_unexpected, exit 1
+(unclassified); adding a Host-internal error must not require a CLI catalog edit.
+This is a source inventory, not transitive call-graph inference. Test blocks are
+excluded; helpers outside test blocks remain in scope. Comments and strings are
+never code.
+"""
 import argparse
 import json
 from pathlib import Path
