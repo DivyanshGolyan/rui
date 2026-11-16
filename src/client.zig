@@ -914,6 +914,48 @@ pub fn discoverUpgradeHosts(allocator: std.mem.Allocator, io: std.Io, cancellati
     return candidates.toOwnedSlice(allocator);
 }
 
+/// Process generation and retirement are independent of runtime/Store leases.
+/// A successful same-user census (which includes ps itself) proves absence;
+/// unknown, truncated or failed observations never do. Zombies have retired
+/// even when a foreground caller has not yet reaped them.
+pub fn upgradeGenerationRetired(allocator: std.mem.Allocator, io: std.Io, pid: c_int, started: u64, deadline: i128) !bool {
+    const identity = @import("host_identity.zig");
+    const before = identity.generation(pid) catch null;
+    var uid: [32]u8 = undefined;
+    const processes = try std.process.run(allocator, io, .{
+        .argv = &.{ "/bin/ps", "-u", try std.fmt.bufPrint(&uid, "{d}", .{std.c.geteuid()}), "-o", "pid=,stat=" },
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(4096),
+        .timeout = .{ .deadline = .{ .raw = .{ .nanoseconds = @intCast(deadline) }, .clock = .awake } },
+    });
+    defer allocator.free(processes.stdout);
+    defer allocator.free(processes.stderr);
+    if (!processes.term.success() or processes.stderr.len != 0) return error.HostProcessEnumerationFailed;
+    const after = identity.generation(pid) catch null;
+    return retirementReading(processes.stdout, pid, started, before, after);
+}
+
+fn retirementReading(bytes: []const u8, pid: c_int, started: u64, before: ?u64, after: ?u64) !bool {
+    if ((before != null and before.? != started) or (after != null and after.? != started)) return true;
+    var lines = std.mem.tokenizeScalar(u8, bytes, '\n');
+    var populated = false;
+    var state: ?[]const u8 = null;
+    while (lines.next()) |line| {
+        var fields = std.mem.tokenizeAny(u8, line, " \t\r");
+        const actual = std.fmt.parseInt(c_int, fields.next() orelse return error.HostProcessEnumerationFailed, 10) catch return error.HostProcessEnumerationFailed;
+        const status = fields.next() orelse return error.HostProcessEnumerationFailed;
+        if (actual <= 0 or status.len == 0 or fields.next() != null) return error.HostProcessEnumerationFailed;
+        populated = true;
+        if (actual == pid) {
+            if (state != null) return error.HostProcessEnumerationFailed;
+            state = status;
+        }
+    }
+    if (!populated) return error.HostProcessEnumerationFailed;
+    if (state) |status| return status[0] == 'Z' and before == started and after == started;
+    return true;
+}
+
 /// How long socket discovery retries a refused connect to a Store whose lease
 /// is still held: a live Host's full backlog refuses until it accepts.
 const refused_connect_retry_ns = 200 * std.time.ns_per_ms;
@@ -5870,4 +5912,16 @@ test "upgrade census merges socket hints and retains pathless identified failure
     try std.testing.expectEqual(@as(c_int, 42), candidates.items[0].result.observed.pid);
     try std.testing.expectEqual(@as(?c_int, 43), candidates.items[1].pid);
     try std.testing.expect(candidates.items[1].socket == null);
+}
+
+
+test "upgrade process retirement requires exact generation and complete census not lease release" {
+    const pid: c_int = 42;
+    const generation: u64 = 100;
+    for ([_][]const u8{ "42 S\n80 R\n", "42 Sl+\n80 R\n", "42 T\n80 R\n" }) |living| try std.testing.expect(!try retirementReading(living, pid, generation, generation, generation));
+    try std.testing.expect(try retirementReading("42 Z\n80 R\n", pid, generation, generation, generation));
+    try std.testing.expect(!try retirementReading("42 Z\n80 R\n", pid, generation, null, generation));
+    try std.testing.expect(try retirementReading("42 S\n80 R\n", pid, generation, generation + 1, generation + 1));
+    try std.testing.expect(try retirementReading("80 R\n", pid, generation, null, null));
+    for ([_][]const u8{ "", "42\n", "not-a-pid Z\n", "42 Z extra\n", "42 Z\n42 S\n" }) |malformed| try std.testing.expectError(error.HostProcessEnumerationFailed, retirementReading(malformed, pid, generation, generation, generation));
 }

@@ -127,11 +127,11 @@ fn readEvents(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, progr
 }
 
 fn receiveEntry(allocator: std.mem.Allocator, entries: *std.ArrayList(restart_all.Entry), entry: restart_all.Entry) !void {
-    const socket = if (entry.socket) |path| try decodePath(allocator, path) else null;
+    const socket = if (entry.socket) |path| try allocator.dupe(u8, path) else null;
     errdefer if (socket) |path| allocator.free(path);
-    const directory = if (entry.directory) |path| try decodePath(allocator, path) else null;
+    const directory = if (entry.directory) |path| try allocator.dupe(u8, path) else null;
     errdefer if (directory) |path| allocator.free(path);
-    const store = if (entry.store) |path| try decodePath(allocator, path) else null;
+    const store = if (entry.store) |path| try allocator.dupe(u8, path) else null;
     errdefer if (store) |path| allocator.free(path);
     var state = entry.state;
     if (state == .failed) state.failed.cause = try allocator.dupe(u8, state.failed.cause);
@@ -139,33 +139,9 @@ fn receiveEntry(allocator: std.mem.Allocator, entries: *std.ArrayList(restart_al
     try entries.append(allocator, .{ .socket = socket, .directory = directory, .pid = entry.pid, .store = store, .state = state });
 }
 
-// The private event boundary encodes routing paths as hex, never JSON text.
-// Entry remains an OS-byte domain value everywhere else. This is transport
-// encoding, not a persisted registry or a second discovery authority.
-fn encodePath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-    const hex = "0123456789abcdef";
-    const result = try allocator.alloc(u8, 2 * path.len);
-    for (path, 0..) |byte, index| {
-        result[2 * index] = hex[byte >> 4];
-        result[2 * index + 1] = hex[byte & 15];
-    }
-    return result;
-}
-
-fn decodePath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-    if (path.len % 2 != 0) return error.InvalidCoordinatorPath;
-    const result = try allocator.alloc(u8, path.len / 2);
-    errdefer allocator.free(result);
-    for (result, 0..) |*byte, index| {
-        byte.* = std.fmt.parseInt(u8, path[2 * index ..][0..2], 16) catch return error.InvalidCoordinatorPath;
-        if (byte.* == 0) return error.InvalidCoordinatorPath;
-    }
-    return result;
-}
-
+// std.json preserves OS-byte slices: valid UTF-8 is text; other bytes are
+// numeric arrays. Keep that existing codec, not a second hex/path protocol.
 fn writeEvent(value: Event, writer: *std.Io.Writer) !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
-    defer arena.deinit();
     var line: [@import("start_report.zig").max_line_bytes]u8 = undefined;
     var encoded = value;
     if (encoded == .entry) {
@@ -182,15 +158,6 @@ fn writeEvent(value: Event, writer: *std.Io.Writer) !void {
                 .failure_line = @import("start_report.zig").line(&refusal.failure, &line),
             } };
         }
-    }
-    if (encoded == .entry) {
-        if (encoded.entry.socket) |path| encoded.entry.socket = try encodePath(arena.allocator(), path);
-        if (encoded.entry.directory) |path| encoded.entry.directory = try encodePath(arena.allocator(), path);
-        if (encoded.entry.store) |path| encoded.entry.store = try encodePath(arena.allocator(), path);
-    } else if (encoded == .refused) {
-        if (encoded.refused.socket) |path| encoded.refused.socket = try encodePath(arena.allocator(), path);
-        if (encoded.refused.directory) |path| encoded.refused.directory = try encodePath(arena.allocator(), path);
-        if (encoded.refused.store) |path| encoded.refused.store = try encodePath(arena.allocator(), path);
     }
     try std.json.Stringify.value(encoded, .{}, writer);
 }
@@ -367,4 +334,9 @@ test "coordinator refusal envelopes preserve both stages and semantic failure fi
         try std.testing.expectEqual(failure.code, decoded.code);
         try std.testing.expectEqualStrings(failure.message.slice(), decoded.message.slice());
     }
+}
+
+
+test "coordinator task routing preserves OS bytes through the existing JSON slice codec" {
+    try expectRoundTrip(Task{ .home = "/home/\xff", .target = .{ .build = "/target/\xfe", .version = .{ .schema = 75, .patch = 1 } }, .report = .events });
 }

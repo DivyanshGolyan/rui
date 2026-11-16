@@ -233,20 +233,23 @@ fn stopObserved(io: std.Io, allocator: std.mem.Allocator, plan: *const Plan, con
 }
 
 fn retired(io: std.Io, allocator: std.mem.Allocator, plan: *const Plan) !bool {
-    const until = nowNanos(io) + product_defaults.host_shutdown_seconds * std.time.ns_per_s;
-    while (platform.StoreLease.observe(io, plan.sources.request.dir) != .unowned) {
-        // A concurrent starter may have acquired the lease after the old owner
-        // retired. Never stop it; public start can adopt, final proof decides.
-        if (client.observeUpgradePeer(allocator, io, plan.sources.request.dir, until)) |value| {
-            var peer = value;
-            defer peer.deinit(allocator);
-            if (peer.pid != plan.snapshot.pid or peer.started != plan.snapshot.started) return true;
-        } else |_| {}
-        if (!try sleepToward(io, until)) return false;
-    }
     // Runtime retirement is NOT proof of MySQL GET_LOCK release. Only the
     // replacement starter's Store acquisition/readiness can establish that.
-    return true;
+    const until = nowNanos(io) + product_defaults.host_shutdown_seconds * std.time.ns_per_s;
+    while (true) {
+        const process_retired = client.upgradeGenerationRetired(allocator, io, plan.snapshot.pid, plan.snapshot.started, until) catch false;
+        if (process_retired) {
+            if (platform.StoreLease.observe(io, plan.sources.request.dir) == .unowned) return true;
+            // A concurrent starter may have acquired the lease after the old
+            // generation retired. Never stop it: start adopts, proof decides.
+            if (client.observeUpgradePeer(allocator, io, plan.sources.request.dir, until)) |value| {
+                var peer = value;
+                defer peer.deinit(allocator);
+                if (peer.pid != plan.snapshot.pid or peer.started != plan.snapshot.started) return true;
+            } else |_| {}
+        }
+        if (!try sleepToward(io, until)) return false;
+    }
 }
 
 fn verify(init: std.process.Init, allocator: std.mem.Allocator, plan: *const Plan, executable: []const u8, version: candidate.Version, context: process.Context) !ActivationOutcome {
