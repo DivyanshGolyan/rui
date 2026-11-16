@@ -4,7 +4,7 @@ const installation_path = @import("installation_path.zig");
 const caller_error = @import("caller_error.zig");
 const ClientTask = @import("ClientTask.zig");
 const upgrade_status = @import("upgrade_status.zig");
-const test_poll = @import("testing/poll.zig");
+const test_poll = @import("test_poll");
 const Self = @This();
 
 pub const Outcome = @import("session_upgrade.zig").Outcome;

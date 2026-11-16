@@ -5158,7 +5158,8 @@ test "Upgrade runs inline: Esc cancels it before the draft, checking or preparin
     try expectEffects(&.{.cancel_upgrade}, try press(&state, .clear));
 
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } } });
-    try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", state.notice.?.text());
+    try std.testing.expect(state.notice == null);
+    try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", upgrade_status.line(state.upgrade.run.?, &buffer, .unicode).text);
     try expectEffects(&.{}, try step(&state, .start_upgrade));
     _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none } } } });
 

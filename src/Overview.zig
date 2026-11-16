@@ -4272,7 +4272,9 @@ test "Esc while Upgrade waits for a held archive keeps the cancel: nothing check
         try std.testing.expect(turns < 100);
         try overview.appUpgrade(&ctx);
     }
-    try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", overview.state.notice.?.text());
+    try std.testing.expect(overview.state.notice == null);
+    var cancellation_line: [upgrade_status.max_line_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", upgrade_status.line(overview.state.upgrade.run.?, &cancellation_line, .unicode).text);
     try std.testing.expect(overview.upgrade_report == null);
 }
 
@@ -4357,7 +4359,9 @@ test "a conversation's Upgrade waits for the conversation's running read, though
         try std.testing.expect(turns < 100);
         try overview.appUpgrade(&ctx);
     }
-    try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", overview.state.notice.?.text());
+    try std.testing.expect(overview.state.notice == null);
+    var cancellation_line: [upgrade_status.max_line_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", upgrade_status.line(overview.state.upgrade.run.?, &cancellation_line, .unicode).text);
     try std.testing.expect(overview.upgrade_report == null);
     frontend.leaving = .returned;
     try appSessionLeft(overview, &ctx, .returned);
