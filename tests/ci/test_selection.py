@@ -1,4 +1,5 @@
 import ast
+import errno
 import json
 import re
 import os
@@ -81,6 +82,59 @@ class BinarySourceSelectionTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
+    def write_binary(self, path, payload):
+        try:
+            return path.write_bytes(payload)
+        except OSError as error:
+            invalid_name = any(0xDC80 <= ord(char) <= 0xDCFF for char in path.name)
+            if error.errno == errno.EILSEQ and invalid_name:
+                self.skipTest("Filesystem rejects non-UTF-8 filenames")
+            raise
+
+    def test_binary_filename_guard_only_skips_unsupported_names(self):
+        for filename in ("image.bin", "image-é.bin", "image-\udcff.bin"):
+            for code in (errno.EILSEQ, errno.EACCES, errno.EIO):
+                with self.subTest(filename=filename, errno=code):
+                    error = OSError(code, "injected fixture creation failure")
+                    with patch.object(Path, "write_bytes", side_effect=error):
+                        if filename == "image-\udcff.bin" and code == errno.EILSEQ:
+                            with self.assertRaisesRegex(unittest.SkipTest, "Filesystem rejects"):
+                                self.write_binary(Path(filename), b"\x80")
+                        else:
+                            try:
+                                with self.assertRaises(OSError) as raised:
+                                    self.write_binary(Path(filename), b"\x80")
+                            except unittest.SkipTest as skipped:
+                                self.fail(f"Unexpected skip for {filename!r}, errno {code}: {skipped}")
+                            self.assertIs(raised.exception, error)
+
+    def test_rejecting_filesystem_keeps_valid_filename_cli_coverage(self):
+        write_bytes = Path.write_bytes
+        plan = BinarySourceSelectionTest.plan
+        plans = []
+
+        def reject_invalid_names(path, payload):
+            if "\udcff" in path.name:
+                raise OSError(errno.EILSEQ, "injected unsupported filename")
+            return write_bytes(path, payload)
+
+        def record_plan(case, root, base):
+            result = plan(case, root, base)
+            plans.append(result)
+            return result
+
+        suite = unittest.TestSuite(BinarySourceSelectionTest(method) for method in (
+            "test_binary_add_edit_delete_preserve_graph_fallback_and_asserted_text",
+            "test_unchanged_binary_beside_text_edit_preserves_asserted_text"))
+        result = unittest.TestResult()
+        with (patch.object(Path, "write_bytes", reject_invalid_names),
+              patch.object(BinarySourceSelectionTest, "plan", record_plan)):
+            suite.run(result)
+        self.assertEqual(result.errors, [])
+        self.assertEqual(result.failures, [])
+        self.assertEqual(len(result.skipped), 7)  # Six changed paths and one unchanged path.
+        self.assertEqual(len(plans), 19)  # Eighteen valid-name changes and one unchanged binary.
+
     def test_binary_add_edit_delete_preserve_graph_fallback_and_asserted_text(self):
         payload = b'"A binary fixture draws this message"\r\n' + bytes(range(256))
         for filename in ("octets.bin", "pixel.png", "octets.zig", "octets-\udcff.bin"):
@@ -94,12 +148,12 @@ class BinarySourceSelectionTest(unittest.TestCase):
                         asset = root / path
                         asset.parent.mkdir(parents=True)
                         if change != "add":
-                            asset.write_bytes(payload)
+                            self.write_binary(asset, payload)
                         base = self.commit(root)
                         if change == "delete":
                             asset.unlink()
                         else:
-                            asset.write_bytes(payload + (b"\x80edited" if change == "edit" else b""))
+                            self.write_binary(asset, payload + (b"\x80edited" if change == "edit" else b""))
                         self.commit(root)
                         plan = self.plan(root, base)
                         expected = ({"test-native", "host-launch-integration", "login-signal-integration", "stack-frames"}
@@ -113,19 +167,20 @@ class BinarySourceSelectionTest(unittest.TestCase):
                                       if graph else "Source no import or rule reaches: full fallback", plan["reasons"])
 
     def test_unchanged_binary_beside_text_edit_preserves_asserted_text(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            self.repository(root, 'const render = @import("render.zig");\n')
-            (root / "src/unchanged-\udcff.bin").write_bytes(bytes(range(256)))
-            render = root / "src/render.zig"
-            render.write_bytes(b'const label = "A binary fixture draws this message";\r\n')
-            base = self.commit(root)
-            render.write_bytes(render.read_bytes() + b"// textual edit\r")
-            self.commit(root)
-            plan = self.plan(root, base)
-            self.assertEqual(set(plan["targets"]), {"test-native", "host-launch-integration", "login-signal-integration"})
-            self.assertEqual(set(plan["native_targets"]), {"test-native", "host-launch-integration"})
-            self.assertIn("Asserted text: a fixture waits for text this file draws", plan["reasons"])
+        for filename in ("unchanged.bin", "unchanged-\udcff.bin"):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.repository(root, 'const render = @import("render.zig");\n')
+                self.write_binary(root / "src" / filename, bytes(range(256)))
+                render = root / "src/render.zig"
+                render.write_bytes(b'const label = "A binary fixture draws this message";\r\n')
+                base = self.commit(root)
+                render.write_bytes(render.read_bytes() + b"// textual edit\r")
+                self.commit(root)
+                plan = self.plan(root, base)
+                self.assertEqual(set(plan["targets"]), {"test-native", "host-launch-integration", "login-signal-integration"})
+                self.assertEqual(set(plan["native_targets"]), {"test-native", "host-launch-integration"})
+                self.assertIn("Asserted text: a fixture waits for text this file draws", plan["reasons"])
 
     def test_unchanged_binary_files_count_toward_asserted_text_prevalence(self):
         for binary_count in (1, 2):
