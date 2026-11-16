@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Rui Host",
-    "version": "20",
+    "version": "21",
     "description": "The Rui Host's local protocol: HTTP/1.1 over the Unix socket of a running Host, one POST per request, generated from the Host's own wire types.\n\nRequest bodies list their fields in the order this document lists them; the Host refuses another order. Numbers that may exceed 2^53 travel as decimal strings. String bounds are in UTF-8 bytes (`x-rui-max-bytes`)."
   },
   "paths": {
@@ -440,6 +440,69 @@
                   "anyOf": [
                     {
                       "$ref": "#/components/schemas/SessionPinConflictReply"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorReply"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A refusal or failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorReply"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/control/session-group": {
+      "post": {
+        "operationId": "sessionGroup",
+        "summary": "Assigns, leaves, automatically groups, renames or folds a Session group. Retried by its key.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WireVersion"
+          },
+          {
+            "$ref": "#/components/parameters/HostInstance"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionGroupRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The reply.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionGroupReply"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The key was used before with different input (the conflict reply), or the request names another Store or Host instance (a refusal).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/SessionGroupConflictReply"
                     },
                     {
                       "$ref": "#/components/schemas/ErrorReply"
@@ -1310,7 +1373,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "type": {
             "const": "action_background_reply"
@@ -1359,7 +1422,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "action_background_reply"
@@ -1423,7 +1486,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "action_background_reply"
@@ -1481,7 +1544,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "action_background"
@@ -1519,7 +1582,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "activity_content"
@@ -2699,7 +2762,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "activity_page"
@@ -2767,7 +2830,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "activity_page"
@@ -2795,7 +2858,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "activity_page"
@@ -2981,7 +3044,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "type": {
             "const": "activity_search"
@@ -3015,7 +3078,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "activity_search"
@@ -3339,7 +3402,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "type": {
             "const": "configuration_reply"
@@ -3401,7 +3464,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "configuration_reply"
@@ -3465,7 +3528,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "configuration_reply"
@@ -3537,7 +3600,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "configuration_reply"
@@ -3645,7 +3708,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "configure"
@@ -3694,7 +3757,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "conversation_content"
@@ -3739,7 +3802,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "conversation_page"
@@ -4048,7 +4111,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "conversation_page"
@@ -4367,7 +4430,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "conversation_page"
@@ -4412,7 +4475,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "type": {
             "type": "string",
@@ -4477,11 +4540,37 @@
         ],
         "additionalProperties": false
       },
+      "GroupBrief": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 100,
+            "x-rui-max-bytes": 100
+          },
+          "collapsed": {
+            "type": "boolean"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Decimal"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "collapsed",
+          "revision"
+        ],
+        "additionalProperties": false
+      },
       "HostInfoReply": {
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "type": {
             "const": "host_info"
@@ -4593,7 +4682,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "host_info"
@@ -4615,7 +4704,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "type": {
             "const": "host_pause_reply"
@@ -4635,7 +4724,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "host_pause"
@@ -5435,7 +5524,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "type": {
             "const": "host_stop_reply"
@@ -5455,7 +5544,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "host_stop"
@@ -5479,7 +5568,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "session_report"
@@ -5582,7 +5671,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "session_report"
@@ -5681,7 +5770,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "session_report"
@@ -5734,7 +5823,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "session_report"
@@ -5783,7 +5872,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "kind": {
                 "const": "inspect_session"
@@ -5823,7 +5912,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "kind": {
                 "const": "inspect_session"
@@ -5855,7 +5944,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "kind": {
                 "const": "inspect_session"
@@ -5928,7 +6017,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "session_list"
@@ -5982,7 +6071,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "session_list"
@@ -6038,7 +6127,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "session_list"
@@ -6081,7 +6170,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "list_sessions"
@@ -6144,7 +6233,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "type": {
             "const": "message_reply"
@@ -6256,7 +6345,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "message_reply"
@@ -6351,7 +6440,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "message_reply"
@@ -6482,7 +6571,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "message"
@@ -6581,7 +6670,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "type": {
             "const": "model_interruption_reply"
@@ -6643,7 +6732,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "model_interruption_reply"
@@ -6699,7 +6788,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "model_interruption_reply"
@@ -6769,7 +6858,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "model_interruption"
@@ -6869,7 +6958,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "type": {
             "const": "model_list"
@@ -6892,7 +6981,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "model_list"
@@ -6943,7 +7032,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "command_observation"
@@ -6986,7 +7075,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "command_observation"
@@ -7166,7 +7255,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "command_observation"
@@ -10444,7 +10533,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "command_observation"
@@ -10690,7 +10779,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "command_observation"
@@ -10896,7 +10985,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "command_observation"
@@ -11106,7 +11195,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "command_observation"
@@ -11312,7 +11401,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "command_observation"
@@ -11484,7 +11573,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "command_observation"
@@ -11742,7 +11831,111 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
+              },
+              "type": {
+                "const": "command_observation"
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "delta": {
+                "const": "full"
+              },
+              "since": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 60,
+                    "x-rui-max-bytes": 60
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "observation": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "session_group"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "session_group"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "code": {
+                        "type": "string",
+                        "maxLength": 96,
+                        "x-rui-max-bytes": 96
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "code"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "key",
+              "delta",
+              "since",
+              "observation"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "21"
               },
               "type": {
                 "const": "command_observation"
@@ -11776,7 +11969,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "observe_command"
@@ -11920,7 +12113,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "type": {
             "const": "permission_decision_reply"
@@ -11977,7 +12170,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "permission_decision_reply"
@@ -12028,7 +12221,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "permission_decision_reply"
@@ -12093,7 +12286,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "permission_decision"
@@ -12163,7 +12356,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "read_action_arguments"
@@ -12195,7 +12388,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "read_action_call_id"
@@ -12229,7 +12422,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "action_read"
@@ -12268,7 +12461,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "action_read"
@@ -12364,7 +12557,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "read_action"
@@ -12399,7 +12592,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "read_result"
@@ -12427,7 +12620,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "type": {
             "const": "session_archive_reply"
@@ -12485,7 +12678,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "session_archive_reply"
@@ -12545,7 +12738,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "session_archive_reply"
@@ -12608,7 +12801,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "session_archive"
@@ -12641,11 +12834,366 @@
         ],
         "additionalProperties": false
       },
+      "SessionGroupConflictReply": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "21"
+          },
+          "type": {
+            "const": "session_group_reply"
+          },
+          "answer": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "const": "conflict"
+              },
+              "replayed": {
+                "const": false
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "code": {
+                "const": "idempotency_key_conflict"
+              }
+            },
+            "required": [
+              "status",
+              "replayed",
+              "session",
+              "code"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "version",
+          "type",
+          "answer"
+        ],
+        "additionalProperties": false
+      },
+      "SessionGroupReply": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "21"
+              },
+              "type": {
+                "const": "session_group_reply"
+              },
+              "answer": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "accepted"
+                  },
+                  "replayed": {
+                    "type": "boolean"
+                  },
+                  "session": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "x-rui-max-bytes": 128
+                  }
+                },
+                "required": [
+                  "status",
+                  "replayed",
+                  "session"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "answer"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "21"
+              },
+              "type": {
+                "const": "session_group_reply"
+              },
+              "answer": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "rejected"
+                  },
+                  "replayed": {
+                    "type": "boolean"
+                  },
+                  "session": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "x-rui-max-bytes": 128
+                  },
+                  "code": {
+                    "type": "string",
+                    "enum": [
+                      "invalid_session_reference",
+                      "unknown_session",
+                      "invalid_group_name",
+                      "unknown_group",
+                      "group_name_exists",
+                      "invalid_group_id"
+                    ]
+                  }
+                },
+                "required": [
+                  "status",
+                  "replayed",
+                  "session",
+                  "code"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "answer"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "SessionGroupRequest": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "21"
+              },
+              "kind": {
+                "const": "session_group"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "group_action": {
+                "const": "assign"
+              },
+              "group_name": {
+                "type": "string",
+                "maxLength": 100,
+                "x-rui-max-bytes": 100
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "key",
+              "session",
+              "group_action",
+              "group_name"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "21"
+              },
+              "kind": {
+                "const": "session_group"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "group_action": {
+                "const": "leave"
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "key",
+              "session",
+              "group_action"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "21"
+              },
+              "kind": {
+                "const": "session_group"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "group_action": {
+                "const": "automatic"
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "key",
+              "session",
+              "group_action"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "21"
+              },
+              "kind": {
+                "const": "session_group"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "group_action": {
+                "const": "rename"
+              },
+              "group_id": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "group_name": {
+                "type": "string",
+                "maxLength": 100,
+                "x-rui-max-bytes": 100
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "key",
+              "session",
+              "group_action",
+              "group_id",
+              "group_name"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "21"
+              },
+              "kind": {
+                "const": "session_group"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "group_action": {
+                "const": "collapse"
+              },
+              "group_id": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "collapsed": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "key",
+              "session",
+              "group_action",
+              "group_id",
+              "collapsed"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
       "SessionPinConflictReply": {
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "type": {
             "const": "session_pin_reply"
@@ -12690,7 +13238,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "session_pin_reply"
@@ -12733,7 +13281,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "session_pin_reply"
@@ -12784,7 +13332,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "session_pin"
@@ -12842,6 +13390,19 @@
                 "type": "null"
               }
             ]
+          },
+          "group": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GroupBrief"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "group_manual": {
+            "type": "boolean"
           },
           "reference": {
             "type": "string",
@@ -12948,6 +13509,8 @@
           "read_version",
           "archive_state",
           "pin_order",
+          "group",
+          "group_manual",
           "reference",
           "workspace",
           "provider",
@@ -12970,7 +13533,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "type": {
             "const": "session_stop_reply"
@@ -13028,7 +13591,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "session_stop_reply"
@@ -13108,7 +13671,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "type": {
                 "const": "session_stop_reply"
@@ -13170,7 +13733,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "kind": {
             "const": "session_stop"
@@ -13249,7 +13812,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "20"
+            "const": "21"
           },
           "type": {
             "const": "skill_suggestions"
@@ -13301,7 +13864,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "kind": {
                 "const": "skill_suggestions"
@@ -13335,7 +13898,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "20"
+                "const": "21"
               },
               "kind": {
                 "const": "skill_suggestions"
@@ -15220,7 +15783,7 @@
         "description": "The wire version this document describes. Any other version is refused.",
         "schema": {
           "type": "string",
-          "const": "20"
+          "const": "21"
         }
       },
       "HostInstance": {

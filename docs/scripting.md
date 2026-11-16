@@ -134,11 +134,63 @@ The other Session replies with an ordinary `session send --to ID`.
 
 An agent can label its own Session: `rui session configure --store "$RUI_STORE" --session "$RUI_ADDRESS" --label "Fix the flaky resize test"`.
 `--label ""` clears it.
-A Label is display text: it never addresses a Session or reaches the model.
+A Label names the chat and supplies the first automatic topic-grouping signal.
+It never addresses a Session or reaches the model.
+Later Label changes keep the saved grouping decision until you explicitly reset it.
+
+## Organize Sessions
+
+To move one Session into a named group, run:
+
+```sh
+rui session group --store "$STORE" --session "$SESSION" --mode assign --name "Storage migration"
+```
+
+Rui creates the exact name if absent and saves the assignment as a manual choice.
+Other members, including agent children, stay where they are.
+To leave the group and keep this chat ungrouped, run:
+
+```sh
+rui session group --store "$STORE" --session "$SESSION" --mode leave
+```
+
+To clear that choice and evaluate automatic grouping again, run:
+
+```sh
+rui session group --store "$STORE" --session "$SESSION" --mode automatic
+```
+
+To find the saved group ID, run `rui session list --store "$STORE" --all` and read the member's `group.id`.
+Set `GROUP` to that ID.
+To rename that group, run:
+
+```sh
+rui session group --store "$STORE" --session "$SESSION" --mode rename --group "$GROUP" --name "Migration work"
+```
+
+To collapse the group for clients using the same Store, run:
+
+```sh
+rui session group --store "$STORE" --session "$SESSION" --mode collapse --group "$GROUP" --collapsed true
+```
+
+Use `--collapsed false` to expand it.
+Every mode requires `--session`; rename and collapse also require the target `--group` ID.
+Group IDs stay stable across rename, and names are unique within the Store.
+Names, membership, collapse, and manual choices survive Host restart and moving the same Store.
+These commands use the ordinary saved-request recovery protocol and send no model Message.
+
+Automatic grouping uses a child's birth creator independently of parent attachment.
+It inherits the creator's group or makes a family when eligible.
+A creator's explicit leave suppresses automatic family creation for its new child.
+Independent chats match only high-confidence references or identical salient word sets in the exact same Workspace.
+See [Grouping Sessions](contracts/sessions.md#grouping-sessions) for the classifier's bounds and [Group Sessions](using-rui.md#group-sessions) for terminal controls.
 
 ## Watch Sessions
 
 `rui session list` reports each unarchived Session's Label, archive state, work state and when that began, who sent its first Message, and when a person or script last wrote to it.
+Each row also carries nullable `group` metadata (`id`, `name`, `collapsed`, and `revision`) and `group_manual`.
+A null `group` with `group_manual:true` is an explicit leave, not an invitation to regroup.
 Use `--archived` for archived Sessions or `--include-archived` for both.
 `--all` still selects every Workspace.
 

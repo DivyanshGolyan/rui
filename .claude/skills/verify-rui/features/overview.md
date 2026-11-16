@@ -9,6 +9,7 @@ Overview lists saved chats under **Sessions**, with **+ New Session**, **Archive
 - Finished and working chats without a message from you appear dimmer. Chats needing approval stay prominent.
 - Left from an empty draft focuses the list beside a wide chat. Right on the open row returns to its input. Clicking the list or chat also moves focus.
 - Alt-Up/Alt-Down switch chats. Ctrl-X stops work on the selected chat; Alt-A archives it.
+- Group headers show the group name and member count. Click or press Enter to fold a group. Left folds and Right expands the selected header.
 
 ## How to get to it (user POV)
 
@@ -18,11 +19,17 @@ Run `rui` in a project. Press Esc from a chat at its latest messages to return t
 
 Capture the states listed below with `$V frames FULLSHA --only quiet-person,quiet-overview,quiet-sidebar,start-empty,start,list-hover,settings-hover,start-busy,overview-printable-ignored,long-labels,many-sessions,many-sessions-middle,many-sessions-end,many-sessions-pinned-end,chat-no-new-session,chat-sidebar-rows,focus-chat,left-to-list,focus-list-A,list-to-chat`.
 
-Frame states: `quiet-person`, `quiet-overview`, `quiet-sidebar`, `start-empty`, `start`, `list-hover`, `settings-hover`, `start-busy`, `overview-printable-ignored`, `long-labels`, `many-sessions`, `many-sessions-middle`, `many-sessions-end`, `many-sessions-pinned-end`, `chat-no-new-session`, `chat-sidebar-rows`, `focus-chat`, `left-to-list`, `focus-list-A`, `list-to-chat`
+Frame states: `quiet-person`, `quiet-overview`, `quiet-sidebar`, `start-empty`, `start`, `list-hover`, `settings-hover`, `start-busy`, `overview-printable-ignored`, `long-labels`, `many-sessions`, `many-sessions-middle`, `many-sessions-end`, `many-sessions-pinned-end`, `chat-no-new-session`, `chat-sidebar-rows`, `focus-chat`, `left-to-list`, `focus-list-A`, `list-to-chat`, `session-groups-auto`, `session-groups-collapsed`, `session-groups-expanded`, `session-groups-sidebar`
 
 Compare 140×40 with 46×30. Check pinned actions at the middle and end of a long list. Compare the caret and selected row before Left and after Right; the open chat's messages must stay in place. Hover must leave the selected row unchanged.
 
+For grouping, capture `session-groups-auto,session-groups-collapsed,session-groups-expanded,session-groups-sidebar` at both sizes. The cast uses the same workspace and the exact informative words `renderer` and `input`. Confirm that the header appears above all three members, its count survives collapse, and the expanded sidebar matches Overview. The state opens a member before returning to Overview so earlier fixtures cannot leave its group off screen.
+
+For a manual grouping journey, create a fresh run and record each public CLI result alongside its committed PTY frame. Use `rui session group --session ID --mode assign --name "Review work" --store STORE`, then `--mode leave`. Restart the fixture-owned Host with `$V restart-host RUN`. Check `rui session list --all --store STORE` before and after restart for the same `group` and `group_manual` values. Finally, use `--mode automatic` and verify that the Session returns to its topic group with `group_manual` false. Run the whole sequence separately at 140×40 and 46×30.
+
 ## Gotchas
+
+A cast entry's `sender` relays a Message to an independently created Session. Use a real agent-creation path when verifying creator-family inheritance. The topic fixtures prove exact label grouping.
 
 Overview has no input. Typing text or `/` there does nothing. Left from an empty draft only moves to a list when that list is visible; Esc leaves the chat at either width.
 

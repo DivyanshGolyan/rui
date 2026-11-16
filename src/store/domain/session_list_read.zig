@@ -185,6 +185,7 @@ const settings_columns = "session.session_ref,session.parent_ref,session.workspa
     command_domain.archive_state_sql ++ " AS archive_state," ++
     "(SELECT pin_command.command_seq FROM session_pin pin JOIN core_command pin_command ON pin_command.command_key=pin.command_key WHERE pin.session_ref=session.session_ref) AS pin_order," ++
     "(" ++ report_domain.person_message_sql ++ ") AS from_person_at," ++
+    "group_member.group_id,group_member.manual AS group_manual,listed_group.name AS group_name,listed_group.collapsed AS group_collapsed,listed_group.revision AS group_revision," ++
     last_line_columns ++ ",";
 
 const last_line_columns =
@@ -196,7 +197,8 @@ const last_line_columns =
 const last_line_joins = " LEFT JOIN turn last_turn ON last_turn.turn_id=(SELECT turn_id FROM turn @index(turn_session_latest) " ++
     "WHERE session_ref=session.session_ref AND outcome_code IS NOT NULL ORDER BY turn_id DESC LIMIT 1) " ++
     "LEFT JOIN action_operation awaiting ON awaiting.action_id=?2 " ++
-    "LEFT JOIN model_tool_call awaiting_call ON awaiting_call.operation_id=awaiting.parent_operation_id AND awaiting_call.call_ordinal=awaiting.call_ordinal ";
+    "LEFT JOIN model_tool_call awaiting_call ON awaiting_call.operation_id=awaiting.parent_operation_id AND awaiting_call.call_ordinal=awaiting.call_ordinal " ++
+    "JOIN session_group_member group_member ON group_member.session_ref=session.session_ref LEFT JOIN session_group listed_group ON listed_group.group_id=group_member.group_id ";
 
 const list_row = rsql.Read(.{
     .sql = "SELECT " ++ settings_columns ++ report_domain.first_message_columns ++ " FROM session " ++
@@ -229,6 +231,11 @@ const ListRow = struct {
     archive_state: session_archive.State,
     pin_order: ?rsql.Positive,
     from_person_at: ?rsql.Positive,
+    group_id: ?rsql.Positive,
+    group_manual: bool,
+    group_name: ?@import("../../session_group.zig").Name,
+    group_collapsed: ?bool,
+    group_revision: ?rsql.Positive,
     last_turn_position: ?rsql.Positive,
     last_answer: ?rsql.Blob(1024),
     last_approval_position: ?rsql.Positive,
@@ -319,6 +326,8 @@ fn rowValues(rows: []const ShownRow, index: usize, now_ms: u64, row: *const List
     return .{
         .archive_state = row.archive_state,
         .pin_order = if (row.pin_order) |rank| rank.get() else null,
+        .group = try groupBrief(row),
+        .group_manual = row.group_manual,
         .reference = row.session_ref.slice(),
         .parent = if (row.parent_ref) |*parent| parent.slice() else null,
         .workspace = row.workspace.slice(),
@@ -391,3 +400,10 @@ pub const LastLineRead = struct {
         } else null } else null;
     }
 };
+
+fn groupBrief(row: *const ListRow) error{CorruptStore}!?@import("../../session_group.zig").Brief {
+    const id = row.group_id orelse return null;
+    const name = row.group_name orelse return error.CorruptStore;
+    if (!@import("../../session_group.zig").validName(name.slice())) return error.CorruptStore;
+    return .{ .id = id.get(), .name = name, .collapsed = row.group_collapsed orelse return error.CorruptStore, .revision = (row.group_revision orelse return error.CorruptStore).get() };
+}

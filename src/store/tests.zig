@@ -108,6 +108,7 @@ const tool_continuation_selection = model_admission_domain.tool_continuation_sel
 const output_metadata_record_bytes = output_format.output_metadata_record_bytes;
 
 test {
+    _ = @import("group_tests.zig");
     _ = @import("domain/configuration.zig");
     _ = @import("domain/session_obligation.zig");
     _ = @import("rsql.zig");
@@ -1122,6 +1123,7 @@ pub const EntryPoint = enum {
     stopSession,
     archiveSession,
     pinSession,
+    groupSession,
     interruptModel,
     decidePermission,
     observeCommand,
@@ -1190,6 +1192,7 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .stopSession = 2,
     .archiveSession = 2,
     .pinSession = 3,
+    .groupSession = 3,
     .interruptModel = 2,
     .decidePermission = 2,
     .observeCommand = 3,

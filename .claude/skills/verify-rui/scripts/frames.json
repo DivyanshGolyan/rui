@@ -4428,6 +4428,171 @@
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
+    },
+    {
+      "name": "session-groups-auto",
+      "note": "Exact topic labels in one workspace share the Store-selected group; return from a member to keep the group in view after earlier fixtures.",
+      "open": "Renderer input",
+      "cast": [
+        {
+          "label": "Renderer input",
+          "workspace": "code/renderer",
+          "mode": "bypass",
+          "messages": [
+            "Seed coordinator"
+          ]
+        },
+        {
+          "label": "Input renderer tests",
+          "workspace": "code/renderer",
+          "mode": "bypass",
+          "messages": [
+            "Seed renderer checks"
+          ]
+        },
+        {
+          "label": "Verify renderer input",
+          "workspace": "code/renderer",
+          "mode": "bypass",
+          "messages": [
+            "Seed input checks"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "wait": "Ready."
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "wait": "Input renderer tests"
+        },
+        {
+          "wait": "Verify renderer input"
+        },
+        {
+          "wait": "▾ Renderer input"
+        }
+      ],
+      "expect": [
+        "▾ Renderer input",
+        "Input renderer tests",
+        "Verify renderer input",
+        "Settings"
+      ]
+    },
+    {
+      "name": "session-groups-collapsed",
+      "note": "One header click folds the shared group without removing its identity or member count.",
+      "open": "Renderer input",
+      "steps": [
+        {
+          "wait": "Ready."
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "wait": "▾ Renderer input"
+        },
+        {
+          "mouse": {
+            "at": "Renderer input",
+            "do": "click"
+          }
+        },
+        {
+          "wait": "▸ Renderer input"
+        }
+      ],
+      "expect": [
+        "▸ Renderer input",
+        "Settings"
+      ],
+      "absent": [
+        "Input renderer tests",
+        "Verify renderer input"
+      ]
+    },
+    {
+      "name": "session-groups-expanded",
+      "note": "Header click and Left/Right use the same group disclosure owner; the final expanded rows remain available.",
+      "open": "Renderer input",
+      "steps": [
+        {
+          "wait": "Ready."
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "wait": "▸ Renderer input"
+        },
+        {
+          "mouse": {
+            "at": "Renderer input",
+            "do": "click"
+          }
+        },
+        {
+          "wait": "Input renderer tests"
+        },
+        {
+          "keys": [
+            "Left"
+          ]
+        },
+        {
+          "wait": "▸ Renderer input"
+        },
+        {
+          "keys": [
+            "Right"
+          ]
+        },
+        {
+          "wait": "▾ Renderer input"
+        },
+        {
+          "wait": "Verify renderer input"
+        }
+      ],
+      "expect": [
+        "▾ Renderer input",
+        "Input renderer tests",
+        "Verify renderer input",
+        "Settings"
+      ]
+    },
+    {
+      "name": "session-groups-sidebar",
+      "note": "The wide conversation sidebar shares the expanded group projection; the narrow screen keeps the conversation.",
+      "open": "Renderer input",
+      "steps": [
+        {
+          "wait": "Ready."
+        },
+        {
+          "wait": "▾ Renderer input",
+          "min_columns": 140
+        },
+        {
+          "wait": "Input renderer tests",
+          "min_columns": 140
+        }
+      ],
+      "expect": [
+        "Ready.",
+        "alt+i info"
+      ]
     }
   ]
 }

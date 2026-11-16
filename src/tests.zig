@@ -1,4 +1,6 @@
 test {
+    _ = @import("session_group.zig");
+    _ = @import("session_group_topic.zig");
     _ = @import("InputCapture.zig");
     _ = @import("host_start.zig");
     _ = @import("server_mcp_settings.zig");

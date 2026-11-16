@@ -20,6 +20,10 @@ Enter these at the chat’s `›` prompt. The overview has no input or slash com
 | `/archive` | Stops active work and archives this Session, confirming when required. |
 | `/unarchive` | Restores this chat without restarting work. |
 | `/rename NAME` | Names this Session. |
+| `/group NAME` | Moves this chat to the named group, creating it if needed. |
+| `/ungroup` | Leaves the group and keeps this chat ungrouped. |
+| `/autogroup` | Resets this chat to automatic grouping. |
+| `/group-rename NAME` | Renames this chat's group for all its members. |
 | `/copy [code\|file]` | Copies the last answer; `code` copies its last code block; `file` saves the answer here. |
 | `/effort LEVEL` | Changes this chat’s effort and also sets the default for new chats. |
 | `/model` | Opens this Session’s model picker, the same one as the footer model button and chat info. Choose a model to save it. |
@@ -115,13 +119,13 @@ If that happens, run your terminal's reset command.
 ## Sessions
 
 Rui calls a saved conversation a **Session**.
-Bare `rui` opens the overview of unarchived Sessions in this Store; each row shows its project.
-The pinned **+ New Session** row always shows a quiet **Archived** at its right end, which opens the archived Sessions inside the overview (see [Archive Sessions](#archive-sessions)).
+Bare `rui` opens the overview of unarchived Sessions in this Store, organized into named groups and ungrouped chats.
+The **Sessions** and **Archived** tabs sit below the fixed **+ New Session** row (see [Archive Sessions](#archive-sessions)).
 Select the pinned **+ New Session** at the top with Home, then Enter, or click it, to create an empty Session and open its focused chat input.
 Creating it sends configuration only: it has no Messages until you type and send one in the chat.
-Sessions without a first Message are omitted from the list, except for the currently open chat’s selected row in a wide sidebar.
+Sessions without a first Message are omitted from the list, except for pinned chats and the currently open chat in a wide sidebar.
 That row is named **New Session**, never its raw reference; after the first Message is admitted it uses the normal conversation name.
-Leaving an empty chat hides its row even after changing its model or effort; the configured Session stays stored and remains available to CLI list, inspect and resume.
+Leaving an unpinned empty chat hides its row even after changing its model or effort; the configured Session stays stored and remains available to CLI list, inspect and resume.
 The empty chat footer shows its model, effort and folder; model and effort are buttons for changing that Session’s settings.
 An existing populated chat keeps its usual footer.
 Enter on a Session row opens it, and Esc returns to the overview.
@@ -131,10 +135,11 @@ The overview list uses the full width at every terminal size, with no empty chat
 
 | Key in the overview | What it does |
 | --- | --- |
-| Up, Down, Home, End | Move through the whole list, including pinned **+ New Session** and **Settings**. |
+| Up, Down, Home, End | Move through visible chats, group headers, **+ New Session**, view tabs, and **Settings**. |
 | Shift-Up, Shift-Down | Select the row above or below. |
-| Right, Left | On **+ New Session**, Right selects **Archived**, and Left goes back to **New Session**. Right on a Session row opens it, as Enter does. |
-| Enter | Opens the selected Session, creates an empty chat from **+ New Session**, or opens **Settings**. On **Archived** it opens the archived Sessions, or from there returns to the usual list; a click on **Archived** does the same, and a click elsewhere on the row is still **New Session**. In Settings, open **Model** to pick the default for future Sessions. |
+| Right, Left | Move between the view tabs. Right opens a Session or expands a group. Left on an unpinned member selects and collapses its group; Left on a header collapses it. |
+| Enter | Opens the selected Session, toggles a group, creates an empty chat from **+ New Session**, selects a view tab, or opens **Settings**. |
+| Alt-Up, Alt-Down | Opens the previous or next visible chat, skipping headers and collapsed children. |
 | Esc, Ctrl-G | Closes the topmost choice or panel, and in the archived Sessions returns to the usual list; no draft or per-start settings exist to clear. |
 | Ctrl-X | Stops the selected Session’s work through the same request owner as the CLI. |
 | Ctrl-D, Ctrl-C | Leaves. |
@@ -146,7 +151,7 @@ A rejected creation shows its failure; an unconfirmed creation retains its origi
 A stop works like `rui session stop`: if its reply is lost, the overview says it is not sure the Session stopped, and prints the `rui request recover` command when you leave.
 To stop every Session that Ctrl-X could stop at once, run `rui session stop --all`.
 A stop still waiting to be sent when you leave is reported as not sent.
-The overview holds at most eight creation, stop, archive, restore, pin, and unpin requests awaiting answers, and refuses more until one is answered.
+The overview holds at most eight creation, stop, archive, restore, pin, unpin, and group requests awaiting answers, and refuses more until one is answered.
 Sessions the stopped Session messaged keep running.
 
 The overview paints its own colours, in khadi: an indigo ground with cotton text on a dark terminal, a cotton ground with indigo ink on a light one.
@@ -197,6 +202,43 @@ rui session pin --session SESSION_REF
 rui session unpin --session SESSION_REF
 ```
 
+### Group Sessions
+
+Rui automatically groups chats about the same clearly identified topic in the same Workspace.
+For example, **Fix session grouping** and **Test session grouping** match after task words are removed.
+Exact GitHub issue or pull-request links and tickets such as **AUTH-123** take priority.
+Generic names, conflicting references, and different salient words stay separate.
+A later chat rename keeps the saved group.
+An expanded automatic group with one eligible chat appears as a normal flat row until another member is visible.
+Manual groups and saved collapsed groups keep their singleton headers.
+
+New agent chats inherit their creator's current group.
+If the creator has no group, Rui makes a family group for the creator and child, unless the creator explicitly left grouping.
+An explicit move changes only one chat, so you can separate a child from its family.
+
+To move the current chat, enter `/group Storage migration`.
+Rui creates **Storage migration** if that exact name does not exist.
+To keep the chat ungrouped, enter `/ungroup`.
+That choice survives new labels and Host restart.
+To evaluate automatic grouping again, enter `/autogroup`.
+To rename the chat's whole group, enter `/group-rename Migration work`.
+Group names are unique within the Store and accept up to 100 UTF-8 bytes.
+
+Click a group header or select it and press Enter to collapse or expand it.
+Left collapses a group; on an unpinned member, Left also selects its header.
+Right expands a selected header.
+Collapse keeps an open chat and its draft intact; its header highlights while that chat is hidden.
+Alt-Up and Alt-Down switch among visible chats and skip collapsed children.
+
+Pinned chats stay in the global pinned strip and appear only once.
+A group's header count includes its matching unpinned members.
+A visible header's status summary also includes matching pinned members and collapsed children, so attention and failures remain visible.
+A group with no matching unpinned members has no header in that view.
+
+Names, membership, manual choices, and collapse state are shared by clients using the Store.
+They survive Host restart and moving the same Store.
+For shell commands, see [Organize Sessions](scripting.md#organize-sessions).
+
 ### Archive Sessions
 
 Select a Session in the overview and press **Alt+A**.
@@ -207,8 +249,9 @@ Alt+A keeps your draft intact.
 For **Stop and archive**, press Enter to confirm or Esc to cancel; neither sends or clears your draft.
 
 The overview shows unarchived Sessions; its former `/sessions`, `/archive`, `/unarchive` and other overview slash commands are gone.
-The pinned **+ New Session** row always shows **Archived** at its right end, including in the conversation sidebar and when the archive is empty.
-Press Right on that row to select it (Left goes back), then Enter, or click it, to list the archived Sessions in the overview; Enter or a click on it there, or Esc, returns to the usual list.
+Select the **Archived** tab below **+ New Session** and press Enter, or click it, to list archived Sessions.
+Select **Sessions** to return to unarchived chats, or press Esc from the archived view.
+The tabs also appear in the conversation sidebar and when either view is empty.
 Use the shell commands below to list archived Sessions from a script or restore one without starting work.
 Inside an open chat, `/archive` and `/unarchive` still act on that Session.
 

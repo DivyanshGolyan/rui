@@ -66,10 +66,13 @@ const setup_options: Options = .of(cli_args.live_setup, &.{ "model", "provider",
 
 const ConversationName = enum {
     archive,
+    autogroup,
     clear,
     copy,
     discard,
     effort,
+    group,
+    @"group-rename",
     model,
     new,
     pin,
@@ -80,15 +83,19 @@ const ConversationName = enum {
     result,
     setup,
     unarchive,
+    ungroup,
     unpin,
 };
 
 pub const conversation = Commands(ConversationName, .{
     .archive = .{ .description = "archive this chat" },
+    .autogroup = .{ .description = "restore automatic grouping" },
     .clear = .{ .description = "start a new chat" },
     .copy = .{ .description = "copy the last answer", .argument = .{ .choice = copy_words } },
     .discard = .{ .listed = false },
     .effort = .{ .description = "change effort", .argument = .effort },
+    .group = .{ .description = "move this chat to a named group", .argument = .{ .required = "NAME" } },
+    .@"group-rename" = .{ .description = "rename this chat’s group", .argument = .{ .required = "NAME" } },
     .model = .{ .description = "change model" },
     .new = .{ .description = "start a new chat" },
     .pin = .{ .description = "pin this chat" },
@@ -99,6 +106,7 @@ pub const conversation = Commands(ConversationName, .{
     .result = .{ .description = "show a saved answer", .argument = .{ .required = "KEY" } },
     .setup = .{ .description = "defaults for new chats", .argument = .{ .options = setup_options } },
     .unarchive = .{ .description = "restore this chat" },
+    .ungroup = .{ .description = "leave this group and pause automatic grouping" },
     .unpin = .{ .description = "unpin this chat" },
 });
 

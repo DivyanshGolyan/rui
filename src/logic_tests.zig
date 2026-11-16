@@ -118,6 +118,8 @@ const cores = .{
     .{ "session_chrome.zig", @import("session_chrome.zig") },
     .{ "session_consent.zig", @import("session_consent.zig") },
     .{ "session_departure.zig", @import("session_departure.zig") },
+    .{ "session_group.zig", @import("session_group.zig") },
+    .{ "session_group_topic.zig", @import("session_group_topic.zig") },
     .{ "session_id.zig", @import("session_id.zig") },
     .{ "session_keys.zig", @import("session_keys.zig") },
     .{ "session_line.zig", @import("session_line.zig") },

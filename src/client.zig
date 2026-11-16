@@ -452,6 +452,12 @@ pub const SessionStopInput = struct {
     session: []const u8,
 };
 
+pub const SessionGroupInput = struct {
+    store: []const u8,
+    session: []const u8,
+    action: @import("session_group.zig").Action,
+};
+
 pub const SessionPinInput = struct {
     store: []const u8,
     session: []const u8,
@@ -1189,6 +1195,30 @@ pub fn captureSessionPin(io: std.Io, input: SessionPinInput, target: CaptureTarg
     return runCapture(io, paths.store.slice(), &location, input.session, .session_pin, null, Capture.writeRequest, .{ protocol.session_pin_request.all, .{ paths.store.slice(), location.key, input.session, input.pinned } });
 }
 
+pub fn captureSessionGroup(io: std.Io, input: SessionGroupInput, target: CaptureTarget) !CapturedRecord {
+    const paths = try platform.resolveClientPaths(io, input.store);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const location = try target.resolve(io, &path_buffer, &key_buffer);
+    try protocol_reply.validateIdentityInputs(location.key, input.session);
+    switch (input.action) {
+        .assign => |name| if (!@import("session_group.zig").validName(name.slice())) return error.InvalidGroupName,
+        .rename => |value| {
+            if (!@import("session_group.zig").validName(value.name.slice())) return error.InvalidGroupName;
+            if (value.group == 0 or value.group > std.math.maxInt(i64)) return error.InvalidGroupId;
+        },
+        .collapse => |value| if (value.group == 0 or value.group > std.math.maxInt(i64)) return error.InvalidGroupId,
+        .leave, .automatic => {},
+    }
+    return switch (input.action) {
+        .assign => |name| runCapture(io, paths.store.slice(), &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.assign, .{ paths.store.slice(), location.key, input.session, name.slice() } }),
+        .leave => runCapture(io, paths.store.slice(), &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.leave, .{ paths.store.slice(), location.key, input.session } }),
+        .automatic => runCapture(io, paths.store.slice(), &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.automatic, .{ paths.store.slice(), location.key, input.session } }),
+        .rename => |value| runCapture(io, paths.store.slice(), &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.rename, .{ paths.store.slice(), location.key, input.session, value.group, value.name.slice() } }),
+        .collapse => |value| runCapture(io, paths.store.slice(), &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.collapse, .{ paths.store.slice(), location.key, input.session, value.group, value.collapsed } }),
+    };
+}
+
 pub fn captureModelInterruption(io: std.Io, input: ModelInterruptionInput, target: CaptureTarget) !CapturedRecord {
     const paths = try platform.resolveClientPaths(io, input.store);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1595,6 +1625,10 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         require_model: ?bool = null,
         archived: bool = true,
         pinned: ?bool = null,
+        group_action: ?protocol_reply.JsonString(16) = null,
+        group_name: ?protocol_reply.JsonString(protocol.max_group_name_bytes) = null,
+        group_id: ?protocol_reply.JsonString(20) = null,
+        collapsed: ?bool = null,
         reload_skills: ?bool = null,
         sender: ?protocol_reply.JsonAddress = null,
         sender_handle: ?protocol_reply.JsonString(32) = null,
@@ -1631,6 +1665,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
             break :blk .{ .message = .{ .bytes = text.value.bytes, .digest = text.value.digest, .creates_session = fields.configuration != null } };
         },
         .session_stop => .session_stop,
+        .session_group => .session_group,
         .session_archive => .{ .session_archive = .{ .archived = fields.archived } },
         .session_pin => .{ .session_pin = .{ .pinned = fields.pinned orelse return error.InvalidRequestRecord } },
         .model_interruption => .{ .model_interruption = .{
@@ -1643,6 +1678,21 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
             .decision = std.meta.stringToEnum(protocol.PermissionDecision, (fields.decision orelse return error.InvalidRequestRecord).slice()) orelse return error.InvalidRequestRecord,
         } },
     };
+    if (kind == .session_group) {
+        const selected = (fields.group_action orelse return error.InvalidRequestRecord).slice();
+        const assign = std.mem.eql(u8, selected, "assign");
+        const rename = std.mem.eql(u8, selected, "rename");
+        const collapse = std.mem.eql(u8, selected, "collapse");
+        if (!(assign or rename or collapse or std.mem.eql(u8, selected, "leave") or std.mem.eql(u8, selected, "automatic")) or
+            (fields.group_name != null) != (assign or rename) or
+            (fields.group_id != null) != (rename or collapse) or
+            (fields.collapsed != null) != collapse) return error.InvalidRequestRecord;
+        if (fields.group_name) |name| if (!@import("session_group.zig").validName(name.slice())) return error.InvalidRequestRecord;
+        if (fields.group_id) |id| {
+            const value = protocol_reply.decimalId(id, false) catch return error.InvalidRequestRecord;
+            if (value > std.math.maxInt(i64)) return error.InvalidRequestRecord;
+        }
+    } else if (fields.group_action != null or fields.group_name != null or fields.group_id != null or fields.collapsed != null) return error.InvalidRequestRecord;
     if ((kind != .configure and kind != .message and fields.configuration != null) or
         (fields.require_model != null and !(kind == .configure or kind == .message and fields.configuration != null)) or
         (kind != .configure and fields.reload_skills != null) or
@@ -3085,6 +3135,7 @@ test "client capture rejects noncanonical Session references before publication"
                 .message => captureMessage(io, .{ .store = root, .session = session, .text_path = "", .text = "input\x00雪" }, target).get(),
                 .session_stop => captureSessionStop(io, .{ .store = root, .session = session }, target),
                 .session_archive => captureSessionArchive(io, .{ .store = root, .session = session }, target),
+                .session_group => captureSessionGroup(io, .{ .store = root, .session = session, .action = .leave }, target),
                 .session_pin => captureSessionPin(io, .{ .store = root, .session = session, .pinned = true }, target),
                 .model_interruption => captureModelInterruption(io, .{ .store = root, .session = session, .turn_id = 1, .operation_id = 1 }, target),
                 .permission_decision => capturePermissionDecision(io, .{ .store = root, .session = session, .action_id = 1 }, target),
@@ -3126,6 +3177,7 @@ test "client recovery rejects noncanonical Session references without retransmis
                     .session_stop => "}",
                     .session_archive => ",\"archived\":true}",
                     .session_pin => ",\"pinned\":true}",
+                    .session_group => ",\"group_action\":\"leave\"}",
                     .model_interruption => ",\"turn\":\"1\",\"operation\":\"1\"}}",
                     .permission_decision => ",\"action\":\"1\",\"decision\":\"deny\"}",
                     .action_background => ",\"action\":\"1\"}",
@@ -5323,4 +5375,33 @@ test "pin captures preserve pin and unpin intent through generated and explicit 
         try std.testing.expectEqual(protocol.CommandKind.session_pin, (try inspectCaptured(io, root, identity.key.slice())).kind);
         try std.testing.expectError(error.RequestBindingMismatch, openCaptured(io, .{ .explicit = .{ .store = root, .record = path, .kind = .session_stop } }));
     }
+}
+
+test "group captures preserve every action through original-byte recovery" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    const Group = @import("session_group.zig");
+    const name = try Group.Name.from("Work \"雪\"");
+    const actions = [_]Group.Action{ .{ .assign = name }, .leave, .automatic, .{ .rename = .{ .group = 7, .name = name } }, .{ .collapse = .{ .group = 7, .collapsed = true } }, .{ .collapse = .{ .group = 7, .collapsed = false } } };
+    for (actions) |action| {
+        var captured = try captureSessionGroup(io, .{ .store = root, .session = "k7m2qx", .action = action }, .{ .generated = root });
+        const identity = captured.saved;
+        var before: [2048]u8 = undefined;
+        const length = try captured.file.readPositionalAll(io, &before, 0);
+        try std.testing.expectEqual(protocol.CommandKind.session_group, identity.kind);
+        try std.testing.expect(captured.target == .session_group);
+        captured.close(io);
+        var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = identity.key.slice() } });
+        defer recovered.close(io);
+        var after: [2048]u8 = undefined;
+        const after_length = try recovered.file.readPositionalAll(io, &after, 0);
+        try std.testing.expectEqualSlices(u8, before[0..length], after[0..after_length]);
+        try std.testing.expect(recovered.target == .session_group);
+    }
+    try std.testing.expectError(error.InvalidGroupName, captureSessionGroup(io, .{ .store = root, .session = "k7m2qx", .action = .{ .assign = .{} } }, .{ .generated = root }));
+    try std.testing.expectError(error.InvalidGroupId, captureSessionGroup(io, .{ .store = root, .session = "k7m2qx", .action = .{ .collapse = .{ .group = 0, .collapsed = true } } }, .{ .generated = root }));
 }

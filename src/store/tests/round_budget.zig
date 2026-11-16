@@ -58,6 +58,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../access.zig"),
         @embedFile("../archive_tests.zig"),
         @embedFile("../pin_tests.zig"),
+        @embedFile("../group_tests.zig"),
         @embedFile("../engine.zig"),
         @embedFile("../engine/Sqlite.zig"),
         @embedFile("../engine/Mysql.zig"),
@@ -82,6 +83,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../domain/reads.zig"),
         @embedFile("../domain/report.zig"),
         @embedFile("../domain/session_list_read.zig"),
+        @embedFile("../domain/session_groups.zig"),
         @embedFile("../domain/session_obligation.zig"),
         @embedFile("../domain/session_report_read.zig"),
         @embedFile("../domain/skills.zig"),
@@ -349,6 +351,11 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try std.testing.expect(storage.pinSession(&pin, .{}) == .accepted);
             meter.stop(.pinSession);
+            var grouping: @import("../../command_input.zig").SessionGroupCommand = .{ .session = session, .action = .leave };
+            try grouping.key.set("budget-group");
+            meter.start();
+            try std.testing.expect(storage.groupSession(&grouping, .{}) == .accepted);
+            meter.stop(.groupSession);
         }
 
         fn mcpTurn(case: *store_testing.Case, meter: *RoundMeter) !void {

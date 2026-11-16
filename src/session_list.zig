@@ -40,6 +40,8 @@ pub const Row = struct {
     read_version: change_ring.Token = .{ .instance = @splat(0), .generation = 0 },
     archive_state: session_archive.State,
     pin_order: ?@import("session_pin.zig").PinOrder = null,
+    group: ?@import("session_group.zig").Brief = null,
+    group_manual: bool = false,
     reference: []const u8,
     parent: ?[]const u8,
     workspace: []const u8,

@@ -23,6 +23,8 @@ pub fn Reply(comptime Capture: type) type {
                 .read_version = values.read_version,
                 .archive_state = values.archive_state,
                 .pin_order = values.pin_order,
+                .group = values.group,
+                .group_manual = values.group_manual,
                 .reference = values.reference,
                 .parent = values.parent,
                 .workspace = values.workspace,

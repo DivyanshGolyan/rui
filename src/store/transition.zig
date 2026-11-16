@@ -129,6 +129,11 @@ fn RoundOf(comptime R: type, comptime commit: Commit, comptime Guards: type, com
             r.get().writer.write(S, args);
         }
 
+        pub fn invalidateSessions(r: *Self) void {
+            transacts("invalidates Session listing");
+            r.get().writer.store.touched.everything = true;
+        }
+
         pub fn obligationsChanged(r: *Self, head: rsql.SessionHead) void {
             transacts("changes obligations");
             r.get().writer.obligationsChanged(head);

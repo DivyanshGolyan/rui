@@ -77,9 +77,17 @@ export interface SessionArchiveResult {
 	completion: "pending" | "completed";
 }
 
+export type SessionGroupAction = Schemas["SessionGroupRequest"] extends infer Request
+    ? Request extends { group_action: string }
+        ? Omit<Request, "version" | "kind" | "store" | "key" | "session">
+        : never
+    : never;
+
 export type SessionPinResult = Pick<Extract<Schemas["SessionPinReply"]["answer"], { status: "accepted" }>, "pinned">;
 
 export interface SessionSummary {
+	group: Schemas["SessionRow"]["group"];
+	groupManual: Schemas["SessionRow"]["group_manual"];
 	id: string;
 	label: string | null;
 	/** The Session's work state, such as `idle`, `working` or `approval`. */
@@ -299,6 +307,18 @@ export class Session {
 		return { archived: answer.archived, completion };
 	}
 
+	/** Saves an explicit grouping choice, or restores automatic grouping. */
+	async group(action: SessionGroupAction, options?: WriteOptions): Promise<void> {
+		const idempotencyKey = key(options);
+		const reply = parse<Schemas["SessionGroupReply"]>(await this.#link.exchange(
+			"/v1/control/session-group",
+			(store) => JSON.stringify({ ...action, version: WIRE_VERSION, kind: "session_group",
+				store, key: idempotencyKey, session: this.id } satisfies Schemas["SessionGroupRequest"]),
+		));
+		accepted(reply.answer);
+		this.#link.activity?.notify(this.id);
+	}
+
 	/** Pins this Session without starting or interrupting work. Repeated pins preserve its position. */
 	pin(options?: WriteOptions): Promise<SessionPinResult> {
 		return this.#setPinned(true, options);
@@ -441,7 +461,7 @@ export class Sessions {
 				),
 			);
 			for (const row of page.sessions) {
-				summaries.push({ id: row.reference, label: row.label, state: row.work.state.kind, archiveState: row.archive_state, parent: row.parent });
+				summaries.push({ id: row.reference, label: row.label, state: row.work.state.kind, archiveState: row.archive_state, parent: row.parent, group: row.group, groupManual: row.group_manual });
 			}
 			if (page.next === null || !("after" in page.next)) return summaries.reverse();
 			after = page.next.after;

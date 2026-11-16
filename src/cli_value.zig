@@ -22,6 +22,7 @@ pub const CommandKind = enum {
     permission_decision,
     session_pin,
     action_background,
+    session_group,
 
     pub fn route(self: CommandKind) []const u8 {
         return switch (self) {
@@ -30,6 +31,7 @@ pub const CommandKind = enum {
             .session_stop => "/v1/control/session-stop",
             .session_archive => "/v1/control/session-archive",
             .session_pin => "/v1/control/session-pin",
+            .session_group => "/v1/control/session-group",
             .model_interruption => "/v1/control/model-interruption",
             .permission_decision => "/v1/control/permission-decision",
             .action_background => "/v1/control/action-background",
@@ -61,7 +63,7 @@ test "CLI choice enums preserve protocol tags and derive reset and recovery spel
     try std.testing.expectEqual(effort.len + 1, choice.len);
     for (effort, choice[0..effort.len]) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
     try std.testing.expectEqualStrings("default", choice[effort.len]);
-    const expected = [_][]const u8{ "configure", "message", "session-stop", "session-archive", "model-interruption", "permission-decision", "session-pin", "action-background" };
+    const expected = [_][]const u8{ "configure", "message", "session-stop", "session-archive", "model-interruption", "permission-decision", "session-pin", "action-background", "session-group" };
     inline for (comptime std.meta.tags(RecoveryKind), expected) |kind, name| {
         try std.testing.expectEqualStrings(name, @tagName(kind));
         const command = commandKind(kind);

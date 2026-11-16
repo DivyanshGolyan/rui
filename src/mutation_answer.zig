@@ -14,6 +14,7 @@ pub const max_session_bytes = 128;
 pub const PermissionDecision = enum { allow_once, deny };
 pub const SkillsReloadStatus = enum { reloaded, unchanged };
 pub const SessionStopCompletion = enum { pending, completed };
+pub const SessionGroupRejection = enum { invalid_session_reference, unknown_session, invalid_group_name, unknown_group, group_name_exists, invalid_group_id };
 pub const SessionPinObservation = struct { pinned: bool };
 pub const SessionPinRejection = enum { invalid_session_reference, unknown_session, session_archiving, session_archived };
 pub const SessionArchiveObservation = struct { archived: bool, completion: SessionStopCompletion };
@@ -47,6 +48,7 @@ pub const Target = union(CommandKind) {
     permission_decision: struct { action: u64, decision: PermissionDecision },
     session_pin: struct { pinned: bool },
     action_background: u64,
+    session_group,
 };
 
 pub const Answer = struct {
@@ -58,6 +60,7 @@ pub const Answer = struct {
             session_stop: struct { turn: ?u64, admission_cutoff: u64, completion: SessionStopCompletion },
             session_archive: SessionArchiveObservation,
             session_pin: SessionPinObservation,
+            session_group,
             model_interruption,
             permission_decision,
             action_background: @import("action_control.zig").Selection,
@@ -118,6 +121,7 @@ pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []c
         .session_stop => "session_stop_reply",
         .session_archive => "session_archive_reply",
         .session_pin => "session_pin_reply",
+        .session_group => "session_group_reply",
         .model_interruption => "model_interruption_reply",
         .permission_decision => "permission_decision_reply",
         .action_background => "action_background_reply",
@@ -214,6 +218,9 @@ pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []c
                 if (pinned != expected.pinned) return error.RequestBindingMismatch;
                 value = .{ .session_pin = .{ .pinned = pinned } };
             }
+        },
+        .session_group => if (accepted) {
+            value = .session_group;
         },
         .model_interruption => if (accepted) {
             value = .model_interruption;
@@ -520,4 +527,14 @@ test "Action promotion replies bind the target and immutable receipt or final se
         try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(200, accepted, "rhvzwc", .{ .action_background = 42 }).answer);
         try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(200, accepted, "k7m2qx", .{ .action_background = 43 }).answer);
     }
+}
+
+test "group replies bind Session identity and reject unrelated mutation fields" {
+    const accepted = "{\"version\":\"" ++ current ++ "\",\"type\":\"session_group_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\"}}";
+    const answer = try decodeForTest(200, accepted, "k7m2qx", .session_group).answer;
+    try std.testing.expect(answer.replayed);
+    try std.testing.expect(answer.result.accepted == .session_group);
+    try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(200, accepted, "rhvzwc", .session_group).answer);
+    const unrelated = "{\"version\":\"" ++ current ++ "\",\"type\":\"session_group_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"pinned\":true}}";
+    try std.testing.expectError(error.InvalidResponse, decodeForTest(200, unrelated, "k7m2qx", .session_group).answer);
 }

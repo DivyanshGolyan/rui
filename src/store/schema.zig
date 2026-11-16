@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 76;
+pub const schema_version: u32 = 77;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -55,6 +55,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 74, .digest = 0xda8e267adbfcef45 },
     .{ .schema_version = 75, .digest = 0xcea5bf4db0d3978d },
     .{ .schema_version = 76, .digest = 0x0d2cb1706af6379c },
+    .{ .schema_version = 77, .digest = 0xbeb4681fe795258b },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -677,6 +678,34 @@ pub const migrations = [_]Migration{
             "CREATE TABLE action_control_command(\n command_key VARCHAR(128) NOT NULL,\n action_id TEXT NOT NULL,\n selected_action_id BIGINT,\n selection VARCHAR(10),\n selection_position BIGINT,\n PRIMARY KEY(command_key),\n FOREIGN KEY(command_key) REFERENCES core_command(command_key),\n FOREIGN KEY(selected_action_id) REFERENCES action_operation(action_id),\n CHECK(OCTET_LENGTH(action_id) BETWEEN 1 AND 20 AND (NOT REGEXP_LIKE(action_id,'[^0-9]','c'))),\n CHECK(selection IS NULL OR selection IN ('background','final')),\n CHECK(selection_position>0),\n CHECK((selected_action_id IS NULL AND selection IS NULL AND selection_position IS NULL) OR (selected_action_id IS NOT NULL AND selection IS NOT NULL AND selection_position IS NOT NULL))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
         },
     },
+    .{
+        .from = 76,
+        .sqlite = &.{
+            "ALTER TABLE core_command RENAME TO core_command_before_77",
+            "CREATE TABLE core_command(\n command_key TEXT NOT NULL UNIQUE CHECK(length(CAST(command_key AS BLOB))<=128),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 9),\n target TEXT NOT NULL CHECK(length(CAST(target AS BLOB))<=128),\n input_digest BLOB NOT NULL CHECK(length(input_digest)=32),\n primary_content_id INTEGER REFERENCES content(content_id),\n secondary_content_id INTEGER REFERENCES content(content_id),\n accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),\n code TEXT NOT NULL CHECK(length(CAST(code AS BLOB))<=96),\n revision INTEGER NOT NULL CHECK(revision>=0),\n created INTEGER NOT NULL CHECK(created IN (0,1)),\n command_seq INTEGER PRIMARY KEY NOT NULL CHECK(command_seq>0)\n) STRICT",
+            "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM core_command_before_77",
+            "DROP TABLE core_command_before_77",
+            "CREATE INDEX core_command_target_order ON core_command(target,kind,command_seq)",
+            "CREATE TABLE session_group(\n group_id INTEGER PRIMARY KEY NOT NULL CHECK(group_id>0),\n name TEXT NOT NULL UNIQUE CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 100),\n collapsed INTEGER NOT NULL CHECK(collapsed IN (0,1)),\n revision INTEGER NOT NULL CHECK(revision>0),\n automatic_anchor BLOB UNIQUE CHECK(automatic_anchor IS NULL OR length(automatic_anchor)=32)\n) STRICT",
+            "CREATE TABLE session_group_member(\n session_ref TEXT PRIMARY KEY NOT NULL REFERENCES session(session_ref),\n group_id INTEGER REFERENCES session_group(group_id),\n manual INTEGER NOT NULL CHECK(manual IN (0,1)),\n creator_ref TEXT REFERENCES session(session_ref),\n evaluated INTEGER NOT NULL CHECK(evaluated IN (0,1)),\n CHECK(creator_ref IS NULL OR creator_ref<>session_ref)\n) STRICT, WITHOUT ROWID",
+            "CREATE INDEX session_group_members ON session_group_member(group_id,session_ref)",
+            "INSERT INTO session_group(group_id,name,collapsed,revision,automatic_anchor) SELECT root.created_seq,'Family '||root.session_ref,0,1,NULL FROM session root WHERE root.parent_ref IS NULL AND EXISTS(SELECT 1 FROM session child WHERE child.parent_ref=root.session_ref)",
+            "WITH RECURSIVE family(session_ref,root_ref) AS (SELECT session_ref,session_ref FROM session WHERE parent_ref IS NULL UNION ALL SELECT child.session_ref,family.root_ref FROM session child JOIN family ON family.session_ref=child.parent_ref) INSERT INTO session_group_member(session_ref,group_id,manual,creator_ref,evaluated) SELECT s.session_ref,g.group_id,0,s.parent_ref,CASE WHEN g.group_id IS NULL THEN 0 ELSE 1 END FROM session s JOIN family ON family.session_ref=s.session_ref JOIN session root ON root.session_ref=family.root_ref LEFT JOIN session_group g ON g.group_id=root.created_seq",
+        },
+        .mysql = &.{
+            "SET @rui_group_kind_ddl=NULL",
+            "SET @rui_group_kind_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK(kind BETWEEN 1 AND 9)') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 8')",
+            "PREPARE rui_group_kind FROM @rui_group_kind_ddl",
+            "EXECUTE rui_group_kind",
+            "DEALLOCATE PREPARE rui_group_kind",
+            "SET @rui_group_kind_ddl=NULL",
+            "CREATE TABLE session_group(\n group_id BIGINT NOT NULL,\n name VARCHAR(100) NOT NULL,\n collapsed TINYINT NOT NULL,\n revision BIGINT NOT NULL,\n automatic_anchor VARBINARY(32),\n PRIMARY KEY(group_id),\n UNIQUE(name),\n UNIQUE(automatic_anchor),\n CHECK(group_id>0),\n CHECK(OCTET_LENGTH(name) BETWEEN 1 AND 100),\n CHECK(collapsed IN (0,1)),\n CHECK(revision>0),\n CHECK(automatic_anchor IS NULL OR length(automatic_anchor)=32)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE TABLE session_group_member(\n session_ref VARCHAR(6) NOT NULL,\n group_id BIGINT,\n manual TINYINT NOT NULL,\n creator_ref VARCHAR(6),\n evaluated TINYINT NOT NULL,\n PRIMARY KEY(session_ref),\n FOREIGN KEY(session_ref) REFERENCES session(session_ref),\n FOREIGN KEY(group_id) REFERENCES session_group(group_id),\n FOREIGN KEY(creator_ref) REFERENCES session(session_ref),\n CHECK(manual IN (0,1)),\n CHECK(evaluated IN (0,1)),\n CHECK(creator_ref IS NULL OR creator_ref<>session_ref)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE INDEX session_group_members ON session_group_member(group_id,session_ref)",
+            "INSERT INTO session_group(group_id,name,collapsed,revision,automatic_anchor) SELECT root.created_seq,CONCAT('Family ',root.session_ref),0,1,NULL FROM session root WHERE root.parent_ref IS NULL AND EXISTS(SELECT 1 FROM session child WHERE child.parent_ref=root.session_ref)",
+            "INSERT INTO session_group_member(session_ref,group_id,manual,creator_ref,evaluated) WITH RECURSIVE family(session_ref,root_ref) AS (SELECT session_ref,session_ref FROM session WHERE parent_ref IS NULL UNION ALL SELECT child.session_ref,family.root_ref FROM session child JOIN family ON family.session_ref=child.parent_ref) SELECT s.session_ref,g.group_id,0,s.parent_ref,CASE WHEN g.group_id IS NULL THEN 0 ELSE 1 END FROM session s JOIN family ON family.session_ref=s.session_ref JOIN session root ON root.session_ref=family.root_ref LEFT JOIN session_group g ON g.group_id=root.created_seq",
+        },
+    },
 };
 
 comptime {
@@ -1066,7 +1095,7 @@ pub const tables = [_]Table{
         .name = "core_command",
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = .{ .max = 128 } } },
-            .{ .name = "kind", .type = .int, .check = "kind BETWEEN 1 AND 8" },
+            .{ .name = "kind", .type = .int, .check = "kind BETWEEN 1 AND 9" },
             .{ .name = "target", .type = .{ .text = .{ .max = 128 } } },
             .{ .name = "input_digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
             .{ .name = "primary_content_id", .type = .int, .nullable = true },
@@ -1243,6 +1272,36 @@ pub const tables = [_]Table{
         },
         .primary_key = &.{"command_key"},
         .foreign_keys = &.{references("command_key", "core_command", command_reference)},
+        .without_rowid = true,
+    },
+    .{
+        .name = "session_group",
+        .columns = &.{
+            .{ .name = "group_id", .type = .int, .check = "group_id>0" },
+            .{ .name = "name", .type = .{ .text = .{ .min = 1, .max = 100 } } },
+            .{ .name = "collapsed", .type = .flag },
+            .{ .name = "revision", .type = .int, .check = "revision>0" },
+            .{ .name = "automatic_anchor", .type = .{ .bytes = .{ .min = 32, .max = 32 } }, .nullable = true },
+        },
+        .primary_key = &.{"group_id"},
+        .uniques = &.{ &.{"name"}, &.{"automatic_anchor"} },
+    },
+    .{
+        .name = "session_group_member",
+        .columns = &.{
+            .{ .name = "session_ref", .type = .{ .text = null } },
+            .{ .name = "group_id", .type = .int, .nullable = true },
+            .{ .name = "manual", .type = .flag },
+            .{ .name = "creator_ref", .type = .{ .text = null }, .nullable = true },
+            .{ .name = "evaluated", .type = .flag },
+        },
+        .primary_key = &.{"session_ref"},
+        .checks = &.{"creator_ref IS NULL OR creator_ref<>session_ref"},
+        .foreign_keys = &.{
+            references("session_ref", "session", session_reference),
+            references("group_id", "session_group", &.{"group_id"}),
+            references("creator_ref", "session", session_reference),
+        },
         .without_rowid = true,
     },
     .{
@@ -1636,6 +1695,7 @@ pub const indexes = [_]Index{
     .{ .name = "session_stop_unpositioned", .table = "session_stop", .columns = &.{"session_ref"}, .where = "position IS NULL" },
     .{ .name = "session_stop_position", .table = "session_stop", .columns = &.{ "session_ref", "position" } },
     .{ .name = "session_stop_turn", .table = "session_stop", .columns = &.{"selected_turn_id"} },
+    .{ .name = "session_group_members", .table = "session_group_member", .columns = &.{ "group_id", "session_ref" } },
     .{ .name = "session_parent", .table = "session", .columns = &.{"parent_ref"}, .where = "parent_ref IS NOT NULL" },
     .{ .name = "session_stop_open", .table = "session_stop_owed", .columns = &.{ "settled", "child_ref" } },
     .{ .name = "session_forward_message", .table = "session_forward", .columns = &.{ "message_delivered", "source_id" } },
@@ -2656,7 +2716,12 @@ test "schema 76 migration creates canonical promotion objects on SQLite and MySQ
         for (statements) |statement| {
             if (!std.mem.startsWith(u8, statement, "CREATE ")) continue;
             for (expected) |object| {
-                if (std.mem.eql(u8, object.sql, statement)) {
+                const historical = if (dialect == .sqlite and std.mem.eql(u8, object.name, "core_command"))
+                    try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 9", "kind BETWEEN 1 AND 8")
+                else
+                    null;
+                defer if (historical) |text| std.testing.allocator.free(text);
+                if (std.mem.eql(u8, historical orelse object.sql, statement)) {
                     matched += 1;
                     break;
                 }
@@ -2682,7 +2747,7 @@ test "schema 75 migration creates canonical pin objects on SQLite and MySQL" {
             if (!std.mem.startsWith(u8, statement, "CREATE ")) continue;
             for (expected) |object| {
                 const historical = if (dialect == .sqlite and std.mem.eql(u8, object.name, "core_command"))
-                    try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 8", "kind BETWEEN 1 AND 7")
+                    try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 9", "kind BETWEEN 1 AND 7")
                 else
                     null;
                 defer if (historical) |text| std.testing.allocator.free(text);
@@ -3166,4 +3231,54 @@ test "model call timing format 68 migration preserves format 67 resolutions with
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT operation_id,attempt_ordinal,resolution_code,resolved_at FROM model_operation EXCEPT SELECT * FROM old_model_resolutions)"));
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE model_operation SET latency_ms=-1"));
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE model_operation SET first_event_ms=-1"));
+}
+
+test "session group migration creates canonical objects for both dialects" {
+    const step = migrations[76 - migration_baseline];
+    inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
+        const expected = comptime objects(dialect);
+        const statements = if (dialect == .sqlite) step.sqlite else step.mysql;
+        var matched: usize = 0;
+        for (statements) |statement| {
+            if (!std.mem.startsWith(u8, statement, "CREATE ")) continue;
+            for (expected) |object| {
+                if (std.mem.eql(u8, object.sql, statement)) {
+                    matched += 1;
+                    break;
+                }
+            } else {
+                std.debug.print("noncanonical group migration {s}: {s}\n", .{ @tagName(dialect), statement });
+                for (expected) |object| if (std.mem.indexOf(u8, statement, object.name) != null) {
+                    std.debug.print("canonical {s}: {s}\n", .{ object.name, object.sql });
+                };
+                return error.NoncanonicalMigrationObject;
+            }
+        }
+        try std.testing.expectEqual(@as(usize, if (dialect == .sqlite) 5 else 3), matched);
+    }
+}
+
+test "session group migration backfills parent trees and leaves unrelated roots independent" {
+    for ([_]u8{ 0, 1, 2 }) |depth| {
+        var database: ?*c.sqlite3 = null;
+        try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &database));
+        defer _ = c.sqlite3_close(database);
+        const db = database.?;
+        try sqlite.exec(db, @embedFile("migration_baseline.sqlite.sql"));
+        try sqlite.exec(db, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        try sqlite.exec(db, @embedFile("migration_baseline_rows.sql"));
+        for (migrations) |step| {
+            if (step.from == 76) break;
+            for (step.sqlite) |statement| try sqlite.exec(db, statement);
+        }
+        if (depth >= 1) try sqlite.exec(db, "UPDATE session SET parent_ref='d8mv7p' WHERE session_ref='brhkcj'");
+        if (depth == 2) try sqlite.exec(db, "UPDATE session SET parent_ref='brhkcj' WHERE session_ref='rhvzwc'");
+        for (migrations[76 - migration_baseline].sqlite) |statement| try sqlite.exec(db, statement);
+        try std.testing.expectEqual(@as(u32, 3), try sqlite.pragmaInt(db, "SELECT count(*) FROM session_group_member"));
+        try std.testing.expectEqual(@as(u32, if (depth == 0) 0 else 1), try sqlite.pragmaInt(db, "SELECT count(*) FROM session_group"));
+        try std.testing.expectEqual(@as(u32, if (depth == 0) 0 else depth + 1), try sqlite.pragmaInt(db, "SELECT count(*) FROM session_group_member WHERE group_id IS NOT NULL"));
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(db, "SELECT count(*) FROM session_group_member WHERE manual<>0"));
+        try std.testing.expectEqual(@as(u32, depth), try sqlite.pragmaInt(db, "SELECT count(*) FROM session_group_member WHERE creator_ref IS NOT NULL"));
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(db, "SELECT count(*) FROM pragma_foreign_key_check"));
+    }
 }

@@ -25,6 +25,7 @@ const model_settlement_domain = @import("model_settlement.zig");
 const tool_set = @import("tool_set.zig");
 const skills_domain = @import("skills.zig");
 const rsql = @import("../rsql.zig");
+const session_groups = @import("session_groups.zig");
 const store_access = @import("../access.zig");
 const Faults = store_core.Faults;
 const StoredAnswer = command_domain.StoredAnswer;
@@ -414,6 +415,7 @@ pub const ParentFailure = struct {
 
 fn prepareParent(a: anytype, reference: []const u8, reads: *ConfigurationReads) void {
     reads.inherits_parent = true;
+    reads.grouping.prepareCreator(a, reference);
     reads.inherited = .{ .workspace = &reads.next.workspace, .provider = undefined, .tools = &reads.saved_tools.names, .permission_mode = undefined };
     a.readInto(parent_settings, .{ .session = reference }, &reads.inherited, &reads.parent_found);
 }
@@ -443,7 +445,8 @@ pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, configuration:
     if (failure) |refused| return refused.code;
     reads.next.provider = reads.inherited.provider;
     reads.workspace_digest = store_core.workspaceDigest(reads.next.workspace.slice());
-    if (reads.attach_parent) reads.parent = configuration.parent.value.slice()[0..session_id.bytes].*;
+    reads.group_creator = configuration.parent.value.slice()[0..session_id.bytes].*;
+    if (reads.attach_parent) reads.parent = reads.group_creator;
     return null;
 }
 
@@ -468,6 +471,8 @@ pub const ConfigurationReads = struct {
     loaded_tools: ?tool_set.Selection = null,
     saved_tools: command_input.ToolsField = undefined,
     saved_loaded: command_input.ToolsField = undefined,
+    grouping: session_groups.Automatic = .{},
+    group_creator: ?[session_id.bytes]u8 = null,
     parent: ?[session_id.bytes]u8 = null,
     inherits_parent: bool = false,
     attach_parent: bool = true,
@@ -873,7 +878,7 @@ fn finishValidation(request: *const Request, reads: *ConfigurationReads) Validat
     return .{ .ready = &reads.validated };
 }
 
-pub const ApplyRound = enum { creation, catalog };
+pub const ApplyRound = enum { creation, grouping, catalog };
 
 pub const Applying = union(enum) {
     round: ApplyRound,
@@ -891,6 +896,10 @@ pub fn applyStep(a: anytype, request: *const Request, faults: Faults, reads: *Co
         .creation => {
             if (reads.creation.taken) return drawReference(a, request.io, reads);
             return insertCreated(a, request, reads);
+        },
+        .grouping => {
+            if (!try reads.grouping.advance(a)) return .{ .round = .grouping };
+            return finishCreated(a, request, reads);
         },
         .catalog => {
             try reads.step.applying.catalog.finish(a, faults);
@@ -959,6 +968,10 @@ fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *Con
         .label = if (next.label) |*label| label.slice() else null,
     });
     try accept(request, reads, head, session);
+    if (configuration.label.state == .value and (reads.validated.before.?.label == null)) {
+        reads.grouping.prepare(a, head, &reads.next.workspace);
+        return .{ .round = .grouping };
+    }
     return .{ .accepted = applied };
 }
 
@@ -976,11 +989,19 @@ fn insertCreated(a: anytype, request: *const Request, reads: *ConfigurationReads
         .next_position = .of(1),
     };
     insertSession(a, head, &reads.next, &reads.workspace_digest, created_seq, if (reads.parent) |*parent| parent else null);
+    session_groups.created(a, head, if (reads.group_creator) |*ref| ref else null);
     try accept(request, reads, head, &reads.reference);
-    if (try skills_domain.Appending.initial(head, request.initial_skills)) |appending| {
-        reads.step.applying.catalog = appending;
-        reads.step.applying.catalog.queue(a);
-        return .{ .round = .catalog };
+    if (try reads.grouping.placeCreated(a, head, &reads.next.workspace, reads.next.label)) return finishCreated(a, request, reads);
+    return .{ .round = .grouping };
+}
+
+fn finishCreated(a: anytype, request: *const Request, reads: *ConfigurationReads) !Applying {
+    if (request.session.len == 0) {
+        if (try skills_domain.Appending.initial(reads.applied.head, request.initial_skills)) |appending| {
+            reads.step.applying.catalog = appending;
+            reads.step.applying.catalog.queue(a);
+            return .{ .round = .catalog };
+        }
     }
     return .{ .accepted = &reads.applied };
 }

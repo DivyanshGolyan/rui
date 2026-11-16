@@ -133,6 +133,14 @@ pub const routes = [_]Route{
         .conflict = jsonReply(.{protocol.session_pin_reply.conflict}),
     },
     .{
+        .path = protocol.CommandKind.session_group.route(),
+        .kind = .session_group,
+        .summary = "Assigns, leaves, automatically groups, renames or folds a Session group. Retried by its key.",
+        .variants = &.{ variant(protocol.session_group_request.assign, .{}), variant(protocol.session_group_request.leave, .{}), variant(protocol.session_group_request.automatic, .{}), variant(protocol.session_group_request.rename, .{}), variant(protocol.session_group_request.collapse, .{}) },
+        .reply = jsonReply(.{ protocol.session_group_reply.accepted, protocol.session_group_reply.rejected }),
+        .conflict = jsonReply(.{protocol.session_group_reply.conflict}),
+    },
+    .{
         .path = protocol.CommandKind.model_interruption.route(),
         .kind = .model_interruption,
         .summary = "Interrupts one model Operation. Retried by its key.",
@@ -464,6 +472,7 @@ fn observationSchema(d: *Document) anyerror!Value {
             .session_stop => .{ .{}, o.session_stop },
             .session_archive => .{ .{}, o.session_archive },
             .session_pin => .{ .{}, o.session_pin },
+            .session_group => .{ .{}, .{} },
             .model_interruption => .{ .{}, o.model_interruption },
             .permission_decision => .{ .{}, o.permission_decision },
             .action_background => .{ o.action_target, o.action_target ++ o.action_selection },
@@ -1781,7 +1790,7 @@ test "statuses, media types and required headers match what the Host sends" {
     var document: Document = .init(arena.allocator());
     const built = try document.build();
     const paths = built.object.get("paths").?.object;
-    const mutations = [_]protocol.CommandKind{ .configure, .message, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background };
+    const mutations = [_]protocol.CommandKind{ .configure, .message, .session_stop, .session_archive, .session_pin, .session_group, .model_interruption, .permission_decision, .action_background };
     for (mutations) |kind| {
         const responses = paths.get(kind.route()).?.object.get("post").?.object.get("responses").?.object;
         try std.testing.expect(responses.contains("409"));

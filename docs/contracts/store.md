@@ -68,6 +68,12 @@ Unpin and archive intent clear that pointer with a typed Session-head update, re
 The SQLite step preserves all Commands and their references while widening the kind CHECK.
 The operator-run MySQL step resolves the exact old kind CHECK in the current database catalog, because its generated name can differ between fresh and previously migrated Stores.
 An absent or ambiguous match refuses before DDL; unrelated checks and foreign keys remain unchanged.
+The step to 77 adds canonical `session_group` and `session_group_member` facts and the group Command kind.
+A group stores its positive ID, unique name, collapse state, revision, and optional automatic-topic or family anchor.
+Each Session stores one nullable membership, manual-choice flag, birth creator, and automatic-evaluation flag.
+The migration makes a family for each existing top-level parent tree that has children; unrelated roots remain ungrouped.
+Birth-creator grouping stays separate from later parent attachment.
+The [grouping contract](sessions.md#grouping-sessions) owns placement, replay, and manual override behavior.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.

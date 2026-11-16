@@ -357,6 +357,37 @@ pub const SessionPinCommand = struct {
     }
 };
 
+pub const SessionGroupCommand = struct {
+    store: Bounded(max_store_bytes) = .{},
+    key: Bounded(max_key_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    action: @import("session_group.zig").Action = .automatic,
+
+    pub fn semanticDigest(self: *const SessionGroupCommand) [32]u8 {
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hashField(&hash, "rui/core/session-group/v1");
+        hashField(&hash, self.session.slice());
+        hashField(&hash, @tagName(self.action));
+        switch (self.action) {
+            .assign => |name| hashField(&hash, name.slice()),
+            .leave, .automatic => {},
+            .rename => |value| {
+                var id: [8]u8 = undefined;
+                std.mem.writeInt(u64, &id, value.group, .big);
+                hash.update(&id);
+                hashField(&hash, value.name.slice());
+            },
+            .collapse => |value| {
+                var id: [8]u8 = undefined;
+                std.mem.writeInt(u64, &id, value.group, .big);
+                hash.update(&id);
+                hash.update(&.{@intFromBool(value.collapsed)});
+            },
+        }
+        return hash.finalResult();
+    }
+};
+
 pub const ModelInterruptionCommand = struct {
     store: Bounded(max_store_bytes) = .{},
     key: Bounded(max_key_bytes) = .{},

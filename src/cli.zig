@@ -278,6 +278,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .session_archive => try archiveSession(init, parsed, true),
         .session_unarchive => try archiveSession(init, parsed, false),
         .session_pin => try pinSession(init, parsed, true),
+        .session_group => try groupSession(init, parsed),
         .session_unpin => try pinSession(init, parsed, false),
         .session_interrupt_model => try interruptModel(init, parsed),
         .session_read_conversation => try readConversation(init, parsed),
@@ -2980,6 +2981,30 @@ fn pinSession(init: std.process.Init, parsed: *const cli_args.Parsed, pinned: bo
     try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null, .json);
 }
 
+fn groupAction(parsed: *const cli_args.Parsed) !@import("session_group.zig").Action {
+    const mode = parsed.get("mode").?;
+    var name: @import("session_group.zig").Name = .{};
+    if (parsed.get("name")) |value| name.set(value) catch return error.InvalidGroupName;
+    const id = if (parsed.get("group")) |value| try std.fmt.parseInt(u64, value, 10) else 0;
+    const rename = std.mem.eql(u8, mode, "rename");
+    const assign = std.mem.eql(u8, mode, "assign");
+    const collapse = std.mem.eql(u8, mode, "collapse");
+    if ((parsed.get("name") != null) != (assign or rename) or
+        (parsed.get("group") != null) != (rename or collapse) or
+        (parsed.get("collapsed") != null) != collapse) return error.InvalidGroupOptions;
+    return if (assign) .{ .assign = name } else if (rename) .{ .rename = .{ .group = id, .name = name } } else if (collapse) .{ .collapse = .{ .group = id, .collapsed = std.mem.eql(u8, parsed.get("collapsed").?, "true") } } else if (std.mem.eql(u8, mode, "leave")) .leave else .automatic;
+}
+
+fn groupSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+    const session = parsed.get("session").?;
+    const action = try groupAction(parsed);
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store = try selectedStore(init, parsed.get("store"), &selected_buffer);
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var captured = try client.captureSessionGroup(init.io, .{ .store = store, .session = session, .action = action }, try captureTarget(init, parsed, &directory_buffer));
+    try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null, .json);
+}
+
 fn sendSessionStop(init: std.process.Init, parsed: *const cli_args.Parsed, input: client.SessionStopInput, target: client.CaptureTarget) !void {
     var captured = try client.captureSessionStop(init.io, input, target);
     try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null, .json);
@@ -3462,6 +3487,7 @@ fn writeSavedRejection(out: *std.Io.Writer, reply: protocol_reply.MutationReply)
         .session_stop => "stop",
         .session_archive => |target| if (target.archived) "archive" else "unarchive",
         .session_pin => |target| if (target.pinned) "pin" else "unpin",
+        .session_group => "group",
         .model_interruption => "interrupt-model",
         .permission_decision => |target| if (target.decision == .allow_once) "allow" else "deny",
         .action_background => "background",
@@ -3566,7 +3592,7 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
         .session_archive => |value| try writer.print("archived: {}; completion: {s}\n", .{ value.archived, @tagName(value.completion) }),
         .session_pin => |value| try writer.print("pinned: {}\n", .{value.pinned}),
         .action_background => |selection| try writer.print("Action selection: {s}; position: {d}\n", .{ @tagName(selection.kind), selection.position }),
-        .model_interruption, .permission_decision => {},
+        .session_group, .model_interruption, .permission_decision => {},
     };
     try writer.flush();
 }
@@ -3641,7 +3667,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
             .session_archive => |value| try writer.print(",\"archived\":{}", .{value.archived}),
             .session_pin => |value| try writer.print(",\"pinned\":{}", .{value.pinned}),
             .action_background => |selection| try writer.print(",\"action_selection\":{{\"kind\":\"{s}\",\"position\":\"{d}\"}}", .{ @tagName(selection.kind), selection.position }),
-            .model_interruption, .permission_decision => {},
+            .session_group, .model_interruption, .permission_decision => {},
         },
         .rejected => |code| {
             try writer.writeAll(",\"code\":");
@@ -5302,5 +5328,43 @@ test "Host launch scoped readiness still discovers selected private keys and req
         try std.testing.expectEqualStrings("custom-model", entry.binding.?.model.slice());
         try std.testing.expect(entry.launch.?.outcome == .ready);
         try std.testing.expectEqual(@as(usize, 0), fixture.launches);
+    }
+}
+
+test "group CLI intent validates the full mode and option presence domain" {
+    const modes = [_][]const u8{ "assign", "leave", "automatic", "rename", "collapse" };
+    for (modes) |mode| {
+        for ([_]bool{ false, true }) |has_name| for ([_]bool{ false, true }) |has_id| for ([_]bool{ false, true }) |has_collapsed| {
+            var args: [12][]const u8 = undefined;
+            var count: usize = 0;
+            for ([_][]const u8{ "--session", "k7m2qx", "--mode", mode }) |value| {
+                args[count] = value;
+                count += 1;
+            }
+            if (has_name) {
+                args[count..][0..2].* = .{ "--name", "Work" };
+                count += 2;
+            }
+            if (has_id) {
+                args[count..][0..2].* = .{ "--group", "7" };
+                count += 2;
+            }
+            if (has_collapsed) {
+                args[count..][0..2].* = .{ "--collapsed", "false" };
+                count += 2;
+            }
+            var problem: cli_args.Refusal = undefined;
+            var storage: [2048]u8 = undefined;
+            var fixed = std.heap.FixedBufferAllocator.init(&storage);
+            const parsed = try cli_args.Command.session_group.definition().parse(args[0..count], fixed.allocator(), &problem);
+            const expects_name = std.mem.eql(u8, mode, "assign") or std.mem.eql(u8, mode, "rename");
+            const expects_id = std.mem.eql(u8, mode, "rename") or std.mem.eql(u8, mode, "collapse");
+            const expects_collapsed = std.mem.eql(u8, mode, "collapse");
+            if (has_name == expects_name and has_id == expects_id and has_collapsed == expects_collapsed) {
+                const intent = try groupAction(&parsed);
+                try std.testing.expectEqualStrings(mode, @tagName(intent));
+                if (intent == .collapse) try std.testing.expect(!intent.collapse.collapsed);
+            } else try std.testing.expectError(error.InvalidGroupOptions, groupAction(&parsed));
+        };
     }
 }

@@ -493,7 +493,7 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
             try std.testing.expectEqual(@as(u64, check[2]), try mysql_testing.rawQueryU64(storage, "SELECT count(*) AS value" ++ catalog ++ "'" ++ check[0] ++ "' AND " ++ check[1]));
         }
         try std.testing.expectEqual(@as(u64, 1), try mysql_testing.rawQueryU64(storage, "SELECT count(*) AS value" ++ background_fk));
-        try std.testing.expectEqual(@as(u64, 1), try mysql_testing.rawQueryU64(storage, "SELECT count(*) AS value" ++ catalog ++ "'core_command' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 8'"));
+        try std.testing.expectEqual(@as(u64, 1), try mysql_testing.rawQueryU64(storage, "SELECT count(*) AS value" ++ catalog ++ "'core_command' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 9'"));
         inline for (checks) |check| {
             try Native.exec(storage, "SET @rui_rewind_ddl=(SELECT CONCAT('ALTER TABLE " ++ check[0] ++ " ',GROUP_CONCAT(CONCAT('DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') ORDER BY tc.CONSTRAINT_NAME SEPARATOR ', '))" ++ catalog ++ "'" ++ check[0] ++ "' AND " ++ check[1] ++ ")");
             try Native.exec(storage, "PREPARE rui_rewind FROM @rui_rewind_ddl");
@@ -553,11 +553,13 @@ fn dropPinOrganization(storage: *Store) !void {
         }
     };
     try dropBackgroundUpgradeShape(storage);
+    try Native.exec(storage, "DROP TABLE session_group_member");
+    try Native.exec(storage, "DROP TABLE session_group");
     try Native.exec(storage, "DROP TABLE session_pin");
     try Native.exec(storage, "DROP TABLE session_pin_command");
     if (storage.engine == .mysql) {
         try Native.exec(storage, "SET @rui_pin_kind_ddl=NULL");
-        try Native.exec(storage, "SET @rui_pin_kind_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK(kind BETWEEN 1 AND 6)') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 8')");
+        try Native.exec(storage, "SET @rui_pin_kind_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK(kind BETWEEN 1 AND 6)') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 9')");
         try Native.exec(storage, "PREPARE rui_pin_kind FROM @rui_pin_kind_ddl");
         try Native.exec(storage, "EXECUTE rui_pin_kind");
         try Native.exec(storage, "DEALLOCATE PREPARE rui_pin_kind");

@@ -132,11 +132,12 @@ pub const Operations = struct {
     stop: *const fn (*Self, client.Requests, client.SessionStopInput, *Reply) anyerror!void,
     archive: *const fn (*Self, client.Requests, client.SessionArchiveInput, *Reply) anyerror!void,
     pin: *const fn (*Self, client.Requests, client.SessionPinInput, *Reply) anyerror!void,
+    group: *const fn (*Self, client.Requests, client.SessionGroupInput, *Reply) anyerror!void,
     models: *const fn (*Self, client.Requests, std.mem.Allocator) anyerror![]u8,
     open: *const fn (*Self, *vxfw.EventContext) anyerror!void,
 };
 
-pub const client_operations: Operations = .{ .host = hostFacts, .start_host = startHost, .list = listPage, .first_line = firstLine, .create = createSession, .stop = stopSession, .archive = archiveSession, .pin = pinSession, .models = listModels, .open = openSession };
+pub const client_operations: Operations = .{ .host = hostFacts, .start_host = startHost, .list = listPage, .first_line = firstLine, .create = createSession, .stop = stopSession, .archive = archiveSession, .pin = pinSession, .group = groupSession, .models = listModels, .open = openSession };
 
 pub const Left = struct {
     session: view.Reference,
@@ -287,6 +288,7 @@ const Job = union(enum) {
     stop: view.Reference,
     archive: view.ArchiveRequest,
     pin: view.PinRequest,
+    group: view.GroupRequest,
     models,
     defaults: DefaultsEdit,
 
@@ -295,7 +297,7 @@ const Job = union(enum) {
     fn quiescence(self: Job) Quiescence {
         return switch (self) {
             .host, .list, .lines, .models => .cancel_read,
-            .start_host, .create, .stop, .archive, .pin, .defaults => .settle_effect,
+            .start_host, .create, .stop, .archive, .pin, .group, .defaults => .settle_effect,
         };
     }
 
@@ -1156,6 +1158,7 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
         .cancel_upgrade => self.upgrade_job.cancel(),
         .archive => |request| self.queue(.{ .archive = request }),
         .pin => |request| self.queue(.{ .pin = request }),
+        .group => |request| self.queue(.{ .group = request }),
         .list_models => self.queue(.models),
         .open => |reference| next = .{ .open = reference },
         .exit => return .{ .next = .leave, .intent_admission = effects.intent_admission },
@@ -1260,6 +1263,10 @@ fn runJob(self: *Self, context: client.ReadContext) !void {
             self.answer = .{ .reply = .refused("pin_request_failed") };
             try self.ops.pin(self, requests, .{ .store = self.options.store, .session = &request.reference, .pinned = request.pinned }, &self.answer.reply);
         },
+        .group => |*request| {
+            self.answer = .{ .reply = .refused("group_request_failed") };
+            try self.ops.group(self, requests, .{ .store = self.options.store, .session = &request.reference, .action = request.action }, &self.answer.reply);
+        },
         .archive => |*request| {
             self.answer = .{ .reply = .refused("archive_request_failed") };
             try self.ops.archive(self, requests, .{ .store = self.options.store, .session = &request.reference, .archived = request.archived }, &self.answer.reply);
@@ -1336,6 +1343,11 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
         },
         .stop => |reference| return self.event(.{ .stop = .{ .reference = reference, .outcome = answer.reply.stop() } }),
         .pin => |request| return self.event(.{ .pin = .{ .request = request, .outcome = switch (answer.reply.outcome) {
+            .accepted => .accepted,
+            .failed => .{ .failed = answer.reply.text.slice() },
+            .unconfirmed => .{ .unconfirmed = answer.reply.text.slice() },
+        } } }),
+        .group => |request| return self.event(.{ .group = .{ .request = request, .outcome = switch (answer.reply.outcome) {
             .accepted => .accepted,
             .failed => .{ .failed = answer.reply.text.slice() },
             .unconfirmed => .{ .unconfirmed = answer.reply.text.slice() },
@@ -1802,6 +1814,17 @@ fn pinSession(self: *Self, requests: client.Requests, input: client.SessionPinIn
     return reply.record(requests.sendCaptured(&captured, .{ .map = self.init.environ_map }, &buffer), captured.identity().key.slice());
 }
 
+fn groupSession(self: *Self, requests: client.Requests, input: client.SessionGroupInput, reply: *Reply) !void {
+    const io = self.init.io;
+    var captured = client.captureSessionGroup(io, input, .{ .generated = self.options.directory }) catch |err| {
+        reply.* = .refused(@errorName(err));
+        return;
+    };
+    defer captured.close(io);
+    var buffer: client.ReplyBuffer = .{};
+    return reply.record(requests.sendCaptured(&captured, .{ .map = self.init.environ_map }, &buffer), captured.identity().key.slice());
+}
+
 const test_now_s: u64 = 1_800_000_000;
 
 const Seen = struct {
@@ -1826,6 +1849,8 @@ const Seen = struct {
     archive_session: view.Reference = @splat(0),
     archive_requested: bool = true,
     pins: usize = 0,
+    groups: usize = 0,
+    group_request: ?view.GroupRequest = null,
     pin_session: view.Reference = @splat(0),
     pin_requested: bool = true,
     archive_filter: protocol.SessionArchiveFilter = .active,
@@ -1924,6 +1949,13 @@ const fake_operations: Operations = .{
             reply.* = .{ .outcome = .accepted };
         }
     }.pin,
+    .group = struct {
+        fn group(_: *Self, _: client.Requests, input: client.SessionGroupInput, reply: *Reply) !void {
+            Seen.now.groups += 1;
+            Seen.now.group_request = .{ .reference = input.session[0..6].*, .action = input.action };
+            reply.* = .{ .outcome = .accepted };
+        }
+    }.group,
     .models = struct {
         fn models(_: *Self, _: client.Requests, gpa: std.mem.Allocator) ![]u8 {
             Seen.now.model_lists += 1;
@@ -2143,6 +2175,7 @@ test "pin separator is ground and inert beside selected controls or Sessions at 
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(overview.state.order.items.len > 1);
     overview.state.rows.items[overview.state.order.items[0]].pin_order = 7;
+    _ = try view.step(&overview.state, .{ .conversation = overview.state.conversing });
     overview.caps = .{};
     const ground = @import("widget_style.zig").of(overview.caps, .{}).bg;
     const highlight = @import("widget_style.zig").of(overview.caps, .{ .background = .selection }).bg;
@@ -7571,5 +7604,57 @@ test "Session pin drawn Root gestures preserve composer focus draft and caret ac
         try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
         try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
         try std.testing.expect(!ctx.quit);
+    }
+}
+
+test "App session groups capture mouse and keyboard edits on the shared list" {
+    for ([_]u16{ 46, 140 }) |width| {
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        const group = @import("session_group.zig");
+        var rows = [_]view.Listed{
+            .{ .reference = "aaaaaa".*, .workspace = "/work", .provider = .codex, .label = "Parent chat", .state = .{ .finished = .{ .since = 0 } }, .first = .{ .position = 1, .admission = 1, .sender = null }, .group = .{ .id = 7, .name = try group.Name.from("Release work"), .collapsed = false, .revision = 1 }, .read_version = .{ .instance = @splat(1), .generation = 1 } },
+            .{ .reference = "bbbbbb".*, .workspace = "/work", .provider = .codex, .label = "Worker chat", .state = .{ .working = .{ .since = 0 } }, .first = .{ .position = 1, .admission = 2, .sender = null }, .group = .{ .id = 7, .name = try group.Name.from("Release work"), .collapsed = false, .revision = 1 }, .read_version = .{ .instance = @splat(1), .generation = 1 } },
+        };
+        _ = try view.step(&overview.state, .{ .tick = 0 });
+        _ = try view.step(&overview.state, .{ .list = .{ .page = .{ .rows = &rows, .answer = .{ .delta = .full, .since = .{ .instance = @splat(1), .generation = 1 } } } } });
+        {
+            var shown = try rig.shown(width, 30);
+            defer shown.deinit();
+            const text = try shown.text();
+            try std.testing.expect(std.mem.indexOf(u8, text, "Release work") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "Parent chat") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "Worker chat") != null);
+        }
+        try std.testing.expect(try rig.click(4, 2, width, 30) == null);
+        try std.testing.expectEqual(@as(usize, 1), overview.state.request_count);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(@as(usize, 1), Seen.now.groups);
+        try std.testing.expectEqual(@as(group.Id, 7), Seen.now.group_request.?.action.collapse.group);
+        try std.testing.expect(Seen.now.group_request.?.action.collapse.collapsed);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+        for (&rows) |*row| {
+            row.group.?.collapsed = true;
+            row.group.?.revision = 2;
+            row.read_version.generation = 2;
+        }
+        _ = try view.step(&overview.state, .{ .tick = view.list_interval_ms });
+        _ = try view.step(&overview.state, .{ .list = .{ .page = .{ .rows = &rows, .answer = .{ .delta = .full, .since = .{ .instance = @splat(1), .generation = 2 } } } } });
+        overview.state.selected = .{ .group = 7 };
+        {
+            var shown = try rig.shown(width, 30);
+            defer shown.deinit();
+            const text = try shown.text();
+            try std.testing.expect(std.mem.indexOf(u8, text, "Release work") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "Parent chat") == null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "Worker chat") == null);
+        }
+        try std.testing.expect(try rig.press("\x1b[C") == null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(@as(usize, 2), Seen.now.groups);
+        try std.testing.expect(!Seen.now.group_request.?.action.collapse.collapsed);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
     }
 }

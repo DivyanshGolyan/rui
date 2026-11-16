@@ -131,6 +131,20 @@ pub fn renderSessionPinReply(
     };
 }
 
+pub fn renderSessionGroupReply(
+    response: protocol.JsonOut,
+    session: []const u8,
+    result: command_reply.SessionGroupReply,
+) !void {
+    const shapes = protocol.session_group_reply;
+    try switch (result) {
+        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session }),
+        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, value.code }),
+        .conflict => response.appendShape(shapes.conflict, .{session}),
+        .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
+    };
+}
+
 pub fn renderModelInterruptionReply(
     response: protocol.JsonOut,
     target: command_reply.ModelInterruptionTarget,
@@ -258,6 +272,7 @@ pub fn renderFullCommandObservation(
             }
         },
         .session_stop => |maybe_stop| if (maybe_stop) |stop| try response.appendShape(shapes.session_stop, .{ stop.selection.selected_turn_id, stop.selection.admission_cutoff, stop.completion }),
+        .session_group => {},
         .session_pin => |pin| if (pin) |value| try response.appendShape(shapes.session_pin, .{value.pinned}),
         .session_archive => |archive| if (archive) |value| try response.appendShape(shapes.session_archive, .{ value.archived, value.completion }),
         .model_interruption => |target| try response.appendShape(shapes.model_interruption, .{ target.session.slice(), target.turn_id, target.operation_id }),

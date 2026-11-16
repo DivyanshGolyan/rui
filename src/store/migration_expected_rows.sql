@@ -75,3 +75,8 @@ INSERT INTO permission_decision_command(command_key,action_id,decision) VALUES
 ('fixture-allow','1','allow_once');
 
 UPDATE session SET obligation_since=1793781720 WHERE session_ref='brhkcj';
+
+INSERT INTO session_group_member(session_ref,group_id,manual,creator_ref,evaluated) VALUES
+('d8mv7p',NULL,0,NULL,0),
+('brhkcj',NULL,0,NULL,0),
+('rhvzwc',NULL,0,NULL,0);

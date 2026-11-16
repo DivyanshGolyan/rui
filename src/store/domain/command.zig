@@ -185,6 +185,7 @@ pub const SubmitMessage = struct {
         .loaded_source = .{.branch},
         .loaded = .{.branch},
         .creation = .{.paged},
+        .grouping = .{.paged},
         .catalog = .{.branch},
         .text = .{.branch},
         .failure = .{.branch},
@@ -238,6 +239,7 @@ pub const SubmitMessage = struct {
                 return t.applyValidated(r);
             },
             .creation => return t.apply(r, .creation),
+            .grouping => return t.apply(r, .grouping),
             .catalog => return t.apply(r, .catalog),
             .text => {
                 const applied = &t.creation.applied;
@@ -719,6 +721,7 @@ pub const StartAgent = struct {
         .loaded_source = .{.branch},
         .loaded = .{.branch},
         .creation = .{.paged},
+        .grouping = .{.paged},
         .catalog = .{.branch},
         .outcome = .{.always},
         .skill = .{.paged},
@@ -772,6 +775,7 @@ pub const StartAgent = struct {
                 else => unreachable,
             }),
             .creation => return t.apply(r, .creation),
+            .grouping => return t.apply(r, .grouping),
             .catalog => return t.apply(r, .catalog),
             .outcome => return t.settle(r),
             .skill => return t.saveSkill(r),
@@ -922,6 +926,7 @@ pub const Configure = struct {
         .loaded_source = .{.branch},
         .loaded = .{.branch},
         .creation = .{.paged},
+        .grouping = .{.paged},
         .catalog = .{.branch},
         .skills = .{.branch},
         .skills_window = .{.raw},
@@ -971,6 +976,7 @@ pub const Configure = struct {
                 else => unreachable,
             }),
             .creation => return t.apply(r, .creation),
+            .grouping => return t.apply(r, .grouping),
             .catalog => return t.apply(r, .catalog),
             .skills => return t.reload(r, .latest),
             .skills_window => return t.reload(r, .window),
@@ -2119,6 +2125,7 @@ fn kindCode(kind: cli_value.CommandKind) u8 {
         .session_archive => 6,
         .session_pin => 7,
         .action_background => 8,
+        .session_group => 9,
     };
 }
 
@@ -2329,6 +2336,7 @@ pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservat
             try a.run();
             observation.kind = .{ .model_interruption = try modelInterruptionTarget(&row) };
         },
+        .session_group => observation.kind = .session_group,
         .action_background => {
             observation.kind = .{ .action_background = try @import("action_control.zig").readSaved(a, key) };
         },

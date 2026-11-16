@@ -126,6 +126,7 @@ pub const Kind = enum {
     session_stop,
     session_archive,
     session_pin,
+    session_group,
     model_interruption,
     permission_decision,
     action_background,
@@ -155,6 +156,8 @@ pub const SkillRequest = struct {
 pub const SessionStopCommand = command_input.SessionStopCommand;
 pub const SessionArchiveCommand = command_input.SessionArchiveCommand;
 pub const SessionPinCommand = command_input.SessionPinCommand;
+pub const SessionGroupCommand = command_input.SessionGroupCommand;
+pub const max_group_name_bytes = @sizeOf(@FieldType(@import("session_group.zig").Name, "bytes"));
 pub const ModelInterruptionCommand = command_input.ModelInterruptionCommand;
 
 pub const PermissionDecision = mutation_answer.PermissionDecision;
@@ -172,6 +175,7 @@ pub const TurnEnding = turn_ending.TurnEnding;
 pub const SessionStopRejection = mutation_answer.SessionStopRejection;
 pub const SessionArchiveRejection = mutation_answer.SessionArchiveRejection;
 pub const SessionPinRejection = mutation_answer.SessionPinRejection;
+pub const SessionGroupRejection = mutation_answer.SessionGroupRejection;
 pub const ModelInterruptionRejection = mutation_answer.ModelInterruptionRejection;
 pub const PermissionDecisionRejection = mutation_answer.PermissionDecisionRejection;
 pub const MessageProgressStatus = WorkState.Progress;
@@ -468,10 +472,21 @@ pub const LastLine = struct {
 
 pub const PermissionMode = cli_value.PermissionMode;
 
+pub const GroupBrief = struct {
+    value: @import("session_group.zig").Brief,
+    pub const json_shape = .{ "{\"id\":\"", Hole.decimal, "\",\"name\":", Hole{ .string = max_group_name_bytes }, ",\"collapsed\":", Hole.boolean, ",\"revision\":\"", Hole.decimal, "\"}" };
+    pub const max_json_bytes = shapeBytes(json_shape);
+    pub fn writeJson(self: *const GroupBrief, out: *std.Io.Writer) !void {
+        try writeShape(out, json_shape, .{ self.value.id, self.value.name.slice(), self.value.collapsed, self.value.revision });
+    }
+};
+
 pub const SessionRow = struct {
     read_version: change_ring.Token = .{ .instance = @splat(0), .generation = 0 },
     archive_state: SessionArchiveState = .active,
     pin_order: ?u64 = null,
+    group: ?@import("session_group.zig").Brief = null,
+    group_manual: bool = false,
     reference: Bounded(max_session_bytes) = .{},
     workspace: Bounded(max_workspace_bytes) = .{},
     provider: Provider = .codex,
@@ -489,13 +504,12 @@ pub const SessionRow = struct {
     peers: PeerFacts = .{},
 
     pub const json_shape = .{
-        "{\"read_version\":\"", Hole{ .text = change_ring.Token.max_bytes }, "\",\"archive_state\":\"", Hole{ .tag = SessionArchiveState }, "\",\"pin_order\":",  Hole.optional_id,                          ",\"reference\":",         Hole{ .string = max_session_bytes }, ",\"workspace\":",       Hole{ .string = max_workspace_bytes },
-        ",\"provider\":\"",     Hole{ .tag = Provider },                     "\",\"model\":",           Hole{ .string = max_model_bytes },  ",\"tools\":",        Hole{ .text = max_tool_names_json_bytes }, ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },       "\",\"parent\":",        Hole{ .optional_string = session_id_bytes },
-        ",\"label\":",          Hole{ .optional_string = max_label_bytes },  ",\"created_at\":\"",      Hole.decimal,                       "\",\"revision\":\"", Hole.decimal,                              "\",\"end\":\"",           Hole.decimal,                        "\",\"first_message\":", Hole{ .optional_json = FirstMessage },
-        ",\"last_line\":",      Hole{ .optional_json = LastLine.Fields },    ",\"work\":",              Hole{ .json = SessionWork },        ",\"peers\":",        Hole{ .json = PeerFacts },                 "}",
+        "{\"read_version\":\"", Hole{ .text = change_ring.Token.max_bytes }, "\",\"archive_state\":\"", Hole{ .tag = SessionArchiveState }, "\",\"pin_order\":",     Hole.optional_id,                          ",\"group\":",             Hole{ .optional_json = GroupBrief },      ",\"group_manual\":", Hole.boolean,                                ",\"reference\":", Hole{ .string = max_session_bytes },        ",\"workspace\":",    Hole{ .string = max_workspace_bytes },
+        ",\"provider\":\"",     Hole{ .tag = Provider },                     "\",\"model\":",           Hole{ .string = max_model_bytes },  ",\"tools\":",           Hole{ .text = max_tool_names_json_bytes }, ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },            "\",\"parent\":",     Hole{ .optional_string = session_id_bytes }, ",\"label\":",     Hole{ .optional_string = max_label_bytes }, ",\"created_at\":\"", Hole.decimal,
+        "\",\"revision\":\"",   Hole.decimal,                                "\",\"end\":\"",           Hole.decimal,                       "\",\"first_message\":", Hole{ .optional_json = FirstMessage },     ",\"last_line\":",         Hole{ .optional_json = LastLine.Fields }, ",\"work\":",         Hole{ .json = SessionWork },                 ",\"peers\":",     Hole{ .json = PeerFacts },                  "}",
     };
     pub const max_json_bytes = shapeBytes(json_shape);
-    pub const budget_bytes = 36 * 1024;
+    pub const budget_bytes = 37 * 1024;
     comptime {
         std.debug.assert(max_json_bytes <= budget_bytes);
     }
@@ -504,6 +518,8 @@ pub const SessionRow = struct {
         read_version: change_ring.Token = .{ .instance = @splat(0), .generation = 0 },
         archive_state: SessionArchiveState = .active,
         pin_order: ?u64 = null,
+        group: ?@import("session_group.zig").Brief = null,
+        group_manual: bool = false,
         reference: []const u8,
         workspace: []const u8,
         provider: Provider,
@@ -525,9 +541,9 @@ pub const SessionRow = struct {
         pub fn writeJson(f: *const Fields, out: *std.Io.Writer) !void {
             var token_buffer: [change_ring.Token.max_bytes]u8 = undefined;
             try writeShape(out, json_shape, .{
-                f.read_version.format(&token_buffer), f.archive_state,   f.pin_order, f.reference, f.workspace,  f.provider, f.model,
-                f.tools,                              f.permission_mode, f.parent,    f.label,     f.created_at, f.revision, f.end,
-                f.first_message,                      f.last_line,       f.work,      f.peers,
+                f.read_version.format(&token_buffer), f.archive_state,   f.pin_order, if (f.group) |group| @as(?GroupBrief, .{ .value = group }) else null, f.group_manual, f.reference, f.workspace, f.provider,      f.model,
+                f.tools,                              f.permission_mode, f.parent,    f.label,                                                              f.created_at,   f.revision,  f.end,       f.first_message, f.last_line,
+                f.work,                               f.peers,
             });
         }
     };
@@ -548,6 +564,8 @@ pub const SessionRow = struct {
             .read_version = self.read_version,
             .archive_state = self.archive_state,
             .pin_order = self.pin_order,
+            .group = self.group,
+            .group_manual = self.group_manual,
             .reference = self.reference.slice(),
             .workspace = self.workspace.slice(),
             .provider = self.provider,
@@ -593,6 +611,7 @@ fn RequestOf(comptime Custody: type) type {
         session_stop: SessionStopCommand,
         session_archive: SessionArchiveCommand,
         session_pin: SessionPinCommand,
+        session_group: SessionGroupCommand,
         model_interruption: ModelInterruptionCommand,
         permission_decision: PermissionDecisionCommand,
         action_background: command_input.ActionBackgroundCommand,
@@ -615,7 +634,7 @@ fn RequestOf(comptime Custody: type) type {
             switch (self.*) {
                 .configure => |*command| try command.removeTemporaryContent(io),
                 .message => |*command| try command.removeTemporaryContent(io),
-                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .observe_command, .read_result, .read_action, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .skill_suggestions, .model_list => {},
+                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .session_group, .model_interruption, .permission_decision, .action_background, .observe_command, .read_result, .read_action, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .skill_suggestions, .model_list => {},
             }
         }
 
@@ -709,6 +728,10 @@ fn ParserOf(comptime Custody: type) type {
                 .session_archive => {
                     out.* = .{ .session_archive = .{ .store = store } };
                     try self.parseSessionArchive(&out.session_archive, &members);
+                },
+                .session_group => {
+                    out.* = .{ .session_group = .{ .store = store } };
+                    try self.parseSessionGroup(&out.session_group, &members);
                 },
                 .session_pin => {
                     out.* = .{ .session_pin = .{ .store = store } };
@@ -1144,6 +1167,40 @@ fn ParserOf(comptime Custody: type) type {
                 .pinned => out.pinned = try self.readBoolean(),
             };
             try require(Field, seen, &.{ .key, .session, .pinned });
+        }
+
+        fn parseSessionGroup(self: *Parser, out: *SessionGroupCommand, members: *Members) !void {
+            const Field = enum { key, session, group_action, group_name, group_id, collapsed };
+            const Action = std.meta.Tag(@import("session_group.zig").Action);
+            var seen: std.enums.EnumSet(Field) = .empty;
+            var action: ?Action = null;
+            var name: @import("session_group.zig").Name = .{};
+            var id: u64 = 0;
+            var collapsed: bool = false;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .key => try self.readCommandKey(&out.key),
+                .session => try self.readSmallString(&out.session),
+                .group_action => {
+                    var text: Bounded(16) = .{};
+                    try self.readSmallString(&text);
+                    action = std.meta.stringToEnum(Action, text.slice()) orelse return error.InvalidJsonShape;
+                },
+                .group_name => try self.readSmallString(&name),
+                .group_id => id = try self.readCanonicalU64(),
+                .collapsed => collapsed = try self.readBoolean(),
+            };
+            try require(Field, seen, &.{ .key, .session, .group_action });
+            const selected = action orelse return error.InvalidJsonShape;
+            if (seen.contains(.group_name) != (selected == .assign or selected == .rename) or
+                seen.contains(.group_id) != (selected == .rename or selected == .collapse) or
+                seen.contains(.collapsed) != (selected == .collapse)) return error.InvalidJsonShape;
+            out.action = switch (selected) {
+                .assign => .{ .assign = name },
+                .leave => .leave,
+                .automatic => .automatic,
+                .rename => .{ .rename = .{ .group = id, .name = name } },
+                .collapse => .{ .collapse = .{ .group = id, .collapsed = collapsed } },
+            };
         }
 
         fn parseModelInterruption(self: *Parser, out: *ModelInterruptionCommand, members: *Members) !void {
@@ -1888,6 +1945,15 @@ pub const session_pin_request = struct {
     pub const tail = .{"}"};
     pub const all = head ++ pinned ++ tail;
 };
+pub const session_group_request = struct {
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"session_group\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole };
+    pub const assign = head ++ .{ ",\"group_action\":\"assign\",\"group_name\":", Hole{ .string = max_group_name_bytes }, "}" };
+    pub const leave = head ++ .{",\"group_action\":\"leave\"}"};
+    pub const automatic = head ++ .{",\"group_action\":\"automatic\"}"};
+    pub const rename = head ++ .{ ",\"group_action\":\"rename\",\"group_id\":\"", Hole.decimal, "\",\"group_name\":", Hole{ .string = max_group_name_bytes }, "}" };
+    pub const collapse = head ++ .{ ",\"group_action\":\"collapse\",\"group_id\":\"", Hole.decimal, "\",\"collapsed\":", Hole.boolean, "}" };
+    pub const variants = .{ assign, leave, automatic, rename, collapse };
+};
 pub const model_interruption_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"model_interruption\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"target\":{\"session\":", session_hole, ",\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\"}}" };
 pub const permission_decision_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"permission_decision\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\",\"decision\":\"", Hole{ .tag = PermissionDecision }, "\"}" };
 pub const action_background_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"action_background\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
@@ -1983,11 +2049,12 @@ pub const message_request = struct {
 
 pub const max_session_stop_request_bytes = shapeBytes(session_stop_request);
 pub const max_session_archive_request_bytes = shapeBytes(session_archive_request.all);
+pub const max_session_group_request_bytes = maxShapeBytes(session_group_request.variants);
 pub const max_session_pin_request_bytes = shapeBytes(session_pin_request.all);
 pub const max_model_interruption_request_bytes = shapeBytes(model_interruption_request);
 pub const max_permission_decision_request_bytes = shapeBytes(permission_decision_request);
 pub const max_action_background_request_bytes = shapeBytes(action_background_request);
-pub const max_control_request_bytes = maxShapeBytes(.{ session_stop_request, session_archive_request.all, session_pin_request.all, model_interruption_request, permission_decision_request, action_background_request });
+pub const max_control_request_bytes = @max(max_session_group_request_bytes, maxShapeBytes(.{ session_stop_request, session_archive_request.all, session_pin_request.all, model_interruption_request, permission_decision_request, action_background_request }));
 pub const max_observe_command_request_bytes = shapeBytes(observe_command_request.all);
 pub const max_host_info_request_bytes = shapeBytes(host_info_request);
 pub const max_host_stop_request_bytes = shapeBytes(host_stop_request);
@@ -2059,6 +2126,14 @@ pub const session_pin_reply = struct {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_pin_reply\",\"answer\":{\"status\":";
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"pinned\":", Hole.boolean, "}}" };
     pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = SessionPinRejection }, "\"}}" };
+    pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"}}" };
+    pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
+};
+
+pub const session_group_reply = struct {
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_group_reply\",\"answer\":{\"status\":";
+    pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, "}}" };
+    pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = SessionGroupRejection }, "\"}}" };
     pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"}}" };
     pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
 };
@@ -2182,6 +2257,7 @@ pub const command_observation_reply = struct {
             .session_stop => shapeBytes(session_stop),
             .session_archive => shapeBytes(session_archive),
             .session_pin => shapeBytes(session_pin),
+            .session_group => 0,
             .model_interruption => shapeBytes(model_interruption),
             .permission_decision => shapeBytes(permission_decision),
             .action_background => shapeBytes(action_target) + shapeBytes(action_selection),
@@ -2202,7 +2278,7 @@ pub const max_control_error_response_bytes = shapeBytes(error_reply);
 
 pub const max_mutation_response_bytes = @max(
     @max(@max(configuration_reply.max_bytes, message_reply.max_bytes), @max(session_stop_reply.max_bytes, model_interruption_reply.max_bytes)),
-    @max(session_pin_reply.max_bytes, @max(session_archive_reply.max_bytes, @max(action_background_reply.max_bytes, @max(permission_decision_reply.max_bytes, max_control_error_response_bytes)))),
+    @max(@max(session_group_reply.max_bytes, session_pin_reply.max_bytes), @max(session_archive_reply.max_bytes, @max(action_background_reply.max_bytes, @max(permission_decision_reply.max_bytes, max_control_error_response_bytes)))),
 );
 
 pub const host_info_reply = struct {
@@ -3224,5 +3300,40 @@ test "Action promotion parses one owned target and binds semantic replay" {
         var invalid: MetadataSource = .{ .input = head ++ tail };
         var invalid_parser = Tested.Parser{ .source = &invalid };
         try std.testing.expectError(error.InvalidIdentity, parseForTest(&invalid_parser));
+    }
+}
+
+test "group parser requires action-specific fields and semantic digest binds every action" {
+    const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"store\":\"s\",\"kind\":\"session_group\",\"key\":\"k\",\"session\":\"k7m2qx\"";
+    var digests: [6][32]u8 = undefined;
+    inline for (.{
+        ",\"group_action\":\"assign\",\"group_name\":\"Work\"}",
+        ",\"group_action\":\"leave\"}",
+        ",\"group_action\":\"automatic\"}",
+        ",\"group_action\":\"rename\",\"group_id\":\"1\",\"group_name\":\"Work\"}",
+        ",\"group_action\":\"collapse\",\"group_id\":\"1\",\"collapsed\":true}",
+        ",\"group_action\":\"collapse\",\"group_id\":\"1\",\"collapsed\":false}",
+    }, 0..) |tail, i| {
+        var source: MetadataSource = .{ .input = prefix ++ tail };
+        var parser: Tested.Parser = .{ .source = &source };
+        var request = try parseForTest(&parser);
+        digests[i] = request.session_group.semanticDigest();
+        for (digests[0..i]) |previous| try std.testing.expect(!std.mem.eql(u8, &previous, &digests[i]));
+        try request.session_group.key.set("other-key");
+        try std.testing.expectEqualSlices(u8, &digests[i], &request.session_group.semanticDigest());
+    }
+    inline for (.{
+        .{ "}", error.MissingField },
+        .{ ",\"group_action\":\"assign\"}", error.InvalidJsonShape },
+        .{ ",\"group_action\":\"leave\",\"group_name\":\"Work\"}", error.InvalidJsonShape },
+        .{ ",\"group_action\":\"automatic\",\"collapsed\":false}", error.InvalidJsonShape },
+        .{ ",\"group_action\":\"rename\",\"group_name\":\"Work\"}", error.InvalidJsonShape },
+        .{ ",\"group_action\":\"collapse\",\"group_id\":\"1\"}", error.InvalidJsonShape },
+        .{ ",\"group_action\":\"other\"}", error.InvalidJsonShape },
+        .{ ",\"group_action\":\"leave\",\"group_action\":\"automatic\"}", error.UnexpectedField },
+    }) |case| {
+        var source: MetadataSource = .{ .input = prefix ++ case[0] };
+        var parser: Tested.Parser = .{ .source = &source };
+        try std.testing.expectError(case[1], parseForTest(&parser));
     }
 }

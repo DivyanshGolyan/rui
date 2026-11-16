@@ -57,7 +57,7 @@ The overview has no slash-command parser or view command surface; the former `/s
 The pinned `+ New Session` action has its own row above the `Sessions` and `Archived` tabs wherever the list is visible, including sidebars and empty lists.
 `OverviewLines.SessionControls` composes both rows with the existing `GroupedList` press regions. No generic tab widget or second focus manager owns them.
 The active tab is bold. Keyboard selection has a separate selection background, so moving between tabs does not imply a filter change. The existing List regions own both hit geometry and per-label selection/hover: a selected span keeps its focus background under a resting pointer, another tab can hover independently, and whitespace stays inert. Region selection is derived per frame from the same Selection owner.
-Down from New Session selects the current view's tab. Up from the first Session returns to that tab, and Up again selects New Session.
+Down from New Session selects the current view's tab. Up from the first projected Session or group header returns to that tab, and Up again selects New Session.
 Left and Right move between the two tab targets. Enter or a click selects that explicit destination. Activating the current tab does not reload or toggle the filter.
 Tab and Shift-Tab follow the same list selection order as Down and Up. Escape in the archived view keeps its existing return to Sessions.
 The header keeps New Session first, then the tabs, then a provider band when height is limited. Hidden tab cells have no pointer target.
@@ -69,7 +69,7 @@ Conversations also expose `/archive` and `/unarchive`; these validated commands 
 The overview core owns their archive/restore request ledger and worker effects; conversation slash commands never run a separate CLI archive mutation.
 Alt-A leaves the draft, caret and retained original unchanged.
 While a conversation is open the refreshes go on without the screen or input, for [desktop notifications](#desktop-notifications).
-Marks hold still: `?` needs you, in the attention colour, `●` active, `◌` queued, dim, `○` idle, `✓` finished, `×` failed, `■` stopped; moving to its group says a row changed.
+Marks hold still: `?` needs you, in the attention colour, `●` active, `◌` queued, dim, `○` idle, `✓` finished, `×` failed, `■` stopped; the mark and compact state age show a row changed.
 The overview's top line is the counts line: the wordmark, then each mark's count where it is not zero, `? 1  ● 2  ◌ 3 · slots 2/2  × 1`, with only `?` and `×` coloured and the model slots only while a Session waits for one.
 Live memory reads `rui 42 MB · tools 1.8 GB`: `rui` is this TUI plus its Host (the TUI alone with no Host), and `tools` the processes below the Host, shown only while one runs.
 It shows quietly on the pinned Settings row, before the version, and as a read-only Memory row on the app Settings page, once the first reading arrives; chat info does not show it.
@@ -87,24 +87,29 @@ Each Session occupies one line: its existing state mark, primary name and a subd
 The duration uses `WorkState.since` through its existing displayed-state projection and `State.now_ms`, including queued rows. A retry that becomes queued at its due time uses that transition's timestamp. Drawing never advances the clock or changes ordering.
 Rows show no Message excerpt, command, cause or Workspace detail, and selection never expands their height. Commands and failure details remain in the conversation. The overview does not acquire or cache waiting Action commands for rows.
 Divyansh chose one-line rows and time in the current state on 2026-11-15, replacing the previous detail line and state-age suppression for queued work.
-Enter on a row opens that Session's conversation, and so does one click on the row, under Enter's rules; a click on a folded group's `N more` opens the group at its first hidden row, as moving into it does; headings, marks, counts, memory and row words take no click (Divyansh, 2026-11-09, TUI rework plan, "Click targets on the final screens").
-One line map, `listItem` in `src/overview_view.zig`, names each list line for drawing, and `clickOf` says what a click on one names: the Session to open or the group to unfold.
-Exactly one blank, noninteractive row separates pinned and unpinned Sessions when both are visible. There is no leading spacer or pin heading. The same projection supplies row selection and overflow counts, excluding the separator from `N more`; keyboard navigation skips it. Empty lists use the existing empty-view line.
-Each drawn row keeps that name, so a click means what the person saw even when the list changed since the frame, and a Session gone by then opens nothing.
+Enter or a normal left-click on a Session row opens that conversation under the existing opening guards.
+A group header is a separate target that toggles the group's saved collapse state.
+Marks, counts, memory, and other noninteractive text take no separate click.
+One line map, `listItem` in `src/overview_view.zig`, names each projected list line for drawing; `clickOf` captures its Session or group target.
+Exactly one blank, noninteractive row separates pinned Sessions from the unpinned projection when both are visible.
+There is no leading spacer or pin heading.
+Keyboard navigation skips the separator, and overflow counts include only projected Session rows.
+Empty lists use the existing empty-view line.
+Each drawn row retains its identity, so a click means what the person saw even after refresh; a missing target activates nothing.
 The Sessions list has no editor or model picker of its own. Settings and Chat Info use the shared model field choice; the chat footer's model button and `/model` open that same choice on its own.
 Ctrl-X sends an ordinary `session stop` for the selected row, with the same capture and recovery as the CLI command.
-List input reaches `overview_view.step` as a semantic action from the list's one key table (Right is `open_session` there), Enter, semantic Left or ignored input; clicks carry the Session, New Session, Sessions tab, Archived tab or Settings identity drawn in the frame.
+List input reaches `overview_view.step` as a semantic action from the list's one key table (Right is `open_session` there), Enter, semantic Left or ignored input; clicks carry the Session, group ID with desired collapse state, New Session, Sessions tab, Archived tab or Settings identity drawn in the frame.
 Enter on a Session row opens it, and Right does the same on a Session row, moves from Sessions to Archived on the tab row, and does nothing on New Session or Settings; on the row of the chat already open, either one, or a click on that row, returns keys to that chat's input instead, keeping its draft and anything it presents, such as Chat Info, and sends the Host nothing.
 Printable keys and bracketed paste are ignored: no editor, hidden draft, frozen-editor state, command list, skill cache or duplicate footer focus exists on the overview.
 Arrows, Home and End keep whole-list navigation, including the pinned New Session action, view tabs and Settings rows; Settings is the penultimate row immediately before the footer.
 The core owns selection, opening admission and pending/uncertain creation; the shell applies its effects.
 The core holds the terminal’s size, and shared screen composition accepts the actual bottom widget: the overview’s status/footer, not a manufactured editor.
 Without an open chat, the overview’s list uses the full width at every terminal size, with no empty compose pane. The wide list beside an open chat or its settings retains its existing row navigation and pointer spans, without an input of its own.
-Option/Alt-Up and Option/Alt-Down immediately switch to the previous or next Session in the list's projected order, even while typing, at every width.
+Option/Alt-Up and Option/Alt-Down immediately switch to the previous or next visible Session row in the list projection, even while typing, at every width.
 The destination's input gets focus; each draft, caret and rejection state stays attached to its own Session, and switching sends nothing.
 Opening another Session uses the existing one-step Follow return: Esc can return to the chat just left before it returns to the overview.
 The shortcut uses the existing opening and departure admission, including pending-creation, unresolved-original, Action, command and Upgrade guards; sign-in, Settings and marked paste keep their input custody.
-It skips New Session, both view tabs and Settings, clamps at the first and last Session, and anchors to the open Session rather than a separately highlighted row; if that Session is absent from the projected list it does nothing.
+It skips group headers, collapsed descendants, the separator, New Session, both view tabs and Settings, clamps at the first and last visible Session, and anchors to the open Session rather than a separately highlighted row; if that Session is absent from the projected list it does nothing.
 Without an open Session it moves from a selected Session, or opens the last/first Session for Up/Down from a control row; an empty list does nothing.
 At 100 columns and wider, keys go to the list or to the chat beside it, one at a time (`app_input`'s list focus).
 Left on an empty chat draft gives keys to the list and leaves the chat open and drawn; a draft with text, even with the caret at its start, takes Left as an edit.
@@ -346,6 +351,41 @@ Each step rereads the preference, so `/setup --notifications off` applies at onc
 With notifications off Rui wants no record: while any record of Rui's may be on the terminal it writes one clear (`state=clear:id=rui`, which clears Rui's records and no other program's), and from the frame that carries it until one writes it whole, what the terminal holds of each record is unknown; on again, it writes every record again.
 Leaving clears Rui's records too whenever one may be on the terminal, though the spec lets `done` and `error` outlive the program: a record of a Session no Rui watches would not change again.
 
+### Session group projection
+
+[Grouping Sessions](sessions.md#grouping-sessions) owns durable membership and automatic placement.
+`overview_view` owns one projection for drawing, selection, pointer targets, overflow counts, and adjacent-chat navigation.
+The client publishes a new grouped projection only after all pages of its listing traversal arrive.
+It never invents optimistic membership or collapse state while a command awaits a committed listing.
+
+The global pinned strip stays above groups, newest pin first.
+A pinned member appears once in that strip and never repeats under its group.
+Groups with visible headers follow stable group ID order, followed by ungrouped Sessions and flat automatic singletons.
+Within a group and among flat rows, the existing work, age, and reference comparator applies.
+A group header appears only when the current archive and visibility filters include an unpinned member.
+A group containing only pinned or filtered-out members has no header.
+An expanded automatic group with one eligible member renders as an ordinary flat row, without a header or indentation.
+Its saved membership and ID remain unchanged.
+A second eligible member reveals the header.
+Any eligible manual assignment or saved collapsed state keeps a singleton header visible, provided an unpinned member matches the filters.
+Empty-Session visibility and active/archive placement keep their existing rules.
+
+Each header shows its name, saved collapse mark, and count of matching unpinned members.
+Its status summary includes all matching members, including pinned members and children hidden by collapse.
+The summary reports members needing attention, failed, running, or queued, so collapse cannot hide those signals.
+Header text fits the available width in Unicode and ASCII modes.
+Collapsing a group hides its unpinned rows without closing an open member conversation or changing its draft.
+The collapsed header highlights the open hidden member.
+A collapse that hides the selected member moves list selection to the header.
+
+A header click or Enter toggles saved collapse state through the shared request ledger.
+The drawn click captures the group ID and explicit desired state, so a refresh cannot retarget it or invert its meaning.
+Left on a header collapses it; Left on an unpinned member selects its header and requests collapse.
+Right on a header expands it.
+Up, Down, Tab, Shift-Tab, Home, and End select headers and visible rows from the same projection.
+Option/Alt-Up and Option/Alt-Down visit only visible Session rows and skip collapsed children and headers.
+Grouping adds no full-text search.
+
 ### Staged persistent input
 
 Explicitly addressed `rui session resume` and a Session opened from the overview use one conversation-first `SessionFrontend`, without a compatibility alias.
@@ -445,10 +485,9 @@ The `↓` chip uses a permanently reserved row. Its count names newly rendered A
 When rows run short, the work line and a waiting Message's row keep theirs and call rows give way to the overflow row, which counts them; a running call whose row is not drawn hands its clock to the work line.
 While a permission prompt is open the Action's instructions speak instead.
 An overview row whose work needs the person or explains a wait (approval, a retry, a running command, stopping) says the same words beside its own age column, so it adds only a retry's countdown, and takes its tone; one functional core, `work_line`, holds the wording and tone for both.
-The overview groups its rows as Needs you (waiting on an Action, a Bash call's approval included, whoever started the Session), Yours, Active (thinking, running a tool, retrying or stopping), Idle, Finished, and Stopped or failed; a Session the person spoke in is in Yours unless it needs them.
-A queued row (waiting for a model slot, as a retry that has fallen due does) sits last in Active, or in Yours when it is yours, longest wait first, and shows only its dim `◌`, its title and how long it has waited.
-Each group heading ends in its count, folded rows included, `Active · 3`.
-Divyansh asked for the counts on 2026-11-02 and on 2026-11-09 chose Needs you first and Queued folded into Active (TUI rework plan, "What changes" O5 and "Queued rows inside Active"), replacing the Queued group of 2026-11-02.
+The overview uses the [Session group projection](#session-group-projection) for organization, with the existing work comparator inside each group and among ungrouped rows.
+Rows that need a decision precede active work, settled work, and queued work within that order.
+Queued rows retain the longest-wait-first comparator.
 A Message a person or script sends while work is under way waits as the activity tail's last row, `◌ also update docs …`, or `◌ 3 · also update docs …` when more than one waits, with the newest such Message's first line cut to fit, until it shows as its conversation row; a Message a stop excluded shows labelled `! Stopped before it ran · send it again to run it` before `! Session stopped.`.
 Divyansh approved those labels on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF); the row's `◌` form is the vxfw rework plan's.
 The Host reports how many wait and the newest on each Activity page (`queued`), and the row reads that Message's first line at its Admission position, which holds that Admission alone, never by text; it keeps the line with that Message's admission ID and shows it only while the Host names that Message newest.
@@ -925,6 +964,7 @@ Host work and captured-request recovery are independent of terminal state; unsen
 | [One ChatGPT sign-in label](#human-entry-and-authentication) (Divyansh chose this on 2026-11-13) | `provider_name.zig` `'every provider's name reads apart, its sign-in reads the same exactly within its account, and its login is a terminal command'`; `app_settings.zig` `'App settings sign-in and effort choices'` (Sign-in reads ChatGPT for saved `codex` and `chatgpt`, API key for `openai`) and the 99x20/46x20 page test; `model_choice.zig` `'Model choice keeps a chat on its own way into ChatGPT, and either ChatGPT word finds it'` (each sign-in's list keeps its own models; `chatgpt` and `codex` find ChatGPT rows, `api` API-key rows); `model_picker.zig` `'/model terra low api'` and `'a word narrows'`; `model_picker_signin_integration.py` | Every list on screen scopes to one sign-in, so none shows two ChatGPT routes; the sign-in columns in `model_picker_view.zig` are unwired since #1327. Fixture lists only |
 | [Bare entry](#human-entry-and-authentication) overview and empty creation | `overview_view.zig` in `test-logic`: list input has no text domain; New Session Enter/click creates once from a copied default; acceptance opens the returned reference, rejection permits retry, uncertainty keeps its recovery key and blocks duplicate creation, and Host holds/ledger capacity preserve local Settings access. `Overview.zig`: printable ASCII/Unicode, unknown keys, `x`, `r` and bracketed paste are ignored at both widths; accepted empty creation opens a blank focused chat with no Message intent; Configure completion retains saved permissions, effort and model admission without loaded tools. Creation owner tests change saved effort and permission before admission and again after queueing, proving one fresh admitted snapshot remains fixed through the worker; covered, pasted and pending gestures do not sample creation preferences. `overview_clicks_cases.empty_list` drives click and Home/Enter separately: each captures one Configure, creates exactly one Session with zero Messages, and only subsequent chat typing sends a Message. Existing stop, spinner, canonical-failure and `require_model` owners retain their separate checks. | Native PTY and owner tests are not physical-keyboard or Mac display evidence; no new native result is claimed by this inventory. |
 | Mouse and keyboard choice parity | `widgets/List.zig` and `widgets/Panel.zig` send enter, motion, press and leave events over clipped rows, fields, inline choices and column actions; hover preserves keyboard selection and focus and takes the hover style, which the selection overrides. Region-only rows hover their clipped label spans; selected regions keep their selection background while another region hovers, and repeated identical motion does not churn pointer shape or redraw. `Overview.zig` `Overview mouse` and `overview_view.zig` list click tests cover empty New Session creation, pinned Settings and Host start/retry availability; chat tests retain palette and model/effort controls. `widget_style.zig` `hover differs` walks every skin and depth: hover differs from ground, bar and selection, and monochrome hover underlines without reverse. `SessionFrontend.zig` `App Session palette` and `App Session status mouse`, plus `PermissionCard.zig`, cover choices, skills, recovery rows, editable/fixed status fields, stale frames, paste and consent guards. `FeedView.zig`, `DocumentView.zig`, `transcript_selection.zig`, `FactsRow.zig`, `StatusRow.zig` and `SessionChrome.zig` check row hover backgrounds, open rows keeping their selection background, full linked-label underlines, wide cells, continuations, retry/new-entry chips and click actions. | Event-driven widget and shell evidence; no physical-terminal mouse claim |
+| [Session group projection](#session-group-projection) | `overview_view.zig` tests prefixed `session groups` cover every pin/collapse combination without duplicate chats, committed-listing collapse and retained open identity, captured header clicks after refresh/deletion, staging all pages, hidden attention summaries across Unicode/ASCII widths, and flat automatic singletons versus visible manual/collapsed singletons. `SessionFrontend.zig` group-command tests cover parsing and shared overview delivery. | These are owner and frontend tests. Native macOS grouping behavior remains unverified until CI. Physical keyboard/mouse use and process restart require separate exact-candidate evidence; this row does not claim them. |
 | [Session pinning](sessions.md#pinning-a-session) | `session_pin.zig` exhausts archive state, current rank, and desired value; `store/pin_tests.zig` checks no-op rank, replay/conflict, unpin/repin, ordinary stop, restart, unknown targets, changed listing, creation pagination, concurrent ranks, and commit rollback on each engine. `store/archive_tests.zig` checks pending archive clear, Message restore, and independent parent/child pins. `overview_view.zig`, `GroupedList.zig`, `OverviewLines.zig`, `Root.zig`, `Overview.zig`, and `SessionFrontend.zig` cover the one visible order, pinned empties, captured target/value, release, non-Session controls, focus and draft preservation, shared admission and recovery. `client.zig`, `protocol.zig`, `protocol_reply.zig`, `mutation_answer.zig`, and `server.zig` check capture, binding, positive rank grammar, producers, and keyed observation. On the exact candidate, drive both terminal gestures and both slash commands against a real Host, observe from a second client and after restart, and retain archive and unrelated draft/focus witnesses. Mutation controls must show loss of pin writes, replay classification, archive clear, or draw-time capture fails at its intended assertion. |
 | Alt-A archive on the overview and exact conversation | `overview_view.zig` `Alt-A` tests cover the shared policy, captured reference, absent listing, busy/approval confirmation, server-only visibility, archived/archiving guards and pending/unknown duplicate suppression. `Overview.zig` and `SessionFrontend.zig` `Alt-A` tests cover unchanged draft bytes, caret/revision and retained original, confirmation precedence and permission-offer spending. `SessionFrontend.zig` conversation slash tests cover shared archive/restore ownership, submitted-line and completion consumption, busy/approval confirmation, mixed-input duplicate suppression, recovery handles and propagated dispatch errors; `Overview.zig` checks the exact unlisted open reference through the worker. | Plain-PTY verify-rui capture required. No live provider needed |
 | Reader failure provenance and Host recovery | `SessionFrontend.zig` drives read/copy/command disconnects and local create/sink/rename failures through the joined worker with discovery reachable or held. Required `ReadContext` callback types bind the joined `ClientTask` result origin; skills tests retry the same prefix through the real adapter after reobservation, retaining the held page. Cancellation, canonical failures and origin reset keep their independent lanes | Injected local filesystem faults and a scripted local peer; error names never decide Host loss in the shell |

@@ -1359,6 +1359,8 @@ pub const SessionListPage = struct {
                 read_version: JsonString(protocol.SinceToken.max_bytes),
                 archive_state: JsonEnum(protocol.SessionArchiveState),
                 pin_order: ?JsonString(20),
+                group: ?struct { id: JsonString(20), name: JsonString(protocol.max_group_name_bytes), collapsed: bool, revision: JsonString(20) },
+                group_manual: bool,
                 reference: JsonString(protocol.max_session_bytes),
                 parent: ?JsonString(protocol.session_id_bytes),
                 workspace: JsonString(protocol.max_workspace_bytes),
@@ -1383,10 +1385,13 @@ pub const SessionListPage = struct {
             if (!protocol.validSessionId(wire.reference.slice()) or wire.workspace.value.len == 0 or wire.model.value.len == 0) return error.InvalidCharacter;
             if (wire.parent) |parent| if (!protocol.validSessionId(parent.slice()) or parent.eql(wire.reference.slice())) return error.InvalidCharacter;
             if (wire.label) |label| if (!protocol.validLabel(label.slice())) return error.InvalidCharacter;
+            if (wire.group) |group| if (!@import("session_group.zig").validName(group.name.slice())) return error.InvalidCharacter;
             var row: Row = .{
                 .read_version = try protocol.SinceToken.parse(wire.read_version.slice()),
                 .archive_state = wire.archive_state.value,
                 .pin_order = if (wire.pin_order) |rank| try ActivityPage.id(rank, false) else null,
+                .group = if (wire.group) |group| .{ .id = try ActivityPage.id(group.id, false), .name = group.name.value, .collapsed = group.collapsed, .revision = try ActivityPage.id(group.revision, false) } else null,
+                .group_manual = wire.group_manual,
                 .reference = wire.reference.value,
                 .parent = if (wire.parent) |parent| parent.value else null,
                 .workspace = wire.workspace.value,
@@ -2642,9 +2647,9 @@ test "canonical failure classifier bounds deep wide and escaped maximum replies"
 
 const testing_list_facts = "],\"delta\":\"full\",\"since\":\"abababababababababababababababab.42\",\"next\":";
 const testing_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null" ++ testing_row_details;
-const testing_row_details = ",\"parent\":null,\"label\":null,\"created_at\":\"1\",\"revision\":\"1\",\"end\":\"0\",\"first_message\":null,\"last_line\":null," ++
+const testing_row_details = ",\"group\":null,\"group_manual\":false,\"parent\":null,\"label\":null,\"created_at\":\"1\",\"revision\":\"1\",\"end\":\"0\",\"first_message\":null,\"last_line\":null," ++
     "\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null},\"peers\":{\"from_person_at\":null}";
-const testing_started_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\",\"revision\":\"1\",\"end\":\"9\"," ++
+const testing_started_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"group\":null,\"group_manual\":false,\"parent\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\",\"revision\":\"1\",\"end\":\"9\"," ++
     "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}," ++
     "\"last_line\":null,\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1792925300\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null},\"peers\":{\"from_person_at\":\"1792925001\"}";
 
@@ -2655,7 +2660,7 @@ test "Session list facts own complete rows and render semantic output after scra
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
     const digest = @as([64]u8, @splat('a'));
-    const facts = "\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"label\":\"Review \\u0050R\",\"created_at\":\"1792925000\",\"revision\":\"3\",\"end\":\"9\"," ++
+    const facts = "\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"group\":null,\"group_manual\":false,\"parent\":\"p33rs1\",\"label\":\"Review \\u0050R\",\"created_at\":\"1792925000\",\"revision\":\"3\",\"end\":\"9\"," ++
         "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":{\"session\":\"p33rs1\"},\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ digest ++ "\"}}," ++
         "\"last_line\":{\"position\":\"8\",\"text\":\"Saved preview\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null}," ++
         "\"peers\":{\"from_person_at\":\"1792925200\"}";
@@ -2682,8 +2687,8 @@ test "Session list facts own complete rows and render semantic output after scra
     var output: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
     try page.writeJson(&writer);
-    try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"reference\":\"k7m2qx\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
-        "\"parent\":\"p33rs1\",\"label\":\"Review PR\"" ++ facts["\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"label\":\"Review \\u0050R\"".len..] ++ "}" ++ testing_list_facts ++ "null}", writer.buffered());
+    try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"group\":null,\"group_manual\":false,\"reference\":\"k7m2qx\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
+        "\"parent\":\"p33rs1\",\"label\":\"Review PR\"" ++ facts["\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"group\":null,\"group_manual\":false,\"parent\":\"p33rs1\",\"label\":\"Review \\u0050R\"".len..] ++ "}" ++ testing_list_facts ++ "null}", writer.buffered());
     var exhausted = std.Io.Writer.fixed(&.{});
     try std.testing.expectError(error.WriteFailed, page.writeJson(&exhausted));
 }
@@ -3019,6 +3024,8 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
     const largest = std.math.maxInt(i64);
     var maximal: protocol.SessionRow = .{ .read_version = .{ .instance = @splat(0xab), .generation = std.math.maxInt(u64) }, .archive_state = .archiving, .provider = .codex, .tools = try .of(&.{"bash"}), .permission_mode = .bypass, .label = .{}, .created_at = largest, .revision = largest, .end = largest };
+    maximal.group = .{ .id = largest, .name = try .from(&@as([protocol.max_group_name_bytes]u8, @splat('"'))), .collapsed = true, .revision = largest };
+    maximal.group_manual = true;
     maximal.parent = .{};
     try maximal.parent.?.set("zzzzzz");
     try maximal.workspace.set(&workspace);
@@ -3051,6 +3058,8 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     try std.testing.expectEqual(@as(u64, 23), page.next.?.ceiling);
     for (page.rows[0..8], 0..) |*row, index| {
         try std.testing.expectEqualDeep(maximal.read_version, row.read_version);
+        try std.testing.expectEqualDeep(maximal.group, row.group);
+        try std.testing.expect(row.group_manual);
         try std.testing.expectEqual(@as(u8, @intCast('0' + index)), row.reference.bytes[0]);
         try std.testing.expectEqual(protocol.session_id_bytes, row.reference.len);
         try std.testing.expectEqualStrings(&workspace, row.workspace.slice());
@@ -3119,6 +3128,7 @@ test "keyed observation validates every operation shape and binding" {
         .{ "session_stop", ",\"selection\":{\"turn\":null,\"admission_cutoff\":\"0\"},\"completion\":{\"status\":\"completed\"}", "" },
         .{ "session_archive", ",\"archived\":false,\"completion\":{\"status\":\"completed\"}", "" },
         .{ "session_pin", ",\"pinned\":false", "" },
+        .{ "session_group", "", "" },
         .{ "model_interruption", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"7\"}", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"0\",\"operation\":\"0\"}" },
         .{ "permission_decision", ",\"permission_target\":{\"action\":\"29\",\"decision\":\"allow_once\"}", ",\"permission_target\":{\"action\":\"0\",\"decision\":\"deny\"}" },
         .{ "action_background", ",\"action_target\":{\"action\":\"29\"},\"action_selection\":{\"kind\":\"background\",\"position\":\"31\"}", ",\"action_target\":{\"action\":\"29\"}" },
@@ -3953,4 +3963,54 @@ test "Session pin list ranks round trip as positive decimal strings" {
     var writer = std.Io.Writer.fixed(&output);
     try decoded.page.writeJson(&writer);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"pin_order\":\"9223372036854775807\"") != null);
+}
+
+test "group list metadata round trips identity manual choice and collapse state" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "group-list", .{ .read = true });
+    defer file.close(io);
+    var input: [2048]u8 = undefined;
+    const ungrouped = try testingListPage(&input, &.{"k7m2qx"}, testing_list_facts ++ "null}");
+    const group_json = "\"group\":{\"id\":\"9007199254740993\",\"name\":\"Release\",\"collapsed\":true,\"revision\":\"7\"},\"group_manual\":true";
+    const grouped = try std.mem.replaceOwned(u8, std.testing.allocator, ungrouped, "\"group\":null,\"group_manual\":false", group_json);
+    defer std.testing.allocator.free(grouped);
+    try file.writePositionalAll(io, grouped, 0);
+    const decoded = try SessionListReply.decode(io, file, "/w", .{}, .{ .report = .{ .bytes = grouped.len } });
+    const row = &decoded.page.rows[0];
+    try std.testing.expect(row.group_manual);
+    try std.testing.expectEqual(@as(u64, 9007199254740993), row.group.?.id);
+    try std.testing.expectEqualStrings("Release", row.group.?.name.slice());
+    try std.testing.expect(row.group.?.collapsed);
+    try std.testing.expectEqual(@as(u64, 7), row.group.?.revision);
+    var output: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&output);
+    try decoded.page.writeJson(&writer);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), group_json) != null);
+}
+
+test "group list metadata rejects missing facts invalid names and noncanonical identities" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "invalid-group-list", .{ .read = true });
+    defer file.close(io);
+    var input: [2048]u8 = undefined;
+    const ungrouped = try testingListPage(&input, &.{"k7m2qx"}, testing_list_facts ++ "null}");
+    const original = "\"group\":null,\"group_manual\":false,";
+    inline for (.{
+        "\"group\":null,",
+        "\"group_manual\":false,",
+        "\"group\":null,\"group_manual\":null,",
+        "\"group\":{\"id\":\"0\",\"name\":\"Work\",\"collapsed\":false,\"revision\":\"1\"},\"group_manual\":false,",
+        "\"group\":{\"id\":\"01\",\"name\":\"Work\",\"collapsed\":false,\"revision\":\"1\"},\"group_manual\":false,",
+        "\"group\":{\"id\":\"1\",\"name\":\"\",\"collapsed\":false,\"revision\":\"1\"},\"group_manual\":false,",
+        "\"group\":{\"id\":\"1\",\"name\":\"Work\",\"collapsed\":false,\"revision\":\"0\"},\"group_manual\":false,",
+    }) |replacement| {
+        const invalid = try std.mem.replaceOwned(u8, std.testing.allocator, ungrouped, original, replacement);
+        defer std.testing.allocator.free(invalid);
+        try file.writePositionalAll(io, invalid, 0);
+        try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, invalid.len, "/w", .{}));
+    }
 }

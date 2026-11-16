@@ -38,6 +38,7 @@ const action_read_domain = @import("domain/action_read.zig");
 const reads_domain = @import("domain/reads.zig");
 const report_domain = @import("domain/report.zig");
 const session_list_read = @import("domain/session_list_read.zig");
+const session_groups = @import("domain/session_groups.zig");
 const session_report_read = @import("domain/session_report_read.zig");
 const rsql = @import("rsql.zig");
 const store_access = @import("access.zig");
@@ -679,6 +680,14 @@ pub const Store = struct {
 
     fn pinSessionHeld(self: *Store, command: *const command_input.SessionPinCommand, faults: Faults) SessionPinReply {
         return transition.apply(self, command_domain.PinSession, .{ .command = command }, faults) catch .infrastructure_failure;
+    }
+
+    pub fn groupSession(self: *Store, command: *const command_input.SessionGroupCommand, faults: Faults) command_reply.SessionGroupReply {
+        return self.queue().write(groupSessionHeld, .{ self, command, faults });
+    }
+
+    fn groupSessionHeld(self: *Store, command: *const command_input.SessionGroupCommand, faults: Faults) command_reply.SessionGroupReply {
+        return transition.apply(self, session_groups.GroupSession, .{ .command = command }, faults) catch .infrastructure_failure;
     }
 
     pub fn archiveSession(self: *Store, command: *const command_input.SessionArchiveCommand, faults: Faults) SessionArchiveReply {
@@ -1577,7 +1586,7 @@ const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @a
 const accepted_settlement_growth = 14352;
 
 comptime {
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 15624 or scratch_bytes != 19032)
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 16464 or scratch_bytes != 19032)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
@@ -2005,7 +2014,7 @@ pub fn publicConversationPageForTesting(self: *Store, request: conversation_read
     return page;
 }
 
-pub const Identity = enum { turn_id, operation_id, action_id, content_id, created_seq, command_seq, admission_id, tool_record_id, tool_set_id, forward_id };
+pub const Identity = enum { turn_id, operation_id, action_id, content_id, created_seq, command_seq, admission_id, tool_record_id, tool_set_id, forward_id, group_id };
 
 pub const SavedHostToolSet = struct {
     records: []tool_record.Record,
@@ -2090,6 +2099,7 @@ fn IdentityCeiling(comptime column: Identity) type {
         .tool_record_id => "tool_record",
         .tool_set_id => "tool_set",
         .forward_id => "session_forward",
+        .group_id => "session_group",
     };
     return rsql.Read(.{
         .sql = "SELECT coalesce(max(" ++ @tagName(column) ++ "),0) AS ceiling FROM " ++ table,

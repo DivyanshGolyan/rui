@@ -55,12 +55,70 @@ There is no pin marker or menu.
 
 Pinned rows appear once, below the fixed New Session control, newest pin first.
 Activity changes never reorder pins.
-`overview_view.visible` and `arrange` produce the one visible and navigation order in `State.order`; unpinned rows retain their existing comparator exactly.
+`overview_view.visible` and `arrange` derive the ordered members and the one visible navigation projection in `State.projection`.
+Unpinned rows use the [group projection](session-ui.md#session-group-projection), retaining their existing comparator within each group and among ungrouped rows.
 Pinned empty Sessions remain visible after leaving the conversation, subject to the ordinary archive filter.
 Admission of archive intent clears the pin in that same transaction, including while its stop is pending.
 Restore and Message-unarchive never resurrect it, and ordinary stop never clears it.
 Parents and children have independent organization.
-No optimistic durable pin state, second list, or second comparator exists in the client.
+The client derives pin and group presentation from canonical listing facts.
+
+#### Grouping Sessions
+
+A Session belongs to at most one named group in its Store.
+The Store owns group membership, a manual-choice flag, stable positive group IDs, unique names, and saved collapse state.
+These facts survive Host restart and moving the same Store to another directory.
+Group names are valid nonblank UTF-8 labels of at most 100 bytes, without terminal control bytes.
+Renaming a group preserves its ID and membership; a name already used by another group rejects.
+Grouping never changes Messages, work, pins, archive state, or parent links.
+
+`POST /v1/control/session-group` accepts a Session, command key, and one closed action.
+`assign` moves only that Session to the exact named group, creating the group when absent, and records a manual choice.
+`leave` clears membership and records a durable negative override, even if the Session was already ungrouped.
+`automatic` clears the manual choice and current membership, then evaluates automatic placement again.
+`rename` and `collapse` target a group ID and change its name or explicit desired collapse state.
+Repeating the same desired collapse state or name is a no-op.
+The serialized Store transition owns validation, atomic updates, replay, conflicts, and fault fencing.
+Replay returns the historical answer without applying an older assignment, leave, rename, or collapse again.
+
+The CLI exposes these actions through `rui session group --session ID --mode assign|leave|automatic|rename|collapse`.
+`assign` requires `--name`; `rename` requires `--group` and `--name`; `collapse` requires `--group` and `--collapsed true|false`.
+Every mode requires `--session`, including actions that target a group ID.
+The chat commands `/group NAME`, `/ungroup`, `/autogroup`, and `/group-rename NAME` share the overview's captured-command ledger and recovery owner.
+They admit no Message or Configure.
+`/group-rename` targets the current chat's group and rejects an ungrouped chat.
+
+Automatic placement preserves every manual assignment and negative override.
+A new child retains its birth creator for grouping independently of whether its parent link is attached.
+The child inherits its creator's current group.
+If an eligible creator has no group, creation makes a family group for the creator and child.
+A creator that manually left remains ungrouped and suppresses automatic family creation for its new child.
+Moving or leaving one existing member never moves the other members.
+Changing a parent attachment later does not rewrite the birth creator or regroup the chat.
+
+For an independent chat, automatic placement evaluates the first available Label once and saves the outcome, including no match.
+A chat created without a Label waits for its first Label.
+Later Label changes do not rename its group or move its membership.
+Only an explicit `automatic` action resets this decision.
+Existing parent trees migrate conservatively into family groups; shared Workspaces or peer Messages alone do not establish a family.
+
+`session_group_topic.key` owns topic matching, scoped to the exact Workspace bytes.
+It first accepts one distinct canonical GitHub issue or pull-request URL, or a project ticket such as `AUTH-123`.
+A GitHub URL has the form `https://github.com/OWNER/REPO/issues/NUMBER` or `https://github.com/OWNER/REPO/pull/NUMBER`, with an optional final slash.
+A ticket has an alphabetic prefix of at least two letters, a hyphen, and positive decimal digits.
+Reference numbers have no leading zero.
+GitHub identities include the owner, repository, issue or pull-request kind, and positive number.
+Hostname suffixes, malformed URLs, and multiple distinct strong references yield no match.
+Repeated copies of the same reference, letter case, and surrounding task words do not change the identity.
+Without a strong reference, matching requires identical sorted sets of distinct lowercase ASCII words after generic task words are removed.
+Each informative word has at least two ASCII alphanumeric bytes and contains a letter.
+The set must contain 2 to 16 informative words totaling at least 8 bytes; duplicates and punctuation do not change it.
+The owner rejects labels longer than 100 bytes, invalid UTF-8, terminal controls, and excess informative words without truncation.
+Non-ASCII labels yield no topic key unless they contain a valid strong GitHub URL.
+Matching makes no model, network, or filesystem calls and never expands into fuzzy or transitive clusters.
+For example, `Fix session grouping` and `Test session grouping` match, while `session rendering` remains separate.
+
+[Session UI](session-ui.md#session-group-projection) owns headers, visible rows, collapse gestures, and navigation.
 
 #### Archiving a Session
 
@@ -165,6 +223,7 @@ A crash reopens committed queue/selection facts without inventing a terminal out
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
 | [Control replay and conflicts](admission.md#recovering-a-submission-after-a-lost-reply) | `'exact model interruption'`, `'idle Session stop'`, `'controls remove scheduled retries'`, `'allow once survives'`, `'model revisions'` | Reopen is not crash recovery |
+| [Session grouping](#grouping-sessions) | `session_group.zig` tests manual-choice preservation and name/ID boundaries. `store/group_tests.zig`: `session group manual moves leaves and reset persist through replay and reopen`, `session group first label topic placement metadata and pagination remain durable`, and `session group invalid edits reject atomically and preserve names`. `session_group_topic.zig` tests exact salient sets, strong references, ambiguous and spoofed references, UTF-8, controls, Workspace isolation, and boundary limits. | Store tests run through `forEachEngine` for available engines. Reopen is not process-crash evidence. Native macOS grouping checks remain unverified until CI; test names describe coverage, not a completed native run. |
 | Native control replay | `control_integration.py` `prove_idle_stop_wire_recovery`, `prove_retry_wait_control`, `check_schema`, `bash_integration.py`, `admission_integration.sh` | None |
 
 ### Control races and acknowledgement

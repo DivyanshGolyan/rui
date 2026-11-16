@@ -645,15 +645,15 @@ test("session summaries preserve both parent references and top-level nulls", as
 	const link: Link = {
 		exchange: async () => Buffer.from(JSON.stringify({
 			sessions: [
-				{ reference: "p33rs1", label: "caller", work: { state: { kind: "idle" } }, archive_state: "active", parent: null },
-				{ reference: "k7m2qx", label: "child", work: { state: { kind: "pending" } }, archive_state: "archiving", parent: "p33rs1" },
+				{ reference: "p33rs1", label: "caller", work: { state: { kind: "idle" } }, archive_state: "active", parent: null, group: null, group_manual: true },
+				{ reference: "k7m2qx", label: "child", work: { state: { kind: "pending" } }, archive_state: "archiving", parent: "p33rs1", group: { id: "9007199254740993", name: "Release", collapsed: true, revision: "7" }, group_manual: false },
 			],
 			next: null,
 		})),
 	};
 	assert.deepEqual(await new Sessions(link).list(), [
-		{ id: "k7m2qx", label: "child", state: "pending", archiveState: "archiving", parent: "p33rs1" },
-		{ id: "p33rs1", label: "caller", state: "idle", archiveState: "active", parent: null },
+		{ id: "k7m2qx", label: "child", state: "pending", archiveState: "archiving", parent: "p33rs1", group: { id: "9007199254740993", name: "Release", collapsed: true, revision: "7" }, groupManual: false },
+		{ id: "p33rs1", label: "caller", state: "idle", archiveState: "active", parent: null, group: null, groupManual: true },
 	]);
 });
 

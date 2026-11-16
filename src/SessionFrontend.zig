@@ -1,4 +1,5 @@
 const std = @import("std");
+const session_group = @import("session_group.zig");
 const utf8_validation = @import("utf8_validation.zig");
 const session_list = @import("session_list.zig");
 const vaxis = @import("vaxis");
@@ -1585,6 +1586,8 @@ const Slash = union(enum) {
     archive,
     unarchive,
     pin: bool,
+    group: overview_view.GroupInput,
+    invalid_group_name,
     inspection: Inspection,
     discard,
     recover: []const u8,
@@ -1605,6 +1608,14 @@ fn parse(text: []const u8) Slash {
         .unarchive => .unarchive,
         .pin => .{ .pin = true },
         .unpin => .{ .pin = false },
+        .group, .@"group-rename" => blk: {
+            const name = std.mem.trim(u8, command.argument, " \t");
+            if (!session_group.validName(name)) break :blk .invalid_group_name;
+            const value = session_group.Name.from(name) catch unreachable;
+            break :blk .{ .group = if (command.name == .group) .{ .assign = value } else .{ .rename = value } };
+        },
+        .ungroup => .{ .group = .leave },
+        .autogroup => .{ .group = .automatic },
         .requests => .{ .inspection = .requests },
         .copy => .{ .inspection = .{ .copy = if (command.argument.len == 0) .answer else std.meta.stringToEnum(reads.Copy, command.argument).? } },
         .setup, .result, .rename, .effort, .@"reload-skills" => .{ .inspection = .command },
@@ -1616,7 +1627,7 @@ fn parse(text: []const u8) Slash {
 fn slashCommand(self: *Self, text: []const u8) !void {
     const parsed = parse(text);
     const admitted_elsewhere = switch (parsed) {
-        .archive, .unarchive, .pin => true,
+        .archive, .unarchive, .pin, .group => true,
         else => false,
     };
     if (self.upgradeHeld() and !admitted_elsewhere) {
@@ -1629,6 +1640,8 @@ fn slashCommand(self: *Self, text: []const u8) !void {
         .archive => try self.perform(.archive),
         .unarchive => try self.converse(.unarchive),
         .pin => |pinned| try self.converse(.{ .pin = pinned }),
+        .group => |action| try self.converse(.{ .group = action }),
+        .invalid_group_name => self.notice = "! Use a group name of 1–100 bytes on one line.",
         .inspection => self.input.queueCommand(text),
         .discard => {
             self.submission.discardRejected() catch {
@@ -2451,7 +2464,7 @@ fn converse(self: *Self, input: overview_view.ConversationInput) !void {
 fn converseAdmission(self: *Self, input: overview_view.ConversationInput) !overview_view.IntentAdmission {
     const host_intent = switch (input) {
         .other, .cancel_upgrade, .upgrade_failed => false,
-        .stop, .archive, .unarchive, .pin => true,
+        .stop, .archive, .unarchive, .pin, .group => true,
     };
     if (host_intent and self.hostHeld()) return .refused;
     if (host_intent and self.upgradeHeld()) {
@@ -4846,6 +4859,8 @@ const ArchiveOverview = struct {
     archives: usize = 0,
     pins: usize = 0,
     pin_requested: ?bool = null,
+    groups: usize = 0,
+    group_requested: ?overview_view.GroupRequest = null,
     stops: usize = 0,
     host_inputs: usize = 0,
     cancels: usize = 0,
@@ -4865,7 +4880,7 @@ const ArchiveOverview = struct {
         const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
         switch (input) {
             .other, .cancel_upgrade, .upgrade_failed => {},
-            .stop, .archive, .unarchive, .pin => self.host_inputs += 1,
+            .stop, .archive, .unarchive, .pin, .group => self.host_inputs += 1,
         }
         const effects = try overview_view.step(&self.state, .{ .conversed = .{ .reference = "k7m2qx".*, .work = work, .input = input } });
         for (effects.slice()) |effect| switch (effect) {
@@ -4878,6 +4893,10 @@ const ArchiveOverview = struct {
                 try std.testing.expectEqualStrings("k7m2qx", &request.reference);
                 self.pins += 1;
                 self.pin_requested = request.pinned;
+            },
+            .group => |request| {
+                self.groups += 1;
+                self.group_requested = request;
             },
             .stop => self.stops += 1,
             .cancel_upgrade => self.cancels += 1,
@@ -9863,4 +9882,68 @@ test "App Session quote gesture preserves the caret and cancels under Escape mod
         for (fixture.ctx.cmds.items) |command| try std.testing.expect(command != .copy_to_clipboard);
         if (case == .insert) try std.testing.expectEqual(@as(usize, "left\n> quoted source\n".len), self.input.composition().cursor);
     }
+}
+
+test "conversation grouping commands share captured organization admission and retain original text" {
+    const Case = struct { line: []const u8, tag: std.meta.Tag(session_group.Action) };
+    const cases = [_]Case{
+        .{ .line = "/group Release work", .tag = .assign },
+        .{ .line = "/ungroup", .tag = .leave },
+        .{ .line = "/autogroup", .tag = .automatic },
+    };
+    for (cases) |case| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        var overview: ArchiveOverview = .{ .state = undefined };
+        try overview.init();
+        defer overview.deinit();
+        held.self.lender = overview.lender();
+        held.self.command = UnusedArchiveCommand.command;
+        UnusedArchiveCommand.calls = 0;
+        const original = held.self.input.submitText("retained original");
+        try sendKeys(&held.self, case.line);
+        try sendKeys(&held.self, "\r");
+        try std.testing.expectEqual(@as(usize, 1), overview.groups);
+        const request = overview.group_requested.?;
+        try std.testing.expectEqual(case.tag, std.meta.activeTag(request.action));
+        if (request.action == .assign) try std.testing.expectEqualStrings("Release work", request.action.assign.slice());
+        try std.testing.expectEqualStrings("k7m2qx", &request.reference);
+        try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+        try std.testing.expectEqualStrings("retained original", try held.self.input.message(original));
+        try std.testing.expect(held.self.input.queuedCommand() == null);
+        try std.testing.expect(held.self.submission.view() == null);
+        try std.testing.expectEqual(@as(usize, 0), UnusedArchiveCommand.calls);
+        _ = try overview_view.step(&overview.state, .{ .group = .{ .request = request, .outcome = .{ .unconfirmed = "saved-group-handle" } } });
+        try sendKeys(&held.self, "/ungroup\r");
+        try std.testing.expectEqual(@as(usize, 1), overview.groups);
+        var buffer: [1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try overview_view.writeDeparture(&overview.state, null, &writer);
+        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "rui request recover saved-group-handle") != null);
+    }
+}
+
+test "conversation grouping names reject overflow controls and missing names before organization admission" {
+    for ([_][]const u8{ "/group", "/group-rename", "/ungroup extra", "/autogroup extra" }) |line| {
+        try std.testing.expect(parse(line) == .misused);
+    }
+    var overflow: [108]u8 = undefined;
+    @memcpy(overflow[0..7], "/group ");
+    @memset(overflow[7..], 'x');
+    try std.testing.expect(parse(&overflow) == .invalid_group_name);
+    try std.testing.expect(parse("/group bad\x1bname") == .invalid_group_name);
+    const renamed = parse("/group-rename 代码").group;
+    try std.testing.expectEqualStrings("代码", renamed.rename.slice());
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    var overview: ArchiveOverview = .{ .state = undefined };
+    try overview.init();
+    defer overview.deinit();
+    held.self.lender = overview.lender();
+    try held.self.slashCommand(&overflow);
+    try std.testing.expectEqual(@as(usize, 0), overview.groups);
+    try std.testing.expect(held.self.notice != null);
+    try std.testing.expect(held.self.submission.view() == null);
+    try held.self.slashCommand("/group Valid name");
+    try std.testing.expectEqual(@as(usize, 1), overview.groups);
 }

@@ -88,6 +88,7 @@ pub const checkSessionReportsForTesting = @import("store/tests.zig").checkSessio
 pub const SessionStopReply = command_domain.SessionStopReply;
 pub const SessionArchiveReply = command_domain.SessionArchiveReply;
 pub const SessionPinReply = command_domain.SessionPinReply;
+pub const SessionGroupReply = @import("command_reply.zig").SessionGroupReply;
 pub const settleCompactionForTesting = store_testing.settleCompactionForTesting;
 pub const setLoadedToolsForTesting = store_testing.setLoadedToolsForTesting;
 pub const setLegacyNullEffortForTesting = store_testing.setLegacyNullEffortForTesting;

@@ -74,6 +74,7 @@ pub const CommandObservation = struct {
         permission_decision: struct { action_id: u64, decision: mutation_answer.PermissionDecision },
         session_pin: ?mutation_answer.SessionPinObservation,
         action_background: @import("action_control.zig").Observation,
+        session_group,
     } = .{ .configure = .{} },
 
     pub fn requestState(self: *const CommandObservation) ?message_observation.MessageRequestState {
@@ -144,6 +145,13 @@ pub const SessionArchiveReply = union(enum) {
 pub const SessionPinReply = union(enum) {
     accepted: struct { replayed: bool, pinned: bool },
     rejected: struct { replayed: bool, code: mutation_answer.SessionPinRejection },
+    conflict,
+    infrastructure_failure,
+};
+
+pub const SessionGroupReply = union(enum) {
+    accepted: struct { replayed: bool },
+    rejected: struct { replayed: bool, code: mutation_answer.SessionGroupRejection },
     conflict,
     infrastructure_failure,
 };
