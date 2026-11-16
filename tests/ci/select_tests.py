@@ -651,9 +651,9 @@ BUILD_MODULES = {
     # the terminal. Its renderer harnesses are nonblocking (renderer-contracts.yml).
     "build/screen.zig": ("check-full", "skills-integration", "upgrade-integration"),
     # The unit roots, their runners and filters, the deadline witness and the
-    # portable logic root. check and check-full run the same unit binaries,
-    # and test runs them alone.
-    "build/unit.zig": ("test", "test-full", "test-logic"),
+    # portable logic root, plus the transport roots named by its registry.
+    # check and check-full run the same unit binaries; test runs native/Store.
+    "build/unit.zig": ("test", "test-full", "test-logic", "test-h2", "test-pg", "mysql-wire-integration"),
     # The Go measurement packages and the macOS measure-* campaigns, which no PR runs.
     "build/measurement.zig": ("measurement-check",),
     # The table of simple process fixtures: an edit to one row selects that

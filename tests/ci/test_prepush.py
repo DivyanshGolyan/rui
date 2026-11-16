@@ -38,6 +38,7 @@ class PrepushTest(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.addCleanup(patch.stopall)
         patch.object(prepush, "ROOT", self.root).start()
+        patch.object(prepush, "previous_red", return_value=(None, [])).start()
 
     def file(self, path, text=""):
         target = self.root / path

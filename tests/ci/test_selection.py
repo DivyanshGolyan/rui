@@ -1890,7 +1890,7 @@ class FullCheckPartitionTest(unittest.TestCase):
                  ready=lambda live: not live)
 
     def run_part(self, part, fail="", overlap=False, hold="", timing=False, clock_error="",
-                 timeout=60, python_delay=0, fail_at=""):
+                 timeout=60, python_delay=0, fail_at="", native=True):
         with ExitStack() as owner:
             root = Path(tempfile.mkdtemp())
             process = None
@@ -1994,7 +1994,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                     f"if (len(sys.argv) == 1) == {clock_error == 'start'!r}:\n"
                     "    time.monotonic_ns = fail_clock\n")
                 env["PYTHONPATH"] = str(root)
-            arguments = (["parallel", str(root / "native"), "status", "sessions", "activity", "preferences", "notice", "mysql-admin"]
+            arguments = (["parallel", str(root / "native") if native else "", "status", "sessions", "activity", "preferences", "notice", "mysql-admin"]
                          if part == "parallel" else
                          ["status", "sessions", "activity", "preferences", part, "notice", "mysql-admin"])
             command = [
@@ -2384,6 +2384,13 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
         for part in ("callers", "parallel"):
             result, _ = self.run_part(part, overlap=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_parallel_gate_without_native_composition_omits_unit_execution(self):
+        result, lines = self.run_part("parallel", native=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("native ", lines)
+        self.assertIn("dispatch_integration.py release", lines)
+        self.assertIn("human_cli_integration.py:callers release", lines)
 
     def test_parallel_gate_drains_native_and_execution_peers(self):
         for peer in ("native", "admission_integration.sh", "dispatch_integration.py",
