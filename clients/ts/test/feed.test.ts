@@ -34,19 +34,23 @@ function narrowed(entry: FeedEntry): void {
 			const server: string | null = entry.server;
 			void [description, tool, server];
 			const fields: [Schemas["ActivityItemContent"], Schemas["ActivityItemContent"], Schemas["ActivityItemContent"]] = entry.fields;
+			// @ts-expect-error Only top-level camelCase keys are exposed.
 			void entry.call_ordinal;
+			// @ts-expect-error Calls do not have the text-bearing row's extras.
 			void entry.text;
 			void [ordinal, fields];
 			break;
 		}
 		case "tool_result": case "hosted_call": {
 			const position: string | null = entry.presentation.publication_position;
+			// @ts-expect-error Nested keys keep their generated wire spelling.
 			void entry.presentation.publicationPosition;
 			void position;
 			break;
 		}
 		case "turn_ended": {
 			const sessionId: string = entry.sessionId;
+			// @ts-expect-error The wire session field is exposed as sessionId.
 			void entry.session;
 			const ending: "done" | "context_full" | "provider_refused" | "provider_unavailable" | "stopped" | "interrupted" | "failed" = entry.ending;
 			const content: Schemas["ActivityItemContent"] | null = entry.content;
@@ -65,8 +69,10 @@ function narrowed(entry: FeedEntry): void {
 		}
 		case "send_failed": {
 			const target: Schemas["NamedPeer"] | null = entry.target;
+			// @ts-expect-error A refused Message need not name a canonical peer.
 			const nonnull: Schemas["NamedPeer"] = entry.target;
 			const { target: omitted, ...withoutTarget } = entry;
+			// @ts-expect-error The target field is required even when its value is null.
 			const missing: typeof entry = withoutTarget;
 			if (entry.target !== null) {
 				const session: string = entry.target.session;
@@ -77,6 +83,7 @@ function narrowed(entry: FeedEntry): void {
 		}
 		case "approval_requested": {
 			const sessionId: string = entry.sessionId;
+			// @ts-expect-error The wire session field is exposed as sessionId.
 			void entry.session;
 			const action: string = entry.action;
 			const ordinal: string = entry.callOrdinal;
@@ -84,6 +91,7 @@ function narrowed(entry: FeedEntry): void {
 			const tool: string | null = entry.tool;
 			const server: string | null = entry.server;
 			void [description, tool, server];
+			// @ts-expect-error Other kinds' fields must not be accepted.
 			void entry.final;
 			void [sessionId, action, ordinal];
 			break;
@@ -109,6 +117,7 @@ function narrowed(entry: FeedEntry): void {
 			const first: string | null = entry.firstEventMs;
 			const status: string = entry.status;
 			const attempts: string = entry.attempts;
+			// @ts-expect-error Model calls do not expose message text.
 			void entry.text;
 			void [model, served, input, output, cached, latency, first, status, attempts];
 			break;

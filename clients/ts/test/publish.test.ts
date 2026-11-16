@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+// @ts-expect-error: a plain JavaScript release script with no type declarations.
 import { publicationOrder } from "../scripts/publish.mjs";
 
 const client = (platforms: string[]) => ({

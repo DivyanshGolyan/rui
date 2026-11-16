@@ -448,6 +448,7 @@ test("presets preserve creation fields and use the existing spec writer", () => 
 	const spec = { model: "custom", effort: null, compactAt: 1000, tools: ["bash"] as const, permissionMode: "ask" as const, provider: "openai" as const, workspace: "/w", outputSchema: { type: "object" } };
 	assert.deepEqual(documentFor({ presets: { review: spec } }).presets, { review: spec });
 	for (const text of ["[]", "false", "not JSON"]) {
+		// @ts-expect-error The runtime Host also refuses non-object schemas.
 		const invalid = documentFor({ presets: { review: { ...spec, outputSchema: text } } });
 		assert.equal(invalid.presets.review.outputSchema, text);
 	}
@@ -585,8 +586,11 @@ test("a followed feed resumes from the end of an exhausted page", async () => {
 });
 
 function launchTypeChecks() {
+	// @ts-expect-error The owner accepts only the two lifetime choices, not null.
 	launchFor({ interface: { lifetime: null } }, "/r");
+	// @ts-expect-error Store Adapters are objects, not the old URL/path field.
 	encodeSettings({ store: "/s" });
+	// @ts-expect-error Provider CA trust is a PEM filename, never a verification toggle.
 	launchFor({ network: { caFile: false } }, "/r");
 	new RuiStartError("store_fenced", "refused");
 	new RuiStartError("mysql_version", "refused");
@@ -597,6 +601,7 @@ function launchTypeChecks() {
 	new RuiStartError("binlog_statement", "refused");
 	new RuiStartError("mysql_unreachable", "refused");
 	new RuiStartError("mysql_login", "refused");
+	// @ts-expect-error Unknown codes are not launch refusals in the Host enum.
 	new RuiStartError("not_a_start_error", "refused");
 }
 

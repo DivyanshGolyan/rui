@@ -83,6 +83,7 @@ test("an invalid connect preset is a RuiStartError naming the preset and field",
 	await assert.rejects(Rui.connect({
 		store: { sqlite: { dir: join(root, "store") } },
 		providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: "sk-ts-presets" } },
+		// @ts-expect-error Deliberately bypass the complete spec type to exercise Host refusal.
 		presets: { review: { model: "m", tools: [], compactAt: 1000, permissionMode: "ask" } },
 	}, { binary: binary ?? "rui" }), (error: unknown) => error instanceof RuiStartError && error.code === "settings_invalid" && /review.*effort/.test(error.message));
 });
@@ -92,6 +93,7 @@ test("a connect preset without tools is refused by the Host", { skip }, async ()
 	await assert.rejects(Rui.connect({
 		store: { sqlite: { dir: join(root, "store") } },
 		providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: "sk-ts-presets" } },
+		// @ts-expect-error Deliberately omit tools to exercise Host refusal.
 		presets: { review: { model: "m", effort: "low", compactAt: 1000, permissionMode: "ask" } },
 	}, { binary: binary ?? "rui" }), (error: unknown) => error instanceof RuiStartError && error.code === "settings_invalid" && /review.*tools/.test(error.message));
 });
@@ -102,6 +104,7 @@ for (const outputSchema of ["[]", "false", "not JSON"]) {
 		await assert.rejects(Rui.connect({
 			store: { sqlite: { dir: join(root, "store") } },
 			providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: "sk-ts-presets" } },
+			// @ts-expect-error Deliberately exercise runtime refusal of non-object schemas.
 			presets: { review: { model: "m", effort: "low", compactAt: 1000, tools: [], permissionMode: "ask", outputSchema } },
 		}, { binary: binary ?? "rui" }), (error: unknown) => error instanceof RuiStartError && error.code === "settings_invalid" && /review.*outputSchema/.test(error.message));
 	});
