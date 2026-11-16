@@ -12,7 +12,7 @@ const historical_domain = @import("../domain/historical.zig");
 const sqlite = @import("../sqlite.zig");
 const store_testing = @import("../testing.zig");
 const HistoricalSettings = historical_domain.HistoricalSettings;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
 const submitTestMessage = store_testing.submitTestMessage;
@@ -60,8 +60,8 @@ test "loaded tools hide configured tools from frozen requests reports and call s
     try submitTestMessage(&storage, &tmp, "loaded-hidden-message", "loaded-hidden-message", session.slice(), "classify");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     {
-        var view: HistoricalView = undefined;
-        storage.openHistoricalView(binding, &view);
+        var view: TestingPage = undefined;
+        view.open(&storage, binding);
         defer view.close();
         var settings: HistoricalSettings = undefined;
         try view.settings(&settings);

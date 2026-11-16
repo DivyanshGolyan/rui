@@ -841,9 +841,9 @@ pub const AdmitModel = struct {
     pub const Guards = error{ SelectionChanged, ProjectionFailed, InstructionSelectionFailed, CompactionDue };
     pub const Declined = error{};
 
-    /// Where the admitted request starts, and the Store its view reads
-    /// through: the step only hands the Store to the view it opens.
-    pub const Starting = struct { start: historical_domain.Start, store: *Store };
+    /// Where the admitted request starts, and the selector of the Store
+    /// its settings name.
+    pub const Starting = struct { start: historical_domain.Start, selector: *const @FieldType(Store, "selector") };
 
     /// What the run reads over 1 KiB, in the Store's report scratch: the
     /// selected model the Operation's insert reads in place at the commit,
@@ -1086,10 +1086,10 @@ pub const AdmitModel = struct {
         t.binding = .{ .turn_id = turn_id, .operation_id = operation_id, .attempt_ordinal = 1 };
         // The request's settings round reads only what this commit saves,
         // so it follows COMMIT in the same message.
-        if (t.input.start) |starting| if (starting.start.open(starting.store, t.binding)) {
+        if (t.input.start) |starting| if (starting.start.open(t.binding)) {
             t.opened = true;
             const request = &t.input.scratch.request;
-            request.* = .init(starting.start.view, starting.start.settings);
+            request.* = .init(starting.start.view, starting.start.settings, starting.selector);
             request.readAhead(starting.start, &admitting.session.ref, position);
         };
         return .commit;
@@ -1100,7 +1100,7 @@ pub const AdmitModel = struct {
     }
 
     pub fn committed(t: *const AdmitModel) Result {
-        const started = t.opened and t.input.start.?.start.view.settled != null;
+        const started = t.opened and t.input.start.?.start.view.read != null;
         if (t.opened and !started) t.input.start.?.start.view.close();
         return .{ .permit = .{ .binding = t.binding }, .request_started = started };
     }

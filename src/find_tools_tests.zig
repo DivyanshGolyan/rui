@@ -99,8 +99,8 @@ test "find_tools loads saved name and description matches once in one revision a
             try std.testing.expectEqual(revisions + 1, try count(&storage, session.slice(), "session_revision"));
             try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key=?1", .{try std.fmt.allocPrint(alloc, "rui.core/find_tools/{d}", .{input.binding.action_id})}));
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            var view: store.HistoricalView = undefined;
-            storage.openHistoricalView(next, &view);
+            var view: store.testing.TestingPage = undefined;
+            view.open(&storage, next);
             var settings: store.HistoricalSettings = undefined;
             try view.settings(&settings);
             try std.testing.expectEqual(@as(u64, 3), settings.tool_count);

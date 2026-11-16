@@ -16,7 +16,7 @@ const ActionExecutionInput = action_domain.ActionExecutionInput;
 const ContentReader = content_domain.ContentReader;
 const Faults = store_core.Faults;
 const HistoricalSettings = historical_domain.HistoricalSettings;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
 const completeMessage = store_testing.completeMessage;
@@ -828,8 +828,8 @@ test "configure parent inherits binding without a task, uses the create round bu
             try submitTestMessage(&storage, &tmp, "native-child-task", "native-child-task", session.slice(), "answer");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             {
-                var view: HistoricalView = undefined;
-                storage.openHistoricalView(model, &view);
+                var view: TestingPage = undefined;
+                view.open(&storage, model);
                 defer view.close();
                 var settings: HistoricalSettings = undefined;
                 try view.settings(&settings);

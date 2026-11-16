@@ -14,7 +14,7 @@ const store_testing = @import("../testing.zig");
 const AcceptedMessage = command_domain.AcceptedMessage;
 const ActionExecutionInput = action_domain.ActionExecutionInput;
 const ContentReader = content_domain.ContentReader;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
 const completeMessage = store_testing.completeMessage;
@@ -344,8 +344,8 @@ test "a peer sender is resolved from its Action handle and exact replays survive
 
             // The model's historical view carries the recorded sender, not text.
             var admitted = (try storage.admitNextModelAttempt(.{})).?;
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(try admitted.permit.consume(), &view);
+            var view: TestingPage = undefined;
+            view.open(&storage, try admitted.permit.consume());
             defer view.close();
             const entry = (try view.nextEntry(0)).?;
             try std.testing.expect(entry.kind == .user);
