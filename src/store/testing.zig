@@ -305,6 +305,86 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
     }
 }
 
+/// Reconstruct the scalar predecessor only for certified, single-Text fixtures.
+/// This discards no compound input and is never a production downgrade.
+fn restoreScalarUpgradeInput(storage: *Store) !void {
+    const schema = @import("schema.zig");
+    const Native = struct {
+        fn exec(store: *Store, sql: [:0]const u8) !void {
+            if (store.engine == .mysql) return mysql_testing.rawExec(store, sql);
+            return sqlite.exec(store.sqliteDatabase(), sql);
+        }
+    };
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM message_skill", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM core_command c WHERE c.kind=2 AND (NOT " ++ input_domain.messageConsistentSql("c", true) ++
+        " OR (c.accepted=1 AND (c.input_part_count<>1 OR " ++ input_domain.messageTextIdSql("c") ++ " IS NULL)) OR (c.accepted=0 AND c.input_part_count<>0))", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM message_admission m LEFT JOIN core_command c ON c.command_key=m.command_key WHERE c.command_key IS NULL OR c.kind<>2 OR c.accepted<>1", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM conversation_entry e LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id WHERE e.entry_kind=1 AND m.admission_id IS NULL", .{}));
+    const checks = .{
+        .{ "core_command", "(LOCATE('input_part_count',cc.CHECK_CLAUSE)>0 OR LOCATE('input_reference_',cc.CHECK_CLAUSE)>0 OR LOCATE('primary_content_id',cc.CHECK_CLAUSE)>0)", 6 },
+        .{ "message_admission", "LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='content_id is null'", 1 },
+        .{ "conversation_entry", "LOCATE('content_id',cc.CHECK_CLAUSE)>0", 1 },
+    };
+    const catalog = " FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.CONSTRAINT_TYPE='CHECK' AND tc.TABLE_NAME=";
+    const unique_input = "(SELECT INDEX_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='core_command' AND NON_UNIQUE=0 GROUP BY INDEX_NAME HAVING GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX SEPARATOR ',')='command_key,kind,input_part_count')";
+    if (storage.engine == .mysql) {
+        inline for (checks) |check| {
+            try std.testing.expectEqual(@as(u64, check[2]), try mysql_testing.queryU64(storage, "SELECT count(*) AS value" ++ catalog ++ "'" ++ check[0] ++ "' AND " ++ check[1], .{}));
+        }
+        try std.testing.expectEqual(@as(u64, 1), try mysql_testing.queryU64(storage, "SELECT count(*) AS value FROM " ++ unique_input ++ " rewind_index", .{}));
+        inline for (checks) |check| {
+            try Native.exec(storage, "SET @rui_rewind_ddl=(SELECT CONCAT('ALTER TABLE " ++ check[0] ++ " ',GROUP_CONCAT(CONCAT('DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') ORDER BY tc.CONSTRAINT_NAME SEPARATOR ', '))" ++ catalog ++ "'" ++ check[0] ++ "' AND " ++ check[1] ++ ")");
+            try Native.exec(storage, "PREPARE rui_rewind FROM @rui_rewind_ddl");
+            try Native.exec(storage, "EXECUTE rui_rewind");
+            try Native.exec(storage, "DEALLOCATE PREPARE rui_rewind");
+        }
+        try Native.exec(storage, "UPDATE core_command c JOIN input_part p ON p.command_key=c.command_key AND p.command_kind=2 AND p.part_count=1 AND p.ordinal=0 AND p.part_kind=1 SET c.primary_content_id=p.content_id WHERE c.kind=2 AND c.accepted=1");
+        try Native.exec(storage, "UPDATE message_admission m JOIN core_command c ON c.command_key=m.command_key SET m.content_id=c.primary_content_id");
+        try Native.exec(storage, "UPDATE conversation_entry e JOIN message_admission m ON m.admission_id=e.source_admission_id SET e.content_id=m.content_id WHERE e.entry_kind=1");
+        try Native.exec(storage, "ALTER TABLE message_admission MODIFY content_id BIGINT NOT NULL");
+        try Native.exec(storage, "ALTER TABLE conversation_entry MODIFY content_id BIGINT NOT NULL");
+        try Native.exec(storage, "DROP TABLE input_part");
+        try Native.exec(storage, "SET @rui_rewind_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP INDEX `',REPLACE(INDEX_NAME,'`','``'),'`') FROM " ++ unique_input ++ " rewind_index)");
+        try Native.exec(storage, "PREPARE rui_rewind FROM @rui_rewind_ddl");
+        try Native.exec(storage, "EXECUTE rui_rewind");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_rewind");
+        try Native.exec(storage, "SET @rui_rewind_ddl=NULL");
+        try Native.exec(storage, "ALTER TABLE core_command DROP COLUMN input_reference_digest, DROP COLUMN input_reference_length, DROP COLUMN input_part_count");
+    } else {
+        try Native.exec(storage, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        defer Native.exec(storage, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF") catch unreachable;
+        try Native.exec(storage, "ALTER TABLE core_command RENAME TO rewind_core_command");
+        try Native.exec(storage, "ALTER TABLE message_admission RENAME TO rewind_message_admission");
+        try Native.exec(storage, "ALTER TABLE conversation_entry RENAME TO rewind_conversation_entry");
+        try Native.exec(storage, schema.migrations[74 - schema.migration_baseline].sqlite[1]);
+        try Native.exec(storage, historicalFixtureStatement(baseline_sqlite_ddl, "CREATE TABLE message_admission("));
+        try Native.exec(storage, schema.migrations[59 - schema.migration_baseline].sqlite[2]);
+        try Native.exec(storage, "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) SELECT c.command_key,c.kind,c.target,c.input_digest,CASE WHEN c.kind=2 AND c.accepted=1 THEN " ++ input_domain.messageTextIdSql("c") ++ " ELSE c.primary_content_id END,c.secondary_content_id,c.accepted,c.code,c.revision,c.created,c.command_seq FROM rewind_core_command c");
+        try Native.exec(storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position) SELECT m.admission_id,m.session_ref,m.command_key,c.primary_content_id,m.admission_position,m.turn_id,m.admitted_at,m.sender_session_ref,m.sender_position FROM rewind_message_admission m JOIN core_command c ON c.command_key=m.command_key");
+        try Native.exec(storage, "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_catalog_position,source_skill_admission_id,source_skill_position,source_operation_id,source_item_ordinal,content_id,recorded_at) SELECT e.session_ref,e.entry_ordinal,e.session_position,e.entry_kind,e.turn_id,e.source_admission_id,e.source_revision,e.source_catalog_position,e.source_skill_admission_id,e.source_skill_position,e.source_operation_id,e.source_item_ordinal,CASE WHEN e.entry_kind=1 THEN (SELECT m.content_id FROM message_admission m WHERE m.admission_id=e.source_admission_id) ELSE e.content_id END,e.recorded_at FROM rewind_conversation_entry e");
+        try Native.exec(storage, "DROP TABLE rewind_conversation_entry");
+        try Native.exec(storage, "DROP TABLE rewind_message_admission");
+        try Native.exec(storage, "DROP TABLE input_part");
+        try Native.exec(storage, "DROP TABLE rewind_core_command");
+        for (schema.migrations[75 - schema.migration_baseline].sqlite) |sql| {
+            if (std.mem.startsWith(u8, sql, "CREATE INDEX ") or std.mem.startsWith(u8, sql, "CREATE UNIQUE INDEX ")) try Native.exec(storage, sql);
+        }
+        try std.testing.expectEqual(@as(u64, 0), try sqliteQueryU64(storage.sqliteDatabase(), "SELECT count(*) FROM pragma_foreign_key_check", .{}));
+    }
+}
+
+fn historicalFixtureStatement(comptime ddl: []const u8, comptime prefix: []const u8) [:0]const u8 {
+    @setEvalBranchQuota(200_000);
+    comptime {
+        var statements = std.mem.splitScalar(u8, ddl, ';');
+        while (statements.next()) |statement| {
+            const text = std.mem.trim(u8, statement, " \n\r\t");
+            if (std.mem.startsWith(u8, text, prefix)) return std.fmt.comptimePrint("{s}", .{text});
+        }
+        @compileError("historical fixture statement not found: " ++ prefix);
+    }
+}
+
 /// Rewind pin-free upgrade fixtures before replaying the format-75 step.
 fn dropPinOrganization(storage: *Store) !void {
     const schema = @import("schema.zig");
@@ -315,6 +395,8 @@ fn dropPinOrganization(storage: *Store) !void {
         }
     };
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_pin_command", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM core_command WHERE kind>=7", .{}));
+    try restoreScalarUpgradeInput(storage);
     try Native.exec(storage, "DROP TABLE session_pin");
     try Native.exec(storage, "DROP TABLE session_pin_command");
     if (storage.engine == .mysql) {
