@@ -1411,8 +1411,46 @@ while True:
                 command(args)
             self.assertEqual(err.getvalue(), "verify-rui: this build has no screen library\n")
 
+    def test_upgrade_context_never_overlaps_parent_host_and_restores_for_normal_states(self):
+        active = {"parent": True, "child": False}
+        events = []
+        def pause(_run):
+            self.assertTrue(active["parent"])
+            self.assertFalse(active["child"])
+            active["parent"] = False
+            events.append("parent paused")
+        def restore(_run):
+            self.assertFalse(active["parent"])
+            self.assertFalse(active["child"])
+            active["parent"] = True
+            events.append("parent restored")
+        @contextlib.contextmanager
+        def context(run, state, _build):
+            if state.get("upgrade"):
+                self.assertFalse(active["parent"])
+                self.assertFalse(active["child"])
+                active["child"] = True
+                events.append("child entered")
+            else:
+                self.assertTrue(active["parent"])
+            try:
+                yield run, state, None
+            finally:
+                if state.get("upgrade"):
+                    active["child"] = False
+                    events.append("child retired")
+        scenario = {"sizes": ["140x40"], "states": [
+            {"name": "ordinary-first", "open": "overview", "steps": []},
+            {"name": "upgrade-first", "upgrade": "current", "open": "overview", "steps": []},
+            {"name": "upgrade-second", "upgrade": "available", "open": "overview", "steps": []},
+            {"name": "ordinary-last", "open": "overview", "steps": []}]}
+        self.run_frames_scenario(scenario, hooks={"frame_upgrade_run": context, "frame_pause_owned_host": pause,
+                                                 "launch_host": restore, "upgrade_actor": lambda _build: None,
+                                                 "require_upgrade_fixture_user": lambda: None})
+        self.assertEqual(events, ["parent paused", "child entered", "child retired", "child entered", "child retired", "parent restored"])
+
     def run_frames_scenario(self, scenario, sizes=None, capture_ok=True, only=None, failing_state=None,
-                            initial_frames=("›",), real_steps=False):
+                            initial_frames=("›",), real_steps=False, hooks=None):
         command = self.helper["cmd_frames"]
         calls = []
         with tempfile.TemporaryDirectory() as temp:
@@ -1468,6 +1506,7 @@ while True:
                             "frame_ready": lambda target, state, **kw: calls.append(("ready", state["name"])), "FrameTerminal": Terminal,
                             "load_build": lambda _sha: {"screen_library": "/test/library"},
                             "frame_steps": self.helper["frame_steps"] if real_steps else steps, "frame_capture": capture}
+            replacements.update(hooks or {})
             with patch.dict(command.__globals__, replacements), patch.dict(os.environ), \
                     patch("time.sleep", side_effect=AssertionError("frames must not sleep to settle")), \
                     contextlib.redirect_stdout(io.StringIO()):
@@ -2396,6 +2435,233 @@ else:
         self.assertIn("fake", prefix)
         self.assertEqual(screens, "## Screens\nold\n\n")
         self.assertEqual(suffix, "## Evidence\nproof\n")
+
+
+class UpgradeFramesTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.helper = runpy.run_path(str(SCRIPT))
+
+    def test_upgrade_frames_refuse_root_before_build_or_run_allocation(self):
+        frames = self.helper["run_frames"]
+        with tempfile.TemporaryDirectory() as directory:
+            scenario = Path(directory) / "scenario.json"
+            scenario.write_text(json.dumps({"sizes": ["140x40"], "states": [
+                {"name": "current", "upgrade": "current", "open": "overview", "steps": []}]}))
+            args = types.SimpleNamespace(scenario=str(scenario), sizes=None, only="current", sha="a" * 40)
+            with patch("os.getuid", return_value=0), patch("os.geteuid", return_value=0), \
+                    patch.dict(frames.__globals__, {"load_build": lambda *_args: self.fail("loaded build before root refusal"),
+                                                   "cmd_new": lambda *_args: self.fail("launched run as root")}), \
+                    contextlib.redirect_stderr(io.StringIO()) as error, self.assertRaises(SystemExit):
+                frames(args)
+            self.assertIn("UID-global", error.getvalue())
+
+    def test_upgrade_fixture_identity_requires_explicit_matching_dedicated_account(self):
+        import pwd
+        guard = self.helper["require_upgrade_fixture_user"]
+        with patch("os.getuid", return_value=1234), patch("os.geteuid", return_value=1234), \
+                patch.object(pwd, "getpwuid", return_value=types.SimpleNamespace(pw_name="rui-s7-sidebar")):
+            for expected in ("", "ordinary-user"):
+                with self.subTest(expected=expected), patch.dict(os.environ, {"VERIFY_RUI_UPGRADE_FIXTURE_USER": expected}), \
+                        contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    guard()
+            with patch.dict(os.environ, {"VERIFY_RUI_UPGRADE_FIXTURE_USER": "rui-s7-sidebar"}):
+                guard()
+
+    def test_actor_manifest_rejects_missing_modified_and_wrong_lineage(self):
+        check = self.helper["upgrade_actor"]
+        with tempfile.TemporaryDirectory() as directory:
+            actor = Path(directory) / "actor"
+            actor.write_bytes(b"release actor")
+            build = {"sha": "a" * 40, "tree": "tree", "upgrade_actor": {
+                "binary": str(actor), "sha256": self.helper["sha256"](actor), "sha": "a" * 40, "tree": "tree"}}
+            self.assertEqual(check(build), actor)
+            for key, value in (("sha", "b" * 40), ("tree", "other"), ("sha256", "wrong"),
+                               ("binary", str(actor.parent / "absent"))):
+                invalid = copy.deepcopy(build)
+                invalid["upgrade_actor"][key] = value
+                with self.subTest(key=key), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    check(invalid)
+            actor.write_bytes(b"changed actor")
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                check(build)
+
+    def test_comparison_oracles_have_full_schema_validation(self):
+        validate = self.helper["validate_scenario"]
+        for override in ({"expect": 17}, {"absent": {}}, {"expect_regex": ["["]},
+                         {"expect_next": {"Settings": 1}}, {"expect_last": []},
+                         {"expect_dim": [{"text": "version", "dim": "yes"}]}):
+            scenario = {"sizes": ["140x40"], "states": [{"name": "current", "open": "overview", "steps": [],
+                         "comparison": {"before": override}}]}
+            with self.subTest(override=override), self.assertRaises((ValueError, __import__("re").error)):
+                validate(scenario)
+
+    def test_upgrade_matrix_has_distinct_exact_baseline_oracles_and_saved_chat(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = [state for state in scenario["states"] if state.get("upgrade")]
+        self.assertEqual(len(states), 10)
+        self.assertEqual({state.get("theme") for state in states}, {"day", "night"})
+        for state in states:
+            self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
+            if state["upgrade"] == "chat":
+                self.assertEqual(state["open"], state["cast"][0]["label"])
+                self.assertIn("Upgraded to ", state["absent"])
+                before = state["comparison"]["before"]
+                self.assertIn("Upgraded to {upgrade_version}", before["expect"])
+                self.assertNotIn("Upgraded to ", before["absent"])
+                self.assertNotIn("alt+i info", before["expect"])
+                after_only = "Upgrade witness alt+i info"
+                self.assertFalse(all(text in after_only for text in before["expect"]))
+            else:
+                before = state["comparison"]["before"]
+                self.assertTrue(before["expect_regex"])
+                self.assertNotEqual(before["expect_regex"], state["expect_regex"])
+                if state["upgrade"] == "failure":
+                    self.assertIn("! Couldn't reach GitHub; nothing changed", before["expect"])
+                if state["upgrade"] == "updating":
+                    self.assertIn("Publishing; cancelling no longer rolls back", before["expect"])
+
+    def test_compact_row_oracle_rejects_old_memory_labels_and_nonliteral_version(self):
+        row_failure = self.helper["frame_row_failure"]
+        state = {"expect_regex": [r"^\s*\d+(?:\.\d+)? (?:MB|GB)\s+0\.70\.10000\s*$"]}
+        self.assertIsNone(row_failure(state, "  38 MB       0.70.10000 "))
+        for row in ("rui 38 MB       0.70.10000", "38 MB tools 120 MB 0.70.10000", "38 MB 0x70x10000"):
+            with self.subTest(row=row):
+                self.assertIsNotNone(row_failure(state, row))
+
+    def test_native_retry_journey_waits_for_archive_gate_before_release_and_settings(self):
+        journey = self.helper["frame_upgrade_journey"]
+        events = []
+        class Release:
+            def set(self):
+                events.append("release archive")
+        gate = types.SimpleNamespace(entered=types.SimpleNamespace(is_set=lambda: True), release=Release())
+        releases = types.SimpleNamespace(status={"/releases/latest": 403}, gate_archive=lambda: gate)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = types.SimpleNamespace(home=root, store=root / "store", meta={"upgrade_previous_instance": "old"},
+                                        rui_cmd=lambda *_args: types.SimpleNamespace(returncode=0, stderr="", stdout='{"status":"ready","instance":"new"}'))
+            terminal = types.SimpleNamespace(capture=types.SimpleNamespace(generation=3),
+                                            mouse=lambda event: events.append(event["at"]),
+                                            wait=lambda _predicate, description, **_kwargs: events.append(description))
+            def capture(_run, _terminal, _out, specimen, _size, _reason):
+                events.append(specimen["name"])
+                return {"ok": True}
+            with patch.dict(journey.__globals__, {"frame_ready": lambda *_args: None, "frame_capture": capture,
+                                                 "frame_steps": lambda *_args: events.append("Settings Version")}):
+                journey(run, terminal, {"name": "failure", "upgrade": "failure", "comparison_side": "after"},
+                        (releases, None, "0.70.10000"), root, (46, 30))
+            self.assertNotIn("/releases/latest", releases.status)
+            self.assertLess(events.index("Update failed"), events.index("retry archive HTTP gate"))
+            self.assertLess(events.index("retry-updating"), events.index("release archive"))
+            self.assertLess(events.index("retry-completed"), events.index("Settings Version"))
+            self.assertIn("settings-version-up-to-date", events)
+            evidence = json.loads((root / "journeys/failure/journey.json").read_text())
+            self.assertEqual(evidence["steps"][0]["name"], "failed-both-viewports-captured")
+            self.assertEqual(len(evidence["records"]), 3)
+
+    def test_replacement_host_requires_confirmed_current_instance_retirement(self):
+        pause = self.helper["frame_pause_owned_host"]
+        for retirement in ("unconfirmed", "confirmed"):
+            with self.subTest(retirement=retirement), tempfile.TemporaryDirectory() as directory:
+                events = []
+                stopped = False
+                def command(*args, **_kwargs):
+                    nonlocal stopped
+                    events.append(args)
+                    if args[:2] == ("host", "pause"):
+                        self.assertEqual(args[-2:], ("--instance", "replacement-instance"))
+                        stopped = True
+                        body = {"status": "acknowledged", "instance": "replacement-instance", "retirement": retirement}
+                    else:
+                        body = {"status": "unavailable"} if stopped else {"status": "ready", "instance": "replacement-instance"}
+                    return types.SimpleNamespace(returncode=0, stdout=json.dumps(body), stderr="")
+                run = types.SimpleNamespace(store=Path(directory) / "store", evidence=Path(directory), rui_cmd=command,
+                                            owned=lambda: [{"kind": "host", "pid": 123, "lstart": "retired-original"}])
+                with patch.dict(pause.__globals__, {"process_start": lambda _pid: None}):
+                    if retirement == "unconfirmed":
+                        with self.assertRaises(self.helper["FrameFailure"]):
+                            pause(run)
+                        self.assertFalse((Path(directory) / "upgrade-host-lifecycle.jsonl").exists())
+                    else:
+                        pause(run)
+                        receipt = json.loads((Path(directory) / "upgrade-host-lifecycle.jsonl").read_text())
+                        self.assertEqual(receipt["instance"], "replacement-instance")
+                        self.assertEqual(receipt["retirement"], "confirmed")
+                self.assertEqual(events[0][:2], ("host", "status"))
+                self.assertEqual(events[1][:2], ("host", "pause"))
+                self.assertEqual(len(events), 2 if retirement == "unconfirmed" else 3)
+
+    def test_upgrade_setup_failure_retires_server_and_preserves_primary(self):
+        self.upgrade_cleanup_case(setup_failure=True)
+
+    def test_upgrade_body_failure_retires_host_and_server_and_restores_parent(self):
+        self.upgrade_cleanup_case(setup_failure=False)
+
+    def upgrade_cleanup_case(self, setup_failure):
+        import upgrade_fixture
+        frame_run = self.helper["frame_upgrade_run"]
+        events = []
+        class Releases:
+            origin = "http://127.0.0.1:1"
+            status = {}
+            requests = []
+            def __init__(self, _binary, version):
+                self.version = version
+            def close(self):
+                events.append("server closed")
+                raise RuntimeError("cleanup failed")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "evidence").mkdir()
+            (root / "home/.config/rui").mkdir(parents=True)
+            (root / "scratch").mkdir()
+            actor = root / "actor"
+            actor.write_bytes(b"actor")
+            meta = {"scratch": str(root / "scratch"), "home": str(root / "home"),
+                    "store": str(root / "store"), "binary": str(actor), "project": str(root),
+                    "sessions": {"original": "abc123"}}
+            (root / "run.json").write_text(json.dumps(meta))
+            run = self.helper["Run"](root)
+            build = {"sha": "a" * 40, "tree": "tree", "upgrade_actor": {
+                "binary": str(actor), "sha256": self.helper["sha256"](actor), "sha": "a" * 40, "tree": "tree"}}
+            def launch(isolated):
+                isolated.store.mkdir()
+                events.append("host started")
+                return types.SimpleNamespace(stdout='{"instance":"old-instance"}')
+            def command(_run, *args, **_kwargs):
+                events.append(tuple(args[:2]))
+                if args[:2] == ("host", "pause"):
+                    body = {"status": "acknowledged", "instance": "replacement", "retirement": "confirmed"}
+                else:
+                    body = {"status": "unavailable"} if ("host", "pause") in events else {"status": "ready", "instance": "replacement"}
+                return types.SimpleNamespace(returncode=0, stdout=json.dumps(body), stderr="")
+            failure = OSError("setup failed") if setup_failure else RuntimeError("body failed")
+            with patch.object(upgrade_fixture, "Releases", Releases), \
+                    patch("subprocess.check_output", return_value="rui 0.70.10000 (fixture)"), \
+                    patch("subprocess.run", return_value=types.SimpleNamespace(returncode=0, stdout="", stderr="")), \
+                    patch.object(type(run), "rui_cmd", command), \
+                    patch.dict(frame_run.__wrapped__.__globals__, {"launch_host": launch}):
+                with contextlib.ExitStack() as patches:
+                    if setup_failure:
+                        patches.enter_context(patch("shutil.copytree", side_effect=failure))
+                    with self.assertRaises(type(failure)) as caught:
+                        with frame_run(run, {"name": "failure", "upgrade": "failure"}, build) as (isolated, _state, fixture):
+                            self.assertNotEqual(isolated.home, run.home)
+                            self.assertNotEqual(isolated.store, run.store)
+                            self.assertEqual(isolated.env()["HOME"], str(isolated.home))
+                            self.assertEqual(fixture[0].status["/releases/latest"], 403)
+                            (root / "run.json").write_text(json.dumps(isolated.meta))
+                            raise failure
+                self.assertIs(caught.exception, failure)
+                self.assertTrue(any("cleanup failed" in note for note in failure.__notes__))
+            self.assertIn("server closed", events)
+            self.assertEqual(json.loads((root / "run.json").read_text()), meta)
+            if setup_failure:
+                self.assertNotIn("host started", events)
+                self.assertNotIn(("host", "pause"), events)
+            else:
+                self.assertIn(("host", "pause"), events)
 
 
 if __name__ == "__main__":

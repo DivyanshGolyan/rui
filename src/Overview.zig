@@ -7357,7 +7357,7 @@ test "Overview Settings live memory frame uses quiet role in day and night" {
         rig.overview.caps = caps;
         var before = try rig.shown(80, 24);
         defer before.deinit();
-        if (rig.overview.state.memory == null) try std.testing.expect(std.mem.indexOf(u8, try before.text(), "rui 38 MB") == null);
+        if (rig.overview.state.memory == null) try std.testing.expect(std.mem.indexOf(u8, try before.text(), "38 MB") == null);
         _ = try rig.overview.event(.{ .memory = .{ .rui = 38 * view.mib, .tools = 120 * view.mib } });
         var shown = try rig.shown(80, 24);
         defer shown.deinit();
