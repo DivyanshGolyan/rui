@@ -77,6 +77,7 @@ pub const CommandObservation = struct {
         session_archive: ?mutation_answer.SessionArchiveObservation,
         model_interruption: ModelInterruptionTarget,
         permission_decision: struct { action_id: u64, decision: mutation_answer.PermissionDecision },
+        session_pin: ?mutation_answer.SessionPinObservation,
     } = .{ .configure = .{} },
 
     /// The Host's one ordered Message-state rule. Clients consume this value.
@@ -141,6 +142,13 @@ pub const SessionArchiveReply = union(enum) {
         interrupted_operation_id: ?u64 = null,
     },
     rejected: struct { replayed: bool, code: mutation_answer.SessionArchiveRejection },
+    conflict,
+    infrastructure_failure,
+};
+
+pub const SessionPinReply = union(enum) {
+    accepted: struct { replayed: bool, pinned: bool },
+    rejected: struct { replayed: bool, code: mutation_answer.SessionPinRejection },
     conflict,
     infrastructure_failure,
 };

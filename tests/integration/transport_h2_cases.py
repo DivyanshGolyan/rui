@@ -169,8 +169,7 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
         dispatch.host_arguments(
             store,
             f"https://localhost:{endpoint.server_address[1]}/responses",
-            "--provider-ca-file",
-            str(ca_file),
+            "--set", "network.caFile=" + str(ca_file),
             active_capacity=capacity,
         ),
         required_fields={"execution": "enabled", "nghttp2": "1.70.0"},
@@ -425,7 +424,7 @@ def held_streams(root, endpoint, after_progress=False):
     endpoint.held_bytes = 10_000 if after_progress else 0
     host = dispatch.start_host(
         store, f"https://localhost:{endpoint.server_address[1]}/responses",
-        "--provider-ca-file", str(root / "cert.pem"),
+        "--set", "network.caFile=" + str(str(root / "cert.pem")),
         "--test-phase-trace", active_capacity=100, observations="interrupt",
     )
     diagnostics = HostDiagnostics(host)
@@ -509,7 +508,7 @@ def write_failure_isolated(root, endpoint):
     store = root / "write-failure-store"
     host = dispatch.start_host(
         store, f"https://localhost:{endpoint.server_address[1]}/responses",
-        "--provider-ca-file", str(root / "cert.pem"),
+        "--set", "network.caFile=" + str(str(root / "cert.pem")),
         "--fault", "response-write-once", active_capacity=20,
     )
     outcomes = []
@@ -562,7 +561,7 @@ def refused_stream(root, endpoint, phase):
     store = root / f"refused-{phase}-store"
     host = dispatch.start_host(
         store, f"https://localhost:{endpoint.server_address[1]}/responses",
-        "--provider-ca-file", str(root / "cert.pem"),
+        "--set", "network.caFile=" + str(str(root / "cert.pem")),
         "--test-retry-waits-ms", "60000,60000,60000",
     )
     try:
@@ -602,7 +601,7 @@ def flow_while_execution_held(root, endpoint):
     gate = ReleaseGate(root / "flow-settlement-gate")
     host = dispatch.start_host(
         store, f"https://localhost:{endpoint.server_address[1]}/responses",
-        "--provider-ca-file", str(root / "cert.pem"),
+        "--set", "network.caFile=" + str(str(root / "cert.pem")),
         "--test-phase-trace", "--test-model-result-gate-path", str(gate.path), active_capacity=2,
     )
     try:
@@ -641,7 +640,7 @@ def dead_reused_connection(root, endpoint):
     store = root / "dead-reuse-store"
     host = dispatch.start_host(
         store, f"https://localhost:{endpoint.server_address[1]}/responses",
-        "--provider-ca-file", str(root / "cert.pem"),
+        "--set", "network.caFile=" + str(str(root / "cert.pem")),
         "--test-retry-waits-ms", "100,60000,60000",
     )
     try:
@@ -675,7 +674,7 @@ def isolated_bad_header(root, endpoint):
     store = root / "sibling-header-store"
     host = dispatch.start_host(
         store, f"https://localhost:{endpoint.server_address[1]}/responses",
-        "--provider-ca-file", str(root / "cert.pem"), active_capacity=2,
+        "--set", "network.caFile=" + str(str(root / "cert.pem")), active_capacity=2,
     )
     try:
         sessions = []
@@ -711,7 +710,7 @@ def isolated_terminal_stream(root, endpoint, mode):
     options = ("--test-request-scratch-limit", str(32 * 1024)) if mode == "capture" else ()
     host = dispatch.start_host(
         store, f"https://localhost:{endpoint.server_address[1]}/responses",
-        "--provider-ca-file", str(root / "cert.pem"), *options, active_capacity=2,
+        "--set", "network.caFile=" + str(str(root / "cert.pem")), *options, active_capacity=2,
     )
     try:
         sessions = {}
@@ -783,7 +782,7 @@ def connection_failure(root, endpoint):
     store = root / "connection-failure-store"
     host = dispatch.start_host(
         store, f"https://localhost:{endpoint.server_address[1]}/responses",
-        "--provider-ca-file", str(root / "cert.pem"),
+        "--set", "network.caFile=" + str(str(root / "cert.pem")),
         "--test-retry-waits-ms", "100,60000,60000", "--test-phase-trace", active_capacity=2,
     )
     diagnostics = None
@@ -897,7 +896,7 @@ def unsupported_https(root):
     store = root / "non-h2-store"
     host = dispatch.start_host(
         store, f"https://localhost:{endpoint.server_port}/responses",
-        "--provider-ca-file", str(root / "cert.pem"),
+        "--set", "network.caFile=" + str(str(root / "cert.pem")),
     )
     try:
         session = dispatch.configure(root, store, "non-h2-config", None, "gpt-6-sol")
@@ -928,7 +927,7 @@ def negotiated_h2_early_error(root, endpoint):
     store = root / "early-h2-error-store"
     host = dispatch.start_host(
         store, f"https://localhost:{endpoint.server_address[1]}/responses",
-        "--provider-ca-file", str(root / "cert.pem"), "--test-retry-waits-ms", "1,1,1",
+        "--set", "network.caFile=" + str(str(root / "cert.pem")), "--test-retry-waits-ms", "1,1,1",
     )
     try:
         session = dispatch.configure(root, store, "early-h2-config", None, "gpt-6-sol")

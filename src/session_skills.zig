@@ -269,7 +269,12 @@ pub fn suggestions(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allo
 
 fn selectSuggestions(allocator: std.mem.Allocator, found: catalog.Catalog, prefix: []const u8) !@import("skill_suggestions.zig").Page {
     const suggestion = @import("skill_suggestions.zig");
-    // All full catalogs are lexical. Retain a bounded page, never their paths.
+    const completion = @import("skill_completion.zig");
+    // Catalogs are lexical: stable insertion by rank retains that order
+    // within each rank, even when the best match follows a full page.
+    const Selected = struct { entry: catalog.Entry, rank: completion.Rank };
+    var selected: [suggestion.capacity]Selected = undefined;
+    var retained: usize = 0;
     var count: usize = 0;
     var total: usize = 0;
     var revision: std.hash.Wyhash = .init(0);
@@ -280,7 +285,16 @@ fn selectSuggestions(allocator: std.mem.Allocator, found: catalog.Catalog, prefi
             revision.update(&size);
             revision.update(field);
         }
-        if (std.mem.startsWith(u8, entry.name, prefix)) total += 1;
+        const matched = completion.match(prefix, entry.name, entry.description) orelse continue;
+        total += 1;
+        var at: usize = 0;
+        while (at < retained and @backingInt(selected[at].rank) <= @backingInt(matched.rank)) : (at += 1) {}
+        if (at == selected.len) continue;
+        const next = @min(retained + 1, selected.len);
+        var move = next - 1;
+        while (move > at) : (move -= 1) selected[move] = selected[move - 1];
+        selected[at] = .{ .entry = entry, .rank = matched.rank };
+        retained = next;
     }
     const entries = try allocator.alloc(suggestion.Entry, @min(total, suggestion.capacity));
     var page: suggestion.Page = .{ .entries = entries[0..0], .revision = revision.final(), .total = total };
@@ -291,9 +305,8 @@ fn selectSuggestions(allocator: std.mem.Allocator, found: catalog.Catalog, prefi
         }
         allocator.free(entries);
     }
-    for (found.entries) |entry| {
-        if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
-        if (count == entries.len) break;
+    for (selected[0..retained]) |item| {
+        const entry = item.entry;
         const name = try allocator.dupe(u8, entry.name);
         errdefer allocator.free(name);
         const description = try allocator.dupe(u8, entry.description);
@@ -316,6 +329,41 @@ test "inline skills suggestions bound pages and retain prefix-independent revisi
     try std.testing.expectEqual(@as(usize, 3), all.total);
     try std.testing.expectEqual(@as(usize, 1), filtered.total);
     try std.testing.expectEqualStrings("beta", filtered.entries[0].name);
+}
+
+test "inline skills suggestions use shared case-insensitive name and description ranking" {
+    const entries = [_]catalog.Entry{
+        .{ .name = "alpha", .description = "REView changes", .path = "/never-read" },
+        .{ .name = "pre-review", .description = "Metadata", .path = "/never-read" },
+        .{ .name = "review", .description = "Metadata", .path = "/never-read" },
+        .{ .name = "reviewer", .description = "Metadata", .path = "/never-read" },
+    };
+    var page = try selectSuggestions(std.testing.allocator, .{ .entries = &entries }, "ReViEw");
+    defer page.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 4), page.total);
+    for (page.entries, [_][]const u8{ "review", "reviewer", "pre-review", "alpha" }) |entry, expected|
+        try std.testing.expectEqualStrings(expected, entry.name);
+}
+
+test "inline skills suggestions retain late best ranks beyond page capacity" {
+    const suggestion = @import("skill_suggestions.zig");
+    var names: [suggestion.capacity][16]u8 = undefined;
+    var entries: [suggestion.capacity + 2]catalog.Entry = undefined;
+    for (&names, entries[0..names.len], 0..) |*name, *entry, index| entry.* = .{
+        .name = try std.fmt.bufPrint(name, "earlier-{d:0>2}", .{index}),
+        .description = "Review changes",
+        .path = "/never-read",
+    };
+    entries[names.len] = .{ .name = "review", .description = "Metadata", .path = "/never-read" };
+    entries[names.len + 1] = .{ .name = "reviewer", .description = "Metadata", .path = "/never-read" };
+    var page = try selectSuggestions(std.testing.allocator, .{ .entries = &entries }, "REVIEW");
+    defer page.deinit(std.testing.allocator);
+    try std.testing.expectEqual(entries.len, page.total);
+    try std.testing.expectEqual(suggestion.capacity, page.entries.len);
+    try std.testing.expectEqualStrings("review", page.entries[0].name);
+    try std.testing.expectEqualStrings("reviewer", page.entries[1].name);
+    for (page.entries[2..], entries[0 .. suggestion.capacity - 2]) |actual, expected|
+        try std.testing.expectEqualStrings(expected.name, actual.name);
 }
 
 test "inline skills bind the complete catalog beyond a truncated suggestion preview" {

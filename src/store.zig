@@ -15,7 +15,6 @@ const store_schema = @import("store/schema.zig");
 const store_testing = @import("store/testing.zig");
 const store_test_fixtures = @import("store/tests.zig");
 
-pub const ModelFact = @import("store/domain/model_facts.zig").Fact;
 pub const ModelCatalogSource = @import("store/domain/model_facts.zig").Source;
 pub const Store = store_core.Store;
 pub const readUnixMilliseconds = store_core.readUnixMilliseconds;
@@ -92,6 +91,7 @@ pub const SessionReportCapture = report_domain.SessionReportCapture;
 pub const checkSessionReportsForTesting = @import("store/tests.zig").checkSessionReportsForTesting;
 pub const SessionStopReply = command_domain.SessionStopReply;
 pub const SessionArchiveReply = command_domain.SessionArchiveReply;
+pub const SessionPinReply = command_domain.SessionPinReply;
 pub const settleCompactionForTesting = store_testing.settleCompactionForTesting;
 pub const setLoadedToolsForTesting = store_testing.setLoadedToolsForTesting;
 pub const setLegacyNullEffortForTesting = store_testing.setLegacyNullEffortForTesting;
@@ -122,6 +122,7 @@ pub const ActionSettlement = action_domain.ActionSettlement;
 pub const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 
 test {
+    _ = @import("store/Store.zig");
     _ = @import("store/domain/action.zig");
     _ = @import("store/domain/history_floor.zig");
     _ = @import("store/tests.zig");
@@ -159,6 +160,7 @@ test {
     _ = @import("store/tests/transition.zig");
     _ = @import("store/tests/turn.zig");
     _ = @import("store/archive_tests.zig");
+    _ = @import("store/pin_tests.zig");
     _ = @import("store/sqlite_tests.zig");
     _ = @import("store/sqlite_tests/access.zig");
     _ = @import("store/sqlite_tests/action.zig");

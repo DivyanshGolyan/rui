@@ -268,7 +268,7 @@ pub fn UserBody(comptime Sink: type) type {
 
         pub fn init(self: *Self, sink: Sink, length: u64, whole: bool) !void {
             self.* = .{ .out = .{ .sink = sink }, .escaped = undefined, .length = length, .whole = whole };
-            self.escaped = .{ .sink = &self.out, .text = .{ .mode = .multiline } };
+            self.escaped = .{ .sink = &self.out, .text = .{ .mode = .multiline }, .authored = true };
             try self.out.feed(Mark.body);
         }
 
@@ -288,8 +288,8 @@ pub fn UserBody(comptime Sink: type) type {
             return self.finishTarget(null);
         }
 
-        pub fn finishMessage(self: *Self, target: Collapsed) anyerror!void {
-            _ = try self.finishTarget(target);
+        pub fn finishMessage(self: *Self, target: Collapsed) anyerror!bool {
+            return self.finishTarget(target);
         }
 
         fn finishTarget(self: *Self, target: ?Collapsed) anyerror!bool {
@@ -303,7 +303,7 @@ pub fn UserBody(comptime Sink: type) type {
             } else {
                 if (self.length <= collapse_bytes) try self.scan(self.small[0..self.length]);
                 try self.endLine();
-                if (self.shown != 0) try self.out.feed("\n");
+                if (self.shown != 0) try self.out.body("\n");
                 var count: [96]u8 = undefined;
                 const hidden = self.nonblank - self.shown;
                 var number: [32]u8 = undefined;
@@ -345,7 +345,7 @@ pub fn UserBody(comptime Sink: type) type {
             if (self.line_blank) return;
             self.nonblank += 1;
             if (self.shown == preview_lines) return;
-            if (self.shown != 0) try self.out.feed("\n");
+            if (self.shown != 0) try self.out.body("\n");
             self.shown += 1;
             const kept = self.line[0..@intCast(@min(self.line_bytes, self.line.len))];
             const cut = if (self.line_bytes <= preview_bytes) kept.len else graphemeCut(kept, preview_bytes);
@@ -669,25 +669,35 @@ pub fn Indented(comptime Sink: type) type {
         line_start: bool = false,
         sgr: bool = false,
         pub fn feed(self: *@This(), bytes: []const u8) anyerror!void {
+            try self.write(bytes, false);
+        }
+        pub fn body(self: *@This(), bytes: []const u8) anyerror!void {
+            try self.write(bytes, true);
+        }
+        fn emit(self: *@This(), bytes: []const u8, authored: bool) !void {
+            const sink = if (@typeInfo(Sink) == .pointer) self.sink else &self.sink;
+            if (authored) try Text.writeBody(sink, bytes) else try sink.feed(bytes);
+        }
+        fn write(self: *@This(), bytes: []const u8, authored: bool) anyerror!void {
             var storage: [4096]u8 = undefined;
             var out = std.Io.Writer.fixed(&storage);
             for (bytes) |byte| {
-                if (storage.len - out.end < self.prefix.len + 1) {
-                    try self.sink.feed(out.buffered());
+                if (out.end == storage.len) {
+                    try self.emit(out.buffered(), authored);
                     out.end = 0;
                 }
-                if (self.line_start and byte == '\n' and self.marks_empty) {
-                    try out.writeAll(std.mem.trimEnd(u8, self.prefix, " "));
-                } else if (self.line_start and byte != '\n') {
-                    try out.writeAll(self.prefix);
-                    self.line_start = false;
+                if (self.line_start and (byte != '\n' or self.marks_empty)) {
+                    try self.emit(out.buffered(), authored);
+                    out.end = 0;
+                    try self.sink.feed(if (byte == '\n') std.mem.trimEnd(u8, self.prefix, " ") else self.prefix);
+                    if (byte != '\n') self.line_start = false;
                 }
                 if (self.sgr or byte == 0x1b) {
                     self.sgr = byte != 'm';
                 } else if (byte == '\n') self.line_start = true;
                 try out.writeByte(byte);
             }
-            if (out.end != 0) try self.sink.feed(out.buffered());
+            if (out.end != 0) try self.emit(out.buffered(), authored);
         }
         pub fn collapsedSummary(self: *@This(), value: Collapsed, bytes: []const u8) !void {
             if (self.line_start) try self.sink.feed(self.prefix);
@@ -722,11 +732,6 @@ test "hanging indentation survives split windows and trusted styles" {
         try std.testing.expectEqualStrings("first\n  \x1b[1msecond\x1b[0m\n\n  third", sink.bytes[0..sink.length]);
     }
 }
-
-/// What the Action's `?` row says, for keeping it beside the choice.
-pub const ActionSummary = struct {
-    description: protocol.Bounded(protocol.max_tool_description_bytes) = .{},
-};
 
 /// A time limit as exactly as the model set it, in its largest whole unit.
 fn writeTimeLimit(out: anytype, milliseconds: u64) !void {
@@ -817,15 +822,17 @@ pub fn actionTool(requests: client.Requests, store: []const u8, session: []const
     return actionToolFromCapture(&observed, requests.io, scratch, action);
 }
 
-/// Null means the selected approval target resolved since the activity scan.
-pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool) !?ActionSummary {
-    const tool = try actionTool(requests, store, session, action, scratch) orelse return null;
-    return try permissionForTool(requests, store, session, action, scratch, sink, colour, &tool);
+/// False means the selected approval target resolved since the activity scan,
+/// so no request was shown.
+pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool) !bool {
+    const tool = try actionTool(requests, store, session, action, scratch) orelse return false;
+    try permissionForTool(requests, store, session, action, scratch, sink, colour, &tool);
+    return true;
 }
 
 /// The CLI's inspection and the conversation approval share the same MCP
 /// presentation; neither guesses a runner from the arguments' shape.
-pub fn permissionForTool(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !ActionSummary {
+pub fn permissionForTool(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !void {
     // Action reads write at the descriptor's streaming offset, not positionally.
     try requests.io.vtable.fileSeekTo(requests.io.userdata, scratch, 0);
     try scratch.setLength(requests.io, 0);
@@ -857,7 +864,7 @@ const ArgumentSource = struct {
 
 /// Renders a complete captured argument file; the consent owner applies the
 /// same viewport bound to either runner before offering a decision.
-pub fn renderPermissionArguments(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !ActionSummary {
+pub fn renderPermissionArguments(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !void {
     return switch (try tool.runner()) {
         .bash => request(io, scratch, sink, colour),
         .mcp => mcpRequest(io, scratch, sink, colour, tool),
@@ -893,19 +900,18 @@ pub fn bashCommand(io: std.Io, scratch: std.Io.File, tool: *const ActionTool, bu
 /// Arguments remain exact JSON, not a Bash command or a schema interpretation.
 /// Like Bash, render to the Action file in full: SessionScreen applies its
 /// viewport bound and refuses consent when that file is only a preview.
-fn mcpRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !ActionSummary {
+fn mcpRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !void {
     var buffer: [4096]u8 = undefined;
     var reader = scratch.reader(io, &buffer);
-    const summary: ActionSummary = .{ .description = tool.description };
     try sink.feed("\n");
     try sink.feed(Style.attention.code(colour));
     try sink.feed("?");
     try sink.feed(Style.normal.code(colour));
     var indented: Indented(@TypeOf(sink)) = .{ .sink = sink };
-    if (summary.description.len != 0) {
+    if (tool.description.len != 0) {
         try indented.feed(" ");
         var label: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .label } };
-        try label.feed(summary.description.slice());
+        try label.feed(tool.description.slice());
         try label.finish();
     }
     try indented.feed("\nTool: ");
@@ -927,11 +933,10 @@ fn mcpRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, too
     try lines.finish();
     try indented.feed("\n");
     try indented.finish();
-    return summary;
 }
 
 /// The request block from an Action's arguments JSON in `scratch`.
-fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool) !ActionSummary {
+fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool) !void {
     var buffer: [4096]u8 = undefined;
     var reader = scratch.reader(io, &buffer);
     var source: ArgumentSource = .{ .reader = &reader.interface };
@@ -974,9 +979,6 @@ fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool) !Actio
     }
     try indented.feed("\n");
     try indented.finish();
-    var summary: ActionSummary = .{};
-    try summary.description.set(arguments.description.slice());
-    return summary;
 }
 
 test "an Action's command and stdin lines carry the content mark, so neither can pass for a field" {
@@ -1040,8 +1042,13 @@ pub fn Escaped(comptime Sink: type) type {
     return struct {
         sink: Sink,
         text: Text,
+        authored: bool = false,
         storage: [256]u8 = undefined,
         used: usize = 0,
+        fn emit(self: *@This(), bytes: []const u8) !void {
+            const sink = if (@typeInfo(Sink) == .pointer) self.sink else &self.sink;
+            if (self.authored) try Text.writeBody(sink, bytes) else try sink.feed(bytes);
+        }
         pub fn writeAll(self: *@This(), bytes: []const u8) anyerror!void {
             try self.feed(bytes);
         }
@@ -1050,7 +1057,7 @@ pub fn Escaped(comptime Sink: type) type {
             out.end = self.used;
             for (bytes) |byte| {
                 if (self.storage.len - out.end < 16) {
-                    try self.sink.feed(out.buffered());
+                    try self.emit(out.buffered());
                     out.end = 0;
                 }
                 try self.text.feed(&out, &.{byte});
@@ -1061,11 +1068,11 @@ pub fn Escaped(comptime Sink: type) type {
             var out = std.Io.Writer.fixed(&self.storage);
             out.end = self.used;
             if (self.storage.len - out.end < 16) {
-                try self.sink.feed(out.buffered());
+                try self.emit(out.buffered());
                 out.end = 0;
             }
             try self.text.finish(&out);
-            if (out.end != 0) try self.sink.feed(out.buffered());
+            if (out.end != 0) try self.emit(out.buffered());
             self.used = 0;
         }
     };
@@ -1097,7 +1104,8 @@ pub fn Answer(comptime Sink: type) type {
         }
         fn forward(self: *@This(), bytes: []const u8) std.Io.Writer.Error!void {
             if (bytes.len == 0) return;
-            self.sink.feed(bytes) catch |err| {
+            const sink = if (@typeInfo(Sink) == .pointer) self.sink else &self.sink;
+            Text.writeBody(sink, bytes) catch |err| {
                 self.failure = err;
                 return error.WriteFailed;
             };
@@ -1245,8 +1253,9 @@ pub fn message(requests: client.Requests, store: []const u8, session: []const u8
     var body: UserBody(@TypeOf(sink)) = undefined;
     try body.init(sink, value.content.length, false);
     try content(requests, store, session, item, value.content, &body);
-    try body.finishMessage(block);
-    try sink.feed("\n");
+    if (try body.finishMessage(block)) {
+        try sink.feed("\n");
+    } else try Text.writeBody(sink, "\n");
 }
 
 fn content(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, reference: protocol.ActivityItem.Content, target: anytype) !void {
@@ -1633,7 +1642,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             answer.init(sink, home, colour, destination);
             try content(requests, store, session, item, assistant.content, &answer);
             try answer.finish();
-            try sink.feed("\n");
+            try Text.writeBody(sink, "\n");
         },
         .tool_result => |result| {
             var scan: ToolHeaderScan = .{};
@@ -1808,8 +1817,7 @@ test "MCP approval uses the saved description and renders exact arguments with A
         try scratch.writePositionalAll(std.testing.io, case.arguments, 0);
         try action.setLength(std.testing.io, 0);
         var sink: Sink = .{ .file = action };
-        const summary = try renderPermissionArguments(std.testing.io, scratch, &sink, false, &tool);
-        try std.testing.expectEqualStrings(case.description, summary.description.slice());
+        try renderPermissionArguments(std.testing.io, scratch, &sink, false, &tool);
         var rendered: [2048]u8 = undefined;
         const count = try action.readPositionalAll(std.testing.io, &rendered, 0);
         var heading: [256]u8 = undefined;
@@ -1896,7 +1904,7 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
     while (at < Viewport.capacity + 4096) : (at += fill.len) try scratch.writePositionalAll(std.testing.io, &fill, at);
     try scratch.writePositionalAll(std.testing.io, "\"\n}", at);
     var sink: Sink = .{ .file = action };
-    _ = try renderPermissionArguments(std.testing.io, scratch, &sink, false, &tool);
+    try renderPermissionArguments(std.testing.io, scratch, &sink, false, &tool);
     var beginning: [512]u8 = undefined;
     const count = try action.readPositionalAll(std.testing.io, &beginning, 0);
     const shown = beginning[0..count];

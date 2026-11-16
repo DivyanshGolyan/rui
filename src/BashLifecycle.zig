@@ -5,7 +5,7 @@
 //! syscalls and reads no clock: callers supply each service-time
 //! observation and native result, then perform any returned `Signal`.
 //! `bash.Execution` holds the child, process group and descriptors and keeps
-//! them aligned with these transitions. See ARCHITECTURE.md, "Bash lifecycle
+//! them aligned with these transitions. See docs/contracts/execution.md, "Bash lifecycle
 //! and capture".
 const std = @import("std");
 const deadline = @import("deadline.zig");

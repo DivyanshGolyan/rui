@@ -53,8 +53,7 @@ B_LABEL = "Worker: multiply"
 
 
 def model_instructions(workspace, session):
-    prefix, address, suffix = (pathlib.Path(__file__).resolve().parents[2] / "src" / "model_instructions.txt").read_text().split("{}")
-    return prefix + json.dumps(str(workspace), ensure_ascii=False)[1:-1] + address + session + suffix
+    return fixture.model_instructions(workspace, store=None, session=session, model="gpt-6-sol")
 
 
 def last_user(request):
@@ -317,7 +316,11 @@ def main(report_source):
         url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
         host_env = {"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": "", **SECRETS}
         host, _ = start_ready_process(
-            [installed, "host", "serve", "--store", store, "--active-capacity", "2", "--provider-endpoint", url],
+            [installed, "host", "serve", "--store", store,
+                "--set", 'execution.activeCapacity=2',
+                "--set", "providers={}",
+                "--set", "providers.codex.endpoint=" + str(url),
+                "--set", "providers.codex.unauthenticated=true"],
             env=host_env, required_fields={"execution": "enabled"},
         )
         instance = run(installed, "host", "status", "--store", store, home=home)["instance"]
@@ -497,7 +500,7 @@ def main(report_source):
         controls = []
         try:
             controls.append(subprocess.Popen(["rui", "60"], executable="/bin/sleep"))
-            controls.append(subprocess.Popen(["renamed-copy", "host", "serve", "--store", str(state / "leak-store")],
+            controls.append(subprocess.Popen(["renamed-copy", "host", "serve", "--store", str(state / "leak-store"), "--set", "providers={}"],
                 executable=installed, env={"PATH": os.environ["PATH"], "HOME": str(state / "leak-home"), "RUI_TEST_MODELS_DEV_URL": ""},
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
             # Darwin's census (lsof) can miss a copy spawned just now; the
@@ -770,8 +773,10 @@ def concurrent_peers():
         endpoint = CohortModel(workspace)
         threading.Thread(target=endpoint.serve_forever, daemon=True).start()
         host, _ = start_ready_process([installed, "host", "serve", "--store", store,
-            "--active-capacity", "12", "--provider-endpoint",
-            f"http://127.0.0.1:{endpoint.server_address[1]}/responses"],
+            "--set", 'execution.activeCapacity=12',
+                "--set", "providers={}",
+                "--set", "providers.codex.endpoint=" + str(f"http://127.0.0.1:{endpoint.server_address[1]}/responses"),
+                "--set", "providers.codex.unauthenticated=true"],
             env=environment, required_fields={"execution": "enabled"})
         run(installed, "defaults", "configure", "--store", store, home=home)
         parent = allocated(run(installed, "session", "configure", "--store", store,

@@ -6,6 +6,7 @@ const core_boundary = @import("core_boundary.zig");
 /// each one listed here and runs its tests, and selector tests require each
 /// to select test-logic. Add entries in alphabetical order by path, ignoring case.
 const cores = .{
+    .{ "action_read.zig", @import("action_read.zig") },
     .{ "action_text.zig", @import("action_text.zig") },
     .{ "ActionConsent.zig", @import("ActionConsent.zig") },
     .{ "activity_facts.zig", @import("activity_facts.zig") },
@@ -47,6 +48,7 @@ const cores = .{
     .{ "draft_layout.zig", @import("draft_layout.zig") },
     .{ "endpoint_value.zig", @import("endpoint_value.zig") },
     .{ "environment.zig", @import("environment.zig") },
+    .{ "error_set.zig", @import("error_set.zig") },
     .{ "failure_class.zig", @import("failure_class.zig") },
     .{ "feed_reads.zig", @import("feed_reads.zig") },
     .{ "find_tools_words.zig", @import("find_tools_words.zig") },
@@ -59,6 +61,8 @@ const cores = .{
     .{ "http1/Parser.zig", @import("http1/Parser.zig") },
     .{ "http1/request.zig", @import("http1/request.zig") },
     .{ "idempotency_key.zig", @import("idempotency_key.zig") },
+    .{ "input_media.zig", @import("input_media.zig") },
+    .{ "input_parts.zig", @import("input_parts.zig") },
     .{ "json_ascii.zig", @import("json_ascii.zig") },
     .{ "json_limits.zig", @import("json_limits.zig") },
     .{ "json_scalar.zig", @import("json_scalar.zig") },
@@ -111,13 +115,13 @@ const cores = .{
     .{ "schema_json.zig", @import("schema_json.zig") },
     .{ "session_consent.zig", @import("session_consent.zig") },
     .{ "session_departure.zig", @import("session_departure.zig") },
-    .{ "session_field.zig", @import("session_field.zig") },
     .{ "session_settings.zig", @import("session_settings.zig") },
     .{ "session_id.zig", @import("session_id.zig") },
     .{ "session_keys.zig", @import("session_keys.zig") },
     .{ "session_line.zig", @import("session_line.zig") },
     .{ "session_list.zig", @import("session_list.zig") },
     .{ "session_notice.zig", @import("session_notice.zig") },
+    .{ "session_pin.zig", @import("session_pin.zig") },
     .{ "session_reading.zig", @import("session_reading.zig") },
     .{ "session_upgrade.zig", @import("session_upgrade.zig") },
     .{ "upgrade_status.zig", @import("upgrade_status.zig") },
@@ -176,6 +180,8 @@ test {
     _ = @import("session_drafts.zig");
     _ = @import("SessionInput.zig");
     _ = @import("TerminalEditor.zig");
+    _ = @import("DraftEditor.zig");
+    _ = @import("keypress.zig");
     _ = @import("tools.zig");
     _ = @import("core_tools.zig");
     inline for (cores) |core| _ = core[1];
@@ -438,7 +444,7 @@ test "overview benchmark: batched initial and refreshed listings at 1,000 and 10
                     const shown: *const overview_view.State = @ptrCast(@alignCast(userdata));
                     const item = overview_view.listItem(shown, index).?;
                     const built = try overview_view.listSegments(arena, shown, item, 200, .{}, 0);
-                    return .{ .segments = built.segments, .heading = built.heading, .height = if (item == .row) 2 else 1, .second = if (item == .row) try overview_view.rowSecondSegments(arena, shown, item.row, 200, .{}) else null };
+                    return .{ .segments = built.segments, .heading = built.heading };
                 }
             };
             list.rows = .{ .userdata = &state, .count = @intCast(overview_view.listLength(&state)), .rowFn = Source.row };

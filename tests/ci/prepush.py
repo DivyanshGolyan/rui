@@ -6,24 +6,13 @@ committed diff against --base; deleted paths still select their owning checks.
 File tools and tests read the working tree; unstaged and untracked-only edits
 do not select checks. GitHub CI owns review-phase acceptance.
 
-When history since the merge base holds a merge of --base, the unit binaries
-are also compiled unfiltered, as CI's unit producer compiles them (#1415).
---full adds that compile, stack-frames at the baseline CPU and, when
-RUI_TEST_MYSQL_* name a reachable server, each selected live need whose own
-target reads it; without one it says so and skips only that part. A live need
-with no target of its own, or whose target needs another server, is recorded
-as skipped for CI, never as passed (#1422).
-
---quick leaves out the Zig builds and is what the git pre-push hook runs;
---install-hook installs that hook. Whitespace errors in committed lines and
-stale generated files (openapi.json and the client's wire.ts/settings-kinds.ts) are fixed in the
-working tree and still fail the run, so the fix is committed before the push.
-
-Each run writes a receipt to the checkout's own git directory: HEAD's tree
-(null when the working tree differs from HEAD), the merge base its diff came
-from, the mode and each command's exit code. The hook skips its checks when
-that receipt holds the pushed tree and its merge base with --base, and ran at
-least one command, every one of which passed.
+Default and --quick run the same cheap feedback. --full is an opt-in diagnostic
+that adds development builds, cross-compilation, all-unit compilation, stack
+frames and reachable live MySQL checks. UID-global Upgrade stays hosted.
+Generation runs only for the emitter's input closure or generated wire inputs.
+The hook reuses a passing receipt for the same tree and merge base.
+Receipts describe local feedback only. Hosted acceptance is never evaluated
+here, and cached output retains every recorded CI deferral.
 
 Run as a script, it re-executes itself in the caller's pinned Python 3.12
 environment when .agents/setup made one (tests/ci/fixture_user.py --venv).
@@ -42,7 +31,7 @@ import build_files
 from caller_errors import inventory_path
 import fixture_user
 from platform_boundary import SCANNED as PLATFORM_SCANNED
-from select_tests import LIVE_MYSQL_DIALECT_TARGETS, changed_paths, matches, select
+from select_tests import LIVE_MYSQL_DIALECT_TARGETS, changed_paths, matches, select, tree_graph
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
 import live_engines
@@ -69,14 +58,15 @@ SOURCE_POLICY = (
     (("tests/ci/caller_errors.py",), (("test_store_engine_boundary.py", "*"),)),
     (("src/store/schema.zig", "tests/integration/host_process.py"),(("test_store_schema_fixtures.py", "*"),)),
     (("src/store/schema.zig",), (("test_store_schema_version.py", "*"),)),
-    (("tests/ci/prepush.py",), (("test_caller_errors.py", "CallerErrors.test_gate_is_explicitly_wired_before_development_builds"),
+    (("tests/ci/prepush.py",), (("test_caller_errors.py", "CallerErrors.test_gate_is_explicitly_wired_in_local_feedback"),
                               ("test_selection.py", "SelectionTest.test_prepush_leaves_server_targets_to_ci"))),
 )
 
 
-def policy_tests(paths):
+def policy_tests(paths, *, broad=False):
     """Return module-to-test filters, or None for the full policy suite."""
     focused = {}
+    shared = False
     for path in paths:
         if path.endswith(".md"):
             continue
@@ -86,14 +76,14 @@ def policy_tests(paths):
             if (ROOT / "tests/ci" / test).is_file():
                 focused.setdefault(test, set()).add("*")
             else:
-                return None
+                shared = True
         elif path.startswith(("tests/ci/", ".github/", ".claude/")) or path in ("build.zig", "build.zig.zon", ".agents/setup") or path.startswith("build/"):
-            return None
+            shared = True
     for patterns, tests in SOURCE_POLICY:
         if any(matches(path, patterns) for path in paths):
             for module, test in tests:
                 focused.setdefault(module, set()).add(test)
-    return focused
+    return None if broad and shared else focused
 
 
 # Generated from the wire types, then from openapi.json; CI fails when any is stale.
@@ -140,11 +130,10 @@ class Skipped(NamedTuple):
     reason: str
 
 
-def checks(paths, available, base, mode="default", merged_base=False, mysql=False):
+def checks(paths, available, base, mode="default", mysql=False):
     """(name, command or Skipped) pairs for the changed paths.
 
-    `mode` is "quick", "default" or "full"; `merged_base` says history since
-    the merge base merges --base; `mysql` says RUI_TEST_MYSQL_* name a server.
+    `mode` is "quick", "default" or "full"; `mysql` says RUI_TEST_MYSQL_* name a server.
     """
     paths = sorted(set(paths))
     if not paths:
@@ -153,7 +142,8 @@ def checks(paths, available, base, mode="default", merged_base=False, mysql=Fals
     build_paths = [path for path in paths if not path.startswith("clients/ts/")]
     development = select(build_paths, "development", available)
     # These targets require CI's live MySQL or Postgres rather than a local skip.
-    targets = [target for target in development["targets"] if target not in development["server_targets"]]
+    targets = [target for target in development["targets"]
+               if target not in development["server_targets"] and target != "upgrade-integration"]
     yield "whitespace", [sys.executable, "-B", "tests/ci/prepush.py", "--fix-whitespace", base]
     zig = [path for path in existing if path.endswith(".zig")]
     if zig:
@@ -162,9 +152,13 @@ def checks(paths, available, base, mode="default", merged_base=False, mysql=Fals
         yield "caller errors", [sys.executable, "-B", "tests/ci/caller_errors.py"]
     if "src/store/schema.zig" in paths:
         yield "schema number", [sys.executable, "-B", "tests/ci/schema_number.py", "--check"]
-    if any(matches(path, ("src/*.zig", "openapi.json")) for path in paths):
+    generation = {"openapi.json", *GENERATED[1:], "clients/ts/scripts/generate-settings.mjs"}
+    if any(path.startswith("src/") for path in paths):
+        graph = tree_graph()
+        generation |= graph.closure(graph.production, ["src/openapi_main.zig"])
+    if generation.intersection(paths):
         yield "generated files", [sys.executable, "-B", "tests/ci/prepush.py", "--regenerate"]
-    policy = policy_tests(paths)
+    policy = policy_tests(paths, broad=mode == "full")
     # Focused discovery cannot depend on another test importing fixture helpers first.
     pythonpath = os.pathsep.join(filter(None, (str(ROOT / "tests/integration"), os.environ.get("PYTHONPATH"))))
     unittest = ["env", f"PYTHONPATH={pythonpath}", sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests/ci"]
@@ -180,9 +174,17 @@ def checks(paths, available, base, mode="default", merged_base=False, mysql=Fals
     python = [path for path in existing if path.endswith(".py")]
     if python:
         yield "undefined Python names", [sys.executable, "-m", "ruff", "check", "--select", "F821", *python]
-    if any(path == "openapi.json" or path.startswith("clients/ts/") and not path.endswith(".md") for path in paths):
+    if mode == "full" and any(path == "openapi.json" or path.startswith("clients/ts/") and not path.endswith(".md") for path in paths):
         yield "TypeScript client", ["npm", "--prefix", "clients/ts", "run", "check"]
-    if mode == "quick":
+    if any(not path.endswith(".md") for path in paths):
+        deferred = sorted(set(development["targets"]) | set(development["server_targets"]))
+        reason = "Selected hosted acceptance is not evaluated by local feedback"
+        if deferred:
+            reason += ": " + " ".join(deferred)
+        if "upgrade-integration" in deferred:
+            reason += "; upgrade-integration needs an exclusive ordinary hosted runner UID"
+        yield "hosted acceptance", Skipped(reason)
+    if mode != "full":
         return
     if targets:
         yield "development selection", ["zig", "build", *targets, "--summary", "line"]
@@ -190,10 +192,8 @@ def checks(paths, available, base, mode="default", merged_base=False, mysql=Fals
     if zig_inputs and select(zig_inputs, "review", available)["targets"]:
         yield "macOS type check", ["zig", "build", "typecheck-macos", "--summary", "line"]
     # A filtered or narrower build never analyzes tests a merge brought back (#1245).
-    if merged_base or mode == "full":
+    if mode == "full":
         yield "unfiltered unit compile", UNIT_COMPILE
-    if mode != "full":
-        return
     yield "stack frames", STACK_FRAMES
     # A live need runs here only through the one target that runs just its tests
     # and reads RUI_TEST_MYSQL_*. Every other need is recorded as skipped, never
@@ -228,15 +228,6 @@ def mysql_reachable(environ):
 
 def git(*args):
     return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()
-
-
-def merged_base(base, ref):
-    """Whether a commit in base..HEAD merges in a commit that `ref` reaches."""
-    for line in git("rev-list", "--merges", "--parents", f"{base}..HEAD").splitlines():
-        for parent in line.split()[2:]:
-            if subprocess.run(["git", "merge-base", "--is-ancestor", parent, ref], cwd=ROOT).returncode == 0:
-                return True
-    return False
 
 
 def receipt_path():
@@ -287,7 +278,7 @@ def run(planned, mode, base):
     # A check that changed the working tree checked what HEAD does not hold.
     tree = before if clean_tree() == before else None
     path = receipt_path()
-    path.write_text(json.dumps({"tree": tree, "base": base, "mode": mode, "results": results}, indent=2) + "\n")
+    path.write_text(json.dumps({"tree": tree, "base": base, "mode": mode, "scope": "local-feedback", "results": results}, indent=2) + "\n")
     if tree is None:
         print(f"The working tree differs from HEAD, so {path} matches no push.")
     return results
@@ -370,7 +361,7 @@ def main():
     parser.add_argument("--base", default="origin/main")
     parser.add_argument("--plan", action="store_true", help="print selected commands without executing them")
     modes = parser.add_mutually_exclusive_group()
-    modes.add_argument("--quick", action="store_true", help="leave out the Zig builds, as the pre-push hook does")
+    modes.add_argument("--quick", action="store_true", help="alias for default cheap feedback, used by installed hooks")
     modes.add_argument("--full", action="store_true", help="also compile the unit binaries unfiltered, run stack-frames "
                        "and, with a reachable local MySQL, the selected targets that read it")
     parser.add_argument("--install-hook", action="store_true", help="install the git pre-push hook that runs --quick")
@@ -388,19 +379,23 @@ def main():
     if pushed:
         receipt = read_receipt()
         if receipt_covers(receipt, [pushed_key(sha, args.base) for sha in pushed]):
-            print(f"prepush: the {receipt['mode']} run on tree {receipt['tree']} against {receipt['base']} passed; "
-                  "not running it again.")
+            print(f"prepush: local feedback from the {receipt['mode']} run on tree {receipt['tree']} against {receipt['base']} passed; "
+                  "not running it again. Hosted acceptance was not evaluated.")
+            for result in receipt["results"]:
+                if "skipped" in result:
+                    print(f"== {result['name']}: skipped: {result['skipped']}")
             raise SystemExit(0)
     available = set(build_files.steps())
     base = git("merge-base", "HEAD", args.base)
     paths, _ = changed_paths(base, "HEAD")
-    planned = list(checks(paths, available, base, mode, merged_base(base, args.base),
+    planned = list(checks(paths, available, base, mode,
                           mode == "full" and mysql_reachable(os.environ)))
     if args.plan:
         print(json.dumps({"base": base, "paths": paths, "checks": [
             {"name": name, "skipped": command.reason} if isinstance(command, Skipped) else {"name": name, "command": command}
             for name, command in planned]}, indent=2))
         raise SystemExit(0)
+    print("Local feedback only. Hosted acceptance is not evaluated.", flush=True)
     results = run(planned, mode, base)
     failed = [result["name"] for result in results if result.get("exit")]
     print(json.dumps({"failed": failed, "skipped": [result["name"] for result in results if "skipped" in result]}))

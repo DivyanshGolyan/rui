@@ -53,7 +53,8 @@ pub const openssl_version = "3.6.3";
 pub const max_url_bytes = url_value.max_url_bytes;
 /// The longest DNS name; IP literals are shorter.
 pub const max_host_bytes = url_value.max_host_bytes;
-pub const max_endpoints = 4;
+/// Distinct URL registrations per Client, including paths sharing an origin.
+pub const max_endpoints = 6;
 /// Request fields a caller may set; pseudo-headers, content-length and
 /// accept-encoding are the client's own.
 pub const max_fields = 16;
@@ -99,7 +100,7 @@ pub const Liveness = policy.Liveness;
 
 /// What verifies an `https://` peer. Verification is never off. `.system`
 /// is Apple SecTrust on macOS, and elsewhere what `tls_client.Trust`
-/// describes; `.ca_file` is only that file (`--provider-ca-file`).
+/// describes; `.ca_file` is only that file (`network.caFile`).
 pub const Trust = tls_client.Trust;
 
 pub const Options = struct {

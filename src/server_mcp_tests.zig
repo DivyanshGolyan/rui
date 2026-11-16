@@ -120,14 +120,17 @@ fn run(case: Case) !void {
         else => 5_000,
     };
     var servers = [_]mcp.Server{ .{ .name = @constCast("docs"), .url = url, .token = @constCast("secret"), .target = try @import("http1/request.zig").parseTarget(url), .timeout_ms = timeout_ms }, .{ .name = @constCast("other"), .url = other_url, .token = @constCast("other-secret"), .target = try @import("http1/request.zig").parseTarget(other_url), .timeout_ms = 5_000 } };
-    var custody: [1]execution.CustodyRecord = @splat(.{});
+    var custody: [2]execution.CustodyRecord = @splat(.{});
     const host = try allocator.create(Host);
     defer allocator.destroy(host);
-    host.* = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = storage, .custody = execution.CustodyPool.initialize(&custody), .mcp_servers = .{ .entries = &servers } };
+    host.* = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = storage, .custody = execution.CustodyPool.initialize(custody[0..(if (case == .concurrent) 2 else 1)]), .mcp_servers = .{ .entries = &servers } };
     var active: mcp.Calls = .{};
-    defer active.shutdown(host);
+    defer {
+        _ = host.advance(.stopping);
+        active.shutdown(host);
+    }
     for (0..count) |ordinal| {
-        const work = (try storage.nextCoreWork()).?;
+        const work = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?;
         try expectHere(@src(), work == .mcp);
         try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, active.admit(host, work.mcp));
         if (case != .down) {
@@ -136,7 +139,7 @@ fn run(case: Case) !void {
             try storage.readActionExecutionInput(.mcp, .{ .action_id = work.mcp.action_id, .parent_operation_id = binding.operation_id, .turn_id = binding.turn_id }, input);
             try std.testing.expectEqual(servers[0].timeout_ms, input.timeout_ms);
         }
-        if (case == .serial) try expectHere(@src(), (try storage.nextCoreWork()) == null);
+        if (case == .serial) try expectHere(@src(), (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })) == null);
         const Context = struct {
             active: *mcp.Calls,
             host: *Host,
@@ -165,7 +168,7 @@ fn run(case: Case) !void {
             var other_call = calls[0];
             other_call.name = "fetch_other";
             try store.settleCallsForTesting(storage, &tmp, other_binding, "other-calls", &.{other_call});
-            const other_work = (try storage.nextCoreWork()).?;
+            const other_work = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?;
             try expectHere(@src(), other_work == .mcp);
             try expectHere(@src(), other_work.mcp.action_id != work.mcp.action_id);
             try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, active.admit(host, other_work.mcp));
@@ -186,15 +189,17 @@ fn run(case: Case) !void {
             try expectHere(@src(), std.mem.indexOf(u8, other_report, "page payload") != null);
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try std.testing.expectEqual(other_binding.turn_id, next.turn_id);
+            _ = host.advance(.stopping);
             active.shutdown(host);
             try expectHere(@src(), try storage.recoverOneUncertainAction(.empty()));
         }
         if (case == .shutdown) {
             try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(5)), context, Context.sent);
+            _ = host.advance(.stopping);
             active.shutdown(host);
             try expectHere(@src(), try storage.recoverOneUncertainAction(.empty()));
             try expectHere(@src(), !try storage.recoverOneUncertainAction(.empty()));
-            try expectHere(@src(), (try storage.nextCoreWork()) == null);
+            try expectHere(@src(), (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })) == null);
         }
         if (case == .stop or case == .stop_unsent) {
             if (case == .stop) try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(5)), context, Context.sent);
@@ -249,7 +254,7 @@ fn run(case: Case) !void {
         try std.testing.expectEqual(@as(u64, if (case == .stop_unsent) 1 else 0), cancelled_count);
         if (case == .stop) try expectHere(@src(), std.mem.indexOf(u8, report, "not retried") != null);
         if (case == .stop_unsent) try std.testing.expect(!script.request_received.load(.acquire));
-        try expectHere(@src(), (try storage.nextCoreWork()) == null);
+        try expectHere(@src(), (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })) == null);
         return;
     }
     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;

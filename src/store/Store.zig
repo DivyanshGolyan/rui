@@ -3,6 +3,7 @@
 //! identities and traces. The facade re-exports only the Store type and its value types.
 
 const std = @import("std");
+const stderr = @import("../stderr.zig");
 const command_reply = @import("../command_reply.zig");
 const store_schema = @import("schema.zig");
 const attempt = @import("../attempt.zig");
@@ -25,6 +26,7 @@ const command_input = @import("../command_input.zig");
 const retry_policy = @import("../retry_policy.zig");
 const change_ring = @import("../change_ring.zig");
 const action_domain = @import("domain/action.zig");
+const DispatchCapacity = @import("../execution.zig").DispatchCapacity;
 const command_domain = @import("domain/command.zig");
 const configuration_domain = @import("domain/configuration.zig");
 const skills_domain = @import("domain/skills.zig");
@@ -36,6 +38,7 @@ const tool_record = @import("../tool_record.zig");
 const historical_domain = @import("domain/historical.zig");
 const model_admission_domain = @import("domain/model_admission.zig");
 const model_settlement_domain = @import("domain/model_settlement.zig");
+const action_read_domain = @import("domain/action_read.zig");
 const reads_domain = @import("domain/reads.zig");
 const report_domain = @import("domain/report.zig");
 const session_list_read = @import("domain/session_list_read.zig");
@@ -83,6 +86,7 @@ const PublicConversationPage = reads_domain.PublicConversationPage;
 const SessionObservation = reads_domain.SessionObservation;
 const SessionStopReply = command_domain.SessionStopReply;
 const SessionArchiveReply = command_domain.SessionArchiveReply;
+const SessionPinReply = command_domain.SessionPinReply;
 const SupersedingControl = action_domain.SupersedingControl;
 const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 const Queue = @import("queue.zig").Queue;
@@ -332,11 +336,6 @@ pub const Store = struct {
         try entry.finish(Ordinary.none, access.run());
         if (ids.failed) return error.OutOfMemory;
         return ids.items.toOwnedSlice(allocator);
-    }
-
-    /// Compatibility convenience; all initialization belongs to openTarget.
-    pub fn openMysql(self: *Store, io: std.Io, connection: mysql_connection.Options, selector: []const u8, options: OpenOptions) !void {
-        return self.openTarget(io, .{ .mysql = connection }, selector, options);
     }
 
     pub fn kind(self: *const Store) Kind {
@@ -704,9 +703,12 @@ pub const Store = struct {
             .allocator = allocator,
             .committed = committed,
             .reply = &reply,
-        }, faults) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => reply = .infrastructure_failure,
+        }, faults) catch |err| {
+            stderr.print("rui: Store configure transition failed: {s}\n", .{@errorName(err)});
+            switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => reply = .infrastructure_failure,
+            }
         };
         if (reply == .rejected)
             reply.rejected.message = configuration_domain.missingToolMessage(self.hostTools().host_tool_set, reply.rejected.code, &command.configuration.tools);
@@ -795,6 +797,14 @@ pub const Store = struct {
         faults: Faults,
     ) SessionStopReply {
         return self.noteControl(transition.apply(self, command_domain.StopSession, .ofStop(command, false), faults) catch .infrastructure_failure);
+    }
+
+    pub fn pinSession(self: *Store, command: *const command_input.SessionPinCommand, faults: Faults) SessionPinReply {
+        return self.queue().write(pinSessionHeld, .{ self, command, faults });
+    }
+
+    fn pinSessionHeld(self: *Store, command: *const command_input.SessionPinCommand, faults: Faults) SessionPinReply {
+        return transition.apply(self, command_domain.PinSession, .{ .command = command }, faults) catch .infrastructure_failure;
     }
 
     pub fn archiveSession(self: *Store, command: *const command_input.SessionArchiveCommand, faults: Faults) SessionArchiveReply {
@@ -1089,6 +1099,18 @@ pub const Store = struct {
         };
     }
 
+    pub fn readAction(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
+        return self.queue().run(readActionHeld, .{ self, request, out });
+    }
+
+    fn readActionHeld(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.action_read, action_read_domain.actionRead(&access, request, out));
+    }
+
     pub fn actionArguments(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {
         return self.actionContent(session_ref, action_id, .arguments);
     }
@@ -1310,42 +1332,38 @@ pub const Store = struct {
         return transition.apply(self, forward_domain.Deliver, .{ .forward_id = forward_id }, faults);
     }
 
-    /// Owed stops, ending Messages and ancestor feed hops precede calls.
-    pub fn nextCoreWork(self: *Store) !?CoreWork {
-        return self.nextCoreWorkForHost(true);
-    }
-
     /// Which of the dispatch loop's commit-driven scans would find work,
     /// in one round; `paused` is whether new Turns are held.
-    pub fn dispatchWork(self: *Store, paused: bool) !DispatchWork {
-        return self.queue().run(dispatchWorkHeld, .{ self, paused });
+    pub fn dispatchWork(self: *Store, paused: bool, capacity: DispatchCapacity) !DispatchWork {
+        return self.queue().run(dispatchWorkHeld, .{ self, paused, capacity });
     }
 
-    fn dispatchWorkHeld(self: *Store, paused: bool) !DispatchWork {
+    fn dispatchWorkHeld(self: *Store, paused: bool, capacity: DispatchCapacity) !DispatchWork {
         const survey = self.identities().survey;
         const asked: @FieldType(Survey, "asked") = if (paused) .paused else .running;
         self.identities().survey.kept = .none;
         self.identities().survey.asked = asked;
+        self.identities().survey.capacity = capacity;
         // Nothing committed since the survey ran, right after its COMMIT.
-        if (survey.kept == .ready and survey.asked == asked and !self.isFenced())
+        if (survey.kept == .ready and survey.asked == asked and survey.capacity.includesMcp() == capacity.includesMcp() and !self.isFenced())
             return .{ .core = survey.core, .mcp = survey.mcp, .bash = survey.bash, .message = survey.message, .tool_continuation = survey.tool_continuation, .retry = survey.retry };
         const entry = try enter(self, .none);
         defer entry.release();
         var access: store_access.Access(.survey, error{}) = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.none, model_admission_domain.dispatchWork(&access, paused));
+        return entry.finish(Ordinary.none, model_admission_domain.dispatchWork(&access, paused, capacity));
     }
 
-    pub fn nextCoreWorkForHost(self: *Store, include_mcp: bool) !?CoreWork {
-        return self.queue().run(nextCoreWorkHeld, .{ self, include_mcp });
+    pub fn nextCoreWork(self: *Store, capacity: DispatchCapacity) !?CoreWork {
+        return self.queue().run(nextCoreWorkHeld, .{ self, capacity });
     }
 
-    fn nextCoreWorkHeld(self: *Store, include_mcp: bool) !?CoreWork {
+    fn nextCoreWorkHeld(self: *Store, capacity: DispatchCapacity) !?CoreWork {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.none, action_domain.nextCoreWork(&access, include_mcp));
+        return entry.finish(Ordinary.none, action_domain.nextCoreWork(&access, capacity));
     }
 
     /// Runs the `message_agent` call `binding` names with its checked
@@ -1835,7 +1853,7 @@ fn destroyRing(ring: *change_ring.Ring) void {
 }
 
 /// Expected outcomes of entry points. A canonical read or save
-/// fault fences the Host (ARCHITECTURE.md, "Commit boundaries and crash
+/// fault fences the Host (docs/contracts/execution.md, "Commit boundaries and crash
 /// recovery"), so every other error from an entry point has fenced the
 /// Store before the caller sees it.
 pub const Ordinary = struct {
@@ -1844,6 +1862,7 @@ pub const Ordinary = struct {
     const content = error{ContentNotFound};
     const public_content = error{ ContentNotFound, RangeOutOfBounds };
     pub const action = error{ActionNotFound};
+    pub const action_read = action || error{InvalidCursor};
     const result = error{ ResultNotFound, ResultNotReady, ResultFailed };
     pub const attempt_binding = error{ StaleAttemptBinding, SupersededByControl };
     pub const historical_entry = error{HistoricalPending};
@@ -2094,7 +2113,7 @@ pub noinline fn commitWithSurvey(self: *Store, writer: anytype, follow: anytype)
     defer reads.deinit();
     if (follow) |after| after.queue(&reads);
     var survey: model_admission_domain.DispatchSurvey = .{};
-    if (surveyed) survey.queue(&reads, kept.asked == .paused);
+    if (surveyed) survey.queue(&reads, kept.asked == .paused, kept.capacity);
     if (reads.failure != null) {
         self.engine.dropTail();
         return writer.passCommit(null);
@@ -2150,7 +2169,10 @@ fn finishBatch(context: *anyopaque) bool {
             self.engine.releaseUnusedMemory(model_facts_domain.save_statements);
         }
     }
-    commitBatch(self) catch return false;
+    commitBatch(self) catch |err| {
+        stderr.print("rui: Store batch commit failed: {s}\n", .{@errorName(err)});
+        return false;
+    };
     const values = self.identities();
     for (values.admitted[0..values.admitted_len]) |*admission| admission.tell();
     return true;
@@ -2382,7 +2404,8 @@ const Survey = packed struct(u16) {
     message: bool = false,
     tool_continuation: bool = false,
     retry: bool = false,
-    _: u6 = 0,
+    capacity: DispatchCapacity = .{ .free_credit = true, .mcp_open = true },
+    _: u4 = 0,
 };
 
 const Admitted = struct {
@@ -2535,3 +2558,54 @@ const ModelIds = struct {
         return true;
     }
 };
+
+test "Store failure diagnostics retain stage and error without changing replies or cleanup" {
+    const testing = @import("testing.zig");
+    const FailedBatch = struct {
+        fn run(storage: *Store, accepted: configuration_domain.AcceptedConfiguration) ConfigureReply {
+            storage.batch = .lost;
+            return .{ .accepted = accepted };
+        }
+    };
+    for ([_]bool{ false, true }) |suppressed| {
+        for ([_]enum { configure, batch }{ .configure, .batch }) |stage| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testing.testingSqliteStore(&storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [@import("../protocol.zig").max_workspace_bytes]u8 = undefined;
+            const workspace = try testing.canonicalCwd(std.testing.io, &workspace_buffer);
+            var command = try testing.completeConfiguration("diagnostic-fixture", "", workspace, "model-a");
+            const accepted = if (stage == .batch) (try storage.configure(&command, .{})).accepted else null;
+            const output = try tmp.dir.createFile(std.testing.io, "diagnostic", .{ .read = true });
+            defer output.close(std.testing.io);
+            const saved = std.c.dup(2);
+            if (saved < 0) return error.SystemResources;
+            defer _ = std.c.close(saved);
+            if (std.c.dup2(output.handle, 2) < 0) return error.SystemResources;
+            defer std.debug.assert(std.c.dup2(saved, 2) >= 0);
+            if (suppressed) try std.testing.expect(stderr.tryAcquire());
+            defer if (suppressed) stderr.release();
+
+            const reply = switch (stage) {
+                .configure => try storage.configure(&command, .{ .before_commit = true }),
+                .batch => storage.queue().write(FailedBatch.run, .{ &storage, accepted.? }),
+            };
+            try std.testing.expect(reply == .infrastructure_failure);
+            try std.testing.expect(storage.isFenced());
+            try std.testing.expectEqual(.none, storage.batch);
+            try std.testing.expect(!storage.savepoint);
+            try std.testing.expectEqual(@as(usize, 0), storage.identities().admitted_len);
+            try std.testing.expectEqual(@as(u64, 0), storage.identities().second);
+            try std.testing.expect(!storage.engine.inTransaction());
+            var bytes: [256]u8 = undefined;
+            const count = try output.readPositional(std.testing.io, &.{&bytes}, 0);
+            const expected = if (suppressed) "" else switch (stage) {
+                .configure => "rui: Store configure transition failed: InjectedCommitFailure\n",
+                .batch => "rui: Store batch commit failed: CanonicalRollbackFailed\n",
+            };
+            try std.testing.expectEqualStrings(expected, bytes[0..count]);
+        }
+    }
+}

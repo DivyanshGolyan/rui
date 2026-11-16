@@ -97,3 +97,11 @@ test "request wait catalog exits preserve the caller policy" {
     try std.testing.expectEqual(Status.later, forCode(.confirmed, .wait_timed_out));
     try std.testing.expectEqual(Status.unconfirmed, forCode(.confirmed, .request_absent));
 }
+
+test "guided sign-in native outcomes require environment repair rather than wait or successful exit" {
+    for ([_]anyerror{ error.ConnectionSuperseded, error.ConnectionNotActive, error.SignInReportingUnavailable }) |cause| {
+        try std.testing.expectEqual(Status.environment, knownError(cause));
+        try std.testing.expectEqual(@as(u8, 6), @backingInt(knownError(cause)));
+    }
+    for ([_]anyerror{ error.NoSpaceLeft, error.WriteFailed, error.AccessDenied, error.SignInReceiptPartlyReported }) |cause| try std.testing.expectEqual(Status.unclassified, knownError(cause));
+}

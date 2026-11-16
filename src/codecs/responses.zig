@@ -38,6 +38,13 @@ pub const Version = enum {
     pub fn declaresTools(self: Version) bool {
         return self != .one;
     }
+
+    /// Whether the effort in force travels in the history, where an
+    /// Operation boundary changes it and a provider can refuse the change.
+    /// The other versions send each Operation's effort at the top.
+    pub fn carriesEffort(self: Version) bool {
+        return self == .two;
+    }
 };
 
 /// How version three asks for compaction, at the end of a compaction
@@ -78,6 +85,8 @@ pub const Encoder = struct {
     /// A version three compaction request, which asks for compaction at
     /// the request's end.
     compact: bool = false,
+
+    input_part_comma: bool = false,
 
     pub fn encodeItem(self: *Encoder, header: *const ItemHeader, out: *Pieces) error{Declined}!void {
         out.len = 0;
@@ -186,16 +195,49 @@ pub const Encoder = struct {
                 out.content(1, .json_string_v1);
                 out.literal("\"}");
             },
+            .image_message_open => |author| {
+                self.separateInput(out);
+                self.input_part_comma = false;
+                out.literal(switch (author) {
+                    .user => "{\"role\":\"user\",\"content\":[",
+                    .instruction => "{\"role\":\"developer\",\"content\":[",
+                });
+            },
+            .image_tool_open => {
+                self.separateInput(out);
+                self.input_part_comma = false;
+                out.literal("{\"type\":\"function_call_output\",\"call_id\":\"");
+                out.content(0, .json_string_v1);
+                out.literal("\",\"output\":[");
+            },
+            .input_text => {
+                if (self.input_part_comma) out.literal(",");
+                self.input_part_comma = true;
+                out.literal("{\"type\":\"input_text\",\"text\":\"");
+                out.content(0, .json_string_v1);
+                out.literal("\"}");
+            },
+            .input_image => |mime| {
+                if (self.input_part_comma) out.literal(",");
+                self.input_part_comma = true;
+                out.literal(switch (mime) {
+                    .png => "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,",
+                    .jpeg => "{\"type\":\"input_image\",\"image_url\":\"data:image/jpeg;base64,",
+                });
+                out.base64(0);
+                out.literal("\",\"detail\":\"auto\"}");
+            },
+            .image_message_close, .image_tool_close => out.literal("]}"),
             // Version two changes effort where an Operation changed it; an
             // unchanged effort writes nothing. Versions one and three wrote
             // this Operation's effort at the top. Effort is null for a whole
             // Session or for none of it, so a boundary never returns to it.
-            .operation => |effort| if (self.carry.version == .two and !std.meta.eql(effort, self.carry.effort)) {
+            .operation => |effort| if (self.carry.version.carriesEffort() and !std.meta.eql(effort, self.carry.effort)) {
                 self.changeEffort(effort orelse return error.Declined, out);
             },
             // The original current boundary is an admission fact. Replay and
             // refused retries above may restore an already admitted value.
-            .effort_update => |effort| if (self.carry.version == .two) self.changeEffort(effort, out),
+            .effort_update => |effort| if (self.carry.version.carriesEffort()) self.changeEffort(effort, out),
             .declare_open => {
                 if (!self.carry.version.declaresTools()) return error.Declined;
                 self.separateInput(out);
@@ -2079,6 +2121,7 @@ test "every item at its longest fits max_pieces and names only handles it has" {
             for (pieces.slice()) |piece| switch (piece) {
                 .literal => |bytes| try std.testing.expect(bytes.len != 0),
                 .content => |content| try std.testing.expect(header.has(content.handle)),
+                .base64 => |handle| try std.testing.expect(header.has(handle)),
             };
         };
     };

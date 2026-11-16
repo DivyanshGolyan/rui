@@ -6,12 +6,13 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
+const Hover = @import("widgets/Hover.zig");
 const Self = @This();
 
 label: []const u8,
 style: vaxis.Style = .{},
 /// While the pointer is over it.
-hover: vaxis.Style = .{ .ul_style = .single },
+hover: vaxis.Style = Hover.underlined(.{}),
 method: vaxis.gwidth.Method = .unicode,
 userdata: *anyopaque,
 on_click: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,

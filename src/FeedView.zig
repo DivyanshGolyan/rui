@@ -11,6 +11,7 @@ const View = @import("session_view.zig");
 const selecting = @import("transcript_selection.zig");
 const Row = selecting.RowFor(@FieldType(Window, "document"));
 const Self = @This();
+const SessionInput = @import("SessionInput.zig");
 const Hover = @import("widgets/Hover.zig");
 
 window: *Window,
@@ -39,13 +40,28 @@ pub const Handler = struct {
     on_scroll: *const fn (*anyopaque, *vxfw.EventContext, up: bool) anyerror!void,
     on_click: ?*const fn (*anyopaque, *vxfw.EventContext, resident.Point) anyerror!void = null,
     on_retry: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
+    quote: ?struct {
+        begin: *const fn (*anyopaque) ?SessionInput.Insertion,
+        insert: *const fn (*anyopaque, *vxfw.EventContext, SessionInput.Insertion, []const u8) anyerror!void,
+    } = null,
 };
 pub const Openable = union(enum) { message: View.Collapsed, session: [6]u8, tool: resident.Key };
 const Cell = struct { row: i32, col: i32 };
 // Both bounds of both clusters are keyed. No saved offset counts from the
 // window's start/end; a prepend or removal of another row cannot move them.
 const Spot = struct { start: resident.Point, end: resident.Point };
+const QuoteFrame = struct {
+    revision: u64 = 0,
+    size: vxfw.Size = .{},
+    method: vaxis.gwidth.Method = .unicode,
+    presentation: resident.Presentation = .{},
+};
+const Purpose = union(enum) {
+    copy,
+    quote: struct { target: SessionInput.Insertion, frame: QuoteFrame },
+};
 const Selection = struct {
+    purpose: Purpose = .copy,
     press: Cell,
     anchor: Spot,
     head: Spot,
@@ -56,6 +72,7 @@ const Selection = struct {
     row: u32 = 0,
 };
 const Drawn = struct {
+    quote: QuoteFrame = .{},
     first: ?resident.Point = null,
     row: u32 = 0,
     pad: u32 = 0,
@@ -85,6 +102,29 @@ pub fn scroll(self: *Self, rows: i32) void {
 
 pub fn dragging(self: *const Self) bool {
     return self.selection != null;
+}
+
+pub fn cancelSelection(self: *Self) bool {
+    const held = self.selection != null;
+    self.selection = null;
+    self.retry_press = null;
+    return held;
+}
+
+pub fn cancelQuote(self: *Self) bool {
+    const held = self.selection orelse return false;
+    return if (held.purpose == .quote) self.cancelSelection() else false;
+}
+
+fn quoteFrame(self: *const Self) QuoteFrame {
+    return .{ .revision = self.window.revision, .size = self.size, .method = self.method, .presentation = self.presentation() };
+}
+
+fn current(self: *const Self, purpose: Purpose) bool {
+    return switch (purpose) {
+        .copy => true,
+        .quote => |quote| std.meta.eql(quote.frame, self.quoteFrame()),
+    };
 }
 
 pub fn messageAt(self: *const Self, point: resident.Point) ?View.Collapsed {
@@ -217,6 +257,9 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!v
     try self.hover.handleEvent(ctx, input);
     switch (input) {
         .mouse => |value| try self.mouse(ctx, value),
+        .focus_out => {
+            if (self.cancelQuote()) ctx.redraw = true;
+        },
         .mouse_leave => {
             self.retry_press = null;
             if (self.selection != null) {
@@ -242,6 +285,12 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!v
 fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
     const handler = self.handler orelse return;
     const at: Cell = .{ .row = value.row, .col = value.col };
+    if (self.selection) |held| if (!self.current(held.purpose)) {
+        _ = self.cancelSelection();
+        ctx.consumeAndRedraw();
+        return;
+    };
+    if (value.type == .press) _ = self.cancelQuote();
     if (self.retry_press) |pressed| switch (value.type) {
         .drag => {
             self.retry_press = null;
@@ -264,7 +313,23 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
     switch (value.type) {
         .press => {
             if (value.button != .left) return;
-            if (handler.on_retry != null) if (try self.retryAt(ctx.alloc, at)) |hit| {
+            var purpose: Purpose = .copy;
+            if (value.mods.alt and !value.mods.shift and !value.mods.ctrl) {
+                const quote = handler.quote orelse {
+                    ctx.consumeEvent();
+                    return;
+                };
+                const target = quote.begin(handler.userdata) orelse {
+                    ctx.consumeEvent();
+                    return;
+                };
+                if (!std.meta.eql(self.drawn.quote, self.quoteFrame())) {
+                    ctx.consumeEvent();
+                    return;
+                }
+                purpose = .{ .quote = .{ .target = target, .frame = self.drawn.quote } };
+            }
+            if (purpose == .copy and handler.on_retry != null) if (try self.retryAt(ctx.alloc, at)) |hit| {
                 // Synthetic-only wrap padding is not a resident text position.
                 // Leave the existing selection path to original body cells.
                 if (hit == .link) self.retry_press = .{ .cell = at, .ending = hit.link };
@@ -272,7 +337,7 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
                 return;
             };
             const spot = try self.spotAt(ctx.alloc, at) orelse return;
-            self.selection = .{ .press = at, .anchor = spot, .head = spot };
+            self.selection = .{ .purpose = purpose, .press = at, .anchor = spot, .head = spot };
             ctx.consumeEvent();
         },
         .drag => {
@@ -295,6 +360,20 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
             ctx.consumeAndRedraw();
             const anchor = self.resolved(held.anchor) orelse return;
             const head = self.resolved(held.head) orelse return;
+            if (held.purpose == .quote) {
+                if (!held.dragging or (value.button != .left and value.button != .none) or at.row < 0 or at.col < 0 or at.row >= self.drawn.height or at.col >= self.drawn.width) return;
+                const quote = handler.quote orelse return;
+                const result = try selecting.copyBody(ctx.alloc, self.window, .of(anchor, head));
+                switch (result) {
+                    .text => |text| {
+                        defer ctx.alloc.free(text.bytes);
+                        try quote.insert(handler.userdata, ctx, held.purpose.quote.target, text.bytes);
+                    },
+                    .too_large => try handler.on_notice(handler.userdata, ctx, "Quote is too large for the draft"),
+                    .nothing => {},
+                }
+                return;
+            }
             if (held.dragging) {
                 const result = try selecting.copy(ctx.alloc, &self.window.document, .of(anchor, head));
                 if (result == .text) try ctx.addCmd(.{ .copy_to_clipboard = result.text.bytes });
@@ -317,6 +396,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const self: *Self = @ptrCast(@alignCast(raw));
     var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), ctx.max.size());
     self.size = surface.size;
+    if (self.selection) |held| if (!self.current(held.purpose)) {
+        _ = self.cancelSelection();
+    };
     // Measure with the same full pane regardless of the anchor. A scrolled
     // frame must not remove the tail and change its own scroll geometry.
     const tail = if (self.tail) |child| try child.draw(ctx.withConstraints(.{}, ctx.max)) else null;
@@ -333,7 +415,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         for (0..visible.line) |_| offset = self.window.document.lineEnd(offset) + 1;
         first = .{ .key = entry.key, .offset = offset - entry.offset };
     } else if (visible.first < entries.len) first = .{ .key = resident.tail_key, .offset = 0 };
-    self.drawn = .{ .first = first, .row = visible.row, .pad = visible.pad, .width = self.size.width, .height = self.size.height };
+    self.drawn = .{ .quote = self.quoteFrame(), .first = first, .row = visible.row, .pad = visible.pad, .width = self.size.width, .height = self.size.height };
     if (tail) |child| {
         var row: i64 = visible.pad;
         for (entries[@min(visible.first, entries.len)..], @min(visible.first, entries.len)..) |entry, i| {
@@ -412,23 +494,21 @@ fn drawHover(self: *Self, ctx: vxfw.DrawContext, surface: vxfw.Surface) !void {
             try targets.append(arena, rect);
             const open = self.colour and self.window.document.toolIsOpen(position.offset);
             if (!open and self.hover.contains(rect)) for (cells) |*cell| {
-                cell.style.bg = self.hover_style.bg;
-                cell.style.reverse = self.hover_style.reverse;
-                cell.style.ul_style = self.hover_style.ul_style;
+                cell.style = Hover.look(cell.style, self.hover_style);
             };
         }
         if (retry) |columns| {
             const rect: Hover.Rect = .{ .row = @intCast(row), .col = columns.start, .width = columns.end - columns.start };
             try targets.append(arena, rect);
             if (self.hover.contains(rect)) for (cells[columns.start..columns.end]) |*cell| {
-                cell.style.ul_style = .single;
+                cell.style = Hover.underlined(cell.style);
             };
         }
         if (handler.on_open != null) for (try selecting.peers(&self.window.document, cells, arena)) |span| {
             const rect: Hover.Rect = .{ .row = @intCast(row), .col = span.start, .width = span.end - span.start };
             try targets.append(arena, rect);
             if (self.hover.contains(rect)) for (cells[span.start..span.end]) |*cell| {
-                cell.style.ul_style = .single;
+                cell.style = Hover.underlined(cell.style);
             };
         };
     }
@@ -964,4 +1044,180 @@ test "FeedView hover and drag highlight measure each visible line a bounded numb
     // Every line is one row, so a linear frame costs at most 32 times as
     // much for 32 times the rows; the quadratic walk cost about 1000 times.
     try std.testing.expect(measured[1] <= 32 * measured[0]);
+}
+
+const QuoteFixture = struct {
+    input: *SessionInput,
+    inserted: usize = 0,
+    clicked: usize = 0,
+    fn begin(raw: *anyopaque) ?SessionInput.Insertion {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        return self.input.insertionTarget();
+    }
+    fn insert(raw: *anyopaque, ctx: *vxfw.EventContext, target: SessionInput.Insertion, body: []const u8) !void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        if ((try self.input.insertQuote(ctx.alloc, target, body)) == .redraw) self.inserted += 1;
+    }
+    fn click(raw: *anyopaque, _: *vxfw.EventContext, _: resident.Point) !void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        self.clicked += 1;
+    }
+    fn handler(self: *@This()) Handler {
+        return .{ .userdata = self, .on_notice = RetryClicks.notice, .on_scroll = RetryClicks.scroll, .on_click = click, .quote = .{ .begin = begin, .insert = insert } };
+    }
+};
+
+fn quoteReport(view: *Self, ctx: *vxfw.EventContext, bytes: []const u8) !void {
+    var parser: vaxis.Parser = .{};
+    const result = try parser.parse(bytes, null);
+    try std.testing.expectEqual(bytes.len, result.n);
+    const report = result.event.?.mouse;
+    try view.widget().handleEvent(ctx, .{ .mouse = report });
+}
+
+fn clipboardCommands(ctx: *const vxfw.EventContext) usize {
+    var count: usize = 0;
+    for (ctx.cmds.items) |command| if (command == .copy_to_clipboard) {
+        count += 1;
+    };
+    return count;
+}
+
+test "FeedView quote gesture latches decoded Alt and never copies or submits" {
+    const gpa = std.testing.allocator;
+    const window = try testWindow();
+    defer gpa.destroy(window);
+    try appendQuoteTestRow(window, 1, "雪e\u{301}\n\nlast\n");
+    const input = try gpa.create(SessionInput);
+    defer gpa.destroy(input);
+    var anchor: Feed = .{};
+    var fixture: QuoteFixture = .{ .input = input };
+    var view: Self = .{ .window = window, .anchor = &anchor, .handler = fixture.handler() };
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]bool{ false, true }) |backwards| {
+        input.init();
+        _ = input.append("leftRIGHT");
+        input.editors[input.active].setCursor(4);
+        _ = try testFrame(&view, arena.allocator(), 16, 3);
+        try quoteReport(&view, &ctx, if (backwards) "\x1b[<8;4;3M" else "\x1b[<8;1;1M");
+        try std.testing.expect(view.selection.?.purpose == .quote);
+        // Releasing Alt mid-drag does not turn the release into a copy.
+        try quoteReport(&view, &ctx, if (backwards) "\x1b[<32;1;1M" else "\x1b[<32;4;3M");
+        _ = try testFrame(&view, arena.allocator(), 16, 3);
+        try quoteReport(&view, &ctx, if (backwards) "\x1b[<0;1;1m" else "\x1b[<0;4;3m");
+        try std.testing.expectEqualStrings("left\n> 雪e\u{301}\n>\n> last\nRIGHT", input.composition().bytes);
+        try std.testing.expectEqual(null, input.submitted);
+        try std.testing.expectEqual(@as(usize, 0), clipboardCommands(&ctx));
+        // A duplicate release cannot edit a second time.
+        const revision = input.revision;
+        try quoteReport(&view, &ctx, "\x1b[<0;4;3m");
+        try std.testing.expectEqual(revision, input.revision);
+    }
+    try std.testing.expectEqual(@as(usize, 2), fixture.inserted);
+    input.init();
+    _ = input.append("draft");
+    try quoteReport(&view, &ctx, "\x1b[<0;1;1M");
+    try quoteReport(&view, &ctx, "\x1b[<40;4;3M");
+    try quoteReport(&view, &ctx, "\x1b[<8;4;3m");
+    try std.testing.expectEqual(@as(usize, 1), clipboardCommands(&ctx));
+    try std.testing.expectEqualStrings("draft", input.composition().bytes);
+    try std.testing.expectEqual(@as(usize, 2), fixture.inserted);
+}
+
+test "FeedView quote gesture cancels stale content reflow leave and outside release" {
+    const gpa = std.testing.allocator;
+    const window = try testWindow();
+    defer gpa.destroy(window);
+    const input = try gpa.create(SessionInput);
+    defer gpa.destroy(input);
+    var anchor: Feed = .{};
+    var fixture: QuoteFixture = .{ .input = input };
+    var view: Self = .{ .window = window, .anchor = &anchor, .handler = fixture.handler() };
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    const Case = enum { click, leave, focus, cancel, resize, replace, append, evict, draft, caret, outside, wrong_button };
+    for (std.enums.values(Case)) |case| {
+        input.init();
+        _ = input.append("leftRIGHT");
+        input.editors[input.active].setCursor(4);
+        window.trim(window.count, 0);
+        try appendQuoteTestRow(window, 1, "first\nsecond\nthird\n");
+        anchor.follow();
+        _ = try testFrame(&view, arena.allocator(), 16, 3);
+        try quoteReport(&view, &ctx, "\x1b[<8;1;1M");
+        if (case != .click) try quoteReport(&view, &ctx, "\x1b[<40;4;2M");
+        switch (case) {
+            .click => {},
+            .leave => try view.widget().handleEvent(&ctx, .mouse_leave),
+            .focus => try view.widget().handleEvent(&ctx, .focus_out),
+            .cancel => {
+                _ = view.cancelSelection();
+            },
+            .resize => {
+                _ = try testFrame(&view, arena.allocator(), 8, 3);
+            },
+            .replace => try window.replace(.{ .position = 1 }, .{ .bytes = "unrelated\n" }),
+            .append => try appendQuoteTestRow(window, 2, "stream\n"),
+            .evict => window.trim(window.count, 0),
+            .draft => {
+                _ = input.append("!");
+            },
+            .caret => input.editors[input.active].setCursor(0),
+            .outside, .wrong_button => {},
+        }
+        const draft = try arena.allocator().dupe(u8, input.composition().bytes);
+        const caret = input.composition().cursor;
+        try quoteReport(&view, &ctx, switch (case) {
+            .outside => "\x1b[<8;30;2m",
+            .wrong_button => "\x1b[<10;4;2m",
+            else => "\x1b[<8;4;2m",
+        });
+        try std.testing.expectEqualStrings(draft, input.composition().bytes);
+        try std.testing.expectEqual(caret, input.composition().cursor);
+        try std.testing.expectEqual(null, input.submitted);
+        try std.testing.expectEqual(@as(usize, 0), clipboardCommands(&ctx));
+        try std.testing.expectEqual(@as(usize, 0), fixture.inserted);
+        try std.testing.expectEqual(@as(usize, 0), fixture.clicked);
+    }
+}
+
+test "FeedView quote gesture keeps emoji combining CJK and long wrapped body text" {
+    const gpa = std.testing.allocator;
+    const window = try testWindow();
+    defer gpa.destroy(window);
+    const words = "👩🏽‍💻 王秀英 e\u{301}\n\nbartholomew.fitzgerald@northwind-industries-holdings.example.com\n";
+    try appendQuoteTestRow(window, 1, words);
+    const input = try gpa.create(SessionInput);
+    defer gpa.destroy(input);
+    var anchor: Feed = .{};
+    var fixture: QuoteFixture = .{ .input = input };
+    var view: Self = .{ .window = window, .anchor = &anchor, .handler = fixture.handler() };
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]u16{ 4, 8, 16, 46, 140 }) |width| {
+        input.init();
+        var height: u16 = 0;
+        for (window.heights(.{ .width = width, .method = .unicode })) |entry| for (entry.lines) |rows| {
+            height += @intCast(rows);
+        };
+        _ = try testFrame(&view, arena.allocator(), width, height);
+        try view.widget().handleEvent(&ctx, .{ .mouse = .{ .row = 0, .col = 0, .type = .press, .button = .left, .mods = .{ .alt = true } } });
+        try view.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(height - 1), .col = @intCast(width - 1), .type = .drag, .button = .left, .mods = .{ .alt = true } } });
+        try view.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(height - 1), .col = @intCast(width - 1), .type = .release, .button = .left, .mods = .{ .alt = true } } });
+        try std.testing.expectEqualStrings("> 👩🏽‍💻 王秀英 e\u{301}\n>\n> bartholomew.fitzgerald@northwind-industries-holdings.example.com\n", input.composition().bytes);
+        try std.testing.expectEqual(@as(usize, 0), clipboardCommands(&ctx));
+    }
+}
+
+fn appendQuoteTestRow(window: *Window, position: u64, bytes: []const u8) !void {
+    var document: viewport.Sized(1024, true) = .{};
+    try document.append(@import("TerminalText.zig").body_on);
+    try document.append(bytes);
+    try document.append(@import("TerminalText.zig").body_off);
+    try document.prepare();
+    try window.append(&.{.{ .key = .{ .position = position }, .text = resident.Text.fromDocument(&document) }});
 }

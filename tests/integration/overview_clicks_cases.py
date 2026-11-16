@@ -167,7 +167,7 @@ def flat_list():
             listed = screen.wait(lambda frame: all(f" ✓ {label}" in frame for label in peers_by_label),
                                  "every finished peer without folding")
             lines = listed.split("\n")
-            assert lines[0] == "  + New Session" and lines[1] == "", listed
+            assert lines[0] == "  + New Session" and lines[1] == "  Sessions  Archived" and re.fullmatch(r" ✓ (?:lead|peer-[0-6]) +\d+[smhd]", lines[2]), listed
             assert not any(re.fullmatch(r" \S.* · \d+", line) for line in lines), listed
             assert " more" not in listed, listed
             # New Session opens an empty chat, then returns to this flat list.
@@ -187,8 +187,9 @@ def flat_list():
 def empty_list():
     for columns in (46, 140):
         with world("clicks-empty", {"first task": answer("new", "first task answered")}) as w, w.overview(columns=columns, rows=30) as screen:
-            frame = screen.contains("+ New Session")
-            assert "No unarchived Sessions" not in frame and "Type a task" not in frame, frame
+            frame = screen.wait(lambda frame: "+ New Session" in frame and "No unarchived Sessions." in frame,
+                                "listed empty view")
+            assert "Type a task" not in frame, frame
             known = set()
             abandoned = set()
             for gesture in ("click", "Enter"):

@@ -888,7 +888,7 @@ func expectedCapacityRequests(keys, sessions []string, workspace, store string) 
 	rows := make([]keyedDigest, 0, len(keys))
 	totalBytes := 0
 	for index, key := range keys {
-		body := []byte(`{"model":"gpt-6-luna","parallel_tool_calls":true,"store":false,"stream":true,"include":["reasoning.encrypted_content"],"reasoning":{"effort":"medium"},"instructions":` + measurement.JSONString(measurement.ModelInstructions(workspace, sessions[index])) + `,"input":[{"role":"user","content":[{"type":"input_text","text":` + measurement.JSONString(key) + `}]}],"tools":[],"text":{"verbosity":"low"}}`)
+		body := []byte(`{"model":"gpt-6-luna","parallel_tool_calls":true,"store":false,"stream":true,"include":["reasoning.encrypted_content"],"reasoning":{"effort":"medium"},"instructions":` + measurement.JSONString(measurement.ModelInstructions(workspace, sessions[index], "gpt-6-luna")) + `,"input":[{"role":"user","content":[{"type":"input_text","text":` + measurement.JSONString(key) + `}]}],"tools":[],"text":{"verbosity":"low"}}`)
 		digest := sha256.Sum256(body)
 		rows = append(rows, keyedDigest{key: key, digest: hex.EncodeToString(digest[:])})
 		totalBytes += len(body)
@@ -1620,7 +1620,7 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 		if fixture.providerCA == "" || !strings.HasPrefix(fixture.ProviderURL(), "https://") {
 			return nil, errors.New("concurrent provider fixture requires trusted HTTPS")
 		}
-		hostOptions = []string{"--provider-ca-file", fixture.providerCA}
+		hostOptions = []string{"--set", "network.caFile=" + fixture.providerCA}
 	}
 	var launch measurement.Launch
 	if diagnostics {
@@ -1924,7 +1924,7 @@ func measureSessions(binary, output string, sessions int, hold bool, expectation
 		return result, err
 	}
 	defer measurement.JoinCleanup(&resultError, fixture.Close)
-	host, err := measurement.StartHost(binary, store, fixture.ProviderURL(), 100, filepath.Join(directory, "host-stderr.log"), deadline, "--provider-ca-file", fixture.providerCA)
+	host, err := measurement.StartHost(binary, store, fixture.ProviderURL(), 100, filepath.Join(directory, "host-stderr.log"), deadline, "--set", "network.caFile="+fixture.providerCA)
 	if err != nil {
 		return result, err
 	}

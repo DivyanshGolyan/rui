@@ -23,7 +23,7 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
     # Future selector obligations must not be erased by the path allowlist.
     if any(p[key] for key in ('targets', 'native_targets', 'native_required', 'mac_required', 'upgrade_required',
                               'server_targets', 'cache_execution_checks', 'typecheck_macos', 'linux_memory_checks',
-                              'manual_checks')):
+                              'manual_checks')) or p.get('unit_compile_required', False):
         kind = ChangeKind.NORMAL
     p['change_kind'] = kind.value
     draft_run = event_name == 'pull_request' and draft
@@ -81,13 +81,22 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
         p['targets'] = [t for t in p['targets'] if t != 'stack-frames']
     p['native_required'] = bool(p['native_targets'])
     p['upgrade_required'] = ready_pr and kind == ChangeKind.NORMAL and p['upgrade_required']
+    # Widen compilation, not execution. `test` reaches both native and Store
+    # partitions; test-native/test-store alone do not. Existing check/test
+    # producers already cover them, so keep a single artifact pair.
+    compile_targets = list(p['targets'])
+    if ready_pr and kind == ChangeKind.NORMAL and p.get('unit_compile_required', False):
+        if not {'test', 'check', 'check-full'} & set(compile_targets):
+            compile_targets = sorted(set(compile_targets) | {'test'})
+    p['linux_compile_targets'] = compile_targets
     outputs = dict(
         change_kind=kind.value,
         draft_run=draft_run,
         targets=p['targets'],
+        linux_compile_targets=compile_targets,
         native_targets=p['native_targets'],
         linux_matrix=shards(p['targets'], mysql_suites=p['mysql_suites']),
-        linux_split=split_build(p['targets']),
+        linux_split=split_build(compile_targets),
         macos_split=split_build(p['native_targets']),
         linux_codegen=p['linux_codegen'],
         macos_matrix=shards(p['native_targets'], 'macos', mysql_suites=p['mysql_suites']),

@@ -274,6 +274,104 @@ class AssertedTextSelectionTest(unittest.TestCase):
             "Asserted text: a fixture waits for text this file draws"), 1)
 
 
+class BinarySourceSelectionTest(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.git("init", "-q")
+        self.git("config", "user.email", "selector@example.invalid")
+        self.git("config", "user.name", "Selector regression")
+        self.write("src/logic_tests.zig", b"const cores = .{\n};\n")
+        self.write("tests/integration/host_launch_integration.py",
+                   b'expected = "A fixture waits for this message"\n')
+
+    def git(self, *args):
+        return subprocess.check_output(["git", "-C", str(self.root), *args])
+
+    def write(self, name, data):
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+    def commit(self):
+        self.git("add", "-A")
+        self.git("commit", "-qm", "Selector fixture")
+        return self.git("rev-parse", "HEAD").decode().strip()
+
+    def plan(self, base):
+        # Run the real CLI and Git readers against this small committed tree.
+        module = str(Path(__file__).resolve().parent)
+        command = ("import sys; from pathlib import Path; "
+                   f"sys.path.insert(0, {module!r}); import select_tests; "
+                   "select_tests.ROOT = Path.cwd(); select_tests.main()")
+        result = subprocess.run([sys.executable, "-c", command, "--base", base],
+                                cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_revision_text_preserves_octets_newlines_and_absence(self):
+        from select_tests import revision_text
+
+        raw = bytes(range(256)) + b"\r\nCRLF\rCR\nLF"
+        name = "src/fixtures/all octets.bin"
+        self.write(name, raw)
+        head = self.commit()
+        # revision_text resolves revisions relative to the CLI's cwd.
+        previous = Path.cwd()
+        try:
+            os.chdir(self.root)
+            text = revision_text(head, name)
+            absent = revision_text(head, "src/absent.bin")
+        finally:
+            os.chdir(previous)
+        self.assertIsInstance(text, str)
+        self.assertEqual(text.encode("utf-8", "surrogateescape"),
+                         raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n"))
+        self.assertIsNone(absent)
+
+    def test_binary_add_edit_delete_preserve_graph_and_fallback_selection(self):
+        name = "src/fixtures/all octets.bin"
+        prose = b'"A fixture waits for this message"\n'
+        for graph in (True, False):
+            for operation in ("add", "edit", "delete"):
+                for octets in (b"ASCII control", bytes(range(256))):
+                    with self.subTest(graph=graph, operation=operation, binary=len(octets) == 256):
+                        self.write("src/logic_tests.zig", b"const cores = .{\n};\n" +
+                                   (b'const image = @embedFile("fixtures/all octets.bin");\n' if graph else b""))
+                        (self.root / name).unlink(missing_ok=True)
+                        if operation != "add":
+                            self.write(name, prose + octets)
+                        base = self.commit()
+                        if operation == "delete":
+                            (self.root / name).unlink()
+                        else:
+                            # Editing removes the old prose; it must still select its fixture.
+                            self.write(name, (prose if operation == "add" else b"edited") + octets)
+                        self.commit()
+                        result = self.plan(base)
+                        target = "test-logic" if graph else "check"
+                        for field in ("targets", "native_targets"):
+                            self.assertIn(target, result[field])
+                        self.assertIn("Asserted text: a fixture waits for text this file draws", result["reasons"])
+                        self.assertIn("Import graph: the unit roots and fixtures that reach the changed file"
+                                      if graph else "Source no import or rule reaches: full fallback", result["reasons"])
+
+    def test_unchanged_binary_prose_counts_toward_prevalence(self):
+        prose = b'"A fixture waits for this message"\n'
+        self.write("src/render.zig", prose)
+        self.write("src/fixtures/unchanged.bin", prose + bytes(range(256)))
+        base = self.commit()
+        self.write("src/render.zig", prose + b"// edited\n")
+        self.commit()
+        self.assertIn("Asserted text: a fixture waits for text this file draws", self.plan(base)["reasons"])
+        self.write("src/other.zig", prose)
+        base = self.commit()
+        self.write("src/render.zig", prose + b"// edited again\n")
+        self.commit()
+        self.assertNotIn("Asserted text: a fixture waits for text this file draws", self.plan(base)["reasons"])
+
+
 class WorkflowEntrypointsTest(unittest.TestCase):
     def test_workflows_have_no_scheduled_triggers_or_branches(self):
         workflows = sorted(Path(".github/workflows").glob("*.y*ml"))
@@ -287,6 +385,8 @@ class WorkflowEntrypointsTest(unittest.TestCase):
         removed = ("daily-macos.yml", "cold-acceptance.yml",
                    "Daily changed-main macOS", "Scheduled cold acceptance")
         paths = [*Path(".github").rglob("*.y*ml"), Path("VERIFICATION.md"),
+                 *Path("docs/contracts").glob("*.md"),
+                 *Path("docs/verification").glob("*.md"),
                  Path("tests/ci/platform_boundary.py")]
         for name in removed[:2]:
             self.assertFalse(Path(".github/workflows", name).exists(), name)
@@ -549,7 +649,7 @@ class SelectionTest(unittest.TestCase):
 
     def test_installer_owners_select_standalone_fixture_in_both_phases(self):
         paths = ("tests/integration/installer_integration.py", "tests/ci/fake_rui.py",
-                 "tests/ci/test_install.py", "tests/ci/test_installer_boundary.py", "tests/ci/test_release.py", "tests/ci/release.py",
+                 "tests/ci/test_install.py", "tests/ci/test_installer_boundary.py", "tests/ci/test_release.py", "tests/ci/release.py", "tests/ci/git_command.py",
                  "tests/ci/release_numbers.py", "tests/ci/qualification.py", "src/Installation.zig", "src/installation_path.zig",
                  "src/release_candidate.zig", "src/cli.zig", "src/cli_args.zig", "src/store/schema.zig",
                  "src/fetch_dependencies.sh", "release/publish.sh", "release/install.sh",
@@ -618,7 +718,7 @@ class SelectionTest(unittest.TestCase):
         for path in ("src/store/rsql.zig", "src/store/wire/mysql_connection.zig", "src/store/wire/pg.zig"):
             with self.subTest(path=path):
                 builds = [command for name, command in prepush.checks([path], AVAILABLE, "HEAD") if name == "development selection"]
-                self.assertEqual(builds, [["zig", "build", "test-logic", "--summary", "line"]])
+                self.assertEqual(builds, [])
 
     def test_workflow_consumes_mysql_provisioning_and_postgres_condition(self):
         workflow = Path(".github/workflows/check.yml").read_text()
@@ -669,6 +769,10 @@ class SelectionTest(unittest.TestCase):
         for path, readers in (("src/model_instructions.txt", {"codex-h2-integration", "current-facts-integration",
                                                                "server-delivery-integration", "peer-integration",
                                                                "measurement-check"}),
+                              *((f"src/model_instructions/{name}.txt", {"codex-h2-integration", "current-facts-integration",
+                                                                        "server-delivery-integration", "peer-integration",
+                                                                        "measurement-check"})
+                                for name in ("luna", "terra-astra", "sol")),
                               ("src/peer_message.txt", {"peer-integration", "sender-identity-integration"})):
             with self.subTest(path=path):
                 targets = set(select([path], "review", AVAILABLE)["targets"])
@@ -918,7 +1022,7 @@ class SelectionTest(unittest.TestCase):
                 actual = 'skipped'
                 if admitted:
                     result = subprocess.run(['bash', '-e', '-c', script], capture_output=True,
-                                            env={**os.environ, 'DRAFT_RUN': 'false', 'TARGETS': targets, 'PLAN_RESULT': plan,
+                                            env={**os.environ, 'DRAFT_RUN': 'false', 'TARGETS': targets, 'COMPILE_TARGETS': targets, 'PLAN_RESULT': plan,
                                                  'POLICY_RESULT': policy, 'BUILD_RESULT': build,
                                                  'NATIVE_RESULT': native, 'TYPECHECK_RESULT': typecheck,
                                                  'TYPECHECK': typecheck_selected,
@@ -946,7 +1050,7 @@ class SelectionTest(unittest.TestCase):
             job = jobs[name]
             self.assertIn('needs: plan', job)
             self.assertIn('runs-on: macos-15', job)
-            self.assertIn('timeout-minutes: ' + ('60' if name == 'macos_build' else '15'), job)
+            self.assertIn('timeout-minutes: 60', job)
             self.assertIn('check-part: ' + part + '\n', job)
             self.assertIn('TARGETS: ${{ needs.plan.outputs.native_targets }}', job)
             self.assertIn('artifact: ${{ steps.publish.outputs.artifact-id }}', job)

@@ -112,7 +112,7 @@ class PlanHandler(fixture.SuccessHandler):
 
 def start(store, endpoint):
     host, _ = start_ready_process(
-        [fixture.RUI, "host", "serve", "--store", store, "--active-capacity", "2",
+        [fixture.RUI, "host", "serve", "--store", store, "--set", 'execution.activeCapacity=2',
          "--test-chatgpt-fixture-endpoint", endpoint],
         required_fields={"execution": "enabled"},
     )

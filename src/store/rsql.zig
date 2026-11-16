@@ -344,6 +344,11 @@ pub fn Blob(comptime capacity: usize) type {
     };
 }
 
+/// Whether `T` is a `Blob`: bytes up to its capacity.
+pub fn isBlob(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "blob_capacity") and T == Blob(T.blob_capacity);
+}
+
 /// A stored integer that is never 0 or negative: an id or a position.
 pub const Positive = enum(u64) {
     _,
@@ -355,6 +360,11 @@ pub const Positive = enum(u64) {
 
     pub fn get(self: Positive) u64 {
         return @backingInt(self);
+    }
+
+    /// A nullable column's value, null when the row holds none.
+    pub fn optional(value: ?Positive) ?u64 {
+        return if (value) |positive| positive.get() else null;
     }
 };
 
@@ -501,6 +511,8 @@ pub fn ObligationProjection(comptime spec: ObligationProjectionSpec) type {
     const projected = "SELECT session_ref,min(saved_since) AS saved_since,min(owed_since) AS owed_since FROM (" ++ spec.sql ++ ") obligation_values GROUP BY session_ref";
     const text = "UPDATE session SET obligation_since=(SELECT owed_since FROM (" ++ projected ++ ") obligation_new WHERE obligation_new.session_ref=session.session_ref) " ++
         "WHERE session_ref IN (SELECT session_ref FROM (" ++ projected ++ ") obligation_changed WHERE @distinct(owed_since,saved_since))";
+    const mysql_text = "UPDATE session JOIN (" ++ projected ++ ") obligation_new ON obligation_new.session_ref=session.session_ref " ++
+        "SET session.obligation_since=obligation_new.owed_since WHERE @distinct(obligation_new.owed_since,obligation_new.saved_since)";
     return struct {
         pub const kind: StatementKind = .write;
         pub const made_from = spec;
@@ -508,7 +520,7 @@ pub fn ObligationProjection(comptime spec: ObligationProjectionSpec) type {
         pub const expect: Expect = .{ .at_most = std.math.maxInt(u32) };
         pub const guarded = true;
         pub const sql = renderStatement(text, fieldCount(Args));
-        pub const mysql: Template = mysqlTemplate(text);
+        pub const mysql: Template = mysqlTemplate(mysql_text);
         pub const uses_now = R.uses_now;
         // Access already holds the changed domain heads. The projection's
         // owner streams ancestor hints in the same batch, without new heads.

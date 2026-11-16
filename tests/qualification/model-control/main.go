@@ -551,7 +551,7 @@ func activeCancellation(binary, root, url string, endpoint *streamEndpoint) (res
 	}
 	store := filepath.Join(directory, "store")
 	deadline := measurement.NewDeadline(4 * time.Minute)
-	host, err := measurement.StartHost(binary, store, url, capacity, filepath.Join(directory, "host-stderr.log"), deadline, "--provider-ca-file", endpoint.caFile)
+	host, err := measurement.StartHost(binary, store, url, capacity, filepath.Join(directory, "host-stderr.log"), deadline, "--set", "network.caFile="+endpoint.caFile)
 	if err != nil {
 		return nil, err
 	}
@@ -1074,7 +1074,7 @@ func controlFirst(binary, root string) (result map[string]any, resultError error
 	defer endpoint.Close()
 	deadline := measurement.NewDeadline(4 * time.Minute)
 	store := filepath.Join(directory, "store")
-	host, observations, err := measurement.StartHostWith(measurement.Launch{ObservationPlan: "control"}, binary, store, endpoint.URL(), controlHeadroom, filepath.Join(directory, "host-stderr.log"), deadline, "--provider-ca-file", endpoint.caFile, "--test-inspection-reply-delay-ms", "8000", "--test-before-result-delay-ms", "1200")
+	host, observations, err := measurement.StartHostWith(measurement.Launch{ObservationPlan: "control"}, binary, store, endpoint.URL(), controlHeadroom, filepath.Join(directory, "host-stderr.log"), deadline, "--set", "network.caFile="+endpoint.caFile, "--test-inspection-reply-delay-ms", "8000", "--test-before-result-delay-ms", "1200")
 	if err != nil {
 		return nil, err
 	}

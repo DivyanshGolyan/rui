@@ -18,6 +18,7 @@ import tempfile
 
 import human_cli_fixture as cli
 import host_process
+from host_serve_dialect import HostServeDialect
 from host_process import start_ready_process, stop_process
 import os_semantics
 from proc_sample import sample
@@ -138,7 +139,8 @@ def main():
             for repetition in range(3):
                 for label, binary in (("baseline", baseline), ("candidate", candidate)):
                     print(json.dumps(capture(state, binary, label, size, repetition)), flush=True)
-        host, _ = start_ready_process([baseline, "serve", "--store", state / "live-store", "--active-capacity", "1"])
+        host, _ = start_ready_process(HostServeDialect(baseline).host_arguments(state / "live-store"),
+                                      isolate_providers=False)
         try:
             cli.fixture.RUI = baseline
             cli.fixture.command("configure", "--store", state / "live-store", "--session", "resources/original",

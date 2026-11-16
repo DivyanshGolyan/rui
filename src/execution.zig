@@ -302,6 +302,15 @@ pub const CustodyRecord = struct {
     timing: model_timing.Attempt = .{},
 };
 
+pub const DispatchCapacity = packed struct(u2) {
+    free_credit: bool,
+    mcp_open: bool,
+
+    pub fn includesMcp(capacity: DispatchCapacity) bool {
+        return capacity.free_credit and capacity.mcp_open;
+    }
+};
+
 pub const CustodyPool = struct {
     records: []CustodyRecord,
 
@@ -399,24 +408,31 @@ pub const CustodyPool = struct {
     }
 
     pub fn detach(self: *CustodyPool, token: CustodyToken) !void {
-        const record = try self.current(token);
-        if (record.state.cmpxchgStrong(.attached, .detached, .acq_rel, .acquire) != null) {
-            return error.InvalidCustodyTransition;
-        }
+        return self.transition(token, .attached, .detached);
     }
 
     pub fn releaseUnused(self: *CustodyPool, token: CustodyToken) !void {
+        return self.transition(token, .reserved, .free);
+    }
+
+    pub fn cleanupComplete(self: *CustodyPool, token: CustodyToken) !void {
+        return self.transition(token, .detached, .free);
+    }
+
+    /// Moves the token's current record from `from` to `to` in one atomic
+    /// step, or refuses when it is in any other state.
+    fn transition(self: *CustodyPool, token: CustodyToken, from: State, to: State) !void {
         const record = try self.current(token);
-        if (record.state.cmpxchgStrong(.reserved, .free, .acq_rel, .acquire) != null) {
+        if (record.state.cmpxchgStrong(from, to, .acq_rel, .acquire) != null) {
             return error.InvalidCustodyTransition;
         }
     }
 
-    pub fn cleanupComplete(self: *CustodyPool, token: CustodyToken) !void {
+    /// The token's current record, when it is in `state`.
+    fn expectState(self: *CustodyPool, token: CustodyToken, state: State) !*CustodyRecord {
         const record = try self.current(token);
-        if (record.state.cmpxchgStrong(.detached, .free, .acq_rel, .acquire) != null) {
-            return error.InvalidCustodyTransition;
-        }
+        if (record.state.load(.acquire) != state) return error.InvalidCustodyTransition;
+        return record;
     }
 
     /// Custody-local structural checks. Each inspects the current
@@ -426,21 +442,17 @@ pub const CustodyPool = struct {
     /// retain historical binding fields; only the checked state,
     /// generation, kind, and identity must agree.
     pub fn checkReserved(self: *CustodyPool, token: CustodyToken) !void {
-        const record = try self.current(token);
-        if (record.state.load(.acquire) != .reserved) return error.InvalidCustodyTransition;
+        _ = try self.expectState(token, .reserved);
     }
 
     pub fn checkAttached(self: *CustodyPool, token: CustodyToken, expected: CustodyBinding) !void {
-        const record = try self.current(token);
-        if (record.state.load(.acquire) != .attached) return error.InvalidCustodyTransition;
-        try checkBinding(record, expected);
+        try checkBinding(try self.expectState(token, .attached), expected);
     }
 
     /// A null `expected` checks only that the token's record is detached,
     /// for retained owners that keep no Attempt identity.
     pub fn checkDetached(self: *CustodyPool, token: CustodyToken, expected: ?CustodyBinding) !void {
-        const record = try self.current(token);
-        if (record.state.load(.acquire) != .detached) return error.InvalidCustodyTransition;
+        const record = try self.expectState(token, .detached);
         if (expected) |value| try checkBinding(record, value);
     }
 
@@ -450,8 +462,7 @@ pub const CustodyPool = struct {
     }
 
     pub fn checkFree(self: *CustodyPool, token: CustodyToken) !void {
-        const record = try self.current(token);
-        if (record.state.load(.acquire) != .free) return error.InvalidCustodyTransition;
+        _ = try self.expectState(token, .free);
     }
 
     pub fn canClaimTerminalDelivery(self: *CustodyPool, token: CustodyToken) bool {
@@ -474,6 +485,10 @@ pub const CustodyPool = struct {
             }
         }
         return count;
+    }
+
+    pub fn dispatchCapacity(self: *const CustodyPool, mcp_open: bool) DispatchCapacity {
+        return .{ .free_credit = self.occupied() < self.records.len, .mcp_open = mcp_open };
     }
 
     pub fn occupied(self: *const CustodyPool) usize {
@@ -1048,4 +1063,23 @@ test "model prepared routes preserve one shot handoff across rejection and reuse
             try pool.releaseUnused(reused);
         }
     }
+}
+
+test "dispatch capacity reflects shared custody through detached cleanup" {
+    var records: [1]CustodyRecord = @splat(.{});
+    var pool = CustodyPool.initialize(&records);
+    const open = pool.dispatchCapacity(true);
+    try std.testing.expect(open.free_credit and open.includesMcp());
+    const locally_full = pool.dispatchCapacity(false);
+    try std.testing.expect(locally_full.free_credit and !locally_full.includesMcp());
+    const token = pool.reserve().?;
+    try std.testing.expect(!pool.dispatchCapacity(true).free_credit);
+    try std.testing.expect(!pool.dispatchCapacity(true).includesMcp());
+    var permit = attempt.DispatchPermit{ .binding = .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 1 } };
+    _ = try pool.attach(token, &permit);
+    try pool.detach(token);
+    try std.testing.expect(!pool.dispatchCapacity(true).free_credit);
+    try pool.cleanupComplete(token);
+    try std.testing.expect(pool.dispatchCapacity(true).includesMcp());
+    try std.testing.expect(open.free_credit and open.includesMcp());
 }

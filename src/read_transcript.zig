@@ -5,6 +5,7 @@ const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
 const core = @import("core_tools.zig");
 const storage = @import("store.zig");
+const utf8_validation = @import("utf8_validation.zig");
 
 const window_bytes = 16 * 1024;
 
@@ -175,20 +176,12 @@ fn readLocation(arena: std.mem.Allocator, location: storage.ContentLocation, off
     return bytes;
 }
 
-/// Only the final character may be partial in a prefix of valid UTF-8.
-fn wholePrefix(bytes: []const u8) []const u8 {
-    var end = bytes.len;
-    while (end > 0 and !std.unicode.utf8ValidateSlice(bytes[0..end])) : (end -= 1) {
-        if (bytes.len - end == 3) return bytes[0..0];
-    }
-    return bytes[0..end];
-}
-
 fn nameText(store: *storage.Store, arena: std.mem.Allocator, name: protocol.ProposalFieldReference) ![]const u8 {
     const location = try store.openContent(.{ .length = name.length, .digest = name.digest });
     // Known tool names fit the wire's name bound. Rejected calls can name
     // arbitrarily long tools; keep their outline bounded as well.
-    return wholePrefix(try readLocation(arena, location, 0, protocol.max_tool_name_bytes));
+    const read = try readLocation(arena, location, 0, protocol.max_tool_name_bytes);
+    return utf8_validation.wholePrefix(read) orelse read[0..0];
 }
 
 fn outline(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, item: *const protocol.ActivityItem, out: *std.Io.Writer) !void {
@@ -231,7 +224,7 @@ fn outline(store: *storage.Store, arena: std.mem.Allocator, session: []const u8,
             const bytes = try readLocation(arena, try store.openActivityContent(request), 0, 100);
             const line = bytes[0 .. std.mem.indexOfAny(u8, bytes, "\r\n") orelse bytes.len];
             try out.writeAll(": ");
-            try std.json.Stringify.value(wholePrefix(line), .{}, out);
+            try std.json.Stringify.value(utf8_validation.wholePrefix(line) orelse "", .{}, out);
         }
     }
     if (note) |description| try out.print(": {s}", .{description.slice()});
@@ -278,7 +271,7 @@ fn full(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, it
         return outline(store, arena, session, item, out);
     }
     if (text.len > 0 and text[0] & 0xc0 == 0x80) return error.InvalidOffset;
-    const prefix = wholePrefix(text);
+    const prefix = utf8_validation.wholePrefix(text) orelse "";
     // Canonical content is byte-oriented. Never return a continuation at the
     // same offset if a public result contains malformed text in its interior.
     if (text.len != 0 and prefix.len == 0) return error.InvalidEntryText;
@@ -290,9 +283,9 @@ fn full(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, it
 }
 
 test "read_transcript previews and windows cut only at whole UTF-8 characters" {
-    try std.testing.expectEqualStrings("abc", wholePrefix("abc\xc3"));
-    try std.testing.expectEqualStrings("aé", wholePrefix("aé\xf0\x9f\x98"));
-    try std.testing.expectEqualStrings("aé😀", wholePrefix("aé😀"));
+    try std.testing.expectEqualStrings("abc", utf8_validation.wholePrefix("abc\xc3").?);
+    try std.testing.expectEqualStrings("aé", utf8_validation.wholePrefix("aé\xf0\x9f\x98").?);
+    try std.testing.expectEqualStrings("aé😀", utf8_validation.wholePrefix("aé😀").?);
 }
 
 test "read_transcript core runner reads other Session outlines before full windows unknown id and self" {
@@ -367,7 +360,7 @@ test "read_transcript core runner reads other Session outlines before full windo
     try std.testing.expectEqual(@as(u64, 1), try storage.testing.sqlite_only.queryU64(&database, "SELECT count(*) FROM model_tool_call WHERE description='Read zzzzzz''s transcript'", .{}));
 
     for (args, 0..) |_, index| {
-        const work = (try database.nextCoreWork()).?.action;
+        const work = (try database.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
         try std.testing.expect(work.tool == .read_transcript);
         try run(&database, arena, &work, .{});
         const result_id = try storage.testing.sqlite_only.queryU64(&database, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{work.binding.action_id});
@@ -430,7 +423,7 @@ test "read_transcript core runner reads other Session outlines before full windo
             else => unreachable,
         }
     }
-    try std.testing.expect(try database.nextCoreWork() == null);
+    try std.testing.expect(try database.nextCoreWork(.{ .free_credit = true, .mcp_open = true }) == null);
 }
 
 test "read_transcript opens public calls and no-content rows and identifies nonzero result ordinals" {
@@ -473,7 +466,7 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
         .{ .item_id = "sender", .name = "bash", .encoded_call_id = "sender", .decoded_call_id = "sender", .encoded_arguments = quoted_sender[1 .. quoted_sender.len - 1], .decoded_arguments = sender_arguments },
     };
     try settleCallsForTesting(&database, &tmp, source_model, "transcript-source-calls", &source_calls);
-    const work = (try database.nextCoreWork()).?.action;
+    const work = (try database.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
     try std.testing.expect(try database.deliverAgentMessage(work.binding, "zzzzzz", "hello", .{}) == .failed);
     const sender_action = (try database.admitNextActionAttempt(300_000, .{})).?.permit.binding;
     var sender_input: ActionExecutionInput = undefined;
@@ -571,7 +564,7 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
     }
     try settleCallsForTesting(&database, &tmp, model, "transcript-reader-calls", &calls);
     for (arguments, 0..) |_, index| {
-        const input = (try database.nextCoreWork()).?.action;
+        const input = (try database.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
         try run(&database, arena, &input, .{});
         const result_id = try storage.testing.sqlite_only.queryU64(&database, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{input.binding.action_id});
         const reference = try testingContentReference(&database, result_id);
@@ -671,10 +664,10 @@ test "searchActivity finds start_agent call names and stored JSON arguments not 
     try std.testing.expectEqual(@as(usize, 0), result.count);
     // Settle the earlier invalid start call at its owner boundary, then run
     // read_transcript against the same public call inventory (D163).
-    const start = (try database.nextCoreWork()).?.action;
+    const start = (try database.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
     try std.testing.expect(start.tool == .start_agent);
     _ = try database.failCoreCall(start.binding, "invalid start arguments", .{});
-    const read = (try database.nextCoreWork()).?.action;
+    const read = (try database.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
     try run(&database, arena, &read, .{});
     const id = try storage.testing.sqlite_only.queryU64(&database, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{read.binding.action_id});
     const reference = try testingContentReference(&database, id);

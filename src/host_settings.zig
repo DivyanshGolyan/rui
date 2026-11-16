@@ -8,6 +8,7 @@ const secret_value = @import("secret_value.zig");
 const preset_value = @import("preset_value.zig");
 const start_report = @import("start_report.zig");
 const hex_value = @import("hex_value.zig");
+const utf8_validation = @import("utf8_validation.zig");
 const defaults = @import("product_defaults.zig");
 const http = @import("http1/request.zig");
 const endpoint_value = @import("endpoint_value.zig");
@@ -304,11 +305,6 @@ fn pathDefault(comptime text: []const u8) OsBytes(max_path_bytes) {
     result.set(text) catch @compileError("invalid default path");
     return result;
 }
-fn textDefault(comptime capacity: usize, comptime value: []const u8) Text(capacity) {
-    var text: Text(capacity) = .{};
-    text.set(value) catch @compileError("invalid default text");
-    return text;
-}
 
 /// Structured JSON Schema facts passed to a visitor. Secret objects are a
 /// choice of exactly one source; literals are pipe-only and never written.
@@ -369,7 +365,7 @@ pub fn path(comptime pattern: []const u8) []const u8 {
     if (!found) @compileError("not a Host settings leaf: " ++ pattern);
     return pattern;
 }
-fn camel(comptime name: []const u8) []const u8 {
+pub fn camel(comptime name: []const u8) []const u8 {
     var result: []const u8 = "";
     var upper = false;
     for (name) |byte| {
@@ -586,15 +582,12 @@ fn refuse(failure: *start_report.Failure, leaf_path: []const u8, reason: []const
     failure.code = .settings_invalid;
     var out = std.Io.Writer.fixed(&failure.message.bytes);
     // Diagnostic truncation, never semantic input truncation. Stay on UTF-8.
-    var end: usize = @min(leaf_path.len, failure.message.bytes.len / 2);
-    while (!std.unicode.utf8ValidateSlice(leaf_path[0..end]) and end > 0) end -= 1;
-    out.writeAll(if (leaf_path.len == 0) "$" else leaf_path[0..end]) catch unreachable;
+    const shown = utf8_validation.validPrefix(leaf_path[0..@min(leaf_path.len, failure.message.bytes.len / 2)]);
+    out.writeAll(if (leaf_path.len == 0) "$" else shown) catch unreachable;
     out.writeAll(": ") catch unreachable;
     // A diagnostic may be clipped; no semantic input is ever clipped.
     out.writeAll(if (std.unicode.utf8ValidateSlice(reason)) reason else "invalid value") catch {};
-    end = out.buffered().len;
-    while (end > 0 and !std.unicode.utf8ValidateSlice(out.buffered()[0..end])) end -= 1;
-    failure.message.len = end;
+    failure.message.len = utf8_validation.validPrefix(out.buffered()).len;
     return error.SettingsInvalid;
 }
 /// Paths are diagnostics, not semantic keys. Cap the copy before allocating:
@@ -614,8 +607,7 @@ fn childPath(arena: std.mem.Allocator, prefix: []const u8, name: []const u8) err
     const name_len = @min(name.len, result.len - end);
     @memcpy(result[end..][0..name_len], name[0..name_len]);
     end += name_len;
-    while (end > 0 and !std.unicode.utf8ValidateSlice(result[0..end])) end -= 1;
-    return result[0..end];
+    return utf8_validation.validPrefix(result[0..end]);
 }
 
 const Read = struct { arena: std.mem.Allocator, gpa: std.mem.Allocator, origin: Origin, check: PresetCheck, failure: *start_report.Failure };
@@ -777,7 +769,8 @@ fn readKind(comptime T: type, dest: *T, value: std.json.Value, at: []const u8, r
             const raw = try readOsBytes(T.max_bytes, value, at, read);
             const text = if (T.path_rule == .interface) std.mem.trimEnd(u8, raw, "/") else raw;
             if ((text.len == 0 and !T.allow_empty) or (T.absolute and !std.fs.path.isAbsolute(text))) return refuse(read.failure, at, "must be an absolute path");
-            dest.text.set(text) catch return refuse(read.failure, at, "path exceeds its byte bound or contains NUL");
+            if (text.len > T.max_bytes) return refuse(read.failure, at, std.fmt.comptimePrint("path is longer than {d} bytes{s}", .{ T.max_bytes, if (T.path_rule == .interface) ", the most a socket path in it allows" else "" }));
+            dest.text.set(text) catch return refuse(read.failure, at, "path contains NUL");
             dest.anchored = false;
         },
         .url => {

@@ -7,7 +7,8 @@
 //! can use it.
 
 /// Concurrent model/Bash executions of a Host started without
-/// `--active-capacity`. A running Host keeps the capacity it started with.
+/// an `execution.activeCapacity` setting. A running Host keeps the capacity
+/// it started with.
 pub const active_capacity: usize = 100;
 
 /// Simultaneous ordinary client exchanges budgeted at Host startup. A finite

@@ -2,6 +2,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
+const cell_line = @import("cell_line.zig");
 const Self = @This();
 
 left: []const u8,
@@ -27,39 +28,11 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
     @memset(surface.buffer, .{ .style = self.style });
     if (size.width == 0 or size.height == 0) return surface;
-    const right = prefix(ctx, self.rightText(), size.width);
+    const right = cell_line.fit(ctx, self.rightText(), size.width);
     const right_col = size.width - right.width;
-    const left = prefix(ctx, self.left, right_col);
-    paint(ctx, surface, left.text, 0, self.style);
-    paint(ctx, surface, right.text, right_col, self.right_style orelse self.style);
+    _ = cell_line.paint(ctx, surface, self.left, 0, 0, self.style, right_col);
+    _ = cell_line.paint(ctx, surface, right.text, right_col, 0, self.right_style orelse self.style, size.width);
     return surface;
-}
-
-fn prefix(ctx: vxfw.DrawContext, text: []const u8, limit: u16) struct { text: []const u8, width: u16 } {
-    var iter = ctx.graphemeIterator(text);
-    var width: u16 = 0;
-    var end: usize = 0;
-    while (iter.next()) |part| {
-        const grapheme = part.bytes(text);
-        if (std.mem.indexOfAny(u8, grapheme, "\r\n") != null) break;
-        const cells = ctx.stringWidth(grapheme);
-        if (cells > limit - width) break;
-        width += @intCast(cells);
-        end += grapheme.len;
-    }
-    return .{ .text = text[0..end], .width = width };
-}
-
-fn paint(ctx: vxfw.DrawContext, surface: vxfw.Surface, text: []const u8, start: u16, style: vaxis.Style) void {
-    var iter = ctx.graphemeIterator(text);
-    var col = start;
-    while (iter.next()) |part| {
-        const grapheme = part.bytes(text);
-        const width: u8 = @intCast(ctx.stringWidth(grapheme));
-        if (width == 0) continue;
-        surface.writeCell(col, 0, .{ .char = .{ .grapheme = grapheme, .width = width }, .style = style });
-        col += width;
-    }
 }
 
 test "Footer aligns keys and cuts the label first in terminal cells" {

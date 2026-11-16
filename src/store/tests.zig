@@ -114,6 +114,7 @@ const output_metadata_record_bytes = output_format.output_metadata_record_bytes;
 
 test {
     _ = @import("domain/configuration.zig");
+    _ = @import("domain/session_obligation.zig");
     _ = @import("rsql.zig");
     _ = @import("schema.zig");
     _ = @import("access.zig");
@@ -1198,6 +1199,7 @@ pub const EntryPoint = enum {
     submitMessageWithModel,
     stopSession,
     archiveSession,
+    pinSession,
     interruptModel,
     decidePermission,
     observeCommand,
@@ -1213,6 +1215,7 @@ pub const EntryPoint = enum {
     readSessionReport,
     readSessionList,
     actionContent,
+    readAction,
     admitModelAttempt,
     admitNextActionAttempt,
     readBashExecutionInput,
@@ -1269,6 +1272,9 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .submitMessageWithModel = 2,
     .stopSession = 2,
     .archiveSession = 2,
+    // Fresh admission runs saved, branch facts, then commit; the transition
+    // declaration counts only its always round and commit.
+    .pinSession = 3,
     .interruptModel = 2,
     .decidePermission = 2,
     .observeCommand = 3,
@@ -1284,6 +1290,7 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .readSessionReport = 6,
     .readSessionList = 7,
     .actionContent = 2,
+    .readAction = 1,
     .admitModelAttempt = 2,
     .admitNextActionAttempt = 2,
     .readBashExecutionInput = 2,

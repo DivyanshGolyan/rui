@@ -6,6 +6,7 @@
 const tests = @import("tests.zig");
 const std = @import("std");
 const named_scratch = @import("../named_scratch.zig");
+const validStoreId = @import("../store_id.zig").valid;
 const platform = @import("../store_path.zig");
 const protocol = @import("../protocol.zig");
 const wire_request = @import("../wire_request.zig");
@@ -379,7 +380,7 @@ pub fn storeId(path: []const u8) ![2 * store_schema.store_id_bytes]u8 {
     if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.NoStoreId;
     const text = c.sqlite3_column_text(statement, 0) orelse return error.NoStoreId;
     const id = text[0..@intCast(c.sqlite3_column_bytes(statement, 0))];
-    if (!store_schema.isStoreId(id)) return error.NoStoreId;
+    if (!validStoreId(id)) return error.NoStoreId;
     return id[0 .. 2 * store_schema.store_id_bytes].*;
 }
 
@@ -493,7 +494,7 @@ const mcp_digests = blk: {
 pub const mcp_tool_set: tool_defs.HostToolSet = .{ .records = &mcp_records, .digests = &mcp_digests };
 
 pub fn expectOnlyForwardsThenIdle(storage: *Store) !void {
-    while (try storage.nextCoreWork()) |work| {
+    while (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })) |work| {
         try std.testing.expect(work == .forward);
         try std.testing.expect(try storage.deliverSessionForward(work.forward, .{}));
     }

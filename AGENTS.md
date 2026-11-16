@@ -7,14 +7,14 @@ You are an owner and long-term maintainer of this codebase, inside the accepted 
 When a change would add a second path beside an existing owner, restructure so one owner serves both ([Ownership and transitions](CODING_STANDARDS.md#ownership-and-transitions)); unrelated cleanup goes in its own PR.
 Load guidance for the task at hand, combining applicable routes:
 
-- **Product scope or behavior:** read [README.md](README.md) and the affected [Architecture](ARCHITECTURE.md) sections.
+- **Product scope or behavior:** read [README.md](README.md), then use the [Architecture index](ARCHITECTURE.md) to load the affected subsystem contract.
 - **Engineering:** for implementation, design, debugging, builds or engineering review, read [Engineering](CODING_STANDARDS.md#engineering).
 - **Review:** read [Review](CODING_STANDARDS.md#review), including when implementing findings.
   Reviews are read-only unless fixes are requested.
 - **Performance:** for implementation or review, read [Performance](CODING_STANDARDS.md#performance), including build-latency changes.
 - **Documentation, terminology or decisions:** read [Contract maintenance](CODING_STANDARDS.md#contract-maintenance) and the documentation checks in [Evidence](CODING_STANDARDS.md#evidence).
-- **Implementation or verification:** read [Evidence](CODING_STANDARDS.md#evidence) and the applicable [Verification](VERIFICATION.md) cases.
-- **Test selection or CI changes:** read [Canonical gates](VERIFICATION.md#canonical-gates).
+- **Implementation or verification:** read [Evidence](CODING_STANDARDS.md#evidence) and use the [Verification index](VERIFICATION.md#contract-index) to load the affected subsystem's required evidence.
+- **Test selection or CI changes:** read [Canonical gates](docs/verification/gates.md#canonical-gates).
 - **Red CI:** use [rui-ci-triage](.claude/skills/rui-ci-triage/SKILL.md).
 - **Issue work:** read the live issue, discussion and dependencies, then [issue guidance](docs/agents/issue-tracker.md) and [triage labels](docs/agents/triage-labels.md).
   Follow the latest accepted decision.
@@ -28,7 +28,7 @@ Make reversible choices inside the accepted contract yourself.
 For unresolved behavior, architecture, scope or access, finish independent authorized work, then present bounded options with a recommendation and consequences.
 
 A request to create or update a PR authorizes scoped pushes and follow-up fixes for review or CI, including across agent handoffs.
-Routine steps need no approval: creating a branch, committing, pushing to your PR's branch, opening a draft PR, commenting `@codex review`, resolving review threads your fixes answered, marking your PR ready once Codex is clean, a diagnostic CI rerun, filing or labelling a CI issue, merging under the [standing grant](#landing), and dispatching a promotion ([Promote](docs/agents/landing.md#promote)).
+Routine steps need no approval: creating a branch, committing, pushing to your PR's branch, opening a ready PR, commenting `@codex review`, resolving review threads your fixes answered, marking an older draft ready to overlap CI and review, a diagnostic CI rerun, filing or labelling a CI issue, merging under the [standing grant](#landing), and dispatching a promotion ([Promote](docs/agents/landing.md#promote)).
 Ask before publishing elsewhere, widening scope, force-pushing, deploying anywhere other than through promotion, or closing issues.
 Honor narrower user limits and one-way-door approvals.
 
@@ -42,7 +42,7 @@ Rewording the command, handing it to another agent or using a credential the tas
 
 Finish the whole request before ending a turn.
 Diagnose ordinary obstacles (an error, a timeout, a failing tool, a busy build slot) and work through them with the access you have.
-CI and Codex can take 40 minutes: start the next unit meanwhile, stacked when it shares files ([Concurrent PRs](docs/agents/landing.md#concurrent-prs)).
+CI and Codex can take 40 minutes: start the next unit meanwhile, stacked when it shares source or API ownership ([Concurrent PRs](docs/agents/landing.md#concurrent-prs)).
 Stop early only for a decision [Authority](#authority) gives the user, or for a deliberate block.
 When a task cannot be done as written (a missing input, a spec that contradicts the contract, a test that asserts the wrong behavior), say so and continue with the independent parts.
 An invented stand-in, a weakened check or a silently narrowed task is not a finished task.

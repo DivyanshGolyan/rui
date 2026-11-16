@@ -5,6 +5,7 @@ const std = @import("std");
 const model_attempt = @import("model_attempt.zig");
 const command_reply = @import("../../command_reply.zig");
 const skills_domain = @import("skills.zig");
+const sourced_input = @import("sourced_input.zig");
 const turn_ending = @import("../../turn_ending.zig");
 const message_admission = @import("../../message_admission.zig");
 const workspace_path = @import("../../workspace_path.zig");
@@ -19,6 +20,7 @@ const mutation_answer = @import("../../mutation_answer.zig");
 const configuration_admission = @import("../../configuration_admission.zig");
 const provider_name = @import("../../provider_name.zig");
 const provider_route = @import("../../provider_route.zig");
+const session_pin = @import("../../session_pin.zig");
 const session_archive = @import("../../session_archive.zig");
 const session_id = @import("../../session_id.zig");
 const content_custody = @import("../../content_custody.zig");
@@ -77,6 +79,7 @@ pub const SessionStopReply = command_reply.SessionStopReply;
 pub const ModelInterruptionReply = command_reply.ModelInterruptionReply;
 
 pub const SessionArchiveReply = command_reply.SessionArchiveReply;
+pub const SessionPinReply = command_reply.SessionPinReply;
 
 pub const PermissionDecisionReply = command_reply.PermissionDecisionReply;
 pub const max_permission_decision_bytes = sqlite.maxEnumTagBytes(mutation_answer.PermissionDecision);
@@ -118,27 +121,8 @@ const message_replay = rsql.Read(.{
     .cardinality = .one,
 });
 
-/// A person's Message.
-const admit_message = rsql.Write(.{
-    .sql = "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) VALUES(?1,@session(?2),?3,?4,?5,@now)",
-    .Args = struct { admission_id: u64, session: rsql.SessionHead, key: []const u8, content_id: u64, position: u64 },
-    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
-});
-pub const admit_message_sql = admit_message.sql;
-
-/// A peer's Message: the sender's own position orders the send among its
-/// other facts.
-const admit_sent_message = rsql.Write(.{
-    .sql = "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position) " ++
-        "VALUES(?1,@session(?2),?3,?4,?5,@now,@session(?6),?7)",
-    .Args = struct { admission_id: u64, session: rsql.SessionHead, key: []const u8, content_id: u64, position: u64, sender: rsql.SessionHead, sender_position: u64 },
-    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
-});
-
-/// The one writer of a Message from another Session. Heads were read (or
-/// created) by the caller in this transaction; admission never adds a round.
-/// The caller then saves the skills its text bound
-/// (`skills_domain.SavingBound`), a round each.
+/// Saves the peer's command before queuing its admission; the caller
+/// then saves the skills its text bound (`skills_domain.SavingBound`).
 fn admitFromSession(
     a: anytype,
     sender: *const rsql.SessionHead,
@@ -150,17 +134,7 @@ fn admitFromSession(
     answer: *const StoredAnswer,
 ) !u64 {
     try queueMessageCommand(a, target, key, content_id, digest, configured, answer);
-    const admission_id = try a.identity(.admission_id);
-    a.write(admit_sent_message, .{
-        .admission_id = admission_id,
-        .session = target.*,
-        .key = key,
-        .content_id = content_id,
-        .position = try (try a.positions(target.*)).take(1),
-        .sender = sender.*,
-        .sender_position = try (try a.positions(sender.*)).take(1),
-    });
-    return admission_id;
+    return sourced_input.queue(a, target, .{ .peer = .{ .key = key, .session = sender.* } }, content_id);
 }
 
 fn queueMessageCommand(a: anytype, target: *const rsql.SessionHead, key: []const u8, content_id: u64, digest: *const [32]u8, configured: ?*const configuration_domain.Applied, answer: *const StoredAnswer) !void {
@@ -534,9 +508,7 @@ pub const SubmitMessage = struct {
             try admitFromSession(r, &message.sender.?.session, &t.head, command.key.slice(), text_id, &message.digest, configured, &t.answer)
         else person: {
             try queueMessageCommand(r, &t.head, command.key.slice(), text_id, &message.digest, configured, &t.answer);
-            const admission_id = try r.identity(.admission_id);
-            r.write(admit_message, .{ .admission_id = admission_id, .session = t.head, .key = command.key.slice(), .content_id = text_id, .position = try (try r.positions(t.head)).take(1) });
-            break :person admission_id;
+            break :person try sourced_input.queue(r, &t.head, .{ .person = command.key.slice() }, text_id);
         };
         t.later = .{ .skills = .{ .admission_id = admission_id, .bound = message.bound } };
         t.admission_id = admission_id;
@@ -1773,6 +1745,7 @@ pub const StopSession = struct {
         const stop_position = try positions.take(1);
         r.write(insert_stop, .{ .key = key, .session = head.*, .selected_turn_id = selection.selected_turn_id, .admission_cutoff = selection.admission_cutoff, .position = stop_position, .parent_caused = found.owed_cause != null });
         if (t.input.archive) {
+            r.write(clear_pin, .{ .session = head.* });
             r.write(insert_archive_command, .{ .key = key, .archived = true });
             if (t.archive_existing != null) r.write(update_archive, .{ .session = head.*, .key = key }) else r.write(insert_archive, .{ .session = head.*, .key = key });
             if (t.archive_endings.count != 0) r.writeCount(suppress_archive_endings, .{ .parent = &head.ref }, t.archive_endings.count);
@@ -2021,6 +1994,114 @@ pub const ArchiveSession = struct {
             return if (t.rejection) |code| .{ .rejected = .{ .replayed = false, .code = code } } else .{ .accepted = .{ .replayed = false, .archived = false, .completion = .completed } };
         }
     };
+};
+
+const pin_record = rsql.Read(.{
+    .sql = "SELECT core_command.command_seq FROM session_pin LEFT JOIN core_command ON core_command.command_key=session_pin.command_key WHERE session_pin.session_ref=?1",
+    .Args = struct { session: []const u8 },
+    .Row = struct { command_seq: ?rsql.Positive },
+    .cardinality = .optional,
+});
+
+const insert_pin_command = rsql.Write(.{
+    .sql = "INSERT INTO session_pin_command(command_key,pinned) VALUES(?1,?2)",
+    .Args = struct { key: []const u8, pinned: bool },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+const insert_pin = rsql.Write(.{
+    .sql = "INSERT INTO session_pin(session_ref,command_key) VALUES(@session(?1),?2)",
+    .Args = struct { session: rsql.SessionHead, key: []const u8 },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+const update_pin = rsql.Write(.{
+    .sql = "UPDATE session_pin SET command_key=?2 WHERE session_ref=@session(?1)",
+    .Args = struct { session: rsql.SessionHead, key: []const u8 },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+const clear_pin = rsql.Write(.{
+    .sql = "UPDATE session_pin SET command_key=NULL WHERE session_ref=@session(?1) AND command_key IS NOT NULL",
+    .Args = struct { session: rsql.SessionHead },
+    .expect = .{ .at_most = 1 },
+});
+
+const pin_request = rsql.Read(.{
+    .sql = "SELECT pinned FROM session_pin_command WHERE command_key=?1",
+    .Args = struct { key: []const u8 },
+    .Row = struct { pinned: bool },
+    .cardinality = .one,
+});
+
+pub const PinSession = struct {
+    pub const rounds = transition.rounds(.{ .saved = .{.always}, .facts = .{.branch} });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .saved;
+    pub const Input = struct { command: *const command_input.SessionPinCommand };
+    pub const Result = SessionPinReply;
+    pub const Ordinary = store_core.Ordinary.none;
+    pub const Guards = error{};
+    pub const Declined = error{};
+
+    input: Input,
+    digest: [32]u8 = undefined,
+    saved: saved_command.Result = undefined,
+    target: target_session.Result = null,
+    current: pin_record.Result = null,
+    answer: StoredAnswer = undefined,
+    rejection: ?mutation_answer.SessionPinRejection = null,
+
+    pub fn step(t: *PinSession, r: *transition.Round(PinSession), ran: ?rounds.At) !transition.Next(PinSession) {
+        const command = t.input.command;
+        const key = command.key.slice();
+        const session = command.session.slice();
+        if (ran == null) {
+            t.digest = command.semanticDigest();
+            lookupCommand(r, key, &t.saved);
+            return .{ .round = .saved };
+        }
+        if (ran.? == .saved) {
+            switch (try classify(mutation_answer.SessionPinRejection, &t.saved, .session_pin, session, &t.digest)) {
+                .fresh => {},
+                .conflict => return .{ .done = .conflict },
+                .accepted => return .{ .done = .{ .accepted = .{ .replayed = true, .pinned = command.pinned } } },
+                .rejected => |code| return .{ .done = .{ .rejected = .{ .replayed = true, .code = code } } },
+            }
+            readTarget(r, session, &t.target);
+            if (session_id.valid(session)) r.read(pin_record, .{ .session = session }, &t.current);
+            return .{ .round = .facts };
+        }
+        t.rejection = if (!session_id.valid(session)) .invalid_session_reference else if (t.target == null) .unknown_session else null;
+        var change: session_pin.Change = .keep;
+        if (t.rejection == null) {
+            change = session_pin.decide(t.target.?.archive_state, if (t.current) |row| (if (row.command_seq) |rank| rank.get() else null) else null, command.pinned) catch |err| failed: {
+                t.rejection = switch (err) {
+                    error.SessionArchiving => .session_archiving,
+                    error.SessionArchived => .session_archived,
+                };
+                break :failed .keep;
+            };
+        }
+        t.answer = .{ .accepted = t.rejection == null };
+        if (t.rejection) |code| try t.answer.code.set(@tagName(code));
+        try queueCommand(r, key, .session_pin, session, &t.digest, null, null, &t.answer);
+        if (t.rejection == null) {
+            r.write(insert_pin_command, .{ .key = key, .pinned = command.pinned });
+            switch (change) {
+                .keep => {},
+                .pin => if (t.current != null) r.write(update_pin, .{ .session = t.target.?.session, .key = key }) else r.write(insert_pin, .{ .session = t.target.?.session, .key = key }),
+                .unpin => r.write(clear_pin, .{ .session = t.target.?.session }),
+            }
+        }
+        if (r.faults().before_commit) return error.InjectedCommitFailure;
+        return .commit;
+    }
+
+    pub fn committed(t: *const PinSession) Result {
+        return if (t.rejection) |code| .{ .rejected = .{ .replayed = false, .code = code } } else .{ .accepted = .{ .replayed = false, .pinned = t.input.command.pinned } };
+    }
 };
 
 /// A Session a command names, as a round reads it: its head, and the
@@ -2391,6 +2472,7 @@ fn kindCode(kind: cli_value.CommandKind) u8 {
         .model_interruption => 4,
         .permission_decision => 5,
         .session_archive => 6,
+        .session_pin => 7,
     };
 }
 
@@ -2614,6 +2696,14 @@ pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservat
                 completion = stopObservation(&selection).completion;
             }
             observation.kind.session_archive = .{ .archived = request.archived, .completion = completion };
+        },
+        .session_pin => {
+            observation.kind = .{ .session_pin = null };
+            if (!command.accepted) return;
+            var request: pin_request.Row = undefined;
+            a.read(pin_request, .{ .key = key }, &request);
+            try a.run();
+            observation.kind.session_pin = .{ .pinned = request.pinned };
         },
         .model_interruption => {
             var row: interruption_target.Row = undefined;

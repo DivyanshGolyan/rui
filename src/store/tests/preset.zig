@@ -51,7 +51,7 @@ test "core_tools presets retain caller narrowing after overrides resolve" {
             try settleCallsForTesting(&storage, &tmp, model, "preset-agent-calls", &calls);
             const start = try arena.create(core_tools.StartAgent);
             for (arguments, 0..) |bytes, at| {
-                const action = (try storage.nextCoreWork()).?.action;
+                const action = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
                 try std.testing.expect(try core_tools.checkStartAgentWithPresets(arena, bytes, &presets, start) == .accepted);
                 const result = try storage.startAgent(action.binding, parent.slice(), start.task, start.attached, &start.configuration, null, .{});
                 if (at == 0) {

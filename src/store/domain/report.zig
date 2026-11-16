@@ -112,7 +112,7 @@ pub const SessionReportCapture = struct {
         }
     }
 
-    pub const AppendError = @typeInfo(@typeInfo(@TypeOf(append)).@"fn".return_type.?).error_union.error_set;
+    pub const AppendError = ErrorOf(append);
 
     /// A `std.Io.Writer` over the capture, buffered in `buffer`, which the
     /// Host writes its reply's shapes through. Once a write fails,
@@ -823,9 +823,7 @@ pub const WorkRead = struct {
     }
 };
 
-fn optional(value: ?rsql.Positive) ?u64 {
-    return if (value) |positive| positive.get() else null;
-}
+const optional = rsql.Positive.optional;
 
 /// Reads every `works` to its end, each stage of every one in a shared
 /// round, so the rounds are the deepest work's stages, not the count.
@@ -1040,9 +1038,7 @@ fn declares(comptime L: type, comptime name: []const u8) bool {
     return false;
 }
 
-fn ErrorOf(comptime f: anytype) type {
-    return @typeInfo(@typeInfo(@TypeOf(f)).@"fn".return_type.?).error_union.error_set;
-}
+const ErrorOf = @import("../../error_set.zig").Of;
 
 /// A list's state across its rows, `struct {}` without one.
 fn ListState(comptime L: type) type {
@@ -1165,7 +1161,7 @@ fn RunState(comptime Ls: anytype, comptime Watcher: type) type {
 
 /// What a failed round of run `Ls` can answer (`runFailure`).
 fn RunError(comptime Ls: anytype, comptime Watcher: type) type {
-    var set = @typeInfo(@typeInfo(@TypeOf(ReadAccess.run)).@"fn".return_type.?).error_union.error_set;
+    var set = ErrorOf(ReadAccess.run);
     for (Ls) |L| set = set || @TypeOf(L.failed) || Chunk(L, Watcher).Failure || CheckFirstError(L);
     return set;
 }

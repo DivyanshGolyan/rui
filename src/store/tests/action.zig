@@ -231,7 +231,7 @@ test "core tool table routes every built-in to its sole action selector" {
                     .decoded_arguments = arguments,
                 }};
                 try settleCallsForTesting(&storage, &tmp, binding, "table-calls", &calls);
-                const core = try storage.nextCoreWork();
+                const core = try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true });
                 const bash = try storage.admitNextActionAttempt(300_000, .{});
                 try std.testing.expectEqual(expected == .core, core != null);
                 try std.testing.expectEqual(expected == .bash, bash != null);
@@ -242,11 +242,11 @@ test "core tool table routes every built-in to its sole action selector" {
                     try std.testing.expectEqual(binding.turn_id, call.binding.turn_id);
                     try std.testing.expectEqualStrings(session.slice(), call.session.slice());
                     // Selection is a read, not an Attempt or a resolution.
-                    try std.testing.expectEqual(call.binding.action_id, (try storage.nextCoreWork()).?.action.binding.action_id);
+                    try std.testing.expectEqual(call.binding.action_id, (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action.binding.action_id);
                 }
                 if (bash) |attempted| {
                     try std.testing.expectEqual(binding.operation_id, attempted.permit.binding.parent_operation_id);
-                    try std.testing.expect((try storage.nextCoreWork()) == null);
+                    try std.testing.expect((try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })) == null);
                     try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
                 }
             }
@@ -566,6 +566,76 @@ test "runner action seam covers selection admission input settlement stop and re
                     try std.testing.expectEqualStrings(expected_code, actions[0].object.get("resolution").?.string);
                     try std.testing.expectEqualStrings(expected_text, actions[0].object.get("result").?.object.get("text").?.string);
                 }
+            }
+        }
+    }.run);
+}
+
+test "Action read covers permission queue attempt and immutable final paging" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const status = @import("../../action_read.zig");
+            const repeats = status.window_bytes / 3 + 3;
+            const large = "a" ++ @as([3 * repeats]u8, @bitCast(@as([repeats][3]u8, @splat("雪".*))));
+            for ([_][]const u8{ "done", large }) |bytes| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSessionAsk(&storage, "read-session");
+                const other = try configureTestSessionAsk(&storage, "other-session");
+                try submitTestMessage(&storage, &tmp, "read-input", "read-message", session.slice(), "propose");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleTwoActionsForTesting(&storage, &tmp, model, "read-calls");
+                const action = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{});
+                const sibling = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
+                var result: status.Read = undefined;
+                var deny: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = sibling, .decision = .deny };
+                try deny.key.set("read-deny");
+                try std.testing.expect(storage.decidePermission(&deny, .{}) == .accepted);
+                try storage.readAction(&.{ .session = session, .action_id = sibling }, &result);
+                try std.testing.expect(result.status == .resolved);
+                try std.testing.expectEqualStrings("denied", result.status.resolved.resolution.code.slice());
+                const request: status.Request = .{ .session = session, .action_id = action };
+                try storage.readAction(&request, &result);
+                try std.testing.expect(result.status == .pending and result.status.pending == .waiting_approval);
+                try std.testing.expectError(error.ActionNotFound, storage.readAction(&.{ .session = other, .action_id = action }, &result));
+                try std.testing.expectError(error.ActionNotFound, storage.readAction(&.{ .session = session, .action_id = 0 }, &result));
+                try std.testing.expectError(error.ActionNotFound, storage.readAction(&.{ .session = session, .action_id = std.math.maxInt(i64) }, &result));
+                try std.testing.expectError(error.InvalidCursor, storage.readAction(&.{ .session = session, .action_id = action, .offset = 1 }, &result));
+                var allow: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = action, .decision = .allow_once };
+                try allow.key.set("read-allow");
+                try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+                try storage.readAction(&request, &result);
+                try std.testing.expect(result.status == .pending and result.status.pending == .queued);
+                const binding = (try storage.admitNextActionAttempt(30_000, .{})).?.permit.binding;
+                try storage.readAction(&request, &result);
+                try std.testing.expect(result.status == .pending and result.status.pending == .attempted);
+                try std.testing.expectError(error.InvalidActionResult, storage.settleActionAttempt(binding, .succeeded, "", .{}));
+                try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(binding, .succeeded, bytes, .{}));
+                try storage.readAction(&request, &result);
+                try std.testing.expect(result.status == .resolved);
+                const first = result.status.resolved;
+                try std.testing.expectEqualStrings("succeeded", first.resolution.code.slice());
+                try std.testing.expectEqual(bytes.len, first.resolution.content.length);
+                try std.testing.expectEqualSlices(u8, &protocol.contentDigest(bytes), &first.resolution.content.digest);
+                try std.testing.expectEqualSlices(u8, bytes[0..first.window.next], first.window.text.slice());
+                try std.testing.expect(first.window.more == (bytes.len > status.window_bytes));
+                try std.testing.expect(std.unicode.utf8ValidateSlice(first.window.text.slice()));
+                if (first.window.more) {
+                    try std.testing.expectError(error.InvalidCursor, storage.readAction(&.{ .session = session, .action_id = action, .offset = 2 }, &result));
+                    try storage.readAction(&.{ .session = session, .action_id = action, .offset = first.window.next }, &result);
+                    try std.testing.expect(!result.status.resolved.window.more);
+                    try std.testing.expectEqualSlices(u8, bytes[first.window.next..], result.status.resolved.window.text.slice());
+                }
+                try storage.readAction(&.{ .session = session, .action_id = action, .offset = bytes.len }, &result);
+                try std.testing.expectEqualStrings("", result.status.resolved.window.text.slice());
+                try std.testing.expect(!result.status.resolved.window.more);
+                try std.testing.expectError(error.InvalidCursor, storage.readAction(&.{ .session = session, .action_id = action, .offset = bytes.len + 1 }, &result));
+                try storage.readAction(&request, &result);
+                try std.testing.expectEqualDeep(first, result.status.resolved);
+                try std.testing.expect((try storage.admitNextActionAttempt(30_000, .{})) == null);
             }
         }
     }.run);

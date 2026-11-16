@@ -189,7 +189,7 @@ test "provider interpretation preserves independently reported model evidence" {
             try std.testing.expectEqualSlices(u8, &protocol.contentDigest("ok"), &interpreted.accepted.output.answer_digest);
             try std.testing.expectEqualStrings("r", interpreted.accepted.output.evidence.response_id.slice());
             try std.testing.expectEqualSlices(u8, case.certificate, interpreted.accepted.model_evidence.slice());
-            var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file, interpreted.accepted.output.item_count);
+            var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file);
             var usage: ?output_format.Usage = null;
             while (try reader.next()) |record| if (record.tag == .usage) {
                 usage = record.usage;
@@ -529,7 +529,7 @@ const HistoricalSource = struct {
 const context_parts = blk: {
     @setEvalBranchQuota(10_000);
     var parts = std.mem.splitSequence(u8, @embedFile("model_instructions.txt"), "{}");
-    const result = .{ parts.next().?, parts.next().?, parts.next().? };
+    const result = .{ parts.next().?, parts.next().?, parts.next().?, parts.next().? };
     std.debug.assert(parts.next() == null);
     break :blk result;
 };
@@ -745,6 +745,7 @@ pub const Preparation = struct {
         fixed: struct { bytes: []const u8, cursor: request_encoding.FixedCursor = .{} },
         json: JsonEmission,
         raw: request_encoding.RawCursor,
+        base64: request_encoding.Base64Cursor,
         history_memo,
 
         /// Whether the emission reads the preparation's content reader.
@@ -752,7 +753,7 @@ pub const Preparation = struct {
             return switch (self.*) {
                 .none, .fixed, .history_memo => false,
                 .json => |*json| json.bytes == null,
-                .raw => true,
+                .raw, .base64 => true,
             };
         }
     };
@@ -1272,6 +1273,16 @@ pub const Preparation = struct {
                     self.state.emission = .{ .fixed = .{ .bytes = bytes } };
                     return true;
                 },
+                .base64 => |handle| {
+                    std.debug.assert(self.item.has(handle));
+                    const content = switch (self.handles[handle]) {
+                        .content => |content| content,
+                        else => unreachable,
+                    };
+                    try self.view.openContent(content, &self.reader);
+                    self.state.emission = .{ .base64 = .{ .offset = 0, .carry_length = 0, .encoded_length = 0, .encoded_offset = 0 } };
+                    return true;
+                },
                 .content => |content| {
                     std.debug.assert(self.item.has(content.handle));
                     self.state.content = .{ .handle = content.handle, .escape = content.escape };
@@ -1292,7 +1303,9 @@ pub const Preparation = struct {
                 // The originating Operation's ID, rebuilt on every Attempt.
                 3 => .{ .source = .{ .bytes = self.settings.session.slice() }, .quoted = true },
                 4 => .{ .source = .{ .bytes = context_parts[2] } },
-                5 => .{ .source = .{ .content = self.settings.baseline_instructions } },
+                5 => .{ .source = .{ .bytes = model_catalog.builtinInstructions(self.settings.model.slice()).bytes() } },
+                6 => .{ .source = .{ .bytes = context_parts[3] } },
+                7 => .{ .source = .{ .content = self.settings.baseline_instructions } },
                 else => null,
             },
             .sender => switch (index) {
@@ -1337,6 +1350,11 @@ pub const Preparation = struct {
                 if (json.bytes == null) self.reader.close();
             },
             .raw => |*cursor| {
+                const source = HistoricalSource{ .reader = &self.reader };
+                if (!try cursor.advance(source, &self.writer, bytes_left)) return false;
+                self.reader.close();
+            },
+            .base64 => |*cursor| {
                 const source = HistoricalSource{ .reader = &self.reader };
                 if (!try cursor.advance(source, &self.writer, bytes_left)) return false;
                 self.reader.close();
@@ -1927,8 +1945,6 @@ const DrainedRequest = struct { bytes: []u8, length: u64, digest: [32]u8 };
 // Share the tool's prose and schema, not the request's tool envelope.
 const bash_tool_json = "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"" ++ tools.bash_record.description ++
     "\",\"strict\":false,\"parameters\":" ++ tools.bash_record.input_schema ++ "}";
-// A Session created with the product's default tools.
-const default_tools_json = bash_tool_json ++ ",{\"type\":\"web_search\",\"external_web_access\":true}";
 /// Version two's declaration of Bash inside the history, and its top-level
 /// tools for the default set: only the provider-run one.
 const declared_bash_json = "{\"type\":\"additional_tools\",\"role\":\"developer\",\"tools\":[" ++ bash_tool_json ++ "]}";
@@ -1940,9 +1956,9 @@ fn requestGolden(workspace: []const u8, session: []const u8, request: []const u8
     defer std.testing.allocator.free(quoted_workspace);
     const quoted_session = try std.json.Stringify.valueAlloc(std.testing.allocator, session, .{});
     defer std.testing.allocator.free(quoted_session);
-    const context = try std.testing.allocator.print("{s}{s}{s}{s}{s}", .{
+    const context = try std.testing.allocator.print("{s}{s}{s}{s}{s}{s}", .{
         context_parts[0],                            quoted_workspace[1 .. quoted_workspace.len - 1], context_parts[1],
-        quoted_session[1 .. quoted_session.len - 1], context_parts[2],
+        quoted_session[1 .. quoted_session.len - 1], context_parts[2],                                context_parts[3],
     });
     defer std.testing.allocator.free(context);
     const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, context, .{});
@@ -2357,7 +2373,7 @@ test "request preparation minimal golden is exact across schedules" {
         defer parsed.deinit();
         const instructions = parsed.value.object.get("instructions").?.string;
         // Slots are found by the prompt file's own parts, never its wording.
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[2]));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[3]));
         const path_start = context_parts[0].len - 1;
         const path_end = std.mem.indexOf(u8, instructions, context_parts[1]).? + 1;
         const decoded_path = try std.json.parseFromSlice([]const u8, std.testing.allocator, instructions[path_start..path_end], .{});
@@ -2499,8 +2515,8 @@ test "request preparation escapes instructions and user content" {
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, first.bytes, .{});
     defer parsed.deinit();
     const instructions = parsed.value.object.get("instructions").?.string;
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[2]));
-    try std.testing.expect(std.mem.endsWith(u8, instructions, context_parts[2] ++ instructions_text));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[3]));
+    try std.testing.expect(std.mem.endsWith(u8, instructions, context_parts[3] ++ instructions_text));
     const input = parsed.value.object.get("input").?.array.items;
     try std.testing.expectEqualStrings(user_text, input[0].object.get("content").?.array.items[0].object.get("text").?.string);
 
@@ -2629,6 +2645,9 @@ test "request preparation keeps the starting effort at the top and changes it at
         try std.testing.expect(configured == .accepted);
         const session = configured.accepted.session;
         try setup.submit("effort-message", "effort-message", session.slice(), "keep this exact input");
+        const encoded_builtin = try std.json.Stringify.valueAlloc(std.testing.allocator, model_catalog.builtinInstructions(case.model).bytes(), .{});
+        defer std.testing.allocator.free(encoded_builtin);
+        const step_bound = 32768 + preparationTestStepBound(encoded_builtin.len - 2);
         // Ordinary and compaction envelopes must use their admitted effort.
         for (0..2) |purpose| {
             var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
@@ -2649,11 +2668,12 @@ test "request preparation keeps the starting effort at the top and changes it at
             setup.storage.openHistoricalView(binding, &preparation.view);
             try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
             defer if (preparation.state.active) preparation.cancel();
-            const sealed = try drainLivePreparation(&preparation, 1, 1, 32768);
+            const sealed = try drainLivePreparation(&preparation, 1, 1, step_bound);
             var owned = true;
             defer if (owned) sealed.deinit(std.testing.io, preparation.writer.budget);
-            var buffer: [8192]u8 = undefined;
-            const count = try sealed.file.readPositionalAll(std.testing.io, &buffer, 0);
+            const buffer = try std.testing.allocator.alloc(u8, @intCast(sealed.length));
+            defer std.testing.allocator.free(buffer);
+            const count = try sealed.file.readPositionalAll(std.testing.io, buffer, 0);
             const bytes = buffer[0..count];
             try std.testing.expectEqual(sealed.length, count);
             try std.testing.expectEqual(sealed.length, try sealed.file.length(std.testing.io));
@@ -3678,8 +3698,8 @@ test "compaction preparation appends request only trigger and replays asymmetric
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
     defer parsed.deinit();
     const instructions = parsed.value.object.get("instructions").?.string;
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[2]));
-    try std.testing.expect(std.mem.endsWith(u8, instructions, context_parts[2]));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[3]));
+    try std.testing.expect(std.mem.endsWith(u8, instructions, context_parts[3]));
     const input = parsed.value.object.get("input").?.array.items;
     // The base covers the earlier declarations, so the Operation after the
     // anchor declares its tools again.
@@ -4670,7 +4690,7 @@ test "find_tools declares a found tool on the next request without losing the me
     });
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const find = (try setup.storage.nextCoreWork()).?.action;
+    const find = (try setup.storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
     try @import("find_tools.zig").run(&setup.storage, arena.allocator(), &find, .{});
     admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     binding = try admitted.permit.consume();
@@ -4694,7 +4714,7 @@ test "find_tools declares a found tool on the next request without losing the me
     try settleItemsForTesting(&setup, binding, "find-codec-found", &.{
         "{\"type\":\"function_call\",\"id\":\"read-item\",\"call_id\":\"read-call\",\"name\":\"read_transcript\",\"arguments\":\"{}\"}",
     });
-    const read = (try setup.storage.nextCoreWork()).?.action;
+    const read = (try setup.storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
     try std.testing.expect(read.tool == .read_transcript);
     try @import("read_transcript.zig").run(&setup.storage, arena.allocator(), &read, .{});
 }
@@ -5205,7 +5225,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     try settleItemsForTesting(&setup, binding, "skills-invoke-call", &.{
         "{\"type\":\"function_call\",\"id\":\"skill-invoke-item\",\"call_id\":\"skill-invoke-call\",\"name\":\"skill\",\"arguments\":\"{\\\"operation\\\":\\\"invoke\\\",\\\"name\\\":\\\"demo\\\"}\"}",
     });
-    const action = (try setup.storage.nextCoreWork()).?.action;
+    const action = (try setup.storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
     try std.testing.expectEqual(@TypeOf(action.tool).skill, action.tool);
     const current = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .invoke, .name = demo }, null);
     try std.testing.expect(std.mem.endsWith(u8, current.invocation, current_raw));
@@ -5238,7 +5258,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     try settleItemsForTesting(&setup, binding, "skills-reload-call", &.{
         "{\"type\":\"function_call\",\"id\":\"skill-reload-item\",\"call_id\":\"skill-reload-call\",\"name\":\"skill\",\"arguments\":\"{\\\"operation\\\":\\\"reload\\\"}\"}",
     });
-    const reload_action = (try setup.storage.nextCoreWork()).?.action;
+    const reload_action = (try setup.storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
     const no_change = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .reload }, null);
     try std.testing.expect(try setup.storage.settleSkillTool(reload_action.binding, arena, &no_change, .{}));
     admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
@@ -5511,4 +5531,266 @@ test "MCP projected offers preserve request prefixes and memo rebuilds" {
         try std.testing.expect(std.mem.indexOf(u8, request.bytes, "original page") != null);
         try testing.settleItemsForTesting(&setup.storage, &setup.tmp, binding, &.{"{\"type\":\"message\",\"id\":\"done\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}"}, "done");
     }
+}
+
+const image_test_png = @embedFile("codecs/fixtures/image-input/pixel.png");
+const image_test_base64 = @embedFile("codecs/fixtures/image-input/pixel.base64");
+const image_test_part = "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64," ++ image_test_base64 ++ "\",\"detail\":\"auto\"}";
+
+fn openRawImagePreparationWithDigestRecheck(
+    setup: *PreparationTestSetup,
+    binding: store.AttemptBinding,
+    preparation: *Preparation,
+    used: *std.atomic.Value(u64),
+    limit: u64,
+) !store.HistoricalContent {
+    setup.storage.openHistoricalView(binding, &preparation.view);
+    var retained: ?named_scratch.Owner = null;
+    try preparation.init(std.testing.io, setup.root, .{ .used = used, .limit = limit }, protocol.routesAll(.endpoint), null, .{}, &retained);
+    errdefer preparation.cancel();
+    try std.testing.expect(retained == null);
+    try preparation.view.settings(&preparation.settings);
+    var position: u64 = 0;
+    while (try preparation.view.nextEntry(position)) |entry| {
+        position = entry.position;
+        if (entry.kind != .user) continue;
+        var content = entry.content.?;
+        content.verified = false;
+        return content;
+    }
+    return error.MissingImageFixture;
+}
+
+fn loadRawImageItem(preparation: *Preparation, item: codec_abi.Item, handles: []const Handle) !void {
+    var mask: u8 = 0;
+    for (handles, 0..) |handle, index| {
+        preparation.handles[index] = handle;
+        mask |= @as(u8, 1) << @intCast(index);
+    }
+    _ = preparation.loadItemHeader(item, mask);
+    try preparation.encodeItem();
+}
+
+fn drainRawImageItem(preparation: *Preparation, allowance: usize) !void {
+    var steps: usize = 0;
+    while (true) {
+        var left = allowance;
+        var items: usize = 64;
+        while (left != 0) {
+            if (preparation.state.emission != .none) {
+                if (!try preparation.advanceEmission(&left, &items)) break;
+            } else if (!try preparation.nextPiece()) {
+                try preparation.writer.flush();
+                return;
+            }
+        }
+        try std.testing.expect(left <= allowance);
+        try preparation.writer.flush();
+        steps += 1;
+        try std.testing.expect(steps < 4096);
+    }
+}
+
+test "raw image preparation streams canonical PNG into user and tool arrays" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("image-codec-config");
+    try setup.submit("raw-png", "raw-png", session.slice(), image_test_png);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    const expected = "[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"before\"}," ++ image_test_part ++
+        ",{\"type\":\"input_text\",\"text\":\"\"},{\"type\":\"input_text\",\"text\":\"after\"}]}," ++
+        "{\"type\":\"function_call_output\",\"call_id\":\"shot\\\"\",\"output\":[" ++ image_test_part ++
+        ",{\"type\":\"input_text\",\"text\":\"observed\"}]}," ++
+        "{\"type\":\"function_call_output\",\"call_id\":\"text-only\",\"output\":\"still a string\"}]";
+    for ([_]protocol.Codec{ .@"openai-responses/1", .@"openai-responses/2", .@"openai-responses/3" }) |codec| {
+        for ([_]usize{ 1, 2, 3, 5, 17, preparation_byte_allowance }) |allowance| {
+            var used: std.atomic.Value(u64) = .init(0);
+            var preparation: Preparation = undefined;
+            const content = try openRawImagePreparationWithDigestRecheck(&setup, binding, &preparation, &used, expected.len);
+            defer if (preparation.state.active) preparation.cancel();
+            preparation.settings.codec = codec;
+            preparation.carry = codecs.initialCarry(codec, null);
+            preparation.encoder = codecs.resumeFrom(preparation.carry);
+            try preparation.writer.write("[");
+            const Item = struct { item: codec_abi.Item, handles: []const Handle = &.{} };
+            for ([_]Item{
+                .{ .item = .{ .image_message_open = .user } },
+                .{ .item = .input_text, .handles = &.{.{ .text = "before" }} },
+                .{ .item = .{ .input_image = .png }, .handles = &.{.{ .content = content }} },
+                .{ .item = .input_text, .handles = &.{.{ .text = "" }} },
+                .{ .item = .input_text, .handles = &.{.{ .text = "after" }} },
+                .{ .item = .image_message_close },
+                .{ .item = .image_tool_open, .handles = &.{.{ .text = "shot\"" }} },
+                .{ .item = .{ .input_image = .png }, .handles = &.{.{ .content = content }} },
+                .{ .item = .input_text, .handles = &.{.{ .text = "observed" }} },
+                .{ .item = .image_tool_close },
+                .{ .item = .tool_result, .handles = &.{ .{ .text = "text-only" }, .{ .text = "still a string" } } },
+            }) |item| {
+                try loadRawImageItem(&preparation, item.item, item.handles);
+                try drainRawImageItem(&preparation, allowance);
+                try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+            }
+            try preparation.writer.write("]");
+            preparation.state.stage = .end;
+            const request = try drainLivePreparation(&preparation, allowance, 1, 64);
+            defer request.deinit(std.testing.io, preparation.writer.budget);
+            var bytes: [expected.len]u8 = undefined;
+            try std.testing.expectEqual(bytes.len, try request.file.readPositionalAll(std.testing.io, &bytes, 0));
+            try std.testing.expectEqualStrings(expected, &bytes);
+            try std.testing.expectEqual(@as(u64, expected.len), used.load(.monotonic));
+        }
+    }
+}
+
+test "raw image preparation cancels every read and base64 output boundary" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("image-cancel-config");
+    try setup.submit("raw-png", "raw-png", session.slice(), image_test_png);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    const work = image_test_png.len + image_test_part.len;
+    for (0..work + 1) |cut| {
+        var used: std.atomic.Value(u64) = .init(0);
+        var preparation: Preparation = undefined;
+        const content = try openRawImagePreparationWithDigestRecheck(&setup, binding, &preparation, &used, image_test_part.len);
+        defer if (preparation.state.active) preparation.cancel();
+        preparation.carry = codecs.initialCarry(.@"openai-responses/1", null);
+        preparation.encoder = codecs.resumeFrom(preparation.carry);
+        try loadRawImageItem(&preparation, .{ .input_image = .png }, &.{.{ .content = content }});
+        preparation.state.stage = .end;
+        for (0..cut) |_| {
+            switch (preparation.advance(1, 64)) {
+                .pending => {},
+                .failed => |err| return err,
+                .prepared => |request| {
+                    request.deinit(std.testing.io, preparation.writer.budget);
+                    return error.ImageSealedBeforeCancellation;
+                },
+            }
+            const stats = preparation.advanceStats();
+            try std.testing.expectEqual(@as(usize, 1), stats.work_bytes);
+            try std.testing.expect(stats.work_items <= 64);
+        }
+        preparation.cancel();
+        try std.testing.expect(!preparation.view.isActive());
+        try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+        try std.testing.expectEqual(@as(u64, 0), used.load(.monotonic));
+    }
+}
+
+test "raw image preparation releases capacity and write failures without sealing" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("image-failure-config");
+    try setup.submit("raw-png", "raw-png", session.slice(), image_test_png);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    for ([_]enum { capacity, write }{ .capacity, .write }) |fault| {
+        var used: std.atomic.Value(u64) = .init(0);
+        var preparation: Preparation = undefined;
+        const content = try openRawImagePreparationWithDigestRecheck(&setup, binding, &preparation, &used, if (fault == .capacity) image_test_part.len - 1 else image_test_part.len);
+        defer if (preparation.state.active) preparation.cancel();
+        preparation.carry = codecs.initialCarry(.@"openai-responses/1", null);
+        preparation.encoder = codecs.resumeFrom(preparation.carry);
+        try loadRawImageItem(&preparation, .{ .input_image = .png }, &.{.{ .content = content }});
+        preparation.state.stage = .end;
+        if (fault == .write) {
+            const prefix = "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,";
+            try stepPreparationToOffset(&preparation, prefix.len + 1, 4096);
+            try std.testing.expect(preparation.state.emission == .base64);
+            try std.testing.expectEqual(@as(usize, 1), preparation.view.outstandingReaders());
+            preparation.writer.fail_write = true;
+        }
+        try std.testing.expectError(if (fault == .capacity) error.RequestScratchExhausted else error.InjectedRequestWriteFailure, drainLivePreparation(&preparation, 1, 1, 4096));
+        preparation.cancel();
+        try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+        try std.testing.expectEqual(@as(u64, 0), used.load(.monotonic));
+    }
+}
+
+test "raw image preparation rejects a wrong canonical digest before sealing" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("image-digest-config");
+    try setup.submit("raw-png", "raw-png", session.slice(), image_test_png);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    var used: std.atomic.Value(u64) = .init(0);
+    var preparation: Preparation = undefined;
+    var content = try openRawImagePreparationWithDigestRecheck(&setup, binding, &preparation, &used, image_test_part.len);
+    defer if (preparation.state.active) preparation.cancel();
+    content.digest[0] ^= 1;
+    preparation.carry = codecs.initialCarry(.@"openai-responses/1", null);
+    preparation.encoder = codecs.resumeFrom(preparation.carry);
+    try loadRawImageItem(&preparation, .{ .input_image = .png }, &.{.{ .content = content }});
+    preparation.state.stage = .end;
+    try std.testing.expectError(error.CorruptStore, drainLivePreparation(&preparation, 1, 1, 4096));
+    preparation.cancel();
+    try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+    try std.testing.expectEqual(@as(u64, 0), used.load(.monotonic));
+}
+
+test "request preparation streams exact built-in instructions across provider routes" {
+    const models = [_][]const u8{ "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra", "openai/gpt-6-luna" };
+    const baseline = "Caller rules {} \"quoted\"\n雪";
+    for (models) |model| for ([_][]const u8{ "codex", "openai", "chatgpt" }) |provider_name| {
+        const body = model_catalog.builtinInstructions(model).bytes();
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        const file = try setup.tmp.dir.createFile(std.testing.io, "instructions", .{ .read = true });
+        try file.writeStreamingAll(std.testing.io, baseline);
+        try file.sync(std.testing.io);
+        var command: wire_request.ConfigureCommand = .{};
+        try command.key.set("config");
+        command.configuration.workspace.state = .value;
+        try command.configuration.workspace.value.set(setup.workspace);
+        command.configuration.provider.state = .value;
+        try command.configuration.provider.value.set(provider_name);
+        command.configuration.model.state = .value;
+        try command.configuration.model.value.set(model);
+        command.configuration.tools.state = .value;
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("bypass");
+        command.configuration.compaction_trigger.state = .value;
+        try command.configuration.compaction_trigger.value.set("115200");
+        command.configuration.reasoning_effort.state = .value;
+        try command.configuration.reasoning_effort.value.set("low");
+        command.configuration.instructions = .{ .state = .value, .file = file, .length = baseline.len, .digest = protocol.contentDigest(baseline) };
+        defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+        const created = try setup.storage.configure(&command, .{});
+        try std.testing.expect(created == .accepted);
+        const session = created.accepted.session;
+        try setup.submit("input", "message", session.slice(), "work");
+        var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+        const binding = try admitted.permit.consume();
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var prep: Preparation = undefined;
+        setup.storage.openHistoricalView(binding, &prep.view);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        defer if (prep.state.active) prep.cancel();
+        const result = try drainPreparation(&prep, 7, 1, 1024 * 1024);
+        defer std.testing.allocator.free(result.bytes);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings(model, parsed.value.object.get("model").?.string);
+        const quoted_workspace = try std.json.Stringify.valueAlloc(std.testing.allocator, setup.workspace, .{});
+        defer std.testing.allocator.free(quoted_workspace);
+        const expected = try std.mem.concat(std.testing.allocator, u8, &.{ context_parts[0], quoted_workspace[1 .. quoted_workspace.len - 1], context_parts[1], session.slice(), context_parts[2], body, context_parts[3], baseline });
+        defer std.testing.allocator.free(expected);
+        const instructions = parsed.value.object.get("instructions").?.string;
+        try std.testing.expectEqualStrings(expected, instructions);
+        if (body.len != 0) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, body));
+        try std.testing.expectEqual(@as(u64, result.bytes.len), result.length);
+        try std.testing.expectEqual(protocol.contentDigest(result.bytes), result.digest);
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expect(retained == null);
+    };
 }

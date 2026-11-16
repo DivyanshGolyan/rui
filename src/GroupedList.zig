@@ -10,7 +10,7 @@ const List = @import("widgets/List.zig");
 pub const Segment = overview_view.Segment;
 /// What a press on a row means, as the screen's core takes it.
 pub const Target = overview_view.Click;
-pub const Region = struct { start: u16, end: u16, target: Target };
+pub const Region = struct { start: u16, end: u16, target: Target, selected: bool = false };
 pub const Row = struct {
     segments: []const Segment,
     heading: bool = false,
@@ -19,6 +19,7 @@ pub const Row = struct {
     /// What a left press on this row means; null for a row that takes
     /// none, as a heading or a gap.
     target: ?Target = null,
+    alternate_target: ?Target = null,
     regions: []const Region = &.{},
 };
 
@@ -98,11 +99,16 @@ const Frame = struct {
             try self.targets.append(arena, .{ .id = id, .target = target });
             break :blk id;
         } else null;
+        const alternate_id: ?u32 = if (built.alternate_target) |target| blk: {
+            const id: u32 = @intCast(self.targets.items.len);
+            try self.targets.append(arena, .{ .id = id, .target = target });
+            break :blk id;
+        } else null;
         const regions = try arena.alloc(List.Region, built.regions.len);
         for (built.regions, regions) |region, *dest| {
             const id: u32 = @intCast(self.targets.items.len);
             try self.targets.append(arena, .{ .id = id, .target = region.target });
-            dest.* = .{ .start = region.start, .end = region.end, .target = id };
+            dest.* = .{ .start = region.start, .end = region.end, .target = id, .selected = region.selected };
         }
         const lines = try arena.alloc(List.Line, built.height);
         lines[0] = segments;
@@ -112,7 +118,7 @@ const Frame = struct {
             for (second, converted) |segment, *dest| dest.* = .{ .text = segment.text, .style = widget_style.of(owner.caps, segment.style) };
             lines[1] = converted;
         }
-        return .{ .lines = lines, .target = target_id, .regions = regions };
+        return .{ .lines = lines, .target = target_id, .alternate_target = alternate_id, .regions = regions };
     }
 };
 
@@ -227,8 +233,6 @@ test "GroupedList quiet rows normalize whole lines before selection and hover in
         const first = try view.listSegments(arena.allocator(), &state, .{ .row = 0 }, width, caps, 0);
         const rows: []const Row = &.{.{
             .segments = first.segments,
-            .second = try view.rowSecondSegments(arena.allocator(), &state, 0, width, caps),
-            .height = 2,
             .target = .{ .open = listed.reference },
         }};
         var presses: Pressed = .{};
@@ -240,11 +244,12 @@ test "GroupedList quiet rows normalize whole lines before selection and hover in
             try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 1, .row = row, .button = .none, .type = .motion, .mods = .{} } });
         }
         const surface = try list.widget().draw(ctx);
-        const background: view.Background = if (selected) .selection else if (hover_row != null) .hover else .ground;
+        const hovered = hover_row == 0;
+        const background: view.Background = if (selected) .selection else if (hovered) .hover else .ground;
         const highlight = widget_style.of(caps, .{ .background = background });
         for (surface.children[0].surface.buffer) |cell| {
-            // Includes both lines' visible text, interstitial padding and ends.
-            try std.testing.expectEqual(!wrote and !selected and hover_row == null, cell.style.dim);
+            // Includes the line's visible text, interstitial padding and ends.
+            try std.testing.expectEqual(!wrote and !selected and !hovered, cell.style.dim);
             try std.testing.expectEqual(highlight.bg, cell.style.bg);
             try std.testing.expectEqual(highlight.reverse, cell.style.reverse);
             try std.testing.expectEqual(highlight.ul_style, cell.style.ul_style);
@@ -449,4 +454,49 @@ test "GroupedList selected row uses the owner's focused or inactive background" 
         _ = try list.widget().draw(ctx);
         try std.testing.expectEqual(widget_style.of(list.caps, .{ .background = background }).bg, list.inner.selection_style.bg);
     }
+}
+
+test "Session pin gestures retain the drawn target and desired value without normal activation" {
+    const first: Target = .{ .pin = .{ .reference = "k7m2qx".*, .pinned = true } };
+    const second: Target = .{ .pin = .{ .reference = "rhvzwc".*, .pinned = false } };
+    var rows = [_]Row{
+        .{ .segments = &.{.{ .text = "header", .style = .{} }}, .heading = true },
+        .{ .segments = &.{.{ .text = "Session", .style = .{} }}, .target = .{ .open = "k7m2qx".* }, .alternate_target = first },
+        .{ .segments = &.{.{ .text = "New Session", .style = .{} }}, .target = .new_session },
+        .{ .segments = &.{.{ .text = "Settings", .style = .{} }}, .target = .settings },
+    };
+    const source: []const Row = &rows;
+    var pressed: Pressed = .{};
+    var list: Self = .{ .rows = .of(&source), .on_press = pressed.press() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    _ = try list.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 8 }, .cell_size = .{} });
+    rows[1].target = .{ .open = "rhvzwc".* };
+    rows[1].alternate_target = second;
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    defer events.cmds.deinit(events.alloc);
+    for ([_]vaxis.Mouse{
+        .{ .col = 3, .row = 1, .button = .right, .type = .press, .mods = .{} },
+        .{ .col = 3, .row = 1, .button = .left, .type = .press, .mods = .{ .alt = true } },
+    }) |mouse| {
+        events.consume_event = false;
+        try list.widget().handleEvent(&events, .{ .mouse = mouse });
+        try std.testing.expect(events.consume_event);
+        try std.testing.expectEqualDeep(first, pressed.targets[pressed.count - 1]);
+        var release = mouse;
+        release.type = .release;
+        try list.widget().handleEvent(&events, .{ .mouse = release });
+    }
+    try std.testing.expectEqual(@as(usize, 2), pressed.count);
+    for ([_]i16{ 0, 2, 3 }) |row| for ([_]bool{ false, true }) |alt| {
+        events.consume_event = false;
+        try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 3, .row = row, .button = if (alt) .left else .right, .type = .press, .mods = .{ .alt = alt } } });
+        try std.testing.expectEqual(@as(usize, 2), pressed.count);
+    };
+    try list.widget().handleEvent(&events, leftPress(3, 1));
+    try std.testing.expectEqualDeep(Target{ .open = "k7m2qx".* }, pressed.targets[2]);
+    for (events.cmds.items) |cmd| switch (cmd) {
+        .set_mouse_shape => {},
+        else => return error.TestUnexpectedCommand,
+    };
 }

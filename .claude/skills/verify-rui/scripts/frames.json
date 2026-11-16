@@ -5,6 +5,25 @@
   ],
   "states": [
     {
+      "name": "archived-row-none",
+      "note": "Archived stays available with nothing archived",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "+ New Session"
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Settings",
+        "Archived"
+      ],
+      "absent": [],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
       "name": "inputtint-night-empty",
       "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
       "theme": "night",
@@ -311,7 +330,7 @@
     },
     {
       "name": "quiet-overview",
-      "note": "Whole rows, including marks, ages and folders, dim only for never-written finished and working chats; approval stays loud",
+      "note": "Whole rows, including marks, names and state durations, dim only for never-written finished and working chats; approval stays loud",
       "open": "overview",
       "cast": [
         {
@@ -349,18 +368,17 @@
           "wait": "Agent working"
         },
         {
-          "wait": "Thinking"
+          "wait": "⠹ Agent working"
         },
         {
-          "wait": "set -eu"
+          "wait": "? Agent approval"
         }
       ],
       "expect": [
         "You wrote",
         "Agent done",
         "Agent approval",
-        "Agent working",
-        "Thinking"
+        "Agent working"
       ],
       "absent": [
         "No Sessions yet.",
@@ -372,15 +390,7 @@
           "dim": true
         },
         {
-          "text": "The deadline check",
-          "dim": true
-        },
-        {
           "text": "⠹ Agent working",
-          "dim": true
-        },
-        {
-          "text": "Thinking",
           "dim": true
         },
         {
@@ -409,11 +419,11 @@
           "min_columns": 140
         },
         {
-          "wait": "Thinking",
+          "wait": "⠹ Agent working",
           "min_columns": 140
         },
         {
-          "wait": "set -eu",
+          "wait": "? Agent approval",
           "min_columns": 140
         }
       ],
@@ -430,17 +440,7 @@
           "min_columns": 140
         },
         {
-          "text": "The deadline check",
-          "dim": true,
-          "min_columns": 140
-        },
-        {
           "text": "⠹ Agent working",
-          "dim": true,
-          "min_columns": 140
-        },
-        {
-          "text": "Thinking",
           "dim": true,
           "min_columns": 140
         },
@@ -461,7 +461,7 @@
     },
     {
       "name": "appcmds-conversation",
-      "note": "All chat commands are listed beside skills with their descriptions",
+      "note": "Untitled bounded panel shows the first commands and an overflow label",
       "open": "App command replacements",
       "cast": [
         {
@@ -487,13 +487,7 @@
         "/copy           copy the last answer",
         "/effort         change effort",
         "/model          change model",
-        "/new            start a new chat",
-        "/reload-skills  reload skills",
-        "/rename         rename this chat",
-        "/requests       recover a lost request",
-        "/result         show a saved answer",
-        "/setup          defaults for new chats",
-        "/unarchive      restore this chat"
+        "more \u00b7 type to narrow"
       ],
       "absent": [
         "/configure",
@@ -509,11 +503,21 @@
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "expect_dim": [
+        {
+          "text": "archive this chat",
+          "dim": false
+        },
+        {
+          "text": "change model",
+          "dim": false
+        }
       ]
     },
     {
       "name": "appcmds-conversation-end",
-      "note": "The end selection keeps every short chat command phrase visible",
+      "note": "Moving selection scrolls the bounded panel to the last command",
       "open": "App command replacements",
       "steps": [
         {
@@ -542,18 +546,12 @@
         }
       ],
       "expect": [
-        "/archive        archive this chat",
-        "/clear          start a new chat",
-        "/copy           copy the last answer",
-        "/effort         change effort",
-        "/model          change model",
-        "/new            start a new chat",
-        "/reload-skills  reload skills",
         "/rename         rename this chat",
         "/requests       recover a lost request",
         "/result         show a saved answer",
         "/setup          defaults for new chats",
-        "/unarchive      restore this chat"
+        "/unarchive      restore this chat",
+        "more \u00b7 type to narrow"
       ],
       "absent": [
         "/configure",
@@ -569,6 +567,12 @@
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "expect_dim": [
+        {
+          "text": "restore this chat",
+          "dim": false
+        }
       ]
     },
     {
@@ -670,20 +674,14 @@
         }
       ],
       "expect": [
-        "/archive        archive this chat",
-        "/clear          start a new chat",
-        "/copy           copy the last answer",
-        "/effort         change effort",
-        "/model          change model",
-        "/new            start a new chat",
-        "/reload-skills  reload skills",
         "/rename         rename this chat",
         "/requests       recover a lost request",
         "/result         show a saved answer",
         "/setup          defaults for new chats",
         "/unarchive      restore this chat",
         "/review",
-        "Verify the project and review"
+        "Verify the project and",
+        "more \u00b7 type to narrow"
       ],
       "absent": [
         "/configure",
@@ -854,6 +852,160 @@
       ]
     },
     {
+      "name": "archived-row",
+      "note": "Sessions and Archived tabs stay below the separate New Session action",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Archived"
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Archived"
+      ],
+      "absent": [
+        "Archive audit",
+        "/sessions"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "archived-row-chosen",
+      "note": "Down from New Session selects Sessions; Right selects Archived, Left returns to Sessions",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Archived"
+        },
+        {
+          "keys": [
+            "Home",
+            "Down",
+            "Right",
+            "Left",
+            "Right"
+          ]
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Archived"
+      ],
+      "absent": [
+        "Archive audit"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "archived-view",
+      "note": "Enter on Archived opens the existing archived view: plain names, no archived marker",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Archived"
+        },
+        {
+          "keys": [
+            "Home",
+            "Down",
+            "Right",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Archive audit"
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Archived",
+        "Archive audit"
+      ],
+      "absent": [
+        "· archived",
+        "[Archived]"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "archived-view-click",
+      "note": "A click on Archived opens the archived view",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Archived"
+        },
+        {
+          "mouse": {
+            "at": "Archived",
+            "do": "click"
+          }
+        },
+        {
+          "wait": "Archive audit"
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Archived",
+        "Archive audit"
+      ],
+      "absent": [
+        "· archived"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "archived-view-esc",
+      "note": "Esc in the archived view returns to the usual list",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Archived"
+        },
+        {
+          "keys": [
+            "Home",
+            "Down",
+            "Right",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Archive audit"
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "gone": "Archive audit"
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Archived",
+        "enter open"
+      ],
+      "absent": [
+        "Archive audit",
+        "No archived Sessions"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
       "name": "transient-chat",
       "note": "A chat copy reply appears once on Footer, alongside durable archive state",
       "open": "Archive audit",
@@ -885,18 +1037,21 @@
     },
     {
       "name": "first-run",
-      "note": "No credentials: sign-in choice occupies the input row, ChatGPT selected",
+      "note": "Centered guided account chooser; no Session or chat composer is created",
       "open": "overview",
       "first_run": true,
       "steps": [
         {
-          "wait": "\u203a ChatGPT    API key"
+          "wait": "Sign in to Rui"
         }
       ],
       "expect": [
-        "\u203a ChatGPT    API key",
+        "Sign in to Rui",
+        "ChatGPT",
         "API key",
-        "Sign in"
+        "[ Close ]",
+        "Choose an account.",
+        "Tab / Shift-Tab"
       ],
       "absent": [
         "Provider: [c]",
@@ -909,7 +1064,7 @@
     },
     {
       "name": "first-run-browser",
-      "note": "Browser sign-in on the loopback fixture issuer: short link, masked address entry, Tab offered; no browser opens",
+      "note": "Guided browser method on the loopback fixture, masked callback and explicit reopen controls",
       "open": "overview",
       "first_run": true,
       "env": {
@@ -917,7 +1072,7 @@
       },
       "steps": [
         {
-          "wait": "\u203a ChatGPT    API key"
+          "wait": "Sign in to Rui"
         },
         {
           "keys": [
@@ -925,25 +1080,33 @@
           ]
         },
         {
-          "wait": "Sign in at 127.0.0.1:1"
+          "wait": "ChatGPT account"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "127.0.0.1:1"
         }
       ],
       "expect": [
-        "Sign in at 127.0.0.1:1",
-        "Or paste the address your browser ended on",
-        "tab device code · esc back"
+        "Continue in your browser",
+        "127.0.0.1:1",
+        "Paste callback",
+        "[ Open browser ]",
+        "[ Change method ]",
+        "[ Back ]"
       ],
       "absent": [
         "Provider: [c]",
-        "[ChatGPT]",
-        "[API key]",
-        "Codex",
-        "oauth/authorize"
+        "Codex"
       ]
     },
     {
       "name": "first-run-codex",
-      "note": "Tab from the browser sign-in to the fake device login: clickable link and code, no network",
+      "note": "Explicit device method; visible linked URL and code, no automatic clipboard or network",
       "open": "overview",
       "first_run": true,
       "env": {
@@ -951,7 +1114,7 @@
       },
       "steps": [
         {
-          "wait": "› ChatGPT    API key"
+          "wait": "Sign in to Rui"
         },
         {
           "keys": [
@@ -959,64 +1122,70 @@
           ]
         },
         {
-          "wait": "Sign in at 127.0.0.1:1"
+          "wait": "ChatGPT account"
         },
         {
-          "keys": [
-            "Tab"
-          ]
+          "mouse": {
+            "at": "Device code",
+            "do": "click"
+          }
         },
         {
           "wait": "BDL9-KI88H"
         }
       ],
       "expect": [
-        "auth.openai.com/codex/device \u00b7 BDL9-KI88H",
-        "Waiting for ChatGPT"
+        "Use a device code",
+        "https://auth.openai.com/codex/device",
+        "BDL9-KI88H",
+        "[ Copy code ]",
+        "[ Open browser ]",
+        "[ Change method ]",
+        "[ Back ]",
+        "C copies code"
       ],
       "absent": [
         "Provider: [c]",
-        "[ChatGPT]",
-        "[API key]",
-        "Sign in at",
-        "Open auth.openai.com",
-        "and enter"
+        "Paste callback"
       ]
     },
     {
       "name": "first-run-key",
-      "note": "API key entry is masked before publication",
+      "note": "Focusable masked key, editable base URL and model, no publication",
       "open": "overview",
       "first_run": true,
       "steps": [
         {
-          "wait": "\u203a ChatGPT    API key"
+          "wait": "Sign in to Rui"
         },
         {
-          "keys": [
-            "Right",
-            "Enter"
-          ]
+          "mouse": {
+            "at": "API key",
+            "do": "click"
+          }
         },
         {
-          "wait": "API key"
+          "wait": "Connect with an API key"
         },
         {
           "text": "sk-secret"
         },
         {
-          "wait": "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
+          "wait": "*********"
         }
       ],
       "expect": [
-        "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
-        "esc back"
+        "Connect with an API key",
+        "Base URL",
+        "API key",
+        "Model ID",
+        "*********",
+        "[ Connect ]",
+        "[ Back ]"
       ],
       "absent": [
         "sk-secret",
-        "Provider: [c]",
-        "[ChatGPT]",
-        "[API key]"
+        "Provider: [c]"
       ]
     },
     {
@@ -1099,12 +1268,12 @@
           ]
         },
         {
-          "sleep": 0.5
+          "gone": "enter pick"
         }
       ],
       "expect": [
-        "Draft lifecycle",
-        "gpt-6.1-sol"
+        "gpt-6.1-sol",
+        "alt+i info"
       ],
       "absent": [
         "\u203a /effort",
@@ -1821,7 +1990,7 @@
     },
     {
       "name": "start-busy",
-      "note": "03-overview-busy: two-line working Sessions",
+      "note": "03-overview-busy: one-line working Sessions",
       "open": "overview",
       "steps": [
         {
@@ -2282,6 +2451,31 @@
       "expect": "Keep this chat draft",
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "chat-draft-multiline",
+      "note": "chat composer with a wrapped multi-line draft and the caret moved up a line",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "text": "First line of a multi-line draft\nsecond line long enough to wrap at forty-six columns of the narrow layout\nthird"
+        },
+        {
+          "keys": [
+            "Up"
+          ]
+        },
+        {
+          "wait": "third"
+        }
+      ],
+      "expect": [
+        "First line of a multi-line draft",
+        "third"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -3066,6 +3260,11 @@
       "expect_style": [
         {
           "text": "help",
+          "within": "/help",
+          "bold": true
+        },
+        {
+          "text": "help",
           "within": "/review-help",
           "bold": true
         },
@@ -3118,6 +3317,11 @@
         },
         {
           "text": "/help",
+          "bold": false
+        },
+        {
+          "text": " the project",
+          "within": "Verify the project",
           "bold": false
         }
       ],
@@ -3204,6 +3408,11 @@
       "expect_style": [
         {
           "text": "help",
+          "within": "/help",
+          "bold": true
+        },
+        {
+          "text": "help",
           "within": "/review-help",
           "bold": true
         },
@@ -3257,6 +3466,11 @@
         },
         {
           "text": "/help",
+          "bold": false
+        },
+        {
+          "text": " the project",
+          "within": "Verify the project",
           "bold": false
         }
       ],
@@ -3903,7 +4117,7 @@
     },
     {
       "name": "no-color",
-      "note": "72-no-color: quiet two-line sidebar alongside the chat",
+      "note": "72-no-color: quiet one-line sidebar alongside the chat",
       "open": "Markdown retry",
       "steps": [
         {

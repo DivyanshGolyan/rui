@@ -31,6 +31,16 @@ pub const max_link_bytes = 2048;
 /// click and never sends it to the terminal as a hyperlink.
 pub const session_link = "rui-session:";
 
+/// Trusted renderer-only provenance in the retained conversation stream.
+/// Plain terminal sinks receive only the displayed bytes.
+pub const body_on = "\x1b[200m";
+pub const body_off = "\x1b[201m";
+pub fn writeBody(sink: anytype, bytes: []const u8) !void {
+    if (comptime std.meta.hasMethod(@TypeOf(sink), "body")) {
+        try sink.body(bytes);
+    } else try sink.feed(bytes);
+}
+
 /// The most bytes Rui sets the clipboard to (OSC 52): hterm's osc52.sh
 /// sends at most 100,000 base64 bytes, the smallest limit a terminal's own
 /// tooling documents.
@@ -74,7 +84,7 @@ pub fn feed(self: *Self, out: *std.Io.Writer, bytes: []const u8) !void {
 }
 
 pub fn finish(self: *Self, out: *std.Io.Writer) !void {
-    for (self.utf8[0..self.utf8_len]) |byte| try self.escapeByte(out, byte);
+    for (self.utf8[0..self.utf8_len]) |byte| try escapeByte(out, byte);
     self.utf8_len = 0;
 }
 
@@ -119,8 +129,6 @@ fn feedByte(self: *Self, out: *std.Io.Writer, value: u8) !void {
                     '\r' => return out.writeAll("\\r"),
                     else => {},
                 }
-            }
-            if (self.mode != .multiline) {
                 if (value == '"' and self.mode == .line) return out.writeAll("\\\"");
                 if (value == '\\') return out.writeAll("\\\\");
             }
@@ -129,10 +137,10 @@ fn feedByte(self: *Self, out: *std.Io.Writer, value: u8) !void {
             {
                 return out.writeAll(&.{value});
             }
-            return self.escapeByte(out, value);
+            return escapeByte(out, value);
         }
         self.utf8_need = std.unicode.utf8ByteSequenceLength(value) catch {
-            try self.escapeByte(out, value);
+            try escapeByte(out, value);
             return;
         };
     } else if (value & 0xc0 != 0x80) {
@@ -154,8 +162,7 @@ fn feedByte(self: *Self, out: *std.Io.Writer, value: u8) !void {
     }
 }
 
-fn escapeByte(self: *Self, out: *std.Io.Writer, value: u8) !void {
-    _ = self;
+fn escapeByte(out: *std.Io.Writer, value: u8) !void {
     var escaped: [max_bytes_per_byte]u8 = undefined;
     try out.writeAll(try std.fmt.bufPrint(&escaped, "\\x{x:0>2}", .{value}));
 }

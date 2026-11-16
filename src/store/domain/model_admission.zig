@@ -2,11 +2,13 @@
 //! facts, context estimates and retries.
 
 const std = @import("std");
+const DispatchCapacity = @import("../../execution.zig").DispatchCapacity;
 const replay_recipe = @import("../../replay_recipe.zig");
 const attempt = @import("../../attempt.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const provider_name = @import("../../provider_name.zig");
+const model_catalog = @import("../../model_catalog.zig");
 const model_capability = @import("../../model_capability.zig");
 const product_defaults = @import("../../product_defaults.zig");
 const output_format = @import("../../output_format.zig");
@@ -241,6 +243,7 @@ pub const CompactionRead = struct {
             .context_changed = false,
             .usage_tokens = null,
             .uncovered_bytes = 0,
+            .builtin_instruction_bytes = model_catalog.builtinInstructions(model).bytes().len,
             .output_reservation = policy.output_reservation,
         } };
     }
@@ -945,6 +948,7 @@ pub const AdmitModel = struct {
             .context_changed = false,
             .usage_tokens = null,
             .uncovered_bytes = 0,
+            .builtin_instruction_bytes = model_catalog.builtinInstructions(facts.model.slice()).bytes().len,
             .output_reservation = policy.output_reservation,
         };
         if (facts.latest_turn != null) {
@@ -985,7 +989,7 @@ pub const AdmitModel = struct {
             .revision = facts.revision.get(),
             .policy = policy,
             .reasoning_effort = configuration_domain.effectiveReasoningEffort(facts),
-            .shipped_context_window = model_capability.contextWindow(@import("../../model_catalog.zig").shipped, facts.model.slice()),
+            .shipped_context_window = model_capability.contextWindow(model_catalog.shipped, facts.model.slice()),
             .instructions = if (purpose == .compaction) 0 else facts.instructions,
             .tool_set_id = facts.tool_set_id.get(),
             .loaded_tool_set_id = if (facts.loaded_tool_set_id) |id| id.get() else null,
@@ -1142,8 +1146,8 @@ pub const DispatchSurvey = struct {
     /// The statement whose failed step names the read's failure.
     pub const named = .{.{ blocked_operation, error.CallReadFailed }};
 
-    pub fn queue(survey: *DispatchSurvey, reader: anytype, paused: bool) void {
-        survey.actions.queue(reader);
+    pub fn queue(survey: *DispatchSurvey, reader: anytype, paused: bool, capacity: DispatchCapacity) void {
+        survey.actions.queue(reader, capacity);
         queueSelection(reader, if (paused) .open_turn_message else .message, &survey.message);
         queueSelection(reader, .tool_continuation, &survey.continuation);
         survey.idle.queue(reader);
@@ -1178,9 +1182,9 @@ pub const DispatchSurvey = struct {
 
 /// Reads `DispatchWork`: `DispatchSurvey`'s round, then the blocked
 /// calls' outcomes when the idle checks ask for them.
-pub fn dispatchWork(reader: anytype, paused: bool) !DispatchWork {
+pub fn dispatchWork(reader: anytype, paused: bool, capacity: DispatchCapacity) !DispatchWork {
     var survey: DispatchSurvey = .{};
-    survey.queue(reader, paused);
+    survey.queue(reader, paused, capacity);
     try store_access.runNamed(reader, DispatchSurvey.named, error.TurnReadFailed);
     if (try survey.unsettled()) try validateBlockedToolCalls(reader);
     return survey.found();

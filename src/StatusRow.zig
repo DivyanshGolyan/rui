@@ -7,6 +7,7 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const chrome = @import("session_chrome.zig");
 const Chip = @import("Chip.zig");
+const Hover = @import("widgets/Hover.zig");
 const Self = @This();
 
 bar: chrome.Bar = .{},
@@ -38,8 +39,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const column = Chip.print(surface, self.method, 0, 0, words, tone, left_end);
     if (keyed and column < left_end) {
         self.key.style = tone;
-        self.key.hover = tone;
-        self.key.hover.ul_style = .single;
+        self.key.hover = Hover.underlined(tone);
         self.key.method = self.method;
         children[used] = .{ .origin = .{ .row = 0, .col = column }, .surface = try self.key.widget().draw(ctx.withConstraints(.{}, .{ .width = left_end - column, .height = 1 })) };
         used += 1;
@@ -47,8 +47,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     if (self.bar.stop and self.bar.stop_column < size.width) {
         self.stop.label = chrome.stop_key;
         self.stop.style = self.quiet;
-        self.stop.hover = self.quiet;
-        self.stop.hover.ul_style = .single;
+        self.stop.hover = Hover.underlined(self.quiet);
         self.stop.method = self.method;
         children[used] = .{ .origin = .{ .row = 0, .col = self.bar.stop_column }, .surface = try self.stop.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width - self.bar.stop_column, .height = 1 })) };
         used += 1;

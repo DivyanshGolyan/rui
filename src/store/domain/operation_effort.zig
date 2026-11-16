@@ -21,8 +21,14 @@ pub fn refusalEligibleSql(comptime operation: []const u8) []const u8 {
     return "(" ++ emittedSql(operation) ++ ") AND " ++ operation ++ ".effort_source_revision>1 AND NOT @same(" ++ operation ++ ".reasoning_effort," ++ operation ++ ".previous_reasoning_effort) AND NOT EXISTS(SELECT 1 FROM session_change source_refusal WHERE source_refusal.session_ref=" ++ operation ++ ".session_ref AND source_refusal.revision=" ++ operation ++ ".effort_source_revision AND source_refusal.field='reasoning_effort_refused')";
 }
 
+/// `projection` over the Session's last Operation admitted before
+/// `boundary` on `model`, named `prior_effort`.
+fn priorSql(comptime projection: []const u8, comptime session: []const u8, comptime boundary: []const u8, comptime model: []const u8) []const u8 {
+    return "(SELECT " ++ projection ++ " FROM model_operation prior_effort @index(model_operation_admission) JOIN session_revision prior_model ON prior_model.session_ref=prior_effort.session_ref AND prior_model.revision=prior_effort.settings_revision WHERE prior_effort.session_ref=" ++ session ++ " AND prior_effort.admission_position<" ++ boundary ++ " AND prior_model.model=" ++ model ++ " ORDER BY prior_effort.admission_position DESC LIMIT 1)";
+}
+
 pub fn previousSql(comptime session: []const u8, comptime boundary: []const u8, comptime model: []const u8) []const u8 {
-    return "(SELECT " ++ effectiveSql("prior_effort") ++ " FROM model_operation prior_effort @index(model_operation_admission) JOIN session_revision prior_model ON prior_model.session_ref=prior_effort.session_ref AND prior_model.revision=prior_effort.settings_revision WHERE prior_effort.session_ref=" ++ session ++ " AND prior_effort.admission_position<" ++ boundary ++ " AND prior_model.model=" ++ model ++ " ORDER BY prior_effort.admission_position DESC LIMIT 1)";
+    return priorSql(effectiveSql("prior_effort"), session, boundary, model);
 }
 
 /// The source revision owns the nullable override. A refusal maps that exact
@@ -32,5 +38,5 @@ pub fn sourceOverrideSql(comptime session: []const u8, comptime source: []const 
 }
 
 pub fn previousOverrideSql(comptime session: []const u8, comptime boundary: []const u8, comptime model: []const u8) []const u8 {
-    return "(SELECT " ++ sourceOverrideSql("prior_effort.session_ref", "prior_effort.effort_source_revision") ++ " FROM model_operation prior_effort @index(model_operation_admission) JOIN session_revision prior_model ON prior_model.session_ref=prior_effort.session_ref AND prior_model.revision=prior_effort.settings_revision WHERE prior_effort.session_ref=" ++ session ++ " AND prior_effort.admission_position<" ++ boundary ++ " AND prior_model.model=" ++ model ++ " ORDER BY prior_effort.admission_position DESC LIMIT 1)";
+    return priorSql(sourceOverrideSql("prior_effort.session_ref", "prior_effort.effort_source_revision"), session, boundary, model);
 }

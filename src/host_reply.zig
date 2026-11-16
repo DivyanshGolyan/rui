@@ -8,6 +8,7 @@ const command_reply = @import("command_reply.zig");
 const AttemptBinding = @import("attempt.zig").AttemptBinding;
 const skill_suggestions = @import("skill_suggestions.zig");
 const activity_reply = @import("activity_reply.zig");
+const CallText = @import("activity_read.zig").CallText;
 
 pub fn activityPageBytes(page: *const protocol.ActivityFacts) usize {
     return if (page.not_modified) protocol.shapeBytes(activity_reply.page_reply.unchanged) else activity_reply.max_page_bytes;
@@ -123,6 +124,20 @@ pub fn renderSessionArchiveReply(
     };
 }
 
+pub fn renderSessionPinReply(
+    response: protocol.JsonOut,
+    session: []const u8,
+    result: command_reply.SessionPinReply,
+) !void {
+    const shapes = protocol.session_pin_reply;
+    try switch (result) {
+        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, value.pinned }),
+        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, value.code }),
+        .conflict => response.appendShape(shapes.conflict, .{session}),
+        .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
+    };
+}
+
 pub fn renderModelInterruptionReply(
     response: protocol.JsonOut,
     target: command_reply.ModelInterruptionTarget,
@@ -158,6 +173,15 @@ pub fn renderPermissionDecisionReply(
         .conflict => response.appendShape(shapes.conflict, .{ session, target.action_id, target.decision }),
         .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
     };
+}
+
+pub fn renderActionRead(response: protocol.JsonOut, value: *const @import("action_read.zig").Read) !void {
+    const shapes = protocol.action_read_reply;
+    try response.appendShape(shapes.head, .{ value.session.slice(), value.action_id });
+    switch (value.status) {
+        .pending => |state| try response.appendShape(shapes.pending, .{state}),
+        .resolved => |*final| try response.appendShape(shapes.final, .{ final.resolution.position, final.resolution.code.slice(), final.resolution.content.length, final.resolution.content.digest, final.window.offset, final.window.next, final.window.more, final.window.text.slice() }),
+    }
 }
 
 pub fn commandObservationBytes(observed: *const command_reply.Observed) usize {
@@ -222,6 +246,7 @@ pub fn renderFullCommandObservation(
             }
         },
         .session_stop => |maybe_stop| if (maybe_stop) |stop| try response.appendShape(shapes.session_stop, .{ stop.selection.selected_turn_id, stop.selection.admission_cutoff, stop.completion }),
+        .session_pin => |pin| if (pin) |value| try response.appendShape(shapes.session_pin, .{value.pinned}),
         .session_archive => |archive| if (archive) |value| try response.appendShape(shapes.session_archive, .{ value.archived, value.completion }),
         .model_interruption => |target| try response.appendShape(shapes.model_interruption, .{ target.session.slice(), target.turn_id, target.operation_id }),
         .permission_decision => |permission| try response.appendShape(shapes.permission_decision, .{ permission.action_id, permission.decision }),
@@ -458,7 +483,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         .{ .admission = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
         .{ .user = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
         .{ .assistant = .{ .content = reference, .final = false } },
-        .{ .call = .{ .position = max, .operation = max, .turn = max, .call_ordinal = max, .action = max, .rejection = Worst.tag(protocol.ProposalRejection), .fields = @splat(field), .description = .{ .bytes = @splat(1), .len = protocol.max_tool_description_bytes }, .tool = .{ .bytes = @splat(1), .len = @import("tool_name.zig").max_bytes }, .server = .{ .bytes = @splat(1), .len = @import("tool_record.zig").max_server_bytes } } },
+        .{ .call = .{ .position = max, .operation = max, .turn = max, .call_ordinal = max, .action = max, .rejection = Worst.tag(protocol.ProposalRejection), .fields = @splat(field), .description = .{ .bytes = @splat(1), .len = CallText.max_description_bytes }, .tool = .{ .bytes = @splat(1), .len = CallText.max_tool_bytes }, .server = .{ .bytes = @splat(1), .len = CallText.max_server_bytes } } },
         .{ .tool_result = .{ .content = reference, .presentation = presentation } },
         .{ .hosted_call = presentation },
         .{ .turn_ended = .{ .session = .{ .bytes = session.bytes[0..6].*, .len = 6 }, .turn = max, .operation = max, .ending = Worst.tag(protocol.TurnEnding), .code = code, .content = reference } },
@@ -466,7 +491,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         .{ .sent = .{ .admission = max, .target = peer, .content = reference, .admitted_at = max } },
         .{ .send_failed = .{ .key = key, .target = peer, .code = code } },
         .{ .received = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
-        .{ .approval_requested = .{ .session = .{ .bytes = session.bytes[0..6].*, .len = 6 }, .action = max, .operation = max, .call_ordinal = max, .description = .{ .bytes = @splat(1), .len = protocol.max_tool_description_bytes }, .tool = .{ .bytes = @splat(1), .len = @import("tool_name.zig").max_bytes }, .server = .{ .bytes = @splat(1), .len = @import("tool_record.zig").max_server_bytes } } },
+        .{ .approval_requested = .{ .session = .{ .bytes = session.bytes[0..6].*, .len = 6 }, .action = max, .operation = max, .call_ordinal = max, .description = .{ .bytes = @splat(1), .len = CallText.max_description_bytes }, .tool = .{ .bytes = @splat(1), .len = CallText.max_tool_bytes }, .server = .{ .bytes = @splat(1), .len = CallText.max_server_bytes } } },
         .{ .session_changed = .{ .revision = max, .field = Worst.tag(protocol.SessionField), .provider_text = .{ .bytes = @splat(1), .len = protocol.max_report_bytes } } },
         .{ .compacted = .{ .operation = max, .dropped = max } },
         .{ .model_call = .{ .model = .{ .bytes = @splat(1), .len = protocol.max_model_bytes }, .served_model = .{ .bytes = @splat(1), .len = protocol.max_model_bytes }, .input_tokens = max, .output_tokens = max, .cached_tokens = max, .latency_ms = max, .first_event_ms = max, .status = code, .attempts = max } },
@@ -532,4 +557,33 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     var suggestions_response: protocol.FixedJsonBuffer(protocol.skill_suggestions_reply.max_bytes) = .{};
     try suggestions_response.render(renderSkillSuggestions, .{&suggestions});
     try std.testing.expectEqual(protocol.skill_suggestions_reply.max_bytes, suggestions_response.len);
+}
+
+test "Action read JSON reaches its exact bound with an escaped final window" {
+    const Read = @import("action_read.zig").Read;
+    const value = try std.testing.allocator.create(Read);
+    defer std.testing.allocator.destroy(value);
+    const max = std.math.maxInt(u64);
+    value.* = .{
+        .session = .{ .bytes = @splat(1), .len = protocol.max_session_bytes },
+        .action_id = max,
+        .status = .{ .resolved = .{
+            .resolution = .{ .position = max, .code = .{ .bytes = @splat(1), .len = protocol.max_code_bytes }, .content = .{ .length = max, .digest = @splat(0xff) } },
+            .window = .{ .offset = max, .next = max, .more = false, .text = .{ .bytes = @splat(1), .len = @import("action_read.zig").window_bytes } },
+        } },
+    };
+    const bytes = try std.testing.allocator.alloc(u8, protocol.action_read_reply.max_bytes);
+    defer std.testing.allocator.free(bytes);
+    var writer = std.Io.Writer.fixed(bytes);
+    try renderActionRead(.{ .writer = &writer }, value);
+    try std.testing.expectEqual(protocol.action_read_reply.max_bytes, writer.buffered().len);
+    writer = .fixed(bytes);
+    try renderActionRead(.{ .writer = &writer }, value);
+    const decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+    defer decoded.deinit();
+    try std.testing.expectEqualStrings("resolved", decoded.value.object.get("state").?.string);
+    value.status = .{ .pending = .queued };
+    writer = .fixed(bytes);
+    try renderActionRead(.{ .writer = &writer }, value);
+    try std.testing.expect(std.mem.endsWith(u8, writer.buffered(), "\"final\":null}"));
 }

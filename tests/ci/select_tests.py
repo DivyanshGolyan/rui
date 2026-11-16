@@ -373,7 +373,7 @@ def tree_uncommon_texts(candidates):
     for name in tracked:
         if not name or matches(name, TEST_CODE) or not (ROOT / name).is_file():
             continue
-        source = source_strings((ROOT / name).read_text())
+        source = source_strings((ROOT / name).read_text(encoding="utf-8", errors="surrogateescape"))
         for text, count in counts.items():
             if count < 3 and text in source:
                 counts[text] += 1
@@ -397,7 +397,7 @@ UPGRADE_PATHS = (UPGRADE, "src/installation_path.zig", "src/TerminalEditor.zig",
 # Keep this standalone even beside check, which does not run the installer driver.
 INSTALLER_PATHS = ("tests/integration/installer_integration.py", "tests/ci/fake_rui.py",
                    "tests/ci/test_install.py", "tests/ci/test_installer_boundary.py", "tests/ci/test_release.py",
-                   "tests/ci/release.py", "tests/ci/release_publication.py", "tests/ci/test_release_publication.py", "tests/ci/release_numbers.py", "tests/ci/qualification.py",
+                   "tests/ci/release.py", "tests/ci/release_publication.py", "tests/ci/git_command.py", "tests/ci/test_release_publication.py", "tests/ci/release_numbers.py", "tests/ci/qualification.py",
                    "src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig",
                    "src/cli.zig", "src/cli_args.zig", *CLI_GRAMMAR, "src/store/schema.zig",
                    "src/fetch_dependencies.sh", "release/*", "install.sh", "build.zig", "build.zig.zon")
@@ -536,7 +536,7 @@ RULES = (
      ("test", "host-launch-integration", "descriptor-capacity-integration", "codex-h2-integration", "transport-h2-integration"),
      ("test", "host-launch-integration", "descriptor-capacity-integration", "codex-h2-integration", "transport-h2-integration"),
      "Startup capacity: every refusal boundary, managed transport and its companion oracle"),
-    (("src/model_instructions.txt",),
+    (("src/model_instructions.txt", "src/model_instructions/*.txt"),
      ("transport-h2-integration", "codex-h2-integration", "current-facts-integration",
       "server-delivery-integration", "measurement-check"),
      ("transport-h2-integration", "codex-h2-integration", "current-facts-integration",
@@ -955,6 +955,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
             "live_needs": sorted(([root, reason] for root, reason in live_needs), key=lambda need: (need[0] or "", need[1])),
             "native_targets": sorted(native_targets), "native_required": bool(native_targets),
             "mac_required": mac_required, "upgrade_required": upgrade_required,
+            "unit_compile_required": "src/store/schema.zig" in paths,
             # Store, recovery and upgrade changes fail for real; never rerun them.
             "retry": not strict(paths),
             "cache_execution_checks": cache_execution_checks,
@@ -978,9 +979,20 @@ def changed_paths(base, head):
     return [p.decode("utf-8", "surrogateescape") for p in raw.split(b"\0") if p], base_commit
 
 
+def merged_base(base, ref, head="HEAD"):
+    """Whether branch history since base merges a commit reachable from ref."""
+    merges = subprocess.check_output(["git", "rev-list", "--merges", "--parents", f"{base}..{head}"], text=True)
+    for line in merges.splitlines():
+        for parent in line.split()[2:]:
+            if subprocess.run(["git", "merge-base", "--is-ancestor", parent, ref]).returncode == 0:
+                return True
+    return False
+
+
 def revision_text(commit, path):
     """The path's text at commit, or None where the commit has no such file."""
-    shown = subprocess.run(["git", "show", f"{commit}:{path}"], capture_output=True, text=True)
+    shown = subprocess.run(["git", "show", f"{commit}:{path}"], capture_output=True, text=True,
+                           encoding="utf-8", errors="surrogateescape")
     return shown.stdout if shown.returncode == 0 else None
 
 
@@ -988,6 +1000,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", required=True)
     parser.add_argument("--head", default="HEAD")
+    parser.add_argument("--branch-head", default="", help="PR branch head whose main-merge history requires all-unit compilation")
     parser.add_argument("--phase", choices=("development", "review"), default="review")
     args = parser.parse_args()
     available = set(build_files.steps())
@@ -998,6 +1011,9 @@ def main():
                               for path in paths
                               if path.startswith("src/") or path == FIXTURE_TABLE
                               or any(matches(path, patterns) for patterns, _ in CONTENT_RULES.values())})
+    if args.branch_head:
+        branch_base = subprocess.check_output(["git", "merge-base", args.branch_head, base], text=True).strip()
+        result["unit_compile_required"] |= merged_base(branch_base, base, args.branch_head)
     result["base"] = base
     result["head"] = head
     print(json.dumps(result, indent=2))

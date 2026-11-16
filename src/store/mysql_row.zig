@@ -15,8 +15,10 @@
 //! failure the rest of the result is still due; its owner drains it.
 const std = @import("std");
 const Bounded = @import("../bounded.zig").Bounded;
+const isBounded = @import("../bounded.zig").isBounded;
 const mysql = @import("wire/mysql.zig");
 const rsql = @import("rsql.zig");
+const isBlob = rsql.isBlob;
 
 /// MySQL's `binary` character set: a column of bytes, not text. Numbers
 /// carry it too, so a column of bytes is a string type with it.
@@ -137,18 +139,6 @@ fn decodeHead(kinds: *const [3]Kind, source: anytype, out: *rsql.SessionHead) !v
     if ((try readText(try nextValue(source), source, &ref)).len != ref.len) return error.CorruptStore;
     const workspace_key = try readPositive(kinds[1], try nextValue(source), source);
     out.* = .{ .ref = ref, .workspace_key = workspace_key, .next_position = try readPositive(kinds[2], try nextValue(source), source) };
-}
-
-/// Whether `T` is an `rsql.Blob`: bytes up to its capacity.
-fn isBlob(comptime T: type) bool {
-    return @typeInfo(T) == .@"struct" and @hasDecl(T, "blob_capacity") and T == rsql.Blob(T.blob_capacity);
-}
-
-/// Whether `T` is a `Bounded` text.
-fn isBounded(comptime T: type) bool {
-    if (@typeInfo(T) != .@"struct" or !@hasField(T, "bytes")) return false;
-    const bytes = @typeInfo(@FieldType(T, "bytes"));
-    return bytes == .array and T == Bounded(bytes.array.len);
 }
 
 fn maxTagBytes(comptime Enum: type) usize {

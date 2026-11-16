@@ -33,6 +33,7 @@ const allowed_std = [_][]const u8{
 /// Pure constants and parsers exposed beside effectful standard-library APIs.
 /// Unlike namespace allowances, these grant no sibling or child access.
 const allowed_std_exact = [_][]const u8{
+    "std.hash.Wyhash.hash",
     "std.posix.PATH_MAX",
     "std.fs.path.isAbsolute",
     "std.Io.net.Ip6Address.parse",
@@ -364,7 +365,7 @@ test "clock methods are reflected from every time type a core may hold" {
 test "pure standard leaves do not grant sibling I/O or child namespaces" {
     inline for (.{
         "std.posix.PATH_MAX",          "std.fs.path.isAbsolute", "std.Io.net.Ip6Address.parse",
-        "std.Io.net.HostName.max_len",
+        "std.Io.net.HostName.max_len", "std.hash.Wyhash.hash",
     }) |path| {
         try std.testing.expectEqual(@as(?Violation, null), check("const value = " ++ path ++ ";", &.{}));
         try std.testing.expect(check("const value = " ++ path ++ ".effect;", &.{}) != null);
@@ -373,7 +374,7 @@ test "pure standard leaves do not grant sibling I/O or child namespaces" {
     inline for (.{
         "std.posix.read",               "std.posix",                     "std.fs.path",         "std.fs.openFileAbsolute",
         "std.Io.net.Ip6Address",        "std.Io.net.Ip6Address.resolve", "std.Io.net.HostName", "std.Io.net.HostName.lookup",
-        "std.Io.net.IpAddress.connect", "std.builtin.Type.StructField",
+        "std.Io.net.IpAddress.connect", "std.builtin.Type.StructField",  "std.hash.Wyhash",     "std.hash.Wyhash.init",
     }) |path| try std.testing.expect(check("const value = " ++ path ++ ";", &.{}) != null);
     // A path to an unregistered core remains forbidden even with a named value module.
     try std.testing.expect(check("const url = @import(\"url.zig\");", &.{}) != null);

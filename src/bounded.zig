@@ -20,8 +20,22 @@ pub fn Bounded(comptime capacity: usize) type {
             self.len = value.len;
         }
 
+        /// A value holding `text`, refused as `set` refuses it.
+        pub fn from(text: []const u8) error{ ValueTooLong, InvalidUtf8 }!@This() {
+            var value: @This() = .{ .len = 0 };
+            try value.set(text);
+            return value;
+        }
+
         pub fn eql(self: *const @This(), value: []const u8) bool {
             return std.mem.eql(u8, self.slice(), value);
         }
     };
+}
+
+/// Whether `T` is a `Bounded` text.
+pub fn isBounded(comptime T: type) bool {
+    if (@typeInfo(T) != .@"struct" or !@hasField(T, "bytes")) return false;
+    const bytes = @typeInfo(@FieldType(T, "bytes"));
+    return bytes == .array and T == Bounded(bytes.array.len);
 }

@@ -7,4 +7,4 @@ Other Sessions: `rui session start` reads a task on stdin, starts a Session and 
 
 Always end with a non-empty final answer. Continue the current task after context compaction.
 
-Session instructions:
+{}Session instructions:

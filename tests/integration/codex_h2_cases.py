@@ -74,9 +74,9 @@ def run(*, observed=False, intake=100):
         # controls and discovery, authentication, and the intake wake pair.
         default_required = 3 + os_semantics.HOST_FIXED_DESCRIPTORS + DEFAULT_CLIENT_DESCRIPTORS + 10 + os_semantics.AUTHENTICATION_DESCRIPTORS + 2
         minimum_required = default_required - ORDINARY_EXCHANGE_DESCRIPTORS * (100 - 10)
-        serve = [fixture.RUI, "host", "serve", "--store", store, "--active-capacity", "1",
+        serve = [fixture.RUI, "host", "serve", "--store", store, "--set", 'execution.activeCapacity=1',
                  "--test-codex-fixture-endpoint", f"https://localhost:{endpoint.server_address[1]}/responses",
-                 "--provider-ca-file", root / "cert.pem", "--test-phase-trace"]
+                 "--set", "network.caFile=" + str(root / "cert.pem"), "--test-phase-trace"]
         def limited(limit):
             return ["sh", "-c", 'set -e; ulimit -Sn "$1"; ulimit -Hn "$1"; shift; exec "$@"',
                     "rui-managed-descriptors", str(limit), *serve]
@@ -237,7 +237,7 @@ def openai_base_url_run(*, catalog_available=False):
     try:
         catalog_url = f"https://localhost:{endpoint.server_address[1]}/api.json" if catalog_available else "https://127.0.0.1:1/api.json"
         # A served provider uses system trust, which this certificate joins.
-        host, ready = start_ready_process([fixture.RUI, "host", "serve", "--store", store, "--provider", "openai", "--active-capacity", "1",
+        host, ready = start_ready_process([fixture.RUI, "host", "serve", "--store", store, "--set", 'providers={"openai":{}}', "--set", 'execution.activeCapacity=1',
             "--test-models-dev-url", catalog_url], env={
             **os.environ, "RUI_OPENAI_KEY_FILE": str(key_file), **os_semantics.system_trust(root / "cert.pem"),
             "RUI_OPENAI_BASE_URL": f"https://localhost:{endpoint.server_address[1]}/custom/v1/",
@@ -306,7 +306,7 @@ def openai_base_url_run(*, catalog_available=False):
         fixture.stop_host(host)
         host = None
         endpoint.models = b'{"error":"model list unavailable"}'
-        host, ready = start_ready_process([fixture.RUI, "host", "serve", "--store", store, "--provider", "openai", "--active-capacity", "1"], env={
+        host, ready = start_ready_process([fixture.RUI, "host", "serve", "--store", store, "--set", 'providers={"openai":{}}', "--set", 'execution.activeCapacity=1'], env={
             **os.environ, "RUI_OPENAI_KEY_FILE": str(key_file), **os_semantics.system_trust(root / "cert.pem"),
             "RUI_OPENAI_BASE_URL": f"https://localhost:{endpoint.server_address[1]}/custom/v1/",
         })
@@ -382,8 +382,8 @@ def saved_catalog_run():
     env = {**os.environ, "RUI_OPENAI_KEY_FILE": str(key_file),
            **os_semantics.system_trust(root / "cert.pem"),
            "RUI_OPENAI_BASE_URL": f"https://localhost:{endpoint.server_address[1]}/v1/"}
-    arguments = [fixture.RUI, "host", "serve", "--store", store, "--provider", "openai",
-                 "--active-capacity", "1", "--test-models-dev-url",
+    arguments = [fixture.RUI, "host", "serve", "--store", store, "--set", 'providers={"openai":{}}',
+                 "--set", 'execution.activeCapacity=1', "--test-models-dev-url",
                  f"https://localhost:{endpoint.server_address[1]}/api.json"]
 
     def listed():
@@ -536,7 +536,7 @@ def saved_catalog_run():
         credential = root / "codex.json"
         codex.credentials(credential)
         codex_arguments = arguments.copy()
-        codex_arguments[codex_arguments.index("--provider") + 1] = "codex"
+        codex_arguments[codex_arguments.index('providers={"openai":{}}')] = 'providers={"codex":{}}'
         host, ready = start_ready_process(codex_arguments, env={**env, "RUI_CODEX_CREDENTIAL_FILE": str(credential)})
         codex_list = h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
         assert codex_list == [{"provider": "codex", "source": "catalog",

@@ -1,6 +1,6 @@
 //! One invocation's logical drafts. Initialize in final storage; never move.
 const std = @import("std");
-const Editor = @import("TerminalEditor.zig");
+const Editor = @import("DraftEditor.zig");
 const keymap = @import("keymap.zig");
 const slash_commands = @import("slash_commands.zig").conversation;
 const Self = @This();
@@ -52,7 +52,9 @@ editors: [2]Editor = undefined,
 command_buffer: [capacity]u8 = undefined,
 command_length: ?usize = null,
 active: u1 = 0,
-submitted: ?struct { bank: u1, literal: bool } = null,
+/// The loaned bank and its Message's length; the bank's editor no longer
+/// holds it.
+submitted: ?struct { bank: u1, literal: bool, length: usize } = null,
 serial: u64 = 0,
 recall: Recall = .{},
 /// Counts the draft's changes: each edit, clear, send and recalled Message.
@@ -67,7 +69,9 @@ pub fn init(self: *Self) void {
 
 /// A bank's empty draft, whose Tab completes what the command list shows.
 fn empty(self: *Self, bank: u1) Editor {
-    return .{ .buffer = &self.banks[bank], .completion = self.completion };
+    var editor: Editor = .init(&self.banks[bank]);
+    editor.completion = self.completion;
+    return editor;
 }
 
 /// Sets what Tab adds in every draft, now and after each reset.
@@ -78,33 +82,73 @@ pub fn complete(self: *Self, completion: Editor.Completion) void {
 
 /// Adds `text` at the draft's end, as Tab's completion does.
 pub fn append(self: *Self, text: []const u8) Editor.KeyOutcome {
-    const editor = &self.editors[self.active];
-    const edits = editor.edits;
-    const outcome = editor.append(text);
-    if (editor.edits != edits) self.changed();
-    return outcome;
+    return self.tracked(Editor.KeyOutcome, Editor.append, .{text});
 }
 
 /// Puts `change`'s text in place of its range, as Tab's completion does.
 pub fn replace(self: *Self, change: Editor.Replacement) Editor.KeyOutcome {
+    return self.tracked(Editor.KeyOutcome, Editor.replace, .{change});
+}
+
+/// A press names this draft and caret, not whichever draft is active later.
+pub const Insertion = struct { owner: *const Self, revision: u64, bank: u1, caret: usize };
+
+pub fn insertionTarget(self: *const Self) ?Insertion {
+    const editor = &self.editors[self.active];
+    if (editor.rejected != null or editor.pasting() or editor.area.partial_length != 0) return null;
+    return .{ .owner = self, .revision = self.revision, .bank = self.active, .caret = editor.cursor() };
+}
+
+/// Quotes displayed body text without touching a loaned submission or replacing
+/// the draft. The temporary Markdown belongs to this call only.
+pub fn insertQuote(self: *Self, gpa: std.mem.Allocator, target: Insertion, body: []const u8) !Editor.KeyOutcome {
+    if (!std.meta.eql(self.insertionTarget(), @as(?Insertion, target)) or body.len == 0) return .none;
+    const draft = self.composition();
+    const leading = target.caret != 0 and draft.bytes[target.caret - 1] != '\n';
+    var length: usize = @intFromBool(leading);
+    var lines = std.mem.splitScalar(u8, body, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0 and lines.index == null and std.mem.endsWith(u8, body, "\n")) break;
+        if (line.len > capacity or length > capacity - line.len) return .{ .refused = .overflow };
+        length += line.len + 2 + @intFromBool(line.len != 0);
+        if (length > capacity - draft.bytes.len) return .{ .refused = .overflow };
+    }
+    const markdown = try gpa.alloc(u8, length);
+    defer gpa.free(markdown);
+    var out = std.Io.Writer.fixed(markdown);
+    if (leading) try out.writeByte('\n');
+    lines.reset();
+    while (lines.next()) |line| {
+        if (line.len == 0 and lines.index == null and std.mem.endsWith(u8, body, "\n")) break;
+        try out.writeByte('>');
+        if (line.len != 0) try out.writeByte(' ');
+        try out.writeAll(line);
+        try out.writeByte('\n');
+    }
+    return self.tracked(std.mem.Allocator.Error!Editor.KeyOutcome, Editor.insertMultiline, .{ gpa, out.buffered() });
+}
+
+/// Runs `method` on the active draft with `args`, and marks the draft
+/// changed when the call edited it.
+fn tracked(self: *Self, comptime Outcome: type, comptime method: anytype, args: anytype) Outcome {
     const editor = &self.editors[self.active];
     const edits = editor.edits;
-    const outcome = editor.replace(change);
+    const outcome = @call(.auto, method, .{editor} ++ args);
     if (editor.edits != edits) self.changed();
     return outcome;
 }
 
 pub fn composition(self: *const Self) View {
     const editor = &self.editors[self.active];
-    return .{ .bytes = editor.buffer[0..editor.length], .cursor = editor.cursor };
+    return .{ .bytes = editor.text(), .cursor = editor.cursor() };
 }
 
 /// Captures the active draft without transferring its storage.
 pub fn snapshot(self: *const Self) Snapshot {
     const editor = &self.editors[self.active];
     return .{
-        .bytes = editor.buffer[0..editor.length],
-        .cursor = editor.cursor,
+        .bytes = editor.text(),
+        .cursor = editor.cursor(),
         .anchor = self.recall.shown,
         .rejected = editor.rejected,
     };
@@ -115,18 +159,14 @@ pub fn restore(self: *Self, draft: Snapshot) void {
     std.debug.assert(draft.bytes.len <= capacity and draft.cursor <= draft.bytes.len);
     self.clear();
     const editor = &self.editors[self.active];
-    @memmove(editor.buffer[0..draft.bytes.len], draft.bytes);
-    editor.length = draft.bytes.len;
-    editor.cursor = draft.cursor;
+    // A snapshot is this input's own draft, which its editor already held.
+    std.debug.assert(editor.set(draft.bytes, draft.cursor) == null);
     editor.rejected = draft.rejected;
     self.recall.shown = draft.anchor;
 }
 
 pub fn appEvent(self: *Self, comptime keys: anytype, event: @import("vaxis").vxfw.Event, pasting: bool, selected: bool) Event(@TypeOf(keys).Action) {
-    const editor = &self.editors[self.active];
-    const edits = editor.edits;
-    const outcome = editor.appEvent(keys, event, pasting);
-    if (editor.edits != edits) self.changed();
+    const outcome = self.tracked(keymap.Outcome(@TypeOf(keys).Action), Editor.appEvent, .{ keys, event, pasting });
     return self.accept(@TypeOf(keys).Action, outcome, selected);
 }
 
@@ -149,7 +189,7 @@ test "Ctrl-J inserts at the caret without submitting, in every encoding" {
         errdefer std.debug.print("bytes={any}\n", .{bytes});
         self.init();
         _ = self.append("leftRIGHT");
-        self.editors[self.active].cursor = 4;
+        self.editors[self.active].setCursor(4);
         try std.testing.expect(self.typed(bytes) == .editor);
         try std.testing.expectEqualStrings("left\nRIGHT", self.composition().bytes);
         try std.testing.expectEqual(@as(usize, 5), self.composition().cursor);
@@ -172,7 +212,7 @@ fn accept(self: *Self, comptime Action: type, outcome: keymap.Outcome(Action), s
         .message, .word => {},
     }
     if (!selected or self.submitted != null) return .busy;
-    return .{ .message = self.seal(false) };
+    return .{ .message = self.seal(false, bytes.len) };
 }
 
 /// Whether a command may run now, typed or clicked: only while none waits.
@@ -202,11 +242,8 @@ pub fn takeCommand(self: *Self) ?[]const u8 {
 /// including leading slashes, and uses the same retained submission bank.
 pub fn submitText(self: *Self, text: []const u8) Ticket {
     std.debug.assert(self.submitted == null and text.len <= capacity);
-    const editor = &self.editors[self.active];
-    @memcpy(editor.buffer[0..text.len], text);
-    editor.length = text.len;
-    editor.cursor = text.len;
-    return self.seal(true);
+    @memcpy(self.banks[self.active][0..text.len], text);
+    return self.seal(true, text.len);
 }
 
 /// Loans the staged Message's exact bytes, including slashes, without editing
@@ -218,16 +255,16 @@ pub fn submitPreservingDraft(self: *Self, io: std.Io, file: std.Io.File, length:
     const bytes = self.banks[bank][0..length];
     if (try file.readPositionalAll(io, bytes, 0) != length) return error.TruncatedRetryScratch;
     self.editors[bank] = self.empty(bank);
-    self.editors[bank].length = length;
-    self.editors[bank].cursor = length;
     self.serial += 1;
-    self.submitted = .{ .bank = bank, .literal = true };
+    self.submitted = .{ .bank = bank, .literal = true, .length = length };
     return .{ .owner = self, .serial = self.serial };
 }
 
-fn seal(self: *Self, literal: bool) Ticket {
+/// Loans the active bank's first `length` bytes and edits in the other.
+fn seal(self: *Self, literal: bool, length: usize) Ticket {
     self.serial += 1;
-    self.submitted = .{ .bank = self.active, .literal = literal };
+    self.submitted = .{ .bank = self.active, .literal = literal, .length = length };
+    self.editors[self.active] = self.empty(self.active);
     self.active ^= 1;
     self.clear();
     return .{ .owner = self, .serial = self.serial };
@@ -289,15 +326,19 @@ pub fn land(self: *Self, step: Step, found: ?Found) Landing {
 
 /// Replaces the draft with a found Message's bytes from `file`, the caret at
 /// their end. Text that begins with `/` takes a second one, as typing it
-/// would, so Enter sends it rather than running a command.
+/// would, so Enter sends it rather than running a command. The recall worker
+/// staged only text `DraftEditor.textCheck()` accepts, so the draft always
+/// holds it.
 pub fn fill(self: *Self, io: std.Io, file: std.Io.File, found: Found) !void {
     const editor = &self.editors[self.active];
     editor.* = self.empty(self.active);
+    const bank = &self.banks[self.active];
     const start = @intFromBool(found.slash);
-    if (found.slash) editor.buffer[0] = '/';
-    if (try file.readPositionalAll(io, editor.buffer[start..][0..found.length], 0) != found.length) return error.TruncatedDisplayScratch;
-    editor.length = start + found.length;
-    editor.cursor = editor.length;
+    if (found.slash) bank[0] = '/';
+    if (try file.readPositionalAll(io, bank[start..][0..found.length], 0) != found.length) return error.TruncatedDisplayScratch;
+    const length = start + found.length;
+    // The recall worker staged only text the draft's own check takes.
+    std.debug.assert(editor.set(bank[0..length], length) == null);
     self.revision +%= 1;
     self.recall.shown = found.at;
 }
@@ -305,8 +346,7 @@ pub fn fill(self: *Self, io: std.Io, file: std.Io.File, found: Found) !void {
 /// The submission owner retains this immutable loan through capture and join.
 pub fn message(self: *const Self, ticket: Ticket) ![]const u8 {
     const submitted = try self.checked(ticket);
-    const editor = &self.editors[submitted.bank];
-    const bytes = editor.buffer[0..editor.length];
+    const bytes = self.banks[submitted.bank][0..submitted.length];
     return if (!submitted.literal and std.mem.startsWith(u8, bytes, "//")) bytes[1..] else bytes;
 }
 
@@ -507,9 +547,14 @@ test "a recall step lands only on the draft it began from, one at a time" {
 
 test "Tab puts in the list's first word at the draft's end and adds a tab anywhere else" {
     const List = struct {
-        fn add(_: *const anyopaque, draft: []const u8, _: usize) ?Editor.Replacement {
-            const list = slash_commands.suggest(draft, .{}) orelse return null;
-            return .append(draft, if (list.count == 0) "" else list.completion(0));
+        fn add(_: *const anyopaque, draft: []const u8, caret: usize) ?Editor.Replacement {
+            const completion = @import("skill_completion.zig");
+            var reads: completion.Reads = .{};
+            var rows: completion.Rows = .{};
+            const shown = reads.shown(&rows, draft, caret, 1, .{}, null) orelse
+                return if (slash_commands.suggest(draft, .{}) != null) .append(draft, "") else null;
+            const change = completion.edit(draft, caret, &shown);
+            return .{ .start = change.start, .end = change.end, .text = change.text };
         }
     };
     const cases = [_]struct { typed: []const u8, shown: []const u8 }{
@@ -565,4 +610,58 @@ test "SessionInput retry loan preserves the whole active editor and recall even 
         try std.testing.expectEqualDeep(editor, self.editors[self.active]);
         try std.testing.expectEqualDeep(recall, self.recall);
     }
+}
+
+test "quote insertion preserves draft banks revision and caret ownership" {
+    const gpa = std.testing.allocator;
+    const self = try gpa.create(Self);
+    defer gpa.destroy(self);
+    self.init();
+    const ticket = self.submitText("loaned original");
+    _ = self.append("leftRIGHT");
+    self.editors[self.active].setCursor(4);
+    const target = self.insertionTarget().?;
+    const revision = self.revision;
+    try std.testing.expectEqual(Editor.KeyOutcome.redraw, try self.insertQuote(gpa, target, "雪e\u{301}\n\n  indented"));
+    try std.testing.expectEqualStrings("left\n> 雪e\u{301}\n>\n>   indented\nRIGHT", self.composition().bytes);
+    try std.testing.expectEqual(@as(usize, "left\n> 雪e\u{301}\n>\n>   indented\n".len), self.composition().cursor);
+    try std.testing.expectEqual(revision + 1, self.revision);
+    try std.testing.expectEqualStrings("loaned original", try self.message(ticket));
+    const after = self.composition();
+    try std.testing.expectEqual(Editor.KeyOutcome.none, try self.insertQuote(gpa, target, "stale"));
+    try std.testing.expectEqualStrings(after.bytes, self.composition().bytes);
+    const moved = self.insertionTarget().?;
+    self.editors[self.active].setCursor(0);
+    try std.testing.expectEqual(Editor.KeyOutcome.none, try self.insertQuote(gpa, moved, "stale caret"));
+    try std.testing.expectEqual(@as(usize, 0), self.composition().cursor);
+}
+
+test "quote insertion overflow leaves the draft usable and untouched" {
+    const gpa = std.testing.allocator;
+    const self = try gpa.create(Self);
+    defer gpa.destroy(self);
+    self.init();
+    var text: [capacity - 1]u8 = @splat('a');
+    _ = self.append(&text);
+    self.editors[self.active].setCursor(3);
+    const target = self.insertionTarget().?;
+    const revision = self.revision;
+    try std.testing.expectEqual(Editor.KeyOutcome{ .refused = .overflow }, try self.insertQuote(gpa, target, "a"));
+    try std.testing.expectEqualStrings(&text, self.composition().bytes);
+    try std.testing.expectEqual(@as(usize, 3), self.composition().cursor);
+    try std.testing.expectEqual(revision, self.revision);
+    try std.testing.expectEqual(null, self.editors[self.active].rejected);
+    try std.testing.expect(self.typed("\r") == .message);
+}
+
+test "quote insertion never moves an existing regional indicator suffix into the quote" {
+    const gpa = std.testing.allocator;
+    const self = try gpa.create(Self);
+    defer gpa.destroy(self);
+    self.init();
+    _ = self.append("🇧 original suffix");
+    self.editors[self.active].setCursor(0);
+    try std.testing.expectEqual(Editor.KeyOutcome.redraw, try self.insertQuote(gpa, self.insertionTarget().?, "🇦"));
+    try std.testing.expectEqualStrings("> 🇦\n🇧 original suffix", self.composition().bytes);
+    try std.testing.expectEqual(@as(usize, "> 🇦\n".len), self.composition().cursor);
 }

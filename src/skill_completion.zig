@@ -63,20 +63,21 @@ pub fn skillWordAt(draft: []const u8, caret: usize) ?Word {
 pub const Rank = enum { exact, prefix, inside, description };
 
 /// How a row matches the typed name, and the bytes the list bolds.
-pub const Match = struct { rank: Rank, bold: slash_commands.Bold };
+pub const Match = struct { rank: Rank, spans: slash_commands.MatchSpans };
 
-/// The one rule every `/word` list shows rows by: a row whose `shown`
-/// text, `/name`, holds `typed` in its name, else whose description holds
-/// it, ignoring ASCII case. Null for a row that does not match.
-pub fn match(typed: []const u8, shown: []const u8, description: []const u8) ?Match {
-    std.debug.assert(shown.len != 0 and shown[0] == '/');
-    const name = shown[1..];
-    if (std.ascii.findIgnoreCase(name, typed)) |at| {
-        const rank: Rank = if (at != 0) .inside else if (name.len == typed.len) .exact else .prefix;
-        return .{ .rank = rank, .bold = .{ .in = .shown, .start = 1 + at, .len = typed.len } };
-    }
-    const at = std.ascii.findIgnoreCase(description, typed) orelse return null;
-    return .{ .rank = .description, .bold = .{ .in = .description, .start = at, .len = typed.len } };
+/// The one filtering and ranking rule, shared by the Host's bounded skill
+/// preview and the composer's combined command/skill rows. Names and
+/// descriptions match ASCII case-insensitive substrings.
+pub fn match(typed: []const u8, name: []const u8, description: []const u8) ?Match {
+    const name_at = std.ascii.findIgnoreCase(name, typed);
+    const description_at = std.ascii.findIgnoreCase(description, typed);
+    const rank: Rank = if (name_at) |at|
+        (if (at != 0) .inside else if (name.len == typed.len) .exact else .prefix)
+    else if (description_at != null) .description else return null;
+    return .{ .rank = rank, .spans = .{
+        .name = if (name_at) |at| .{ .start = 1 + at, .len = typed.len } else null,
+        .description = if (description_at) |at| .{ .start = at, .len = typed.len } else null,
+    } };
 }
 
 /// The longest name prefix the Host reads suggestions for.
@@ -178,15 +179,18 @@ pub const Reads = struct {
     /// each word. Anywhere else, the command grammar's own list for the
     /// draft, read against `context`. Null when nothing matches.
     pub fn shown(self: *const Reads, rows: *Rows, draft: []const u8, caret: usize, revision: u64, context: slash_commands.Context, previous: ?slash_commands.Shown) ?slash_commands.Shown {
-        const word = skillWordAt(draft, caret) orelse return slash_commands.Shown.next(previous, revision, slash_commands.conversation.suggest(draft, context));
+        const word = skillWordAt(draft, caret) orelse {
+            const source = if (context.model) |model| std.hash.Wyhash.hash(0, model) else 0;
+            return slash_commands.Shown.nextOf(previous, revision, source, slash_commands.conversation.suggest(draft, context));
+        };
         const typed = word.name(draft);
         const held = if (self.held) |*kept| (if (std.mem.startsWith(u8, typed, kept.prefix.slice())) kept else null) else null;
         const none: skill_suggestions.Page = .{};
         const page = if (held) |kept| &kept.page else &none;
         // What the rows come from besides the draft: the caret's word and
         // the page read for it. The held read, else none, in the high half;
-        // one past the word's `/` in the low, so no word's list is ever the
-        // grammar's own, which is 0. A draft holds far fewer than 2^32 bytes.
+        // one past the word's `/` in the low. A draft holds far fewer than
+        // 2^32 bytes.
         const source = ((if (held) |kept| kept.read else 0) << 32) | (@as(u32, @intCast(word.slash)) + 1);
         const commands = if (word.slash == 0) slash_commands.conversation.listed() else null;
         return slash_commands.Shown.nextOf(previous, revision, source, rows.list(typed, commands, page));
@@ -205,44 +209,38 @@ pub const Rows = struct {
     /// the commands a skill of that name could never be sent and is left
     /// out. Null when nothing matches.
     pub fn list(self: *Rows, typed: []const u8, commands: ?slash_commands.List, page: *const skill_suggestions.Page) ?slash_commands.List {
-        const capacity = slash_commands.List.capacity;
-        var found: [capacity]slash_commands.Entry = undefined;
-        var ranks: [capacity]Rank = undefined;
-        var count: usize = 0;
-        if (commands) |listed| for (listed.shown()) |entry| {
-            const matched = match(typed, entry.shown, entry.description) orelse continue;
-            found[count] = entry;
-            found[count].bold = matched.bold;
-            ranks[count] = matched.rank;
-            count += 1;
-        };
-        for (page.entries) |entry| {
-            if (count == capacity) break;
-            if (commands != null and slash_commands.conversation.nameOf(entry.name) != null) continue;
-            const text = &self.text[count];
-            text[0] = '/';
-            @memcpy(text[1..][0..entry.name.len], entry.name);
-            text[1 + entry.name.len] = ' ';
-            const shown = text[0 .. entry.name.len + 1];
-            const matched = match(typed, shown, entry.description) orelse continue;
-            found[count] = .{
-                .word = text[1 .. entry.name.len + 2],
-                .shown = shown,
-                .description = entry.description,
-                .runs = false,
-                .bold = matched.bold,
-            };
-            ranks[count] = matched.rank;
-            count += 1;
-        }
-        if (count == 0) return null;
         var rows: slash_commands.List = .{ .typed = typed, .column = if (commands) |listed| listed.column else null };
-        for (std.enums.values(Rank)) |rank| for (found[0..count], ranks[0..count]) |entry, kept| {
-            if (kept != rank) continue;
-            rows.entries[rows.count] = entry;
-            rows.count += 1;
-        };
-        return rows;
+        // Rank before bounding: a late exact skill must survive a page of
+        // weaker commands or skills. Commands retain precedence within a rank.
+        for (std.enums.values(Rank)) |rank| {
+            if (commands) |listed| for (listed.shown()) |entry| {
+                const matched = match(typed, entry.shown[1..], entry.description) orelse continue;
+                if (matched.rank != rank) continue;
+                if (rows.count == slash_commands.List.capacity) return rows;
+                rows.entries[rows.count] = entry;
+                rows.entries[rows.count].matches = matched.spans;
+                rows.count += 1;
+            };
+            for (page.entries) |entry| {
+                if (commands != null and slash_commands.conversation.nameOf(entry.name) != null) continue;
+                const matched = match(typed, entry.name, entry.description) orelse continue;
+                if (matched.rank != rank) continue;
+                if (rows.count == slash_commands.List.capacity) return rows;
+                const text = &self.text[rows.count];
+                text[0] = '/';
+                @memcpy(text[1..][0..entry.name.len], entry.name);
+                text[1 + entry.name.len] = ' ';
+                rows.entries[rows.count] = .{
+                    .word = text[1 .. entry.name.len + 2],
+                    .shown = text[0 .. entry.name.len + 1],
+                    .description = entry.description,
+                    .runs = false,
+                    .matches = matched.spans,
+                };
+                rows.count += 1;
+            }
+        }
+        return if (rows.count == 0) null else rows;
     }
 };
 
@@ -339,7 +337,7 @@ test "skill completion agrees with the Host on every name the Host binds" {
     }
 }
 
-test "skill completion lists the page's skills the name starts" {
+test "skill completion lists matching page skills" {
     const entries = [_]skill_suggestions.Entry{
         .{ .name = "recap", .description = "Summarise" },
         .{ .name = "review", .description = "Review a change" },
@@ -357,7 +355,7 @@ test "skill completion lists the page's skills the name starts" {
     try std.testing.expectEqual(@as(?slash_commands.List, null), rows.list("zz", null, &page));
 }
 
-test "skill completion stops at the list's capacity" {
+test "skill completion bounds the ranked list, not its candidates" {
     var names: [slash_commands.List.capacity + 2][8]u8 = undefined;
     var entries: [names.len]skill_suggestions.Entry = undefined;
     for (&names, &entries, 0..) |*name, *entry, index| {
@@ -366,11 +364,13 @@ test "skill completion stops at the list's capacity" {
         name[7] = '0' + @as(u8, @intCast(index % 10));
         entry.* = .{ .name = name, .description = "" };
     }
+    entries[entries.len - 1].name = "skill";
     const page: skill_suggestions.Page = .{ .entries = &entries, .total = entries.len };
     var rows: Rows = .{};
-    const listed = rows.list("", null, &page).?;
+    const listed = rows.list("skill", null, &page).?;
     try std.testing.expectEqual(slash_commands.List.capacity, listed.count);
-    try std.testing.expectEqualStrings("/skill-23", listed.entries[23].shown);
+    try std.testing.expectEqualStrings("/skill", listed.entries[0].shown);
+    try std.testing.expectEqualStrings("/skill-22", listed.entries[23].shown);
 }
 
 fn expectReplacement(expected: Replacement, actual: Replacement) !void {
@@ -447,9 +447,8 @@ test "a /word's list ranks exact, prefix, inside and description matches, comman
         try std.testing.expectEqual(case.rows.len, shown.list.count);
         for (case.rows, shown.list.shown()) |expected, entry| {
             try std.testing.expectEqualStrings(expected.shown, entry.shown);
-            const bold = entry.bold.?;
-            try std.testing.expectEqual(expected.in_description, bold.in == .description);
-            const text = if (bold.in == .description) entry.description else entry.shown;
+            const bold = (if (expected.in_description) entry.matches.description else entry.matches.name).?;
+            const text = if (expected.in_description) entry.description else entry.shown;
             try std.testing.expectEqualStrings(expected.bold, text[bold.start..][0..bold.len]);
         }
     }
@@ -466,7 +465,7 @@ test "skills do not replace a command argument or invent an argument list" {
 test "leading skill collisions use the complete grammar including hidden commands" {
     // Independent command-domain oracle: the two recovery actions are grammar,
     // even though neither is a row in the slash list.
-    const names = [_][]const u8{ "archive", "clear", "copy", "discard", "effort", "model", "new", "recover", "reload-skills", "rename", "requests", "result", "setup", "unarchive" };
+    const names = [_][]const u8{ "archive", "clear", "copy", "discard", "effort", "model", "new", "pin", "recover", "reload-skills", "rename", "requests", "result", "setup", "unarchive", "unpin" };
     var entries: [names.len]skill_suggestions.Entry = undefined;
     for (names, &entries) |name, *entry| entry.* = .{ .name = name, .description = "Colliding skill" };
     var reads: Reads = .{};
@@ -521,8 +520,8 @@ test "leading skill collisions use the complete grammar including hidden command
 
 test "chat table lists all commands with descriptions plus every loaded skill" {
     try std.testing.expect(!@hasDecl(slash_commands, "overview"));
-    const names = [_][]const u8{ "archive", "clear", "copy", "effort", "model", "new", "reload-skills", "rename", "requests", "result", "setup", "unarchive" };
-    const descriptions = [_][]const u8{ "archive this chat", "start a new chat", "copy the last answer", "change effort", "change model", "start a new chat", "reload skills", "rename this chat", "recover a lost request", "show a saved answer", "defaults for new chats", "restore this chat" };
+    const names = [_][]const u8{ "archive", "clear", "copy", "effort", "model", "new", "pin", "reload-skills", "rename", "requests", "result", "setup", "unarchive", "unpin" };
+    const descriptions = [_][]const u8{ "archive this chat", "start a new chat", "copy the last answer", "change effort", "change model", "start a new chat", "pin this chat", "reload skills", "rename this chat", "recover a lost request", "show a saved answer", "defaults for new chats", "restore this chat", "unpin this chat" };
     var skill_names: [skill_suggestions.capacity][16]u8 = undefined;
     var entries: [skill_suggestions.capacity]skill_suggestions.Entry = undefined;
     for (&entries, &skill_names, 0..) |*entry, *name, index| entry.* = .{
@@ -589,7 +588,7 @@ test "Tab or Enter on a row replaces the caret's name, or adds a later word's re
     try expectReplacement(.{ .start = 1, .end = command.len, .text = "reload-skills" }, edit(command, command.len, &listed));
 }
 
-test "every list row starts the word the list was built for, at every caret of every draft" {
+test "every list row matches the word the list was built for, at every caret of every draft" {
     const entries = [_]skill_suggestions.Entry{
         .{ .name = "archx", .description = "Skill" },
         .{ .name = "review", .description = "Skill" },
@@ -606,10 +605,11 @@ test "every list row starts the word the list was built for, at every caret of e
                 shown.highlight = row;
                 const entry = shown.list.entries[row];
                 // Every row matches the word its list was built for.
-                if (entry.bold) |bold| try std.testing.expectEqualStrings(shown.list.typed, switch (bold.in) {
-                    .shown => entry.shown,
-                    .description => entry.description,
-                }[bold.start..][0..bold.len]) else try std.testing.expect(std.mem.startsWith(u8, entry.word, shown.list.typed));
+                if (entry.matches.name) |span| {
+                    try std.testing.expect(std.ascii.eqlIgnoreCase(shown.list.typed, entry.shown[span.start..][0..span.len]));
+                } else if (entry.matches.description) |span| {
+                    try std.testing.expect(std.ascii.eqlIgnoreCase(shown.list.typed, entry.description[span.start..][0..span.len]));
+                } else try std.testing.expect(std.mem.startsWith(u8, entry.word, shown.list.typed));
                 var buffer: [96]u8 = undefined;
                 const after = switch (enter(draft, caret, &shown)) {
                     .run, .edit => |change| try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{ draft[0..change.start], change.text, draft[change.end..] }),
@@ -799,5 +799,29 @@ test "a transport-interrupted skills read is retryable without discarding the he
         try std.testing.expect(next.read > pending.read);
         reads.fail(next.read); // Local failure still suppresses the same prefix.
         try std.testing.expect(reads.ask("re") == null);
+    }
+}
+
+test "grammar choice picks expire when the model changes without a draft edit" {
+    var reads: Reads = .{};
+    var rows: Rows = .{};
+    const draft = "/effort ";
+    for ([_][]const u8{ "unlisted-model", "gpt-5.5", "gpt-4o" }) |before| {
+        for ([_][]const u8{ "unlisted-model", "gpt-5.5", "gpt-4o" }) |after| {
+            var drawn = reads.shown(&rows, draft, draft.len, 1, .{ .model = before }, null).?;
+            drawn.drew(true);
+            const pick = drawn.pick(drawn.list.count - 1);
+            var stored: ?slash_commands.Shown = drawn;
+            const next = reads.shown(&rows, draft, draft.len, 1, .{ .model = after }, drawn);
+            if (std.mem.eql(u8, before, after)) {
+                try std.testing.expect(slash_commands.Shown.pickedNow(&stored, next, pick) != null);
+            } else {
+                try std.testing.expect(slash_commands.Shown.pickedNow(&stored, next, pick) == null);
+                stored = next;
+                stored.?.drew(true);
+                const current = stored.?.pick(0);
+                try std.testing.expect(slash_commands.Shown.pickedNow(&stored, stored, current) != null);
+            }
+        }
     }
 }

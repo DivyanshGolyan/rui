@@ -3,6 +3,7 @@ const std = @import("std");
 const Store = @import("Store.zig").Store;
 const testing = @import("testing.zig");
 const schema = @import("schema.zig");
+const validStoreId = @import("../store_id.zig").valid;
 const sqlite = @import("sqlite.zig");
 const wire = @import("wire/mysql_connection.zig");
 const literal = @import("mysql_literal.zig");
@@ -116,7 +117,7 @@ pub fn open(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: test
         };
         if (!exists) {
             for (comptime schema.objects(.mysql)) |object| try run(object.sql);
-            try run(try std.fmt.bufPrint(&buffer, "CREATE DATABASE {s}_oracle;CREATE TABLE {s}_oracle.touched_oracle(session_ref VARCHAR(6))", .{ name, name }));
+            try run(try std.fmt.bufPrint(&buffer, "CREATE DATABASE {s}_oracle;CREATE TABLE {s}_oracle.touched_oracle" ++ dialect.touch_oracle_definition, .{ name, name }));
             // Trigger names live in the Store schema; their root definer can
             // write the sibling schema without enlarging the app's grants.
             inline for (comptime sqlite.touchOracleTriggers(.mysql, "ORACLE.touched_oracle")) |sql| {
@@ -568,7 +569,7 @@ test "store.mysql live metadata repair rolls back with a refused ownership updat
     }
     var repaired = try admitMetadata(name, name);
     const id = repaired.state.store_id;
-    try std.testing.expect(schema.isStoreId(&id));
+    try std.testing.expect(validStoreId(&id));
     try std.testing.expectEqual(epoch + 1, repaired.state.epoch);
     try repaired.close();
     try root.query("SELECT count(*) FROM store_meta");
@@ -792,7 +793,7 @@ test "Store target MySQL owns admitted identity routes and neutral diagnostics" 
     try std.testing.expectEqual(.mysql, storage.kind());
     const id = storage.engine.mysql.state.store_id;
     try std.testing.expectEqualStrings(&id, storage.storeId());
-    try std.testing.expect(@import("../store_id.zig").valid(storage.storeId()));
+    try std.testing.expect(validStoreId(storage.storeId()));
     const diagnostic = storage.diagnostic();
     try std.testing.expect(diagnostic == .mysql);
     try std.testing.expectEqualStrings(diagnostic.mysql.doublewrite.slice(), storage.admissionDiagnostic().doublewrite.?);
@@ -1549,34 +1550,54 @@ test "store.mysql live a lone write's message carries the dispatch survey the Ho
     var before = queries.*;
     try storage.queue().write(insertHeld, .{ &storage, 9000800 });
     try std.testing.expectEqual(before + 1, queries.*);
-    const asked = try storage.dispatchWork(false);
+    const asked = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true });
     try std.testing.expectEqual(before + 2, queries.*);
     // Then a commit's one message carries the survey, and the next ask
     // sends nothing and answers as a survey of its own does.
     before = queries.*;
     try storage.queue().write(insertHeld, .{ &storage, 9000801 });
     try std.testing.expectEqual(before + 1, queries.*);
-    const carried = try storage.dispatchWork(false);
+    const carried = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true });
     try std.testing.expectEqual(before + 1, queries.*);
     try std.testing.expectEqual(asked, carried);
     // It answers one ask.
-    try std.testing.expectEqual(carried, try storage.dispatchWork(false));
+    try std.testing.expectEqual(carried, try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true }));
+    try std.testing.expectEqual(before + 2, queries.*);
+    before = queries.*;
+    try storage.queue().write(insertHeld, .{ &storage, 9000890 });
+    _ = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = false });
+    try std.testing.expectEqual(before + 2, queries.*);
+    before = queries.*;
+    try storage.queue().write(insertHeld, .{ &storage, 9000891 });
+    _ = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true });
+    try std.testing.expectEqual(before + 2, queries.*);
+    before = queries.*;
+    try storage.queue().write(insertHeld, .{ &storage, 9000892 });
+    _ = try storage.dispatchWork(false, .{ .free_credit = false, .mcp_open = true });
+    try std.testing.expectEqual(before + 2, queries.*);
+    before = queries.*;
+    try storage.queue().write(insertHeld, .{ &storage, 9000893 });
+    _ = try storage.dispatchWork(false, .{ .free_credit = false, .mcp_open = false });
+    try std.testing.expectEqual(before + 1, queries.*);
+    before = queries.*;
+    try storage.queue().write(insertHeld, .{ &storage, 9000894 });
+    _ = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true });
     try std.testing.expectEqual(before + 2, queries.*);
     // An ask with Turns held is another survey.
     before = queries.*;
     try storage.queue().write(insertHeld, .{ &storage, 9000802 });
-    _ = try storage.dispatchWork(true);
+    _ = try storage.dispatchWork(true, .{ .free_credit = true, .mcp_open = true });
     try std.testing.expectEqual(before + 2, queries.*);
     // A write that saved nothing leaves no survey: the message, ROLLBACK,
     // then the Host's own.
     before = queries.*;
     try std.testing.expectError(error.LiveGuard, storage.queue().write(insertTouching, .{ &storage, 9000803, 9000899 }));
-    _ = try storage.dispatchWork(true);
+    _ = try storage.dispatchWork(true, .{ .free_credit = true, .mcp_open = true });
     try std.testing.expectEqual(before + 3, queries.*);
     try std.testing.expect(!storage.isFenced());
     // A carried survey is dropped by a later commit that carries none:
     // two writes sharing a batch.
-    _ = try storage.dispatchWork(false);
+    _ = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true });
     try storage.queue().write(insertHeld, .{ &storage, 9000804 });
     const Writer = struct {
         result: anyerror!void = {},
@@ -1596,7 +1617,7 @@ test "store.mysql live a lone write's message carries the dispatch survey the Ho
     for (threads) |thread| thread.join();
     for (writers) |writer| try writer.result;
     before = queries.*;
-    _ = try storage.dispatchWork(false);
+    _ = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true });
     try std.testing.expectEqual(before + 1, queries.*);
 }
 
@@ -1616,7 +1637,7 @@ test "store.mysql live a write saves in its one message whether or not the batch
     try openLive(&storage, &tmp);
     defer storage.close() catch unreachable;
     const queries = &storage.engine.mysql.state.connection.queries;
-    _ = try storage.dispatchWork(false);
+    _ = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true });
     // From room for COMMIT and none of the survey, through part of it, to
     // all of it: the write is one message and saves, and the Host's ask
     // is free only when the whole survey rode.
@@ -1628,7 +1649,7 @@ test "store.mysql live a write saves in its one message whether or not the batch
         try storage.queue().write(insertWithRoom, .{ &storage, id, room });
         try std.testing.expectEqual(before + 1, queries.*);
         try std.testing.expect(!storage.isFenced());
-        _ = try storage.dispatchWork(false);
+        _ = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true });
         const asked = queries.* - before - 1;
         try std.testing.expect(asked <= 1);
         carried[@intFromBool(asked == 0)] = true;
@@ -1648,7 +1669,7 @@ test "store.mysql live a carried survey whose read fails fences as the Host's ow
     defer storage.close() catch |err| {
         std.testing.expectEqual(error.StoreCloseFailed, err) catch unreachable;
     };
-    _ = try storage.dispatchWork(false);
+    _ = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true });
     const generation = storage.commitGeneration();
     // A table the survey reads is gone: its SELECT fails after COMMIT ran.
     try rawExec(&storage, "RENAME TABLE session_stop_owed TO session_stop_owed_gone");
@@ -2310,4 +2331,46 @@ test "store.mysql live lone single writes guard their shared COMMIT and payload 
     }
     needs_close = false;
     try storage.close();
+}
+
+test "store.mysql touch oracle observes and clears uncommitted entry writes without changing rollback" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    const session = try testing.configureTestSession(&storage, "oracle-uncommitted");
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    const Head = @import("tests.zig").TestingRound.head;
+    var head: Head.Row = undefined;
+    const mysql = &storage.engine.mysql;
+    try mysql.bind(Head, &.{ .session_ref = session.slice() }, 0);
+    try mysql.startPass();
+    try std.testing.expect(try mysql.nextRow());
+    try mysql.decodeRow(Head.Row, &head);
+    try std.testing.expect(!try mysql.nextRow());
+    mysql.endStatement();
+    try mysql.finishPass();
+    try store_core.begin(&storage);
+    defer if (storage.engine.inTransaction()) store_core.rollbackAfterError(&storage, .{}) catch @panic("oracle fixture rollback failed");
+    // The restricted application connection changes canonical rows, deliberately
+    // without a typed touch, while the root oracle observes another connection.
+    const forgotten_touch = rsql.Write(.{
+        .sql = "UPDATE session SET label='oracle uncommitted' WHERE session_ref=@session(?1)",
+        .Args = struct { session: rsql.SessionHead },
+        .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+    });
+    try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, forgotten_touch, .{ .session = head.head }));
+    // A pending BEGIN is not enough: this pass must have sent it to MySQL.
+    try std.testing.expect(storage.engine.mysql.state.begin == .sent);
+    const missing = store_core.untouchedForTesting(&storage);
+    try std.testing.expectEqual(true, missing != null);
+    try std.testing.expectEqualStrings(session.slice(), &missing.?);
+    // This is the next queued entry's clear, before the batch's COMMIT.
+    clearTouchOracleForTesting(&storage);
+    try std.testing.expect(storage.engine.inTransaction());
+    try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
+    try store_core.rollbackAfterError(&storage, .{});
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM session WHERE label='oracle uncommitted'", .{}));
 }

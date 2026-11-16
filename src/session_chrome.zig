@@ -4,6 +4,7 @@
 //! reads a clock or the terminal; the shell passes the time and widths.
 const std = @import("std");
 const session_line = @import("session_line.zig");
+const utf8_validation = @import("utf8_validation.zig");
 const TerminalText = @import("TerminalText.zig");
 
 pub const Method = session_line.Method;
@@ -134,7 +135,7 @@ pub fn Notice(comptime capacity: usize) type {
         /// text is cut on a character.
         pub fn show(self: *Self, text: []const u8, now_ms: u64) void {
             self.answers = .other;
-            const len = cutUtf8(text, capacity);
+            const len = utf8_validation.scalarStart(text, @min(text.len, capacity));
             std.mem.copyForwards(u8, self.bytes[0..len], text[0..len]);
             self.len = len;
             self.shown_ms = now_ms;
@@ -481,7 +482,7 @@ pub const title_bytes = TerminalText.max_bytes_per_byte * title_name_bytes + ses
 pub fn title(buffer: *[title_bytes]u8, session: ?[]const u8, needs_you: u64) []const u8 {
     var out = std.Io.Writer.fixed(buffer);
     if (session) |name| {
-        const cut = cutUtf8(name, title_name_bytes);
+        const cut = utf8_validation.scalarStart(name, @min(name.len, title_name_bytes));
         var text: TerminalText = .{ .mode = .label };
         text.feed(&out, name[0..cut]) catch unreachable;
         text.finish(&out) catch unreachable;
@@ -508,15 +509,6 @@ pub const Title = struct {
         return self.bytes[0..text.len];
     }
 };
-
-/// The longest prefix of `bytes` within `limit` that ends on a UTF-8 scalar
-/// boundary.
-fn cutUtf8(bytes: []const u8, limit: usize) usize {
-    if (bytes.len <= limit) return bytes.len;
-    var end = limit;
-    while (end > 0 and bytes[end] & 0xc0 == 0x80) end -= 1;
-    return end;
-}
 
 test "a notice goes after about five seconds or at the next key; the newest replaces it; what needs the person stays" {
     var notice: Notice(256) = .{};

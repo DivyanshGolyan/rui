@@ -158,6 +158,14 @@ pub fn signOut(path: []const u8, scratch: *Scratch, context: anytype, revoke: an
 /// exclusive lock; true when this call wrote it. A file that exists is never
 /// replaced.
 pub fn createPrivate(path: []const u8, bytes: []const u8, buffer: []u8) !bool {
+    var published = false;
+    return createPrivateObserved(path, bytes, buffer, &published, null);
+}
+
+pub const PrivateFault = Owner.PublishFault;
+
+/// `published` changes only after this owner renames the new immutable file.
+pub fn createPrivateObserved(path: []const u8, bytes: []const u8, buffer: []u8, published: *bool, fault: ?PrivateFault) !bool {
     var owner = try Owner.open(path);
     defer owner.close();
     const lock = try owner.acquireLock(.exclusive);
@@ -169,7 +177,7 @@ pub fn createPrivate(path: []const u8, bytes: []const u8, buffer: []u8) !bool {
         error.FileNotFound => {},
         else => return err,
     }
-    try owner.publishBytes(bytes, null);
+    try owner.publishBytesObserved(bytes, fault, published);
     return true;
 }
 
@@ -196,6 +204,37 @@ pub fn publishPrivate(path: []const u8, bytes: []const u8) !void {
     const lock = try owner.acquireLock(.exclusive);
     defer lock.close(io);
     return owner.publishBytes(bytes, null);
+}
+
+/// Syncs an already admitted private credential directory after removal.
+pub fn syncPrivateDirectory(directory: std.Io.Dir) !void {
+    if (std.c.fsync(directory.handle) != 0) return error.DirectorySyncFailed;
+}
+
+/// Holds the same private-file lock from snapshot through publication. The
+/// callback borrows current bytes and returns replacement bytes borrowed until
+/// this call returns. Null inspects without writing. Scratch belongs to caller.
+/// DirectorySyncFailed means rename already happened; retain referenced files.
+pub const PrivatePublication = union(enum) { committed, unconfirmed: anyerror };
+
+pub fn editPrivate(path: []const u8, buffer: []u8, context: anytype, comptime edit: anytype, fault: ?PrivateFault) !PrivatePublication {
+    var owner = try Owner.open(path);
+    defer owner.close();
+    const lock = try owner.acquireLock(.exclusive);
+    defer lock.close(io);
+    const current = owner.readBytes(buffer) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
+    defer if (current) |bytes| std.crypto.secureZero(u8, bytes);
+    if (try edit(context, current)) |replacement| {
+        var renamed = false;
+        owner.publishBytesObserved(replacement, fault, &renamed) catch |err| {
+            if (renamed) return .{ .unconfirmed = err };
+            return err;
+        };
+    }
+    return .committed;
 }
 
 const Owner = struct {
@@ -308,6 +347,11 @@ const Owner = struct {
     }
 
     fn publishBytes(self: *Owner, encoded: []const u8, fault: ?PublishFault) !void {
+        var renamed = false;
+        return self.publishBytesObserved(encoded, fault, &renamed);
+    }
+
+    fn publishBytesObserved(self: *Owner, encoded: []const u8, fault: ?PublishFault, renamed: *bool) !void {
         if (self.parent.openFile(io, self.finalName(), .{
             .allow_directory = false,
             .follow_symlinks = false,
@@ -353,6 +397,7 @@ const Owner = struct {
             }
             if (fault == .rename) return error.InjectedCredentialRenameFailure;
             try self.parent.rename(temp_name, self.parent, self.finalName(), io);
+            renamed.* = true;
         }
         // After rename the new value is visible and committed at file level. If
         // this fails, callers receive DirectorySyncFailed and must inspect on
@@ -363,7 +408,7 @@ const Owner = struct {
     }
 
     fn syncDirectory(self: *Owner) !void {
-        if (std.c.fsync(self.parent.handle) != 0) return error.DirectorySyncFailed;
+        return syncPrivateDirectory(self.parent);
     }
 };
 
@@ -746,4 +791,65 @@ test "each replacement failure leaves only a complete old or new credential" {
         try std.testing.expectEqualStrings(if (case[0] == .directory_sync) "new" else "old", observed.account_id.slice());
         if (case[0] == .directory_sync) break;
     }
+}
+
+test "private document edit distinguishes callback key sync from document rename uncertainty" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try testPath(&tmp, "host.json", &path_buffer);
+    var buffer: [128]u8 = undefined;
+    const Edit = struct {
+        fn replace(_: void, current: ?[]const u8) !?[]const u8 {
+            try std.testing.expectEqualStrings("old", current.?);
+            return "new";
+        }
+        fn keySync(_: void, _: ?[]const u8) !?[]const u8 {
+            return error.DirectorySyncFailed;
+        }
+    };
+    try publishPrivate(path, "old");
+    try std.testing.expectError(error.DirectorySyncFailed, editPrivate(path, &buffer, {}, Edit.keySync, null));
+    try std.testing.expectEqualStrings("old", (try readPrivate(path, &buffer)).?);
+    for ([_]Owner.PublishFault{ .write, .file_sync, .rename }) |fault| {
+        const result = editPrivate(path, &buffer, {}, Edit.replace, fault);
+        if (result) |_| return error.TestExpectedError else |_| {}
+        try std.testing.expectEqualStrings("old", (try readPrivate(path, &buffer)).?);
+    }
+    const uncertain = try editPrivate(path, &buffer, {}, Edit.replace, .directory_sync);
+    try std.testing.expectEqual(error.InjectedCredentialDirectorySyncFailure, uncertain.unconfirmed);
+    try std.testing.expectEqualStrings("new", (try readPrivate(path, &buffer)).?);
+}
+
+test "private document edits hold one lock across concurrent read modify and publication" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try testPath(&tmp, "host.json", &path_buffer);
+    try publishPrivate(path, "0");
+    const Worker = struct {
+        path: []const u8,
+        bytes: [32]u8 = undefined,
+        failure: ?anyerror = null,
+        fn edit(self: *@This(), current: ?[]const u8) !?[]const u8 {
+            const value = try std.fmt.parseInt(u32, current.?, 10);
+            return try std.fmt.bufPrint(&self.bytes, "{d}", .{value + 1});
+        }
+        fn run(self: *@This()) void {
+            var read_buffer: [32]u8 = undefined;
+            for (0..20) |_| {
+                _ = editPrivate(self.path, &read_buffer, self, edit, null) catch |err| {
+                    self.failure = err;
+                    return;
+                };
+            }
+        }
+    };
+    var workers = [_]Worker{ .{ .path = path }, .{ .path = path } };
+    var threads: [2]std.Thread = undefined;
+    for (&workers, &threads) |*worker, *thread| thread.* = try std.Thread.spawn(.{}, Worker.run, .{worker});
+    for (threads) |thread| thread.join();
+    for (workers) |worker| try std.testing.expectEqual(@as(?anyerror, null), worker.failure);
+    var result: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("40", (try readPrivate(path, &result)).?);
 }

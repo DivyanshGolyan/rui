@@ -727,8 +727,10 @@ def tap_main(args):
 def launch_host(run):
     """Start this run's Host from the options saved at `new`; return its ready status."""
     options = run.meta["host_options"]
-    host_argv = [str(run.rui), "host", "serve", "--store", str(run.store), "--active-capacity", str(options["active_capacity"]),
-                 "--provider-endpoint", run.meta["fixture_url"], "--test-retry-waits-ms", "50,100,150"]
+    host_argv = [str(run.rui), "host", "serve", "--store", str(run.store),
+                 "--set", f"execution.activeCapacity={options['active_capacity']}",
+                 "--set", "providers={}", "--set", f"providers.codex.endpoint={run.meta['fixture_url']}",
+                 "--set", "providers.codex.unauthenticated=true", "--test-retry-waits-ms", "50,100,150"]
     host_env = run.env()
     for assignment in options["host_setenv"]:
         key, _, value = assignment.partition("=")
@@ -782,7 +784,8 @@ def cmd_new(args):
             "binary_sha256": build["files_sha256"]["rui"], "source": build["source"],
             "scratch": str(scratch), "home": str(scratch / "home"), "store": str(scratch / "store"),
             "project": str(scratch / "project"), "created": wall(), "label": args.label,
-            "helper_sha256": sha256(HERE), "answers": getattr(args, "answers", "echo")}
+            "helper_sha256": sha256(HERE), "answers": getattr(args, "answers", "echo"),
+            "no_sessions": args.no_sessions}
     (root / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
     run = Run(root)
     (run.home / ".config/rui").mkdir(parents=True, mode=0o700)
@@ -897,7 +900,27 @@ def cmd_doctor(args):
     check("owned Host process holds this Store open", any(line[1:].startswith(str(run.store)) for line in held.splitlines()),
           f"pid={host_pid}")
     sessions = run.rui_cmd("session", "list", "--store", run.store, "--all", log=False)
-    check("configured Sessions present", sessions.returncode == 0 and all(f'"{run.sid(name)}"' in sessions.stdout for name in ("demo", "approve")),
+    no_sessions = run.meta.get("no_sessions", False)
+    registered = run.meta.get("sessions")
+    registry_ok = (type(no_sessions) is bool and isinstance(registered, dict)
+                   and all(isinstance(label, str) and label.strip() and isinstance(sid, str) and sid.strip()
+                           for label, sid in registered.items())
+                   and len(set(registered.values())) == len(registered)
+                   and (no_sessions or {"demo", "approve"} <= registered.keys()))
+    try:
+        listing = json.loads(sessions.stdout)
+    except ValueError:
+        listing = None
+    rows = listing.get("sessions") if isinstance(listing, dict) else None
+    references = ([row.get("reference") if isinstance(row, dict) else None for row in rows]
+                  if isinstance(rows, list) else None)
+    listing_ok = (references is not None
+                  and all(isinstance(sid, str) and sid.strip() for sid in references)
+                  and len(set(references)) == len(references))
+    sessions_ok = (sessions.returncode == 0 and registry_ok and listing_ok
+                   and set(registered.values()) <= set(references)
+                   and (bool(registered) or (no_sessions and not references)))
+    check("configured Sessions present", sessions_ok,
           sessions.stdout.strip()[:300] or sessions.stderr.strip()[:300])
     if run.sock.exists():
         server = run.tmux("display-message", "-p", "#{pid} #{socket_path}", check=False)
@@ -2549,15 +2572,18 @@ def frame_steps(run, terminal, steps, exiting=False):
 
 
 def frame_initial_ready(terminal, first_wait=None, allow_exit=False):
-    # Chat/sign-in and old baseline images have a prompt. The editorless
-    # overview instead commits its pinned actions and bottom footer. Keep
-    # both paths so current recipes can still capture the unfixed baseline.
-    # The opening read resets the scroll anchor before input is released.
-    terminal.wait(lambda c: ("›" in c.completed or all(text in c.completed for text in
-                              ("+ New Session", "Settings", "enter open")))
-                  and "Opening…" not in c.completed
-                  and (not first_wait or first_wait in c.completed),
-                  "initial screen ready" + (f" with {first_wait!r}" if first_wait else ""),
+    def ready(capture):
+        text = capture.completed
+        guided = (re.search(r"^ *Sign in to Rui *$", text, re.M) is not None
+                  and all(re.search(r"^ *" + re.escape(label) + r" {2,}\S", text, re.M)
+                          for label in ("ChatGPT", "API key"))
+                  and re.search(r"^ *(?:Close {2,}\S|\[ Close \] *$)", text, re.M) is not None
+                  and re.search(r"^ *(?:Navigation {2,})?Tab / Shift-Tab", text, re.M) is not None)
+        return (("›" in text or all(marker in text for marker in
+                 ("+ New Session", "Settings", "enter open")) or guided)
+                and "Opening…" not in text and (not first_wait or first_wait in text))
+
+    terminal.wait(ready, "initial screen ready" + (f" with {first_wait!r}" if first_wait else ""),
                   allow_exit=allow_exit)
 
 
@@ -2638,13 +2664,22 @@ def frame_background_failure(state, frame):
     return None
 
 
+def frame_contains(text, plain):
+    if text in plain:
+        return True
+    if text.startswith("https://"):
+        from terminal_screen import shown
+        return shown(text, plain)
+    return False
+
+
 def frame_ready(terminal, state, allow_exit=False, sessions=None):
     # Transitions are asserted at the frame their last wait observed, not
     # polled until a later frame happens to satisfy the regression oracle.
     if state.get("first_frame", False):
         return
     expected, absent = frame_expectations(state), frame_absences(state, sessions)
-    terminal.wait(lambda c: all(text in c.completed for text in expected)
+    terminal.wait(lambda c: all(frame_contains(text, c.completed) for text in expected)
                   and all(text not in c.completed for text in absent)
                   and frame_row_failure(state, c.completed) is None,
                   "state expectations: " + repr({
@@ -2659,7 +2694,7 @@ def frame_capture(run, target, out, state, size, reason):
     files = {ext: f"{stem}.{ext}" for ext in ("txt", "ansi", "html")}
     frame = target.frame
     plain, ansi, page = cells_render(frame)
-    missing = next((text for text in frame_expectations(state) if text not in plain), None)
+    missing = next((text for text in frame_expectations(state) if not frame_contains(text, plain)), None)
     if missing is not None and reason is None:
         reason = f"state left before capture: {missing}"
     unexpected = next((text for text in frame_absences(state, run.meta.get("sessions", {})) if text in plain), None)

@@ -41,12 +41,6 @@ const insert_set = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-const insert_member = rsql.Write(.{
-    .sql = "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) VALUES(?1,?2,?3)",
-    .Args = struct { set: u64, ordinal: u64, record: u64 },
-    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
-});
-
 /// SQL for loaded intent on a Session or configuration revision: its explicit
 /// loaded set, otherwise all configured names. Frozen offers live on Operations.
 pub fn offeredSetSql(comptime revision_alias: []const u8) []const u8 {
@@ -253,8 +247,6 @@ const update_host_tool_set = rsql.Write(.{
 pub fn lookupHostToolSet(a: anytype, digest: *const [32]u8, set: *lookup_tool_set.Result) void {
     a.read(lookup_tool_set, .{ .digest = digest.* }, set);
 }
-
-pub const ToolSetLookup = lookup_tool_set.Result;
 
 /// Queues making `set_id` the Host's tool_set, the one the next start
 /// reads back.

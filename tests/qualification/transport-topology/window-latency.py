@@ -108,7 +108,7 @@ def run(binary, update_delay, iteration):
         server_thread.start()
         store = root / "store"
         host = dispatch.start_host(store, f"https://localhost:{endpoint.server_address[1]}/responses",
-                                   "--provider-ca-file", str(root / "cert.pem"), "--test-phase-trace",
+                                   "--set", "network.caFile=" + str(str(root / "cert.pem")), "--test-phase-trace",
                                    active_capacity=1)
         diagnostics = HostDiagnostics(host)
         try:

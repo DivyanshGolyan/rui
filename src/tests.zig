@@ -1,4 +1,5 @@
 test {
+    _ = @import("InputCapture.zig");
     _ = @import("host_start.zig");
     _ = @import("server_mcp_settings.zig");
     _ = @import("testing/host_settings.zig");
@@ -15,6 +16,7 @@ test {
     _ = @import("widgets/Stack.zig");
     _ = @import("widgets/Layer.zig");
     _ = @import("widgets/Footer.zig");
+    _ = @import("widgets/cell_line.zig");
     _ = @import("widgets/List.zig");
     _ = @import("widgets/Feed.zig");
     _ = @import("feed_window.zig");

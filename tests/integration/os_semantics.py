@@ -78,7 +78,7 @@ def semantics(platform_name):
 
     # A Host's system trust is OpenSSL's on Linux, which SSL_CERT_FILE extends,
     # and Apple SecTrust on Darwin, which ignores it (src/h2/tests.zig). So
-    # only Linux can trust a self-signed fixture without --provider-ca-file.
+    # only Linux can trust a self-signed fixture without --set network.caFile=PATH.
     SSL_CERT_FILE_TRUST = not DARWIN
 
     # GNU time (`/usr/bin/time -f`) measures a caller's peak RSS on Linux.
@@ -119,7 +119,7 @@ def system_trust(certificate):
 
     Only Linux's system trust reads it (SSL_CERT_FILE_TRUST); Darwin's SecTrust
     would ignore it and quietly test the system roots instead, so this refuses
-    there. A fixture that must run on both passes --provider-ca-file or the
+    there. A fixture that must run on both passes --set network.caFile=PATH or the
     settings document's network.caFile instead.
     """
     assert _module.SSL_CERT_FILE_TRUST, "Darwin system trust ignores SSL_CERT_FILE; pass the CA explicitly"

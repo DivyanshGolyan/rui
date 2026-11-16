@@ -13,7 +13,7 @@ const Input = @import("SessionInput.zig");
 const Submission = @import("SessionSubmission.zig");
 const Task = @import("ClientTask.zig");
 const View = @import("session_view.zig");
-const Editor = @import("TerminalEditor.zig");
+const DraftEditor = @import("DraftEditor.zig");
 const History = @import("session_history.zig");
 const departure = @import("session_departure.zig");
 const TerminalText = @import("TerminalText.zig");
@@ -302,7 +302,6 @@ pub const Job = struct {
         command_stderr_restored: bool = false,
         info_saved: bool = false,
         action: ?u64 = null,
-        summary: View.ActionSummary = .{},
         // Bytes of live output staged in the inspection scratch file.
         output_length: u64 = 0,
         copied: Copied = .no_answer,
@@ -416,8 +415,9 @@ const RetryStaging = struct {
 /// One step over the Messages the person sent, from the one the draft
 /// shows or from the newest: a one-row activity page of `admission` rows,
 /// then that Message's content staged in scratch. One the draft cannot
-/// hold as typed text (over its capacity, or with a control character) is
-/// passed over, its content read at most once, and the result says so.
+/// hold (over its capacity, or text its own check refuses, such as a
+/// control character or a leading standalone mark) is passed over, its
+/// content read at most once, and the result says so.
 pub fn recall(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const requests = task.requests();
@@ -457,46 +457,29 @@ pub fn recall(raw: *anyopaque, task: *Task) !void {
 /// it as typed text.
 fn stageRecalled(requests: client.Requests, job: *const Job, io: std.Io, at: Input.Recalled, content: protocol.ActivityItem.Content) !?Input.Found {
     try job.files.scratch.setLength(io, 0);
-    var staging: RecallStaging = .{ .io = io, .file = job.files.scratch };
+    var staging: RecallStaging = .{ .io = io, .file = job.files.scratch, .check = DraftEditor.textCheck() };
     const reference: protocol_reply.CommandObservation.ContentReference = .{ .bytes = content.length, .digest = content.digest };
     if (try requests.readActivityContent(job.store, job.session, at.position, 0, reference, &staging)) |failure| return requests.failRead(failure);
     if (staging.offset != content.length) return error.ContentLengthMismatch;
     const slash = staging.first == '/';
-    if (!staging.editable or staging.need != 0 or staging.offset + @intFromBool(slash) > Input.capacity) return null;
+    if (staging.check.finish() != null or staging.offset + @intFromBool(slash) > Input.capacity) return null;
     return .{ .at = at, .length = @intCast(staging.offset), .slash = slash };
 }
 
-/// A sent Message's text in scratch, checked scalar by scalar as the
-/// editor checks literal text.
+/// A sent Message's text in scratch, checked as it arrives by the draft's
+/// own check, the one `SessionInput.fill` relies on.
 const RecallStaging = struct {
     io: std.Io,
     file: std.Io.File,
+    check: DraftEditor.TextCheck,
     offset: u64 = 0,
     first: ?u8 = null,
-    editable: bool = true,
-    scalar: [4]u8 = undefined,
-    have: u3 = 0,
-    need: u3 = 0,
 
     pub fn feed(self: *@This(), bytes: []const u8) !void {
         try self.file.writePositionalAll(self.io, bytes, self.offset);
         self.offset += bytes.len;
         if (self.first == null and bytes.len != 0) self.first = bytes[0];
-        for (bytes) |byte| {
-            if (!self.editable) return;
-            if (self.need == 0) self.need = std.unicode.utf8ByteSequenceLength(byte) catch {
-                self.editable = false;
-                return;
-            };
-            self.scalar[self.have] = byte;
-            self.have += 1;
-            if (self.have != self.need) continue;
-            Editor.validateText(self.scalar[0..self.have]) catch {
-                self.editable = false;
-            };
-            self.have = 0;
-            self.need = 0;
-        }
+        self.check.feed(bytes);
     }
 };
 
@@ -581,7 +564,7 @@ pub fn permission(raw: *anyopaque, task: *Task) !void {
         var output: DisplayCapture = .{ .task = task, .file = job.files.action };
         // A target resolved between reads is the same as a scan with no
         // pending Action: leave result.action empty and refresh, without consent.
-        job.result.summary = (try View.permission(task.requests(), job.store, job.session, action, job.files.scratch, &output, job.colour)) orelse return;
+        if (!try View.permission(task.requests(), job.store, job.session, action, job.files.scratch, &output, job.colour)) return;
         job.result.action = action;
     }
 }
@@ -764,15 +747,16 @@ const DisplayCapture = struct {
 /// source even when full. Cuts end outside UTF-8 scalars and controls; the
 /// marker closes any hyperlink and resets presentation before its notice.
 const RowCapture = struct {
-    const more = TerminalText.link_close ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ More — Ctrl-O for whole message" ++ View.Mark.reset ++ "\n";
+    const more = TerminalText.body_off ++ TerminalText.link_close ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ More — Ctrl-O for whole message" ++ View.Mark.reset ++ "\n";
     const notice_capacity = 128;
-    const unkeyed_more = TerminalText.link_close ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ More content omitted" ++ View.Mark.reset ++ "\n";
+    const unkeyed_more = TerminalText.body_off ++ TerminalText.link_close ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ More content omitted" ++ View.Mark.reset ++ "\n";
     task: *Task,
     file: std.Io.File,
     row: *RenderedRow,
     start: u64,
     length: u64 = 0,
     cut: bool = false,
+    in_body: bool = false,
     cap_target: ?View.Collapsed = null,
     omitted_summaries: u64 = 0,
     boundary: u64 = 0,
@@ -780,6 +764,14 @@ const RowCapture = struct {
     control: enum { none, escape, csi, osc, osc_escape } = .none,
 
     pub fn feed(self: *@This(), raw: []const u8) !void {
+        if (self.in_body) {
+            try self.write(TerminalText.body_off);
+            self.in_body = false;
+        }
+        try self.write(raw);
+    }
+
+    fn write(self: *@This(), raw: []const u8) !void {
         if (self.task.cancellation.stopped.load(.acquire)) return error.Cancelled;
         if (raw.len == 0 or self.cut) return;
         const bytes = raw;
@@ -822,6 +814,15 @@ const RowCapture = struct {
         self.cut = fit.len != bytes.len;
     }
 
+    pub fn body(self: *@This(), bytes: []const u8) !void {
+        if (bytes.len == 0) return;
+        if (!self.in_body) {
+            try self.write(TerminalText.body_on);
+            self.in_body = true;
+        }
+        try self.write(bytes);
+    }
+
     pub fn excluding(_: *@This(), _: u64) void {}
 
     /// One bounded admission for complete summary bytes and their target.
@@ -837,19 +838,21 @@ const RowCapture = struct {
     }
 
     pub fn collapsedSummary(self: *@This(), value: View.Collapsed, bytes: []const u8) !void {
+        try self.feed("");
         if (self.cut) return;
         if (try self.retainSummary(value, bytes, feed_window.row_capacity - notice_capacity)) return;
         if (self.row.collapsed_count == self.row.collapsed_targets.len) self.omitted_summaries += 1 else self.cut = true;
     }
 
     fn finish(self: *@This()) !void {
+        try self.feed("");
         var aggregate: [notice_capacity]u8 = undefined;
         if (!self.cut and self.omitted_summaries == 0) return;
         if (self.cut) self.length = self.boundary;
         // Both cap and count notices use the same admission decision as every
         // other summary. The final aggregate has no per-Message action.
         const notice = if (self.omitted_summaries != 0)
-            try std.fmt.bufPrint(&aggregate, TerminalText.link_close ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ {d} more summar{s}{s}" ++ View.Mark.reset ++ "\n", .{ self.omitted_summaries, if (self.omitted_summaries == 1) "y" else "ies", if (self.cut) "; more content omitted" else "" })
+            try std.fmt.bufPrint(&aggregate, TerminalText.body_off ++ TerminalText.link_close ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ {d} more summar{s}{s}" ++ View.Mark.reset ++ "\n", .{ self.omitted_summaries, if (self.omitted_summaries == 1) "y" else "ies", if (self.cut) "; more content omitted" else "" })
         else if (self.cap_target) |target| keyed: {
             if (try self.retainSummary(target, more, feed_window.row_capacity)) {
                 try self.file.setLength(self.task.io, self.start + self.length);
@@ -1652,6 +1655,13 @@ test "activity golden stop with interrupted ending draws one line across pages" 
         pub fn feed(self: *@This(), bytes: []const u8) !void {
             try self.out.writeAll(bytes);
         }
+        pub fn body(self: *@This(), bytes: []const u8) !void {
+            if (bytes.len == 0) return;
+            try self.feed(TerminalText.body_on);
+            try self.feed(bytes);
+            try self.feed(TerminalText.body_off);
+        }
+
         pub fn excluding(_: *@This(), _: u64) void {}
     };
     var session: protocol.Bounded(6) = .{};
@@ -1712,6 +1722,13 @@ test "session_reads rendered row kinds keep their own text and feed_window draws
         pub fn feed(self: *@This(), bytes: []const u8) !void {
             try self.document.append(bytes);
         }
+        pub fn body(self: *@This(), bytes: []const u8) !void {
+            if (bytes.len == 0) return;
+            try self.feed(TerminalText.body_on);
+            try self.feed(bytes);
+            try self.feed(TerminalText.body_off);
+        }
+
         pub fn excluding(_: *@This(), _: u64) void {}
     };
     var peer: protocol.NamedPeer = .{ .session = .{} };
@@ -2383,4 +2400,125 @@ test "chat info worker owns typed model and label bytes until completion" {
     try std.testing.expectEqualStrings("future-chat", job.info_edit.?.model);
     try job.setInfoEdit(.{ .permission = .ask });
     try std.testing.expectEqual(ChatInfo.Edit{ .permission = .ask }, job.info_edit.?);
+}
+
+test "session_reads recall passes over a Message the draft refuses in one step, whatever refuses it" {
+    // A control character fails the draft's scalar policy; a leading
+    // standalone mark fails its renderability. Both are passed over alike.
+    for ([_][]const u8{ "\x01x", "\u{301}x" }) |refused| for (0..3) |bad| {
+        errdefer std.debug.print("refused={any} bad position={d}\n", .{ refused, bad + 1 });
+        var texts = [_][]const u8{ "older", "middle", "newer" };
+        texts[bad] = refused;
+        var tail: [3]FakeHost.Tail = undefined;
+        for (&tail, texts, 1..) |*row, body, admission| {
+            var value = FakeHost.message(admission);
+            value.admission.content = .{ .length = body.len, .digest = protocol.contentDigest(body) };
+            row.* = .{ .value = value };
+        }
+        var host: FakeHost = .{ .history = 0, .tail = &tail, .end = tail.len, .content_texts = &texts };
+        // Ctrl-P from an empty draft until nothing older is left: each press
+        // lands on the next Message the draft holds.
+        var from: ?Input.Recalled = null;
+        var shown: [3]?u64 = .{ null, null, null };
+        var passed: [3]bool = .{ false, false, false };
+        for (0..3) |press| {
+            var job: Job = .{ .recall = .{ .from = from, .older = true, .revision = 0 } };
+            try host.readWith(&job, recall);
+            passed[press] = job.result.recall_passed;
+            const found = job.result.recalled orelse break;
+            try std.testing.expectEqual(texts[@intCast(found.at.position - 1)].len, found.length);
+            shown[press] = found.at.position;
+            from = found.at;
+        }
+        // `bad` 0 is the oldest Message, at position 1; 2 is the newest.
+        const expected_shown: [3]?u64 = switch (bad) {
+            0 => .{ 3, 2, null },
+            1 => .{ 3, 1, null },
+            else => .{ 2, 1, null },
+        };
+        const expected_passed: [3]bool = switch (bad) {
+            0 => .{ false, false, true },
+            1 => .{ false, true, false },
+            else => .{ true, false, false },
+        };
+        try std.testing.expectEqual(expected_shown, shown);
+        try std.testing.expectEqual(expected_passed, passed);
+        // Every Message's content is read once, the refused one included.
+        try std.testing.expectEqual(@as(usize, 3), host.contents);
+    };
+}
+
+test "quote body extraction follows rendered person and peer provenance through stopped rows" {
+    const gpa = std.testing.allocator;
+    var peer: protocol.NamedPeer = .{ .session = .{} };
+    try peer.session.set("9f8e7d");
+    try peer.label.set("Other Session");
+    var received = FakeHost.message(2).admission;
+    received.sender = peer;
+    const Case = enum { person, peer, stopped };
+    for (std.enums.values(Case)) |case| {
+        const tail = [_]FakeHost.Tail{
+            .{ .value = switch (case) {
+                .peer => .{ .received = received },
+                else => FakeHost.message(1),
+            }, .excluded_at = if (case == .stopped) 3 else null },
+            .{ .value = .{ .received = received } },
+            .{ .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 2, .completion = .completed } } },
+        };
+        var host: FakeHost = .{ .history = 0, .tail = tail[0..if (case == .stopped) 3 else 1], .end = if (case == .stopped) 3 else 1 };
+        var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = host.end } };
+        try host.read(&job);
+        try std.testing.expectEqual(@as(usize, if (case == .stopped) 2 else 1), job.result.row_count);
+        const document = try gpa.create(Viewport.Sized(feed_window.row_capacity, true));
+        defer gpa.destroy(document);
+        document.* = .{};
+        const window = try gpa.create(feed_window.Window);
+        defer gpa.destroy(window);
+        window.* = .{};
+        for (job.result.rows[0..job.result.row_count]) |row| {
+            document.clear();
+            try document.append(host.shown[@intCast(row.offset)..][0..@intCast(row.length)]);
+            try document.prepare();
+            try window.append(&.{.{ .key = row.key, .text = feed_window.Text.fromDocument(document) }});
+        }
+        const result = try @import("transcript_selection.zig").copyBody(gpa, window, .{ .from = 0, .to = window.document.length });
+        if (case == .peer) {
+            try std.testing.expect(result == .nothing);
+        } else {
+            defer gpa.free(result.text.bytes);
+            try std.testing.expectEqualStrings(FakeHost.text ++ "\n", result.text.bytes);
+        }
+    }
+}
+
+test "quote body extraction clears provenance at bounded capture notices and split controls" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "quote-cap", .{ .read = true });
+    defer file.close(io);
+    var task: Task = .{ .io = io };
+    const bytes = try std.testing.allocator.alloc(u8, feed_window.row_capacity + 128);
+    defer std.testing.allocator.free(bytes);
+    const document = try std.testing.allocator.create(Viewport.Sized(feed_window.row_capacity + 128, true));
+    defer std.testing.allocator.destroy(document);
+    for ([_][]const u8{ "é", "\x1b[1m", TerminalText.link_open ++ "https://example.test/" ++ TerminalText.link_end, TerminalText.body_off }) |piece| {
+        for (0..piece.len + 1) |remaining| {
+            try file.setLength(io, 0);
+            @memset(bytes, 'x');
+            var row: RenderedRow = .{ .key = .{ .position = 1 }, .offset = 0, .length = 0, .tight = false, .provisional = false };
+            var capture: RowCapture = .{ .task = &task, .file = file, .start = 0, .row = &row };
+            try capture.body(bytes[0 .. feed_window.row_capacity - RowCapture.notice_capacity - TerminalText.body_on.len - remaining]);
+            for (piece) |byte| try capture.body(&.{byte});
+            try capture.body("exceeds the cap");
+            try capture.finish();
+            const shown = bytes[0..try file.readPositionalAll(io, bytes, 0)];
+            document.* = .{};
+            try document.append(shown);
+            try document.prepare();
+            const notice = std.mem.indexOf(u8, document.text(), "More").?;
+            try std.testing.expect(document.bodyAt(0));
+            for (notice..document.length) |at| try std.testing.expect(!document.bodyAt(at));
+        }
+    }
 }

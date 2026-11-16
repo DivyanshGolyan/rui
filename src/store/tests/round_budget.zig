@@ -69,6 +69,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../Store.zig"),
         @embedFile("../access.zig"),
         @embedFile("../archive_tests.zig"),
+        @embedFile("../pin_tests.zig"),
         @embedFile("../engine.zig"),
         @embedFile("../engine/Sqlite.zig"),
         @embedFile("../engine/Mysql.zig"),
@@ -76,6 +77,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../engine/mysql_open.zig"),
         @embedFile("../engine/mysql_refusal.zig"),
         @embedFile("../domain/action.zig"),
+        @embedFile("../domain/action_read.zig"),
         @embedFile("../domain/forward.zig"),
         @embedFile("../domain/command.zig"),
         @embedFile("../domain/configuration.zig"),
@@ -94,6 +96,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../domain/session_obligation.zig"),
         @embedFile("../domain/session_report_read.zig"),
         @embedFile("../domain/skills.zig"),
+        @embedFile("../domain/sourced_input.zig"),
         @embedFile("../domain/tool_offer.zig"),
         @embedFile("../domain/tool_set.zig"),
         @embedFile("../domain/turn.zig"),
@@ -360,6 +363,11 @@ test "each Store entry point takes its round budget on its common path" {
             archive.archived = false;
             try archive.key.set("budget-unarchive");
             try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+            var pin: protocol.SessionPinCommand = .{ .session = session, .pinned = true };
+            try pin.key.set("budget-pin");
+            meter.start();
+            try std.testing.expect(storage.pinSession(&pin, .{}) == .accepted);
+            meter.stop(.pinSession);
         }
 
         /// Drive MCP through an actual frozen tool set offer, without changing
@@ -454,7 +462,7 @@ test "each Store entry point takes its round budget on its common path" {
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const calls = [_]TestingCall{.{ .item_id = "skill-item", .name = "skill", .encoded_call_id = "skill-call", .decoded_call_id = "skill-call", .encoded_arguments = "{\\\"operation\\\":\\\"invoke\\\",\\\"name\\\":\\\"demo\\\"}", .decoded_arguments = "{\"operation\":\"invoke\",\"name\":\"demo\"}" }};
             try settleCallsForTesting(&storage, &tmp, model, "budget-skill-calls", &calls);
-            const input = (try storage.nextCoreWork()).?.action;
+            const input = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
             try std.testing.expectEqual(action_domain.CoreTool.skill, input.tool);
             const captured: skills_fixture_domain.Capture = .{ .invocation = "Skill file: \"/budget/demo/SKILL.md\"\n\nbudget bytes" };
             meter.start();
@@ -475,7 +483,7 @@ test "each Store entry point takes its round budget on its common path" {
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const calls = [_]TestingCall{.{ .item_id = "find-item", .name = "find_tools", .encoded_call_id = "find-call", .decoded_call_id = "find-call", .encoded_arguments = "{\\\"words\\\":\\\"absent0 absent1 absent2 absent3 absent4 absent5 absent6 absent7\\\"}", .decoded_arguments = "{\"words\":\"absent0 absent1 absent2 absent3 absent4 absent5 absent6 absent7\"}" }};
             try settleCallsForTesting(storage, tmp, model, "budget-find-calls", &calls);
-            const input = (try storage.nextCoreWork()).?.action;
+            const input = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
             const words: @import("../../core_tools.zig").FindTools = .{ .words = .{ "absent0", "absent1", "absent2", "absent3", "absent4", "absent5", "absent6", "absent7" }, .count = 8 };
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
@@ -507,18 +515,18 @@ test "each Store entry point takes its round budget on its common path" {
             };
             try settleCallsForTesting(storage, tmp, model, "budget-core-calls", &calls);
             meter.start();
-            const core = (try storage.nextCoreWork()).?.action;
+            const core = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
             meter.stop(.nextCoreWork);
             meter.start();
             try std.testing.expect(try storage.deliverAgentMessage(core.binding, session.slice(), "hi", .{}) == .delivered);
             meter.stop(.deliverAgentMessage);
-            const start = (try storage.nextCoreWork()).?.action;
+            const start = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
             try std.testing.expect(start.tool == .start_agent);
             var spec = try testingAgentSpec(&.{"message_agent"}, "ask");
             meter.start();
             try std.testing.expect(try storage.startAgent(start.binding, session.slice(), "look around", true, &spec, null, .{}) == .started);
             meter.stop(.startAgent);
-            const refused = (try storage.nextCoreWork()).?.action;
+            const refused = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
             meter.start();
             try std.testing.expect(try storage.failCoreCall(refused.binding, "Rui could not start the agent: task is required. Nothing was started.", .{}));
             meter.stop(.resolveCoreCall);
@@ -536,17 +544,17 @@ test "each Store entry point takes its round budget on its common path" {
             while (try storage.admitNextModelAttempt(.{})) |_| {}
             var stop = try completeSessionStop("budget-core-stop", session.slice());
             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-            const owed = (try storage.nextCoreWork()).?.stop;
+            const owed = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.stop;
             var owed_stop: protocol.SessionStopCommand = .{ .key = owed.key };
             try owed_stop.session.set(owed.session.slice());
             meter.start();
             try std.testing.expect(storage.stopOwedSession(&owed_stop, .{}) == .accepted);
             meter.stop(.stopOwedSession);
-            const ending = (try storage.nextCoreWork()).?.ending;
+            const ending = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.ending;
             meter.start();
             try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
             meter.stop(.deliverChildEnding);
-            const forward = (try storage.nextCoreWork()).?.forward;
+            const forward = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.forward;
             meter.start();
             try std.testing.expect(try storage.deliverSessionForward(forward, .{}));
             meter.stop(.deliverSessionForward);
@@ -571,6 +579,10 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             _ = try storage.actionArguments(session.slice(), allowed);
             meter.stop(.actionContent);
+            var action_read: @import("../../action_read.zig").Read = undefined;
+            meter.start();
+            try storage.readAction(&.{ .session = session, .action_id = allowed }, &action_read);
+            meter.stop(.readAction);
             var allow: protocol.PermissionDecisionCommand = .{ .action_id = allowed, .decision = .allow_once };
             try allow.key.set("budget-allow");
             try allow.session.set(session.slice());
@@ -668,7 +680,7 @@ test "each Store entry point takes its round budget on its common path" {
             try std.testing.expect(try storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{}, null) == null);
             meter.stop(.tryAdmitNextModelRetry);
             meter.start();
-            _ = try storage.dispatchWork(false);
+            _ = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true });
             meter.stop(.dispatchWork);
             meter.start();
             try std.testing.expect(!try storage.recoverOneExhaustedModelAttempt(ActiveOperationFilter.empty()));
