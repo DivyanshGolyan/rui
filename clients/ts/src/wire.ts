@@ -514,6 +514,7 @@ export interface components {
                     state: "queued" | "applied" | "excluded";
                     admitted_at: components["schemas"]["Decimal"];
                     sender: components["schemas"]["NamedPeer"] | null;
+                    source_action: components["schemas"]["Decimal"] | null;
                     content: components["schemas"]["ActivityItemContent"];
                 };
             };
@@ -530,6 +531,7 @@ export interface components {
                     state: "queued" | "applied" | "excluded";
                     admitted_at: components["schemas"]["Decimal"];
                     sender: components["schemas"]["NamedPeer"] | null;
+                    source_action: components["schemas"]["Decimal"] | null;
                     content: components["schemas"]["ActivityItemContent"];
                 };
             };
@@ -648,6 +650,7 @@ export interface components {
                     state: "queued" | "applied" | "excluded";
                     admitted_at: components["schemas"]["Decimal"];
                     sender: components["schemas"]["NamedPeer"] | null;
+                    source_action: components["schemas"]["Decimal"] | null;
                     content: components["schemas"]["ActivityItemContent"];
                 };
             };
@@ -980,6 +983,7 @@ export interface components {
                 };
                 admitted_at: components["schemas"]["Decimal"];
                 sender: components["schemas"]["NamedPeer"] | null;
+                source_action: components["schemas"]["Decimal"] | null;
             } | {
                 position: components["schemas"]["Decimal"];
                 ordinal: components["schemas"]["Decimal"];
@@ -1060,6 +1064,7 @@ export interface components {
                 };
                 admitted_at: components["schemas"]["Decimal"];
                 sender: components["schemas"]["NamedPeer"] | null;
+                source_action: components["schemas"]["Decimal"] | null;
             } | {
                 position: components["schemas"]["Decimal"];
                 ordinal: components["schemas"]["Decimal"];

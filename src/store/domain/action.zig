@@ -130,16 +130,21 @@ pub fn actionStopKeysSql(comptime action: []const u8, comptime operation: []cons
     return "SELECT source_stop.command_key FROM session_stop source_stop WHERE " ++ sessionStopPredicate(action, operation);
 }
 
-fn sessionStopPredicate(comptime action: []const u8, comptime operation: []const u8) []const u8 {
-    return "source_stop.session_ref=" ++ action ++ ".session_ref AND (source_stop.action_cutoff>=" ++ action ++ ".action_id OR source_stop.selected_turn_id=" ++ operation ++ ".turn_id)";
+fn selectedStopSql(comptime action: []const u8, comptime operation: []const u8) []const u8 {
+    return "(source_stop.action_cutoff>=" ++ action ++ ".action_id OR source_stop.selected_turn_id=" ++ operation ++ ".turn_id)";
 }
 
-pub fn actionStopPositionSql(comptime action: []const u8, comptime operation: []const u8) []const u8 {
-    return "(SELECT min(source_stop.position) FROM session_stop source_stop WHERE " ++ sessionStopPredicate(action, operation) ++ ")";
+fn sessionStopPredicate(comptime action: []const u8, comptime operation: []const u8) []const u8 {
+    return "source_stop.session_ref=" ++ action ++ ".session_ref AND " ++ selectedStopSql(action, operation);
+}
+
+pub fn stoppedSql(comptime session: []const u8, comptime selected: []const u8) []const u8 {
+    return "(EXISTS(SELECT 1 FROM session_stop source_stop WHERE source_stop.session_ref=" ++ session ++ " AND " ++ selected ++
+        ") OR EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=" ++ session ++ " AND owed.settled=0))";
 }
 
 pub fn actionStoppedSql(comptime action: []const u8, comptime operation: []const u8) []const u8 {
-    return "EXISTS(SELECT 1 FROM session_stop source_stop WHERE " ++ sessionStopPredicate(action, operation) ++ ")";
+    return stoppedSql(action ++ ".session_ref", selectedStopSql(action, operation));
 }
 
 pub fn stopCompletedSql(comptime stop: []const u8, comptime turn: []const u8, comptime end: []const u8) []const u8 {
@@ -154,7 +159,7 @@ pub fn unresolvedSql(comptime action: []const u8) []const u8 {
 
 pub fn eligibleSql(comptime action: []const u8, comptime operation: []const u8, comptime turn: []const u8) []const u8 {
     return unresolvedSql(action) ++ " AND (" ++ turn ++ ".outcome_code IS NULL OR " ++ action ++ ".background_position IS NOT NULL) AND NOT " ++
-        actionStoppedSql(action, operation) ++ " AND NOT EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=" ++ action ++ ".session_ref AND owed.settled=0)";
+        actionStoppedSql(action, operation);
 }
 
 fn bashReadySql(comptime first: u8) []const u8 {
@@ -513,8 +518,7 @@ pub fn readBashExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *A
 
 pub const core_facts = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,action.background_position IS NOT NULL AS background," ++
-        "(" ++ actionStoppedSql("action", "operation") ++ " " ++
-        "OR EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=s.session_ref AND owed.settled=0)) AS stopped," ++ coreCaseSql(4) ++
+        actionStoppedSql("action", "operation") ++ " AS stopped," ++ coreCaseSql(4) ++
         "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND operation.turn_id=?3 " ++
