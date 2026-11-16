@@ -143,6 +143,7 @@ pub const Kind = enum {
     session_pin,
     model_interruption,
     permission_decision,
+    action_background,
     observe_command,
     read_result,
     read_action,
@@ -668,6 +669,7 @@ fn RequestOf(comptime Custody: type) type {
         session_pin: SessionPinCommand,
         model_interruption: ModelInterruptionCommand,
         permission_decision: PermissionDecisionCommand,
+        action_background: command_input.ActionBackgroundCommand,
         observe_command: ObserveCommand,
         read_result: ReadResult,
         read_action: @import("action_read.zig").Request,
@@ -687,7 +689,7 @@ fn RequestOf(comptime Custody: type) type {
             switch (self.*) {
                 .configure => |*command| try command.removeTemporaryContent(io),
                 .message => |*command| try command.removeTemporaryContent(io),
-                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .skill_suggestions, .model_list => {},
+                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .observe_command, .read_result, .read_action, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .skill_suggestions, .model_list => {},
             }
         }
 
@@ -798,6 +800,10 @@ fn ParserOf(comptime Custody: type) type {
                 .permission_decision => {
                     out.* = .{ .permission_decision = .{ .store = store } };
                     try self.parsePermissionDecision(&out.permission_decision, &members);
+                },
+                .action_background => {
+                    out.* = .{ .action_background = .{ .store = store } };
+                    try self.parseActionBackground(&out.action_background, &members);
                 },
                 .read_action => {
                     out.* = .{ .read_action = .{ .store = store } };
@@ -1279,6 +1285,17 @@ fn ParserOf(comptime Custody: type) type {
                 },
             };
             try require(Field, seen, &.{ .key, .session, .action, .decision });
+        }
+
+        fn parseActionBackground(self: *Parser, out: *command_input.ActionBackgroundCommand, members: *Members) !void {
+            const Field = enum { key, session, action };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .key => try self.readCommandKey(&out.key),
+                .session => try self.readSmallString(&out.session),
+                .action => out.action_id = try self.readCanonicalU64(),
+            };
+            try require(Field, seen, &.{ .key, .session, .action });
         }
 
         fn parseReadAction(self: *Parser, out: *@import("action_read.zig").Request, members: *Members) !void {
@@ -2028,6 +2045,7 @@ pub const session_pin_request = struct {
 pub const model_interruption_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"model_interruption\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"target\":{\"session\":", session_hole, ",\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\"}}" };
 /// Holes: Store, key, Session, Action, decision.
 pub const permission_decision_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"permission_decision\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\",\"decision\":\"", Hole{ .tag = PermissionDecision }, "\"}" };
+pub const action_background_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"action_background\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
 /// Holes: Store, key.
 pub const observe_command_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"observe_command\",\"store\":", store_hole, ",\"key\":", key_hole };
@@ -2145,7 +2163,8 @@ pub const max_session_archive_request_bytes = shapeBytes(session_archive_request
 pub const max_session_pin_request_bytes = shapeBytes(session_pin_request.all);
 pub const max_model_interruption_request_bytes = shapeBytes(model_interruption_request);
 pub const max_permission_decision_request_bytes = shapeBytes(permission_decision_request);
-pub const max_control_request_bytes = maxShapeBytes(.{ session_stop_request, session_archive_request.all, session_pin_request.all, model_interruption_request, permission_decision_request });
+pub const max_action_background_request_bytes = shapeBytes(action_background_request);
+pub const max_control_request_bytes = maxShapeBytes(.{ session_stop_request, session_archive_request.all, session_pin_request.all, model_interruption_request, permission_decision_request, action_background_request });
 pub const max_observe_command_request_bytes = shapeBytes(observe_command_request.all);
 pub const max_host_info_request_bytes = shapeBytes(host_info_request);
 pub const max_host_stop_request_bytes = shapeBytes(host_stop_request);
@@ -2263,6 +2282,16 @@ pub const permission_decision_reply = struct {
     pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
 };
 
+pub const action_background_reply = struct {
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"action_background_reply\",\"answer\":{\"status\":";
+    const target = .{ ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"" };
+    pub const selection = .{ ",\"action_selection\":{\"kind\":\"", Hole{ .tag = @FieldType(@import("action_control.zig").Selection, "kind") }, "\",\"position\":\"", Hole.decimal, "\"}" };
+    pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean } ++ target ++ selection ++ .{"}}"};
+    pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean } ++ target ++ .{ ",\"code\":\"", Hole{ .tag = @import("action_control.zig").Rejection }, "\"}}" };
+    pub const conflict = .{head ++ "\"conflict\",\"replayed\":false"} ++ target ++ .{",\"code\":\"idempotency_key_conflict\"}}"};
+    pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
+};
+
 pub const action_read_reply = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"action_read\",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"," };
     pub const pending = .{ "\"state\":\"", Hole{ .tag = @import("action_read.zig").PendingState }, "\",\"final\":null}" };
@@ -2364,6 +2393,8 @@ pub const command_observation_reply = struct {
     pub const model_interruption = .{",\"interruption_target\":"} ++ model_interruption_target_shape;
     /// Holes: Action, decision.
     pub const permission_decision = .{ ",\"permission_target\":{\"action\":\"", Hole.decimal, "\",\"decision\":\"", Hole{ .tag = PermissionDecision }, "\"}" };
+    pub const action_target = .{ ",\"action_target\":{\"action\":\"", Hole.decimal, "\"}" };
+    pub const action_selection = action_background_reply.selection;
     pub const tail = .{"}}"};
 
     /// The largest observation of this kind.
@@ -2377,6 +2408,7 @@ pub const command_observation_reply = struct {
             .session_pin => shapeBytes(session_pin),
             .model_interruption => shapeBytes(model_interruption),
             .permission_decision => shapeBytes(permission_decision),
+            .action_background => shapeBytes(action_target) + shapeBytes(action_selection),
         };
         return shapeBytes(head(kind)) + shapeBytes(code) + body + shapeBytes(tail);
     }
@@ -2396,7 +2428,7 @@ pub const max_control_error_response_bytes = shapeBytes(error_reply);
 
 pub const max_mutation_response_bytes = @max(
     @max(@max(configuration_reply.max_bytes, message_reply.max_bytes), @max(session_stop_reply.max_bytes, model_interruption_reply.max_bytes)),
-    @max(session_pin_reply.max_bytes, @max(session_archive_reply.max_bytes, @max(permission_decision_reply.max_bytes, max_control_error_response_bytes))),
+    @max(session_pin_reply.max_bytes, @max(session_archive_reply.max_bytes, @max(action_background_reply.max_bytes, @max(permission_decision_reply.max_bytes, max_control_error_response_bytes)))),
 );
 
 /// Holes: Store, instance, Active and intake capacity, descriptor limit
@@ -3450,5 +3482,28 @@ test "Action read request preserves canonical identity and optional cursor" {
         var source: MetadataSource = .{ .input = head ++ tail };
         var parser = Tested.Parser{ .source = &source };
         try std.testing.expectError(error.InvalidIdentity, parseForTest(&parser));
+    }
+}
+
+test "Action promotion parses one owned target and binds semantic replay" {
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"action_background\",\"store\":\"s\",\"key\":\"promote\",\"session\":\"k7m2qx\",\"action\":";
+    var source: MetadataSource = .{ .input = head ++ "\"42\"}" };
+    var parser = Tested.Parser{ .source = &source };
+    var command = (try parseForTest(&parser)).action_background;
+    try std.testing.expectEqual(@as(u64, 42), command.action_id);
+    try std.testing.expectEqualStrings("k7m2qx", command.session.slice());
+    const digest = command.semanticDigest();
+    try command.key.set("another-key");
+    try command.store.set("another-store");
+    try std.testing.expectEqualSlices(u8, &digest, &command.semanticDigest());
+    command.action_id = 43;
+    try std.testing.expect(!std.mem.eql(u8, &digest, &command.semanticDigest()));
+    command.action_id = 42;
+    try command.session.set("rhvzwc");
+    try std.testing.expect(!std.mem.eql(u8, &digest, &command.semanticDigest()));
+    inline for (.{ "\"01\"}", "\"-1\"}", "\"18446744073709551616\"}" }) |tail| {
+        var invalid: MetadataSource = .{ .input = head ++ tail };
+        var invalid_parser = Tested.Parser{ .source = &invalid };
+        try std.testing.expectError(error.InvalidIdentity, parseForTest(&invalid_parser));
     }
 }

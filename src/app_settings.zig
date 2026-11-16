@@ -1,5 +1,3 @@
-//! App defaults and live app facts behind a borrowed, typed backend.
-//! No preference writer or Upgrade worker lives here.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -20,8 +18,6 @@ const Self = @This();
 
 pub const SaveState = enum { idle, pending, saved, failed };
 
-/// Borrowed for the page's lifetime. The backend owns save outcomes; pending
-/// includes queued work, not just a currently running worker.
 pub const Backend = struct {
     context: *anyopaque,
     read: *const fn (*anyopaque) anyerror!preferences.Values,
@@ -30,14 +26,11 @@ pub const Backend = struct {
     upgrade: *const fn (*anyopaque) anyerror!void,
     run: *const fn (*anyopaque) ?upgrade_status.Run,
     caps: *const fn (*anyopaque) view.Caps,
-    /// Latest app-owned physical memory reading; null before the first read.
     memory: ?*const fn (*anyopaque) ?view.Memory = null,
-    /// Live lists change revision on every replacement or release.
     models: ?*const fn (*anyopaque) ModelChoice.Snapshot = null,
     sign_in: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
 };
 
-/// The page's rows, in drawn order: the Panel's field index of each.
 pub const Row = enum { model, effort, permissions, notifications, sign_in, version, memory, keys };
 const row_count = std.enums.values(Row).len;
 
@@ -49,13 +42,10 @@ read_failed: bool = false,
 panel: Panel = .{ .title = "Rui" },
 model_choice: ModelChoice = .{},
 fields: [row_count]Panel.Field = undefined,
-/// The row awaiting the backend's answer. Displayed values always come from
-/// the saved file, including uncertain saves.
 saving_row: ?Row = null,
 failures: std.EnumArray(Row, ?[]const u8) = .initFill(null),
 effort_choices: [std.enums.values(catalog.ReasoningEffort).len + 1][]const u8 = undefined,
 effort_count: usize = 0,
-/// Supplied by the application owner, not a dependency of UI-only roots.
 version: []const u8 = "",
 upgrade_buffer: [upgrade_status.max_line_bytes]u8 = undefined,
 
@@ -67,31 +57,25 @@ pub fn hasChoice(self: *const Self) bool {
     return self.panel.choice != null or self.model_choice.active;
 }
 
-/// End the current edit while retaining the enclosing Settings page.
 pub fn cancelChoice(self: *Self) void {
     self.cancelEdit();
 }
 
-/// Transient editing state, independent of presentation and admitted work.
 fn cancelEdit(self: *Self) void {
     self.panel.closeChoice();
     self.model_choice.cancel();
     self.panel.custom_choice = null;
 }
 
-/// The page takes its panel's keys, and text while filtering models.
 pub fn takesKey(self: *const Self, key: vaxis.Key) bool {
     if (@import("keypress.zig").named(key)) |name| if (@import("app_input.zig").keys.get(name) != null) return true;
     return (self.model_choice.active and ModelChoice.takesKey(key)) or Panel.takesKey(key);
 }
 
-/// Only the Model filter edits text; a paste must never choose or act.
 pub fn takesPaste(self: *const Self) bool {
     return self.model_choice.active;
 }
 
-/// Esc is the Upgrade's while it can still change nothing, as on the
-/// overview and in a conversation.
 pub fn upgradeTakesEscape(self: *const Self) bool {
     const backend = self.backend orelse return false;
     const run = backend.run(backend.context) orelse return false;
@@ -106,10 +90,7 @@ pub fn refresh(self: *Self) !void {
     try self.readValues();
 }
 
-/// Refresh the saved facts used by the Settings page.
 fn readValues(self: *Self) !void {
-    // A choice is tied to the saved provider/model snapshot it opened on.
-    // Refreshing (including failure) invalidates that choice.
     self.cancelEdit();
     const backend = self.backend orelse {
         self.read_failed = true;
@@ -290,7 +271,6 @@ fn pick(raw: *anyopaque, ctx: *vxfw.EventContext, field: usize, choice: usize) !
             },
         },
         .permissions => .{ .permission_mode = .{ .set = if (choice == 0) .bypass else .ask } },
-        // Model uses the shared full-width choice.
         .model, .notifications, .sign_in, .version, .memory, .keys => unreachable,
     });
 }
@@ -357,7 +337,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     if (self.keys_open) {
         var reference = keys_panel.panel(if (self.backend) |backend| backend.caps(backend.context) else .{});
         var surface = try reference.widget().draw(ctx);
-        // Settings retains focus and input ownership while the reference is drawn.
         surface.widget = self.widget();
         return surface;
     }
@@ -365,7 +344,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const size = ctx.max.size();
     if (size.width == 0 or size.height == 0) return .empty(self.widget());
     const memory = if (self.backend) |backend| (if (backend.memory) |read| read(backend.context) else null) else null;
-    // Memory is the row's whole value, from the aligned value column to the edge.
     const text = try @import("memory_text.zig").fit(ctx.arena, memory, self.panel.unicode, size.width -| Panel.value_column);
     self.fields[@backingInt(Row.memory)].value = text;
     self.fields[@backingInt(Row.memory)].visible = text.len != 0;
@@ -474,7 +452,6 @@ test "App settings choices submit typed edits and show saved values after the ba
     try std.testing.expectEqualStrings(chosen_model, page.model());
     try std.testing.expectEqual(@as(?[]const u8, null), page.failures.get(.model));
 
-    // Effort choices are the selected model's supported efforts, plus clearing.
     page.select(.effort);
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expectEqualStrings("model default", page.effort_choices[0]);
@@ -508,7 +485,6 @@ test "App settings choices submit typed edits and show saved values after the ba
     try page.widget().handleEvent(&ctx, .tick);
     try std.testing.expect(!page.values.notifications);
 
-    // Read-only sign-in doesn't submit, while Version delegates to Upgrade.
     page.select(.sign_in);
     fixture.last_edit = null;
     try press(&page, &ctx, vaxis.Key.enter);
@@ -533,7 +509,6 @@ test "App settings failures stay on the field and can recover" {
     try std.testing.expect(page.values.notifications);
     fixture.fail_save = false;
     try press(&page, &ctx, vaxis.Key.enter);
-    // A failed backend answer is a row failure even if publication succeeded.
     fixture.values.notifications = false;
     fixture.save_status = .failed;
     try page.widget().handleEvent(&ctx, .tick);
@@ -572,8 +547,6 @@ test "App settings completion uses the backend outcome and reports read failures
             try std.testing.expectEqual(@as(?Row, .notifications), page.saving_row);
             fixture.save_status = state;
             fixture.fail_read = fail_read;
-            // The saved file is authoritative for displayed values; the
-            // backend's outcome, not a value comparison, decides success.
             try page.widget().handleEvent(&ctx, .tick);
             try std.testing.expectEqual(@as(?Row, null), page.saving_row);
             try std.testing.expectEqual(fail_read, page.read_failed);
@@ -630,8 +603,6 @@ test "App settings page text and ground at 99x20 and 46x20" {
         try std.testing.expect(std.mem.indexOf(u8, text, "   Effort          low") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Permissions     run without asking") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Notifications   on") != null);
-        // The product default signs in with a device code, and reads as
-        // the one ChatGPT sign-in.
         try std.testing.expect(std.mem.indexOf(u8, text, "   Sign-in         ChatGPT") != null);
         try std.testing.expect(std.ascii.findIgnoreCase(text, "codex") == null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Version         0.60.0 · up to date") != null);
@@ -644,8 +615,6 @@ test "App settings page text and ground at 99x20 and 46x20" {
 
 test "App settings sign-in and effort choices reflect saved values without assuming a provider" {
     var fixture: Fixture = .{};
-    // Either way into ChatGPT reads "ChatGPT"; the device code is how,
-    // not what, a person signed in with.
     for ([_][2][]const u8{ .{ "codex", "ChatGPT" }, .{ "chatgpt", "ChatGPT" }, .{ "openai", "API key" } }) |case| {
         try fixture.values.provider.set(case[0]);
         var shown: Self = .{ .backend = fixture.backend() };
@@ -666,8 +635,6 @@ test "App settings sign-in and effort choices reflect saved values without assum
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(page.hasChoice());
     page.cancelChoice();
-    // A formerly supported sign-in remains readable in preferences. It must
-    // not become a different sign-in or a forced-unwrapped enum in this page.
     try fixture.values.provider.set("legacy");
     try page.refresh();
     page.bind();
@@ -675,8 +642,6 @@ test "App settings sign-in and effort choices reflect saved values without assum
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(!page.hasChoice());
     try std.testing.expectEqualStrings(" · sign-in unavailable", page.failures.get(.model).?);
-    // A saved effort excluded by this model doesn't mark "model default" as
-    // current: the page must not claim that an unsaved clearing already holds.
     for (catalog.shipped) |entry| if (entry.openai_listed and !entry.efforts.contains(.max)) {
         try fixture.values.model.set(entry.id);
         break;
@@ -853,7 +818,6 @@ test "App settings Sign-in row opens the shared sign-in screen on Enter" {
     var backend = fixture.backend();
     var page: Self = .{ .backend = backend };
     try page.refresh();
-    // Other backend operations are not used by this row.
     backend.context = &owner;
     backend.sign_in = SignIn.open;
     page.backend = backend;
@@ -922,7 +886,6 @@ test "App settings Keys is last and opens by Enter or click without a backend" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     for ([_]u16{ 140, 46 }) |width| for ([_]bool{ false, true }) |click| {
-        // The reference remains available when preferences cannot be read.
         var page: Self = .{};
         try page.refresh();
         page.bind();
@@ -931,7 +894,6 @@ test "App settings Keys is last and opens by Enter or click without a backend" {
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         if (click) {
             _ = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
-            // With no backend, Memory is absent and Keys follows Version.
             try page.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .row = 2 + @as(u16, @backingInt(Row.version)) + 1, .col = 4, .mods = .{} } });
         } else {
             page.select(.keys);
@@ -942,7 +904,6 @@ test "App settings Keys is last and opens by Enter or click without a backend" {
         const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         try std.testing.expectEqualStrings("e", drawn.readCell(1, 0).char.grapheme);
         try std.testing.expect(drawn.widget.eql(page.widget()));
-        // Enter on a reference is inert, not a hidden settings edit.
         try press(&page, &ctx, vaxis.Key.enter);
         try std.testing.expect(page.keys_open);
         try std.testing.expect(page.saving_row == null);
@@ -955,7 +916,6 @@ test "App settings Memory gets the columns from the value column to the edge" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     try page.refresh();
-    // memory_text owns which form fits; this page owns only the columns it gives memory.
     for ([_]struct { width: u16, expected: ?[]const u8 }{
         .{ .width = Panel.value_column + 24, .expected = "Memory          rui 38 MB · tools 120 MB" },
         .{ .width = Panel.value_column + 23, .expected = "Memory          rui 38 MB" },

@@ -1,7 +1,4 @@
 #!/bin/sh
-# The pinned OpenSSL and nghttp2 public headers for a target, without
-# building either library: enough to type-check the HTTP/2 client for a
-# target whose transport is not built here (macOS from Linux).
 set -eu
 
 openssl_source=$1
@@ -26,8 +23,6 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
-# Configure plus only the public headers that OpenSSL generates from .in
-# templates, with build_transport.sh's options.
 generated=$(cd "$openssl_source" && for template in include/openssl/*.h.in; do
     printf '%s ' "${template%.in}"
 done)
@@ -35,7 +30,6 @@ done)
     cd "$build_root"
     perl "$openssl_source/Configure" "$openssl_target" \
         no-shared no-tests no-apps no-docs
-    # shellcheck disable=SC2086 # one word per header
     make $generated
 ) >>"$log" 2>&1 || {
     tail -100 "$log" >&2

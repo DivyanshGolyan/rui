@@ -1,4 +1,3 @@
-/* Independent filesystem calibration, not a replacement SQLite workload. */
 #include <libproc.h>
 #include <unistd.h>
 #include <fcntl.h>

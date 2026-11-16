@@ -1,4 +1,3 @@
-// Throwaway: sealed output-item arrays, not the complete Responses/SSE adapter.
 const std = @import("std");
 const prod = @import("prod");
 const c = @cImport({

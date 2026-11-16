@@ -78,7 +78,6 @@ int main(int argc,char**argv){
  else {assert(scalar("SELECT count(*) FROM accepted")==rows);assert(compare(size,rows,0));sample("exact_reread");assert(!compare(size,rows,1));assert(compare(size,rows,1));printf("{\"equal\":true,\"last_byte_conflict_detected\":true}\n");
  if(!strcmp(mode,"select")){sqlite3_stmt*q=0;check(sqlite3_prepare_v2(db,"SELECT payload FROM content WHERE content_id=1",-1,&q,0));int r=sqlite3_step(q);if(r==SQLITE_ROW){const void*p=sqlite3_column_blob(q,0);(void)p;r=sqlite3_errcode(db);}sample("whole_select");printf("{\"whole_select_rc\":%d}\n",r);sqlite3_finalize(q);}}
  sample("retained_idle");check(sqlite3_db_release_memory(db));sample("released_cache");check(sqlite3_close(db));db=0;sample("closed");
- // Reopen verifies transactional publication across connection lifetime, not process crash or power loss.
  check(sqlite3_open(path,&db));assert(scalar("SELECT count(*) FROM witness WHERE value='prior-commit'")==1);assert(scalar("SELECT count(*) FROM content")==(rc==SQLITE_OK?rows:0));assert(scalar("SELECT count(*) FROM accepted")==(rc==SQLITE_OK?rows:0));check(sqlite3_close(db));db=0;
  close(source);unlink(src);free(a);free(b);app_live=0;sqlite3_shutdown();sample("cleanup");return 0;
 }

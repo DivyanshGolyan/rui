@@ -1,5 +1,3 @@
-// The publication order comes from the tarballs' manifests, never from a list
-// of package names, so a new platform or a renamed tarball needs no change here.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 

@@ -175,6 +175,26 @@ pub fn renderPermissionDecisionReply(
     };
 }
 
+pub const ActionBackgroundTarget = struct {
+    session: protocol.Bounded(protocol.max_session_bytes),
+    action_id: u64,
+};
+
+pub fn renderActionBackgroundReply(
+    response: protocol.JsonOut,
+    target: ActionBackgroundTarget,
+    result: @import("action_control.zig").Reply,
+) !void {
+    const shapes = protocol.action_background_reply;
+    const session = target.session.slice();
+    try switch (result) {
+        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, target.action_id, value.selection.kind, value.selection.position }),
+        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, target.action_id, value.code }),
+        .conflict => response.appendShape(shapes.conflict, .{ session, target.action_id }),
+        .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
+    };
+}
+
 pub fn renderActionRead(response: protocol.JsonOut, value: *const @import("action_read.zig").Read) !void {
     const shapes = protocol.action_read_reply;
     try response.appendShape(shapes.head, .{ value.session.slice(), value.action_id });
@@ -250,6 +270,10 @@ pub fn renderFullCommandObservation(
         .session_archive => |archive| if (archive) |value| try response.appendShape(shapes.session_archive, .{ value.archived, value.completion }),
         .model_interruption => |target| try response.appendShape(shapes.model_interruption, .{ target.session.slice(), target.turn_id, target.operation_id }),
         .permission_decision => |permission| try response.appendShape(shapes.permission_decision, .{ permission.action_id, permission.decision }),
+        .action_background => |selected| {
+            try response.appendShape(shapes.action_target, .{selected.action_id});
+            if (selected.selection) |selection| try response.appendShape(shapes.action_selection, .{ selection.kind, selection.position });
+        },
     }
     try response.appendShape(shapes.tail, .{});
 }
@@ -398,6 +422,14 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         command_reply.PermissionDecisionReply.conflict,
     }));
 
+    const background: ActionBackgroundTarget = .{ .session = session, .action_id = max };
+    const control = @import("action_control.zig");
+    try std.testing.expectEqual(protocol.action_background_reply.max_bytes, try Worst.reply(renderActionBackgroundReply, background, .{
+        control.Reply{ .accepted = .{ .replayed = false, .action_id = max, .selection = .{ .kind = Worst.tag(@FieldType(control.Selection, "kind")), .position = max } } },
+        control.Reply{ .rejected = .{ .replayed = false, .code = Worst.tag(control.Rejection) } },
+        control.Reply.conflict,
+    }));
+
     var failure: protocol.ResponseBuffer = .{};
     try failure.render(renderStatic, .{ Worst.tag(protocol.ErrorType), &escaped_code });
     try std.testing.expectEqual(protocol.max_control_error_response_bytes, failure.len);
@@ -447,6 +479,12 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     var decided = command_reply.CommandObservation{ .status = .accepted, .code = code, .kind = .{ .permission_decision = .{ .action_id = max, .decision = Worst.tag(protocol.PermissionDecision) } } };
     try decided.target.set(&escaped_session);
     try std.testing.expectEqual(observations.maxBytes(.permission_decision), try Worst.observation(&escaped_key, decided));
+    var backgrounded = command_reply.CommandObservation{ .status = .accepted, .code = code, .kind = .{ .action_background = .{
+        .action_id = max,
+        .selection = .{ .kind = Worst.tag(@FieldType(control.Selection, "kind")), .position = max },
+    } } };
+    try backgrounded.target.set(&escaped_session);
+    try std.testing.expectEqual(observations.maxBytes(.action_background), try Worst.observation(&escaped_key, backgrounded));
     try std.testing.expect(try Worst.observation(&escaped_key, .{ .status = .absent }) <= protocol.command_observation_reply.max_bytes);
 
     var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};

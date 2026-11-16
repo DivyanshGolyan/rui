@@ -1,4 +1,3 @@
-// Derive runtime input codecs from the same schema that generates wire.ts.
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 

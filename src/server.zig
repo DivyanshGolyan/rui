@@ -448,6 +448,7 @@ const Intake = struct {
                         .session_pin => protocol.max_session_pin_request_bytes,
                         .model_interruption => protocol.max_model_interruption_request_bytes,
                         .permission_decision => protocol.max_permission_decision_request_bytes,
+                        .action_background => protocol.max_action_background_request_bytes,
                         else => std.math.maxInt(u64),
                     };
                     if (self.header.content_length > limit) return error.RequestTooLarge;
@@ -1624,6 +1625,7 @@ const Route = enum {
     session_pin,
     model_interruption,
     permission_decision,
+    action_background,
     observe,
     read_result,
     read_action,
@@ -1641,7 +1643,7 @@ const Route = enum {
     unsupported_control,
 
     fn isControl(self: Route) bool {
-        return self == .host_stop or self == .host_pause or self == .session_stop or self == .session_archive or self == .session_pin or self == .model_interruption or self == .permission_decision or self == .unsupported_control;
+        return self == .host_stop or self == .host_pause or self == .session_stop or self == .session_archive or self == .session_pin or self == .model_interruption or self == .permission_decision or self == .action_background or self == .unsupported_control;
     }
 
     /// Answered on the listener from atomics and fixed values alone,
@@ -1912,6 +1914,15 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             if (result == .accepted) publishControlHint(host, command.key.slice());
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
             try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderPermissionDecisionReply, .{ host_reply.PermissionTarget{ .session = command.session, .action_id = command.action_id, .decision = command.decision }, result });
+            fd.timing = timing;
+        },
+        .action_background => |*command| {
+            var timing = ControlTiming.init(host, command.key, "action_background", accepted_at_ns);
+            const result = host.store.backgroundAction(command, host.dispatchCapacity(), host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
+            if (result == .infrastructure_failure) fenceDispatch(host, "Action background save", error.CanonicalStoreFailure);
+            if (result == .accepted) publishControlHint(host, command.key.slice());
+            if (header.drop == .after_commit and result != .infrastructure_failure) return;
+            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderActionBackgroundReply, .{ host_reply.ActionBackgroundTarget{ .session = command.session, .action_id = command.action_id }, result });
             fd.timing = timing;
         },
         .observe_command => |*command| {
@@ -2446,7 +2457,7 @@ test "mutation decoder validates every actual producer and preserved domain answ
                         try std.testing.expectEqual(.pending, value.completion);
                     },
                     .session_pin => |value| try std.testing.expect(!value.pinned),
-                    .model_interruption, .permission_decision => {},
+                    .model_interruption, .permission_decision, .action_background => {},
                 };
             }
         }
@@ -3573,6 +3584,7 @@ test "retired reserved exchanges cannot block their successors while workers are
                 .session_pin => "control/session-pin",
                 .model_interruption => "control/model-interruption",
                 .permission_decision => "control/permission-decision",
+                .action_background => "control/action-background",
                 .unsupported_control => "control/unknown",
                 else => unreachable,
             };

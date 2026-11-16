@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Qualify a pinned, synchronous UTF-8 reader extension and thin data decoder."""
 import argparse
 import fcntl
 import hashlib
@@ -96,7 +95,6 @@ def cases():
         yield dict(name='heap-exhaustion',value=Text(repeat=4194304),staged=staged,window=16384,mode='heap',failure='engine_exhaustion')
         invalid = [b'\x80',b'\xc0\x80',b'\xc1\xbf',b'\xe0\x80\x80',b'\xed\xa0\x80',b'\xed\xbf\xbf',b'\xf0\x80\x80\x80',b'\xf4\x90\x80\x80',b'\xf5\x80\x80\x80',b'\xf0\x9f',b'\xe2x\xa1']
         for i,bad in enumerate(invalid):
-            # Put invalid/truncated sequences across the input-window boundary.
             raw=b'x'*16383+bad
             yield dict(name=f'utf8-{i}',value=Raw(b'\4'+struct.pack('<Q',len(raw))+raw),staged=staged,window=16384,failure='invalid_utf8')
         yield dict(name='invalid-key',value=Raw(b'\6'+struct.pack('<I',1)+struct.pack('<Q',3)+b'\xed\xa0\x80'+b'\0'),staged=staged,window=1,failure='invalid_utf8')
@@ -165,7 +163,7 @@ with open('/tmp/rui-memory-experiments.lock','a') as lock:
                 parent_preparation_current=current,parent_preparation_peak=peak,
                 returncode=result.returncode,stderr=result.stderr,elapsed_seconds=time.monotonic()-start,records=records)
             output['runs'].append(row)
-            save()  # Keep failure evidence before validating the claimed outcome.
+            save()
             assert result.stderr=='',(case['name'],result.stderr)
             expected_exit=10 if case.get('failure') else 0
             if case.get('allow_exhaustion'):
@@ -196,9 +194,6 @@ with open('/tmp/rui-memory-experiments.lock','a') as lock:
         for case in selected:
             execute(case)
         if not args.smoke and not args.negative_control:
-            # Exhaust every backing allocation in one nested object/key decode,
-            # including Promise construction. Successful recovery must still
-            # match the complete independent fingerprint.
             for staged in [0,1]:
                 baseline=next(r for r in output['runs'] if r['name']=='injection-oracle' and r['staged']==staged)
                 attempts=baseline['records'][-1]['decode_attempts']

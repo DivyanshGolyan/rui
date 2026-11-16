@@ -1,5 +1,3 @@
-//! Model admission Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -18,7 +16,7 @@ const ActiveOperationFilter = action_domain.ActiveOperationFilter;
 const AttemptBinding = store_core.AttemptBinding;
 const Faults = store_core.Faults;
 const HistoricalSettings = historical_domain.HistoricalSettings;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const ModelAdmissionKind = model_admission_domain.ModelAdmissionKind;
 const ModelFailure = model_settlement_domain.ModelFailure;
 const ModelOperationKind = historical_domain.ModelOperationKind;
@@ -53,11 +51,9 @@ test "a quota reset is read from a saved record and never fences" {
             for ([_]struct { code: []const u8, diagnostic: ?[]const u8, resets_at: ?u64 }{
                 .{ .code = "provider_quota", .diagnostic = "{\"refusal\":\"quota\",\"resets_at\":null}", .resets_at = null },
                 .{ .code = "provider_plan", .diagnostic = "{\"refusal\":\"plan\",\"resets_at\":42}", .resets_at = 42 },
-                // A missing, corrupt or mismatched record gives no time.
                 .{ .code = "provider_quota", .diagnostic = null, .resets_at = null },
                 .{ .code = "provider_quota", .diagnostic = "{\"refusal\":\"quota\",\"resets_at\":4x}", .resets_at = null },
                 .{ .code = "provider_quota", .diagnostic = "{\"refusal\":\"plan\",\"resets_at\":42}", .resets_at = null },
-                // Only a quota code reads one.
                 .{ .code = "provider_http_403", .diagnostic = "{\"refusal\":\"quota\",\"resets_at\":42}", .resets_at = null },
             }, 0..) |case, index| {
                 var key_buffer: [32]u8 = undefined;
@@ -97,7 +93,6 @@ test "kind-specific admission selects a tool continuation despite fresh input an
             try submitTestMessage(&storage, &tmp, "fresh-input", "fresh-input", allocated_session_1.slice(), "competing input");
 
             try std.testing.expectError(error.InjectedAttemptCommitFailure, storage.admitModelAttempt(.tool_continuation, .{ .attempt_before_commit = true }));
-            // A failed admission commit fences; recovery is a fresh Store open.
             try std.testing.expectError(error.StoreFenced, storage.admitModelAttempt(.tool_continuation, .{}));
             try storage.close();
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
@@ -176,7 +171,7 @@ test "each transition that lets a Turn continue without input makes it selectabl
                                 try allow.key.set(try std.fmt.bufPrint(&key_buffer, "{s}-allow", .{name}));
                                 try allow.session.set(session.slice());
                                 try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-                                const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+                                const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
                                 try std.testing.expect((try storage.admitModelAttempt(.tool_continuation, .{})) == null);
                                 if (path == .settled) {
                                     try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{}));
@@ -243,12 +238,9 @@ test "production turn preserves skipped continuation preference through actual S
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             const turn = @import("../../execution_turn.zig");
-            // Real canonical admissions and outcomes; no native effect is launched.
-            // The test controls only available preparation and execution capacity.
             const Context = struct {
                 storage: *Store,
                 preparation_open: bool = true,
-                /// Counts each preparation slot opening or closing, as setSlot does.
                 slot_changes: u64 = 0,
                 observed_open: bool = true,
                 model: ?AttemptBinding = null,
@@ -291,7 +283,7 @@ test "production turn preserves skipped continuation preference through actual S
                     return 1;
                 }
                 pub fn dispatchCapacity(self: *@This()) turn.DispatchCapacity {
-                    return .{ .free_credit = self.freeSlots() != 0, .mcp_open = false };
+                    return .fromFree(self.freeSlots(), false);
                 }
                 pub fn providerConfigured(_: *@This()) bool {
                     return true;
@@ -312,7 +304,7 @@ test "production turn preserves skipped continuation preference through actual S
                     return .no_work;
                 }
                 pub fn admitBash(self: *@This()) turn.Admission {
-                    var admission = (self.storage.admitNextActionAttempt(1000, self.faults) catch |err| {
+                    var admission = (self.storage.admitNextActionAttempt(self.dispatchCapacity(), 1000, self.faults) catch |err| {
                         self.failure = err;
                         return .retry_later;
                     }) orelse return .no_work;
@@ -414,14 +406,9 @@ test "production turn preserves skipped continuation preference through actual S
             context.preparation_open = true;
             _ = turn.run(&state, &context);
             try std.testing.expectEqual(@as(?anyerror, null), context.failure);
-            // A circular cursor reset by the Bash winner, or the old combined
-            // fresh-input-first Store selector, admits fresh work here instead.
             try std.testing.expectEqual(peer.turn_id, context.model.?.turn_id);
             try std.testing.expect((try store_testing.observeCommandForTesting(&storage, "fresh-message")).kind.message.?.queue.?.state == .queued);
 
-            // Keep fresh Messages available while actual retries, Bash and tool-only
-            // continuations repeatedly commit. The fixture makes retry clocks due;
-            // the production turn and Store still own eligibility and admission.
             var sustained_tmp = std.testing.tmpDir(.{});
             defer sustained_tmp.cleanup();
             var sustained: Store = undefined;
@@ -439,13 +426,11 @@ test "production turn preserves skipped continuation preference through actual S
             try sustained.settleModelAttemptFailure(bindings[1], .{ .uncorrelated = "temporary" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
             try settleCallsForTesting(&sustained, &sustained_tmp, bindings[2], "sending-result", &bash_calls);
             const allocated_session_3 = try configureTestSession(&sustained, "fresh-loop-config");
-            var progress = [_]usize{ 0, 0, 0, 0 }; // Bash, retry, fresh Message, continuation.
+            var progress = [_]usize{ 0, 0, 0, 0 };
             var sustained_state: turn.State = .{};
             var sustained_context = Context{ .storage = &sustained };
             var fresh_number: usize = 0;
             for (0..32) |iteration| {
-                // Replenish independently before every selection, never only after
-                // the competing candidate has won.
                 var key_buffer: [64]u8 = undefined;
                 const key = try std.fmt.bufPrint(&key_buffer, "fresh-loop-{d}", .{fresh_number});
                 fresh_number += 1;
@@ -453,7 +438,6 @@ test "production turn preserves skipped continuation preference through actual S
                 try store_testing.exec(&sustained, "UPDATE model_operation SET retry_due_at_ms=1 WHERE retry_due_at_ms>0 AND resolution_code IS NULL", .{});
                 sustained_context.model = null;
                 sustained_context.action = null;
-                // The timer edge is fixture-owned; it grants no Attempt authority.
                 sustained_state.last_retry_poll = null;
                 _ = turn.run(&sustained_state, &sustained_context);
                 try std.testing.expectEqual(@as(?anyerror, null), sustained_context.failure);
@@ -518,19 +502,16 @@ test "runnable discovery fences structurally incomplete current tool calls" {
     }.run);
 }
 
-/// The dispatch loop's work read against the owners it speaks for: each
-/// call reads the hint, runs the owner, and expects the same answer.
 const WorkParity = struct {
-    /// The slot-free runners. Reads only, so any state can call it.
     fn core(storage: *Store) !void {
-        const work = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true });
-        try std.testing.expectEqual((try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = false })) != null, work.core);
-        try std.testing.expectEqual((try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })) != null, work.core or work.mcp);
+        const work = try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true });
+        try std.testing.expectEqual((try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = false })) != null, work.core);
+        try std.testing.expectEqual((try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })) != null, work.core or work.mcp);
     }
 
     fn model(storage: *Store, kind: ModelAdmissionKind) !?AttemptBinding {
         try core(storage);
-        const work = try storage.dispatchWork(kind == .open_turn_message, .{ .free_credit = true, .mcp_open = true });
+        const work = try storage.dispatchWork(kind == .open_turn_message, .{ .free_credit = .one, .mcp_open = true });
         const admission = try storage.admitModelAttempt(kind, .{});
         try std.testing.expectEqual(admission != null, if (kind == .tool_continuation) work.tool_continuation else work.message);
         return if (admission) |found| found.permit.binding else null;
@@ -538,13 +519,12 @@ const WorkParity = struct {
 
     fn bash(storage: *Store) !?ActionAttemptBinding {
         try core(storage);
-        const work = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true });
-        const admission = try storage.admitNextActionAttempt(300_000, .{});
+        const work = try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true });
+        const admission = try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{});
         try std.testing.expectEqual(admission != null, work.bash);
         return if (admission) |found| found.permit.binding else null;
     }
 
-    /// Every owner at once, for a state where none has work.
     fn idle(storage: *Store) !void {
         for (std.enums.values(ModelAdmissionKind)) |kind| try std.testing.expect((try model(storage, kind)) == null);
         try std.testing.expect((try bash(storage)) == null);
@@ -560,28 +540,23 @@ test "the dispatch work read answers as each admission owner does, in every stat
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             try WorkParity.idle(&storage);
-            try std.testing.expect(!(try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true })).retry);
+            try std.testing.expect(!(try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true })).retry);
 
-            // Waiting input: a new Turn takes it unless new Turns are held.
             const session = try configureTestSessionAsk(&storage, "parity-config");
             try submitTestMessage(&storage, &tmp, "parity-start", "parity-start", session.slice(), "start");
             try std.testing.expect((try WorkParity.model(&storage, .open_turn_message)) == null);
             try std.testing.expect((try WorkParity.model(&storage, .tool_continuation)) == null);
             const first = (try WorkParity.model(&storage, .message)).?;
             try WorkParity.idle(&storage);
-            // Its running Attempt is what a retry scan would read; once it
-            // resolves, neither scan has a row.
-            try std.testing.expect((try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true })).retry);
+            try std.testing.expect((try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true })).retry);
 
-            // Two Bash calls wait on a person: a blocked Operation, no work.
             try settleTwoActionsForTesting(&storage, &tmp, first, "parity-config");
             try WorkParity.idle(&storage);
-            try std.testing.expect(!(try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true })).retry);
+            try std.testing.expect(!(try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true })).retry);
             try std.testing.expect(!try storage.recoverOneExhaustedModelAttempt(ActiveOperationFilter.empty()));
             var scheduled: ?u64 = 0;
             try std.testing.expect((try storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{}, &scheduled)) == null);
             try std.testing.expectEqual(@as(?u64, null), scheduled);
-            // Input that arrives now joins the open Turn, held or not, once it continues.
             try submitTestMessage(&storage, &tmp, "parity-more", "parity-more", session.slice(), "more");
             const last_action = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
             try denyForTesting(&storage, session.slice(), "parity-deny", last_action - 1);
@@ -590,19 +565,16 @@ test "the dispatch work read answers as each admission owner does, in every stat
             try allow.key.set("parity-allow");
             try allow.session.set(session.slice());
             try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-            // An authorized Bash Action is Bash work alone.
             try std.testing.expect((try WorkParity.model(&storage, .tool_continuation)) == null);
             const action = (try WorkParity.bash(&storage)).?;
             try WorkParity.idle(&storage);
             try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{}));
-            // Its last result lets the Turn go on; the queued input makes that a message admission.
             try std.testing.expect((try WorkParity.bash(&storage)) == null);
             try std.testing.expect((try WorkParity.model(&storage, .tool_continuation)) == null);
             const joined = (try WorkParity.model(&storage, .open_turn_message)).?;
             try std.testing.expectEqual(first.turn_id, joined.turn_id);
             try WorkParity.idle(&storage);
 
-            // A rejected call continues its Turn with no input.
             const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
             try settleCallsForTesting(&storage, &tmp, joined, "parity-rejected", &calls);
             try std.testing.expect((try WorkParity.model(&storage, .message)) == null);
@@ -611,7 +583,6 @@ test "the dispatch work read answers as each admission owner does, in every stat
             try std.testing.expectEqual(first.turn_id, continued.turn_id);
             try WorkParity.idle(&storage);
 
-            // A core tool call is slot-free work, never Bash work.
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             var command = try completeConfiguration("parity-agent", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
             command.configuration.tools.state = .value;
@@ -623,22 +594,21 @@ test "the dispatch work read answers as each admission owner does, in every stat
             const asking = (try WorkParity.model(&storage, .message)).?;
             const agent_calls = [_]TestingCall{.{ .item_id = "agent-item", .name = "message_agent", .encoded_call_id = "agent-call", .decoded_call_id = "agent-call", .encoded_arguments = "{\\\"id\\\":\\\"zzzzzz\\\",\\\"text\\\":\\\"hi\\\"}", .decoded_arguments = "{\"id\":\"zzzzzz\",\"text\":\"hi\"}" }};
             try settleCallsForTesting(&storage, &tmp, asking, "parity-agent-calls", &agent_calls);
-            try std.testing.expect((try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true })).core);
+            try std.testing.expect((try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true })).core);
             try WorkParity.idle(&storage);
-            const call = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
+            const call = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
             try std.testing.expectEqual(command_domain.AgentDelivery.failed, try storage.deliverAgentMessage(call.binding, "zzzzzz", "hi", .{}));
-            try std.testing.expect(!(try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true })).core);
+            try std.testing.expect(!(try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true })).core);
             _ = (try WorkParity.model(&storage, .tool_continuation)).?;
             try WorkParity.idle(&storage);
 
-            // A stop above an attached child with a Turn leaves that child's stop owed.
             const child = try configureTestSession(&storage, "parity-child");
             try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ caller.slice(), child.slice() });
             try submitTestMessage(&storage, &tmp, "parity-child-task", "parity-child-task", child.slice(), "work");
             _ = (try WorkParity.model(&storage, .message)).?;
             var stop = try completeSessionStop("parity-stop", caller.slice());
             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-            try std.testing.expect((try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true })).core);
+            try std.testing.expect((try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true })).core);
             try WorkParity.core(&storage);
         }
     }.run);
@@ -669,7 +639,7 @@ test "the dispatch work read fences a Store whose blocked Operations are malform
                     },
                 }
                 try std.testing.expect(!storage.isFenced());
-                try std.testing.expectError(error.CorruptStore, storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true }));
+                try std.testing.expectError(error.CorruptStore, storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true }));
                 try std.testing.expect(storage.isFenced());
             }
         }
@@ -701,7 +671,6 @@ test "an admission that selects nothing fences a Store whose blocked Operations 
                     },
                 }
                 try std.testing.expect(!storage.isFenced());
-                // No Message waits, so the admission selects nothing.
                 try std.testing.expectError(error.CorruptStore, storage.admitModelAttempt(.message, .{}));
                 try std.testing.expect(storage.isFenced());
             }
@@ -721,8 +690,6 @@ test "an admission that selects nothing fences a Store whose blocked Operation's
             try submitTestMessage(&storage, &tmp, "outcome", "outcome", session.slice(), "start");
             const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, first, "outcome-admission");
-            // The calls lose their output items: the Turn still agrees it
-            // waits, so only the calls' own round finds the damage.
             try store_testing.exec(&storage, "UPDATE model_output_item SET item_kind=1 WHERE item_kind=3", .{});
             try std.testing.expect(!storage.isFenced());
             try std.testing.expectError(error.CorruptStore, storage.admitModelAttempt(.message, .{}));
@@ -739,7 +706,6 @@ test "an admission that selects nothing reads a blocked Operation's calls in a r
             var storage: Store = undefined;
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            // Selection, then the idle checks.
             var rounds = storage.testing_content_work.rounds;
             try std.testing.expect(try storage.admitModelAttempt(.message, .{}) == null);
             if (!case.rerun) try std.testing.expectEqual(rounds + 2, storage.testing_content_work.rounds);
@@ -747,7 +713,6 @@ test "an admission that selects nothing reads a blocked Operation's calls in a r
             try submitTestMessage(&storage, &tmp, "blocked", "blocked", session.slice(), "start");
             const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, first, "blocked-admission");
-            // Its asked calls block the Operation: their outcomes take a third round.
             rounds = storage.testing_content_work.rounds;
             try std.testing.expect(try storage.admitModelAttempt(.message, .{}) == null);
             if (!case.rerun) try std.testing.expectEqual(rounds + 3, storage.testing_content_work.rounds);
@@ -767,21 +732,19 @@ test "an admission's commit reads the request's settings where its message carri
             const session = try configureTestSession(&storage, "config");
             {
                 try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "one");
-                var view: HistoricalView = undefined;
+                var view: TestingPage = undefined;
                 var settings: HistoricalSettings = undefined;
-                const admitted = (try storage.admitModelAttemptInto(.message, .{}, .{ .view = &view, .settings = &settings })).?;
+                const admitted = (try storage.admitModelAttemptInto(.message, .{}, .{ .view = view.pageFor(&storage), .settings = &settings })).?;
                 const binding = admitted.permit.binding;
-                // A lone write's COMMIT rides its message only on MySQL.
                 if (!case.rerun) try std.testing.expectEqual(case.engine == .mysql, admitted.request_started);
-                if (!admitted.request_started) storage.openHistoricalView(binding, &view);
+                if (!admitted.request_started) view.open(&storage, binding);
                 defer view.close();
                 const before = storage.testing_content_work.rounds;
                 try view.settings(&settings);
                 try std.testing.expectEqual(before + @intFromBool(!admitted.request_started), storage.testing_content_work.rounds);
-                // The settings a round of their own reads.
-                var plain_view: HistoricalView = undefined;
+                var plain_view: TestingPage = undefined;
                 var plain: HistoricalSettings = undefined;
-                storage.openHistoricalView(binding, &plain_view);
+                plain_view.open(&storage, binding);
                 defer plain_view.close();
                 try plain_view.settings(&plain);
                 inline for (.{ "operation", "compaction_trigger", "output_reservation", "reasoning_effort", "starting_effort", "codec", "provider", "session_affinity", "tool_count" }) |field|
@@ -790,9 +753,9 @@ test "an admission's commit reads the request's settings where its message carri
                     try std.testing.expectEqualStrings(@field(plain, field).slice(), @field(settings, field).slice());
                 try std.testing.expectEqual(plain.baseline_instructions.content_id, settings.baseline_instructions.content_id);
                 try std.testing.expectEqual(plain.baseline_instructions.length, settings.baseline_instructions.length);
-                try std.testing.expectEqual(plain_view.output_boundary, view.output_boundary);
-                try std.testing.expectEqual(plain_view.output_frontier, view.output_frontier);
-                try std.testing.expectEqual(plain_view.tool_set_id, view.tool_set_id);
+                try std.testing.expectEqual(plain_view.page.output_boundary, view.page.output_boundary);
+                try std.testing.expectEqual(plain_view.page.output_frontier, view.page.output_frontier);
+                try std.testing.expectEqual(plain_view.page.tool_set_id, view.page.tool_set_id);
             }
         }
     }.run);
@@ -802,7 +765,6 @@ test "an admission's commit reads the first history round from where its caller 
     try store_testing.forEachEngine(struct {
         const Variant = enum { right, no_memory, other_position, other_cursor, other_base, other_tools };
 
-        /// What a caller remembers of the one Session these cases drive.
         const Memory = struct {
             session: []const u8,
             resume_from: ?historical_domain.Resume,
@@ -813,9 +775,7 @@ test "an admission's commit reads the first history round from where its caller 
             }
         };
 
-        /// The entries after `after` and every tool of the set, as a
-        /// request that resumes its tool groups at `cursor` reads them.
-        fn walk(view: *HistoricalView, after: u64, cursor: u64, buffer: []u8) ![]const u8 {
+        fn walk(view: *TestingPage, after: u64, cursor: u64, buffer: []u8) ![]const u8 {
             while (!try view.validateOutputsStep()) {}
             _ = try view.coverage();
             view.expectTools(.all);
@@ -841,10 +801,9 @@ test "an admission's commit reads the first history round from where its caller 
             const items = [_][]const u8{"{\"type\":\"message\",\"id\":\"m0\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}"};
             var names: [std.enums.values(Variant).len][32]u8 = undefined;
             for (std.enums.values(Variant), &names) |variant, *name| {
-                // What the last request's view ended with, as a caller keeps it.
-                var last: HistoricalView = undefined;
+                var last: TestingPage = undefined;
                 var last_settings: HistoricalSettings = undefined;
-                storage.openHistoricalView(binding, &last);
+                last.open(&storage, binding);
                 try last.settings(&last_settings);
                 var scratch: [8 * 1024]u8 = undefined;
                 _ = try walk(&last, 0, 0, &scratch);
@@ -871,32 +830,28 @@ test "an admission's commit reads the first history round from where its caller 
                     .other_tools => remembered.tool_set += 1,
                 }
                 var memory: Memory = .{ .session = session.slice(), .resume_from = if (variant == .no_memory) null else remembered };
-                var view: HistoricalView = undefined;
+                var view: TestingPage = undefined;
                 var settings: HistoricalSettings = undefined;
                 const admitted = (try storage.admitModelAttemptInto(.message, .{}, .{
-                    .view = &view,
+                    .view = view.pageFor(&storage),
                     .settings = &settings,
                     .remembered = .{ .context = &memory, .of = Memory.of },
                 })).?;
                 binding = admitted.permit.binding;
                 if (!case.rerun) try std.testing.expectEqual(case.engine == .mysql, admitted.request_started);
-                if (!admitted.request_started) storage.openHistoricalView(binding, &view);
+                if (!admitted.request_started) view.open(&storage, binding);
                 defer view.close();
-                // The request reads on from where its caller's memo ended,
-                // or, its memo lost, from the start.
                 const after = if (variant == .other_position) 0 else right.after_position;
                 const rounds = ViewRounds.start(&storage);
                 try view.settings(&settings);
                 var buffer: [8 * 1024]u8 = undefined;
                 const read = try walk(&view, after, right.group_cursor, &buffer);
-                // Only the round read from where the request does read, by
-                // the keys its own boundary gives, is its own.
                 const ahead: u16 = if (!admitted.request_started) 2 else if (variant == .right) 0 else 1;
                 try std.testing.expectEqual(ahead, rounds.taken().rounds);
 
-                var plain_view: HistoricalView = undefined;
+                var plain_view: TestingPage = undefined;
                 var plain_settings: HistoricalSettings = undefined;
-                storage.openHistoricalView(binding, &plain_view);
+                plain_view.open(&storage, binding);
                 defer plain_view.close();
                 try plain_view.settings(&plain_settings);
                 var plain_buffer: [8 * 1024]u8 = undefined;
@@ -984,7 +939,6 @@ test "model admission work excludes failed historical Operation population, in r
                 const session = try configureTestSession(&storage, "config");
                 try submitTestMessage(&storage, &tmp, "input", "input", session.slice(), "retain");
                 const current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-                // Keep the actual current Operation newer than all injected history.
                 try store_testing.exec(&storage, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL; UPDATE session SET next_position=100001", .{});
                 try store_testing.exec(&storage, failed_purpose_operations_sql, .{ population, current.operation_id });
                 try storage.settleModelAttemptFailure(current, .{ .uncorrelated = if (overflow) "overflow" else "provider_http_422" }, if (overflow) .context_overflow else .ordinary, .{});
@@ -1032,8 +986,6 @@ test "model admission work excludes accepted compaction base history, in rounds"
                     try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
                     current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                     if (index + 1 != population) {
-                        // Provider-only suffix allows the next overflow recovery
-                        // without accumulating retained host input.
                         const call = TestingCall{ .item_id = "old-item", .name = "unknown", .encoded_call_id = "old-call", .decoded_call_id = "old-call", .encoded_arguments = "{}", .decoded_arguments = "{}" };
                         try settleCallsForTestingWithFaults(&storage, &tmp, current, "old-output", &.{call}, .{}, null);
                         current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -1074,9 +1026,15 @@ test "model admission work excludes usage-covered accepted tool and instruction 
             var bounded = true;
             for ([_]Measure.Population{ .rejection, .action, .instruction }) |kind| {
                 for ([_]bool{ false, true }) |compact| {
-                    const small = try Measure.run(case, 8, kind, compact);
-                    const large = try Measure.run(case, 128, kind, compact);
-                    bounded = bounded and large == small;
+                    var counts: [2]u16 = undefined;
+                    for ([_]usize{ 8, 128 }, 0..) |population, index| {
+                        counts[index] = Measure.run(case, population, kind, compact) catch |err| {
+                            std.debug.print("usage-history measurement failed engine={s} replay={} kind={s} compact={} population={d}: {s}\n", .{ @tagName(case.engine), case.rerun, @tagName(kind), compact, population, @errorName(err) });
+                            return err;
+                        };
+                    }
+                    if (counts[0] != counts[1]) std.debug.print("usage-history round bound failed engine={s} replay={} kind={s} compact={} small={d} large={d}\n", .{ @tagName(case.engine), case.rerun, @tagName(kind), compact, counts[0], counts[1] });
+                    bounded = bounded and counts[1] == counts[0];
                 }
             }
             try std.testing.expect(bounded);
@@ -1118,16 +1076,13 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                     try submitTestMessage(&storage, &tmp, "input", message_key, session.slice(), "old input");
                     const binding = (try storage.admitNextModelAttempt(.{}) orelse return error.MissingPressureInput).permit.binding;
                     if (kind == .instruction and index != population) {
-                        // Isolate revision history from accepted-output population.
                         try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
                     } else {
                         try settleCallsForTestingWithFaults(&storage, &tmp, binding, "output", &.{call}, .{}, if (index == population) (if (compact) (if (kind == .instruction) "{\"input_tokens\":99900,\"output_tokens\":0}" else "{\"input_tokens\":99999,\"output_tokens\":0}") else "{\"input_tokens\":1,\"output_tokens\":0}") else null);
                     }
                     if (kind == .action) {
-                        const action = (try storage.admitNextActionAttempt(1000, .{}) orelse return error.MissingPressureAction).permit.binding;
+                        const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 1000, .{}) orelse return error.MissingPressureAction).permit.binding;
                         _ = try storage.settleActionAttempt(action, .succeeded, "result", .{});
-                        // Measure the actual tool successor: the producer's result
-                        // is after its usage/output and must remain in pressure.
                         if (index != population) {
                             const continuation = (try storage.admitNextModelAttempt(.{}) orelse return error.MissingPressureContinuation).permit.binding;
                             try storage.settleModelAttemptFailure(continuation, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
@@ -1140,7 +1095,6 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                 patch.configuration.compaction_trigger.state = .value;
                 try patch.configuration.compaction_trigger.value.set("100000");
                 if (kind == .instruction) {
-                    // Same-text updates are new input, not content deduplication.
                     patch.configuration.instructions = try testingBytesContent(&tmp, "pending-instruction", &instructions);
                 }
                 defer patch.removeTemporaryContent(std.testing.io) catch unreachable;
@@ -1196,8 +1150,8 @@ test "ordinary MCP physical eligibility cannot hide later no-credit core work" {
             const core_action = try propose(&storage, &tmp, "later-core", "find_tools");
             try std.testing.expect(mcp_action < core_action);
             for ([_]usize{ 0, 1, 2 }) |free| {
-                const capacity: @import("../../execution.zig").DispatchCapacity = .{ .free_credit = free != 0, .mcp_open = true };
-                const include_mcp = capacity.includesMcp();
+                const capacity = @import("../../execution_turn.zig").DispatchCapacity.fromFree(free, true);
+                const include_mcp = capacity.hasCredit();
                 const selected = (try storage.nextCoreWork(capacity)).?;
                 if (include_mcp) try std.testing.expectEqual(mcp_action, selected.mcp.action_id) else try std.testing.expectEqual(core_action, selected.action.binding.action_id);
                 const work = try storage.dispatchWork(false, capacity);
@@ -1205,13 +1159,13 @@ test "ordinary MCP physical eligibility cannot hide later no-credit core work" {
                 try std.testing.expectEqual(include_mcp, work.mcp);
                 try std.testing.expect(!work.bash);
             }
-            try std.testing.expectEqual(core_action, (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = false })).?.action.binding.action_id);
+            try std.testing.expectEqual(core_action, (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = false })).?.action.binding.action_id);
             try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE attempt_ordinal=0 AND authorized=1 AND resolution_code IS NULL", .{}));
-            const core = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = false })).?.action;
+            const core = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = false })).?.action;
             try std.testing.expect(try storage.succeedCoreCall(core.binding, "Found", .{}));
-            const blocked = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = false });
+            const blocked = try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = false });
             try std.testing.expect(!blocked.core and !blocked.mcp);
-            const resumed = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true });
+            const resumed = try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true });
             try std.testing.expect(!resumed.core and resumed.mcp);
         }
     }.run);

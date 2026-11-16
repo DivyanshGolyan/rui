@@ -1,11 +1,3 @@
-//! Codex device-login and token-exchange messages as values.
-//!
-//! Builds request bodies and interprets response statuses and bodies for the
-//! pinned device-code flow and refresh, and builds the login and refresh
-//! records those exchanges produce. Callers own the transport, the clock and the
-//! polling loop; selection and admission live in `codex_credential_policy.zig`.
-//! The ChatGPT plan sign-in (`chatgpt_plan_wire.zig`) talks to the same
-//! issuer, so it reuses the token response, refresh and form encoding here.
 const std = @import("std");
 const policy = @import("codex_credential_policy.zig");
 const Text = @import("json_scalar.zig").Text;
@@ -19,30 +11,23 @@ const json_content = "application/json";
 pub const form_content = "application/x-www-form-urlencoded";
 const token_url = issuer ++ "/oauth/token";
 
-/// One POST to the issuer. The body may borrow caller-owned secret bytes.
 pub const Request = struct {
     url: []const u8,
-    /// The content-type field's value.
     content_type: []const u8,
     body: []const u8,
 };
 
-/// Room to parse one issuer response: the JSON arena and the claims of the
-/// tokens it carries. Its owner keeps it off the stack.
 pub const Scratch = struct {
     json: [wire_arena_bytes]u8 = undefined,
     claims: policy.ClaimScratch = undefined,
 };
 
-/// Owns all credential bytes. Callers must keep this value out of diagnostics.
 pub const Tokens = struct {
     id_token: Required(token_limit) = .{},
     access_token: Required(token_limit) = .{},
     refresh_token: Required(token_limit) = .{},
 };
 
-/// Builds the record a device login installs. The generation is assigned at
-/// admission. On error the record is zeroed.
 pub fn loginRecord(tokens: *const Tokens, refreshed_at: i64, record: *policy.Record, claims: *policy.ClaimScratch) !void {
     record.* = .{ .generation = 0, .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 0, .refreshed_at = refreshed_at };
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(record));
@@ -59,7 +44,6 @@ pub const device_start: Request = .{
 };
 
 pub const DeviceStart = struct {
-    /// Complete JSON body for each token poll; it ends with the user code.
     poll: [1024]u8 = undefined,
     poll_len: usize = 0,
     user_code_len: usize = 0,
@@ -74,8 +58,6 @@ pub const DeviceStart = struct {
     }
 };
 
-/// Interprets the device-code start response. A code whose poll body cannot
-/// be built is rejected before it can be shown.
 pub fn parseDeviceStart(status: u16, body: []const u8, arena: *[wire_arena_bytes]u8, destination: *DeviceStart) !void {
     if (status == 404) return error.DeviceAuthenticationUnavailable;
     if (status < 200 or status >= 300) return error.LoginStartRejected;
@@ -99,11 +81,8 @@ pub fn parseDeviceStart(status: u16, body: []const u8, arena: *[wire_arena_bytes
 
 pub const Poll = enum { pending, granted };
 
-/// Interprets one token poll response; a granted body carries the grant.
 pub fn classifyPoll(status: u16, body: []const u8) !Poll {
     if (status == 403 or status == 404) {
-        // The pinned client treats these codes as pending, but a structured
-        // terminal error from the peer must not be polled for fifteen minutes.
         var arena: [4096]u8 = undefined;
         defer std.crypto.secureZero(u8, &arena);
         var fixed = std.heap.FixedBufferAllocator.init(&arena);
@@ -117,7 +96,6 @@ pub fn classifyPoll(status: u16, body: []const u8) !Poll {
     return .granted;
 }
 
-/// Builds the authorization-code exchange from a device grant body.
 pub fn grantExchangeRequest(grant_body: []const u8, buffer: []u8, arena: *[wire_arena_bytes]u8) !Request {
     const Grant = struct { authorization_code: Text, code_challenge: Text, code_verifier: Text };
     defer std.crypto.secureZero(u8, arena);
@@ -126,8 +104,6 @@ pub fn grantExchangeRequest(grant_body: []const u8, buffer: []u8, arena: *[wire_
     return .{ .url = token_url, .content_type = form_content, .body = try formEncode(buffer, grant.value.authorization_code.slice, grant.value.code_verifier.slice) };
 }
 
-/// Parses a complete authorization-code exchange response into
-/// `destination`, which is zeroed if a field fails.
 pub fn parseTokenResponse(status: u16, json: []const u8, arena: *[wire_arena_bytes]u8, destination: *Tokens) !void {
     if (status < 200 or status >= 300) return error.TokenExchangeRejected;
     defer std.crypto.secureZero(u8, arena);
@@ -150,11 +126,6 @@ pub fn refreshRequest(current: *const policy.Record, buffer: []u8) !Request {
     return .{ .url = token_url, .content_type = json_content, .body = writer.buffered() };
 }
 
-/// Builds the replacement for a claimed record from a refresh response.
-/// Omitted rotating fields are kept; routing and expiry follow the resulting
-/// tokens, whose account is read by the record's own kind
-/// (`policy.accountOf`), so a plan record's refresh keeps its subject. The generation is assigned at admission. On error the replacement
-/// is zeroed.
 pub fn parseRefreshResponse(current: *const policy.Record, status: u16, json: []const u8, refreshed_at: i64, replacement: *policy.Record, scratch: *Scratch) !void {
     replacement.* = current.*;
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(replacement));
@@ -196,8 +167,6 @@ fn refreshRejection(json: []const u8, arena: *[wire_arena_bytes]u8) error{ Refre
     return error.RefreshRejected;
 }
 
-/// A refresh rejection names its code in `error`, as a string or an object's
-/// `code`, or else in `code`. A value of another type counts as absent.
 const Rejection = struct {
     @"error": ?ErrorCode = null,
     code: ?LooseText = null,
@@ -226,12 +195,8 @@ const Rejection = struct {
     };
 };
 
-/// Parse room for one issuer response.
 pub const wire_arena_bytes = 48 * 1024;
 
-/// The token fields of one exchange response. Each present value is
-/// nonempty, at most `token_limit` bytes, and borrows the response or the
-/// parse arena.
 const TokenWire = struct {
     id_token: ?Text = null,
     access_token: ?Text = null,
@@ -262,8 +227,6 @@ fn formEncode(buffer: []u8, code: []const u8, verifier: []const u8) ![]const u8 
     return stream.buffered();
 }
 
-/// Writes `value` with every byte outside RFC 3986's unreserved set as `%XX`,
-/// which suits both a form body and a URL query.
 pub fn percentEncode(writer: *std.Io.Writer, value: []const u8) !void {
     const hex = "0123456789ABCDEF";
     for (value) |byte| switch (byte) {
@@ -306,11 +269,9 @@ test "refresh preserves omitted fields and refuses account replacement" {
     try std.testing.expectEqualStrings("refresh-new", updated.refresh_token.slice());
     try std.testing.expectEqualStrings(old_id, updated.id_token.slice());
     try std.testing.expectEqual(@as(i64, 4_102_444_800), updated.expires_at);
-    // The replacement is ready, stamped and keeps the claimed generation.
     try std.testing.expectEqual(policy.State.ready, updated.state);
     try std.testing.expectEqual(@as(i64, 77), updated.refreshed_at);
     try std.testing.expectEqual(@as(u64, 3), updated.generation);
-    // Rotated tokens for the same account replace the old ones.
     const same_account = "e30.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2N0XzEiLCJzdWIiOiJ4In0.c2ln";
     var json: [512]u8 = undefined;
     try parseRefreshResponse(&current, 200, try std.fmt.bufPrint(&json, "{{\"id_token\":\"{s}\",\"access_token\":\"opaque-new\"}}", .{same_account}), 78, &updated, &scratch);
@@ -318,7 +279,6 @@ test "refresh preserves omitted fields and refuses account replacement" {
     try std.testing.expectEqualStrings("opaque-new", updated.access_token.slice());
     try std.testing.expectEqualStrings("refresh-old", updated.refresh_token.slice());
     try std.testing.expectEqual(@as(i64, 0), updated.expires_at);
-    // A foreign account or rejected status leaves no partial replacement.
     const foreign = "e30.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2N0XzIifQ.c2ln";
     const response = try std.fmt.bufPrint(&json, "{{\"id_token\":\"{s}\",\"refresh_token\":\"refresh-new\"}}", .{foreign});
     try std.testing.expectError(error.AccountChanged, parseRefreshResponse(&current, 200, response, 79, &updated, &scratch));
@@ -375,10 +335,8 @@ test "refresh keeps the account's routing claim in both directions" {
         const response = try std.fmt.bufPrint(&json, "{{\"id_token\":\"{s}\"}}", .{case[1]});
         try std.testing.expectError(error.AccountChanged, parseRefreshResponse(&current, 200, response, 77, &updated, &scratch));
     }
-    // An unchanged routing claim is carried into the replacement.
     try parseRefreshResponse(&current, 200, "{\"access_token\":\"opaque-new\"}", 77, &updated, &scratch);
     try std.testing.expect(updated.fedramp);
-    // Routing is read from the resulting ID token, not copied from the record.
     current.fedramp = false;
     try parseRefreshResponse(&current, 200, "{}", 77, &updated, &scratch);
     try std.testing.expect(updated.fedramp);
@@ -410,7 +368,6 @@ test "a login record takes its account, routing and expiry from its tokens" {
         try policy.validateSelected(&record, false, &scratch.claims);
         try policy.validateReplacement(&record);
     }
-    // The id token is read before the access token.
     for ([_]struct { id: []const u8, access: []const u8, err: anyerror }{
         .{ .id = policy.fixture_id_token, .access = "a..c", .err = error.InvalidCompactToken },
         .{ .id = "e30.e30.sig", .access = policy.fixture_access_token, .err = error.MissingAccountClaim },
@@ -478,7 +435,6 @@ test "device start validates codes and builds the poll body" {
         "{\"device_auth_id\":\"dev-1\",\"user_code\":\"A\",\"interval\":\"901\"}",
         "{\"device_auth_id\":\"dev 1\",\"user_code\":\"A\",\"interval\":\"5\"}",
     }) |body| try std.testing.expectError(error.InvalidDeviceResponse, parseDeviceStart(200, body, &arena, &start));
-    // A code whose poll body cannot be built is rejected before it can be shown.
     var device_id: [600]u8 = undefined;
     @memset(&device_id, 'd');
     var code: [400]u8 = undefined;
@@ -525,8 +481,6 @@ fn raises(comptime function: anytype, comptime name: []const u8) bool {
 }
 
 test "authentication failure classes name errors their producers raise" {
-    // `policy.failureCode` classifies by name; a misspelled or renamed
-    // producer error would silently become a backend failure.
     inline for (@typeInfo(policy.LoginRequired).error_set.error_names.?) |name| {
         const plan = @import("chatgpt_plan_wire.zig");
         try std.testing.expect(comptime raises(parseRefreshResponse, name) or raises(plan.parseRefreshResponse, name) or raises(policy.select, name) or raises(policy.launchCheck, name));

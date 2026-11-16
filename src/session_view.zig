@@ -512,6 +512,7 @@ fn toolState(code: protocol.ToolPresentation.Code) struct { glyph: []const u8, s
     const state: struct { mark: marks.Mark, suffix: []const u8 } = switch (code) {
         .unresolved => .{ .mark = .active, .suffix = "" },
         .pending_permission => .{ .mark = .needs_you, .suffix = "" },
+        .background => .{ .mark = .finished, .suffix = " · background" },
         .succeeded => .{ .mark = .finished, .suffix = "" },
         .denied => .{ .mark = .stopped, .suffix = " · denied" },
         .unknown_tool => .{ .mark = .failed, .suffix = " · rejected" },
@@ -1329,6 +1330,7 @@ test "tool header hides all body lines for every outcome and first-line split" {
     const cases = .{
         .{ protocol.ToolPresentation.Code.unresolved, "⠹ Tool call" },
         .{ protocol.ToolPresentation.Code.pending_permission, "? Tool call" },
+        .{ protocol.ToolPresentation.Code.background, "✓ Tool call · background" },
         .{ protocol.ToolPresentation.Code.succeeded, "✓ Tool call" },
         .{ protocol.ToolPresentation.Code.failed, "× Tool call · 7" },
         .{ protocol.ToolPresentation.Code.timed_out, "× Tool call · timed out" },
@@ -1357,7 +1359,7 @@ test "tool header hides all body lines for every outcome and first-line split" {
                     if (colour) try expected.feed(switch (case[0]) {
                         .unresolved => "\x1b[94m",
                         .pending_permission => "\x1b[33m",
-                        .succeeded => "\x1b[90m",
+                        .succeeded, .background => "\x1b[90m",
                         .denied, .cancelled => "\x1b[39m",
                         else => "\x1b[91m",
                     });

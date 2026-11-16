@@ -141,12 +141,14 @@ pub const JsonCursor = struct {
             const length = source.contentLength();
             if (self.offset == length) return true;
             if (self.offset < self.buffer_start or self.offset >= self.buffer_start + self.buffer_length) {
-                self.buffer_start = self.offset;
                 var wanted: usize = @intCast(@min(length - self.offset, @min(self.buffer.len, bytes_left.*)));
                 wanted = source.maxWindow(self.offset, wanted);
                 if (wanted == 0) return false;
                 const count = try source.readContent(self.offset, self.buffer[0..wanted]);
                 if (count != wanted) return error.ShortCanonicalRead;
+                // The window moves only with a read that filled it, so a
+                // read that fails leaves the cursor as it was, to read again.
+                self.buffer_start = self.offset;
                 self.buffer_length = count;
             }
             const available = self.buffer[@intCast(self.offset - self.buffer_start)..self.buffer_length];
@@ -584,6 +586,75 @@ test "request encoding json window boundaries preserve bytes" {
     const mixed_cuts = [_]u64{ 1, 4, window_bytes - 1, window_bytes, window_bytes + 1, mixed.len - 1 };
     for ([_][]const usize{ &.{1}, &.{ 2, 7 }, &.{4095}, &.{4096}, &.{4097}, &.{16384} }) |seq| {
         try runJsonCase("json repeated escape windows", mixed, &mixed_cuts, seq, mixed_expected, mixed.len + mixed_expected.len);
+    }
+}
+
+/// Fails every other refill read, whose caller then reads again: a source
+/// whose bytes another owner fills between the two calls.
+const RefusingSource = struct {
+    bytes: []const u8,
+    refused: *bool,
+
+    pub fn contentLength(self: RefusingSource) u64 {
+        return self.bytes.len;
+    }
+
+    pub fn maxWindow(self: RefusingSource, offset: u64, wanted: usize) usize {
+        _ = self;
+        _ = offset;
+        return wanted;
+    }
+
+    pub fn readContent(self: RefusingSource, offset: u64, destination: []u8) !usize {
+        self.refused.* = !self.refused.*;
+        if (self.refused.*) return error.Refused;
+        const start: usize = @intCast(offset);
+        @memcpy(destination, self.bytes[start..][0..destination.len]);
+        return destination.len;
+    }
+};
+
+test "request encoding cursors read a refused refill again where they stood" {
+    // Two windows and a byte, with an escape at each window's end.
+    var input: [2 * window_bytes + 1]u8 = undefined;
+    @memset(&input, 'x');
+    input[window_bytes - 1] = '"';
+    input[2 * window_bytes - 1] = '\\';
+    var expected_buf: [2 * window_bytes + 3]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&expected_buf);
+    for (input) |byte| switch (byte) {
+        '"' => try stream.writeAll("\\\""),
+        '\\' => try stream.writeAll("\\\\"),
+        else => try stream.writeByte(byte),
+    };
+    for ([_]usize{ 1, 7, window_bytes, 3 * window_bytes }) |allowance| {
+        var refused = false;
+        const source: RefusingSource = .{ .bytes = &input, .refused = &refused };
+        var json_sink = TestSink.init(std.testing.allocator);
+        defer json_sink.deinit();
+        var json: JsonCursor = .{};
+        var refusals: usize = 0;
+        while (true) {
+            var left = allowance;
+            if (json.advance(source, &json_sink, &left)) |done| {
+                if (done) break;
+            } else |err| {
+                try std.testing.expectEqual(error.Refused, err);
+                refusals += 1;
+            }
+        }
+        try std.testing.expect(refusals != 0);
+        try std.testing.expectEqualStrings(stream.buffered(), json_sink.output.items);
+        var raw_sink = TestSink.init(std.testing.allocator);
+        defer raw_sink.deinit();
+        var raw: RawCursor = .{};
+        while (true) {
+            var left = allowance;
+            if (raw.advance(source, &raw_sink, &left)) |done| {
+                if (done) break;
+            } else |err| try std.testing.expectEqual(error.Refused, err);
+        }
+        try std.testing.expectEqualStrings(&input, raw_sink.output.items);
     }
 }
 

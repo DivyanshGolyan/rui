@@ -1,5 +1,3 @@
-//! What a configure asks for: the settings a caller names, sparse, and the
-//! client defaults a fresh Session or a reset setting takes in their place.
 const std = @import("std");
 const client_defaults = @import("client_defaults.zig");
 const product_defaults = @import("product_defaults.zig");
@@ -41,13 +39,8 @@ pub const ConfigureInput = struct {
     compaction_trigger: OptionalPolicy = .{},
     output_reservation: OptionalPolicy = .{},
     reasoning_effort: OptionalPolicy = .{},
-    /// A null value clears the Label.
     label: OptionalPolicy = .{},
 
-    /// A fresh Session sends every setting its caller left to the client
-    /// defaults concretely, for the provider and model it starts on. The
-    /// saved effort applies only where the caller named no effort; "default"
-    /// takes the model's own. Saved permissions apply only when not named.
     pub fn completeCreation(self: *ConfigureInput, provider: Provider, model: []const u8, saved_effort: ?ReasoningEffort, saved_permission: ?PermissionMode, compaction: *[20]u8) void {
         self.reasoning_effort = creationEffort(model, self.reasoning_effort, saved_effort);
         if (!self.compaction_trigger.present or self.compaction_trigger.value == null) self.compaction_trigger = .{ .present = true, .value = compactionTrigger(provider, model, compaction) };
@@ -55,28 +48,21 @@ pub const ConfigureInput = struct {
         if (!self.permission_mode.present) self.permission_mode = .{ .present = true, .value = if (saved_permission) |mode| @tagName(mode) else product_defaults.permission_mode };
     }
 
-    /// An update resets a named setting to the client default for the
-    /// Session's provider and model; the others stay sparse.
     pub fn completeReset(self: *ConfigureInput, provider: Provider, model: []const u8, compaction: *[20]u8) void {
         if (self.compaction_trigger.present and self.compaction_trigger.value == null) self.compaction_trigger.value = compactionTrigger(provider, model, compaction);
         if (self.reasoning_effort.present and self.reasoning_effort.value == null) self.reasoning_effort = startEffort(model, null);
     }
 
-    /// Whether `completeReset` needs the Session's current provider and model.
     pub fn resetsToDefault(self: ConfigureInput) bool {
         return (self.compaction_trigger.present and self.compaction_trigger.value == null) or
             (self.reasoning_effort.present and self.reasoning_effort.value == null);
     }
 };
 
-/// A policy setting as a caller spells it: "default" resets it.
 pub fn policy(text: []const u8) OptionalPolicy {
     return .{ .present = true, .value = if (std.mem.eql(u8, text, "default")) null else text };
 }
 
-/// A fresh Session's complete effort policy. Explicit values stay intact
-/// for admission; omission reads saved effort and default ignores it.
-/// Every fallback remains with client_defaults.startEffort.
 pub fn creationEffort(model: []const u8, held: OptionalPolicy, saved: ?ReasoningEffort) OptionalPolicy {
     if (!held.present) return startEffort(model, saved);
     if (held.value == null) return startEffort(model, null);
@@ -115,7 +101,6 @@ test "a fresh Session sends concrete defaults where its caller named none" {
     input = .{ .store = "", .session = .create };
     input.completeCreation(.codex, "gpt-6.1-sol", null, null, &compaction);
     try std.testing.expectEqualStrings("244800", input.compaction_trigger.value.?);
-    // A model that takes no effort sends an explicit null, not an omission.
     input = .{ .store = "", .session = .create };
     input.completeCreation(.openai, "openai/whisper-1", .high, null, &compaction);
     try std.testing.expect(input.reasoning_effort.present and input.reasoning_effort.value == null);
@@ -128,7 +113,6 @@ test "a fresh Session takes the saved effort only where its caller named none" {
         .{ .effort = .{}, .saved = null, .sent = product_defaults.reasoning_effort },
         .{ .effort = policy("default"), .saved = .max, .sent = product_defaults.reasoning_effort },
         .{ .effort = policy("high"), .saved = .max, .sent = "high" },
-        // The saved effort is admitted against the model it starts on.
         .{ .effort = .{}, .saved = .none, .sent = product_defaults.reasoning_effort },
     };
     for (cases) |case| {

@@ -1,10 +1,3 @@
-//! The Session screen's state slot, Footer line and clickable keys. It owns
-//! the rows and chips that
-//! present what `session_chrome` decided, and puts them in the Session
-//! screen's slots each frame from the values the screen passes. It holds no
-//! decision and no state but its widgets: the screen keeps the notice
-//! (`session_chrome.Notice`) and the title (`session_chrome.Title`). Every
-//! click runs one of the screen's own actions, the same one its key runs.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -19,7 +12,6 @@ const session_line = @import("session_line.zig");
 const Self = @This();
 const empty_marker: vxfw.Text = .{ .text = "" };
 
-/// The screen's actions a click runs.
 pub const Actions = struct {
     userdata: *anyopaque,
     close: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
@@ -27,20 +19,13 @@ pub const Actions = struct {
     model: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
     effort: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
     details: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
-    /// `ctrl+r retries`, or whatever key the needs text ends with.
     key: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
-    /// `ctrl+x stop`.
     stop: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
-    /// `‹`: back to the overview, as Esc.
     back: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
-    /// `↓`: the latest view, as Esc.
     latest: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
-    /// The chat info panel.
     status_page: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
 };
 
-/// Semantic identity stays intact until the footer knows its available cells.
-/// The existing formatter owns whole-item omission and name ellipsis.
 pub const Identity = struct {
     current: ?session_line.Facts = null,
     name: []const u8 = "",
@@ -60,30 +45,18 @@ pub const Identity = struct {
     }
 };
 
-/// What the screen read for this frame.
 pub const View = struct {
-    /// Shell fact, never inferred from this pane's width.
     list_visible: bool = false,
-    /// Anchor held away from the end: the reserved marker row shows its chip.
     browsing: bool = false,
-    /// Transcript entries that arrived below while browsing.
     new_entries: u64 = 0,
-    /// What needs the person, ending in its key (`! Not confirmed · ctrl+r
-    /// retries`), and that key's words, which become clickable.
     needs: ?[]const u8 = null,
     needs_key: []const u8 = "",
-    /// Where a send stands (`chrome.Send.progress`).
     progress: ?[]const u8 = null,
     stoppable: bool = false,
     details: bool = false,
-    /// Identity after the narrow back control, or the wide input gutter.
     facts: Identity = .{},
-    /// The reply to the last key that shows now (`Notice.current`), and
-    /// what the overview says (`chrome.Facts.overview`), each borrowed
-    /// until the next frame.
     notice: ?[]const u8 = null,
     overview: ?[]const u8 = null,
-    /// The screen's palette, or null.
     overlay: ?vxfw.Widget = null,
     choice: chrome.ChoiceState = .closed,
     width: u16,
@@ -130,7 +103,6 @@ pub fn init(actions: Actions) Self {
     };
 }
 
-/// Puts this frame's chrome in the Session screen's slots.
 pub fn place(self: *Self, screen: *AppScreen.Session, input: *@import("InputArea.zig"), view: View) void {
     self.status.bar = chrome.bar(.{
         .needs = view.needs,
@@ -150,7 +122,6 @@ pub fn place(self: *Self, screen: *AppScreen.Session, input: *@import("InputArea
     self.state.style = if (self.status.bar.tone == .attention) self.status.attention else self.status.quiet;
     input.facts = .{ .userdata = self, .drawFn = drawFooter };
     input.status = self.state.widget();
-    // Activity is the Feed's last entry, not a separate shell row.
     screen.tail = null;
     self.marker.label = chrome.marker(&self.marker_text, view.new_entries);
     screen.marker = if (view.browsing) self.marker.widget() else empty_marker.widget();
@@ -165,9 +136,6 @@ fn stateText(text: []const u8, key: []const u8) []const u8 {
     return text;
 }
 
-/// Identity fits whole items in the left budget; Footer owns alignment and
-/// final cell clipping. The chips only add mouse targets to
-/// those same cells, using the same actions as the keyboard.
 fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     self.status.stop.label = if (self.keys.other_actions and self.stoppable) chrome.stop_key else "";
@@ -182,7 +150,6 @@ fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
         self.status.key.label = "";
         self.details.label = "";
     }
-    // Empty chats introduce their facts before optional details.
     if (self.facts.identity.current) |facts| {
         if (facts.folder != null) self.details.label = "";
     }
@@ -370,8 +337,6 @@ test "SessionChrome puts notices in Footer without a state row and preserves nee
         try std.testing.expectEqual(idle.size.height, noticed.size.height);
         const footer = try input.facts.draw(ctx);
         for ("Copied 3 lines", width - "Copied 3 lines".len..) |byte, col| try std.testing.expectEqual(byte, footer.readCell(col, 0).char.grapheme[0]);
-        // Only Back remains: the name is not a button, and a notice
-        // replaces the right keys without leaving invisible targets.
         try std.testing.expectEqual(@as(usize, 1), footer.children.len);
     }
 
@@ -397,7 +362,6 @@ test "SessionChrome footer keeps identity left and active keys right, with back 
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    // Visibility is an input from Root, never a width inference in the chat.
     for ([_]u16{ 140, 46 }) |width| for ([_]bool{ true, false }) |list_visible| {
         self.place(&screen, &input, .{ .width = width, .facts = .{ .current = .{ .name = "Chat", .model = "model", .effort = .high, .left = 62 } }, .list_visible = list_visible, .stoppable = true });
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} };
@@ -486,7 +450,6 @@ test "SessionChrome footer keeps the input gutter beside the visible list" {
     self.facts.identity = .{ .current = .{ .name = "Fix retry deadline", .model = "gpt-6.1-sol", .effort = .high, .left = 100 } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    // A 140-column shell leaves 99 columns to the chat beside its list.
     const footer = try drawFooter(&self, .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 99, .height = 1 }, .cell_size = .{} });
     try std.testing.expectEqualStrings(" ", footer.readCell(0, 0).char.grapheme);
     try std.testing.expectEqualStrings("F", footer.readCell(1, 0).char.grapheme);
@@ -572,8 +535,6 @@ test "SessionChrome model and effort words are independent controls beside the i
             for (0..child.surface.size.width) |offset| {
                 const col: i16 = @intCast(child.origin.col + @as(i17, @intCast(offset)));
                 const action: Recorder.Action = if (child.surface.widget.eql(self.facts.model.widget())) .model else if (child.surface.widget.eql(self.facts.effort.widget())) .effort else .status_page;
-                // Read the actual painted cells, not a second layout. The
-                // archive/ask suffix must not displace either field's hitbox.
                 const chip: *Chip = if (action == .model) &self.facts.model else if (action == .effort) &self.facts.effort else &self.info;
                 const start = std.mem.indexOf(u8, text.written(), chip.label).?;
                 const painted_col = session_line.cells(text.written()[0..start], .unicode) + offset;
@@ -611,8 +572,6 @@ test "SessionChrome identity chips preserve cells and clicks for every terminal 
         var terminal: vaxis.Screen = .{ .width = width, .height = 1, .width_method = method, .buf = try arena.allocator().alloc(vaxis.Cell, width) };
         @memset(terminal.buf, .{});
         try footer.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 1, .screen = &terminal }, self.facts.model.widget());
-        // Footer owns the text and its cell positions. Adding mouse targets
-        // must not move or repaint any glyph with a different terminal width.
         for (footer.buffer, terminal.buf) |expected, actual| {
             try std.testing.expectEqualStrings(expected.char.grapheme, actual.char.grapheme);
             try std.testing.expectEqual(expected.char.width, actual.char.width);
@@ -675,13 +634,11 @@ test "SessionChrome drawn field identity survives a newer model and nonbutton wo
     defer arena.deinit();
     const footer = try drawFooter(&self, .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 1 }, .cell_size = .{} });
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    // Same word appears as name and model: only the semantic model span acts.
     try clickAt(footer, arena.allocator(), &ctx, 0, 1);
     try std.testing.expectEqual(@as(usize, 0), recorder.clicked.get(.model));
     try std.testing.expectEqual(@as(usize, 0), recorder.clicked.get(.effort));
     try clickAt(footer, arena.allocator(), &ctx, 0, 9);
     try std.testing.expectEqual(@as(usize, 1), recorder.clicked.get(.model));
-    // Facts changed after draw; the drawn effort still names effort.
     self.facts.identity.current.?.effort = null;
     for (footer.children) |child| if (child.surface.widget.eql(self.facts.effort.widget())) {
         try clickAt(footer, arena.allocator(), &ctx, 0, @intCast(child.origin.col));

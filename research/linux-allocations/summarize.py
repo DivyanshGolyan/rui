@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""Summarize disjoint allocation origins from heaptrack collapsed stacks.
-
-Input uses heaptrack_print -m0 and disabled suppressions. Peak input must be
-the global-peak export, not a sum of per-caller high-water marks. Unknown
-origins are retained for inspection rather than assigned to Rui.
-"""
 import collections
 import json
 from pathlib import Path
@@ -12,8 +6,6 @@ import sys
 
 
 def origin(stack):
-    # Frames are root-to-leaf. Native allocation wrappers identify the library
-    # that requests storage even when Rui and curl occur further up the stack.
     for frame in reversed(stack.split(";")):
         if "heaptrack" in frame or not frame.strip():
             continue

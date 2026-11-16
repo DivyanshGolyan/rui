@@ -93,7 +93,7 @@ fn run(case: Case) !void {
     };
     const count: usize = if (case == .serial) 2 else 1;
     try store.settleCallsForTesting(storage, &tmp, binding, "mcp-calls", calls[0..count]);
-    try expectHere(@src(), (try storage.admitNextActionAttempt(300_000, .{})) == null);
+    try expectHere(@src(), (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})) == null);
     try expectHere(@src(), (try storage.admitNextModelAttempt(.{})) == null);
 
     const script = try allocator.create(Script);
@@ -130,7 +130,7 @@ fn run(case: Case) !void {
         active.shutdown(host);
     }
     for (0..count) |ordinal| {
-        const work = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?;
+        const work = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?;
         try expectHere(@src(), work == .mcp);
         try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, active.admit(host, work.mcp));
         if (case != .down) {
@@ -139,7 +139,7 @@ fn run(case: Case) !void {
             try storage.readActionExecutionInput(.mcp, .{ .action_id = work.mcp.action_id, .parent_operation_id = binding.operation_id, .turn_id = binding.turn_id }, input);
             try std.testing.expectEqual(servers[0].timeout_ms, input.timeout_ms);
         }
-        if (case == .serial) try expectHere(@src(), (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })) == null);
+        if (case == .serial) try expectHere(@src(), (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })) == null);
         const Context = struct {
             active: *mcp.Calls,
             host: *Host,
@@ -168,7 +168,7 @@ fn run(case: Case) !void {
             var other_call = calls[0];
             other_call.name = "fetch_other";
             try store.settleCallsForTesting(storage, &tmp, other_binding, "other-calls", &.{other_call});
-            const other_work = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?;
+            const other_work = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?;
             try expectHere(@src(), other_work == .mcp);
             try expectHere(@src(), other_work.mcp.action_id != work.mcp.action_id);
             try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, active.admit(host, other_work.mcp));
@@ -199,7 +199,7 @@ fn run(case: Case) !void {
             active.shutdown(host);
             try expectHere(@src(), try storage.recoverOneUncertainAction(.empty()));
             try expectHere(@src(), !try storage.recoverOneUncertainAction(.empty()));
-            try expectHere(@src(), (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })) == null);
+            try expectHere(@src(), (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })) == null);
         }
         if (case == .stop or case == .stop_unsent) {
             if (case == .stop) try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(5)), context, Context.sent);
@@ -254,14 +254,14 @@ fn run(case: Case) !void {
         try std.testing.expectEqual(@as(u64, if (case == .stop_unsent) 1 else 0), cancelled_count);
         if (case == .stop) try expectHere(@src(), std.mem.indexOf(u8, report, "not retried") != null);
         if (case == .stop_unsent) try std.testing.expect(!script.request_received.load(.acquire));
-        try expectHere(@src(), (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })) == null);
+        try expectHere(@src(), (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })) == null);
         return;
     }
     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try std.testing.expectEqual(binding.turn_id, continuation.turn_id);
-    const view = try allocator.create(store.HistoricalView);
+    const view = try allocator.create(store.testing.TestingPage);
     defer allocator.destroy(view);
-    storage.openHistoricalView(continuation, view);
+    view.open(storage, continuation);
     defer if (view.isActive()) view.close();
     var position: u64 = 0;
     var found: usize = 0;
@@ -269,7 +269,7 @@ fn run(case: Case) !void {
         position = entry.position;
         if (entry.kind != .tool_results) continue;
         while (try view.nextToolResult()) |result| {
-            var reader: store.HistoricalReader = undefined;
+            var reader: store.testing.TestingReader = undefined;
             try view.openContent(result.output, &reader);
             defer reader.close();
             const bytes = try allocator.alloc(u8, @intCast(result.output.length));
@@ -300,7 +300,7 @@ fn expectNextRequest(storage: *store.Store, tmp: *std.testing.TmpDir, binding: s
     defer if (retained) |*owner| {
         _ = owner.reclaim(root) catch unreachable;
     };
-    storage.openHistoricalView(binding, &preparation.view);
+    preparation.page.open(binding);
     try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
     // A runaway guard on bounded nonblocking work, not a scheduler wait.
@@ -308,7 +308,14 @@ fn expectNextRequest(storage: *store.Store, tmp: *std.testing.TmpDir, binding: s
     while (true) {
         advances += 1;
         try expectHere(@src(), advances < 16384);
-        switch (preparation.advance(16384, 64)) {
+        var progress = preparation.advance(16384, 64);
+        // As the shell does: the Store reads what the request's page asks.
+        while (progress == .read) {
+            try storage.readRequestPage(&preparation.page);
+            progress = preparation.proceed();
+        }
+        switch (progress) {
+            .read => unreachable,
             .pending => {},
             .failed => |err| return err,
             .prepared => |request| {

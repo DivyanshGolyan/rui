@@ -1,5 +1,3 @@
-//! Skills migration SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
@@ -39,8 +37,6 @@ test "skills schema 56 wire 9 upgrades populated rows to the current Store" {
             if (step.from >= 56) break;
             for (step.sqlite) |statement| try sqlite.exec(raw, statement);
         }
-        // Deliberately old metadata, not protocol.wire_version: omitting
-        // the new wire UPDATE must fail the production open below.
         try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version=56", .{store_schema.application_id}));
         const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','9'),('store_selector',?1),('format','56')");
         defer _ = c.sqlite3_finalize(meta);
@@ -61,8 +57,6 @@ test "skills schema 56 wire 9 upgrades populated rows to the current Store" {
         try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog", .{}));
         try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE source_catalog_position IS NULL AND turn_id IS NOT NULL", .{}));
         try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
-        // The old assistant answer is still ordinary public content, byte
-        // for byte, accessible through the same production content reader.
         const reference = try testingContentReference(&storage, 5);
         var reader: ContentReader = undefined;
         reader.open(try storage.openContent(reference));
@@ -75,9 +69,6 @@ test "skills schema 56 wire 9 upgrades populated rows to the current Store" {
         const skills = try storage.readSkills(arena.allocator(), "d8mv7p");
         try std.testing.expectEqual(@as(usize, 0), skills.catalog.entries.len);
     }
-    // The pinned expected rows are independent of the forward migration.
-    // Compare every durable row (including new NULL provenance fields),
-    // not just the populated table counts or a schema assembled as current.
     try freshStoreWithExpectedRows(fresh, root);
     var migrated_rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer migrated_rows.deinit();
@@ -149,8 +140,6 @@ test "skills schema 58 wire 10 upgrades populated archive and refusal rows to th
             if (step.from >= 58) break;
             for (step.sqlite) |statement| try sqlite.exec(raw, statement);
         }
-        // Deliberately old metadata, not protocol.wire_version: omitting
-        // the new wire UPDATE must fail the production open below.
         try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version=58", .{store_schema.application_id}));
         const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','10'),('store_selector',?1),('format','58')");
         defer _ = c.sqlite3_finalize(meta);
@@ -180,8 +169,6 @@ test "skills schema 58 wire 10 upgrades populated archive and refusal rows to th
         try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog", .{}));
         try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE source_catalog_position IS NULL AND turn_id IS NOT NULL", .{}));
         try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
-        // The old assistant answer is still ordinary public content, byte
-        // for byte, accessible through the same production content reader.
         const reference = try testingContentReference(&storage, 5);
         var reader: ContentReader = undefined;
         reader.open(try storage.openContent(reference));
@@ -194,9 +181,6 @@ test "skills schema 58 wire 10 upgrades populated archive and refusal rows to th
         const skills = try storage.readSkills(arena.allocator(), "d8mv7p");
         try std.testing.expectEqual(@as(usize, 0), skills.catalog.entries.len);
     }
-    // The pinned expected rows are independent of the forward migration.
-    // Compare every durable row (including new NULL provenance fields),
-    // not just the populated table counts or a schema assembled as current.
     try freshStoreWithExpectedRows(fresh, root);
     {
         const raw = try openRaw(fresh);

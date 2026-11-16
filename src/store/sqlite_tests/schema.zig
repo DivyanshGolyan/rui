@@ -1,5 +1,3 @@
-//! Schema SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const std = @import("std");
 const platform = @import("../../store_path.zig");
@@ -36,7 +34,6 @@ test "fresh Store uses current schema and rejects the prior version" {
         try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(removed_index, 0));
     }
     {
-        // Uncertainty is derived from resolution and retry facts, not stored.
         const stored_uncertainty = try sqlite.prepare(
             storage.sqliteDatabase(),
             "SELECT (SELECT count(*) FROM pragma_table_info('action_operation') WHERE name='uncertain')+" ++
@@ -47,7 +44,6 @@ test "fresh Store uses current schema and rejects the prior version" {
         try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(stored_uncertainty, 0));
     }
     {
-        // An Action stores only its authorization; its denial is its Resolution.
         const stored_permission = try sqlite.prepare(
             storage.sqliteDatabase(),
             "SELECT count(*) FROM pragma_table_info('action_operation') WHERE name='permission_state'",
@@ -57,8 +53,6 @@ test "fresh Store uses current schema and rejects the prior version" {
         try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(stored_permission, 0));
     }
     try storage.close();
-    // Model the prior format's rollback-journal header; rejection must
-    // happen before the WAL switch, leaving that Store unmodified.
     {
         var raw: ?*c.sqlite3 = null;
         var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
@@ -94,7 +88,6 @@ test "existing Store strictly validates current format metadata and keeps no wir
     var storage: Store = undefined;
     try storage.open(std.testing.io, database, root);
     try std.testing.expectEqual(@as(u64, schema_version), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
-    // A new Store has no wire label, and it opens again without one.
     try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'", .{}));
     try storage.close();
     try storage.open(std.testing.io, database, root);
@@ -179,9 +172,6 @@ test "SQLite selector mismatch retains migration evidence and rolls back metadat
 }
 
 test "metadata seed preserves exact SQLite bootstrap bytes and digest" {
-    // The seed text: parameter slots, tuple order and random expression are
-    // format, not merely row-equivalent implementation details. Format 74
-    // dropped the wire label.
     try std.testing.expectEqualStrings(
         "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_selector',?1),('format','" ++
             std.fmt.comptimePrint("{d}", .{schema_version}) ++ "'),('store_id',lower(hex(randomblob(16))))",
@@ -269,7 +259,6 @@ test "existing Store rejects a table rebuilt without one of its CHECKs, and stay
     const original = comptime for (store_schema.objects(.sqlite)) |object| {
         if (std.mem.eql(u8, object.name, "content")) break object.sql;
     } else unreachable;
-    // The same text without its first CHECK clause.
     const unchecked = comptime blk: {
         const start = std.mem.indexOf(u8, original, " CHECK(").?;
         var depth: usize = 0;
@@ -292,7 +281,6 @@ test "existing Store rejects a table rebuilt without one of its CHECKs, and stay
                 create ++ "; INSERT INTO content SELECT * FROM kept; DROP TABLE kept; COMMIT");
         }
     };
-    // Rebuilt from its own text, the Store still opens.
     try Rebuild.run(database, original);
     try storage.open(std.testing.io, database, root);
     try storage.close();

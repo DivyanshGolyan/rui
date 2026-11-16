@@ -1,25 +1,3 @@
-//! The live check of the Store's MySQL spelling against a MySQL 8.4 server,
-//! in test builds only. One root connection per test process, over the Unix
-//! socket `RUI_TEST_MYSQL_SOCKET` with `RUI_TEST_MYSQL_ROOT_PASSWORD`, opens
-//! on first use. It creates the database `rui_dialect_check`, sets
-//! `schema.mysql_session`, runs every `schema.objects(.mysql)` statement,
-//! and creates the touch oracle's MySQL triggers over a table in the sibling
-//! database `rui_dialect_check_oracle`. Then `shadowPrepare` PREPAREs, on
-//! that database, each statement text the test run hands it.
-//!
-//! Without both variables the check does nothing and its test skips, unless
-//! `RUI_TEST_REQUIRE_ENGINES` lists `mysql`; then its test fails.
-//!
-//! With `RUI_TEST_MYSQL_RECORD` set, the check rewrites that file after each
-//! thing it does: the DDL statements it ran, the PREPAREs it issued, and the
-//! probes MySQL refused as expected, and the migration tests that passed.
-//! CI fails a shard whose record is missing, counts no PREPARE or no
-//! passed migration test (`tests/integration/live_engines.py`), so
-//! any path that keeps the check from running turns red.
-//!
-//! PREPARE resolves names, types and grammar; it binds no value and runs
-//! nothing, so literal typing, guards, row counts, transactions and query
-//! plans are not checked here.
 const std = @import("std");
 const wire_version = @import("../wire_version.zig").wire_version;
 const rsql = @import("rsql.zig");
@@ -35,31 +13,22 @@ const oracle_database = "rui_dialect_check_oracle";
 
 const State = enum { unopened, absent, open, broken };
 
-// The root observer must see and clear each entry's trigger evidence before
-// a queued batch commits. Only this disposable oracle is nontransactional;
-// canonical tables and the application login's grants stay unchanged.
 pub const touch_oracle_definition = "(session_ref VARCHAR(6)) ENGINE=MEMORY";
 
-/// Guards everything below: some Store tests call the Store from threads.
 var mutex: std.Io.Mutex = .init;
 var state: State = .unopened;
 var driver: mysql_connection.Connection = undefined;
-/// Each statement the opening's DDL had refused, with MySQL's error, one
-/// per line; the DDL test reports them.
 var ddl_refusals: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
 var socket_buffer: [std.Io.net.UnixAddress.max_len]u8 = undefined;
 var password_buffer: [mysql.max_password_bytes]u8 = undefined;
 var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-/// The file `RUI_TEST_MYSQL_RECORD` names, or null.
 var record_path: ?[]const u8 = null;
-/// What the check did in this process, as the record states it.
 var done: struct {
     ddl: u32 = 0,
     ddl_refused: u32 = 0,
     prepares: u32 = 0,
     prepare_refused: u32 = 0,
     probes: u32 = 0,
-    /// Migration tests whose migrated database matched a fresh one.
     migrations: u32 = 0,
     conformance: u32 = 0,
 
@@ -72,9 +41,6 @@ var done: struct {
 
 pub const Config = struct { socket: []const u8, password: []const u8, record: ?[]const u8 };
 
-/// The server the environment names, copied out of it; null when it names
-/// none. `error.MysqlRequired` when `RUI_TEST_REQUIRE_ENGINES` lists `mysql`
-/// and either variable is missing, or when only one of them is set.
 fn configured() !?Config {
     var environ = try std.testing.environ.createMap(std.heap.page_allocator);
     defer environ.deinit();
@@ -97,8 +63,6 @@ fn configured() !?Config {
     };
 }
 
-/// `configured`, under `mutex`, for another live test that opens its own
-/// connection to the same server.
 pub fn rootConfig() !?Config {
     const io = std.testing.io;
     mutex.lockUncancelable(io);
@@ -106,8 +70,6 @@ pub fn rootConfig() !?Config {
     return configured();
 }
 
-/// Under `mutex`: rewrites the record file with `done`, when one is named.
-/// A failed write logs at err level, so a run that cannot record fails.
 fn writeRecord() void {
     const path = record_path orelse return;
     var line: [160]u8 = undefined;
@@ -120,9 +82,6 @@ fn writeRecord() void {
         std.log.err("MySQL dialect check: cannot write the record {s}: {s}", .{ path, @errorName(err) });
 }
 
-/// Under `mutex`: the bootstrapped connection, or null when MySQL is not
-/// configured or the opening failed. The first call opens it; a failed
-/// opening logs at err level, which fails the test that made the call.
 fn connection() ?*mysql_connection.Connection {
     switch (state) {
         .open => return &driver,
@@ -153,8 +112,6 @@ fn connection() ?*mysql_connection.Connection {
     return &driver;
 }
 
-/// The fresh databases, the session settings, then each schema object and
-/// oracle statement on its own, so a refused one does not hide the next.
 fn bootstrap() !void {
     try setup("DROP DATABASE IF EXISTS " ++ database ++ ";DROP DATABASE IF EXISTS " ++ oracle_database ++
         ";CREATE DATABASE " ++ database ++ ";CREATE DATABASE " ++ oracle_database ++ ";USE " ++ database);
@@ -173,8 +130,6 @@ fn setup(text: []const u8) !void {
     }
 }
 
-// Teardown shares setup's SQL-refusal report and adds transport failures to
-// the same test-failure boundary. A defer never replaces the body's error.
 fn restore(text: []const u8) void {
     finishRestoration(setup(text), text, RestoreLog{});
 }
@@ -185,12 +140,9 @@ const RestoreLog = struct {
     }
 };
 
-// The reporting seam permits expected failures to be asserted without hiding
-// err-level logs from the real Zig test runner (which must fail that test).
 fn finishRestoration(result: anyerror!void, text: []const u8, report: anytype) void {
     result catch |err| {
-        state = .broken; // Neither a lost transport nor unrestored settings are reusable.
-        // setup already reported this SQL refusal at err level.
+        state = .broken;
         if (err != error.MysqlRefusedSetup) report.failed(text, err);
     };
 }
@@ -218,8 +170,6 @@ test "MySQL restoration reports every transport failure and keeps a body failure
     defer mutex.unlock(io);
     const saved = state;
     defer state = saved;
-    // query and next errors share this boundary; none may become a green
-    // successful body or replace an earlier, unrelated assertion failure.
     for ([_]anyerror{ error.ConnectionLost, error.DeadlineExceeded }) |transport_error| {
         for ([_]bool{ false, true }) |body_failed| {
             state = .open;
@@ -237,8 +187,6 @@ test "MySQL restoration reports every transport failure and keeps a body failure
     try report.body({}, {});
     try std.testing.expectEqual(@as(usize, 0), report.failures);
     try std.testing.expectEqual(State.open, state);
-    // SQL refusal has already failed the test in setup. Do not log it twice,
-    // but still stop later tests from using an unrestored root connection.
     finishRestoration(error.MysqlRefusedSetup, "SET FOREIGN_KEY_CHECKS=1", &report);
     try std.testing.expectEqual(@as(usize, 0), report.failures);
     try std.testing.expectEqual(State.broken, state);
@@ -262,7 +210,6 @@ const Refused = struct {
     }
 };
 
-/// Runs `text` and returns the first statement refusal of its results.
 fn run(text: []const u8) !?Refused {
     try driver.query(text);
     var refused: ?Refused = null;
@@ -277,19 +224,10 @@ fn run(text: []const u8) !?Refused {
     return refused;
 }
 
-/// PREPAREs `text` on the check's database and DEALLOCATEs it, once per
-/// text per process, when MySQL is configured. A refusal logs the text and
-/// MySQL's error at err level. That fails the running test without stopping
-/// it, so one run reports every refused text the run reaches. A later test
-/// that reaches the same text is not failed again.
 pub fn shadowPrepare(comptime text: []const u8) void {
     once(text, null);
 }
 
-/// Fixture text in MySQL's spelling, through `shadowPrepare` one statement
-/// at a time. Text MySQL rendering refuses is reported like a refused
-/// PREPARE, once and only while MySQL is configured, so the build still
-/// passes where the check does not run.
 pub fn shadowPrepareFixture(comptime text: []const u8) void {
     switch (comptime rsql.mysqlRendering(text)) {
         .refused => |message| once(text, message),
@@ -297,8 +235,6 @@ pub fn shadowPrepareFixture(comptime text: []const u8) void {
     }
 }
 
-/// `shadowPrepare`, or with `unrendered` set, the report of MySQL
-/// rendering's refusal of `text` in its place.
 fn once(comptime text: []const u8, comptime unrendered: ?[]const u8) void {
     if (!@import("builtin").is_test) @compileError("test-only check");
     const Seen = Once(text);
@@ -321,9 +257,6 @@ fn once(comptime text: []const u8, comptime unrendered: ?[]const u8) void {
     std.log.err("MySQL 8.4 refused to PREPARE: {f}\n  {s}", .{ refused orelse return, text });
 }
 
-/// The flag that `text` was checked in this process. The struct names
-/// `text`, so each text gets its own type and flag: a struct that names
-/// no comptime value is one type however often it is instantiated.
 fn Once(comptime text: []const u8) type {
     return struct {
         const key = text;
@@ -331,10 +264,6 @@ fn Once(comptime text: []const u8) type {
     };
 }
 
-/// `PREPARE ... FROM` `text` as a string literal, then DEALLOCATE. MySQL
-/// stops a multi-statement query at its first error, so a refused PREPARE
-/// leaves nothing to deallocate. Quotes double; `schema.mysql_session` sets
-/// NO_BACKSLASH_ESCAPES, so a backslash is an ordinary character.
 fn prepareQuery(comptime text: []const u8) []const u8 {
     comptime {
         @setEvalBranchQuota(10 * text.len + 1000);
@@ -344,8 +273,6 @@ fn prepareQuery(comptime text: []const u8) []const u8 {
     }
 }
 
-/// `text` split at each semicolon outside a string literal, each piece
-/// trimmed, empty pieces dropped.
 fn statements(comptime text: []const u8) []const []const u8 {
     comptime {
         @setEvalBranchQuota(10 * text.len + 1000);
@@ -419,8 +346,6 @@ test "PREPARE on the check's database refuses what MySQL 8.4 refuses" {
 const migrated_database = "rui_migration_migrated";
 const fresh_database = "rui_migration_fresh";
 
-/// Runs `text` on `name`, with foreign keys unchecked when `unchecked`;
-/// a refusal logs and fails.
 fn load(comptime name: []const u8, text: []const u8, unchecked: bool) !void {
     try setup("USE " ++ name);
     if (unchecked) try setup("SET FOREIGN_KEY_CHECKS=0");
@@ -431,7 +356,6 @@ fn load(comptime name: []const u8, text: []const u8, unchecked: bool) !void {
     }
 }
 
-/// `text`'s rows: a line per row, each value as its length and bytes.
 fn writeResult(text: []const u8, out: *std.Io.Writer) !void {
     try driver.query(text);
     var refused = false;
@@ -448,9 +372,6 @@ fn writeResult(text: []const u8, out: *std.Io.Writer) !void {
     if (refused) return error.MysqlRefusedQuery;
 }
 
-/// What information_schema says of database `name`'s tables, columns,
-/// indexes, CHECKs and foreign keys, without the names MySQL generates for
-/// CHECKs and foreign keys.
 fn shapeQueries(comptime name: []const u8) [5][]const u8 {
     const in = " WHERE TABLE_SCHEMA='" ++ name ++ "'";
     return .{
@@ -464,7 +385,6 @@ fn shapeQueries(comptime name: []const u8) [5][]const u8 {
     };
 }
 
-/// Each MySQL table's rows in database `name`, in key order.
 fn rowQueries(comptime name: []const u8) []const []const u8 {
     var queries: []const []const u8 = &.{};
     for (schema.tables) |table| if (table.engines.on(.mysql)) {
@@ -475,13 +395,10 @@ fn rowQueries(comptime name: []const u8) []const []const u8 {
     return queries;
 }
 
-/// Fails unless database `name`'s catalog (`schema.catalogSql`) has the
-/// digest the schema derives, and then logs the lines each side lacks.
 fn expectCatalog(comptime name: []const u8) !void {
     var lines: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer lines.deinit();
     try writeResult(comptime schema.catalogSql("'" ++ name ++ "'"), &lines.writer);
-    // writeResult writes a row as its end of line, then each value as " length:" and its bytes.
     var sum: u64 = 0;
     var rows = std.mem.splitScalar(u8, lines.written(), '\n');
     while (rows.next()) |row| {
@@ -490,7 +407,6 @@ fn expectCatalog(comptime name: []const u8) !void {
         sum +%= schema.catalogLineDigest(row[colon + 1 ..]);
     }
     if (sum == schema.catalogDigest()) return;
-    // stderr, which the test runner always shows.
     const expected = comptime schema.catalogLinesForTesting();
     rows = std.mem.splitScalar(u8, lines.written(), '\n');
     while (rows.next()) |row| {
@@ -510,8 +426,6 @@ fn expectCatalog(comptime name: []const u8) !void {
     return error.MysqlCatalogDiffers;
 }
 
-/// Writes each query of `migrated` and its twin of `fresh`, and fails
-/// on the first pair that differs.
 fn expectSameResults(comptime migrated: []const []const u8, comptime fresh: []const []const u8) !void {
     inline for (migrated, fresh) |left, right| {
         var left_result: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -538,9 +452,6 @@ test "a MySQL Store at the migration baseline with its rows takes every migratio
     try load(migrated_database, store_testing.baseline_mysql_ddl, false);
     try load(migrated_database, store_testing.baseline_rows, true);
     const selector = "/mysql-migration-store";
-    // A persisted format must advance, not be repaired as missing at open.
-    // This older wire label predates the step-local 8 -> 9 -> ... updates;
-    // format 74 deletes whatever label the Store saved.
     try load(migrated_database, std.fmt.comptimePrint(
         "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','{d}'),('wire_version','7'),('store_selector','{s}')",
         .{ schema.migration_baseline, selector },
@@ -554,12 +465,9 @@ test "a MySQL Store at the migration baseline with its rows takes every migratio
     ), false);
     try expectSameResults(comptime &shapeQueries(migrated_database), comptime &shapeQueries(fresh_database));
     try expectSameResults(comptime rowQueries(migrated_database), comptime rowQueries(fresh_database));
-    // What the engine's open compares, on a fresh and a migrated Store.
     try expectCatalog(fresh_database);
     try expectCatalog(migrated_database);
 
-    // Use the production admission path, including metadata, identity,
-    // catalog digest, ownership and the server's durability requirements.
     const config = (try configured()).?;
     const probe = try std.testing.allocator.create(mysql_connection.Connection);
     defer std.testing.allocator.destroy(probe);
@@ -631,7 +539,6 @@ test "schema 55 migrates recovery index and wire 8 together to the current schem
     writeRecord();
 }
 
-/// A live Store conformance body completed successfully.
 pub fn conformancePassed() void {
     const io = std.testing.io;
     mutex.lockUncancelable(io);
@@ -653,8 +560,6 @@ test "skills schema 56 wire 9 MySQL migration preserves ordinary rows and reache
     inline for (schema.migrations) |step| {
         if (step.from < 56) try load(migrated_database, schema.mysqlMigration(step.from), false);
     }
-    // The fixture really is old wire 9 before the new DDL runs. Never
-    // substitute the current protocol constant into this input metadata.
     try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','9'),('format','56')", false);
     var old_wire: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer old_wire.deinit();
@@ -664,9 +569,6 @@ test "skills schema 56 wire 9 MySQL migration preserves ordinary rows and reache
     defer count.deinit();
     try writeResult("SELECT count(*) FROM conversation_entry", &count.writer);
     try std.testing.expectEqualStrings("\n 1:3", count.written());
-    // Explicit old columns make the oracle independent of the added source
-    // column. It covers every ordinary entry and its original public/private
-    // content identity and bytes across the actual ALTER TABLE migration.
     const ordinary_rows = "SELECT e.session_ref,e.entry_ordinal,e.session_position,e.entry_kind,e.turn_id,e.source_admission_id,e.source_revision,e.source_operation_id,e.source_item_ordinal,e.content_id,e.recorded_at,HEX(c.digest),c.byte_length,c.private,k.chunk_index,HEX(k.bytes) " ++
         "FROM conversation_entry e JOIN content c ON c.content_id=e.content_id LEFT JOIN content_chunk k ON k.content_id=c.content_id ORDER BY e.session_ref,e.entry_ordinal,k.chunk_index";
     var before: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -703,10 +605,7 @@ test "skills schema 58 wire 10 MySQL migration preserves archive refusal and ord
     inline for (schema.migrations) |step| {
         if (step.from < 58) try load(migrated_database, schema.mysqlMigration(step.from), false);
     }
-    // The fixture really is old wire 10 before the new DDL runs. Never
-    // substitute the current protocol constant into this input metadata.
     try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','10'),('format','58')", false);
-    // Distinct immutable archive/refusal identities exist before skills DDL.
     try load(migrated_database, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES" ++
         "('skills-58-archive',6,'rhvzwc',X'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',1,'',0,0,1000)," ++
         "('skills-58-refusal',2,'absent',X'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',0,'unknown_session',0,0,1001);" ++
@@ -731,9 +630,6 @@ test "skills schema 58 wire 10 MySQL migration preserves archive refusal and ord
     defer count.deinit();
     try writeResult("SELECT count(*) FROM conversation_entry", &count.writer);
     try std.testing.expectEqualStrings("\n 1:3", count.written());
-    // Explicit old columns make the oracle independent of the added source
-    // column. It covers every ordinary entry and its original public/private
-    // content identity and bytes across the actual ALTER TABLE migration.
     const ordinary_rows = "SELECT e.session_ref,e.entry_ordinal,e.session_position,e.entry_kind,e.turn_id,e.source_admission_id,e.source_revision,e.source_operation_id,e.source_item_ordinal,e.content_id,e.recorded_at,HEX(c.digest),c.byte_length,c.private,k.chunk_index,HEX(k.bytes) " ++
         "FROM conversation_entry e JOIN content c ON c.content_id=e.content_id LEFT JOIN content_chunk k ON k.content_id=c.content_id ORDER BY e.session_ref,e.entry_ordinal,k.chunk_index";
     var before: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -789,8 +685,6 @@ test "metadata seed MySQL missing masks retain canonical selector and id" {
         "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','" ++ std.fmt.comptimePrint("{d}", .{schema.schema_version}) ++ "');",
         "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_id','0123456789abcdef0123456789abcdef');",
     };
-    // Independent domain: every subset of all three repaired keys. Format
-    // 74 retired the wire label, so no subset repairs one.
     const repaired = [_]schema.MetaKey{ .store_selector, .format, .store_id };
     for (0..8) |mask| {
         var seen: schema.MetaPresence = .empty;
@@ -876,7 +770,6 @@ test "schema 74 MySQL migration deletes the saved wire label, and the Store open
     });
     try load(migrated_database, schema.mysqlMigrationFrom(73).?, false);
     try expectCatalog(migrated_database);
-    // The production admission path opens it with no label and writes none.
     const config = (try configured()).?;
     const probe = try std.testing.allocator.create(mysql_connection.Connection);
     defer std.testing.allocator.destroy(probe);
@@ -979,7 +872,6 @@ test "schema 70 MySQL migration updates the saved wire label and preserves ordin
         });
         try load(migrated_database, schema.mysqlMigrationFrom(69).?, false);
         try expectCatalog(migrated_database);
-        // Native Store readback uses the same touch oracle as other live Stores.
         try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ "_oracle;CREATE DATABASE " ++ migrated_database ++ "_oracle;CREATE TABLE " ++ migrated_database ++ "_oracle.touched_oracle" ++ touch_oracle_definition);
         for (comptime sqlite.touchOracleTriggers(.mysql, migrated_database ++ "_oracle.touched_oracle")) |text| try setup(text);
         done.migrations += 1;
@@ -1044,7 +936,6 @@ test "schema 66 MySQL migration freezes actual effort emission and prior admitte
         try load(name, store_testing.operation_effort_migration_seed, false);
         try load(name, choice.sql(), false);
         if (legacy_codec) try load(name, "UPDATE session SET codec='openai-responses/1' WHERE session_ref='d8mv7p'", false);
-        // Seed format 65, then exercise its effort migration and every later step.
         inline for (schema.migrations) |step| {
             if (comptime step.from >= 65) try load(name, schema.mysqlMigration(step.from), false);
         }
@@ -1074,17 +965,16 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
     defer restore("USE " ++ database);
     inline for (.{ false, true }) |historical| {
         try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
-        if (historical) {
-            try load(migrated_database, store_testing.baseline_mysql_ddl, false);
-            try load(migrated_database, store_testing.baseline_rows, true);
-            inline for (schema.migrations) |step| {
-                if (step.from < 74) try load(migrated_database, schema.mysqlMigration(step.from), false);
-            }
-        } else {
-            const objects = comptime schema.objects(.mysql);
-            for (objects) |object| {
-                if (std.mem.eql(u8, object.name, "session_pin") or std.mem.eql(u8, object.name, "session_pin_command")) continue;
-                const text = try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 7", "kind BETWEEN 1 AND 6");
+        try load(migrated_database, store_testing.baseline_mysql_ddl, false);
+        if (historical) try load(migrated_database, store_testing.baseline_rows, true);
+        inline for (schema.migrations) |step| {
+            if (step.from < 74) try load(migrated_database, schema.mysqlMigration(step.from), false);
+        }
+        if (!historical) {
+            try load(migrated_database, "DROP TABLE core_command", true);
+            for (comptime schema.objects(.mysql)) |object| {
+                if (!std.mem.eql(u8, object.name, "core_command") and !std.mem.eql(u8, object.name, "core_command_target_order")) continue;
+                const text = try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 8", "kind BETWEEN 1 AND 6");
                 defer std.testing.allocator.free(text);
                 try load(migrated_database, text, false);
             }
@@ -1094,19 +984,22 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
         defer restore("DROP TEMPORARY TABLE " ++ migrated_database ++ ".original_pin_commands");
         try load(migrated_database, "CREATE TEMPORARY TABLE original_pin_stops AS SELECT * FROM session_stop", false);
         defer restore("DROP TEMPORARY TABLE " ++ migrated_database ++ ".original_pin_stops");
-        try load(migrated_database, schema.mysqlMigration(74), false);
+        inline for (schema.migrations) |step| {
+            if (step.from >= 74) try load(migrated_database, schema.mysqlMigration(step.from), false);
+        }
         try expectCatalog(migrated_database);
         try expectSameResults(&.{
             "SELECT * FROM core_command ORDER BY command_seq",
-            "SELECT * FROM session_stop ORDER BY command_key",
+            "SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused FROM session_stop ORDER BY command_key",
             "SELECT count(*) FROM session_pin",
             "SELECT count(*) FROM session_pin_command",
         }, &.{
             "SELECT * FROM original_pin_commands ORDER BY command_seq",
-            "SELECT * FROM original_pin_stops ORDER BY command_key",
+            "SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused FROM original_pin_stops ORDER BY command_key",
             "SELECT 0",
             "SELECT 0",
         });
+        try expectSameResults(&.{"SELECT count(*) FROM session_stop WHERE action_cutoff<>0"}, &.{"SELECT 0"});
         try load(migrated_database, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('pin-upgrade',7,'d8mv7p',UNHEX(REPEAT('00',32)),1,'',0,0,100);INSERT INTO session_pin_command(command_key,pinned) VALUES('pin-upgrade',1);INSERT INTO session_pin(session_ref,command_key) VALUES('d8mv7p','pin-upgrade');UPDATE session_pin SET command_key=NULL WHERE session_ref='d8mv7p'", false);
         try expectSameResults(&.{
             "SELECT count(*) FROM session_pin WHERE command_key IS NULL",

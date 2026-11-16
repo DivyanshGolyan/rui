@@ -29,8 +29,6 @@ pub const Intent = enum { released_upgrade, released_install, intentional_source
 pub const Receipt = struct {
     operation_build: []const u8,
     selected_after: []const u8,
-    /// Identity of selected_after, captured under the publication lock.
-    /// Intentional source builds need not have a released version.
     selected_version: ?releases.Version = null,
 };
 pub const InstallationOutcome = union(enum) {
@@ -54,7 +52,6 @@ pub const InstallationOutcome = union(enum) {
 pub const CleanupFailure = struct {
     primary: ?anyerror,
     secondary: anyerror,
-    /// Borrowed only until the synchronous reporter returns.
     retained_path: []const u8,
 };
 
@@ -266,11 +263,11 @@ pub fn prepare(allocator: Allocator, io: std.Io, home: []const u8, candidate: *c
     return prepareWithReporter(allocator, io, home, candidate, cancellation, .{}, null);
 }
 
-pub fn prepareWithReporter(allocator: Allocator, io: std.Io, home: []const u8, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation, reporter: CleanupReporter, diagnostic: ?*process.DownloadDiagnostic) !PreparedBuild {
+pub fn prepareWithReporter(allocator: Allocator, io: std.Io, home: []const u8, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation, reporter: CleanupReporter, diagnostic: ?*process.Download) !PreparedBuild {
     return prepareWithCleanup(allocator, io, home, candidate, cancellation, reporter, .{}, diagnostic);
 }
 
-fn prepareWithCleanup(allocator: Allocator, io: std.Io, home: []const u8, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation, reporter: CleanupReporter, faults: CleanupFaults, diagnostic: ?*process.DownloadDiagnostic) !PreparedBuild {
+fn prepareWithCleanup(allocator: Allocator, io: std.Io, home: []const u8, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation, reporter: CleanupReporter, faults: CleanupFaults, diagnostic: ?*process.Download) !PreparedBuild {
     try process.check(cancellation);
     var prepared: PreparedBuild = .{ .path = try newStage(allocator, io, home), .version = candidate.version };
     prepareInto(allocator, io, &prepared, candidate, cancellation, diagnostic) catch |primary| {
@@ -279,15 +276,10 @@ fn prepareWithCleanup(allocator: Allocator, io: std.Io, home: []const u8, candid
     return prepared;
 }
 
-fn prepareInto(allocator: Allocator, io: std.Io, prepared: *PreparedBuild, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation, diagnostic: ?*process.DownloadDiagnostic) !void {
+fn prepareInto(allocator: Allocator, io: std.Io, prepared: *PreparedBuild, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation, diagnostic: ?*process.Download) !void {
     const archive = try std.fmt.allocPrint(allocator, "{s}/archive.tar.gz", .{prepared.path});
     defer allocator.free(archive);
-    const fixture = std.mem.startsWith(u8, candidate.archive_url, "http://");
-    const output = try process.downloadOutput(allocator, io, &.{
-        "curl",         "--disable",               "--fail",  "--silent",                         "--show-error",  "--location", "--connect-timeout", "10",        "--max-time", "300",
-        "--max-redirs", if (fixture) "0" else "5", "--proto", if (fixture) "=http" else "=https", "--proto-redir", "=https",     "--max-filesize",    "268435456", "--output",   archive,
-        "--",           candidate.archive_url,
-    }, cancellation, 1024, diagnostic);
+    const output = try process.downloadOutput(allocator, io, .{ .url = candidate.archive_url, .output = .{ .archive = archive } }, cancellation, 1024, diagnostic);
     allocator.free(output);
     try verifyArchive(allocator, io, prepared, candidate, cancellation, archive);
 }

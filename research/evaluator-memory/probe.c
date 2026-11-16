@@ -1,5 +1,3 @@
-/* Research-only translation unit: uses pinned engine internals to fill a final
- * string. No production bridge or dependency is modified. */
 #include "quickjs.c"
 #include <unistd.h>
 #include <sys/resource.h>
@@ -31,14 +29,13 @@ static uint64_t footprint(void) {
  if(task_info(mach_task_self(),TASK_VM_INFO,(task_info_t)&t,&n)!=KERN_SUCCESS)abort();
  return t.phys_footprint;
 #else
- return 0; /* Linux physical footprint is deliberately not conflated with RSS. */
+ return 0;
 #endif
 }
 static void sample(void){uint64_t p=footprint();if(p>footprint_peak)footprint_peak=p;}
 static void report(JSRuntime *rt,const char*phase){JSMemoryUsage m={0};if(rt)JS_ComputeMemoryUsage(rt,&m);sample();struct rusage r;getrusage(RUSAGE_SELF,&r);
  printf("{\"phase\":\"%s\",\"engine_allocator_live\":%zu,\"engine_allocator_peak\":%zu,\"engine_accounted\":%lld,\"js_memory_used\":%lld,\"native_live\":%zu,\"native_peak\":%zu,\"physical_footprint\":%llu,\"sampled_footprint_peak\":%llu,\"maxrss_raw\":%ld,\"read_bytes\":%zu,\"decode_calls\":%zu,\"failure\":\"%s\"}\n",phase,live,peak,(long long)m.malloc_size,(long long)m.memory_used_size,native_live,native_peak,(unsigned long long)footprint(),(unsigned long long)footprint_peak,r.ru_maxrss,read_bytes,calls,failure);fflush(stdout);}
 static int exact(void *p,size_t n,uint64_t off){while(n){ssize_t k=pread(input_fd,p,n,off);if(k<=0){failure="short_read";return -1;}read_bytes+=k;n-=k;off+=k;p=(char*)p+k;}return 0;}
-/* Fixture integers are LE. Metadata has no resident per-result index. */
 static uint32_t u32(const unsigned char*p){return (uint32_t)p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24;}
 static JSValue lookup(JSContext*c,JSValueConst this_val,int argc,JSValueConst*argv){(void)this_val;int32_t index=0;calls++;
  if(argc && JS_ToInt32(c,&index,argv[0])<0)return JS_EXCEPTION;

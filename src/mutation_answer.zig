@@ -54,6 +54,7 @@ pub const Target = union(CommandKind) {
     model_interruption: struct { turn: u64, operation: u64 },
     permission_decision: struct { action: u64, decision: PermissionDecision },
     session_pin: struct { pinned: bool },
+    action_background: u64,
 };
 
 pub const Answer = struct {
@@ -68,6 +69,7 @@ pub const Answer = struct {
             session_pin: SessionPinObservation,
             model_interruption,
             permission_decision,
+            action_background: @import("action_control.zig").Selection,
         },
         rejected: Bounded(max_code_bytes),
         conflict,
@@ -99,6 +101,7 @@ pub const Wire = struct {
         admission: OmittableJson(JsonString(20)) = .{},
         action: OmittableJson(JsonString(20)) = .{},
         decision: OmittableJson(JsonString(16)) = .{},
+        action_selection: OmittableJson(struct { kind: JsonEnum(@FieldType(@import("action_control.zig").Selection, "kind")), position: JsonString(20) }) = .{},
         archived: OmittableJson(bool) = .{},
         pinned: OmittableJson(bool) = .{},
         selection: OmittableJson(struct { turn: ?JsonString(20), admission_cutoff: JsonString(20) }) = .{},
@@ -133,6 +136,7 @@ pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []c
         .session_pin => "session_pin_reply",
         .model_interruption => "model_interruption_reply",
         .permission_decision => "permission_decision_reply",
+        .action_background => "action_background_reply",
     };
     if (!wire.version.eql(current_version) or !wire.type.eql(expected_type) or wire.code.value != null) return error.InvalidResponse;
     const answer = wire.answer.value orelse return error.InvalidResponse;
@@ -154,6 +158,9 @@ pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []c
     if (target == .permission_decision) {
         if (try decimalId(answer.action.value orelse return error.InvalidResponse, true) != target.permission_decision.action or
             !(answer.decision.value orelse return error.InvalidResponse).eql(@tagName(target.permission_decision.decision))) return error.RequestBindingMismatch;
+    } else if (target == .action_background) {
+        if (try decimalId(answer.action.value orelse return error.InvalidResponse, true) != target.action_background) return error.RequestBindingMismatch;
+        if (answer.decision.value != null) return error.InvalidResponse;
     } else if (answer.action.value != null or answer.decision.value != null) return error.InvalidResponse;
     const accepted = answer.status.eql("accepted");
     const conflict = answer.status.eql("conflict");
@@ -164,7 +171,7 @@ pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []c
         if (answer.code.value != null) return error.InvalidResponse;
     } else {
         const code = answer.code.value orelse return error.InvalidResponse;
-        if (code.slice().len == 0 or answer.revision.value != null or answer.created.value != null or answer.admission.value != null or answer.selection.value != null or answer.archived.value != null) return error.InvalidResponse;
+        if (code.slice().len == 0 or answer.revision.value != null or answer.created.value != null or answer.admission.value != null or answer.selection.value != null or answer.action_selection.value != null or answer.archived.value != null) return error.InvalidResponse;
         if (conflict and (!code.eql("idempotency_key_conflict") or answer.replayed)) return error.InvalidResponse;
     }
     var value: @FieldType(@FieldType(Answer, "result"), "accepted") = undefined;
@@ -230,11 +237,16 @@ pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []c
         .permission_decision => if (accepted) {
             value = .permission_decision;
         },
+        .action_background => if (accepted) {
+            const selected = answer.action_selection.value orelse return error.InvalidResponse;
+            value = .{ .action_background = .{ .kind = selected.kind.value, .position = try decimalId(selected.position, false) } };
+        },
     }
     if ((target != .configure and (answer.revision.value != null or answer.created.value != null)) or
         (target != .message and (answer.admission.value != null or wire.input.value != null or wire.queue.value != null)) or
         (target != .configure and target != .message and wire.execution.value != null) or
         (target != .session_stop and answer.selection.value != null) or
+        (target != .action_background and answer.action_selection.value != null) or
         (target != .session_archive and answer.archived.value != null) or
         (target != .session_pin and answer.pinned.value != null) or
         (target != .session_stop and target != .session_archive and wire.completion.value != null)) return error.InvalidResponse;
@@ -522,4 +534,16 @@ test "Session pin replies bind desired value and reject unrelated mutation autho
     try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(200, accepted, "rhvzwc", target).answer);
     const stopped = "{\"version\":\"" ++ version ++ "\",\"type\":\"session_pin_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"pinned\":false},\"completion\":{\"status\":\"completed\"}}";
     try std.testing.expectError(error.InvalidResponse, decodeForTest(200, stopped, "k7m2qx", target).answer);
+}
+
+test "Action promotion replies bind the target and immutable receipt or final selection" {
+    inline for (.{ "background", "final" }) |kind| {
+        const accepted = "{\"version\":\"" ++ current ++ "\",\"type\":\"action_background_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\",\"action\":\"42\",\"action_selection\":{\"kind\":\"" ++ kind ++ "\",\"position\":\"9007199254740993\"}}}";
+        const answer = try decodeForTest(200, accepted, "k7m2qx", .{ .action_background = 42 }).answer;
+        try std.testing.expect(answer.replayed);
+        try std.testing.expectEqualStrings(kind, @tagName(answer.result.accepted.action_background.kind));
+        try std.testing.expectEqual(@as(u64, 9007199254740993), answer.result.accepted.action_background.position);
+        try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(200, accepted, "rhvzwc", .{ .action_background = 42 }).answer);
+        try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(200, accepted, "k7m2qx", .{ .action_background = 43 }).answer);
+    }
 }

@@ -1,5 +1,3 @@
-//! Report SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
@@ -100,12 +98,9 @@ test "Current selects active then queued work and bounds recent Message identiti
 
 test "contradictory work inputs fence the Store" {
     for ([_][:0]const u8{
-        // A failure code on an active Turn: its settlement closes the Turn.
         "UPDATE model_operation SET resolution_code='provider_http_500',retry_due_at_ms=NULL,attempt_at=NULL,resolved_at=1",
-        // An Action beside an Operation still in flight.
         "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,resolution_code) " ++
             "SELECT 999,operation_id,0,session_ref,1,1,0,NULL FROM model_operation",
-        // A waiting retry without the failure that caused it.
         "UPDATE model_operation SET retry_due_at_ms=9223372036854775807,attempt_at=NULL,retry_scheduled_at=1,last_failure_code=NULL",
     }) |fault| {
         var tmp = std.testing.tmpDir(.{});
@@ -166,8 +161,6 @@ test "canonical report and Action read failures fence later commands" {
     try std.testing.expect(action_store.isFenced());
     try std.testing.expectError(error.StoreFenced, action_store.actionArguments(allocated_session_1.slice(), action_id));
 
-    // Existing public content is not necessarily a valid accepted descriptor.
-    // A changed name must fence just like changed arguments, before dispatch.
     for ([_][:0]const u8{
         "UPDATE model_tool_call SET arguments_content_id=name_content_id",
         "UPDATE model_tool_call SET name_content_id=call_id_content_id",
@@ -191,14 +184,14 @@ test "canonical report and Action read failures fence later commands" {
                 } else |err| err,
                 .arguments => if (storage.actionArguments(allocated_session_2.slice(), try store_testing.sqlite_only.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{}))) |_| {} else |err| err,
                 .execution => blk: {
-                    const action = (try storage.admitNextActionAttempt(300_000, .{})).?;
+                    const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?;
                     var input: ActionExecutionInput = undefined;
                     break :blk storage.readActionExecutionInput(.bash, action.permit.binding, &input);
                 },
             };
             try std.testing.expectError(error.CorruptStore, result);
             try std.testing.expect(storage.isFenced());
-            try std.testing.expectError(error.StoreFenced, storage.admitNextActionAttempt(300_000, .{}));
+            try std.testing.expectError(error.StoreFenced, storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{}));
         }
     }
 }
@@ -262,8 +255,6 @@ test "Current report work is independent of terminal tool history" {
                 "active",
             );
             const active = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            // Usage anchors the context estimate here, so the report reads
-            // only what follows this call, as it does with a real provider.
             try settleCallsForTestingWithFaults(
                 &storage,
                 &tmp,
@@ -374,14 +365,7 @@ test "canonical observation failure fences later admission" {
     try std.testing.expectError(error.StoreFenced, store_testing.observeCommandForTesting(&storage, "later"));
 }
 
-test "a Current report's step faults answer the name of the earliest round that steps the table" {
-    // Each read keeps main's name; when reads in two rounds fail, the
-    // earlier round's name wins. The Action count steps after the tool
-    // outcome rule in their round, so a faulted action_operation answers
-    // the rule's CallReadFailed. Model-bound compaction facts read the
-    // producing session_revision before Action lists and answer CorruptStore
-    // for that fault. With no Turn or list to read, an idle Session does not
-    // step session_revision.
+test "a Current report's read faults keep the owning error and fence" {
     inline for (.{
         .{ TestingWorkShape.awaiting, "model_tool_call", error.CallReadFailed },
         .{ TestingWorkShape.awaiting, "action_operation", error.CallReadFailed },
@@ -394,15 +378,22 @@ test "a Current report's step faults answer the name of the earliest round that 
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try case[0].make(&storage, &tmp, "fault-names");
-        try store_testing.failReadsOf(&storage, case[1]);
+        const indexed = comptime std.mem.eql(u8, case[1], "action_operation");
+        var fault: TestingStatementFault = .{ .sql = namedStatementForTesting(report_domain.session_count_failures, null, "SELECT DISTINCT operation.operation_id,") };
+        if (indexed) {
+            fault.arm(storage.sqliteDatabase());
+        } else try store_testing.failReadsOf(&storage, case[1]);
+        defer if (indexed) fault.disarm(storage.sqliteDatabase());
         if (comptime @TypeOf(case[2]) == @TypeOf(null)) {
             std.testing.allocator.free(try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
-        } else try std.testing.expectError(case[2], testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
+        } else {
+            try std.testing.expectError(case[2], testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
+            if (indexed) try std.testing.expect(fault.failed > 0);
+            try std.testing.expect(storage.isFenced());
+        }
     }
 }
 
-/// Fails the statement whose text is `sql` while `route` reads `session`,
-/// and expects `expected`.
 fn expectRouteStepFailure(storage: *Store, tmp: *std.testing.TmpDir, route: enum { report, inspection, activity }, session: []const u8, sql: [:0]const u8, expected: anyerror) !void {
     var fault: TestingStatementFault = .{ .sql = sql };
     fault.arm(storage.sqliteDatabase());
@@ -422,10 +413,6 @@ fn expectRouteStepFailure(storage: *Store, tmp: *std.testing.TmpDir, route: enum
 }
 
 test "a Proposal check folded into the tool outcome rule answers the rule's CallReadFailed" {
-    // Main checked each call's Proposal in a statement of its own, whose
-    // failed step went through as StatementFailed; the rule's read now
-    // checks it, on an Activity page (`operation_outcome`) and in the
-    // Current report (`active_tool_calls`), and answers that read's name.
     inline for (.{
         .{ .activity, namedStatementForTesting(reads_domain.read_failures, null, "SELECT DISTINCT ?1 AS operation_id") },
         .{ .report, namedStatementForTesting(report_domain.session_count_failures, null, "SELECT DISTINCT operation.operation_id") },
@@ -441,12 +428,8 @@ test "a Proposal check folded into the tool outcome rule answers the rule's Call
 }
 
 test "a Current report's presentation reads answer their list's name" {
-    // Main read each listed call's line and fields apart and named their
-    // failed steps CorruptStore; they are the list's own columns now. The
-    // Turn proposes an asked-for call, whose Action waits, and a call of
-    // an unknown tool, which is rejected.
     inline for (.{
-        .{ namedStatementForTesting(session_report_read_domain.current_failures, null, "a.resolution_code IS NULL ORDER BY a.action_id"), error.ActionReadFailed },
+        .{ namedStatementForTesting(session_report_read_domain.current_failures, null, "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.permission_revision,a.authorized,"), error.ActionReadFailed },
         .{ namedStatementForTesting(session_report_read_domain.current_failures, null, "CROSS JOIN content rejection"), error.CallReadFailed },
     }) |case| {
         var tmp = std.testing.tmpDir(.{});
@@ -467,8 +450,6 @@ test "a Current report's presentation reads answer their list's name" {
 }
 
 test "Session inspection's count reads answer main's names" {
-    // Inspection reads the Current report's counts and the rule in the
-    // same rounds, under main's names.
     inline for (.{
         .{ "SELECT operation.operation_id FROM", error.CallReadFailed },
         .{ "SELECT DISTINCT operation.operation_id", error.CallReadFailed },
@@ -482,14 +463,11 @@ test "Session inspection's count reads answer main's names" {
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try TestingWorkShape.awaiting.make(&storage, &tmp, "inspection-names");
-        // A queued Message, so the pending count steps.
         try submitTestMessage(&storage, &tmp, "inspection-names-queued", "inspection-names-queued", session.slice(), "later");
         try expectRouteStepFailure(&storage, &tmp, .inspection, session.slice(), namedStatementForTesting(report_domain.session_count_failures, null, case[0]), case[1]);
     }
 }
 
-/// The statements the Store's cached statements ran and the VM steps they
-/// took since the last call, which resets them.
 fn cachedWorkForTesting(storage: *Store) struct { statements: i64, steps: i64 } {
     var statements: i64 = 0;
     var steps: i64 = 0;
@@ -500,9 +478,6 @@ fn cachedWorkForTesting(storage: *Store) struct { statements: i64, steps: i64 } 
     return .{ .statements = statements, .steps = steps };
 }
 
-/// The cost fixture: an answered greeting, a reconfigure, `cycles` tool
-/// cycles, a stopped Turn with a Message the stop excluded, and a Turn
-/// awaiting one asked Bash call beside a rejected unknown one.
 fn costFixtureForTesting(storage: *Store, tmp: *std.testing.TmpDir, cycles: usize) !protocol.Bounded(protocol.max_session_bytes) {
     const session = try configureTestSessionAsk(storage, "probe-config");
     const answer = [_]TestingAnswerPart{.{ .encoded = "hello there", .decoded = "hello there" }};
@@ -533,8 +508,7 @@ fn costFixtureForTesting(storage: *Store, tmp: *std.testing.TmpDir, cycles: usiz
 }
 
 test "a Current report and inspection do no more work than main at the cost fixture" {
-    // Main's counts at 72db6de9, each the second, cached, run on this
-    // fixture: statements run and VM steps, the report then inspection.
+    var failure: ?anyerror = null;
     inline for (.{
         .{ 1, [4]i64{ 37, 2954, 12, 633 } },
         .{ 8, [4]i64{ 37, 5674, 12, 633 } },
@@ -557,16 +531,13 @@ test "a Current report and inspection do no more work than main at the cost fixt
         try std.testing.expect(report.statements > 0 and inspection.statements > 0);
         std.testing.expect(report.statements <= main[0] and report.steps <= main[1] and inspection.statements <= main[2] and inspection.steps <= main[3]) catch |err| {
             std.debug.print("report {d} statements, {d} steps; inspection {d}, {d}\n", .{ report.statements, report.steps, inspection.statements, inspection.steps });
-            return err;
+            failure = err;
         };
     }
+    if (failure) |err| return err;
 }
 
 test "a Current report's work grows linearly in one Operation's calls, as main's did" {
-    // Main's counts at 3b3d941a, each the second, cached, report: its
-    // statements and VM steps with 16, 64 and 256 rejected calls in one
-    // Operation. Each listed call's publication is its Operation's, read
-    // once per Operation, not once per call.
     inline for (.{
         .{ 16, [2]i64{ 93, 12411 } },
         .{ 64, [2]i64{ 285, 47067 } },

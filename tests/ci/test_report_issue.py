@@ -95,6 +95,25 @@ WHITESPACE = logged(
 )
 
 
+class GhCompatibilityTest(unittest.TestCase):
+    def test_compile_selection_comes_from_the_failed_producer(self):
+        self.assertEqual(report_issue.compile_targets("zig build ci-build -Dci-targets=check,test-logic -Dci-part=rest failed with exit 1; no gates executed.\n"), ["check", "test-logic"])
+        self.assertEqual(report_issue.compile_targets(logged('  TARGETS: ["request-wait-integration"]')), ["request-wait-integration"])
+        self.assertEqual(report_issue.compile_targets(logged('  TARGETS: [', '    "check",', '    "test-logic"', '  ]', '  PART: rest')), ["check", "test-logic"])
+        self.assertEqual(report_issue.compile_targets("TARGETS: [truncated\n"), [])
+        self.assertEqual(report_issue.compile_targets("src/cli.zig:2: error: no field"), [])
+
+    def test_old_gh_retries_only_the_unsupported_escape_flag(self):
+        error = subprocess.CalledProcessError(1, ["gh"], stderr="unknown flag: --allow-escape-sequences")
+        with mock.patch.object(report_issue.subprocess, "run", side_effect=[error, subprocess.CompletedProcess([], 0, stdout="log")]) as run:
+            self.assertEqual(report_issue.gh("api", "--allow-escape-sequences", "repos/o/r/logs"), "log")
+        self.assertEqual(run.call_args.args[0], ["gh", "api", "repos/o/r/logs"])
+        with mock.patch.object(report_issue.subprocess, "run", side_effect=subprocess.CalledProcessError(1, ["gh"], stderr="HTTP 503")) as run:
+            with self.assertRaises(subprocess.CalledProcessError):
+                report_issue.gh("api", "--allow-escape-sequences", "repos/o/r/logs")
+        self.assertEqual(run.call_count, 1)
+
+
 class CauseTest(unittest.TestCase):
     def setUp(self):
         self.cases = report_issue.fixtures()
@@ -155,6 +174,34 @@ class CauseTest(unittest.TestCase):
         [gate] = report_issue.failure_causes(GATE, self.cases)
         self.assertEqual(gate.signature,
                          'renderer mutation gate failed: mark-collision: expected exactly one anchor, found 0')
+
+    def test_zig_binary_identity_stays_with_each_failed_root(self):
+        [h2] = report_issue.failure_causes(ZIG_CRASH, self.cases)
+        self.assertEqual(h2.zig_binary, "test-h2")
+        log = ZIG_CRASH + ZIG_CRASH.replace("test-h2", "test-pg")
+        causes = report_issue.failure_causes(log, self.cases)
+        self.assertEqual([cause.zig_binary for cause in causes], ["test-h2", "test-pg"])
+        numbered = logged("1/2 tests.test.shared...FAIL (TestUnexpectedResult)",
+                          "failed command: ./.zig-cache/o/ci-compiled/test-h2 --listen=-")
+        self.assertEqual(report_issue.failure_causes(numbered, self.cases)[0].zig_binary, "test-h2")
+        # The next fixture's command cannot supply a unit test's identity.
+        separated = ZIG_FAIL + logged("failed command: ./.zig-cache/o/ci-compiled/test-pg --listen=-")
+        self.assertEqual(report_issue.failure_causes(separated, self.cases)[0].zig_binary, "")
+
+    def test_interleaved_unit_diagnostics_cannot_borrow_a_peer_binary(self):
+        for first, second in (("test-pg", "unit-native-tests"), ("unit-native-tests", "test-pg")):
+            log = logged("error: 'tests.test.native failure' failed",
+                         "error: 'tests.test.pg failure' failed",
+                         f"failed command: /tmp/{first} --listen=-",
+                         f"failed command: /tmp/{second} --listen=-")
+            causes = report_issue.failure_causes(log, self.cases)
+            self.assertEqual(len(causes), 2)
+            self.assertEqual([cause.zig_binary for cause in causes], ["", ""])
+
+    def test_zig_source_uses_complete_nested_module_namespace(self):
+        self.assertEqual(report_issue.zig_paths("store.tests.activity.test.queued input"), ["src/store/tests/activity.zig"])
+        self.assertEqual(report_issue.zig_paths("store.sqlite_tests.report.test.read"), ["src/store/sqlite_tests/report.zig"])
+        self.assertEqual(report_issue.zig_paths("tests.test.ambiguous"), [])
 
     def test_a_whitespace_check_names_its_files(self):
         [cause] = report_issue.failure_causes(WHITESPACE, self.cases)

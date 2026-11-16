@@ -1,4 +1,3 @@
-//! Loading saved tools is one call-keyed command, revision and resolution.
 const std = @import("std");
 const command_input = @import("../../command_input.zig");
 const content_string = @import("../../content_string.zig");
@@ -24,8 +23,6 @@ const settings = rsql.Read(.{
     .cardinality = .one,
 });
 
-/// The shared current projection supplies available identities; only unloaded
-/// records enter matching. Description text is streamed below, never copied.
 const Candidate = struct { name: Bounded(tools.max_name_bytes), content_id: rsql.Positive, byte_length: u64, digest: [32]u8 };
 
 const Candidates = struct {
@@ -72,8 +69,6 @@ const Matches = struct {
     remaining: usize = 0,
 };
 
-/// Per-call, fixed-size heap scratch, never a description-sized allocation or
-/// a Host stack window. Matcher's n-1 byte carry spans successive reads.
 const SearchScratch = struct {
     window: [content.ContentReader.content_window_bytes]u8 = undefined,
     matchers: [8]word_search.Matcher = undefined,
@@ -97,21 +92,6 @@ const FirstLine = struct {
     }
 };
 
-/// Loads the saved tools that match `words` into the call's Session and
-/// resolves the call, in one transaction: one call-keyed command, revision
-/// and resolution. A call whose key is saved, or whose Turn a stop
-/// selected, ends with false.
-///
-/// Round `.facts` reads the call's Action and its key's saved answer, and
-/// `.settings` the Session's tool sets. Unless the call was refused,
-/// `.offer` reads the tools offered but not loaded, and each one whose
-/// name no word matches is searched one `.search` window of its
-/// description at a time. With matches, `.loaded` reads the names already
-/// loaded, and the result lists each match with its description's first
-/// line, read one `.describe` window at a time. `.outcome` looks the
-/// result's row up; with matches, `.selection` reads the configured set's
-/// records and `.selected` the loaded set they make. The commit round
-/// saves the command, the revision and the call's resolution.
 pub const FindTools = struct {
     pub const rounds = transition.rounds(.{
         .facts = .{.always},
@@ -127,9 +107,6 @@ pub const FindTools = struct {
     pub const round_budget = 4;
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = .facts;
-    /// The caller's, which outlive the transition. `arena` holds the
-    /// call's scratch, which keeps tool-name buffers off Host stacks, and
-    /// its result text.
     pub const Input = struct {
         binding: action.ActionAttemptBinding,
         arena: std.mem.Allocator,
@@ -142,7 +119,6 @@ pub const FindTools = struct {
     pub const Declined = error{};
 
     input: Input,
-    /// The command key, in `arena`; the writes read it in place.
     key: []const u8 = &.{},
     facts: action.core_facts.Result = undefined,
     current: settings.Result = undefined,
@@ -150,26 +126,18 @@ pub const FindTools = struct {
     pending: *Candidates = undefined,
     scratch: *SearchScratch = undefined,
     loaded: *LoadedNames = undefined,
-    /// The candidate searched, or the match described.
     index: usize = 0,
-    /// What each round keeps, as one path runs them: the key's saved
-    /// answer, then the description a `.search` or `.describe` round
-    /// reads and the first line it writes.
     early: union {
         saved: command.saved_command.Result,
         reading: struct { windows: content.Windows, first: FirstLine },
     } = undefined,
     output: std.Io.Writer.Allocating = undefined,
     outcome: content.Import = undefined,
-    /// What the rounds after `.outcome` keep, which the commit's writes
-    /// read in place.
     answer: command.StoredAnswer = undefined,
     digest: [32]u8 = undefined,
     later: union {
         saved: tool_set.SavedSelection,
         selected: tool_set.Selection,
-        /// Once the loaded set's writes are queued, which copied what
-        /// they bind of `selected`.
         applied: configuration.Applied,
     } = undefined,
     outcome_id: u64 = 0,
@@ -189,8 +157,6 @@ pub const FindTools = struct {
         }
     }
 
-    // The steps that run a round's work are noinline, so none sits under
-    // another on its thread's chain.
     noinline fn start(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
         const binding = t.input.binding;
         t.key = try std.fmt.allocPrint(t.input.arena, "rui.core/find_tools/{d}", .{binding.action_id});
@@ -201,7 +167,6 @@ pub const FindTools = struct {
         return .{ .round = .facts };
     }
 
-    /// After `.facts`: a saved or stopped call ends.
     noinline fn decide(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
         if (t.early.saved != null) return .{ .done = false };
         const found = if (t.facts) |*row| row else return error.StaleActionAttemptBinding;
@@ -218,8 +183,6 @@ pub const FindTools = struct {
         return if (t.current.loaded_tool_set_id) |id| id.get() else null;
     }
 
-    /// After `.settings`: a refused call writes its result; any other
-    /// reads the tools it may load.
     noinline fn offer(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
         const arena = t.input.arena;
         t.matches = try arena.create(Matches);
@@ -231,7 +194,6 @@ pub const FindTools = struct {
         return .{ .round = .offer };
     }
 
-    /// After `.offer`: searches the first candidate.
     noinline fn searchFirst(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
         const pending = t.pending;
         if (pending.invalid) return error.CorruptStore;
@@ -242,9 +204,6 @@ pub const FindTools = struct {
         return t.search(r);
     }
 
-    /// Searches candidates from `index` on: one whose name a word matches
-    /// matches at once; any other reads its description, a `.search`
-    /// round a window, until a word matches or the description ends.
     fn search(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
         const words = t.input.words;
         const scratch = t.scratch;
@@ -260,8 +219,6 @@ pub const FindTools = struct {
                 if (t.match()) break;
                 continue;
             }
-            // A word must match one field, never the end of a name plus the start of
-            // its description. init also owns query folding, just as in feed search.
             for (words.words[0..words.count], 0..) |word, index| scratch.matchers[index].init(word);
             t.early = .{ .reading = .{ .windows = .{ .content_id = row.content_id.get(), .reference = .{ .length = row.byte_length, .digest = row.digest }, .buffer = &scratch.window }, .first = undefined } };
             if (try t.early.reading.windows.next(r)) return .{ .round = .search };
@@ -269,7 +226,6 @@ pub const FindTools = struct {
         return t.includeLoadedFirst(r);
     }
 
-    /// After a `.search` round: its window, fed to each word's matcher.
     noinline fn searchWindow(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
         const windows = &t.early.reading.windows;
         const bytes = try windows.window();
@@ -286,7 +242,6 @@ pub const FindTools = struct {
         return t.search(r);
     }
 
-    /// Records candidate `index` as a match; true when no more fit.
     fn match(t: *FindTools) bool {
         const matches = t.matches;
         matches.rows[matches.count] = t.pending.rows[t.index];
@@ -295,7 +250,6 @@ pub const FindTools = struct {
         return matches.count == matches.rows.len;
     }
 
-    /// With matches, reads the names already loaded.
     fn includeLoadedFirst(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
         if (t.matches.count == 0) return t.writeResult(r);
         t.loaded = try t.input.arena.create(LoadedNames);
@@ -304,9 +258,6 @@ pub const FindTools = struct {
         return .{ .round = .loaded };
     }
 
-    /// After `.loaded`: merges disjoint, ordered loaded intent and new
-    /// available hits. Unavailable intended names stay, even when the hits
-    /// cover all available tools.
     noinline fn includeLoaded(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
         const loaded = t.loaded;
         const matches = t.matches;
@@ -326,8 +277,6 @@ pub const FindTools = struct {
         return t.writeResult(r);
     }
 
-    /// Writes the call's result: a refusal, no match, or each match with
-    /// its description's first line.
     fn writeResult(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
         t.output = .init(t.input.arena);
         const out = &t.output.writer;
@@ -344,8 +293,6 @@ pub const FindTools = struct {
         return t.lookupOutcome(r);
     }
 
-    /// Describes matches from `index` on, each description read a
-    /// `.describe` round a window.
     fn describe(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
         const out = &t.output.writer;
         while (t.index < t.matches.count) : (t.index += 1) {
@@ -361,7 +308,6 @@ pub const FindTools = struct {
         return t.lookupOutcome(r);
     }
 
-    /// After a `.describe` round: its window's part of the first line.
     noinline fn describeWindow(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
         const reading = &t.early.reading;
         try reading.first.write(try reading.windows.window());
@@ -377,8 +323,6 @@ pub const FindTools = struct {
         return .{ .round = .outcome };
     }
 
-    /// After `.outcome`: saves the result; with matches, reads the
-    /// configured set's records the loaded set selects.
     noinline fn settle(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
         if (r.faults().content_import) return error.InjectedContentImportFailure;
         const refused = t.input.refusal != null;
@@ -386,7 +330,6 @@ pub const FindTools = struct {
         const revision = t.current.revision.get() + @as(u64, if (t.matches.count > 0) 1 else 0);
         t.answer = .{ .accepted = !refused, .revision = revision };
         if (refused) try t.answer.code.set("invalid_arguments");
-        // The call's binding uniquely identifies its saved arguments, even on retry.
         t.digest = content_string.digest(t.key);
         const found = &t.facts.?;
         if (t.matches.count > 0) {
@@ -399,7 +342,6 @@ pub const FindTools = struct {
         return t.resolve(r, outcome_id);
     }
 
-    /// After `.selection`: looks up the loaded set by its digest.
     noinline fn select(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
         const selected = try t.later.saved.selection();
         t.later = .{ .selected = selected };
@@ -407,15 +349,11 @@ pub const FindTools = struct {
         return .{ .round = .selected };
     }
 
-    /// After `.selected`: saves the loaded set, if new, and the revision
-    /// that loads it.
     noinline fn load(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
         const found = &t.facts.?;
         const configured_set = t.configured();
         const revision = t.answer.revision;
         const selected_set = try tool_set.finishSelection(r, &t.later.selected, configured_set);
-        // Sets are saved once per membership: loading every configured name
-        // is the configured set itself, which the Session saves as NULL.
         r.write(update_loaded, .{ .session = found.session, .loaded = if (selected_set == configured_set) null else selected_set, .revision = revision });
         t.later = .{ .applied = .{
             .session = .{},

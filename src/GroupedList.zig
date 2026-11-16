@@ -1,4 +1,3 @@
-//! Convert overview rows and press meanings to the generic list widget.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -8,7 +7,6 @@ const widget_style = @import("widget_style.zig");
 const List = @import("widgets/List.zig");
 
 pub const Segment = overview_view.Segment;
-/// What a press on a row means, as the screen's core takes it.
 pub const Target = overview_view.Click;
 pub const Region = struct { start: u16, end: u16, target: Target, selected: bool = false };
 pub const Row = struct {
@@ -16,15 +14,11 @@ pub const Row = struct {
     heading: bool = false,
     second: ?[]const Segment = null,
     height: u16 = 1,
-    /// What a left press on this row means; null for a row that takes
-    /// none, as a heading or a gap.
     target: ?Target = null,
     alternate_target: ?Target = null,
     regions: []const Region = &.{},
 };
 
-/// The list's rows, built one at a time as they come on screen, so a long
-/// list costs only what shows.
 pub const Rows = struct {
     userdata: *const anyopaque,
     count: u32,
@@ -33,7 +27,6 @@ pub const Rows = struct {
 
     pub const none: Rows = .{ .userdata = undefined, .count = 0, .rowFn = undefined };
 
-    /// Rows already built, as `rows` holds them.
     pub fn of(rows: *const []const Row) Rows {
         return .{ .userdata = @ptrCast(rows), .count = @intCast(rows.len), .rowFn = struct {
             fn at(userdata: *const anyopaque, index: usize, _: std.mem.Allocator) std.mem.Allocator.Error!Row {
@@ -44,7 +37,6 @@ pub const Rows = struct {
     }
 };
 
-/// Who hears the meaning captured when a row was drawn.
 pub const Press = struct {
     userdata: *anyopaque,
     pressed: *const fn (*anyopaque, *vxfw.EventContext, Target) anyerror!void,
@@ -56,12 +48,9 @@ selection_background: @import("overview_style.zig").Background = .selection,
 on_press: ?Press = null,
 caps: overview_view.Caps = .{},
 inner: List = .{},
-/// What is pinned under the list, and the rows the screen's layout gives
-/// it (`overview_view.layout`'s `settings`), which the list never takes.
 tail: ?Tail = null,
 aboveFn: ?*const fn (u32, std.mem.Allocator) std.mem.Allocator.Error!List.Line = null,
 belowFn: ?*const fn (u32, std.mem.Allocator) std.mem.Allocator.Error!List.Line = null,
-/// Borrowed alias to the widget's scrolling owner, established by widget().
 list: *vxfw.ListView = undefined,
 shown: List.Range = .{},
 shown_at: []const Span = &.{},
@@ -71,7 +60,6 @@ pub const Tail = struct { widget: vxfw.Widget, rows: u16 };
 const Span = struct { row: i17, height: u16, target: ?Target };
 const Captured = struct { id: u32, target: Target };
 
-/// Per-draw conversion state and captured meanings live with the frame.
 const Frame = struct {
     owner: *Self,
     targets: std.ArrayList(Captured) = .empty,
@@ -248,19 +236,16 @@ test "GroupedList quiet rows normalize whole lines before selection and hover in
         const background: view.Background = if (selected) .selection else if (hovered) .hover else .ground;
         const highlight = widget_style.of(caps, .{ .background = background });
         for (surface.children[0].surface.buffer) |cell| {
-            // Includes the line's visible text, interstitial padding and ends.
             try std.testing.expectEqual(!wrote and !selected and !hovered, cell.style.dim);
             try std.testing.expectEqual(highlight.bg, cell.style.bg);
             try std.testing.expectEqual(highlight.reverse, cell.style.reverse);
             try std.testing.expectEqual(highlight.ul_style, cell.style.ul_style);
             if (depth == .none) try std.testing.expectEqual(vaxis.Color.default, cell.style.fg);
         }
-        // The selected name stays bold, including in monochrome.
         try std.testing.expectEqual(selected, surface.children[0].surface.readCell(3, 0).style.bold);
     };
 }
 
-/// Records each press GroupedList reports, for the press tests.
 const Pressed = struct {
     targets: [8]Target = undefined,
     count: usize = 0,
@@ -280,7 +265,6 @@ fn leftPress(column: i16, row: i16) vxfw.Event {
     return .{ .mouse = .{ .col = column, .row = row, .button = .left, .type = .press, .mods = .{} } };
 }
 
-/// The Session a numbered test row names.
 fn numbered(index: usize) overview_view.Reference {
     var reference: overview_view.Reference = undefined;
     _ = std.fmt.bufPrint(&reference, "r{d:0>5}", .{index}) catch unreachable;
@@ -300,13 +284,10 @@ test "GroupedList reports a left press as what the row under it drew with, after
     defer arena.deinit();
     const surface = try list.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 5 }, .cell_size = .{} });
     try std.testing.expect(list.shown.first > 0);
-    // Find the screen row each index landed on from what was drawn, not
-    // from how the list scrolls.
     var drawn_at: [40]?i17 = @splat(null);
     for (surface.children, list.list.scroll.top..) |child, index| {
         if (index < drawn_at.len) drawn_at[index] = child.origin.row;
     }
-    // A shown heading, the first multiple of three on screen.
     const heading = (list.shown.first + 2) / 3 * 3;
     try std.testing.expect(heading < list.shown.end and heading != 25);
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
@@ -321,11 +302,9 @@ test "GroupedList reports a left press as what the row under it drew with, after
         events.consume_event = false;
     }
     try std.testing.expect(expected >= 1);
-    // A heading drew with nothing to press, so its press reaches no one.
     try list.widget().handleEvent(&events, leftPress(3, @intCast(drawn_at[heading].?)));
     try std.testing.expectEqual(expected, presses.count);
     try std.testing.expect(!events.consume_event);
-    // Only a left press counts.
     try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 3, .row = @intCast(drawn_at[25].?), .button = .right, .type = .press, .mods = .{} } });
     try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 3, .row = @intCast(drawn_at[25].?), .button = .left, .type = .release, .mods = .{} } });
     try std.testing.expectEqual(expected, presses.count);
@@ -362,7 +341,6 @@ test "GroupedList reports what a row drew with, not what its index holds by the 
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     _ = try list.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 6 }, .cell_size = .{} });
-    // The rows change before the next frame: the first is gone.
     all = rows[1..];
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     try list.widget().handleEvent(&events, leftPress(0, 0));

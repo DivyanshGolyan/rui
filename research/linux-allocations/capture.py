@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Run the existing H2 oracle with the disposable capture-counter build."""
 import json
 from pathlib import Path
 import sys
@@ -11,8 +10,6 @@ import run as workload
 
 def main():
     out = Path(sys.argv[sys.argv.index("--output") + 1]).resolve()
-    # The experiment emits one short record per 100 completions; the bounded
-    # 2,000-request workload fits in stderr's pipe without an extra reader.
     assert "--rounds" in sys.argv and int(sys.argv[sys.argv.index("--rounds") + 1]) <= 20
     assert "--capacity" in sys.argv and int(sys.argv[sys.argv.index("--capacity") + 1]) == 100
 

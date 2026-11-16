@@ -18,6 +18,8 @@ Run as a script, it re-executes itself in the caller's pinned Python 3.12
 environment when .agents/setup made one (tests/ci/fixture_user.py --venv).
 """
 import argparse
+from contextlib import redirect_stdout
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -26,6 +28,13 @@ import socket
 import subprocess
 import sys
 from typing import NamedTuple
+from urllib.parse import quote
+
+import failure_cause
+import report_issue
+from qualification import matrix_targets
+from pr_overlap import repo_from_remote
+from select_tests import FIXTURES
 
 import build_files
 from caller_errors import inventory_path
@@ -57,8 +66,11 @@ SOURCE_POLICY = (
                                           ("test_store_conformance.py", "*"))),
     (("tests/ci/caller_errors.py",), (("test_store_engine_boundary.py", "*"),)),
     (("src/store/schema.zig", "tests/integration/host_process.py"),(("test_store_schema_fixtures.py", "*"),)),
-    (("src/store/schema.zig",), (("test_store_schema_version.py", "*"),)),
-    (("tests/ci/prepush.py",), (("test_caller_errors.py", "CallerErrors.test_gate_is_explicitly_wired_in_local_feedback"),
+    (("src/store/schema.zig", "src/store/migration_baseline.sqlite.sql",
+      "src/store/migration_baseline.mysql.sql", "src/store/migration_baseline_rows.sql"),
+     (("test_store_schema_version.py", "*"),)),
+    (("tests/ci/prepush.py",), (("test_prepush_red.py", "*"),
+                              ("test_caller_errors.py", "CallerErrors.test_gate_is_explicitly_wired_in_local_feedback"),
                               ("test_selection.py", "SelectionTest.test_prepush_leaves_server_targets_to_ci"))),
 )
 
@@ -94,7 +106,26 @@ UNFIXABLE = ("*.patch", "*.diff")
 # Every worktree of a repository shares its hook, so the pushed commits travel
 # in the environment, which a checkout's older prepush.py ignores.
 PUSHED = "RUI_PREPUSH_PUSHED"
+REMOTE_REFS = "RUI_PREPUSH_REMOTE_REFS"
+REMOTE_URL = "RUI_PREPUSH_REMOTE_URL"
 HOOK = f"""#!/bin/sh
+# Installed by tests/ci/prepush.py --install-hook; skip once with git push --no-verify.
+top=$(git rev-parse --show-toplevel) || exit 0
+[ -f "$top/tests/ci/prepush.py" ] || exit 0
+pushed=
+remote_refs=
+while read -r _ local_sha remote_ref remote_sha; do
+    case $local_sha in *[!0]*) pushed="$pushed $local_sha"; remote_refs="$remote_refs $remote_ref $remote_sha" ;; esac
+done
+[ -n "$pushed" ] || exit 0
+{PUSHED}=$pushed
+{REMOTE_REFS}=$remote_refs
+{REMOTE_URL}=$2
+export {PUSHED} {REMOTE_REFS} {REMOTE_URL}
+exec python3 "$top/tests/ci/prepush.py" --quick
+"""
+# Earlier --install-hook texts, which --install-hook replaces as its own.
+PREVIOUS_HOOKS = ("""#!/bin/sh
 # Installed by tests/ci/prepush.py --install-hook; skip once with git push --no-verify.
 top=$(git rev-parse --show-toplevel) || exit 0
 [ -f "$top/tests/ci/prepush.py" ] || exit 0
@@ -103,12 +134,10 @@ while read -r _ local_sha _ _; do
     case $local_sha in *[!0]*) pushed="$pushed $local_sha" ;; esac
 done
 [ -n "$pushed" ] || exit 0
-{PUSHED}=$pushed
-export {PUSHED}
+RUI_PREPUSH_PUSHED=$pushed
+export RUI_PREPUSH_PUSHED
 exec python3 "$top/tests/ci/prepush.py" --quick
-"""
-# Earlier --install-hook texts, which --install-hook replaces as its own.
-PREVIOUS_HOOKS = ("""#!/bin/sh
+""", """#!/bin/sh
 # Installed by tests/ci/prepush.py --install-hook; skip once with git push --no-verify.
 top=$(git rev-parse --show-toplevel) || exit 0
 [ -f "$top/tests/ci/prepush.py" ] || exit 0
@@ -128,6 +157,239 @@ RECEIPT = "rui-prepush-receipt.json"
 class Skipped(NamedTuple):
     """A planned check this run cannot execute, and why."""
     reason: str
+
+
+class NeedsMySQL(NamedTuple):
+    """A filtered unit command whose hosted MySQL rounds must remain accounted for."""
+    command: list
+    sqlite: bool
+
+
+def red_record(name, command):
+    if isinstance(command, NeedsMySQL):
+        return {"name": name, "mysql": command.command, "sqlite": command.sqlite}
+    if isinstance(command, Skipped):
+        return {"name": name, "skipped": command.reason}
+    return {"name": name, "command": command}
+
+
+def local_red_checks(planned, mysql):
+    """Resolve live obligations on every push, including cached derived plans."""
+    for name, command in planned:
+        if not isinstance(command, NeedsMySQL):
+            yield name, command
+        elif mysql:
+            yield name, ["env", f"{live_engines.REQUIRE}=mysql", *command.command]
+        else:
+            if command.sqlite:
+                unset = [arg for variable in live_engines.ENGINES["mysql"] for arg in ("-u", variable)]
+                yield name + " (SQLite subset)", ["env", *unset, f"{live_engines.REQUIRE}=sqlite", *command.command]
+            yield name + " (MySQL rounds)", Skipped("MySQL rounds not evaluated: no reachable configured local MySQL server")
+
+
+def unit_target(targets, cause, graph, registry=None):
+    """Resolve only identities registered by the build, never a matrix fallback."""
+    registry = build_files.unit_roots() if registry is None else registry
+    selected = set(targets)
+    candidates = [root for root in registry if selected.intersection(root["owners"])]
+    if cause.zig_binary:
+        candidates = [root for root in candidates if cause.zig_binary in
+                      (root["name"], root["name"] + "-" + Path(root["source"]).stem)]
+    else:
+        candidates = [root for root in candidates if not root.get("filtered_only")
+                      and (not root.get("prefix") or cause.zig_test.startswith(root["prefix"]))
+                      and (not root.get("exclude_prefix") or not cause.zig_test.startswith(root["exclude_prefix"]))
+                      and (not root.get("filter") or root["filter"] in cause.zig_test)]
+        exact = [root for root in candidates if root["source"] in cause.paths]
+        candidates = exact or [root for root in candidates if any(
+            path in graph.closure(graph.every, [root["source"]]) for path in cause.paths)]
+    mapped = {root["target"] for root in candidates}
+    return next(iter(mapped)) if len(mapped) == 1 else None
+
+
+def red_command(job, cause, available, *, compile_targets=(), graph=None):
+    """Translate a shared parsed cause, preserving the failing job's target."""
+    name = job["name"]
+    zig = ["zig", "build", "-j1"]
+    if name == "macos_typecheck":
+        return [*zig, "typecheck-macos", "--summary", "line"]
+    if name.startswith("macos") or "macos" in name:
+        return Skipped("native macOS check requires a macOS runner")
+    if "upgrade" in name.lower():
+        return Skipped("Upgrade requires an exclusive ordinary hosted runner UID")
+    if name == "linux_build_unit":
+        return [*UNIT_COMPILE, "-j1"]
+    if name == "linux_build":
+        if not compile_targets or not set(compile_targets) <= available:
+            return Skipped("producer's selected compile targets are unavailable in this checkout")
+        return [*zig, "ci-build", "-Dci-targets=" + ",".join(compile_targets), "-Dci-part=all", "--summary", "line"]
+    if name == "linux_codegen":
+        return STACK_FRAMES
+    selected = matrix_targets(name.partition("(")[2].removesuffix(")"))
+    targets = [target for target, _ in selected]
+    if cause.zig_test:
+        graph = graph or tree_graph()
+        target = unit_target(selected, cause, graph)
+        if target is None:
+            return Skipped("unit root is not uniquely registered for the failed binary/source and selected targets")
+        if target not in available:
+            return Skipped("the registered filtered target is unavailable in this checkout")
+        if target == "test-pg":
+            return Skipped("test-pg requires CI's live TLS Postgres server")
+        if target == "mysql-wire-integration":
+            return Skipped("mysql-wire-integration requires CI's live MySQL server")
+        command = [*zig, target, f"-Dtest-filter={cause.zig_test}", "--summary", "line"]
+        if target in ("test", "test-native", "test-store"):
+            store = cause.zig_test.startswith("store.") or any(path.startswith("src/store/") for path in cause.paths)
+            native_live = any(path in graph.live_conformance for path in cause.paths)
+            if store or native_live:
+                mysql_only = any(path in ("src/store/mysql_dialect_check.zig", "src/store/mysql_testing.zig", "src/store/mysql_session_tests.zig") for path in cause.paths)
+                sqlite_only = cause.paths and all(path == "src/store/sqlite_tests.zig" or path.startswith("src/store/sqlite_tests/") for path in cause.paths)
+                if not sqlite_only:
+                    return NeedsMySQL(command, not mysql_only)
+            elif not cause.paths:
+                return Skipped("test source is ambiguous, so its live-engine requirements are unknown")
+        return command
+    if cause.python_test:
+        module, _, test = cause.python_test.partition(".")
+        if f"tests/ci/{module}.py" not in cause.paths:
+            return Skipped("unittest is not a tests/ci module")
+        return ["env", f"PYTHONPATH={ROOT / 'tests/integration'}", sys.executable, "-B", "-m", "unittest",
+                "discover", "-s", "tests/ci", "-p", f"{module}.py", "-k", test]
+    candidates = {target for target, (scripts, _, _) in FIXTURES.items()
+                  if target in available and any(path in scripts for path in cause.paths)}
+    selected = candidates.intersection(targets)
+    if len(selected) == 1:
+        candidates = selected
+    # A composed check runs ordinary fixtures. Debug twins are separate gates.
+    elif any(target in ("check", "check-full") for target in targets):
+        candidates = {target for target in candidates if "-debug-" not in target}
+    if len(candidates) != 1:
+        return Skipped("cause unexplained or fixture target ambiguous in this checkout")
+    target = next(iter(candidates))
+    if target == "upgrade-integration":
+        return Skipped("Upgrade requires an exclusive ordinary hosted runner UID")
+    if target in (graph or tree_graph()).live_mysql or any("mysql" in path for path in cause.paths):
+        return Skipped("fixture requires CI's live MySQL server")
+    return [*zig, target, "--summary", "line"]
+
+
+def red_revision():
+    """All source inputs owning derived commands; shared caches never outlive them."""
+    digest = hashlib.sha256()
+    for path in ("prepush.py", "report_issue.py", "failure_cause.py", "select_tests.py", "build_files.py", "qualification.py"):
+        digest.update((Path(__file__).parent / path).read_bytes())
+    digest.update(build_files.source(ROOT).encode())
+    digest.update((ROOT / "src/unit_test_partition.zig").read_bytes())
+    for path in sorted((ROOT / "tests/integration").glob("*.py")):
+        digest.update(path.name.encode())
+        digest.update(path.read_bytes())
+    digest.update((ROOT / "tests/integration/check.sh").read_bytes())
+    graph = tree_graph()
+    digest.update(json.dumps({target: sorted(reached) for target, reached in graph.reached.items()}, sort_keys=True).encode())
+    digest.update(json.dumps({path: sorted(imports) for path, imports in graph.every.items()}, sort_keys=True).encode())
+    digest.update(json.dumps(sorted(graph.live_mysql)).encode())
+    digest.update(json.dumps(sorted(graph.live_conformance)).encode())
+    digest.update(str((ROOT, sys.executable, sys.platform)).encode())
+    return digest.hexdigest()
+
+
+def previous_red(available):
+    """Latest completed Selected checks on each destination's current remote head.
+
+    Return receipt authority and ordinary checks. Lookup failures fail open with
+    a visible warning; they never certify a stale run or cache missing logs.
+    """
+    try:
+        repository = repo_from_remote(os.environ.get(REMOTE_URL) or git("remote", "get-url", "origin"))
+        refs = os.environ.get(REMOTE_REFS, "").split()
+        if refs:
+            destinations = list(zip(refs[::2], refs[1::2]))
+        else:
+            branch = git("branch", "--show-current")
+            if not branch or branch == "main":
+                raise ValueError("no pushed feature branch")
+            ref = "refs/heads/" + branch
+            head = json.loads(report_issue.gh("api", f"repos/{repository}/git/ref/heads/{quote(branch, safe='/')}"))["object"]["sha"]
+            destinations = [(ref, head)]
+        identities, planned = [], []
+        revision = red_revision()
+        for ref, head in destinations:
+            try:
+                identity, derived = remote_red(repository, ref, head, revision, available)
+            except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as error:
+                red_warning(error)
+                identities.append(None)
+                continue
+            identities.append(identity)
+            planned.extend(derived)
+        if any(isinstance(command, NeedsMySQL) for _, command in planned):
+            environment = [os.environ.get(variable) for variable in live_engines.VARIABLES]
+            identities.append(hashlib.sha256(json.dumps(environment).encode()).hexdigest())
+            planned = list(local_red_checks(planned, mysql_reachable(os.environ)))
+        return identities if any(identity is not None for identity in identities) else None, planned
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as error:
+        red_warning(error)
+        return None, []
+
+
+def red_warning(error):
+    reason = "gh is unavailable" if isinstance(error, FileNotFoundError) and error.filename == "gh" else str(error).split("\n")[0]
+    print(f"prepush: last CI red not evaluated: {reason}", file=sys.stderr, flush=True)
+
+
+def remote_red(repository, ref, head, revision, available):
+    """Derive checks for one exact remote ref and completed workflow attempt."""
+    if not ref.startswith("refs/heads/") or ref == "refs/heads/main" or not head.strip("0"):
+        raise ValueError("no previous feature-branch head")
+    pages = json.loads(report_issue.gh("api", "--paginate", "--slurp",
+        f"repos/{repository}/actions/runs?head_sha={head}&status=completed&per_page=100"))
+    runs = [run for page in pages for run in page["workflow_runs"]
+            if run["name"] == "Selected checks" and run["path"].split("@", 1)[0] == ".github/workflows/check.yml"
+            and run["head_sha"] == head and run["head_branch"] == ref.removeprefix("refs/heads/")
+            and run["status"] == "completed"]
+    if not runs:
+        raise ValueError("no completed Selected checks run on the remote head")
+    latest = max(runs, key=lambda run: run["id"])
+    identity = [repository, ref, head, latest["id"], latest["run_attempt"], latest["conclusion"], revision]
+    if latest["conclusion"] == "success":
+        return identity, []
+    cache = Path(git("rev-parse", "--path-format=absolute", "--git-path", "rui-prepush-red"))
+    cache_file = cache / f"{latest['id']}-{latest['run_attempt']}.json"
+    try:
+        saved = json.loads(cache_file.read_text())
+    except (OSError, ValueError):
+        saved = {}
+    if saved.get("identity") == identity:
+        return identity, [(item["name"], NeedsMySQL(item["mysql"], item["sqlite"]) if "mysql" in item
+                          else Skipped(item["skipped"]) if "skipped" in item else item["command"])
+                          for item in saved["checks"]]
+    derived, logs = [], {}
+    def log_of(job):
+        if job["id"] not in logs:
+            with redirect_stdout(sys.stderr):
+                logs[job["id"]] = report_issue.job_log(repository, job["id"])
+        return logs[job["id"]]
+    jobs = report_issue.run_jobs(repository, latest["id"], latest["run_attempt"])
+    classified = failure_cause.causes(jobs, lambda job: failure_cause.annotations(repository, job), log_of)
+    failed = {name for name, kind, _ in classified if kind == "check"}
+    for job in jobs:
+        if job["name"] not in failed:
+            continue
+        log = log_of(job)
+        causes = report_issue.failure_causes(log, report_issue.fixtures(ROOT / "tests/integration/check.sh"),
+                                             keep_unexplained=True) if log is not None else []
+        causes = causes or [report_issue.Cause(f"{job['name']}: cause unexplained")]
+        targets = report_issue.compile_targets(log) if log is not None and job["name"] == "linux_build" else ()
+        for cause in causes:
+            command = red_command(job, cause, available, compile_targets=targets) if log is not None else Skipped("job log unavailable")
+            item = (f"last CI red: {cause.signature}", command)
+            if item not in derived:
+                derived.append(item)
+    if all(log is not None for log in logs.values()):
+        cache.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(json.dumps({"identity": identity, "checks": [red_record(name, command) for name, command in derived]}))
+    return identity, derived
 
 
 def checks(paths, available, base, mode="default", mysql=False):
@@ -156,6 +418,9 @@ def checks(paths, available, base, mode="default", mysql=False):
     if any(path.startswith("src/") for path in paths):
         graph = tree_graph()
         generation |= graph.closure(graph.production, ["src/openapi_main.zig"])
+        if graph.cores.intersection(paths):
+            yield "core boundary", ["zig", "build", "-j1", "test-logic-only",
+                                    "-Dtest-filter=functional cores stay within the core boundary"]
     if generation.intersection(paths):
         yield "generated files", [sys.executable, "-B", "tests/ci/prepush.py", "--regenerate"]
     policy = policy_tests(paths, broad=mode == "full")
@@ -264,7 +529,7 @@ def receipt_covers(receipt, pushes):
     return bool(ran) and all(result.get("exit") == 0 for result in ran)
 
 
-def run(planned, mode, base):
+def run(planned, mode, base, red=None):
     """Run each planned command once, write the receipt and return its results."""
     before = clean_tree()
     results = []
@@ -278,7 +543,7 @@ def run(planned, mode, base):
     # A check that changed the working tree checked what HEAD does not hold.
     tree = before if clean_tree() == before else None
     path = receipt_path()
-    path.write_text(json.dumps({"tree": tree, "base": base, "mode": mode, "scope": "local-feedback", "results": results}, indent=2) + "\n")
+    path.write_text(json.dumps({"tree": tree, "base": base, "mode": mode, "scope": "local-feedback", "red": red, "results": results}, indent=2) + "\n")
     if tree is None:
         print(f"The working tree differs from HEAD, so {path} matches no push.")
     return results
@@ -376,27 +641,32 @@ def main():
         raise SystemExit(regenerate())
     mode = "full" if args.full else "quick" if args.quick else "default"
     pushed = os.environ.pop(PUSHED, "").split()
+    available = set(build_files.steps())
+    red, red_checks = previous_red(available)
+    if red is not None:
+        red = {"runs": red, "checks": [
+            {"name": name, "skipped": command.reason} if isinstance(command, Skipped)
+            else {"name": name, "command": command} for name, command in red_checks]}
     if pushed:
         receipt = read_receipt()
-        if receipt_covers(receipt, [pushed_key(sha, args.base) for sha in pushed]):
+        if receipt_covers(receipt, [pushed_key(sha, args.base) for sha in pushed]) and receipt.get("red") == red:
             print(f"prepush: local feedback from the {receipt['mode']} run on tree {receipt['tree']} against {receipt['base']} passed; "
                   "not running it again. Hosted acceptance was not evaluated.")
             for result in receipt["results"]:
                 if "skipped" in result:
                     print(f"== {result['name']}: skipped: {result['skipped']}")
             raise SystemExit(0)
-    available = set(build_files.steps())
     base = git("merge-base", "HEAD", args.base)
     paths, _ = changed_paths(base, "HEAD")
     planned = list(checks(paths, available, base, mode,
-                          mode == "full" and mysql_reachable(os.environ)))
+                          mode == "full" and mysql_reachable(os.environ))) + red_checks
     if args.plan:
         print(json.dumps({"base": base, "paths": paths, "checks": [
             {"name": name, "skipped": command.reason} if isinstance(command, Skipped) else {"name": name, "command": command}
             for name, command in planned]}, indent=2))
         raise SystemExit(0)
     print("Local feedback only. Hosted acceptance is not evaluated.", flush=True)
-    results = run(planned, mode, base)
+    results = run(planned, mode, base, red)
     failed = [result["name"] for result in results if result.get("exit")]
     print(json.dumps({"failed": failed, "skipped": [result["name"] for result in results if "skipped" in result]}))
     raise SystemExit(1 if failed else 0)

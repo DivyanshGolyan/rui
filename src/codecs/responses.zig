@@ -1,17 +1,3 @@
-//! The OpenAI Responses codec, in three versions. `openai-responses/1`
-//! sends each Operation's effort at the top of its request, so changing
-//! effort costs the prompt cache. `openai-responses/2` keeps the Session's
-//! starting effort at the top and changes it inside the history with a
-//! `configuration_update` item at the Operation that changed it (D75-D77).
-//! It also declares function tools inside the history, with an
-//! `additional_tools` item at each Operation that adds or rewords one, so a
-//! tool change keeps the cache too; its top-level `tools` holds only the
-//! provider-run tools, which the provider ignores anywhere else.
-//! `openai-responses/3` is version two for an endpoint that refuses the
-//! `configuration_update` and `compaction_trigger` input items: it sends
-//! each Operation's effort at the top, as version one does, and a
-//! compaction request asks for compaction with a top-level
-//! `context_management`, and for no tool call, instead of the trigger item.
 const std = @import("std");
 const codec_abi = @import("../codec_abi.zig");
 const json = @import("json.zig");
@@ -33,15 +19,10 @@ pub const Version = enum {
     two,
     three,
 
-    /// Whether function tools are declared inside the history instead of
-    /// in the tools stage.
     pub fn declaresTools(self: Version) bool {
         return self != .one;
     }
 
-    /// Whether the effort in force travels in the history, where an
-    /// Operation boundary changes it and a provider can refuse the change.
-    /// The other versions send each Operation's effort at the top.
     pub fn carriesEffort(self: Version) bool {
         return self == .two;
     }
@@ -54,18 +35,12 @@ pub const Version = enum {
 /// compacts from calling a function or searching the web.
 const compaction_request = ",\"tool_choice\":\"none\",\"context_management\":[{\"type\":\"compaction\",\"compact_threshold\":1000}]";
 
-/// The encoder's state between history elements: whether one was written,
-/// since the next input item then takes a comma, and under version two the
-/// effort in force, which an Operation boundary changes. Versions one and
-/// three send each Operation's effort at the top instead.
 pub const Carry = struct {
     input_comma: bool = false,
     version: Version,
     effort: ?codec_abi.Effort = null,
 };
 
-/// The carry before the first history element: version two starts at the
-/// effort its requests send at the top.
 pub fn initial(version: Version, starting_effort: ?codec_abi.Effort) Carry {
     return switch (version) {
         .one, .three => .{ .version = version },
@@ -73,17 +48,11 @@ pub fn initial(version: Version, starting_effort: ?codec_abi.Effort) Carry {
     };
 }
 
-/// The request encoder. Beyond its carry, its state lives only within one
-/// output item or the tools array. A function call's open and a tool take
-/// the most pieces of any item, `codec_abi.max_pieces`.
 pub const Encoder = struct {
     carry: Carry,
-    /// The open output item's replay rule and the part array it has open.
     omit_reasoning_text: bool = false,
     array: codec_abi.PartArray = .none,
     tool_comma: bool = false,
-    /// A version three compaction request, which asks for compaction at
-    /// the request's end.
     compact: bool = false,
 
     input_part_comma: bool = false,
@@ -114,8 +83,6 @@ pub const Encoder = struct {
                     .user => "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"",
                     .instruction => "{\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"",
                 });
-                // A peer Message's sender is its own leading part, separate
-                // from the text the peer wrote.
                 if (header.has(1)) {
                     out.content(1, .json_string_v1);
                     out.literal("\"},{\"type\":\"input_text\",\"text\":\"");
@@ -123,8 +90,6 @@ pub const Encoder = struct {
                 out.content(0, .json_string_v1);
                 out.literal("\"}]}");
             },
-            // An output item is rebuilt from Rui's form and its provider
-            // bags, written canonically: the model receives what it sent.
             .output_open => |output| {
                 self.separateInput(out);
                 self.omit_reasoning_text = output.omit_reasoning_text;
@@ -150,7 +115,6 @@ pub const Encoder = struct {
                 }
             },
             .output_part => |part| {
-                // Private reasoning text is never replay input.
                 if (self.omit_reasoning_text and part.array == .content) return;
                 if (self.array == part.array) {
                     out.literal(",");
@@ -228,15 +192,9 @@ pub const Encoder = struct {
                 out.literal("\",\"detail\":\"auto\"}");
             },
             .image_message_close, .image_tool_close => out.literal("]}"),
-            // Version two changes effort where an Operation changed it; an
-            // unchanged effort writes nothing. Versions one and three wrote
-            // this Operation's effort at the top. Effort is null for a whole
-            // Session or for none of it, so a boundary never returns to it.
             .operation => |effort| if (self.carry.version.carriesEffort() and !std.meta.eql(effort, self.carry.effort)) {
                 self.changeEffort(effort orelse return error.Declined, out);
             },
-            // The original current boundary is an admission fact. Replay and
-            // refused retries above may restore an already admitted value.
             .effort_update => |effort| if (self.carry.version.carriesEffort()) self.changeEffort(effort, out),
             .declare_open => {
                 if (!self.carry.version.declaresTools()) return error.Declined;
@@ -265,20 +223,15 @@ pub const Encoder = struct {
                 self.tool_comma = false;
                 out.literal("],\"tools\":[");
             },
-            // Versions two and three declare function tools in the history
-            // instead.
             .tool => {
                 if (self.carry.version.declaresTools()) return error.Declined;
                 self.functionTool(out);
             },
-            // OpenAI runs the search and may open live pages; its results
-            // come back as web_search_call items.
             .web_search => {
                 if (self.tool_comma) out.literal(",");
                 self.tool_comma = true;
                 out.literal("{\"type\":\"web_search\",\"external_web_access\":true}");
             },
-            // The tools array closes here, after its last tool.
             .text_format => if (header.has(0)) {
                 out.literal("],\"text\":{\"verbosity\":\"low\",\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":");
                 out.content(0, .verbatim);
@@ -288,7 +241,6 @@ pub const Encoder = struct {
         }
     }
 
-    /// One function tool from handles 0-2, after a comma unless first.
     fn functionTool(self: *Encoder, out: *Pieces) void {
         if (self.tool_comma) out.literal(",");
         self.tool_comma = true;
@@ -303,7 +255,6 @@ pub const Encoder = struct {
         out.literal("}");
     }
 
-    /// An input item after another takes a comma.
     fn changeEffort(self: *Encoder, effort: codec_abi.Effort, out: *Pieces) void {
         self.separateInput(out);
         out.literal(switch (effort) {
@@ -318,10 +269,8 @@ pub const Encoder = struct {
     }
 };
 
-/// The request headers this codec writes, by name.
 pub const RequestHeader = enum(u8) { accept, @"session-id", originator };
 
-/// Codex routes a Session's requests by its session id.
 pub fn requestHeaders(settings: *const codec_abi.Settings, out: *codec_abi.Headers) void {
     out.count = 0;
     out.add(RequestHeader.accept, "text/event-stream");
@@ -329,11 +278,6 @@ pub fn requestHeaders(settings: *const codec_abi.Settings, out: *codec_abi.Heade
     out.add(RequestHeader.originator, "rui");
 }
 
-/// The provider codes that resending the same request cannot fix, from
-/// Codex 970111f6 codex-api/src/sse/responses_error.rs, each named by what
-/// the person can do about it, and the two OpenAI's API answers a ChatGPT
-/// plan sign-in whose plan usage is spent or not offered. Any other code
-/// narrows nothing.
 const RefusalCode = enum {
     insufficient_quota,
     credit_balance_exhausted,
@@ -360,23 +304,15 @@ fn refusalOf(code: []const u8) ?codec_abi.Refusal {
 }
 
 comptime {
-    // The reader keeps every code this codec knows.
     for (std.meta.fieldNames(RefusalCode)) |name| std.debug.assert(name.len <= json.max_text_bytes);
 }
 
-/// Reads an HTTP error body. A Responses body is one JSON object whose
-/// `error` object names the failure: its `code` (and, for a refusal, its
-/// `resets_at`), its `type` standing in for a missing code in the report,
-/// and its `message`, else a bare `detail`; a body without `error` reports
-/// only its own `message` or `detail`. Only a whole valid body and members
-/// that appear once count.
 pub fn classify(scratch: *ClassifyScratch, body: []const u8, out: *codec_abi.ErrorBody) void {
     out.context_overflow = false;
     out.refusal = null;
     out.resets_at = null;
     out.report = .{ .code = null, .message = null };
     scratch.init();
-    // A body that is not one whole JSON document establishes nothing.
     scratch.reader.read(body, scratch) catch {
         scratch.error_object = false;
         return;
@@ -384,9 +320,6 @@ pub fn classify(scratch: *ClassifyScratch, body: []const u8, out: *codec_abi.Err
     scratch.find(out);
 }
 
-/// Status and error meaning belong together in the codec. Do not infer a
-/// refusal from free prose alone: it must name the parameter/item and carry
-/// an invalid/unsupported-request code (or the provider's equivalent type).
 pub fn effortChangeRefused(scratch: *const ClassifyScratch, status: u16, body: []const u8) bool {
     if (status != 400 and status != 422) return false;
     if (scratch.envelope.get(.@"error").count != 1 or !scratch.error_object) return false;
@@ -400,7 +333,6 @@ pub fn effortChangeRefused(scratch: *const ClassifyScratch, status: u16, body: [
     if (!scratch.item_parameter) return false;
     const message = ClassifyScratch.message(&scratch.failure) orelse return false;
     const text = body[@intCast(message.start)..][0..@intCast(message.length)];
-    // The rejected value, not a mention in a list of supported item types.
     for ([_][]const u8{
         "configuration_update is not supported",
         "'configuration_update' is not supported",
@@ -412,23 +344,15 @@ pub fn effortChangeRefused(scratch: *const ClassifyScratch, status: u16, body: [
     return false;
 }
 
-/// The classifier's working state over one body, which `classify` writes
-/// before it reads.
 pub const ClassifyScratch = struct {
     reader: json.Reader = undefined,
-    /// The named member being read, of the body and of its error object;
-    /// null for any other.
     outer: ?Outer,
     inner: ?Inner,
-    /// Whether the body's `error` member is an object.
     error_object: bool,
     envelope: std.enums.EnumArray(Outer, Member),
     failure: std.enums.EnumArray(Inner, Member),
-    /// The error object's code, when it is a string of at most
-    /// `json.max_text_bytes`; empty otherwise.
     code: [json.max_text_bytes]u8 = undefined,
     code_length: u8,
-    /// The error object's `resets_at`, when it is a plain integer.
     resets_at: ?u64,
     effort_parameter: bool,
     item_parameter: bool,
@@ -438,9 +362,7 @@ pub const ClassifyScratch = struct {
     const Inner = enum { code, type, message, detail, resets_at, param };
 
     const Member = struct {
-        /// How often it appears, counting no further than a duplicate.
         count: u2 = 0,
-        /// Whether its last value is a string, which `range` holds.
         is_string: bool = false,
         range: Range = .{ .start = 0, .length = 0 },
 
@@ -486,15 +408,12 @@ pub const ClassifyScratch = struct {
                 if (self.failure.get(.resets_at).count == 1) found.resets_at = self.resets_at;
             }
         }
-        // An error object's type stands in for a code that is absent, empty
-        // or not a string.
         const named = code.count == 1 and code.is_string and code.range.length != 0;
         const kind = self.failure.get(.type);
         found.report.code = report(if (named) code.range else if (kind.count == 1) kind.string() else null);
         found.report.message = report(message(&self.failure));
     }
 
-    /// `message`, else `detail`; a message that is not a string is left out.
     fn message(members: anytype) ?Range {
         const text = members.get(.message);
         if (text.count == 1) return text.string();
@@ -570,7 +489,6 @@ pub const ClassifyScratch = struct {
         }
     }
 
-    /// Whether the reader is among the members of the body's error object.
     fn inError(self: *const ClassifyScratch) bool {
         return self.outer == .@"error" and self.error_object;
     }
@@ -581,15 +499,11 @@ pub const ClassifyScratch = struct {
     }
 };
 
-/// Every model may ask for several tools in one turn.
 const envelope = "\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]";
-
-// ------------------------------------------------------------- interpret
 
 const Reason = codec_abi.Reason;
 const Range = codec_abi.Range;
 
-/// A verdict while it is being reached, as the error that `Reason` names.
 const Failure = error{
     ContradictoryProviderOutput,
     LateProviderOutput,
@@ -614,7 +528,6 @@ const Failure = error{
 } || Judge.Incompatibility || json.Error;
 
 comptime {
-    // Every reason is a failure and every failure a reason.
     @setEvalBranchQuota(100_000);
     for (@typeInfo(Reason).@"enum".field_names) |name| {
         const error_name = codec_abi.reasonName(@field(Reason, name));
@@ -632,7 +545,6 @@ fn reasonOf(err: Failure) Reason {
     }
 }
 
-/// Strings the interpreter compares whole.
 const Word = enum {
     @"response.output_item.added",
     @"response.output_item.done",
@@ -692,44 +604,27 @@ fn shapeOf(reader: *const json.Reader, kind: json.Kind) Shape {
     };
 }
 
-/// Where a value ends, one past its last byte, in `end`: a number ends at
-/// the byte after it, which the reader is reading.
 fn valueEnd(reader: *const json.Reader, kind: json.Kind) u64 {
     return if (kind == .number) reader.offset else reader.offset + 1;
 }
 
-/// The longest string compared with a known word or code.
 const max_word_bytes = 256;
 
-/// One output item's grammar, as acceptance has always judged it: the first
-/// rule an item breaks, in rule order, or its replay rule. A block's meaning
-/// depends on its item's type, which can arrive after the block, so each
-/// block keeps one result per reading and the item consults the one it
-/// needs. Only the item, its block arrays, blocks, annotation arrays and
-/// annotations carry rules; anything deeper is followed by depth alone.
 const Judge = struct {
     operation: codec_abi.Operation,
     frames: [max_frames]Frame,
-    /// Each frame's fields, as `capacities` sizes them.
     values: [values_count]Value,
-    /// Open judged containers.
     depth: u8,
-    /// Open containers below the judged ones.
     ignored: u8,
     result: Value,
     item_kind: ?codec_abi.OutputKind,
 
     const max_frames = 5;
 
-    // Ordered so that a block, an annotation, a caller and metadata read
-    // only leading names, and their frames hold only those.
     const Name = enum { type, text, refusal, annotations, cell_id, executed_tool_calls, tool_calls_complete, id, status, role, phase, internal_chat_message_metadata_passthrough, content, encrypted_content, summary, name, call_id, arguments, caller, async, namespace, encrypted_function_args };
     const name_count = @typeInfo(Name).@"enum".field_names.len;
     const Names = std.bit_set.IntegerBitSet(name_count);
 
-    /// How many names, from the first, the frame at each depth reads: the
-    /// item at 0, a caller, metadata or block array at 1, a block at 2, an
-    /// annotation array at 3 and an annotation at 4.
     const capacities = [max_frames]usize{
         name_count,
         reach(&.{ type_fields, metadata_fields }),
@@ -737,7 +632,6 @@ const Judge = struct {
         0,
         reach(&.{type_fields}),
     };
-    /// Where each depth's fields start in `values`, and how many there are.
     const starts = blk: {
         var start: [max_frames + 1]usize = undefined;
         start[0] = 0;
@@ -789,14 +683,10 @@ const Judge = struct {
         word: ?Word = null,
         length: u64 = 0,
         duplicate: bool = false,
-        // The first rule broken, in rule order: under every reading, then
-        // under each one.
         failure: ?Incompatibility = null,
         output_failure: ?Incompatibility = null,
         reasoning_failure: ?Incompatibility = null,
         summary_failure: ?Incompatibility = null,
-        /// Whether a field this value's meaning consumes is a duplicate,
-        /// under every reading or under each one.
         ambiguous: Readings = .{},
 
         fn is(self: Value, word: Word) bool {
@@ -824,7 +714,6 @@ const Judge = struct {
         kind: Kind,
         object: bool,
         key: ?Name,
-        /// The names this object holds, whose values `fields` keeps.
         present: Names,
         fields: []Value,
         aggregate: Value,
@@ -848,7 +737,6 @@ const Judge = struct {
             };
         }
 
-        /// A string compared with known words, readable only when short.
         fn word(self: *const Frame, comptime name: Name) Incompatibility!Value {
             const value = try self.string(name);
             if (value.length > max_word_bytes) return error.ProviderValueTooLong;
@@ -873,8 +761,6 @@ const Judge = struct {
             }
         }
 
-        /// A nested array the reading consumes: when present, an array whose
-        /// elements all satisfy that reading.
         fn blocks(self: *const Frame, comptime name: Name, comptime reading: Reading) Incompatibility!void {
             const value = try self.get(name);
             if (value.shape == .absent) return;
@@ -892,9 +778,6 @@ const Judge = struct {
         }
     };
 
-    /// The fields one object's rules consume: plain fields, and nested arrays
-    /// read under one reading. `judge` looks up only these, enforced at
-    /// compile time, and `ambiguity` finds a consumed duplicate among them.
     const Consumed = struct {
         plain: []const Name = &.{},
         nested: []const struct { Name, Reading } = &.{},
@@ -932,7 +815,6 @@ const Judge = struct {
     const text_fields: Consumed = .{ .plain = &.{.text} };
     const metadata_fields: Consumed = .{ .plain = &.{ .cell_id, .executed_tool_calls, .tool_calls_complete } };
 
-    /// A frame's lookups, limited to the fields `consumed` names.
     fn Rules(comptime consumed: Consumed) type {
         return struct {
             frame: *const Frame,
@@ -972,7 +854,6 @@ const Judge = struct {
         };
     }
 
-    /// Readies the judge for one item. The frames are written as they open.
     fn reset(self: *Judge, operation: codec_abi.Operation) void {
         self.operation = operation;
         self.depth = 0;
@@ -981,7 +862,6 @@ const Judge = struct {
         self.item_kind = null;
     }
 
-    /// A key of the innermost open container.
     fn key(self: *Judge, reader: *const json.Reader) void {
         if (self.ignored != 0) return;
         const frame = &self.frames[self.depth - 1];
@@ -1038,7 +918,6 @@ const Judge = struct {
         }
     }
 
-    /// The item's verdict once its last byte is read.
     fn verdict(self: *const Judge) Incompatibility!bool {
         if (self.result.shape != .object) return error.UnexpectedJsonDelimiter;
         if (self.result.failure) |err| return err;
@@ -1046,15 +925,12 @@ const Judge = struct {
         return self.replaysReasoningText();
     }
 
-    // Other kinds leave `content` open, duplicates included.
     fn replaysReasoningText(self: *const Judge) bool {
         if (self.item_kind != .reasoning) return false;
         const content = self.frames[0].get(.content) catch unreachable;
         return content.shape == .array and content.length != 0;
     }
 
-    /// After a compatible message is judged, the phase that selects its
-    /// answer.
     fn answerPhase(self: *const Judge) codec_abi.Phase {
         if (self.item_kind != .message) return .unphased;
         const phase = self.frames[0].get(.phase) catch unreachable;
@@ -1079,7 +955,6 @@ const Judge = struct {
             }
             frame.key = null;
         } else {
-            // Elements are judged in order: the first failure stands.
             frame.aggregate.length += 1;
             inline for (readings) |reading| {
                 const slot = @tagName(reading);
@@ -1118,7 +993,6 @@ const Judge = struct {
         return result;
     }
 
-    // A consumed duplicate, wherever it stands among the rules.
     fn ambiguity(frame: *const Frame) Readings {
         const declared = frame.lookup(.type);
         return switch (frame.kind) {
@@ -1140,8 +1014,6 @@ const Judge = struct {
         };
     }
 
-    // Each object's rules run in a fixed order; the first one broken is its
-    // failure.
     fn judge(self: *Judge, frame: *const Frame, result: *Value) Incompatibility!void {
         switch (frame.kind) {
             .item => {
@@ -1170,9 +1042,6 @@ const Judge = struct {
                         try rules.completed();
                         try rules.encrypted();
                     },
-                    // OpenAI runs the search inside the response: the item
-                    // records what it did and is replayed whole. A search
-                    // that failed still leaves a completed response.
                     .web_search_call => {
                         const rules = Rules(kindFields(.web_search_call)){ .frame = frame };
                         if (self.operation == .compaction) return error.UnsupportedProviderOutput;
@@ -1267,39 +1136,31 @@ const Judge = struct {
         _ = try rules.string(.text);
     }
 
-    // Reasoning and summary blocks retain annotations without interpreting
-    // them.
     fn textBlock(frame: *const Frame, kind: Value, comptime expected: Word) Incompatibility!void {
         if (!kind.is(expected)) return error.UnsupportedReasoningBlock;
         _ = try (Rules(text_fields){ .frame = frame }).string(.text);
     }
 };
 
-/// What an event is, by its type.
 const EventType = enum { added, done, completed, error_event, failed, incomplete, unsupported, other };
 
-/// Names the interpreter follows outside an item's grammar.
 const Key = enum { type, output_index, item, response, code, @"error", message, detail, status, id, model, output, usage, incomplete_details, reason, input_tokens, output_tokens, input_tokens_details, cached_tokens, phase, name, call_id, arguments, element, other };
 
 const EventKey = enum { type, output_index, item, response, code, @"error", message, detail };
 const ReportKey = enum { code, type, message, detail };
 const ResponseKey = enum { status, id, model, output, usage, @"error", incomplete_details };
 const UsageKey = enum { input_tokens, output_tokens, input_tokens_details };
-/// An item's members its value names outside the grammar's verdict.
 const ItemKey = enum { type, id, phase, name, call_id, arguments };
 
 fn subset(comptime T: type, key: Key) ?T {
     return std.meta.stringToEnum(T, @tagName(key));
 }
 
-/// What one named value was, as the envelope's rules read it.
 const Named = struct {
-    /// How often it appears, counting no further than a duplicate.
     count: u2 = 0,
     shape: Shape = .absent,
     word: ?Word = null,
     decoded: u64 = 0,
-    /// A string's contents, or the value whole, as event offsets.
     range: Range = .{ .start = 0, .length = 0 },
     digits: json.Digits = .plain,
     integer: ?u64 = null,
@@ -1328,7 +1189,6 @@ const Named = struct {
         }
     }
 
-    /// The value, unless it appears more than once.
     fn get(self: *const Named) Failure!?*const Named {
         return switch (self.count) {
             0 => null,
@@ -1341,22 +1201,18 @@ const Named = struct {
         return try self.get() orelse error.MissingProviderField;
     }
 
-    /// A string short enough to compare with a word.
     fn compared(self: *const Named) Failure!?Word {
         if (self.shape != .string) return error.ExpectedJsonString;
         if (self.decoded > max_word_bytes) return error.ProviderValueTooLong;
         return self.word;
     }
 
-    /// A count of tokens, if it is a whole number SQLite can hold.
     fn tokens(self: ?*const Named) ?u64 {
         const member = self orelse return null;
         if (member.shape != .number or member.digits != .plain) return null;
         return if (member.integer.? > std.math.maxInt(i64)) null else member.integer.?;
     }
 
-    /// One more appearance of the walked member whose value starts at
-    /// `start`; the walk needs a string's word and decoded length alone.
     fn walked(self: *Named, data: []const u8, start: usize, value: json.Value) void {
         self.count +|= 1;
         self.shape = switch (data[start]) {
@@ -1377,7 +1233,6 @@ const Named = struct {
     }
 };
 
-/// An item's identity, by its type and its nonempty id string.
 fn identity(item_type: *const Named, id: *const Named) Failure!struct { kind: codec_abi.OutputKind, id: Range } {
     const kind = Word.kind(try (try item_type.required()).compared()) orelse return error.UnsupportedItemType;
     const named = try id.required();
@@ -1386,7 +1241,6 @@ fn identity(item_type: *const Named, id: *const Named) Failure!struct { kind: co
     return .{ .kind = kind, .id = named.range };
 }
 
-/// A Responses stream's state between events.
 pub const Stream = struct {
     operation: codec_abi.Operation,
     completed: bool,
@@ -1399,18 +1253,14 @@ pub fn begin(operation: codec_abi.Operation) Stream {
     return .{ .operation = operation, .completed = false, .done_marker = false, .item_count = 0, .added_active = false };
 }
 
-/// The stream ended between events: its verdict, if it fails.
 pub fn finish(stream: *const Stream) ?Reason {
     return if (stream.completed) null else .provider_connection_closed;
 }
 
-/// One event's reading: the envelope's named values and the item's
-/// grammar, which `interpretEvent` writes before it reads.
 pub const InterpretScratch = struct {
     reader: json.Reader,
     type: ?EventType,
     path: [6]Key,
-    /// The event's first item value is being read.
     in_item: bool,
     outer: std.enums.EnumArray(EventKey, Named),
     nested: std.enums.EnumArray(ReportKey, Named),
@@ -1421,11 +1271,8 @@ pub const InterpretScratch = struct {
     usage: std.enums.EnumArray(UsageKey, Named),
     cached: Named,
     judge: Judge,
-    /// What a provider's error names, kept as `streamError` reaches it.
     failed: codec_abi.Failed,
 
-    /// Only counts are reset: a named value's other fields are written as
-    /// it is read.
     fn init(self: *InterpretScratch, operation: codec_abi.Operation) void {
         self.type = null;
         self.path = @splat(.other);
@@ -1541,16 +1388,12 @@ pub const InterpretScratch = struct {
     }
 };
 
-/// Judge one event's data, `data`, in the order acceptance has always
-/// checked: the marker, then lateness, then syntax, then the envelope and
-/// the item's grammar.
 pub fn interpretEvent(stream: *Stream, scratch: *InterpretScratch, data: []const u8) codec_abi.Event {
     var at: codec_abi.At = .{ .stage = .stream, .output_index = null };
     const what = verdict(stream, scratch, data, &at) catch |err| return .{ .at = at, .what = .{ .failed = failedOf(scratch, err) } };
     return .{ .at = at, .what = what };
 }
 
-/// The verdict, with what a provider's error named, if it named any.
 fn failedOf(scratch: *const InterpretScratch, err: Failure) codec_abi.Failed {
     var failed = scratch.failed;
     failed.reason = reasonOf(err);
@@ -1576,8 +1419,6 @@ fn verdict(stream: *Stream, scratch: *InterpretScratch, data: []const u8, at: *c
         .done => return doneItem(stream, scratch, at),
         .completed => return completedResponse(stream, scratch, at),
         .error_event => {
-            // A top-level code, even null, is the event's own; else a
-            // nested error object, if any.
             if (try scratch.outer.getPtrConst(.code).get() == null) {
                 if (try scratch.outer.getPtrConst(.@"error").get()) |nested| try streamError(scratch, data, nested, &scratch.nested, .typed);
             }
@@ -1633,7 +1474,6 @@ fn doneItem(stream: *Stream, scratch: *const InterpretScratch, at: *codec_abi.At
         range.* = members.getPtrConst(name).range;
     };
     const phase_member = members.getPtrConst(.phase);
-    // Rui's form holds only an exact `commentary` or `final_answer`.
     const phase: codec_abi.Phase = if (kind != .message or phase_member.count == 0 or phase_member.shape != .string) .unphased else if (phase_member.word == .commentary) .commentary else if (phase_member.word == .final_answer) .final_answer else .unphased;
     stream.item_count += 1;
     stream.added_active = false;
@@ -1670,8 +1510,6 @@ fn completedResponse(stream: *Stream, scratch: *const InterpretScratch, at: *cod
     return .{ .completed = completed };
 }
 
-/// The response's status, id, model and output list, which the Host reads
-/// after its completion gate.
 fn responseCheck(scratch: *const InterpretScratch, completed: *codec_abi.Completed) Failure!void {
     const response = try scratch.outer.getPtrConst(.response).required();
     if (response.shape != .object) return error.UnexpectedJsonDelimiter;
@@ -1691,9 +1529,6 @@ fn responseCheck(scratch: *const InterpretScratch, completed: *codec_abi.Complet
     completed.output.offset = output.range.start;
 }
 
-/// The usage report, after the output list. `input_tokens` includes the
-/// cached ones, and Responses bills no cache writes. A count missing,
-/// repeated or outside a whole SQLite integer makes the report unusable.
 fn usage(scratch: *const InterpretScratch) Failure!@FieldType(codec_abi.Completed, "usage") {
     const report = try scratch.response.getPtrConst(.usage).get() orelse return .absent;
     if (report.shape == .null_value) return .absent;
@@ -1714,10 +1549,6 @@ fn usageCounts(scratch: *const InterpretScratch) ?codec_abi.Usage {
     return .{ .uncached = input - cached, .cache_read = cached, .cache_write = 0, .output = output };
 }
 
-/// A provider error: its report, then context overflow, a refusal or a
-/// failure the Host decides. `reported` is the error object, null for the
-/// event itself; an object's `type` stands in for a missing code, an
-/// event's is only its name.
 fn streamError(scratch: *InterpretScratch, data: []const u8, reported: ?*const Named, nested: ?*const std.enums.EnumArray(ReportKey, Named), typed: enum { typed, untyped }) Failure!noreturn {
     if (reported) |value| {
         if (value.shape == .null_value) return error.TemporaryProviderFailure;
@@ -1766,9 +1597,6 @@ fn reportRange(member: *const Named) codec_abi.ReportRange {
     return .{ .escape = .json_string_v1, .start = member.range.start, .length = member.range.length };
 }
 
-/// Whether an incomplete response says the request overflowed the context,
-/// by an exact code in its error or its incomplete details. Any other shape
-/// says it did not.
 fn incompleteOverflow(scratch: *const InterpretScratch) bool {
     const response = (scratch.outer.getPtrConst(.response).required() catch return false);
     if (response.shape != .object) return false;
@@ -1786,19 +1614,6 @@ fn incompleteOverflow(scratch: *const InterpretScratch) bool {
     return (reason.compared() catch return false) == .context_length_exceeded;
 }
 
-// ------------------------------------------------------------------ walk
-//
-// The walk reads an event that `interpretEvent` accepted, so it trusts the
-// event's syntax and its item's grammar. It splits an item as acceptance
-// has always split one: every part of a recognised array becomes a part,
-// whose other block members are its bag, and every member Rui's form does
-// not hold goes, as received, into the item bag. A member is Rui's only in
-// exactly the expected shape; `created_by` is dropped, as replay drops it.
-
-/// The next step of the walk from `cursor`, which it moves on; null when
-/// the walk's item or output list ends. Each byte is scanned once, except a
-/// part's other members, read once to find its type and text and again as
-/// its bag.
 pub fn nextMember(data: []const u8, cursor: *codec_abi.Cursor) ?codec_abi.Member {
     while (true) switch (cursor.scope) {
         .item => {
@@ -1842,13 +1657,8 @@ pub fn nextMember(data: []const u8, cursor: *codec_abi.Cursor) ?codec_abi.Member
     };
 }
 
-/// One object member: its key's contents, where it starts and where its
-/// value starts.
 const ObjectMember = struct { key: Range, start: u64, value: u64 };
 
-/// The member after `offset` (an object's `{` or the end of a member), or
-/// null at the object's end, past which `offset` then moves; otherwise
-/// `offset` moves to the member's value.
 fn nextKey(data: []const u8, offset: *u64) ?ObjectMember {
     var at = json.skipSpace(data, @intCast(offset.*));
     if (data[at] != '}') at = json.skipSpace(data, at + 1);
@@ -1862,15 +1672,11 @@ fn nextKey(data: []const u8, offset: *u64) ?ObjectMember {
     return .{ .key = name.contents, .start = at, .value = value };
 }
 
-/// The whole `"key":value` of `member`, whose value the cursor moves past.
 fn bagMember(data: []const u8, member: *const ObjectMember, cursor: *codec_abi.Cursor) Range {
     cursor.offset = json.valueEnd(data, @intCast(member.value));
     return .{ .start = member.start, .length = cursor.offset - member.start };
 }
 
-/// Where the element after `offset` (an array's `[` or the end of an
-/// element) starts, or null at the array's end, past which `offset` then
-/// moves.
 fn nextElement(data: []const u8, offset: *u64) ?u64 {
     var at = json.skipSpace(data, @intCast(offset.*));
     if (data[at] != ']') at = json.skipSpace(data, at + 1);
@@ -1891,7 +1697,6 @@ fn itemMember(data: []const u8, cursor: *const codec_abi.Cursor, member: *const 
     if (name == .type or name == .created_by) return .neutral;
     const array: codec_abi.PartArray = switch (cursor.kind) {
         .message => switch (name) {
-            // The grammar accepts only an assistant's message.
             .role => return .neutral,
             .phase => return if (cursor.phase == .unphased) .bag else .neutral,
             .content => .content,
@@ -1908,15 +1713,11 @@ fn itemMember(data: []const u8, cursor: *const codec_abi.Cursor, member: *const 
         },
         .compaction, .web_search_call => return .bag,
     };
-    // Only a nonempty array holds parts; any other value stays whole.
     const value: usize = @intCast(member.value);
     if (data[value] != '[' or data[json.skipSpace(data, value + 1)] == ']') return .bag;
     return .{ .parts = array };
 }
 
-/// What an accepted web_search_call item did. Its action is OpenAI's to
-/// extend: a shape Rui does not know reads as `.none`, never as a failure.
-/// Each name counts at its first appearance.
 pub fn hostedCall(data: []const u8, item: *const codec_abi.OutputItem) codec_abi.HostedCall {
     std.debug.assert(item.kind == .web_search_call);
     var call: codec_abi.HostedCall = .{};
@@ -1940,7 +1741,6 @@ pub fn hostedCall(data: []const u8, item: *const codec_abi.OutputItem) codec_abi
     if (data[@intCast(start)] != '{') return call;
     const Strings = struct { type: ?Range = null, query: ?Range = null, url: ?Range = null, pattern: ?Range = null };
     var strings: Strings = .{};
-    // A search may name its queries only as a list; its first then reads as the query.
     var first_query: ?Range = null;
     offset = start;
     while (nextKey(data, &offset)) |member| {
@@ -1981,9 +1781,6 @@ pub fn hostedCall(data: []const u8, item: *const codec_abi.OutputItem) codec_abi
     return call;
 }
 
-/// A block of an accepted item, whose `{` is at `start`, its members read
-/// once: its part kind, by its type, its text's contents and its whole text
-/// member.
 fn partOf(data: []const u8, start: u64, kind: codec_abi.OutputKind, array: codec_abi.PartArray) struct { kind: codec_abi.PartKind, text: Range, member: Range } {
     const Text = struct { contents: ?Range = null, member: Range = .{ .start = 0, .length = 0 } };
     var word: ?Word = null;
@@ -2005,7 +1802,6 @@ fn partOf(data: []const u8, start: u64, kind: codec_abi.OutputKind, array: codec
     return .{ .kind = part, .text = chosen.contents.?, .member = chosen.member };
 }
 
-/// The part a block of `array` in an item of `kind` is, by its type.
 fn partKind(kind: codec_abi.OutputKind, array: codec_abi.PartArray, word: ?Word) ?codec_abi.PartKind {
     const known = word orelse return null;
     return switch (array) {
@@ -2019,8 +1815,6 @@ fn partKind(kind: codec_abi.OutputKind, array: codec_abi.PartArray, word: ?Word)
     };
 }
 
-/// The output list element at `start`, an item named by its identity, whose
-/// end `offset` moves to.
 fn terminalOf(data: []const u8, start: u64, offset: *u64) Failure!codec_abi.Member {
     if (data[@intCast(start)] != '{') {
         offset.* = json.valueEnd(data, @intCast(start));
@@ -2044,15 +1838,12 @@ test "an encoder resumed from a carry separates its next input item only after a
     var first: Encoder = .{ .carry = initial(.one, null) };
     try first.encodeItem(&header, &pieces);
     try std.testing.expect(!std.mem.eql(u8, pieces.items[0].literal, ","));
-    // A fresh encoder given only the carry that element ended in.
     var next: Encoder = .{ .carry = first.carry };
     try next.encodeItem(&header, &pieces);
     try std.testing.expectEqualStrings(",", pieces.items[0].literal);
 }
 
 test "every item at its longest fits max_pieces and names only handles it has" {
-    // Every item the Host can give, with each handle set it can give that
-    // item, from every state the encoder can be in before it.
     const Case = struct { item: codec_abi.Item, handles: []const u8 };
     var cases: [80]Case = undefined;
     var count: usize = 0;
@@ -2103,9 +1894,6 @@ test "every item at its longest fits max_pieces and names only handles it has" {
             var encoder: Encoder = .{ .carry = .{ .input_comma = comma, .version = version, .effort = .low }, .tool_comma = comma, .omit_reasoning_text = omit, .array = array };
             const header: ItemHeader = .{ .item = case.item, .handles = handles };
             var pieces: Pieces = .{ .len = 0 };
-            // Version two declines a boundary back to no effort; versions
-            // two and three, a tools-stage function tool; version one, a
-            // declaration.
             const declined = switch (case.item) {
                 .operation => |value| value == null and version == .two,
                 .tool => version != .one,
@@ -2139,7 +1927,6 @@ test "version two keeps the starting effort at the top and changes it at the Ope
     try one.encodeItem(&header, &pieces);
     try std.testing.expectEqualStrings(",\"reasoning\":{\"effort\":\"high\"}", pieces.items[pieces.len - 1].literal);
 
-    // The same effort writes nothing; a new one writes the update once.
     try two.encodeItem(&.{ .item = .{ .operation = .low }, .handles = 0 }, &pieces);
     try std.testing.expectEqual(@as(u8, 0), pieces.len);
     try two.encodeItem(&.{ .item = .{ .operation = .high }, .handles = 0 }, &pieces);
@@ -2148,7 +1935,6 @@ test "version two keeps the starting effort at the top and changes it at the Ope
     try std.testing.expectEqual(@as(?codec_abi.Effort, .high), two.carry.effort);
     try two.encodeItem(&.{ .item = .{ .operation = .high }, .handles = 0 }, &pieces);
     try std.testing.expectEqual(@as(u8, 0), pieces.len);
-    // Version one never writes a boundary.
     try one.encodeItem(&.{ .item = .{ .operation = .high }, .handles = 0 }, &pieces);
     try std.testing.expectEqual(@as(u8, 0), pieces.len);
 }
@@ -2208,8 +1994,6 @@ test "classify answers the same with 0xAA or leftover scratch" {
     try std.testing.expectEqualStrings("Out.", bodies[0][fresh.report.message.?.start..][0..fresh.report.message.?.length]);
 }
 
-/// One line per answer to `events` and per step of each walk it gives,
-/// then the stream's end.
 fn describeForTesting(events: []const []const u8, scratch: *InterpretScratch, out: *std.Io.Writer) !void {
     var stream = begin(.assistant_response);
     for (events) |data| {
@@ -2271,8 +2055,6 @@ fn expectDescribed(events: []const []const u8, expected: []const u8) !void {
 const completed_for_testing = "{\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}";
 
 test "an accepted item walks as its bag members and parts in document order" {
-    // The part's text follows a member of its bag, and the event's type
-    // follows its item: the walk reads the whole event either way.
     const done = "{\"output_index\":0,\"item\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"annotations\":[],\"type\":\"output_text\",\"te\\u0078t\":\"o\\nk\"},{\"type\":\"refusal\",\"refusal\":\"no\",\"text\":1}],\"x\":{\"y\":[1]},\"created_by\":\"z\"},\"type\":\"response.output_item.done\"}";
     try expectDescribed(&.{ done, completed_for_testing, "[DONE]" },
         \\at item 0
@@ -2401,8 +2183,6 @@ test "every entry point answers the same with 0xAA or leftover scratch" {
     var expected: std.Io.Writer = .fixed(&expected_buffer);
     @memset(std.mem.asBytes(&testing_scratch), 0xAA);
     try describeForTesting(&events, &testing_scratch, &expected);
-    // Each event alone after every other one has left the scratch as it
-    // ends, and on scratch of 0xAA.
     for (0..events.len) |first| for (0..events.len) |second| {
         var left_buffer: [2048]u8 = undefined;
         var left: std.Io.Writer = .fixed(&left_buffer);
@@ -2415,7 +2195,6 @@ test "every entry point answers the same with 0xAA or leftover scratch" {
         try describeForTesting(events[second..][0..1], &testing_scratch, &right);
         try std.testing.expectEqualStrings(left.buffered(), right.buffered());
     };
-    // The whole stream, again on leftover scratch.
     var again_buffer: [8192]u8 = undefined;
     var again: std.Io.Writer = .fixed(&again_buffer);
     try describeForTesting(&events, &testing_scratch, &again);
@@ -2468,7 +2247,6 @@ test "version two declares function tools in the history and keeps only provider
     try std.testing.expectEqualStrings(",", pieces.items[0].literal);
     try two.encodeItem(&.{ .item = .declare_close, .handles = 0 }, &pieces);
     try std.testing.expectEqualStrings("]}", pieces.items[0].literal);
-    // The top-level tools array starts fresh after a declaration.
     try two.encodeItem(&.{ .item = .tools_start, .handles = 0 }, &pieces);
     try two.encodeItem(&.{ .item = .web_search, .handles = 0 }, &pieces);
     try std.testing.expectEqualStrings("{\"type\":\"web_search\",\"external_web_access\":true}", pieces.items[0].literal);

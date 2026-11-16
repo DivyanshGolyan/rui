@@ -1,5 +1,3 @@
-//! Rui's resident feed text. Feed owns the anchor; this owner owns text,
-//! page-edge facts and the bounded set of opened tools.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const unicode = @import("terminal_unicode");
@@ -15,15 +13,11 @@ pub const Key = struct {
         return if (primary == .eq) std.math.order(a.ordinal, b.ordinal) else primary;
     }
 };
-/// Stable byte position within a retained row, independent of page seams.
 pub const Point = struct { key: Key, offset: usize };
 pub const MessageTarget = struct { offset: usize, target: View.Collapsed };
 pub const tail_key: Key = .{ .position = std.math.maxInt(u64), .ordinal = std.math.maxInt(u64) };
 pub const Feed = @import("widgets/Feed.zig").Feed(Key);
 
-/// Borrowed, prepared Document representation, not SGR input. Empty styles
-/// means plain text. A renderer uses Document.append/prepare, then fromDocument;
-/// this window neither parses SGR nor implements text layout a second time.
 pub const Text = struct {
     bytes: []const u8,
     styles: []const viewport.RetainedStyle = &.{},
@@ -42,22 +36,9 @@ pub const Entry = struct {
     messages: []const MessageTarget = &.{},
 };
 
-/// One row's bound, applied twice for two reasons: the reader bounds the
-/// bytes it renders (session_reads.RowCapture, which keeps the Ctrl-O target),
-/// and the window bounds the prepared text, which display escaping can grow.
 pub const row_capacity = 32 * 1024;
 pub const entry_capacity = 512;
-// Text, styles, one u32 per byte for newline-only text and the entry, layout
-// and target tables together fit the old styled Document's footprint. Two
-// full rows fit, and 512 one-line entries cover more than three 140x40
-// screens, so neither a large row nor many tiny ones makes loading and
-// eviction ping-pong.
 pub const byte_capacity = 65 * 1024;
-/// The tool rows the person opened, by key. A row renders with its output
-/// while its key is here, so it stays open across trimming and reloading.
-/// Holds at most 64 and never forgets one: a full set refuses another
-/// opening, so the set and the rows' text cannot disagree. Closing releases
-/// a slot.
 pub const Opened = struct {
     pub const capacity = 64;
     keys: [capacity]Key = undefined,
@@ -72,7 +53,6 @@ pub const Opened = struct {
         return self.count == capacity;
     }
 
-    /// The caller asks `full` before opening another row.
     pub fn set(self: *Opened, key: Key, open: bool) void {
         for (self.keys[0..self.count], 0..) |item, i| {
             if (item.order(key) != .eq) continue;
@@ -90,15 +70,12 @@ pub const Opened = struct {
 };
 
 pub const LatestEnding = @import("feed_reads.zig").Ending(Key);
-/// Padding on a synthetic-only wrapped row has no resident text to select.
 pub const RetryHit = union(enum) { link: Key, padding };
 pub const Presentation = struct {
     latest_ending: ?LatestEnding = null,
     retry_actionable: bool = false,
 };
 
-// Only the short, shared ending line is decorated, not arbitrary Message text.
-// This is frame-local presentation; no bytes/styles are written to Window.
 const EndingLine = struct {
     key_start: usize = 0,
     key_end: usize = 0,
@@ -113,7 +90,6 @@ const EndingLine = struct {
         if (end + 1 != entry.offset + entry.length) return false;
         const suffix = " · ";
         const length = end - offset + suffix.len + key.len;
-        // Ending words and key strings come from marks, never content bytes.
         std.debug.assert(length < self.document.bytes.len);
         const head = end - offset;
         self.key_start = head + suffix.len;
@@ -130,9 +106,6 @@ const EndingLine = struct {
         return true;
     }
 
-    /// Paint exactly the wrapped row drawWith paints, then ask that same
-    /// document which byte owns the cell. Margins/indent and the ending's
-    /// words are not part of the retry link.
     fn hit(self: *const EndingLine, row: u16, cells: []vaxis.Cell, col: usize) bool {
         if (col >= cells.len) return false;
         self.paint(row, cells);
@@ -168,17 +141,12 @@ pub const Window = struct {
     count: usize = 0,
     revision: u64 = 0,
     opened: Opened = .{},
-    // Page cursors are facts, not aliases for rendered row keys: filtered or
-    // empty pages can advance them without adding any rendered text.
     at_start: bool = false,
     at_end: bool = false,
     forward_partial: bool = false,
     low: ?Key = null,
     high: ?Key = null,
-    // Borrowed layout output; rebuilt, never cached. Every stored entry has a
-    // terminating newline, so there cannot be more logical lines than bytes.
     dimensions: [entry_capacity + 1]Feed.Entry = undefined,
-    // Last measured activity Widget, never a stored/keyed conversation row.
     tail_rows: u32 = 0,
     tail_lines: [1]u32 = undefined,
     targets: [entry_capacity]Target = undefined,
@@ -191,9 +159,6 @@ pub const Window = struct {
         return .{ .start = self.at_start, .end = self.at_end };
     }
 
-    /// All edits copy their input. Input must not alias this window. Errors are
-    /// atomic: callers can ask Feed.trim before retrying; edits never silently
-    /// evict the anchored entry. Publish the page's edge facts after success.
     pub fn prepend(self: *Window, entries: []const Entry) Error!void {
         try self.splice(0, 0, entries);
     }
@@ -202,16 +167,12 @@ pub const Window = struct {
         try self.splice(self.count, 0, entries);
     }
 
-    /// Keeps the row's flags. A caller notifies Feed.replace with the newly
-    /// measured entry if the anchor's logical coordinates need clamping.
     pub fn replace(self: *Window, key: Key, new_text: Text) Error!void {
         const index = self.indexOf(key) orelse unreachable;
         const old = self.entries[index];
         try self.splice(index, 1, &.{.{ .key = key, .text = new_text, .tight = old.tight, .provisional = old.provisional }});
     }
 
-    /// Forward reads restart at the first provisional row. The replacement may
-    /// settle it, remove it, or introduce other keys in the suffix.
     pub fn replaceFrom(self: *Window, first: Key, entries: []const Entry) Error!void {
         const index = self.indexOf(first) orelse unreachable;
         std.debug.assert(self.entries[index].provisional);
@@ -252,10 +213,8 @@ pub const Window = struct {
             kept += 1;
         };
         self.target_count = kept;
-        // Open keys deliberately survive both sides, including an empty window.
     }
 
-    /// Quote extraction consumes the renderer's retained semantic provenance.
     pub const QuoteFilter = struct {
         window: *const Window,
         pub fn includes(self: *QuoteFilter, at: usize) bool {
@@ -263,15 +222,11 @@ pub const Window = struct {
         }
     };
 
-    /// Text borrows the window and is invalidated by any edit, not by heights.
     pub fn text(self: *const Window, key: Key) Text {
         const entry = self.entries[self.indexOf(key) orelse unreachable];
         return .{ .bytes = self.document.bytes[entry.offset..][0..entry.length], .styles = self.document.styles[entry.offset..][0..entry.length] };
     }
 
-    /// Borrowed until the next heights call or edit. Uses Document.printLine
-    /// with commit=false, including its styles, hanging indents and links.
-    /// A gap belongs to the predecessor's last logical line, not its text.
     pub fn heights(self: *Window, layout: viewport.Layout) []const Feed.Entry {
         return self.heightsWith(layout, .{});
     }
@@ -294,8 +249,6 @@ pub const Window = struct {
         return self.dimensions[0..self.count];
     }
 
-    /// Includes the unkeyed Widget tail only for layout/scroll/read policy.
-    /// The synthetic key is never persisted, targeted or counted as a row.
     pub fn layoutEntries(self: *Window, layout: viewport.Layout) []const Feed.Entry {
         return self.layoutEntriesWith(layout, .{});
     }
@@ -325,13 +278,11 @@ pub const Window = struct {
         return null;
     }
 
-    /// Edits may shorten a row; a surviving keyed endpoint clamps to its end.
     pub fn offsetOf(self: *const Window, point: Point) ?usize {
         const entry = self.entries[self.indexOf(point.key) orelse return null];
         return entry.offset + @min(point.offset, entry.length);
     }
 
-    /// The tool row whose heading line holds this point.
     pub fn toolAt(self: *const Window, point: Point) ?Key {
         const offset = self.offsetOf(point) orelse return null;
         const entry = self.entries[self.indexOf(point.key).?];
@@ -343,8 +294,6 @@ pub const Window = struct {
     pub fn messageAt(self: *const Window, point: Point) ?View.Collapsed {
         const offset = self.offsetOf(point) orelse return null;
         const entry = self.entries[self.indexOf(point.key).?];
-        // Only summary rows are Message targets. A click elsewhere in the
-        // entry must not open its last Message (stops can contain many).
         const end = self.document.lineEnd(offset);
         var line = offset;
         while (line > entry.offset and self.document.bytes[line - 1] != '\n') : (line -= 1) {}
@@ -356,8 +305,6 @@ pub const Window = struct {
         return null;
     }
 
-    /// A synthetic retry link uses EndingLine's own drawing/layout, never a
-    /// resident-text offset. The caller lends one pane-width row of cells.
     pub fn retryAt(self: *const Window, position: viewport.Position, cells: []vaxis.Cell, col: usize, presentation: Presentation) ?RetryHit {
         if (cells.len == 0) return null;
         const point = self.pointAt(position.offset) orelse return null;
@@ -369,8 +316,6 @@ pub const Window = struct {
         return if (position.row >= self.document.lineRows(layout, position.offset)) .padding else null;
     }
 
-    /// The painted retry suffix's columns, shared by hover and the click query.
-    /// `cells` is one pane-width scratch row; no resident offsets are invented.
     pub fn retryColumns(self: *const Window, position: viewport.Position, cells: []vaxis.Cell, presentation: Presentation) ?struct { start: u16, end: u16 } {
         if (cells.len == 0) return null;
         const point = self.pointAt(position.offset) orelse return null;
@@ -387,7 +332,6 @@ pub const Window = struct {
         return .{ .start = start orelse return null, .end = end };
     }
 
-    /// Logical text row beneath the pointer, excluding adjacency gaps/tail.
     pub fn positionAt(self: *const Window, visible: Feed.Visible, row: u32, layout: viewport.Layout) ?viewport.Position {
         return self.positionAtWith(visible, row, layout, .{});
     }
@@ -416,10 +360,6 @@ pub const Window = struct {
         return null;
     }
 
-    /// Screen rows from row 0 of `visible` down, in one forward pass that
-    /// measures each line once: the nth `next` answers what positionAtWith
-    /// answers for row n. A frame walks every row through this, not through
-    /// repeated positionAtWith, whose prefix walk would make it quadratic.
     pub fn rowsWith(self: *const Window, visible: Feed.Visible, layout: viewport.Layout, presentation: Presentation) Rows {
         var rows: Rows = .{ .window = self, .layout = layout, .presentation = presentation, .pad = visible.pad, .index = @min(visible.first, self.count), .row = visible.row };
         if (rows.index == self.count) return rows;
@@ -430,9 +370,7 @@ pub const Window = struct {
         return rows;
     }
 
-    /// Borrows the window; any edit invalidates it.
     pub const Rows = struct {
-        /// A pad or adjacency gap row has no text position.
         pub const Row = ?viewport.Position;
 
         window: *const Window,
@@ -441,12 +379,9 @@ pub const Window = struct {
         pad: u32,
         index: usize,
         offset: usize = 0,
-        /// The next wrapped row of the line at `offset`; its row count is its gap.
         row: u32,
-        /// The line at `offset`'s rows, measured on its first row.
         used: ?u16 = null,
 
-        /// The next screen row, or null below the last line.
         pub fn next(self: *Rows) ?Row {
             if (self.pad != 0) {
                 self.pad -= 1;
@@ -476,14 +411,10 @@ pub const Window = struct {
         }
     };
 
-    /// Feed.Visible must have been obtained at this window's current width and
-    /// width method. The supplied vaxis window is already the shell's feed pane.
     pub fn draw(self: *const Window, visible: Feed.Visible, window: vaxis.Window, colour: bool, plain: vaxis.Style, colours: viewport.Colours) void {
         self.drawWith(visible, window, colour, plain, colours, .{}, null) catch unreachable;
     }
 
-    /// Arena retains decorated graphemes through rendering; null is valid only
-    /// for undecorated drawing (the allocation-free draw wrapper).
     pub fn drawWith(self: *const Window, visible: Feed.Visible, window: vaxis.Window, colour: bool, plain: vaxis.Style, colours: viewport.Colours, presentation: Presentation, arena: ?std.mem.Allocator) !void {
         window.fill(.{ .style = plain });
         if (window.width == 0 or window.height == 0 or visible.first >= self.count) return;
@@ -501,8 +432,6 @@ pub const Window = struct {
                     var ending: EndingLine = .{};
                     const top: i17 = @intCast(row - @as(i32, @intCast(skip)));
                     const height = if (ending.init(self, entry, offset, presentation)) decorated: {
-                        // Cells borrow graphemes through Surface.render, beyond
-                        // this call. Exactly one decorated line per frame.
                         const held = try arena.?.create(EndingLine);
                         held.* = ending;
                         break :decorated held.document.printLine(window, top, 0, true, colour, plain, colours);
@@ -527,8 +456,6 @@ pub const Window = struct {
         return null;
     }
 
-    // Reserve a newline for every entry: logical line boundaries and hidden
-    // link-address runs cannot cross a seam. This is not the adjacency gap.
     const Plan = struct {
         head: usize,
         marker: [64]u8 = undefined,
@@ -543,8 +470,6 @@ pub const Window = struct {
         if (bytes.len + @intFromBool(newline) <= row_capacity)
             return .{ .head = bytes.len, .length = @max(1, bytes.len + @intFromBool(newline)) };
         const limit = row_capacity - 64;
-        // Prefer complete logical lines. With a single enormous line retain
-        // whole graphemes from its head instead; never split a UTF-8 scalar.
         const head = if (std.mem.lastIndexOfScalar(u8, bytes[0..limit], '\n')) |end| end + 1 else blk: {
             var clusters = unicode.graphemeIterator(bytes);
             var end: usize = 0;
@@ -554,7 +479,6 @@ pub const Window = struct {
             }
             break :blk end;
         };
-        // A cut at a line boundary must not count its preceding line as hidden.
         const hidden_bytes = bytes[head..];
         const hidden = std.mem.count(u8, hidden_bytes, "\n") + @intFromBool(hidden_bytes.len != 0 and hidden_bytes[hidden_bytes.len - 1] != '\n');
         var result: Plan = .{ .head = head, .length = undefined };
@@ -585,9 +509,6 @@ pub const Window = struct {
         }
         const length = self.document.length - (old_end - old_start) + added;
         if (length > byte_capacity) return error.WindowFull;
-        // Text and all its actionable targets share this capacity decision.
-        // Reject before mutating, just as for byte/entry capacity; callers may
-        // trim and retry the complete entry instead of orphaning its summaries.
         var targets_needed: usize = 0;
         for (self.targets[0..self.target_count]) |target| {
             const index = self.indexOf(target.point.key) orelse continue;
@@ -636,15 +557,12 @@ pub const Window = struct {
                 self.document.bytes[offset + p.head] = '\n';
                 self.document.styles[offset + p.head] = 0;
             }
-            // End link runs at the seam, but preserve a code newline's band.
             if (p.length > 0) {
                 const last = offset + p.length - 1;
                 self.document.styles[last] = viewport.seamStyle(self.document.styles[last]);
             }
             self.entries[first + i] = .{ .key = entry.key, .offset = offset, .length = p.length, .tight = entry.tight, .provisional = entry.provisional };
             for (entry.messages) |target| {
-                // Oversized rows are capped; targets in omitted text disappear
-                // with their summaries. Capacity was checked before mutation.
                 if (target.offset >= p.head) continue;
                 self.targets[self.target_count] = .{ .point = .{ .key = entry.key, .offset = target.offset }, .target = target.target };
                 self.target_count += 1;
@@ -725,7 +643,6 @@ test "feed_window replace clamps through Feed and suffix replacement can remove 
     var feed: Feed = .{ .anchor = .{ .at = .{ .key = .{ .position = 20 }, .line = 2, .row = 2 } } };
     try window.replace(.{ .position = 20 }, .{ .bytes = "x" });
     feed.replace(window.heights(test_layout)[0]);
-    // One text row and the adjacency gap: logical line remains zero.
     try testing.expectEqualDeep(Feed.Anchor{ .at = .{ .key = .{ .position = 20 }, .row = 1 } }, feed.anchor);
     try window.replaceFrom(.{ .position = 30 }, &.{});
     try testing.expectEqual(@as(usize, 1), window.count);
@@ -771,11 +688,9 @@ test "feed_window open keys survive trimming either edge and reloading" {
     try testing.expect(window.opened.has(.{ .position = 10 }));
     window.opened.set(.{ .position = 10 }, false);
     try testing.expect(!window.opened.has(.{ .position = 10 }));
-    // Same position, different ordinal is a distinct tool.
     window.opened.set(.{ .position = 30, .ordinal = 1 }, true);
     window.opened.set(.{ .position = 30 }, false);
     try testing.expect(window.opened.has(.{ .position = 30, .ordinal = 1 }));
-    // A full set says so and keeps every key; closing one makes room.
     var position: u64 = 100;
     while (!window.opened.full()) : (position += 1) window.opened.set(.{ .position = position }, true);
     try testing.expectEqual(Opened.capacity, window.opened.count);
@@ -796,7 +711,6 @@ test "feed_window byte and entry bounds retain three typical screens without pin
     const typical: viewport.Layout = .{ .width = 140, .method = .unicode };
     const screen_rows = 40;
     const line: [80]u8 = (@as([79]u8, @splat('x')) ++ "\n").*;
-    // Reach each independent cap with a typical layout, never an oversized row.
     for ([_]usize{ 1, 26 }) |lines| {
         var window: Window = .{};
         const repeated: [26][80]u8 = @splat(line);
@@ -814,15 +728,12 @@ test "feed_window byte and entry bounds retain three typical screens without pin
         try testing.expect(window.count <= entry_capacity);
         try testing.expect(totalRows(window.heights(typical)) >= 3 * screen_rows);
         try testing.expect(if (lines == 1) window.count == entry_capacity else window.document.length + lines * line.len > byte_capacity);
-        // Bounds errors, including failed suffix replacement, leave text intact.
         const count = window.count;
         const length = window.document.length;
         try testing.expectError(error.WindowFull, window.prepend(&.{testEntry(0, bytes)}));
         try testing.expectEqual(count, window.count);
         try testing.expectEqual(length, window.document.length);
     }
-    // Feed.trim protects its three-screen margins. After trimming, the loading
-    // policy does not immediately ask to reload what it just evicted.
     var window: Window = .{};
     for (0..entry_capacity) |i| {
         var entry = testEntry(i, &line);
@@ -891,7 +802,6 @@ test "feed_window gaps derive from all tight loose adjacencies across prepend se
         try testing.expectEqualStrings("B", screen.row(@intCast(1 + ab), &buf));
         if (bc != 0) try testing.expectEqualStrings("", screen.row(@intCast(2 + ab), &buf));
         try testing.expectEqualStrings("C", screen.row(@intCast(2 + ab + bc), &buf));
-        // A visible range may begin in the predecessor's gap, not its text.
         if (ab != 0) {
             window.draw(.{ .first = 0, .row = 1 }, screen.window(8, 3), true, .{}, .{});
             try testing.expectEqualStrings("", screen.row(0, &buf));
@@ -924,7 +834,6 @@ test "feed_window heights at two widths match drawing and keep Document colours 
         try testing.expectEqualStrings("https://r.dev", screen.screen.readCell(0, @intCast(wraps)).?.link.uri);
         try testing.expectEqualStrings("", screen.row(@intCast(wraps + 1), &buffer));
         try testing.expectEqualStrings("tail", screen.row(@intCast(wraps + 2), &buffer));
-        // Mid-logical-line clipping uses exactly the same wrapper as measuring.
         if (width == 4) {
             window.draw(.{ .first = 0, .row = 1 }, screen.window(width, 2), true, .{}, .{});
             try testing.expectEqualStrings("efgh", screen.row(0, &buffer));
@@ -983,7 +892,6 @@ test "feed_window worst case newline scratch exact row cap empty edits and wide 
     try testing.expectEqual(row_capacity, entries[1].lines.len);
     try testing.expectError(error.WindowFull, window.replace(.{ .position = 5, .ordinal = std.math.maxInt(u64) }, .{ .bytes = &blank }));
     try testing.expectEqual(byte_capacity, window.document.length);
-    // Cursor facts can refer to filtered rows absent from the resident table.
     window.low = .{ .position = 1 };
     window.high = .{ .position = 9 };
     try window.append(&.{});
@@ -1108,19 +1016,16 @@ test "feed_window target capacity admits whole entries atomically across trim re
     try testing.expectEqual(length, window.document.length);
     try testing.expectEqual(@as(usize, 512), window.target_count);
     try testing.expectEqualDeep(last, window.messageAt(.{ .key = .{ .position = 32 }, .offset = targets[15].offset }).?);
-    // Release exactly one entry's targets, then reload another complete entry.
     window.trim(1, 0);
     try testing.expect(window.messageAt(.{ .key = .{ .position = 1 }, .offset = 0 }) == null);
     try testing.expectEqual(@as(usize, 496), window.target_count);
     try window.append(&.{next});
     try testing.expectEqual(@as(usize, 512), window.target_count);
-    // Failed suffix replacement also leaves the old text/targets provisional.
     const before_replacement = window.document.length;
     try testing.expectError(error.WindowFull, window.replaceFrom(next.key, &.{ next, .{ .key = .{ .position = 34 }, .text = Text.fromDocument(&prepared), .messages = &targets } }));
     try testing.expectEqual(before_replacement, window.document.length);
     try testing.expectEqualDeep(@as(?Key, next.key), window.firstProvisional());
     try testing.expectEqual(@as(usize, 512), window.target_count);
-    // Replacing a provisional suffix reuses its old budget, not a second one.
     targets[0].target.position = 9000;
     try window.replaceFrom(next.key, &.{.{ .key = next.key, .text = Text.fromDocument(&prepared), .messages = &targets }});
     try testing.expectEqual(@as(usize, 512), window.target_count);
@@ -1157,8 +1062,6 @@ test "feed_window rows answer positionAtWith for every screen row from every fir
         for (entries) |entry| for (entry.lines) |rows| {
             total += rows;
         };
-        // Every first row a Feed can choose, gap rows included, with and
-        // without padding above, and the empty window.
         for (0..window.count + 1) |first| {
             const lines = if (first < window.count) entries[first].lines else &[_]u32{1};
             for (lines, 0..) |line_rows, line| for (0..line_rows) |row| for ([_]u32{ 0, 2 }) |pad| {
@@ -1171,7 +1074,6 @@ test "feed_window rows answer positionAtWith for every screen row from every fir
             };
         }
     }
-    // A tall window, from its top: each row once, in order.
     const tall = try testing.allocator.create(Window);
     defer testing.allocator.destroy(tall);
     tall.* = .{};
@@ -1251,7 +1153,6 @@ test "quote body extraction consumes tool output provenance and keeps linked ans
     var answer: View.Answer(*QuoteTestSink) = undefined;
     answer.init(&sink, "", false, .{ .viewport = .unicode });
     const linked = "[shown label](https://example.test/private-hidden-address)\n";
-    // Force writer chunks across every control/address byte.
     for (linked) |byte| try answer.feed(&.{byte});
     try answer.finish();
     try sink.body("\n");

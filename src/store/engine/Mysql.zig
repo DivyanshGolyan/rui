@@ -1,4 +1,3 @@
-//! MySQL's single-owner, blocking Store connection. Large buffers live out of line.
 const std = @import("std");
 const engine = @import("../engine.zig");
 const Store = @import("../Store.zig");
@@ -15,7 +14,6 @@ const Failure = engine.Failure;
 const allocator = std.heap.page_allocator;
 const is_test = @import("builtin").is_test;
 
-/// Semantic query causes, independently counted from the wire sends.
 pub const QueryShape = struct {
     controls: u64 = 0,
     prefix_only: u64 = 0,
@@ -43,79 +41,42 @@ pub const State = struct {
     begin: Begin = .none,
     replacement: Replacement = .none,
     prefix_results: u8 = 0,
-    /// From COMMIT's send until its own OK: a loss then leaves the outcome
-    /// to `settleLostCommit`.
     committing: bool = false,
-    /// COMMIT's place among the pass's prefix results, counted down as
-    /// `fence_result` is; 0 when the pass holds no COMMIT.
     commit_result: u8 = 0,
-    /// Where COMMIT's text ends in the batch that holds it, and where that
-    /// batch ended when sent: the reads after COMMIT lie between.
     commit_end: usize = 0,
     batch_end: usize = 0,
-    /// A COMMIT bound after the writes of its message (`appendCommit`):
-    /// `buffered` until that message is sent, `sent` until COMMIT's OK or
-    /// a server error, which stops the message before it. `settleCommit`
-    /// ends whatever is left.
     inline_commit: enum { none, buffered, sent } = .none,
-    /// Whether the open batch holds a write that needs a guard and has
-    /// none (`guard`): COMMIT then takes a message of its own.
     unguarded: bool = false,
     sink: content.SinkState = .{},
     doublewrite: Bounded(32) = .{},
     store_id: [32]u8 = undefined,
     testing_database: if (is_test) [40]u8 else void = if (is_test) @splat(0) else {},
     fence_result: u8 = 0,
-    /// The login a lost connection reconnects with, kept for the Host's
-    /// life; null when it cannot be kept, and then a loss stays final.
     login: ?Login = null,
-    /// The server session holding the Store's GET_LOCK.
     connection_id: u64 = 0,
     io: std.Io = undefined,
-    /// Whether the Queue may run the current attempt again, so a lost
-    /// connection defers its fence to `recover` (`queue.Batch.arm`).
     armed: bool = false,
-    /// The connection was lost while armed, so `recover` may run the
-    /// attempt again. A loss after a COMMIT's OK never is: the batch is saved.
     rerunnable: bool = false,
-    /// A reconnect already replaced the lost connection, finding nothing
-    /// saved (`settleLostCommit`).
     replaced: bool = false,
-    /// Tests: lose the connection before every armed COMMIT, so each batch
-    /// runs twice.
     testing_drop_armed: if (is_test) bool else void = if (is_test) false else {},
-    /// Tests: where the next COMMIT loses its connection.
     testing_drop: if (is_test) enum { none, before_commit, after_commit, next_pass } else void = if (is_test) .none else {},
 
-    /// Commit, rollback or a server abort ends the transaction, and with
-    /// it every savepoint and any control not yet sent.
     fn endTransaction(s: *State) void {
         s.begin = .none;
         s.replacement = .none;
     }
 };
 
-/// The open transaction's BEGIN, which is the transaction itself: none
-/// once it commits, rolls back or the server aborts it.
 const Begin = union(enum) {
     none,
-    /// Requested; appended ahead of the next statement or control.
     pending,
-    /// In the unsent batch. A discard returns it to pending.
     buffered,
-    /// Sent, so ROLLBACK needs the server. `savepoint` records that a
-    /// SAVEPOINT rui_write was sent after it too.
     sent: struct { savepoint: bool = false },
 };
 
-/// A new SAVEPOINT rui_write not yet sent. An older one already sent
-/// stays independent of it (`Begin.sent.savepoint`).
 const Replacement = enum { none, pending, buffered };
 const unserved = provider_route.all(.unserved);
 
-/// A copy of the open-time login, so a reconnect needs nothing the caller
-/// wiped. Trust is already loaded in the connection and is never borrowed
-/// from this login; reconnect options do not retain a CA file path.
 const Login = struct {
     address: enum { unix_socket, tcp_tls, tcp },
     host: Bounded(253) = .{ .len = 0 },
@@ -153,7 +114,6 @@ const Login = struct {
         return .{
             .address = switch (self.address) {
                 .unix_socket => .{ .unix_socket = self.host.slice() },
-                // `reopen` uses its retained TLS context, not this trust value.
                 .tcp_tls => .{ .tcp_tls = .{ .host = self.host.slice(), .port = self.port, .trust = .system } },
                 .tcp => .{ .tcp = .{ .host = self.host.slice(), .port = self.port } },
             },
@@ -165,8 +125,6 @@ const Login = struct {
     }
 };
 
-/// Reconnects a lost connection tries, a second apart, before the loss
-/// stays final.
 const reconnect_attempts = 3;
 pub const ContentSink = content.ContentSink;
 pub const insert_chunk = rsql.Write(.{
@@ -214,7 +172,6 @@ fn fences(err: Failure) bool {
     };
 }
 
-/// Sink-close errors are delivered once; a lost owner/connection stays fenced.
 pub fn check(self: *Mysql) Failure!void {
     if (self.state.failure) |err| {
         if (!fences(err)) self.state.failure = null;
@@ -234,13 +191,10 @@ pub fn next(self: *Mysql) Failure!wire.mysql.Event {
 }
 
 fn serverError(self: *Mysql, code: u16) Failure {
-    // The server runs nothing of a message after a statement that failed,
-    // so a COMMIT bound after it never ran.
     if (self.state.inline_commit != .none) {
         self.state.inline_commit = .none;
         self.state.committing = false;
     }
-    // The server rolled the transaction back whole: nothing is left to roll back.
     if (code == 1213 or code == 1305) self.state.endTransaction();
     return switch (code) {
         1114, 1021 => error.CanonicalStorageFull,
@@ -248,7 +202,6 @@ fn serverError(self: *Mysql, code: u16) Failure {
     };
 }
 
-/// The observer borrows the stable heap state, never the movable engine value.
 pub fn contentObserver(self: *Mysql) content.Observer {
     return .{ .context = self.state, .server_error = observeServerError, .content_query = observeContentQuery };
 }
@@ -281,19 +234,9 @@ pub fn fits(self: *Mysql, comptime S: type, args: *const S.Args, now: i64) Failu
     return self.state.connection.batchLen() == 0 or n + 1 + reserved <= self.state.connection.batchRoom();
 }
 
-/// The most a write's guard takes in a batch (`guard`).
 const guard_bytes = 112;
 const guard_text = "DO (SELECT 1 FROM (SELECT 1 AS x UNION ALL SELECT 2) g WHERE g.x=1 OR ";
 
-/// Binds, after the write just bound into the open transaction's batch, a
-/// statement that fails unless that write changed exactly `rows` rows, or
-/// at most `rows`: its subquery then returns two rows, error 1242. The
-/// server runs nothing of a message after a failed statement, so a COMMIT
-/// in the same message (`appendCommit`) never saves a write whose count
-/// was wrong. True when the guard was bound, and its OK follows the
-/// write's; false for a write sent alone as a long query, or one the
-/// batch had no room to guard, whose count only its step checks: no
-/// COMMIT joins either (`appendCommit`).
 pub fn guard(self: *Mysql, comptime at_most: bool, rows: u64) bool {
     const s = self.state;
     if (s.long_query or s.begin == .none) return false;
@@ -319,7 +262,6 @@ pub fn bind(self: *Mysql, comptime S: type, args: *const S.Args, now: i64) Failu
     const bound: literal.Bound = .{ .now = now, .served = self.state.served };
     const n = try literal.length(S.mysql, S.Args, args, bound);
     if (n + 1 > self.state.connection.batchRoom()) {
-        // Prefix controls must complete before a streamed statement starts.
         if (self.state.connection.batchLen() != 0) {
             if (is_test) self.state.testing_shape.prefix_only += 1;
             try self.startPass();
@@ -339,8 +281,6 @@ pub fn bind(self: *Mysql, comptime S: type, args: *const S.Args, now: i64) Failu
 fn appendControls(self: *Mysql) Failure!void {
     const s = self.state;
     if (s.begin == .pending) {
-        // The fence is guarded as a write is (`guard`), so a COMMIT that
-        // shares the transaction's first message never saves past it.
         s.connection.batch().print("START TRANSACTION;UPDATE store_owner SET commit_seq=commit_seq+1 WHERE owner_key=1 AND epoch={d} AND commit_seq={d};" ++ guard_text ++ "ROW_COUNT()<>1);", .{ s.epoch, s.commit_seq }) catch return error.BindFailed;
         s.prefix_results += 3;
         s.fence_result = 2;
@@ -355,10 +295,8 @@ fn appendControls(self: *Mysql) Failure!void {
 
 pub fn startPass(self: *Mysql) Failure!void {
     self.sendPass() catch |err| {
-        // The pass's steps are still to come: `settleCommit` follows them.
         if (self.state.inline_commit != .none) return err;
         if (err == error.CommitOutcomeUnknown) return self.settleLostCommit();
-        // A COMMIT that never ran leaves the transaction open, for rollback.
         self.state.committing = false;
         self.state.commit_result = 0;
         return err;
@@ -378,7 +316,6 @@ fn sendPass(self: *Mysql) Failure!void {
         self.state.connection.sendBatch() catch return self.lost();
         if (self.state.inline_commit == .buffered) self.state.inline_commit = .sent;
         if (is_test and self.state.inline_commit == .sent and self.state.testing_drop == .after_commit) {
-            // The server ran the whole message; every answer is lost.
             self.state.testing_drop = .none;
             while (!self.state.connection.isReady()) _ = self.state.connection.next() catch break;
             self.state.connection.disconnect();
@@ -393,7 +330,6 @@ fn sendPass(self: *Mysql) Failure!void {
         const fence = self.state.fence_result == 1;
         const commit = self.state.commit_result == 1;
         if (is_test and commit and self.state.testing_drop == .after_commit) {
-            // The server has committed; only its OK is lost.
             self.state.testing_drop = .none;
             _ = self.state.connection.next() catch {};
             self.state.connection.disconnect();
@@ -420,8 +356,6 @@ pub fn drain(self: *Mysql) Failure!void {
         }
     }
 }
-/// COMMIT's own OK arrived: the transaction is saved, and the batch has
-/// nothing left to run again.
 fn committed(self: *Mysql) void {
     const s = self.state;
     s.committing = false;
@@ -450,12 +384,8 @@ pub fn finishPass(self: *Mysql) Failure!void {
 }
 pub fn discardBatch(self: *Mysql) Failure!void {
     if (self.state.long_query) self.finishPass() catch |err| {
-        // The discarded statement's ordinary failure must not block rollback,
-        // but an unresolved connection/ownership failure cannot be discarded.
         if (fences(err)) return err;
     };
-    // Revert only controls appended but never sent. In particular, an older
-    // server-side savepoint must not be mistaken for the dropped new one.
     if (self.state.replacement == .buffered) self.state.replacement = .pending;
     if (self.state.begin == .buffered) self.state.begin = .pending;
     self.state.connection.writer.end = 0;
@@ -552,7 +482,6 @@ pub fn control(self: *Mysql, comptime which: engine.Control) Failure!void {
             return;
         },
         .release => return,
-        // discardBatch returned anything buffered to pending.
         .rollback => if (self.state.begin != .sent) {
             self.state.endTransaction();
             return;
@@ -587,18 +516,9 @@ pub fn control(self: *Mysql, comptime which: engine.Control) Failure!void {
     if (which == .rollback) self.state.endTransaction();
 }
 
-/// Queues COMMIT as the open transaction's next statement. Reads bound
-/// after it share its message and run in autocommit once it has
-/// committed; the next `startPass` sends them. COMMIT's own OK marks the
-/// transaction saved. A connection lost before that OK is settled by
-/// reconnecting (`settleLostCommit`), which sends the reads again when the
-/// transaction landed; one lost after it, while the reads stream, is
-/// `StoreConnectionLost` with the commit known, and fences.
 pub fn queueCommit(self: *Mysql) Failure!void {
     try self.check();
     std.debug.assert(self.state.begin != .none and self.state.commit_result == 0);
-    // Statements bound before it run in a pass of their own, so COMMIT's
-    // result is a prefix result, as BEGIN's and the fence's are.
     if (self.state.long_query or self.state.connection.batchLen() != 0) {
         try self.startPass();
         try self.finishPass();
@@ -616,14 +536,6 @@ pub fn commitArmed(self: *const Mysql) bool {
     return self.state.armed;
 }
 
-/// Binds COMMIT after the writes already in the open transaction's batch,
-/// so its last writes and its COMMIT are one message: each write's guard
-/// (`guard`) stops the message before COMMIT when its count is wrong, as
-/// any failed statement does, the fence's guard included when the message
-/// opens the transaction too. False, with nothing bound, when the batch
-/// cannot take it: then `queueCommit` commits.
-/// `stepCommit` steps its answer after the writes', and `settleCommit`
-/// follows the pass.
 pub fn appendCommit(self: *Mysql) bool {
     const s = self.state;
     std.debug.assert(s.inline_commit == .none);
@@ -636,15 +548,12 @@ pub fn appendCommit(self: *Mysql) bool {
     return true;
 }
 
-/// Unbinds the reads bound after `appendCommit`'s COMMIT, which is still
-/// unsent: the message ends at COMMIT again.
 pub fn dropTail(self: *Mysql) void {
     const s = self.state;
     std.debug.assert(s.inline_commit == .buffered and !s.long_query);
     s.connection.writer.end = s.commit_end;
 }
 
-/// Steps `appendCommit`'s answer: the transaction is saved.
 pub fn stepCommit(self: *Mysql) Failure!void {
     const s = self.state;
     _ = try self.stepWrite();
@@ -652,14 +561,6 @@ pub fn stepCommit(self: *Mysql) Failure!void {
     self.committed();
 }
 
-/// After the pass that held `appendCommit`'s COMMIT. Nothing is left to
-/// settle once COMMIT's OK arrived, or a server error stopped the message
-/// before it, or the message was never sent: the transaction is saved, or
-/// still open. A connection lost in between is settled as any lost COMMIT
-/// (`settleLostCommit`): saved is success, and not saved is
-/// `StoreConnectionLost` on a new connection. A message the server ran
-/// whole while a step here failed is `CommitOutcomeUnknown`, and fences:
-/// the server saved what the Host refused.
 pub fn settleCommit(self: *Mysql) Failure!void {
     const s = self.state;
     const state = s.inline_commit;
@@ -667,8 +568,6 @@ pub fn settleCommit(self: *Mysql) Failure!void {
     if (state == .none) return;
     if (s.failure) |err| {
         if (err != error.CommitOutcomeUnknown) return err;
-        // Reads that followed COMMIT in its message are not sent again:
-        // they were a survey's (`Store.commitWithSurvey`), which is dropped.
         s.batch_end = s.commit_end;
         return self.settleLostCommit();
     }
@@ -678,16 +577,8 @@ pub fn settleCommit(self: *Mysql) Failure!void {
     return error.CommitOutcomeUnknown;
 }
 
-/// After the connection was lost around COMMIT: reconnects and reads
-/// `commit_seq`, which every transaction advances by exactly one, to learn
-/// whether the transaction landed. Landed is success, and the reads that
-/// followed COMMIT in its message are sent again, since the lost
-/// connection took their answers. Not landed leaves the Store on its new
-/// connection with nothing saved, which still fences for now. When no
-/// reconnect succeeds the outcome stays unknown.
 fn settleLostCommit(self: *Mysql) Failure!void {
     const s = self.state;
-    // The reconnect reuses the send buffer, so the reads are copied first.
     const sent = s.connection.send_buffer[s.commit_end..s.batch_end];
     const reads: ?[]const u8 = if (sent.len == 0) "" else allocator.dupe(u8, sent) catch null;
     defer if (reads) |text| allocator.free(text);
@@ -703,8 +594,6 @@ fn settleLostCommit(self: *Mysql) Failure!void {
         error.OwnershipLost
     else if (owner.commit_seq == s.commit_seq + 1) {
         s.failure = null;
-        // The fence's row at least, whose answer the loss may have taken:
-        // the entry point changed the Store (`Entry.release`).
         s.changes +|= 1;
         s.commit_seq += 1;
         s.armed = false;
@@ -717,30 +606,21 @@ fn settleLostCommit(self: *Mysql) Failure!void {
     return err;
 }
 
-/// Sends `reads`, the statements that followed a COMMIT now known saved,
-/// on the new connection. Null is a copy that could not be kept. A failure
-/// keeps the commit and fences, so the batch never runs again.
 fn sendAgain(self: *Mysql, reads: ?[]const u8) Failure!void {
     const s = self.state;
     s.statement_done = false;
     const text = reads orelse return self.lost();
     if (text.len == 0) return;
-    // A failover may reach a server whose packets are smaller.
     if (text.len > s.connection.batchRoom()) return self.lost();
     s.connection.batch().writeAll(text) catch return self.lost();
     s.connection.sendBatch() catch return self.lost();
 }
 
-/// Whether a fence now would end an attempt the Queue can still run again
-/// on a new connection: the connection was lost while armed.
 pub fn defersFence(self: *const Mysql) bool {
     const s = self.state;
     return s.armed and s.rerunnable and s.login != null and s.failure != null and s.failure.? == error.StoreConnectionLost;
 }
 
-/// After an armed attempt that lost its connection: replaces it, unless a
-/// lost COMMIT already did, and answers whether nothing was saved, so the
-/// attempt may run again. Otherwise the loss stays, and fences.
 pub fn recover(self: *Mysql) bool {
     const s = self.state;
     defer s.replaced = false;
@@ -768,8 +648,6 @@ pub fn recover(self: *Mysql) bool {
     return true;
 }
 
-/// Replaces the lost connection with a new one that holds the Store's
-/// lock again, and returns the ownership row it read.
 fn reconnect(self: *Mysql) !mysql_open.Reclaimed {
     const s = self.state;
     const login = &(s.login orelse return error.StoreConnectionLost);
@@ -781,7 +659,6 @@ fn reconnect(self: *Mysql) !mysql_open.Reclaimed {
         var refusal = std.Io.Writer.fixed(&refusal_buffer);
         s.connection.reopen(login.options(), &refusal) catch continue;
         const owner = mysql_open.reclaim(&s.connection, login.database.slice(), &s.store_id, s.epoch, s.connection_id) catch |err| switch (err) {
-            // Another server, Store or owner, or one admission refuses: no retry helps.
             error.WrongStoreIdentity, error.OwnershipLost, error.StoreLocked, error.MysqlTooOld, error.MysqlIsMariadb, error.MysqlReadOnly, error.MysqlFlushLogUnsafe, error.MysqlSyncBinlogUnsafe, error.MysqlStatementBinlog => return error.StoreConnectionLost,
             else => continue,
         };
@@ -795,7 +672,6 @@ fn reconnect(self: *Mysql) !mysql_open.Reclaimed {
 pub fn inTransaction(self: *const Mysql) bool {
     return self.state.begin != .none;
 }
-/// Every MySQL transaction is a write transaction.
 pub fn inWriteTransaction(self: *const Mysql) bool {
     return self.inTransaction();
 }
@@ -810,25 +686,17 @@ pub fn readRaw(self: *Mysql, id: u64, offset: u64, destination: []u8) Failure!vo
         return err;
     };
 }
-/// A sink on the payload of the content row `id`, whose chunk INSERTs
-/// ride `host`'s batches (`content.Host`).
 pub fn openSink(self: *Mysql, id: u64, length: u64, host: content.Host) Failure!ContentSink {
     try self.check();
     return content.openSink(&self.state.sink, id, length, host);
 }
 
-/// Whether the open batch has room for a chunk INSERT of `n` payload
-/// bytes, with the transaction's opening statements if they are due.
 pub fn chunkFits(self: *Mysql, id: u64, index: u64, n: usize) bool {
     const controls = 384;
     if (self.state.long_query) return false;
     return content.chunkStatementBytes(id, index, n) + controls <= self.state.connection.batchRoom();
 }
 
-/// Begins a chunk INSERT in the open batch, after any opening statements
-/// due, and returns the batch's writer with the text up to its payload
-/// written: the sink writes the payload's hex and the suffix. `chunkFits`
-/// was true.
 pub fn beginChunk(self: *Mysql, id: u64, index: u64) Failure!*std.Io.Writer {
     try self.check();
     try self.appendControls();
@@ -837,8 +705,6 @@ pub fn beginChunk(self: *Mysql, id: u64, index: u64) Failure!*std.Io.Writer {
     return w;
 }
 
-/// Buffered payloads use the same typed statement path as other writes,
-/// preserving oversized-query streaming/drain as well as queue batching.
 pub fn queuePayload(_: *Mysql, id: u64, bytes: []const u8, host: anytype) void {
     var at: usize = 0;
     while (at < bytes.len) {
@@ -865,8 +731,6 @@ test "MySQL error mapping clears only lost transactions" {
     try std.testing.expectEqual(error.CanonicalStorageFull, mysql.serverError(1021));
     try std.testing.expectEqual(error.StatementFailed, mysql.serverError(1213));
     try std.testing.expect(!mysql.inTransaction());
-    // The aborted transaction leaves no sent BEGIN behind: the next
-    // transaction's unsent BEGIN still rolls back without the server.
     try mysql.control(.begin);
     try mysql.control(.rollback);
     try std.testing.expect(!mysql.inTransaction());
@@ -995,6 +859,5 @@ test "mysql reconnect login owns its credentials even with ssl-ca trust" {
     try std.testing.expectEqualStrings("u", options.user);
     try std.testing.expectEqualStrings("secret", options.password);
     try std.testing.expectEqualStrings("db", options.database);
-    // The connection, not these options, owns the trust used by `reopen`.
     try std.testing.expect(options.address.tcp_tls.trust == .system);
 }

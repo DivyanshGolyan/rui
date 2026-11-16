@@ -19,6 +19,8 @@ ROOT = Path(__file__).resolve().parents[2]
 OWNER = re.compile(r'^pub const wire_version = "(\d+)";$', re.MULTILINE)
 GO_OWNER = re.compile(r'^const WireVersion = "(\d+)"$', re.MULTILINE)
 GO_OWNER_FILE = "tests/qualification/measurement/measurement.go"
+TS_OWNER = re.compile(r'^export const WIRE_VERSION = "(\d+)";$', re.MULTILINE)
+TS_OWNER_FILE = "clients/ts/src/transport.ts"
 OWNER_FILE = "src/wire_version.zig"
 # Where releases cut before the owner moved declared it.
 EARLIER_OWNER_FILE = "src/protocol.zig"
@@ -159,6 +161,9 @@ class WireVersionTest(unittest.TestCase):
         go = GO_OWNER.search((ROOT / GO_OWNER_FILE).read_text())
         self.assertIsNotNone(go, f"{GO_OWNER_FILE} declares no WireVersion")
         self.assertEqual(int(go[1]), owner, f"{GO_OWNER_FILE} WireVersion must equal {OWNER_FILE}'s wire_version")
+        ts = TS_OWNER.search((ROOT / TS_OWNER_FILE).read_text())
+        self.assertIsNotNone(ts, f"{TS_OWNER_FILE} declares no WIRE_VERSION")
+        self.assertEqual(int(ts[1]), owner, f"{TS_OWNER_FILE} WIRE_VERSION must equal {OWNER_FILE}'s wire_version")
         sys.path.insert(0, str(ROOT / "tests/integration"))
         try:
             import host_process

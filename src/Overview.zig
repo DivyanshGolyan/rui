@@ -1,14 +1,3 @@
-//! The Session overview's shell: bare `rui`, and `rui session resume` around
-//! the Session it opens.
-//!
-//! It owns the terminal and one loop. Keys, ticks at `State.wakeAt` and the
-//! worker's replies enter `overview_view.step` as events; the loop runs the
-//! effects `step` returns and draws `overview_view.render`. It branches only
-//! on which effect to run, so every screen decision stays in the core. One
-//! worker runs the client requests in order, so one list read is in flight
-//! at a time, and the core only ever hears list replies for the listing it
-//! asked for. An opened Session borrows the terminal through
-//! `SessionFrontend`, with ticks paused, and gives it back on Esc.
 const std = @import("std");
 const session_list = @import("session_list.zig");
 const model_catalog = @import("model_catalog.zig");
@@ -61,32 +50,18 @@ const Self = @This();
 
 pub const Options = struct {
     store: []const u8,
-    /// The canonical cwd: the Workspace new Sessions use.
     workspace: []const u8,
     home: []const u8,
-    /// Where request captures go.
     directory: []const u8,
-    /// The prospective binding captured when New Session is opened. Without
-    /// one, the Host refuses a creation that names no model.
     provider: ?[]const u8 = null,
     model: ?[]const u8 = null,
-    /// This terminal's own successful login, Unix seconds.
     login_at: ?u64 = null,
     sign_in: bool = false,
-    /// The launch's own `--store`, `--provider` and `--model`, as given.
-    /// When it named all three, creation reads no saved defaults, the saved
-    /// effort included. Otherwise saved settings re-resolve the
-    /// default from them and the saved defaults, as a fresh launch would.
     selectors: new_session_selection.Intent = .{},
-    /// A Session to open first, as `session resume` names it.
     open: ?view.Reference = null,
-    /// CLI-authenticated one-shot handoff, borrowed through run and copied
-    /// before any terminal startup. No environment or file reads live here.
     restoration: ?*const handoff.Payload = null,
 };
 
-/// A settled departure the CLI can replace. All slices are owned by the caller;
-/// no terminal, worker or editor remains borrowed when `run` returns it.
 pub const Relaunch = struct {
     executable: []const u8,
     handoff: []const u8,
@@ -105,39 +80,26 @@ pub const Relaunch = struct {
     }
 };
 
-/// What the CLI lends the App: scratch files, captured requests and the
-/// conversation command/configuration hooks.
 pub const Hooks = struct {
     scratch: *const fn (std.process.Init) anyerror!std.Io.File,
     command: SessionFrontend.Command,
     configure: ?session_reads.Configure = null,
     requests: SessionFrontend.Requests,
     status: SessionFrontend.Status,
-    /// Runs between a creation's capture and its send, as the CLI's other
-    /// captures do.
     captured: *const fn (std.Io) anyerror!void,
     activate: ?SignIn.Activate = null,
     ready: ?SignIn.Ready = null,
-    /// The launch owner, without terminal output while App holds the screen.
     start_host: *const fn (std.process.Init, []const u8) HostLaunch,
 };
 
 pub const HostLaunch = @import("host_launch.zig").Summary;
 
-/// One discovery observation, not a UI phase or a launch outcome. A pause
-/// belongs only to a reachable Host; a free Store lease proves it stopped.
 const HostObservation = union(enum) {
-    /// Nothing read yet. The launch that opened this screen saw its Host
-    /// ready, so the first frames say nothing and hold nothing.
     unread,
     ready: struct { facts: view.Host, paused: bool = false },
-    /// The lease is free; the stop record says whether someone asked.
     stopped: platform.StoreLease.LastStop,
-    /// A Host holds the Store and gave no answer: starting, stopping or lost.
     unavailable,
-    /// A Host answered in another Rui version's protocol.
     incompatible,
-    /// The Store's location could not be read, so nothing is known.
     unreadable,
 
     fn facts(self: HostObservation) ?view.Host {
@@ -156,43 +118,26 @@ const HostObservation = union(enum) {
     }
 };
 
-/// One worker read supplies availability, admission and counts together.
 pub const HostRead = struct {
     observation: HostObservation = .unavailable,
-    /// This TUI's memory, with the Host's and its tools' while one runs;
-    /// null when the read sampled none.
     memory: ?view.Memory = null,
 };
 
-/// The client operations the effects run. The worker runs all but
-/// `converse`, each with its own cancellable requests; the loop runs
-/// `converse`. Each returns what the Host answered, failures included, and
-/// an error when there was no answer. Tests substitute their own.
 pub const Operations = struct {
-    /// One Host read: host-info's facts and the memory sampled with them.
     host: *const fn (*Self) HostRead,
     start_host: *const fn (*Self) HostLaunch,
-    /// Reads one `session list` page into `page`, or returns the Host's
-    /// failure.
     list: *const fn (*Self, client.Requests, protocol_reply.SessionListCursor, *protocol_reply.SessionListPage) anyerror!?protocol_reply.ReadFailure,
-    /// The first line of a Session's first Message, read into `buffer`.
     first_line: *const fn (*Self, client.Requests, []const u8, u64, []u8) anyerror!protocol_reply.ActivityPrefixReply,
-    /// Write the request's fate into the Reply, and return the error that
-    /// ends the overview after a canonical Store failure.
     create: *const fn (*Self, client.Requests, configure_input.ConfigureInput, *Reply) anyerror!void,
     stop: *const fn (*Self, client.Requests, client.SessionStopInput, *Reply) anyerror!void,
     archive: *const fn (*Self, client.Requests, client.SessionArchiveInput, *Reply) anyerror!void,
     pin: *const fn (*Self, client.Requests, client.SessionPinInput, *Reply) anyerror!void,
-    /// The Host's `model_list` reply, owned by the allocator.
     models: *const fn (*Self, client.Requests, std.mem.Allocator) anyerror![]u8,
-    /// Opens `opened` as a Session widget under Root.
     open: *const fn (*Self, *vxfw.EventContext) anyerror!void,
 };
 
 pub const client_operations: Operations = .{ .host = hostFacts, .start_host = startHost, .list = listPage, .first_line = firstLine, .create = createSession, .stop = stopSession, .archive = archiveSession, .pin = pinSession, .models = listModels, .open = openSession };
 
-/// A conversation the person left from. Until the terminal is restored it
-/// holds its borrowers; `frontend` is null when it never started.
 pub const Left = struct {
     session: view.Reference,
     frontend: ?*SessionFrontend,
@@ -200,16 +145,11 @@ pub const Left = struct {
     ended: anyerror!SessionFrontend.Outcome,
 };
 
-/// The outcome of a `session start` or `session stop`, held until the loop
-/// steps it.
 pub const Reply = struct {
     outcome: enum { accepted, failed, unconfirmed } = .failed,
     session: view.Reference = undefined,
     archive_pending: bool = false,
-    /// The failure code, why an environment was refused, or the handle
-    /// that recovers an unconfirmed request.
     text: protocol.Bounded(@max(protocol.max_code_bytes, client.Environment.too_large_bytes)) = .{},
-    /// The request's handle, for guidance after an accepted start.
     handle: protocol.Bounded(protocol.max_key_bytes) = .{},
 
     fn refused(code: []const u8) Reply {
@@ -218,7 +158,6 @@ pub const Reply = struct {
         return reply;
     }
 
-    /// Nothing was sent: the environment is over what a Message carries.
     fn environmentTooLarge(environment: client.Environment) Reply {
         var reply: Reply = .{};
         var buffer: [client.Environment.too_large_bytes]u8 = undefined;
@@ -228,10 +167,6 @@ pub const Reply = struct {
         return reply;
     }
 
-    /// Records a send of the captured request `handle`. Only the Host's
-    /// answer settles it: a failed send, or a reply that could not be read,
-    /// leaves the saved request to recover. A canonical Store failure leaves
-    /// it too, and is returned, since it fences the Host.
     fn record(self: *Reply, sent: anytype, handle: []const u8) error{CanonicalStoreFailure}!void {
         const reply = switch (sent) {
             .failed => {
@@ -295,9 +230,6 @@ pub const Reply = struct {
     }
 };
 
-/// A queued edit owns only its set strings in one allocation. One settings
-/// save may be outstanding; keeping this out of the fixed queue avoids a
-/// full preference snapshot (and Store path) in every job slot.
 const DefaultsEdit = struct {
     edit: preferences.Edit,
     bytes: []u8,
@@ -328,14 +260,11 @@ const DefaultsEdit = struct {
     }
 };
 
-/// Saved settings captured once while interpreting an admitted creation effect.
 const CreationSettings = struct {
     effort: ?model_capability.ReasoningEffort = null,
     permission: ?protocol.PermissionMode = null,
 };
 
-/// The native creation effect owns its binding and its preference observation,
-/// including a failed read. The worker never resamples these inputs.
 const CreationSnapshot = struct {
     binding: ?view.Default,
     settings: anyerror!CreationSettings,
@@ -350,13 +279,10 @@ const CreationSnapshot = struct {
 };
 
 const Job = union(enum) {
-    /// host-info, read as each listing starts.
     host,
     start_host,
-    /// The traversal's next page.
     list,
     lines: view.Reads,
-    /// A value snapshot, independent of later preference reads or key presses.
     create: CreationSnapshot,
     stop: view.Reference,
     archive: view.ArchiveRequest,
@@ -366,8 +292,6 @@ const Job = union(enum) {
 
     const Quiescence = enum { cancel_read, settle_effect };
 
-    /// Already accepted effects keep custody through their answer; reads may
-    /// retire early. Both archive and restore are the same mutation job.
     fn quiescence(self: Job) Quiescence {
         return switch (self) {
             .host, .list, .lines, .models => .cancel_read,
@@ -375,8 +299,6 @@ const Job = union(enum) {
         };
     }
 
-    /// A job owns its inputs until it is replaced or the overview ends,
-    /// whether or not it ran.
     fn deinit(self: Job, gpa: std.mem.Allocator) void {
         switch (self) {
             .defaults => |edit| edit.deinit(gpa),
@@ -385,23 +307,15 @@ const Job = union(enum) {
     }
 };
 
-/// What a job leaves, as one value in its job's shape. The job that runs
-/// is its only writer and `deliver`, for that job, its only reader, so no
-/// job reads what another left. A job that fails partway leaves the part
-/// it wrote.
 const Answer = union(enum) {
-    /// No job has run since the last answer was taken, or the job leaves
-    /// only its outcome.
     none,
     host: HostRead,
     start_host: struct { read: HostRead, launch: HostLaunch },
     page: protocol_reply.SessionListPage,
     lines: [view.max_first_line_reads]Line,
-    /// A start's, stop's or archive's.
     reply: Reply,
     menu: model_picker.Menu,
 
-    /// Frees an answer no one took.
     fn deinit(self: *Answer, gpa: std.mem.Allocator) void {
         switch (self.*) {
             .menu => |*menu| menu.deinit(gpa),
@@ -411,17 +325,12 @@ const Answer = union(enum) {
     }
 };
 
-/// Bounded discovery, row/model reads, settings saves and Host startup
-/// share the worker with the requests admitted by the core ledger.
 const max_jobs = 10 + view.max_requests;
 
-/// The longest the first frame waits for the terminal's background.
 const background_wait_ms = 200;
 
 const Line = struct { bytes: [view.max_line_read_bytes]u8 = undefined, result: enum { line, refused, unanswered } = .unanswered, len: usize = 0 };
 
-/// A command's output: one byte past what the core takes tells it was cut.
-/// Stops a running command when App ends on a signal.
 const Signals = struct {
     var cancellation: client.Cancellation = .{};
 };
@@ -432,82 +341,52 @@ signed_in_store: protocol.Bounded(protocol.max_store_bytes) = .{},
 hooks: Hooks,
 ops: Operations,
 state: view.State,
-/// The typed save owns this outcome from acceptance through its worker answer.
 defaults_save: AppSettings.SaveState = .idle,
 caps: view.Caps,
 app: ?*TerminalApp = null,
-/// Program status records beside App's frames.
 attention: *TerminalApp.Attention = undefined,
 root: Root = undefined,
-/// The sign-in page Root shows as an opaque widget; its worker is this owner's.
 sign_in: SignIn = .{},
 app_screen: AppScreen.Overview = undefined,
-/// What can fill the list's place, each its own widget: the screen shows
-/// the one the core names. Only the Sessions hear a press.
 app_sessions: GroupedList = .{},
 app_new_session: OverviewLines.SessionControls = undefined,
 session_drafts: @import("session_drafts.zig").Drafts = .{},
 app_settings_line: OverviewLines.Settings = undefined,
-/// The counts line and its bands, which take the view-name click.
 app_header: OverviewLines.Header = undefined,
 app_frame: u64 = 0,
 app_host_hover: Hover = .{},
 session_screen: *SessionScreen = undefined,
 app_session: ?Left = null,
-/// Where leaving a Session goes when Session links are followed.
 follow: Follow = .{},
 retired: std.ArrayList(struct { left: Left, frame: u64 }) = .empty,
 interrupted: *client.Cancellation,
 worker: ClientTask = .{},
-/// The Upgrade run's worker, for as long as the core says one runs, and
-/// the receipts runs left, which print on exit.
 upgrade_job: UpgradeJob = .{},
-/// The serving Host's pid, read once per Host start.
 host_process: ?struct { started_at: u64, pid: i32 } = null,
-/// Last discovery observation, invalidated by a Session transport loss.
-/// Counts in the view core are a projection of this same read, not a probe.
 host_observation: HostObservation = .unread,
-/// The last launch's typed summary, never a boolean standing in for a cause.
 host_launch: ?HostLaunch = null,
-/// This run's one automatic start after a crash (`host_restart`).
 restart_allowance: host_restart.Allowance = .unspent,
 upgrade_report: ?std.Io.Writer.Allocating = null,
-/// The finished publication is retained after its worker frees the Check.
 relaunch_build: ?[]const u8 = null,
 upgrade_guidance: bool = false,
 relaunch_line: [upgrade_status.max_line_bytes]u8 = undefined,
 relaunch_line_len: usize = 0,
-/// What the overview last said under the open conversation.
 conversation_said: [upgrade_status.max_line_bytes]u8 = undefined,
-/// The terminal title as last set: the open Session's name, if any, and how
-/// many Sessions need the person.
 title: session_chrome.Title = .{},
 jobs: [max_jobs]Job = undefined,
 job_count: usize = 0,
-/// The job the worker runs or last ran, and what it left.
 job: Job = .list,
 answer: Answer = .none,
 traversal: protocol_reply.SessionTraversal = .init(null),
 traversal_archive: protocol.SessionArchiveFilter = .active,
-/// Unlinked scratch for list pages.
 scratch: ?std.Io.File = null,
 
-/// The Session a conversation borrows, in stable storage.
 opened: view.Reference = undefined,
-/// The overview's own step or job failed while a conversation held the
-/// terminal: the failure is the overview's, not the Session's.
 lent_failed: bool = false,
-/// The Session the last accepted start made, for guidance if its
-/// conversation fails.
 started: ?view.Reference = null,
-/// The screen holds no Session's state, so a conversation may use it as is.
 screen_fresh: bool = true,
-/// The screen is initialized, so `run` disposes of it.
 screen_ready: bool = false,
 
-/// Opens the overview and returns once the person leaves it, or a signal
-/// stops it. Every way out restores the terminal, then returns a relaunch
-/// value or prints the ordinary Detached notice once.
 pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !?Relaunch {
     const self = try create(init, options, hooks, client_operations, &Signals.cancellation);
     defer self.destroy();
@@ -527,8 +406,6 @@ pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !?Relaunch {
     app.init(init.io, init.environ_map) catch |err| return self.failed(err, self.options.open);
     self.app = &app;
     self.attention = &app.attention;
-    // Establish the read epoch before a direct resume can start its reader.
-    // No worker exists yet; every later handshake uses the single worker.
     const ended = startup: {
         _ = self.takeHostRead(self.ops.host(self)) catch |err| break :startup @as(anyerror!void, err);
         break :startup app.run(self.root.widget());
@@ -538,8 +415,6 @@ pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !?Relaunch {
     return self.finishApp(ended);
 }
 
-/// Stops the open Session's workers and the overview's before App releases
-/// the terminal. A Session that failed to open has no frontend to stop.
 fn stopApp(self: *Self) void {
     self.root.closeMainPresentation();
     self.root.settings_page.cancelChoice();
@@ -611,17 +486,12 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             try app.vx.queryColor(app.tty.writer(), .bg);
         },
         .tick => {
-            // A subsequent event is after App has replaced both the focus
-            // path and mouse hit list, including their mouse_leave callbacks.
             if (self.signInIsFirstRun()) return;
             try self.appNext(ctx, try self.event(.{ .list_settled = .{ .wide = self.root.size.width >= Root.split_at, .focused = self.root.input.listFocused() and self.root.input.layer == .main } }));
             while (self.retired.items.len != 0 and self.retired.items[0].frame < self.root.frames) {
                 self.disposeSession(self.retired.orderedRemove(0).left);
             }
             if (self.root.session != null) {
-                // Under a Session the overview serves as it did when lending:
-                // a failure there is the overview's, not the Session's. An
-                // Upgrade holds Host work here as it does on the overview.
                 if (self.state.upgrading()) try self.appUpgrade(ctx) else {
                     const answered = try service(self);
                     ctx.redraw = ctx.redraw or answered;
@@ -632,7 +502,6 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                     ctx.redraw = true;
                 }
                 const now = self.realMs();
-                // An Upgrade holds Host work until it ends.
                 if (self.state.upgrading()) try self.appUpgrade(ctx) else {
                     if (self.state.wakeAt()) |at| if (now >= at) {
                         try self.appNext(ctx, try self.event(.{ .tick = now }));
@@ -654,7 +523,6 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     }
 }
 
-/// Root captures the covered screen and paste state before routing list keys.
 fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery: @import("app_input.zig").Effects.Delivery) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const selected = keypress.selectEvent(view.keys, input, delivery.pasted);
@@ -673,14 +541,12 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery:
     ctx.consumeAndRedraw();
 }
 
-/// A click the screen's widgets name steps the core as a key does.
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
     try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click } }));
     ctx.redraw = true;
 }
 
-/// Apply a core navigation result without rereading the initiating input.
 fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
     switch (next orelse return) {
         .leave => {
@@ -712,7 +578,6 @@ fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
     }
 }
 
-/// Opens `self.opened` as a Session widget under Root.
 fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
     const reference = self.opened;
     const screen = self.session_screen;
@@ -734,8 +599,6 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
     const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue, .archive_state = archiveState, .models = modelsSnapshot };
     frontend.begin(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, screen, self.interrupted, lender);
     const child = frontend.attach(.{ .configure = self.hooks.configure, .drafts = &self.session_drafts, .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow, .host = .{ .context = self, .held = hostHeld, .lost = hostLost, .startable = hostStartable, .start = requestHostStart, .notice = hostNotice } }, self.caps);
-    // Custody transfers before focus delivery: on failure the exit
-    // path cancels and joins the same frontend before freeing it.
     self.app_session = .{ .session = reference, .frontend = frontend, .files = files, .ended = .detached };
     count = 0;
     _ = try self.event(.{ .conversation = reference });
@@ -755,8 +618,6 @@ fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFron
             self.app_session = null;
             _ = try self.event(.{ .conversation = null });
             try self.root.closeSession(ctx);
-            // App's last frame can still point at the old widgets. Dispose
-            // only after the next frame replaces that focus/hit-test tree.
             if (outcome == .new_session) {
                 self.follow = .{};
                 return self.appNext(ctx, try self.event(.{ .clicked = .{ .target = .new_session } }));
@@ -767,14 +628,11 @@ fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFron
     ctx.quit = true;
 }
 
-/// A clicked Session link: open it once the current Session has left.
 fn appSessionFollow(raw: *anyopaque, _: *vxfw.EventContext, target: *const [session_id.bytes]u8) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     self.follow.pending = target.*;
 }
 
-/// After leaving `from`, opens the Session a link named, or the one a
-/// followed link left, as opening it from the overview does.
 fn followNext(self: *Self, ctx: *vxfw.EventContext, from: view.Reference) !void {
     if (self.follow.next(from)) |target| try self.appNext(ctx, try self.event(.{ .open = target }));
 }
@@ -788,13 +646,8 @@ fn appCopy(raw: *anyopaque, file: std.Io.File, start: u64, length: u64) !void {
     try app.vx.copyToSystemClipboard(app.tty.writer(), bytes, self.init.gpa);
 }
 
-/// Runs the Upgrade the core says is going: once the overview's own Host
-/// work has settled, the check and install run on their worker. The core
-/// is told where the run stands whenever that differs from what it holds,
-/// so the worker is the one place the run's state is decided.
 fn appUpgrade(self: *Self, ctx: *vxfw.EventContext) !void {
     const job = &self.upgrade_job;
-    // A failed start finishes the run, which the core is told below.
     if (!job.started and try self.quiesceUpgrade() and self.conversationSettled()) job.begin(self.init, self.options.store) catch {};
     const done = job.started and try job.advance();
     const stands = job.status();
@@ -814,15 +667,11 @@ fn leaveForUpgrade(self: *Self, ctx: *vxfw.EventContext, outcome: session_upgrad
     if (session_upgrade.relaunch(outcome, self.upgrade_guidance or self.pendingDepartureGuidance())) {
         ctx.quit = true;
     } else {
-        // A guided run retains today's screen and exit behavior. A later
-        // ordinary quit is not a delayed request to relaunch.
         self.init.gpa.free(self.relaunch_build.?);
         self.relaunch_build = null;
     }
 }
 
-/// Do not leave the screen automatically when guidance is already known.
-/// The settled departure is still authoritative for failures found on leave.
 noinline fn pendingDepartureGuidance(self: *const Self) bool {
     var bytes: [view.max_requests * 512]u8 = undefined;
     var text = std.Io.Writer.fixed(&bytes);
@@ -832,15 +681,12 @@ noinline fn pendingDepartureGuidance(self: *const Self) bool {
     return false;
 }
 
-/// The open conversation, if any, has no Client work of its own in flight.
 fn conversationSettled(self: *const Self) bool {
     const shown = self.app_session orelse return true;
     const frontend = shown.frontend orelse return true;
     return self.root.session == null or frontend.atRest();
 }
 
-/// Keeps a finished run's receipt for exit, the full report when it
-/// failed, retained cleanup or left an unusable Host, and frees the run.
 fn keepUpgrade(self: *Self) !void {
     const job = &self.upgrade_job;
     if (!job.started) return;
@@ -906,8 +752,6 @@ fn finishApp(self: *Self, ended: anyerror!void) !?Relaunch {
     return self.finishDeparture(ended, answered, saved, kept, sign_in_ended, left, departure);
 }
 
-/// One rendered departure supplies both the pure decision and fallback output.
-/// Keep its bounded scratch off the ordinary finish frame.
 noinline fn finishDeparture(self: *Self, ended: anyerror!void, answered: anyerror!?Next, saved: anyerror!void, kept: anyerror!void, sign_in_ended: anyerror!void, left: ?Left, departure: ?SessionFrontend.Departure) !?Relaunch {
     var bytes: [view.max_requests * 512]u8 = undefined;
     var text = std.Io.Writer.fixed(&bytes);
@@ -915,8 +759,6 @@ noinline fn finishDeparture(self: *Self, ended: anyerror!void, answered: anyerro
     const has_failure = std.meta.isError(ended) or std.meta.isError(answered) or std.meta.isError(saved) or std.meta.isError(kept) or std.meta.isError(sign_in_ended);
     const guidance = has_failure or self.upgrade_guidance or text.buffered().len != 0 or
         (if (departure) |value| value.has_guidance else left != null);
-    // The core decides only after all leave work has settled. Encoding failure
-    // preserves today's departure instead of losing an unsent draft.
     const outcome: session_upgrade.Outcome = if (self.state.upgrade.run) |stands| if (stands == .ended) stands.ended.outcome else .unchanged else .unchanged;
     if (session_upgrade.relaunch(outcome, guidance) and self.relaunch_build != null) {
         if (self.makeRelaunch(left)) |request| return request else |_| {}
@@ -924,8 +766,6 @@ noinline fn finishDeparture(self: *Self, ended: anyerror!void, answered: anyerro
     if (self.upgrade_report) |*report| _ = stderr.writeReceipt(report.written());
     _ = stderr.write(text.buffered());
     if (left) |held| {
-        // `finish` has already joined this frontend. Leave only emits the
-        // original guidance; the defer above disposes its scratch and editor.
         try self.leaveFinished(held, departure);
         return null;
     }
@@ -940,8 +780,6 @@ noinline fn finishDeparture(self: *Self, ended: anyerror!void, answered: anyerro
 
 fn makeRelaunch(self: *Self, left: ?Left) !Relaunch {
     const gpa = self.init.gpa;
-    // Put the open editor back under the sparse draft owner before encoding.
-    // The copied snapshot remains owned here until encoding succeeds.
     if (left) |held| if (held.frontend) |frontend| {
         try self.session_drafts.put(gpa, &held.session, frontend.input.snapshot());
     };
@@ -964,13 +802,9 @@ fn makeRelaunch(self: *Self, left: ?Left) !Relaunch {
     return .{ .executable = executable, .handoff = bytes, .receipt = receipt, .open = if (left) |held| held.session else null };
 }
 
-/// Apply the CLI-owned startup value once; every restored byte becomes owned.
 fn restoreRelaunch(self: *Self) !void {
     const value = self.options.restoration orelse return;
     self.options.restoration = null;
-    // Ignore the legacy overview snapshot; only chats retain drafts.
-    // Copy inactive drafts before opening a chat.
-    // An allocation failure refuses startup rather than showing a partial handoff.
     for (value.drafts) |entry| try self.session_drafts.put(self.init.gpa, entry.id, entry.snapshot);
     if (value.open) |id| self.options.open = id[0..session_id.bytes].*;
     var notice: view.Notice = .{ .colour = .normal };
@@ -979,8 +813,6 @@ fn restoreRelaunch(self: *Self) !void {
     self.state.notice = notice;
 }
 
-/// The Sessions list's rows for one frame, each with what a click on it
-/// names.
 const SessionRows = struct {
     state: *const view.State,
     width: u16,
@@ -1010,7 +842,6 @@ const SessionRows = struct {
     }
 };
 
-/// Styled text for one frame.
 fn rich(ctx: vxfw.DrawContext, caps: view.Caps, segments: []const view.Segment) !vxfw.Widget {
     const spans = try ctx.arena.alloc(vaxis.Segment, segments.len);
     for (segments, spans) |segment, *span| span.* = .{ .text = segment.text, .style = @import("widget_style.zig").of(caps, segment.style) };
@@ -1023,13 +854,10 @@ fn wantsFrame(self: *const Self) bool {
     return self.wantsFrameAt(self.animationFrame());
 }
 
-/// Whether a spinning mark on screen has a step to turn at spinner `frame`.
 fn wantsFrameAt(self: *const Self, frame: u64) bool {
     return self.root.listVisible() and frame != self.app_frame and self.listSpins();
 }
 
-/// The drawn viewport is history; which current rows spin is derived. No
-/// animation-eligibility flag survives a row, capability or list-area change.
 fn listSpins(self: *const Self) bool {
     for (self.app_sessions.shown.first..self.app_sessions.shown.end) |at| {
         const item = view.listItem(&self.state, at) orelse break;
@@ -1043,7 +871,6 @@ fn animationFrame(self: *const Self) u64 {
     return @intCast(@divFloor(@max(now, 0), std.time.ns_per_ms * view.spin_interval_ms));
 }
 
-/// The list has only its status and footer: no editor or hidden text storage.
 fn bottomWidget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .drawFn = drawBottom };
 }
@@ -1080,7 +907,6 @@ fn appListDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!v
     return self.drawPart(ctx, .list);
 }
 
-/// Both list layouts share pinned controls; only the overview draws a footer.
 fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) std.mem.Allocator.Error!vxfw.Surface {
     const size = ctx.max.size();
     self.caps.width = self.attention.vx.caps.unicode;
@@ -1138,10 +964,7 @@ fn failed(self: *const Self, err: anyerror, session: ?view.Reference) anyerror {
     return printFailure(err, self.options.store, session, self.started);
 }
 
-/// Prints guidance for a failure and returns it: how to fix TMPDIR, and the
-/// Session to resume when one was being opened.
 pub fn printFailure(err: anyerror, store: []const u8, session: ?view.Reference, started: ?view.Reference) anyerror {
-    // Four bytes per escaped selector byte, plus labels and hex syntax.
     var bytes: [4 * (protocol.max_store_bytes + protocol.max_session_bytes) + 384]u8 = undefined;
     var notice = std.Io.Writer.fixed(&bytes);
     write: {
@@ -1177,7 +1000,6 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     try self.sign_in.target.set(options.store);
     self.root.sign_in = self.sign_in.widget();
     self.paintDivider();
-    // The status's rows sit above the one Footer row.
     self.app_screen = .{ .content = &self.app_sessions, .input = self.bottomWidget(), .userdata = self, .on_event = appEvent };
     self.app_header = .{ .state = &self.state };
     self.app_new_session = .{ .state = &self.state, .caps = self.caps, .userdata = self, .on_click = appClick };
@@ -1203,6 +1025,11 @@ fn openSignIn(self: *Self, ctx: *vxfw.EventContext) !void {
     try self.root.openSignIn(ctx);
 }
 
+fn listVisible(raw: *anyopaque) bool {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return self.root.listVisible();
+}
+
 /// The first-run screen is the only thing the app can do, so it stays until
 /// sign-in gives a default; a screen opened from Settings always returns there.
 fn signInIsFirstRun(self: *const Self) bool {
@@ -1218,8 +1045,6 @@ fn closeSignIn(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
 fn signedIn(raw: *anyopaque, ctx: *vxfw.EventContext, activation: SignIn.Activation) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (!std.mem.eql(u8, self.options.store, activation.store.slice())) {
-        // Only first-run selection can change the Store. Settings pins the
-        // current Store, whose ongoing readers retain their borrowed path.
         std.debug.assert(self.worker.thread == null);
         self.signed_in_store = activation.store;
         self.options.store = self.signed_in_store.slice();
@@ -1242,8 +1067,6 @@ fn signedIn(raw: *anyopaque, ctx: *vxfw.EventContext, activation: SignIn.Activat
     if (self.root.session == null) try ctx.requestFocus(self.widget());
 }
 
-/// Accept one typed preference edit. Only this owner writes its worker queue;
-/// the page borrows the saved values and the answered status, never the job.
 pub fn saveDefaults(self: *Self, edit: preferences.Edit) !void {
     if (!view.admitsDefaultsEdit(&self.state) or self.defaults_save == .pending or self.job_count == max_jobs) return error.DefaultsUnavailable;
     const owned = try DefaultsEdit.init(self.init.gpa, edit);
@@ -1251,7 +1074,6 @@ pub fn saveDefaults(self: *Self, edit: preferences.Edit) !void {
     self.defaults_save = .pending;
 }
 
-/// Use the same Upgrade transition and worker lifecycle as the other screens.
 pub fn startUpgrade(self: *Self) !void {
     if (self.state.left) return error.UpgradeUnavailable;
     if (self.app_session) |shown| if (shown.frontend) |frontend| {
@@ -1261,8 +1083,6 @@ pub fn startUpgrade(self: *Self) !void {
     std.debug.assert(next == null);
 }
 
-/// The bridge stays with its concrete owner, avoiding both an import back into
-/// Overview and a generic adapter with access to this owner's representation.
 fn settingsBackend(self: *Self) AppSettings.Backend {
     const Callbacks = struct {
         fn owner(raw: *anyopaque) *Self {
@@ -1313,15 +1133,12 @@ const Ending = union(enum) { overview, conversation: Left };
 /// What the core asks of the loop: to leave or present a pane under Root.
 const Next = union(enum) { leave, open: struct { reference: view.Reference, browse: bool = false }, open_settings, focus_chat, new_session };
 
-/// Steps the core with one event and queues the jobs it asks for. Presenting
-/// panes and leaving are the loop's to do.
 fn event(self: *Self, value: view.Event) !?Next {
     return (try self.eventResult(value)).next;
 }
 
 const EventResult = struct { next: ?Next = null, intent_admission: view.IntentAdmission = .refused };
 
-/// Keep the core's synchronous admission with the jobs this exact step queued.
 fn eventResult(self: *Self, value: view.Event) !EventResult {
     const held_host = self.state.holdsHost();
     const effects = try view.step(&self.state, value);
@@ -1354,17 +1171,9 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
     return .{ .next = next, .intent_admission = effects.intent_admission };
 }
 
-/// Brings the terminal's program status records to what the core wants:
-/// a report for each Session whose record the terminal does not hold as
-/// wanted, as many as a frame takes, or with notifications off one clear of
-/// every record Rui may have set. The core learns what the terminal holds
-/// only from a frame that wrote the reports whole, so reports a cut frame
-/// may have dropped wait for the next frame.
 fn sendStatuses(self: *Self) void {
     if (self.state.left) return;
     const out = self.attention;
-    // Nothing to report or clear: every event ends here, so a keystroke
-    // never reads the preferences file.
     if (self.state.statusesSettled() and !out.statuses_shown) return;
     if (!(preferences.load(self.options.home) catch preferences.Values{}).notifications) {
         out.clear() catch return;
@@ -1377,7 +1186,6 @@ fn sendStatuses(self: *Self) void {
     }
 }
 
-/// Takes the queued job at `index` out of the queue.
 fn take(self: *Self, index: usize) Job {
     const job = self.jobs[index];
     std.mem.copyForwards(Job, self.jobs[index .. self.job_count - 1], self.jobs[index + 1 .. self.job_count]);
@@ -1391,9 +1199,6 @@ fn queue(self: *Self, job: Job) void {
     self.job_count += 1;
 }
 
-/// Starts the next job once the worker is free. While a conversation
-/// holds the terminal (`lent`) a stop goes first, and a start waits for
-/// the overview.
 fn dispatch(self: *Self, jobs: enum { all, lent }) !void {
     if (self.worker.thread != null) return;
     const queued = self.jobs[0..self.job_count];
@@ -1414,15 +1219,11 @@ fn dispatch(self: *Self, jobs: enum { all, lent }) !void {
     };
 }
 
-/// The worker: runs one job and writes only that job's answer. Its
-/// result is the job's outcome, which `complete` settles.
 fn work(raw: *anyopaque, task: *ClientTask) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     return self.runJob(task.readContext());
 }
 
-/// Runs `job`, on the worker's thread or, for a save on the way out, the
-/// loop's, and leaves its answer.
 fn runJob(self: *Self, context: client.ReadContext) !void {
     const requests = context.requests();
     std.debug.assert(self.answer == .none);
@@ -1430,7 +1231,6 @@ fn runJob(self: *Self, context: client.ReadContext) !void {
         .host => self.answer = .{ .host = self.ops.host(self) },
         .start_host => {
             const launch = self.ops.start_host(self);
-            // Failure is not a reachability observation. Recheck even then.
             self.answer = .{ .start_host = .{ .launch = launch, .read = self.ops.host(self) } };
         },
         .list => {
@@ -1444,8 +1244,6 @@ fn runJob(self: *Self, context: client.ReadContext) !void {
                     line.result = .line;
                     line.len = text.len;
                 },
-                // A refusal answers the row; a canonical Store failure ends
-                // the overview.
                 .failure => |failure| switch (failure.err()) {
                     error.HostInvocationFailed => line.result = .refused,
                     error.CanonicalStoreFailure => |err| return err,
@@ -1480,18 +1278,12 @@ fn runJob(self: *Self, context: client.ReadContext) !void {
             self.answer = .{ .menu = try model_picker.read(gpa, try protocol_reply.modelListProviders(body)) };
         },
         .defaults => |edit| {
-            // These are explicit field choices, not recommendations inferred
-            // from credential readiness. Validation/publication has one owner.
             const readiness: preferences.Readinesses = .initFill(.configured);
             _ = try preferences.update(self.options.home, edit.edit, &readiness);
         },
     }
 }
 
-/// On the way out, runs each save the core asked for that the worker never
-/// started, as the worker would, each answer stepping the core: a save is a
-/// local file write that outlives the overview, and the departure says how
-/// it ended. No other queued job runs.
 fn flushSaves(self: *Self) !void {
     var origin: client.FailureOrigin = .local;
     const requests: client.ReadContext = .{ .io = self.init.io, .origin = &origin };
@@ -1502,17 +1294,12 @@ fn flushSaves(self: *Self) !void {
         self.job.deinit(self.init.gpa);
         self.job = self.take(index);
         _ = self.deliver(self.runJob(requests)) catch |err| {
-            // Settle every accepted save, keeping the first failure primary.
             if (failure == null) failure = err;
         };
     }
     if (failure) |err| return err;
 }
 
-/// Joins the finished job and steps the core with what it left: a failed
-/// job is one without an answer. After a canonical Store failure the
-/// overview then ends, as every other caller does, once the core holds any
-/// request the job left unconfirmed.
 fn complete(self: *Self) !?Next {
     if (self.worker.thread == null) return null;
     const outcome = self.worker.join();
@@ -1521,9 +1308,6 @@ fn complete(self: *Self) !?Next {
     return next;
 }
 
-/// Steps the core with the job's answer, read where the job wrote it, since
-/// an answer may point into its own bytes, and then clears it: a job the
-/// core hears of leaves nothing behind for the next.
 fn deliver(self: *Self, outcome: anyerror!void) !?Next {
     const answer = &self.answer;
     defer answer.deinit(self.init.gpa);
@@ -1546,7 +1330,6 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             outcome catch return self.event(.{ .list = .failed });
             var rows: [view.max_page_rows]view.Listed = undefined;
             const page: view.Page = .of(&self.traversal, &answer.page, &rows);
-            // The next page goes before anything this page's result queues.
             if (page.answer == null) self.queue(.list);
             return self.event(.{ .list = .{ .page = page } });
         },
@@ -1574,22 +1357,18 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
 
         .models => {
             outcome catch |err| return self.event(.{ .models = .failed(err) });
-            // The core owns the menu it is given.
             const menu = answer.menu;
             answer.* = .none;
             return self.event(.{ .models = .{ .menu = menu } });
         },
         .defaults => {
             const written = if (outcome) |_| true else |err| preferences.failure(err).saved;
-            // Resolve saved settings under the launch selectors. The core
-            // applies the complete prospective binding.
             const next = if (written) try self.event(.{ .defaults_saved = self.savedDefault() }) else null;
             std.debug.assert(next == null);
             if (outcome) |_| {
                 self.defaults_save = .saved;
             } else |err| {
                 self.defaults_save = .failed;
-                // With no page left to show the answer, the departure owns it.
                 if (self.state.left) return err;
             }
         },
@@ -1597,8 +1376,6 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
     return null;
 }
 
-/// Read a confirmed saved snapshot, resolve it with the core's provider
-/// authority, then let .defaults_saved apply the complete result.
 fn savedDefault(self: *const Self) ?view.Default {
     if (!self.options.selectors.needsPreferences() or self.options.home.len == 0) return null;
     return resolveDefault(&self.state, .{
@@ -1607,8 +1384,6 @@ fn savedDefault(self: *const Self) ?view.Default {
     });
 }
 
-/// Snapshot owns provider/model validation. The core supplies only the
-/// missing provider authority; this local enrichment cannot pin its model.
 fn resolveDefault(state: *const view.State, saved: new_session_selection.Snapshot) ?view.Default {
     if (!saved.intent.needsPreferences()) return null;
     var snapshot = saved;
@@ -1617,15 +1392,10 @@ fn resolveDefault(state: *const view.State, saved: new_session_selection.Snapsho
     return view.Default.of(binding.provider.slice(), binding.model.slice());
 }
 
-/// Materialize the admitted core intent before queueing the native effect.
-/// Explicit selectors and a missing binding retain their saved-effort opt-out;
-/// permission inherits from the same observation regardless of those choices.
 fn creationSnapshot(self: *const Self, binding: ?view.Default) CreationSnapshot {
     return .read(binding, self.options.home, self.options.selectors.needsPreferences(), preferences.load);
 }
 
-/// The captured empty-Session configuration, completed by the shared
-/// creation owner before Configure admission.
 fn creationInput(self: *const Self, snapshot: *const CreationSnapshot, compaction_buffer: *[20]u8) !configure_input.ConfigureInput {
     const saved = try snapshot.settings;
     const binding = &snapshot.binding;
@@ -1645,14 +1415,10 @@ fn listModels(self: *Self, requests: client.Requests, gpa: std.mem.Allocator) ![
     return requests.modelList(self.options.store, gpa);
 }
 
-/// The wall clock in Unix milliseconds, as the core's times are.
 fn realMs(self: *const Self) u64 {
     return @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
 }
 
-/// An input in the opened Session's conversation, whose work shows as
-/// `kind`, stepped as the overview's own: a stop it asks for is sent at
-/// once.
 fn conversed(raw: *anyopaque, kind: view.Kind, input: view.ConversationInput) !view.IntentAdmission {
     const self: *Self = @ptrCast(@alignCast(raw));
     errdefer self.lent_failed = true;
@@ -1662,8 +1428,6 @@ fn conversed(raw: *anyopaque, kind: view.Kind, input: view.ConversationInput) !v
     return result.intent_admission;
 }
 
-/// A read the opened Session's conversation applied: the outcome it opened
-/// on is one the person has seen.
 fn observed(raw: *anyopaque, read: session_list.Snapshot, opening: bool) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     errdefer self.lent_failed = true;
@@ -1671,10 +1435,6 @@ fn observed(raw: *anyopaque, read: session_list.Snapshot, opening: bool) !void {
     std.debug.assert(next == null);
 }
 
-/// While a conversation has input focus the overview keeps its list current.
-/// Its ticks refresh other Sessions, including the visible pane, and a
-/// finished job is answered here, so a
-/// stop never waits behind a listing. Starts wait for the overview.
 fn service(raw: *anyopaque) !bool {
     const self: *Self = @ptrCast(@alignCast(raw));
     errdefer self.lent_failed = true;
@@ -1685,8 +1445,6 @@ fn service(raw: *anyopaque) !bool {
     };
     const answered = self.worker.thread != null and self.worker.completed();
     if (answered) {
-        // Only a start's answer opens a Session, and none is in flight
-        // while a conversation is open.
         const next = try self.complete();
         std.debug.assert(next == null);
     }
@@ -1718,14 +1476,12 @@ fn memoryValue(raw: *anyopaque) ?view.Memory {
     return self.state.memory;
 }
 
-/// One borrowed source for app settings and the open conversation's choices.
 fn modelsSnapshot(raw: *anyopaque) @import("model_choice.zig").Snapshot {
     const self: *Self = @ptrCast(@alignCast(raw));
     const state = &self.state;
     return .{ .menu = if (state.menu_read == .read or state.menu.entries.len > 0) &state.menu else null, .revision = state.menu_revision, .ready = state.modelsReady() };
 }
 
-/// Project the latest archive request for this exact conversation.
 fn archiveState(raw: *anyopaque) @import("chat_info.zig").SaveState {
     const self: *Self = @ptrCast(@alignCast(raw));
     var at = self.state.request_count;
@@ -1742,26 +1498,21 @@ fn archiveState(raw: *anyopaque) @import("chat_info.zig").SaveState {
     return .idle;
 }
 
-/// The Upgrade, as the open conversation reads it.
 fn upgradeValue(raw: *anyopaque) session_upgrade.Upgrade {
     const self: *Self = @ptrCast(@alignCast(raw));
     return self.state.upgrade;
 }
 
-/// What the overview says under the opened Session's conversation.
 fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Said {
     const self: *Self = @ptrCast(@alignCast(raw));
     const said = view.conversation(&self.state, self.opened, kind, self.caps, &self.conversation_said);
     return .{ .text = said.text, .notice = said.notice, .stoppable = said.stoppable };
 }
 
-/// Render the core departure into the caller's bounded finish scratch.
 fn departureText(self: *const Self, out: *std.Io.Writer) void {
     view.writeDeparture(&self.state, null, out) catch unreachable;
 }
 
-/// Lets the conversation the person left join its borrowers and write its
-/// guidance, then names the Session to resume.
 fn leaveFinished(self: *Self, left: Left, settled: ?SessionFrontend.Departure) !void {
     const session = &left.session;
     const store = self.options.store;
@@ -1787,12 +1538,9 @@ fn leaveFinished(self: *Self, left: Left, settled: ?SessionFrontend.Departure) !
     };
 }
 
-/// The same observation feeds the notice, Session service and core counts.
 fn takeHostRead(self: *Self, read: HostRead) !?Next {
     const previous = self.host_observation;
     self.host_observation = read.observation;
-    // A ready Host outlives what the last start said: a failure lost to a
-    // competing owner, and a warning once the next read has shown it.
     if (read.observation == .ready) self.host_launch = null;
     const restart = host_restart.decide(.{
         .previous = previous.restartSeen(),
@@ -1807,15 +1555,12 @@ fn takeHostRead(self: *Self, read: HostRead) !?Next {
     return self.event(.{ .host = read.observation.facts() });
 }
 
-/// Starting is the effect's actual custody, including a queued job and a
-/// finished worker whose result the UI has not joined. No mirrored phase.
 fn hostStarting(self: *const Self) bool {
     if (self.worker.thread != null and self.job == .start_host) return true;
     for (self.jobs[0..self.job_count]) |job| if (job == .start_host) return true;
     return false;
 }
 
-/// All Host ending words and their optional key live beside their one owner.
 const HostState = enum {
     ready,
     stopped,
@@ -1826,7 +1571,6 @@ const HostState = enum {
 
     fn line(self: HostState) struct { mark: marks.Mark, words: []const u8 } {
         return switch (self) {
-            // Shown only beside a start's warning: the Host is up.
             .ready => .{ .mark = .finished, .words = "Host ready" },
             .stopped => .{ .mark = .stopped, .words = "Host stopped" },
             .paused => .{ .mark = .stopped, .words = "Host paused" },
@@ -1838,8 +1582,6 @@ const HostState = enum {
 };
 
 fn hostState(self: *const Self) HostState {
-    // The upgrade owns the swap and reobservation. A stale pre-swap read
-    // cannot offer a start while that transition still owns the Host.
     if (self.state.holdsHost()) return .paused;
     if (self.hostStarting()) return .starting;
     return switch (self.host_observation) {
@@ -1873,14 +1615,11 @@ fn queueHost(self: *Self) void {
     self.queue(.host);
 }
 
-/// One rule admits the gesture and supplies the exact key tail to the line.
 fn hostNext(self: *const Self) ?HostLaunch.Next {
     if (self.state.holdsHost() or self.hostStarting() or self.host_observation != .stopped) return null;
     return self.launchNext();
 }
 
-/// The key the last launch leaves for a stopped Host: a start, a retry, or
-/// none when no start can mend its failure.
 fn launchNext(self: *const Self) ?HostLaunch.Next {
     return if (self.host_launch) |launch| switch (launch) {
         .failed => |cause| cause.next(),
@@ -1888,13 +1627,11 @@ fn launchNext(self: *const Self) ?HostLaunch.Next {
     } else .start;
 }
 
-/// Queues the one start job, `r`'s or a restart's; the loop's dispatch runs it.
 fn queueHostStart(self: *Self) void {
     self.host_launch = null;
     self.queue(.start_host);
 }
 
-/// The Host is stopped and a start can mend it now.
 fn hostStartable(raw: *anyopaque) bool {
     const self: *Self = @ptrCast(@alignCast(raw));
     return self.hostNext() != null;
@@ -1907,7 +1644,6 @@ fn requestHostStart(raw: *anyopaque, ctx: *vxfw.EventContext) !bool {
     return true;
 }
 
-/// Starts the stopped Host that `hostNext` says a start can mend.
 fn requestedHostStart(self: *Self, ctx: *vxfw.EventContext) !void {
     self.queueHostStart();
     try self.dispatch(if (self.root.session == null) .all else .lent);
@@ -1939,7 +1675,6 @@ fn drawHostNotice(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
     const self: *Self = @ptrCast(@alignCast(raw));
     const state = self.hostState();
     const line = state.line();
-    // These two states already say why no start can help.
     const detail = if (self.state.holdsHost() or state == .incompatible or state == .unreadable) null else self.host_launch;
     const mark = marks.marks.get(if (detail != null and detail.? == .failed) .failed else line.mark);
     const notice = if (detail) |value| value.words() else "";
@@ -1985,13 +1720,9 @@ fn hostFacts(self: *Self) HostRead {
         .incompatible => .incompatible,
         .access_failure => .unreadable,
     };
-    // The same read samples live memory.
     return .{ .observation = observation, .memory = self.liveMemory(if (observation.facts()) |host| host.started_at else null) };
 }
 
-/// Live memory: this TUI, the Host that started at
-/// `host_started_at` and its tools. With no Host ready it is this TUI alone.
-/// The Host's pid is read once per Host start.
 fn liveMemory(self: *Self, host_started_at: ?u64) view.Memory {
     if (host_started_at) |started_at| {
         if (self.host_process == null or self.host_process.?.started_at != started_at) {
@@ -2006,7 +1737,6 @@ fn liveMemory(self: *Self, host_started_at: ?u64) view.Memory {
 }
 
 fn listPage(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
-    // Each page overwrites the one before from offset zero.
     const Sink = struct {
         io: std.Io,
         file: std.Io.File,
@@ -2082,7 +1812,6 @@ fn pinSession(self: *Self, requests: client.Requests, input: client.SessionPinIn
 
 const test_now_s: u64 = 1_800_000_000;
 
-/// What the fake operations were asked, for the wiring tests.
 const Seen = struct {
     hosts: usize = 0,
     lists: usize = 0,
@@ -2112,9 +1841,7 @@ const Seen = struct {
     conversations: usize = 0,
     conversed: view.Reference = @splat(0),
     model_lists: usize = 0,
-    /// How many Sessions the fake listing returns, from `listed_references`.
     listed: usize = 1,
-    /// How many of them are at work; the rest are idle.
     working: usize = listed_references.len,
 
     var now: Seen = .{};
@@ -2126,7 +1853,6 @@ const Seen = struct {
 
 const listed_references = [_][]const u8{ "k7m2qx", "b4n8wd", "p3c6tz", "h5r9vy", "m2j7fs" };
 
-/// Operations that answer from fixed facts and record what they were asked.
 const fake_operations: Operations = .{
     .start_host = struct {
         fn start(_: *Self) HostLaunch {
@@ -2212,7 +1938,6 @@ const fake_operations: Operations = .{
             var reply: std.Io.Writer.Allocating = .init(gpa);
             errdefer reply.deinit();
             try reply.writer.writeAll(protocol.model_list_reply.head);
-            // Navigation tests offer a small set, independent of catalog releases.
             try model_list.writeProviders(&reply.writer, model_catalog.shipped, &.{
                 .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\n" } } },
                 .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nwhisper-1\n" } } },
@@ -2229,7 +1954,6 @@ const fake_operations: Operations = .{
     }.open,
 };
 
-/// A terminal's screen after one App frame.
 const Shown = struct {
     arena: std.heap.ArenaAllocator,
     screen: vaxis.Screen,
@@ -2238,7 +1962,6 @@ const Shown = struct {
         self.arena.deinit();
     }
 
-    /// Row `row` as the terminal shows it, trailing blanks trimmed.
     fn line(self: *Shown, row: u16) ![]const u8 {
         var out: std.ArrayList(u8) = .empty;
         var col: u16 = 0;
@@ -2249,7 +1972,6 @@ const Shown = struct {
         return std.mem.trimEnd(u8, out.items, " ");
     }
 
-    /// Every row, joined by newlines.
     fn text(self: *Shown) ![]const u8 {
         var out: std.ArrayList(u8) = .empty;
         for (0..self.screen.height) |row| {
@@ -2259,7 +1981,6 @@ const Shown = struct {
         return out.items;
     }
 
-    /// The rows from `first` on read `expected`.
     fn expectLines(self: *Shown, first: u16, expected: []const []const u8) !void {
         for (expected, first..) |want, row| try std.testing.expectEqualStrings(want, try self.line(@intCast(row)));
     }
@@ -2269,8 +1990,6 @@ const Shown = struct {
     }
 };
 
-/// An overview over fake operations, reading keys from a pipe and drawing
-/// into another.
 const Rig = struct {
     environ: std.process.Environ.Map,
     init: std.process.Init = undefined,
@@ -2295,18 +2014,12 @@ const Rig = struct {
         try rig.screen.init(std.testing.io, &rig.environ, true);
         errdefer rig.screen.deinit();
         rig.overview = try create(rig.init, options, undefined, ops, interrupted);
-        // What a test's frames show never depends on the environment the
-        // test binary runs in: `zig build` sets NO_COLOR for it and `check`
-        // does not, and a coloured working row's mark turns with the clock.
-        // A test of colour or locale sets its own caps.
         rig.overview.caps = .{ .depth = .none };
         rig.overview.session_screen = rig.screen;
         rig.out = .init(std.testing.allocator);
         rig.attention = .{ .vx = &rig.screen.vx, .out = &rig.out.writer };
         rig.overview.attention = &rig.attention;
-        // The production run establishes its launch epoch before App starts.
         rig.overview.state.read_instance = @splat(1);
-        // As App's first frame does, at the size a PTY opens with.
         _ = try view.step(&rig.overview.state, .{ .resized = .{ .width = 80, .height = 24 } });
         return rig;
     }
@@ -2322,8 +2035,6 @@ const Rig = struct {
         std.testing.allocator.destroy(rig);
     }
 
-    /// The bytes a terminal sends for `bytes`, delivered as App delivers
-    /// them to the overview. Enter is CR, as a real terminal sends it.
     fn press(rig: *Rig, bytes: []const u8) !?Ending {
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
@@ -2331,8 +2042,6 @@ const Rig = struct {
         return if (ctx.quit) .overview else null;
     }
 
-    /// A left press at `column`, `row` on the frame a terminal of `width`
-    /// by `height` shows, delivered as App delivers it.
     fn click(rig: *Rig, column: u16, row: u16, width: u16, height: u16) !?Ending {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
@@ -2343,8 +2052,6 @@ const Rig = struct {
         return if (ctx.quit) .overview else null;
     }
 
-    /// What the overview wrote beside App's frames since the last call:
-    /// program status records.
     fn signalled(rig: *Rig) []const u8 {
         const written = rig.out.written();
         @memcpy(rig.taken[0..written.len], written);
@@ -2352,8 +2059,6 @@ const Rig = struct {
         return rig.taken[0..written.len];
     }
 
-    /// What a terminal of `width` by `height` shows: the overview drawn
-    /// and composited as App's render does, with the current pane focused.
     fn shown(rig: *Rig, width: u16, height: u16) !Shown {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         errdefer arena.deinit();
@@ -2375,7 +2080,6 @@ const Rig = struct {
         return .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty };
     }
 
-    /// Takes the core's request as App's overview does.
     fn next(rig: *Rig, value: ?Next) !?Ending {
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
@@ -2386,7 +2090,6 @@ const Rig = struct {
         return if (ctx.quit) .overview else null;
     }
 
-    /// Runs queued jobs as the loop would, each result stepping the core.
     fn settle(rig: *Rig) !?Ending {
         const overview = rig.overview;
         while (true) {
@@ -2397,7 +2100,6 @@ const Rig = struct {
         }
     }
 
-    /// Waits for the running job's answer.
     fn answered(rig: *Rig) !void {
         const Worker = struct {
             fn completed(overview: *Self) !bool {
@@ -2407,8 +2109,6 @@ const Rig = struct {
         try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), rig.overview, Worker.completed);
     }
 
-    /// Services the overview as a conversation does, until no job it may
-    /// start is left.
     fn lend(rig: *Rig) !void {
         const overview = rig.overview;
         for (0..100) |_| {
@@ -2450,8 +2150,6 @@ test "pin separator is ground and inert beside selected controls or Sessions at 
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(overview.state.order.items.len > 1);
-    // The existing leading Session stays first when pinned; the canonical
-    // prefix now has both groups, so only its boundary gets a separator.
     overview.state.rows.items[overview.state.order.items[0]].pin_order = 7;
     overview.caps = .{};
     const ground = @import("widget_style.zig").of(overview.caps, .{}).bg;
@@ -2465,7 +2163,6 @@ test "pin separator is ground and inert beside selected controls or Sessions at 
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
         try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Archived") != null);
         try std.testing.expectEqual(selection == .new_session, std.meta.eql(highlight, shown.screen.readCell(1, 0).?.style.bg));
-        // Only the pin boundary is blank ground, never selected.
         for (0..30) |col| {
             const cell = shown.screen.readCell(@intCast(col), 3).?;
             try std.testing.expect(std.mem.trim(u8, cell.char.grapheme, " ").len == 0);
@@ -2552,7 +2249,6 @@ test "each effect runs its client operation and each result reaches the core" {
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
     defer rig.close();
     const overview = rig.overview;
-    // A tick lists: the Host's facts, the page, then the first lines it asks for.
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.hosts);
@@ -2563,12 +2259,10 @@ test "each effect runs its client operation and each result reaches the core" {
     try std.testing.expectEqual(@as(u64, 1), Seen.now.line.position);
     const row = overview.state.find("k7m2qx".*).?;
     try std.testing.expectEqualStrings("Fix the flaky test", overview.state.lineOf(row).?);
-    // The next listing asks from the token the first one answered.
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(?u64, 1), if (Seen.now.since) |since| since.generation else null);
 
-    // Enter creates an empty Session from the current defaults, then opens it.
     try std.testing.expect(try rig.press("\x1b[H\r") == null);
     try std.testing.expect(try rig.settle() == null);
     const start = &Seen.now.creation;
@@ -2582,13 +2276,11 @@ test "each effect runs its client operation and each result reaches the core" {
     try std.testing.expectEqual(@as(usize, 1), Seen.now.conversations);
     try std.testing.expectEqualStrings("n3w5es", &Seen.now.conversed);
 
-    // Ctrl-X twice stops the selected Session.
     try std.testing.expect(try rig.press("\x1b[H\x1b[B\x1b[B\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
     try std.testing.expectEqualStrings("k7m2qx", &Seen.now.stopped);
 
-    // Enter on the selected Session opens it; Ctrl-D leaves.
     try std.testing.expect(try rig.press("\r") == null);
     try std.testing.expectEqual(@as(usize, 2), Seen.now.conversations);
     try std.testing.expectEqualStrings("k7m2qx", &Seen.now.conversed);
@@ -2658,7 +2350,6 @@ fn pin(home: []const u8, provider: []const u8, model: []const u8) !void {
     _ = try preferences.update(home, .{ .provider = .{ .set = provider }, .model = .{ .set = model } }, &readiness);
 }
 
-/// Selectors a launch that named the Store, provider and model gives.
 const explicit_selectors: new_session_selection.Intent = .{ .store = "/store", .provider = "codex", .model = "gpt-6-luna" };
 
 test "an overview left without a pick writes no default, pinned or not" {
@@ -2669,7 +2360,6 @@ test "an overview left without a pick writes no default, pinned or not" {
         const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
         if (pinned) try pin(home, "openai", "gpt-6-luna");
         var cancellation: client.Cancellation = .{};
-        // Without a pin, the overview opens on the built-in default.
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = if (pinned) "openai" else "codex", .model = if (pinned) "gpt-6-luna" else "gpt-5.5" }, fake_operations, &cancellation);
         defer rig.close();
         var buffer: [1024]u8 = undefined;
@@ -2758,7 +2448,6 @@ test "the overview opens the resumed Session first, lists on its tick and leaves
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .open = "k7m2qx".* }, fake_operations, &cancellation);
     defer rig.close();
-    // As App's init does with the launch's Session.
     try std.testing.expect(try rig.next(try rig.overview.event(.{ .open = rig.overview.options.open.? })) == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.conversations);
     try std.testing.expectEqualStrings("k7m2qx", &Seen.now.conversed);
@@ -2785,7 +2474,6 @@ test "only your working Session's mark spins, at the frame's step, and without c
         const at_three = try view.listSegments(arena.allocator(), &overview.state, item, 80, overview.caps, 3);
         try std.testing.expectEqual(at_two.segments.len, at_three.segments.len);
         for (at_two.segments, at_three.segments) |two, three| if (!std.mem.eql(u8, two.text, three.text)) {
-            // The mark turns a step; nothing else in the row moves.
             try std.testing.expectEqualStrings(view.spinner[2], two.text);
             try std.testing.expectEqualStrings(view.spinner[3], three.text);
             try std.testing.expect(view.markSpins(&overview.state, item, overview.caps));
@@ -2802,15 +2490,11 @@ test "the overview asks for frames only while a spinning mark is on screen" {
     const rig = try openOverview();
     defer rig.close();
     rig.overview.caps = .{};
-    // Your newest Session works; four more of yours are idle.
     Seen.now.listed = listed_references.len;
     Seen.now.working = 1;
     try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     const Frames = struct {
-        /// Whether, a spinner step after drawing at `height` rows, the
-        /// overview asks App for another frame. The next step is passed in
-        /// rather than waited for, so the clock never decides the result.
         fn after(from: *Rig, height: u16) !bool {
             var shown = try from.shown(80, height);
             defer shown.deinit();
@@ -2820,19 +2504,15 @@ test "the overview asks for frames only while a spinning mark is on screen" {
         }
     };
     try std.testing.expect(try Frames.after(rig, 24));
-    // With the last row selected on a short screen, the spinning row is
-    // above it and needs no frames.
     _ = try rig.press("\x1b[F\x1b[A");
     try std.testing.expect(!try Frames.after(rig, 9));
     try std.testing.expect(try Frames.after(rig, 24));
-    // A main pane over the narrow list shows no marks.
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
     try rig.overview.root.openSettings(&ctx);
     try std.testing.expect(!try Frames.after(rig, 24));
 }
 
-/// The Reply a send leaves, whatever else it returns.
 fn recorded(sent: anytype, handle: []const u8) Reply {
     var reply: Reply = .{};
     reply.record(sent, handle) catch {};
@@ -2858,10 +2538,8 @@ test "a captured request is unconfirmed until the Host answers it" {
     var lost: Reply = .{};
     try lost.record(unread, "h1");
     try std.testing.expectEqualStrings("h1", lost.created().unconfirmed);
-    // Even a send that never connected leaves a saved request to recover.
     const unsent: Sent = .{ .failed = .{ .step = .connect, .err = error.FileNotFound } };
     try std.testing.expectEqualStrings("h1", recorded(unsent, "h1").created().unconfirmed);
-    // A refused environment sent nothing: the start failed, and says why.
     var environ = std.process.Environ.Map.init(std.testing.allocator);
     defer environ.deinit();
     const large = try std.testing.allocator.alloc(u8, 70000);
@@ -2875,7 +2553,6 @@ test "a captured request is unconfirmed until the Host answers it" {
     try std.testing.expectEqualStrings("h1", recorded(uploaded, "h1").created().unconfirmed);
     try std.testing.expectEqualStrings("h1", recorded(uploaded, "h1").stop().unconfirmed);
     try std.testing.expect(recorded(accepted, "h1").stop() == .stopped);
-    // A canonical Store failure is unconfirmed, and its error ends the overview.
     const fenced: Sent = .{ .done = .{ .status = 500, .context = context, .target = target, .answer = error.CanonicalStoreFailure } };
     var unknown: Reply = .{};
     try std.testing.expectError(error.CanonicalStoreFailure, unknown.record(fenced, "h1"));
@@ -2901,7 +2578,6 @@ test "a canonical Store failure ends the overview and names creation recovery" {
     try std.testing.expect(std.mem.indexOf(u8, departure.written(), "rui request recover fenced-handle") != null);
 }
 
-/// A Host's failure reply with `code`, as the client validated it.
 fn readFailure(code: []const u8) protocol_reply.ReadFailure {
     var failure: protocol_reply.ReadFailure = .{ .status = 500, .diagnostic = .{ .type = .{}, .code = .{} } };
     failure.diagnostic.type.set("invocation_error") catch unreachable;
@@ -2976,7 +2652,6 @@ test "a stop whose reply was lost names its request on departure" {
     defer departure.deinit();
     try view.writeDeparture(&rig.overview.state, null, &departure.writer);
     try std.testing.expectEqualStrings(guidance, departure.written());
-    // Its row takes no second stop: Ctrl-X names the recovery and sends nothing.
     try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms }) == null);
     try std.testing.expect(try rig.settle() == null);
     rig.overview.state.notice = null;
@@ -2984,7 +2659,6 @@ test "a stop whose reply was lost names its request on departure" {
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
     try std.testing.expectEqualStrings("! k7m2qx stop unsure; details on exit", rig.overview.state.notice.?.text());
-    // A stop still running as the overview ends is named the same way.
     const running = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
     defer running.close();
     try std.testing.expect(try running.overview.event(.{ .tick = test_now_s * 1000 }) == null);
@@ -2996,21 +2670,15 @@ test "a stop whose reply was lost names its request on departure" {
     try std.testing.expectEqualStrings(guidance, try finishedGuidance(running, &buffer));
 }
 
-/// Runs `finish` over a terminal whose restore failed, which writes nothing
-/// to stdout, and returns what it wrote to stderr.
 fn finishedGuidance(rig: *Rig, buffer: []u8) ![]const u8 {
     const written = try finishedWith(rig, {}, null, buffer);
-    // The overview's departure precedes the Detached notice App's exit writes.
     const at = std.mem.indexOf(u8, written, "\nDetached. Host work continues.\nOverview: rui --store ") orelse return error.TestExpectedDetached;
     return written[0..at];
 }
 
-/// Runs App's `finishApp` after App ended with `ended`, expecting
-/// `failure`, and returns what it wrote to stderr.
 fn finishedWith(rig: *Rig, ended: anyerror!void, failure: ?anyerror, buffer: []u8) ![]const u8 {
     var pipe: [2]c_int = undefined;
     if (std.c.pipe(&pipe) != 0) return error.SystemResources;
-    // A way out that writes nothing must read as nothing, not wait.
     const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
     if (std.c.fcntl(pipe[0], std.c.F.SETFL, std.c.fcntl(pipe[0], std.c.F.GETFL) | nonblock) < 0) return error.SystemResources;
     defer for (pipe) |fd| {
@@ -3036,28 +2704,20 @@ test "while a conversation holds the terminal its stop goes first, the listing g
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
     defer rig.close();
     const overview = rig.overview;
-    // A listing is due as the conversation opens.
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
     overview.opened = "k7m2qx".*;
-    // The due Host read starts before the stop is asked for.
     try overview.dispatch(.lent);
     try std.testing.expectEqual(Job.host, std.meta.activeTag(overview.job));
     _ = try conversed(overview, .working, .stop);
-    // The Host read already running answers first; the stop goes before
-    // the page queued ahead of it.
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), overview, Lent.answered);
     try std.testing.expectEqual(Job.stop, std.meta.activeTag(overview.job));
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), overview, Lent.answered);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
     try std.testing.expectEqual(Job.list, std.meta.activeTag(overview.job));
-    // The listing goes on under the conversation, so records stay current; the
-    // stop's answer asks for another at once.
     try rig.lend();
     try std.testing.expect(Seen.now.hosts >= 1 and Seen.now.lists >= 1);
     try std.testing.expectEqual(@as(usize, 0), overview.job_count);
 
-    // A listing's canonical Store failure under a conversation ends the
-    // overview, with no guidance to resume the Session.
     var ops = fake_operations;
     ops.list = struct {
         fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
@@ -3098,32 +2758,24 @@ test "a terminal that answers the program status probe gets each Session's recor
     defer rig.close();
     const overview = rig.overview;
     rig.overview.options.home = home;
-    // The probe's answer and the device attributes behind it are reports:
-    // the list takes none of their bytes, nor the printable key after them.
     try std.testing.expect(try rig.press("\x1b]7501;?\x1b\\\x1b[?62;22cx\x1b[O") == null);
     try std.testing.expect(try rig.press("\x7f") == null);
-    // The overview opens on k7m2qx working: its record, named by its first
-    // line once read, while away.
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     var written = rig.signalled();
     const working = "\x1b]7501;state=working:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\";
     try std.testing.expect(std.mem.indexOf(u8, written, working) != null);
-    // Its finish replaces the record, away as it is.
     Listing.finished = true;
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 60_000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     written = rig.signalled();
     try std.testing.expect(std.mem.startsWith(u8, written, "\x1b]7501;state=done:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\"));
-    // The conversation reading it first writes nothing.
     overview.opened = "k7m2qx".*;
     try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 } }, false);
     try std.testing.expectEqualStrings("", rig.signalled());
-    // Opening the Session shows the person its outcome.
     try std.testing.expect(try overview.event(.{ .open = "k7m2qx".* }) != null);
     written = rig.signalled();
     try std.testing.expect(std.mem.startsWith(u8, written, "\x1b]7501;state=idle:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\"));
-    // Turned off, Rui clears its records; turned on, it sets them again.
     _ = try preferences.update(home, .{ .notifications = false }, &preferences.Readinesses.initFill(.missing));
     Listing.finished = false;
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 120_000 }) == null);
@@ -3189,7 +2841,6 @@ test "a Session's record takes its new name when only its Label changes" {
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(std.mem.indexOf(u8, rig.signalled(), by_line) != null);
-    // Named while it still works: the record keeps its state, under the Label.
     Listing.label = "Lane four";
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 60_000 }) == null);
     try std.testing.expect(try rig.settle() == null);
@@ -3197,7 +2848,6 @@ test "a Session's record takes its new name when only its Label changes" {
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 120_000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(std.mem.indexOf(u8, rig.signalled(), "\x1b]7501;") == null);
-    // The Label cleared, its first line names it again.
     Listing.label = null;
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 180_000 }) == null);
     try std.testing.expect(try rig.settle() == null);
@@ -3241,11 +2891,9 @@ test "each later finish, and each later wait, is a record again though no listin
     for ([_]struct { work: ?protocol.SessionWork, record: ?[]const u8 }{
         .{ .work = null, .record = "\x1b]7501;state=working:id=rui/k7m2qx:" },
         .{ .work = finished(1), .record = done },
-        // Turn 2 began and finished between listings.
         .{ .work = finished(2), .record = done },
         .{ .work = finished(2), .record = null },
         .{ .work = waiting(3, 7), .record = blocked },
-        // Action 7 was decided and Action 8 waits.
         .{ .work = waiting(3, 8), .record = blocked },
         .{ .work = waiting(3, 8), .record = null },
         .{ .work = waiting(4, 2), .record = blocked },
@@ -3283,13 +2931,11 @@ test "a later Turn's finish the conversation read first is still a record when t
     const overview = rig.overview;
     rig.overview.options.home = home;
     try std.testing.expect(try rig.press("\x1b]7501;?\x1b\\\x1b[?62;22c\x1b[O") == null);
-    // Opened on Turn 1's finish, then a listing that reads it again: no record.
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 60_000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(std.mem.indexOf(u8, rig.signalled(), "\x1b]7501;") == null);
-    // Turn 2 finishes and its conversation reads that before any listing.
     overview.opened = "k7m2qx".*;
     try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 } }, false);
     try std.testing.expectEqualStrings("", rig.signalled());
@@ -3324,8 +2970,6 @@ test "a finish the conversation opened on is no done record when a listing reads
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(std.mem.indexOf(u8, rig.signalled(), "\x1b]7501;state=working:id=rui/k7m2qx:") != null);
-    // Turn 1 finishes; the person opens the Session before a listing reads
-    // that, and its conversation opens on the finish.
     Listing.finished_turn = 1;
     try std.testing.expect(try overview.event(.{ .open = "k7m2qx".* }) != null);
     overview.opened = "k7m2qx".*;
@@ -3333,11 +2977,9 @@ test "a finish the conversation opened on is no done record when a listing reads
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 60_000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(std.mem.startsWith(u8, rig.signalled(), "\x1b]7501;state=idle:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\"));
-    // Back on the overview, later listings of that finish leave the record.
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 120_000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(std.mem.indexOf(u8, rig.signalled(), "\x1b]7501;") == null);
-    // Turn 2's finish, which the person has not opened, is done.
     Listing.finished_turn = 2;
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 180_000 }) == null);
     try std.testing.expect(try rig.settle() == null);
@@ -3356,7 +2998,6 @@ test "records go out though the terminal never answered the probe, and nothing e
     try rig.environ.put("STY", "1.pts-0.host");
     const overview = rig.overview;
     rig.overview.options.home = home;
-    // Away, with no answer to the probe.
     try std.testing.expect(try rig.press("\x1b[O") == null);
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
@@ -3378,7 +3019,6 @@ test "a stop answered under a conversation says so there, and goes before a list
     }.stop;
     const unsure = "! k7m2qx stop unsure; details on exit";
     var cancellation: client.Cancellation = .{};
-    // A stop the worker finished as the conversation opened.
     const finished = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
     defer finished.close();
     try std.testing.expect(try finished.overview.event(.{ .tick = test_now_s * 1000 }) == null);
@@ -3392,8 +3032,6 @@ test "a stop answered under a conversation says so there, and goes before a list
     try std.testing.expectEqual(@as(usize, 2), Seen.now.lists);
     try std.testing.expectEqualStrings(unsure, conversationLine(finished.overview, .working).notice.?);
 
-    // A stop still queued when the conversation opened goes before the
-    // listing queued ahead of it.
     const queued = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
     defer queued.close();
     try std.testing.expect(try queued.overview.event(.{ .tick = test_now_s * 1000 }) == null);
@@ -3425,11 +3063,9 @@ test "a failed terminal restore still prints the departure guidance" {
     try std.testing.expectEqualStrings("rui: Not sure the new Session was created. Check with: rui request recover lost-handle\n", try finishedGuidance(rig, &buffer));
 }
 
-/// Faults cross the same joined-worker boundary as a real lost connection.
 const HostRecovery = struct {
     const Availability = enum { ready, paused, stopping, stopped, incompatible, unreadable };
     var availability: Availability = .ready;
-    /// What a stopped Host's record says. Asked by default: the manual line.
     var last_stop: platform.StoreLease.LastStop = .asked;
     var starts: usize = 0;
     var fail_start: bool = false;
@@ -3565,7 +3201,6 @@ test "Host line and Settings tail show together without overlap at wide and narr
         const text = try shown.text();
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "Host stopped ·"));
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "  Settings"));
-        // One owner places every row: list, Settings tail, Host line, Footer.
         try std.testing.expectEqual(at.list.end, at.settings.start);
         try std.testing.expectEqual(@as(u16, 2), at.settings.len());
         try std.testing.expectEqual(at.settings.end, at.host.start);
@@ -3581,7 +3216,6 @@ test "Host line and Settings tail show together without overlap at wide and narr
             try std.testing.expect(std.mem.indexOf(u8, line, "Settings") == null);
         }
     };
-    // Once the Host is ready again its row returns to the list.
     HostRecovery.availability = .ready;
     overview.host_observation = .unread;
     var shown = try rig.shown(46, 12);
@@ -3618,7 +3252,6 @@ test "Host recovery keeps the open widget drafts and scroll and starts only on a
     frontend.reading.opening = false;
     frontend.poll_at = std.math.maxInt(i96);
     try app_events.send(&ctx, "chat draft", overview.root.widget(), child);
-    // The reader scrolled up to an earlier row: that place is theirs to keep.
     rig.screen.anchor.anchor = .{ .at = .{ .key = .{ .position = 7 }, .line = 1 } };
     const anchor = rig.screen.anchor;
     try frontend.reader.start(std.testing.io, frontend, HostRecovery.lost);
@@ -3643,7 +3276,7 @@ test "Host recovery keeps the open widget drafts and scroll and starts only on a
     _ = frontend.input.replace(.{ .start = 0, .end = frontend.input.composition().bytes.len, .text = "" });
     try app_events.send(&ctx, "r", overview.root.widget(), child);
     try std.testing.expectEqual(HostState.starting, overview.hostState());
-    try std.testing.expect(!try requestHostStart(overview, &ctx)); // One attempt in flight.
+    try std.testing.expect(!try requestHostStart(overview, &ctx));
     var starting = try rig.shown(46, 26);
     defer starting.deinit();
     try std.testing.expect(std.mem.indexOf(u8, try starting.text(), "Host starting") != null);
@@ -3654,7 +3287,7 @@ test "Host recovery keeps the open widget drafts and scroll and starts only on a
     try std.testing.expect(overview.root.session.?.eql(child));
     try std.testing.expectEqualDeep(anchor, rig.screen.anchor);
     try child.handleEvent(&ctx, .tick);
-    try std.testing.expect(frontend.reader.thread != null); // Normal reads resume.
+    try std.testing.expect(frontend.reader.thread != null);
     try std.testing.expect(!ctx.quit);
 }
 
@@ -3679,7 +3312,6 @@ test "Host recovery failed start waits for a retry click and the line also accep
     var shown = try rig.shown(46, 26);
     defer shown.deinit();
     try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "× Host stopped · refused to start · retry") != null);
-    // The control retries once, never a poll or a previous failed attempt.
     try std.testing.expect(try rig.hostStart() == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 2), HostRecovery.starts);
@@ -3748,7 +3380,6 @@ test "Host recovery availability is independent of admission pause for the whole
         defer rig.close();
         const overview = rig.overview;
         overview.hooks.scratch = HostRecovery.scratch;
-        // The frontend freezes its callbacks when the Session opens.
         overview.hooks.requests = Inspection.requests;
         try std.testing.expect(try rig.next(.{ .open = .{ .reference = "k7m2qx".* } }) == null);
         const frontend = overview.app_session.?.frontend.?;
@@ -3761,8 +3392,6 @@ test "Host recovery availability is independent of admission pause for the whole
         }
         frontend.reading.opening = false;
         frontend.poll_at = std.math.maxInt(i96);
-        // A running Action, a sibling awaiting permission, and an already
-        // queued Message are all live while admission of NEW Turns is held.
         frontend.live.work = .{ .state = .{ .bash = .{ .since = 1, .call = 0, .description = null, .running = 1, .approvals = 1 } }, .turn = 1, .operation = 2, .first_action = 0xa };
         frontend.live.queued = .{ .count = 1, .oldest_position = 30, .newest_admission = 9, .newest_position = 30 };
         try frontend.files.action.writePositionalAll(std.testing.io, "pending permission\n", 0);
@@ -3784,13 +3413,11 @@ test "Host recovery availability is independent of admission pause for the whole
         try std.testing.expectEqual(reachable, frontend.app_input.permission != null);
         try std.testing.expectEqual(@as(u64, 1), frontend.live.queued.count);
         try std.testing.expectEqual(@as(u64, 1), frontend.live.work.state.bash.running);
-        // A scan still runs behind a permission card, ready and paused alike.
         frontend.poll_at = 0;
         try child.handleEvent(&ctx, .tick);
         try std.testing.expectEqual(reachable, frontend.reader.thread != null);
         frontend.reader.cancel();
         frontend.reader.join() catch {};
-        // A queued inspection has the same reachability boundary.
         frontend.input.queueCommand("/requests");
         frontend.poll_at = std.math.maxInt(i96);
         try child.handleEvent(&ctx, .tick);
@@ -3800,8 +3427,6 @@ test "Host recovery availability is independent of admission pause for the whole
         frontend.reader.join() catch {};
         frontend.inspection.command_running = false;
         _ = frontend.input.takeCommand();
-        // Once no permission card owns input, a new Message is admitted even
-        // when new Turns are paused. A disconnected Host retains the draft.
         frontend.app_consent.withdraw();
         frontend.app_input.permission = null;
         rig.screen.withdrawAction();
@@ -3820,8 +3445,6 @@ test "Host recovery waits across upgrade swap and reobservation before offering 
     const overview = rig.overview;
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
-    // Even a free lease observed during the swap cannot offer a competing
-    // start. The Upgrade owns that transition until reobservation finishes.
     try std.testing.expect(overview.state.upgrade.start());
     HostRecovery.availability = .stopped;
     try std.testing.expect(try overview.takeHostRead(overview.ops.host(overview)) == null);
@@ -3832,16 +3455,12 @@ test "Host recovery waits across upgrade swap and reobservation before offering 
     overview.state.upgrade.after = .reobserving;
     try std.testing.expectEqual(HostState.paused, overview.hostState());
     try std.testing.expect(!try requestHostStart(overview, &ctx));
-    // The successful reobservation releases the Upgrade, but must not
-    // expose the free-lease sample from the swap as a start gesture.
     overview.state.listing = true;
     overview.state.listing_archive = overview.state.archive;
     try std.testing.expect(try overview.event(.{ .list = .{ .page = .{ .rows = &.{}, .answer = .{ .delta = .full, .since = .{ .instance = @splat(1), .generation = 1 } } } } }) == null);
     try std.testing.expect(!overview.state.holdsHost());
     try std.testing.expectEqual(HostState.paused, overview.hostState());
     try std.testing.expect(!try requestHostStart(overview, &ctx));
-    // An owner with an unavailable listener is not an admission pause, and
-    // not a stopped Host either. No start while it still owns the Store.
     HostRecovery.availability = .stopping;
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(hostHeld(overview));
@@ -3852,7 +3471,6 @@ test "Host recovery waits across upgrade swap and reobservation before offering 
     try std.testing.expect(try overview.takeHostRead(overview.ops.host(overview)) == null);
     try std.testing.expect(!hostHeld(overview));
     try std.testing.expect(hostNotice(overview) == null);
-    // Outside the swap, only confirmed absence of the owner offers start.
     HostRecovery.availability = .stopped;
     try std.testing.expect(try overview.takeHostRead(overview.ops.host(overview)) == null);
     try std.testing.expectEqual(HostState.stopped, overview.hostState());
@@ -3875,8 +3493,6 @@ test "Host recovery derives launch progress from job custody without copying rea
     defer ctx.cmds.deinit(std.testing.allocator);
     HostRecovery.availability = .stopped;
     try std.testing.expect(try overview.takeHostRead(overview.ops.host(overview)) == null);
-    // Another job owns the sole worker. Starting is already true in the
-    // queue, not just once the launch worker gets its thread.
     try overview.worker.start(std.testing.io, overview, Busy.run);
     defer {
         overview.worker.cancel();
@@ -3887,8 +3503,6 @@ test "Host recovery derives launch progress from job custody without copying rea
     try std.testing.expectEqual(HostState.starting, overview.hostState());
     try std.testing.expect(!try requestHostStart(overview, &ctx));
     try std.testing.expectEqual(@as(usize, 0), HostRecovery.starts);
-    // A discovery read is independently authoritative even with a launch
-    // queued. One sample supplies pause, reachability and counts together.
     for ([_]HostRecovery.Availability{ .paused, .ready }) |availability| {
         HostRecovery.availability = availability;
         const read = overview.ops.host(overview);
@@ -3905,8 +3519,6 @@ test "Host recovery derives launch progress from job custody without copying rea
     try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
     try std.testing.expect(!overview.hostStarting());
     try std.testing.expectEqual(HostState.ready, overview.hostState());
-    // A transport hint invalidates only discovery; it is not proof that
-    // the lease is free, and cannot start anything without a fresh sample.
     hostLost(overview);
     try std.testing.expect(hostHeld(overview));
     try std.testing.expectEqual(HostState.paused, overview.hostState());
@@ -3945,20 +3557,15 @@ test "Host recovery renders the launch result cause without confusing failure an
         try std.testing.expectEqual(after != .ready, hostHeld(overview));
         const failure = case.launch == .failed;
         if (after == .ready) {
-            // A competing ready owner wins over a failure at once. A warning
-            // about the Host that did start is shown with the up mark.
             var first = try rig.shown(140, 26);
             defer first.deinit();
             const text = try first.text();
             try std.testing.expectEqual(!failure and case.words.len != 0, std.mem.indexOf(u8, text, "✓ Host ready · ") != null);
             try std.testing.expect(std.mem.indexOf(u8, text, "× Host") == null);
         }
-        // The next read of a ready Host retires what the start said.
         const detail = case.words.len != 0 and after != .ready;
         const next: ?HostLaunch.Next = if (after != .stopped) null else if (failure) (if (case.retry) .retry else null) else .start;
         try std.testing.expectEqual(next, overview.hostNext());
-        // Another discovery read cannot erase the cause while the Host is
-        // still down, or automatically retry an accepted effect.
         overview.queue(.host);
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
@@ -3984,8 +3591,6 @@ test "Host recovery renders the launch result cause without confusing failure an
     };
 }
 
-/// Runs one Host read and steps the overview with it, leaving queued any job
-/// the read asked for.
 fn readHostOnce(rig: *Rig) !void {
     const overview = rig.overview;
     std.debug.assert(overview.job_count == 0 and overview.worker.thread == null);
@@ -4004,8 +3609,6 @@ test "a Host that stopped unasked starts again once by itself; any other stop wa
         .{ .last_stop = .unasked, .upgrading = true, .starts = 0 },
         .{ .last_stop = .asked, .upgrading = true, .starts = 0 },
         .{ .last_stop = .unknown, .upgrading = true, .starts = 0 },
-        // A Host that holds the Store unanswered, answers in another Rui
-        // version, or a Store that cannot be read is held, not crashed.
         .{ .availability = .stopping, .last_stop = .unasked, .starts = 0 },
         .{ .availability = .incompatible, .last_stop = .unasked, .starts = 0 },
         .{ .availability = .unreadable, .last_stop = .unasked, .starts = 0 },
@@ -4025,7 +3628,6 @@ test "a Host that stopped unasked starts again once by itself; any other stop wa
         HostRecovery.last_stop = case.last_stop;
         try readHostOnce(rig);
         if (case.starts == 1) {
-            // The start is queued, not yet run: the line says so meanwhile.
             try std.testing.expectEqual(HostState.starting, overview.hostState());
             var starting = try rig.shown(46, 26);
             defer starting.deinit();
@@ -4056,7 +3658,6 @@ test "a Host that stopped unasked starts again once by itself; any other stop wa
 }
 
 test "the automatic start is spent once per run: a second crash and a failed start leave retry" {
-    // A second crash after the one automatic start succeeded.
     {
         const ops = HostRecovery.operations();
         var cancellation: client.Cancellation = .{};
@@ -4079,14 +3680,11 @@ test "the automatic start is spent once per run: a second crash and a failed sta
         var shown = try rig.shown(46, 26);
         defer shown.deinit();
         try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "■ Host stopped ·") != null);
-        // An explicit click still starts it, as before any crash.
         try std.testing.expect(try rig.hostStart() == null);
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqual(@as(usize, 2), HostRecovery.starts);
         try std.testing.expect(hostNotice(overview) == null);
     }
-    // The one automatic start fails: the line offers a retry and later
-    // reads of the same stop start nothing.
     {
         const ops = HostRecovery.operations();
         var cancellation: client.Cancellation = .{};
@@ -4143,7 +3741,6 @@ test "before the first Host read the screen says nothing about the Host and hold
     var shown = try rig.shown(46, 26);
     defer shown.deinit();
     try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Host") == null);
-    // A Session's lost request still holds it until the Host is read again.
     hostLost(overview);
     try std.testing.expect(hostHeld(overview));
     try std.testing.expectEqual(HostState.paused, overview.hostState());
@@ -4169,10 +3766,8 @@ test "a conversation that fails to open still names unconfirmed creation on depa
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(try rig.press("\x1b[H\r") == null);
     try std.testing.expect(try rig.settle() == null);
-    // The launch/open route can fail independently while creation remains uncertain.
     try std.testing.expectEqual(@as(?Ending, .overview), try rig.next(try rig.overview.event(.{ .open = "k7m2qx".* })));
     try std.testing.expect(rig.overview.app_session.?.frontend == null);
-    // App's exit path stops what opened; nothing did.
     rig.overview.stopApp();
     var buffer: [1024]u8 = undefined;
     const written = try finishedWith(rig, {}, error.AccessDenied, &buffer);
@@ -4212,8 +3807,6 @@ test "a listing failure under a conversation ends the overview once the terminal
     try std.testing.expectEqual(Job.host, std.meta.activeTag(overview.job));
     try rig.answered();
     try std.testing.expect(try overview.complete() == null);
-    // The listing fails on the worker, and the conversation's first step
-    // under it collects the failure.
     try overview.dispatch(.all);
     try std.testing.expectEqual(Job.list, std.meta.activeTag(overview.job));
     try rig.answered();
@@ -4226,7 +3819,6 @@ test "a listing failure under a conversation ends the overview once the terminal
     try std.testing.expectError(error.CanonicalStoreFailure, appEvent(overview, &ctx, .tick));
     var buffer: [4096]u8 = undefined;
     const written = try finishedWith(rig, error.CanonicalStoreFailure, error.CanonicalStoreFailure, &buffer);
-    // The failure is the overview's: no guidance to resume the Session.
     try std.testing.expectEqualStrings("", written);
 }
 
@@ -4251,7 +3843,6 @@ test "App sets the terminal title once per change, with how many Sessions need t
 test "leaving while creation is queued or running says what became of it" {
     var cancellation: client.Cancellation = .{};
     var buffer: [1024]u8 = undefined;
-    // Enter and Ctrl-C in one read: the start is queued and never sent.
     {
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
         defer rig.close();
@@ -4259,7 +3850,6 @@ test "leaving while creation is queued or running says what became of it" {
         try std.testing.expectEqualStrings("rui: The new Session was not created.\n", try finishedGuidance(rig, &buffer));
         try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
     }
-    // The start ran as the overview ended: the Host accepted it.
     {
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
         defer rig.close();
@@ -4274,7 +3864,6 @@ test "a stop captured and then not sent keeps its handle, here and on departure"
     var ops = fake_operations;
     ops.stop = struct {
         fn stop(_: *Self, _: client.Requests, _: client.SessionStopInput, reply: *Reply) !void {
-            // The Host stopped: the saved request never connected.
             const Sent = client.Stepped(client.MutationSendError, protocol_reply.MutationReply);
             return reply.record(Sent{ .failed = .{ .step = .connect, .err = error.FileNotFound } }, "stop-handle");
         }
@@ -4297,14 +3886,12 @@ test "leaving with a stop still queued says it was not sent" {
     defer rig.close();
     try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
-    // Ctrl-X twice and Ctrl-C in one read: the stop is queued and never sent.
     try std.testing.expect((try rig.press("\x1b[H\x1b[B\x1b[B\x18\x18\x03")).? == .overview);
     var buffer: [1024]u8 = undefined;
     try std.testing.expectEqualStrings("rui: k7m2qx was not stopped.\n", try finishedGuidance(rig, &buffer));
     try std.testing.expectEqual(@as(usize, 0), Seen.now.stops);
 }
 
-/// A fresh overview with no pending work.
 fn openOverview() !*Rig {
     const Shared = struct {
         var cancellation: client.Cancellation = .{};
@@ -4323,7 +3910,6 @@ fn openListed() !*Rig {
     return rig;
 }
 
-/// The Session shown at `at` in screen order.
 fn shownRow(rig: *const Rig, at: usize) view.Reference {
     const state = &rig.overview.state;
     return state.rows.items[state.order.items[at]].reference;
@@ -4348,7 +3934,6 @@ test "Shift-Up and Shift-Down select the row above and below after ignored input
     }
 }
 
-/// Status rows immediately above the one Footer, with no overview editor.
 fn statusRowsShown(shown: *Shown, first: u16, height: u16) ![]const []const u8 {
     const rows = try shown.arena.allocator().alloc([]const u8, height - 1 - first);
     for (rows, first..) |*row, at| row.* = std.mem.trim(u8, try shown.line(@intCast(at)), " ");
@@ -4377,11 +3962,8 @@ test "Footer notice domain uses production clipping sanitization and colour" {
         var notice: view.Notice = .{ .colour = colour, .len = case.raw.len };
         @memcpy(notice.bytes[0..notice.len], case.raw);
         rig.overview.state.notice = notice;
-        // Draw the real Overview, including noticeLine and Footer. Expected
-        // single-line text above is independent of either implementation.
         var shown = try rig.shown(width, 24);
         defer shown.deinit();
-        // Overview remains full-width even on a desktop terminal.
         const visible = case.displayed[0..@min(case.displayed.len, width)];
         const footer = try shown.line(23);
         try std.testing.expectEqualStrings(visible, footer[footer.len - @min(footer.len, visible.len) ..]);
@@ -4389,8 +3971,6 @@ test "Footer notice domain uses production clipping sanitization and colour" {
         try std.testing.expectEqual(@as(usize, 0), (try statusRowsShown(&shown, view.layout(&rig.overview.state).input, 24)).len);
         try std.testing.expect(std.mem.indexOf(u8, footer, "enter open") == null);
         const style = @import("widget_style.zig").of(rig.overview.caps, .{ .colour = colour });
-        // Compare actual cells: Footer keeps a prefix, not an ellipsis, and
-        // notice colour survives sanitizing, clipping and terminal mapping.
         for (visible, width - visible.len..width) |byte, col| {
             const cell = shown.screen.readCell(@intCast(col), 23).?;
             try std.testing.expectEqualStrings(&.{byte}, cell.char.grapheme);
@@ -4546,7 +4126,6 @@ test "a stop that ends with no answer reads as failed, whatever the job before i
     const rig = try openListed();
     defer rig.close();
     const overview = rig.overview;
-    // The Host accepts an archive: the job before the stop left an accepted reply.
     try std.testing.expect(try rig.press("\x1ba") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.archives);
@@ -4593,7 +4172,6 @@ test "upgrade quiescence settles accepted queued and running archive mutations b
             calls += 1;
             entered.store(true, .release);
             try test_poll.waitUntil(requests.io, test_poll.after(requests.io, .fromSeconds(10)), &release, test_poll.isSet);
-            // Record before replying: cleanup or joining cannot repair this fact.
             observed_cancel = requests.cancellation.?.stopped.load(.acquire);
             reply.* = .unconfirmed("original-archive-handle");
         }
@@ -4624,7 +4202,6 @@ test "upgrade quiescence settles accepted queued and running archive mutations b
         try std.testing.expect(!try overview.quiesceUpgrade());
         try std.testing.expectEqual(@as(usize, 1), overview.state.request_count);
         try std.testing.expectEqual(@as(@FieldType(view.Request, "status"), .pending), overview.state.requests[0].status);
-        // A fresh opposite intent is not another accepted job to drain.
         _ = try overview.event(.{ .conversed = .{ .reference = "b4n8wd".*, .work = .idle, .input = if (archived) .unarchive else .{ .archive = .active } } });
         try std.testing.expectEqual(@as(usize, 1), overview.state.request_count);
         try std.testing.expectEqual(@as(usize, 0), overview.job_count);
@@ -4672,10 +4249,8 @@ test "Esc while Upgrade waits for a held archive keeps the cancel: nothing check
     try overview.startUpgrade();
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
-    // The archive holds the handoff: the run has not started.
     try overview.appUpgrade(&ctx);
     try std.testing.expect(overview.state.upgrading() and !overview.upgrade_job.started);
-    // Kitty's Esc, unambiguous on its own.
     try std.testing.expect(try rig.press("\x1b[27u") == null);
     Gate.release.store(true, .release);
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), overview, Gate.completed);
@@ -4690,7 +4265,6 @@ test "Esc while Upgrade waits for a held archive keeps the cancel: nothing check
 
 test "memory counts this TUI alone while no Host runs, at open and after a Host it sampled is gone" {
     var cancellation: client.Cancellation = .{};
-    // No Host serves this Store.
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
     defer rig.close();
     const overview = rig.overview;
@@ -4698,8 +4272,6 @@ test "memory counts this TUI alone while no Host runs, at open and after a Host 
     try std.testing.expect(first.observation.facts() == null);
     const alone = first.memory orelse return error.TestUnexpectedResult;
     try std.testing.expect(alone.rui > 0 and alone.tools == null);
-    // As after one good sample of a Host and its tools, which then stopped:
-    // the read after it carries nothing over from that sample.
     overview.host_process = .{ .started_at = 1, .pid = std.c.getpid() };
     const second = overview.hostFacts();
     try std.testing.expect(second.observation.facts() == null);
@@ -4746,7 +4318,6 @@ test "a conversation's Upgrade waits for the conversation's running read, though
     try std.testing.expect(overview.root.session != null);
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
-    // Version's backend preserves every admitted inspection before a run.
     const backend = overview.settingsBackend();
     for ([_]bool{ false, true }) |typed| for ([_]bool{ false, true }) |queued| for ([_]bool{ false, true }) |running| {
         if (!typed and !queued and !running) continue;
@@ -4760,13 +4331,11 @@ test "a conversation's Upgrade waits for the conversation's running read, though
         frontend.info_edit = null;
         frontend.inspection.command_running = false;
     };
-    // A read the conversation still runs, then Upgrade before its tick.
     try frontend.reader.start(std.testing.io, frontend, Worker.read);
     try overview.startUpgrade();
     try std.testing.expect(overview.state.upgrading());
     for (0..3) |_| try overview.appUpgrade(&ctx);
     try std.testing.expect(overview.state.upgrading() and !overview.upgrade_job.started);
-    // Esc ends the run that never started, as on the overview.
     _ = try conversed(overview, .idle, .cancel_upgrade);
     frontend.reader.cancel();
     frontend.reader.join() catch {};
@@ -4851,12 +4420,10 @@ test "a followed Session link opens the peer, Esc reopens the Session it left, t
     const overview = rig.overview;
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
-    // A link in k7m2qx names m3n4p5; k7m2qx then leaves.
     overview.follow.pending = "m3n4p5".*;
     try overview.followNext(&ctx, "k7m2qx".*);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.conversations);
     try std.testing.expectEqualStrings("m3n4p5", &Seen.now.conversed);
-    // Esc in m3n4p5 reopens k7m2qx; Esc there reaches the overview.
     try overview.followNext(&ctx, "m3n4p5".*);
     try std.testing.expectEqual(@as(usize, 2), Seen.now.conversations);
     try std.testing.expectEqualStrings("k7m2qx", &Seen.now.conversed);
@@ -4884,7 +4451,6 @@ test "a Session link that no longer opens ends as any failed open, naming that S
     const unopened = overview.app_session.?;
     try std.testing.expectEqualStrings("m3n4p5", &unopened.session);
     try std.testing.expectError(error.SessionNotFound, unopened.ended);
-    // The way back names the Session the person left, never the failed one.
     try std.testing.expectEqualStrings("k7m2qx", &overview.follow.return_to.?);
     try std.testing.expectEqual(@as(?view.Reference, null), overview.follow.pending);
     overview.app_session = null;
@@ -4900,7 +4466,6 @@ test "App overview schedules spinning rows only while Root shows the list" {
         Seen.now.working = @intFromBool(spinning);
         try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
         try std.testing.expect(try rig.settle() == null);
-        // Keep unrelated listing refreshes from requesting a frame.
         overview.state.next_list_ms = std.math.maxInt(u64);
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
@@ -4911,25 +4476,19 @@ test "App overview schedules spinning rows only while Root shows the list" {
             .{ .width = 99, .open = false, .visible = true },
             .{ .width = 100, .open = false, .visible = true },
             .{ .width = 46, .open = false, .visible = true },
-            // Opening at phone width hides the last drawn spinning row.
             .{ .width = 46, .open = true, .visible = false },
             .{ .width = 99, .open = true, .visible = false },
             .{ .width = 100, .open = true, .visible = true },
             .{ .width = 99, .open = true, .visible = false },
             .{ .width = 140, .open = true, .visible = true },
             .{ .width = 46, .open = true, .visible = false },
-            // Closing at phone width makes the same list eligible again.
             .{ .width = 46, .open = false, .visible = true },
         }) |layout| {
             if (layout.open and overview.root.session == null) try overview.root.openSession(&ctx, session.widget(), null);
             if (!layout.open and overview.root.session != null) try overview.root.closeSession(&ctx);
             _ = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = layout.width, .height = 24 }, .cell_size = .{} });
             try std.testing.expectEqual(spinning, overview.listSpins());
-            // Force a due animation step without waiting for the clock. A
-            // hidden list cannot advance its last frame, even on later ticks.
             overview.app_frame = std.math.maxInt(u64);
-            // Current facts govern animation even before another draw. None
-            // of these changes can leave a cached spinning flag behind.
             const caps = overview.caps;
             overview.caps.depth = .none;
             try std.testing.expectEqual(false, overview.wantsFrame());
@@ -5030,7 +4589,6 @@ test "App overview list stays live beside a focused child and wheels stay in the
     try app_events.mouse(&ctx, frame, .{ .col = 45, .row = 2, .button = .wheel_down, .type = .press, .mods = .{} });
     try std.testing.expectEqual(@as(usize, 1), peer.wheels);
     try std.testing.expectEqualDeep(scrolled, overview.app_sessions.list.scroll);
-    // A later listing is still adopted and drawn at 40 cells with a child open.
     Seen.now.listed = 2;
     overview.state.next_list_ms = 0;
     _ = try service(overview);
@@ -5147,7 +4705,6 @@ test "App shell divider follows overview locale across layouts and screen select
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        // Cover both construction and later theme/cursor repainting.
         for (0..2) |paint| {
             if (paint != 0) try overview.paintCursor();
             for ([_]bool{ false, true }) |open| {
@@ -5238,7 +4795,6 @@ test "App list clicks validate present and removed targets with open and closed 
             const row = for (overview.app_sessions.shown_at) |span| {
                 if (span.target) |target| if (target == .open and std.mem.eql(u8, &target.open, "b4n8wd")) break span.row;
             } else unreachable;
-            // Refresh the core without replacing the drawn hit targets.
             if (!present) {
                 Seen.now.listed = 1;
                 overview.state.next_list_ms = 0;
@@ -5307,8 +4863,6 @@ test "App root navigation shows and focuses the main pane before every Session s
             return error.TestUnexpectedResult;
         }
     };
-    // App-owned drafts can leave safely; SessionFrontend tests own their
-    // handoff policy. Exercise unresolved-work guards, not draft emptiness.
     const Guard = enum { allowed, pending, action, command };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -5318,7 +4872,6 @@ test "App root navigation shows and focuses the main pane before every Session s
             for ([_]bool{ false, true }) |retained| {
                 for ([_]view.Reference{ "k7m2qx".*, "b4n8wd".* }) |target| {
                     for (std.enums.values(Guard)) |guard| {
-                        // Without a retained Session there is nothing to depart.
                         if (!retained and guard != .allowed) continue;
                         errdefer std.debug.print("navigation: settings={any}, width={d}, retained={any}, target={s}, guard={s}\n", .{ settings_open, width, retained, target, @tagName(guard) });
                         Nav.files = 0;
@@ -5350,8 +4903,6 @@ test "App root navigation shows and focuses the main pane before every Session s
                         const same = retained and std.mem.eql(u8, &target, "k7m2qx");
                         if (frontend) |held| {
                             held.reading.opening = false;
-                            // Hold one owner fact without a tick/worker that
-                            // could consume it before the selection observes it.
                             switch (guard) {
                                 .allowed => {},
                                 .pending => {
@@ -5376,8 +4927,6 @@ test "App root navigation shows and focuses the main pane before every Session s
                         }
                         ctx.cmds.clearRetainingCapacity();
                         ctx.redraw = false;
-                        // The list's semantic selection has one presentation
-                        // transition, independent of the later departure result.
                         try overview.appNext(&ctx, try overview.event(.{ .clicked = .{ .target = .{ .open = target } } }));
                         try std.testing.expect(!ctx.quit);
                         try std.testing.expect(ctx.redraw);
@@ -5401,8 +4950,6 @@ test "App root navigation shows and focuses the main pane before every Session s
                         }
                         const requested = try Nav.focus(&ctx);
                         try std.testing.expect(requested.eql(overview.root.session.?));
-                        // App processes focus_in on the requested retained
-                        // widget; its normal afterInput also presents the notice.
                         try requested.handleEvent(&ctx, .focus_in);
                         const selected = try overview.root.widget().draw(draw_context);
                         try std.testing.expect(Nav.contains(selected, overview.root.session.?));
@@ -5428,8 +4975,6 @@ test "App root navigation shows and focuses the main pane before every Session s
                             if (notice) |reason| {
                                 var shown = try rig.shown(width, 24);
                                 defer shown.deinit();
-                                // Even phone chrome must show the reason, not
-                                // merely store it on a hidden frontend.
                                 try std.testing.expect(std.mem.indexOf(u8, try shown.text(), reason[0..31]) != null);
                             }
                         } else try std.testing.expectEqualStrings(&target, &Seen.now.conversed);
@@ -5492,10 +5037,6 @@ test "App settings Enter reaches Root at both widths with and without a retained
             defer arena.deinit();
             const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} };
             _ = try overview.root.widget().draw(draw_context);
-            // Real parser/overview handlers select the last list row;
-            // do not synthesize a core click or set selected directly.
-            // While a Session is the main pane Root gives it the keys, so
-            // there the Settings row's own press opens the page.
             if (retained) {
                 try appClick(overview, &ctx, .settings);
             } else {
@@ -5567,8 +5108,6 @@ test "App settings typed saves own their strings and settle through the Overview
     try std.testing.expectEqual(AppSettings.SaveState.saved, backend.save_state(backend.context));
     try std.testing.expectEqualStrings("gpt-5.5", overview.state.default.?.model.slice());
 
-    // Exercise the wired page, not a manually installed adapter. Its Enter
-    // queues the same typed job and its tick reads the completed saved value.
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
     try overview.root.openSettings(&ctx);
@@ -5614,7 +5153,6 @@ test "App settings typed worker failure reaches its row and a later save recover
     const page = &overview.root.settings_page;
     page.select(.notifications);
     try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
-    // Refuse the real preference writer only after the page's edit is accepted.
     const obstruction = try tmp.dir.createFile(std.testing.io, ".config", .{});
     obstruction.close(std.testing.io);
     try std.testing.expect(try rig.settle() == null);
@@ -5656,7 +5194,6 @@ test "App settings typed admission and Upgrade stay within the Overview owner" {
     try std.testing.expectError(error.DefaultsUnavailable, overview.saveDefaults(.{ .notifications = false }));
     try overview.startUpgrade();
     try std.testing.expectEqual(@as(?upgrade_status.Run, .checking), backend.run(backend.context));
-    // Esc is the run's while it can still change nothing, settings open or not.
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
     try overview.root.openSettings(&ctx);
@@ -5664,8 +5201,6 @@ test "App settings typed admission and Upgrade stay within the Overview owner" {
     try overview.root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
     try std.testing.expect(overview.upgrade_job.cancelling);
     try std.testing.expect(overview.root.input.layer.settingsOpen());
-    // Under the page nothing reaches the hidden draft or moves the list,
-    // and leaving works as on the overview.
     const page = overview.root.settings_page.widget();
     const selected = overview.state.selected;
     try app_events.send(&ctx, "x\x1b[H\x18", overview.root.widget(), page);
@@ -5707,8 +5242,6 @@ test "pinned New Session remains above the end marker and responds to clicks and
     for ([_]u16{ 46, 140 }) |width| {
         const rig = try openListed();
         defer rig.close();
-        // End selects Settings; Up selects the last Session, without changing
-        // the pinned control's position or stealing the selection's space.
         _ = try rig.press("\x1b[F\x1b[A");
         const selected = rig.overview.state.selected.session;
         for (0..2) |_| {
@@ -5747,8 +5280,6 @@ test "chat sidebar and overview share pinned New Session and Archived controls" 
     const rig = try openListed();
     defer rig.close();
     rig.overview.ops.open = Chat.open;
-    // Exercise the same list instance before opening, beside the chat, and on
-    // return, including a prefix change while the list had scrolled.
     _ = try rig.press("\x1b[F\x1b[A");
     var before = try rig.shown(140, 11);
     defer before.deinit();
@@ -5807,7 +5338,6 @@ test "chat pinned controls preserve late-listed Sessions and the physical last-r
         }
         overview.retired.deinit(std.testing.allocator);
     }
-    // The transcript may finish opening before the independent sidebar list.
     overview.app_session.?.frontend.?.reading.opening = false;
     for ([_]bool{ false, true }) |listed| {
         if (listed) {
@@ -5854,7 +5384,6 @@ test "pinned New Session wins the last header row over a provider band" {
         row.state = .{ .failed = .{ .since = test_now_s, .code = .{}, .resets_at = null } };
         try row.state.failed.code.set("provider_http_401");
         try std.testing.expect(view.band(state) != null);
-        // One Footer row leaves exactly one header row at every width.
         var shown = try rig.shown(width, 2);
         defer shown.deinit();
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
@@ -5872,8 +5401,6 @@ test "relaunch departure matrix preserves every screen and all unsent drafts" {
                     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "", .directory = "/requests" }, fake_operations, &cancellation);
                     defer rig.close();
                     const overview = rig.overview;
-                    // Exercise the real joined receipt -> keepUpgrade -> departure
-                    // route, not a synthetic no-guidance incompatible outcome.
                     var arena: std.heap.ArenaAllocator = .init(gpa);
                     defer arena.deinit();
                     const a = arena.allocator();
@@ -5942,7 +5469,6 @@ test "relaunch departure matrix preserves every screen and all unsent drafts" {
                     defer ctx.cmds.deinit(gpa);
                     overview.leaveForUpgrade(&ctx, outcome);
                     try std.testing.expectEqual(outcome != .unchanged and !guidance, ctx.quit);
-                    // Finishing a guided run later must not be a delayed exec.
                     const request = try overview.finishApp({});
                     try std.testing.expectEqual(outcome != .unchanged and !guidance, request != null);
                     if (request) |value| {
@@ -6036,7 +5562,6 @@ test "App settings Model borrow ends on every Overview menu replacement or relea
         try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
         try std.testing.expect(page.model_choice.active);
         try std.testing.expectEqual(&overview.state.menu, page.model_choice.menu);
-        // A failed refresh retains the same immutable list and its choice.
         try std.testing.expect(try overview.event(.{ .models = .unanswered }) == null);
         try std.testing.expect(page.model_choice.active);
         if (release) {
@@ -6044,7 +5569,6 @@ test "App settings Model borrow ends on every Overview menu replacement or relea
         } else {
             try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\n" } } }}) } }) == null);
         }
-        // The next page event validates before using an old index.
         try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
         try std.testing.expect(!page.hasChoice());
         try std.testing.expectEqual(AppSettings.SaveState.idle, overview.defaults_save);
@@ -6069,7 +5593,6 @@ test "bare CSI and SS3 arrows move between view tabs through the existing key ta
 
 test "App settings Model keeps every named app binding live while filter text stays local" {
     for (std.enums.values(keymap.Key)) |key| for (key_encodings.get(key)) |bytes| {
-        // A lone ESC is deliberately incomplete in the byte fixture.
         if (std.mem.eql(u8, bytes, "\x1b")) continue;
         errdefer std.debug.print("settings Model key={s} bytes={x}\n", .{ @tagName(key), bytes });
         const rig = try openOverview();
@@ -6087,8 +5610,6 @@ test "App settings Model keeps every named app binding live while filter text st
         try std.testing.expectEqual(action == .exit, ctx.quit);
         try std.testing.expectEqual(selected, overview.state.selected);
         try std.testing.expect(overview.root.input.layer.settingsOpen());
-        // Terminal departure ends the transient edit; every non-exit app
-        // binding retains the same filter ownership as before.
         try std.testing.expectEqual(action != .exit and key != .escape and key != .ctrl_g, page.hasChoice());
     };
 }
@@ -6106,7 +5627,6 @@ test "App settings Model filters live choices and saves the next Session at both
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = provider, .model = "gpt-5.5" }, fake_operations, &cancellation);
         defer rig.close();
         const overview = rig.overview;
-        // Core opening intents share one read; snapshots never enqueue.
         try std.testing.expect((try overview.event(.{ .clicked = .{ .target = .settings } })).? == .open_settings);
         const initial = modelsSnapshot(overview);
         try std.testing.expect(initial.menu == null);
@@ -6221,7 +5741,6 @@ test "chat info Archive receives its worker answer after the ordinary ledger ent
         }
         try std.testing.expect(try rig.settle() == null);
         const frontend = overview.app_session.?.frontend.?;
-        // Opening has settled; invoke the panel's wired typed Archive action.
         frontend.reading.opening = false;
         const backend = frontend.app_info.backend;
         _ = try backend.archive(backend.context);
@@ -6229,7 +5748,6 @@ test "chat info Archive receives its worker answer after the ordinary ledger ent
         try std.testing.expect(try rig.settle() == null);
         const accepted = outcome == .completed or outcome == .pending;
         try std.testing.expectEqual(if (accepted) @import("chat_info.zig").SaveState.saved else .failed, backend.state(backend.context));
-        // Definite answers retire; only uncertainty remains in the ledger.
         try std.testing.expectEqual(@as(usize, @intFromBool(outcome == .unknown)), overview.state.request_count);
     }
 }
@@ -6368,7 +5886,6 @@ test "Overview mouse Host start and retry hover preserve foreground selection an
         try host_widget.handleEvent(&events, .mouse_leave);
         const left = try host_widget.draw(draw_ctx);
         try std.testing.expectEqual(plain.readCell(2, 0).style, left.readCell(2, 0).style);
-        // Clipping removes the target, including from an old widget handle.
         for ([_]vxfw.Size{ .{ .width = 0, .height = 1 }, .{ .width = 60, .height = 0 } }) |size| {
             _ = try host_widget.draw(draw_ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height }));
             try std.testing.expectEqual(@as(usize, 0), overview.app_host_hover.targets.len);
@@ -6502,7 +6019,6 @@ test "App settings Sign-in Enter and click use the Overview owner and return to 
         }
         try std.testing.expect(overview.root.sign_in.?.eql(overview.sign_in.widget()));
         try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(overview.sign_in.widget()));
-        // Defaultless Settings is not first-run: its owner returns here on Esc.
         try std.testing.expect(!overview.signInIsFirstRun());
         try app_events.send(&ctx, "\x1b", overview.root.widget(), overview.sign_in.widget());
         try std.testing.expect(!overview.root.input.layer.signInOpen());
@@ -6641,8 +6157,6 @@ test "Sign-in Esc at the choice leaves unless the first-run screen has no defaul
         errdefer std.debug.print("sign-in escape: from={s} default={} retained={}\n", .{ @tagName(from), default, retained });
         Nav.files = 0;
         var cancellation: client.Cancellation = .{};
-        // A resumed Session with unreadable saved defaults has no default
-        // and reaches sign-in only from Settings.
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = if (default) "codex" else null, .model = if (default) "gpt-6-luna" else null, .sign_in = from == .first_run }, fake_operations, &cancellation);
         defer rig.close();
         const overview = rig.overview;
@@ -6669,7 +6183,6 @@ test "Sign-in Esc at the choice leaves unless the first-run screen has no defaul
         defer arena.deinit();
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         const page = &overview.sign_in;
-        // The rig gives no launch hooks; nothing here begins an attempt.
         page.activate = null;
         page.ready = null;
         if (from == .settings) {
@@ -6678,11 +6191,8 @@ test "Sign-in Esc at the choice leaves unless the first-run screen has no defaul
         }
         try std.testing.expect(overview.root.input.layer.signInOpen());
         try std.testing.expect(page.state.page == .account);
-        // ChatGPT is chosen first, and begins in the browser.
         try std.testing.expectEqual(@import("sign_in.zig").Control.chatgpt, page.state.focus);
         const stays = from == .first_run and !default;
-        // Only the first-run screen with no default holds the overview's
-        // tick; under any other sign-in the overview and Session are served.
         ctx.cmds.clearRetainingCapacity();
         try appEvent(overview, &ctx, .tick);
         try std.testing.expectEqual(!stays, Nav.titled(&ctx));
@@ -6753,7 +6263,6 @@ test "New Session Enter and clicks cannot duplicate queued or answered creation"
         try std.testing.expectEqual(@as(usize, 1), rig.overview.job_count);
         try rig.overview.dispatch(.all);
         try rig.answered();
-        // A completed worker still owns the pending admission until delivery.
         try std.testing.expect(try rig.press("\r") == null);
         try std.testing.expect(try rig.click(3, 0, width, 24) == null);
         try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
@@ -6821,7 +6330,6 @@ test "accepted empty creation opens the returned Session with blank focused chat
         Scratch.dir = tmp.dir;
         Scratch.files = 0;
         var ops = fake_operations;
-        // Unlike the counting fake, the real operation mounts SessionFrontend.
         ops.open = openSession;
         var cancellation: client.Cancellation = .{};
         const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-6-luna" }, ops, &cancellation);
@@ -6859,7 +6367,6 @@ test "accepted empty creation opens the returned Session with blank focused chat
         try std.testing.expect(Seen.now.creation.loaded_tools == null);
         try std.testing.expect(Seen.now.creation.label == null);
         try std.testing.expect(frontend.reader.thread == null);
-        // Root initialized the real frontend, whose focus request names its only editor.
         const focused = rig.last_focus orelse return error.ExpectedChatFocus;
         try std.testing.expect(focused.eql(frontend.app_input.composer.widget()));
         var shown = try rig.shown(width, 24);
@@ -6909,7 +6416,6 @@ test "empty creation captures fresh effort and permission at admitted Enter or c
         var cancellation: client.Cancellation = .{};
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna" }, fake_operations, &cancellation);
         defer rig.close();
-        // A change after startup but BEFORE admission must be observed.
         _ = try preferences.update(home, .{ .reasoning_effort = .{ .set = .high }, .permission_mode = .{ .set = .bypass } }, &.initFill(.configured));
         if (click) try std.testing.expect(try rig.click(3, 0, width, 24) == null) else try std.testing.expect(try rig.press("\r") == null);
         try std.testing.expect(rig.overview.state.creating());
@@ -6918,7 +6424,6 @@ test "empty creation captures fresh effort and permission at admitted Enter or c
         try std.testing.expectEqualStrings("gpt-6-luna", queued.binding.?.model.slice());
         try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), (try queued.settings).effort);
         try std.testing.expectEqual(@as(?protocol.PermissionMode, .bypass), (try queued.settings).permission);
-        // A later external save and duplicate gestures cannot resample it.
         _ = try preferences.update(home, .{ .reasoning_effort = .{ .set = .xhigh }, .permission_mode = .{ .set = .ask } }, &.initFill(.configured));
         try std.testing.expect(try rig.press("\r") == null);
         try std.testing.expect(try rig.click(3, 0, width, 24) == null);
@@ -6985,9 +6490,6 @@ test "new and clear retire the old chat through the real lender and open empty C
     }
 }
 
-/// Real Overview/SessionFrontend owners over canonical read-boundary fixtures.
-/// Configure-empty rows remain in this backend even when the list hides them;
-/// this is not a Store integration fixture. Native CLI/PTY tests own persistence.
 const EmptySessionOwner = struct {
     rig: *Rig = undefined,
     tmp: std.testing.TmpDir,
@@ -7140,8 +6642,6 @@ const EmptySessionOwner = struct {
 
     fn answer(_: *anyopaque, _: *ClientTask) !void {}
 
-    /// Join a typed reader boundary through the real frontend, holding further
-    /// transport reads while the fixture supplies the following canonical one.
     fn joinRead(self: *EmptySessionOwner) !void {
         try wait(&self.frontend().reader);
         const overview = self.rig.overview;
@@ -7153,8 +6653,6 @@ const EmptySessionOwner = struct {
         self.frontend().poll_at = std.math.maxInt(i96);
     }
 
-    /// A canonical Current/activity read, not a guessed footer label. The
-    /// accepted configure hook changes `rows`; this read projects those facts.
     fn readCurrent(self: *EmptySessionOwner) !void {
         const chat = self.frontend();
         const row = canonical(chat.session);
@@ -7209,8 +6707,6 @@ const EmptySessionOwner = struct {
         try std.testing.expect(try self.rig.settle() == null);
         const reference = self.rig.overview.app_session.?.session;
         try std.testing.expect(canonical(&reference).first_message == null);
-        // Neither open nor an activity observation fabricates a list row.
-        // The sidebar projection waits for canonical listing metadata.
         try self.expectVisible(&.{});
         try self.readCurrent();
         try self.expectVisible(&.{});
@@ -7261,8 +6757,6 @@ const EmptySessionOwner = struct {
         try self.expectSelectedName(self.rig.overview.app_session.?.session, "New Session");
     }
 
-    /// At 140 columns inspect the composed sidebar; Root hides it at 46,
-    /// where the same production list widget is drawn independently.
     fn expectSelectedName(self: *EmptySessionOwner, reference: view.Reference, name: []const u8) !void {
         const overview = self.rig.overview;
         try self.expectVisible(&.{reference});
@@ -7378,8 +6872,6 @@ test "empty New Session owner opens blank then hides on leave without deleting i
     defer fixture.destroy();
     const reference = try fixture.openNew();
     try fixture.expectVisible(&.{reference});
-    // A saved label is not an admitted Message; the open empty row keeps
-    // its product name even when canonical metadata contains another label.
     const empty = EmptySessionOwner.canonical(&reference);
     empty.label = .{};
     try empty.label.?.set("Renamed but still empty");
@@ -7436,9 +6928,6 @@ test "empty New Session owner promotes the same row only after a canonical first
     try std.testing.expectEqualStrings(EmptySessionOwner.message, try chat.input.message(chat.submission.intent.?.message));
     try std.testing.expect(EmptySessionOwner.canonical(&reference).first_message == null);
     try fixture.expectSelectedName(reference, "New Session");
-    // The frontend really sealed and captured the Message. This unit fixture
-    // has no Host; replace its joined transport failure with a typed admitted
-    // reply, as the native request boundary does, rather than faking a send key.
     try EmptySessionOwner.wait(&chat.submission.task);
     try std.testing.expect(chat.submission.join() == .failed);
     try std.testing.expect(chat.submission.captured != null);
@@ -7456,7 +6945,6 @@ test "empty New Session owner promotes the same row only after a canonical first
     fixture.rig.overview.host_observation = observation;
     chat.poll_at = std.math.maxInt(i96);
     try std.testing.expect(chat.submission.intent == null);
-    // Acceptance alone is not the overview's listing authority.
     try fixture.refresh();
     try std.testing.expect(fixture.rig.overview.state.rows.items[0].first == null);
     try fixture.expectSelectedName(reference, "New Session");
@@ -7524,7 +7012,6 @@ test "empty New Session owner upgrade handoff preserves model draft and caret th
     try std.testing.expectEqual(cursor, fixture.frontend().input.composition().cursor);
     try std.testing.expect(fixture.frontend().submission.intent == null);
     try std.testing.expect(EmptySessionOwner.canonical(&reference).first_message == null);
-    // Clear via the real chat editor before its ordinary empty-draft Esc.
     try std.testing.expect(try fixture.rig.press("\x05\x15") == null);
     try std.testing.expectEqualStrings("", fixture.frontend().input.composition().bytes);
     try fixture.leave();
@@ -7545,15 +7032,12 @@ test "Overview forwards captured covered pane and paste without rereading newer 
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
 
-    // Captured under Settings: a newer main layer cannot authorize Enter.
     overview.root.input.layer = .main;
     try appKey(overview, &ctx, enter, .{ .under = .settings, .pasted = false });
     try std.testing.expectEqual(@as(usize, 0), overview.job_count);
     try std.testing.expectEqual(@as(usize, 0), overview.state.request_count);
     try std.testing.expectEqualStrings(text, overview.state.notice.?.bytes[0..overview.state.notice.?.len]);
 
-    // The terminal's later paste flag cannot turn pasted Enter or Ctrl-C
-    // into actions, nor may those ignored events clear the current notice.
     overview.root.input.pasting = false;
     for ([_]vxfw.Event{ enter, exit }) |input| {
         try appKey(overview, &ctx, input, .{ .under = .main, .pasted = true });
@@ -7562,8 +7046,6 @@ test "Overview forwards captured covered pane and paste without rereading newer 
         try std.testing.expectEqualStrings(text, overview.state.notice.?.bytes[0..overview.state.notice.?.len]);
     }
 
-    // Conversely the main, non-pasted delivery remains authorized after
-    // Root has switched to Settings and begun a different paste.
     overview.root.input.layer = .settings;
     overview.root.input.pasting = true;
     try appKey(overview, &ctx, enter, .{ .under = .main, .pasted = false });
@@ -7571,8 +7053,6 @@ test "Overview forwards captured covered pane and paste without rereading newer 
     try std.testing.expectEqual(@as(usize, 1), overview.job_count);
     try std.testing.expect(overview.root.input.layer.settingsOpen());
 
-    // Covered-screen exit still precedes the pending-creation guard. Its
-    // captured non-paste bit wins over Root's newer paste transaction too.
     overview.root.input.layer = .main;
     try appKey(overview, &ctx, exit, .{ .under = .settings, .pasted = false });
     try std.testing.expect(ctx.quit);
@@ -7591,12 +7071,8 @@ test "typed model and footer picker configure the same Session owner and show Cu
         const fixture = try EmptySessionOwner.create();
         defer fixture.destroy();
         const reference = try fixture.openNew();
-        // The fixture owns canonical reads, not a real Host socket. Typing
-        // a leading slash also asks that Host for skills.
         fixture.frontend().skill_read = Skills.read;
         try fixture.chooseModelFrom(gesture);
-        // Acknowledge the configure result without sending a Message; the
-        // narrow footer reserves space for that retained notice until input.
         try std.testing.expect(try fixture.rig.press("x\x7f") == null);
         try std.testing.expectEqual(@as(usize, 1), EmptySessionOwner.configurations);
         try std.testing.expectEqual(reference, fixture.rig.overview.app_session.?.session);
@@ -7641,8 +7117,6 @@ test "App list selection consumes the core projection through arrivals covered S
             for ([_]u16{ 46, 140 }) |width| {
                 var shown = try rig.shown(width, 24);
                 defer shown.deinit();
-                // Root deliberately hides a narrow sidebar. Exercise its
-                // production draw owner too, without inventing its policy.
                 if (!overview.root.listVisible()) _ = try overview.listWidget().draw(.{ .arena = shown.arena.allocator(), .cell_arena = shown.arena.allocator(), .min = .{}, .max = .{ .width = Root.list_width, .height = 24 }, .cell_size = .{} });
                 const expected: ?u32 = if (view.focusedLine(&overview.state, overview.root.input.listFocused() or overview.root.session == null)) |line| @intCast(line) else null;
                 try std.testing.expectEqual(expected, overview.app_sessions.selected);
@@ -7655,7 +7129,6 @@ test "App list selection consumes the core projection through arrivals covered S
     const overview = rig.overview;
     try Check.draw(rig);
 
-    // Opening and an activity read precede the first canonical list row.
     try std.testing.expect(try rig.press("\x1b[H\r") == null);
     try std.testing.expect(try rig.settle() == null);
     const first = overview.app_session.?.session;
@@ -7669,7 +7142,6 @@ test "App list selection consumes the core projection through arrivals covered S
     try Check.draw(rig);
 
     const second = try fixture.openNew();
-    // Canonical admitted rows keep both peers listed while either is open.
     for (EmptySessionOwner.rows[0..EmptySessionOwner.count]) |*row| {
         row.first_message = .{ .position = 1, .admission = 37, .admitted_at = test_now_s, .sender = null, .content = .{ .length = EmptySessionOwner.message.len, .digest = protocol.contentDigest(EmptySessionOwner.message) } };
         row.end = 1;
@@ -7728,7 +7200,6 @@ test "creation snapshot reads one owned preference pair with explicit null bindi
     try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), (try captured.settings).effort);
     try std.testing.expectEqual(@as(?protocol.PermissionMode, .bypass), (try captured.settings).permission);
 
-    // Explicit launch selectors opt out only of saved effort, not permission.
     const explicit = CreationSnapshot.read(binding, "/snapshot-home", false, Load.read);
     try std.testing.expectEqual(@as(usize, 2), Load.calls);
     try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, null), (try explicit.settings).effort);
@@ -7750,8 +7221,6 @@ test "creation snapshot reads one owned preference pair with explicit null bindi
     try std.testing.expectEqual(@as(usize, 5), Load.calls);
     try std.testing.expectError(error.CreationPreferencesUnavailable, explicit_failed.settings);
 
-    // The ordinary worker input consumes copied settings and never invents
-    // a missing provider/model merely to attach a saved effort.
     const rig = try openOverview();
     defer rig.close();
     var buffer: [20]u8 = undefined;
@@ -7784,8 +7253,6 @@ test "creation preference read failure is retained through repair and ordinary r
     defer rig.close();
     const overview = rig.overview;
     try File.write(tmp.dir, "version=unreadable\n");
-    // Unrelated open, unknown bytes, covered Enter and pasted Enter never
-    // materialize a creation effect merely because preferences are broken.
     try std.testing.expect(try rig.next(try overview.event(.{ .open = "k7m2qx".* })) == null);
     try std.testing.expect(try rig.press("unknown\x1b[1114112u") == null);
     var ctx = rig.context();
@@ -7793,8 +7260,6 @@ test "creation preference read failure is retained through repair and ordinary r
     const enter: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.enter } };
     try appKey(overview, &ctx, enter, .{ .under = .settings, .pasted = false });
     try appKey(overview, &ctx, enter, .{ .under = .main, .pasted = true });
-    // Opening legitimately requests the shared model menu, not creation
-    // settings. Settle that independent read before inspecting admission.
     for (overview.jobs[0..overview.job_count]) |job| try std.testing.expect(job != .create);
     try std.testing.expectEqual(@as(usize, 0), overview.state.request_count);
     try std.testing.expect(try rig.settle() == null);
@@ -7803,8 +7268,6 @@ test "creation preference read failure is retained through repair and ordinary r
     try std.testing.expect(try rig.press("\x1b[H\r") == null);
     try std.testing.expectEqual(@as(usize, 1), overview.job_count);
     try std.testing.expectError(error.UnsupportedPreferencesVersion, overview.jobs[0].create.settings);
-    // Repair does not replace the failed observation already owned by this
-    // admitted effect. Pending duplicate keys cannot observe the repair.
     try File.write(tmp.dir, File.valid);
     try std.testing.expect(try rig.press("\r") == null);
     try std.testing.expect(try rig.click(3, 0, 140, 24) == null);
@@ -7814,8 +7277,6 @@ test "creation preference read failure is retained through repair and ordinary r
     try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
     try std.testing.expectEqual(opened, Seen.now.conversations);
     try std.testing.expect(!overview.state.creating());
-    // The ordinary on-screen refusal retires its ledger entry, allowing a
-    // fresh intent; only an unknown answer would retain creation custody.
     try std.testing.expectEqual(@as(usize, 0), overview.state.request_count);
     try std.testing.expect(std.mem.indexOf(u8, overview.state.notice.?.text(), "Not created") != null);
     try std.testing.expect(std.mem.indexOf(u8, overview.state.notice.?.text(), "UnsupportedPreferencesVersion") != null);
@@ -7892,8 +7353,6 @@ test "App overview browse coalesces a rapid batch to one feed-open boundary and 
 }
 
 test "App overview paste shapes after chat close cannot create or retain an editor paste" {
-    // #1379 removed the overview composer. Test its actual list owner, not
-    // a substitute editor: both paste marks are delivered and all text is inert.
     for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |list_focused| for ([_][]const u8{ "", "\n", "text" }) |paste| {
         const rig = try openOverview();
         defer rig.close();
@@ -7915,8 +7374,6 @@ test "App overview paste shapes after chat close cannot create or retain an edit
         try std.testing.expectEqual(opens, Seen.now.conversations);
         try std.testing.expect(!rig.overview.state.creating());
         try std.testing.expect(rig.overview.root.session == null);
-        // Ordinary explicit Enter still creates an empty chat, never sends
-        // any of the ignored paste or later typing as a first Message.
         try std.testing.expect(try rig.press("\r") == null);
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqual(creates + 1, Seen.now.creates);
@@ -7936,11 +7393,9 @@ test "App overview list activation resumes the open chat without closing its pre
         const reference = shownRow(rig, 2);
         const chat: vxfw.Text = .{ .text = "Chat" };
         rig.overview.root.session = chat.widget();
-        // The fixture borrowed the dummy widget, not an app_session allocation.
         defer rig.overview.root.session = null;
         rig.overview.root.size = .{ .width = 140, .height = 40 };
         _ = try rig.overview.event(.{ .conversation = reference });
-        // Stand in for an open Chat Info: it must survive the return.
         rig.overview.root.main_presentation = .{ .context = rig, .close = Presentation.close };
         Presentation.closes = 0;
         var ctx = rig.context();
@@ -7972,7 +7427,6 @@ test "Overview Settings live memory frame uses quiet role in day and night" {
         const memory = std.mem.indexOf(u8, text, "rui 38 MB · tools 120 MB") orelse return error.TestExpectedMemory;
         const expected = @import("widget_style.zig").of(caps, .{ .colour = .quiet });
         for (memory..memory + "rui 38 MB".len) |column| try std.testing.expectEqual(expected, shown.screen.readCell(@intCast(column), row).?.style);
-        // The lender returns the same latest shell read, without a second cache.
         try std.testing.expectEqual(rig.overview.state.memory, memoryValue(rig.overview));
     }
 }
@@ -8002,7 +7456,6 @@ test "App settings live memory follows Overview readings while chat info stays c
         defer shown.deinit();
         try std.testing.expect(std.mem.indexOf(u8, try shown.text(), case.text) != null);
     }
-    // Neither the per-Session facts nor its frontend bridge carries app memory.
     try std.testing.expect(!@hasField(@import("chat_info.zig").Backend, "memory"));
     try std.testing.expect(!@hasField(SessionFrontend.Lender, "memory"));
 }

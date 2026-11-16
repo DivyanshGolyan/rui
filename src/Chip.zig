@@ -11,7 +11,6 @@ const Self = @This();
 
 label: []const u8,
 style: vaxis.Style = .{},
-/// While the pointer is over it.
 hover: vaxis.Style = Hover.underlined(.{}),
 method: vaxis.gwidth.Method = .unicode,
 userdata: *anyopaque,
@@ -25,7 +24,6 @@ pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
 }
 
-/// Cells the label takes.
 pub fn width(self: *const Self) u16 {
     return @intCast(@min(vaxis.gwidth.gwidth(self.label, self.method), std.math.maxInt(u16)));
 }
@@ -78,9 +76,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     return surface;
 }
 
-/// Prints `text` on `row` of `surface` from `column`, clipped at column
-/// `end` and the surface's edge, and returns the column after it. Shared by
-/// the Session chrome's rows.
 pub fn print(surface: vxfw.Surface, method: vaxis.gwidth.Method, column: u16, row: u16, text: []const u8, style: vaxis.Style, end: u16) u16 {
     const limit = @min(end, surface.size.width);
     if (row >= surface.size.height or column >= limit) return column;
@@ -109,15 +104,12 @@ test "a Chip runs its action on press and release over it, and not when the poin
     try chip.widget().handleEvent(&ctx, .{ .mouse = press });
     try chip.widget().handleEvent(&ctx, .{ .mouse = release });
     try std.testing.expectEqual(@as(usize, 1), count.clicks);
-    // Pressed, moved off and released elsewhere: nothing runs.
     try chip.widget().handleEvent(&ctx, .{ .mouse = press });
     try chip.widget().handleEvent(&ctx, .mouse_leave);
     try chip.widget().handleEvent(&ctx, .{ .mouse = release });
     try std.testing.expectEqual(@as(usize, 1), count.clicks);
-    // A release without a press here (a drag that ended on it) does nothing.
     try chip.widget().handleEvent(&ctx, .{ .mouse = release });
     try std.testing.expectEqual(@as(usize, 1), count.clicks);
-    // Motion acts on nothing.
     var motion = press;
     motion.type = .motion;
     try chip.widget().handleEvent(&ctx, .{ .mouse = motion });

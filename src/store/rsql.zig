@@ -1,15 +1,3 @@
-//! Rui SQL: Store SQL text written once for every engine. Source text is SQLite
-//! SQL restricted to a portable subset, plus markers that each engine renders
-//! in its own spelling. The schema's checks and index predicates and every
-//! typed statement passes its checks. `Store.cachedTyped`, the one way a
-//! typed statement reaches SQLite, authenticates its constructor (`isStatement`).
-//! `ObligationProjection` alone lowers a checked SELECT to an ancestor-frontier
-//! update; it cannot change any other column or relax ordinary `Write` guards.
-//! The Store prepares other text in three
-//! places only: its transaction control (`Store.Control`), its test-only
-//! fixtures, and, at open, PRAGMAs, schema bootstrap and one sweep held to
-//! `portabilityError` alone.
-
 const std = @import("std");
 const change_ring = @import("../change_ring.zig");
 const schema = @import("schema.zig");
@@ -17,16 +5,8 @@ const provider_name = @import("../provider_name.zig");
 
 pub const Dialect = enum { sqlite, mysql };
 
-/// A reserved word is a name, and refused, everywhere except the keyword
-/// places in `keywords`; text never names `rowid`. The schema's names,
-/// checks and predicates, every typed statement and opening's sweep are
-/// held to this.
 pub const reserved_names_checked = true;
 
-/// Words reserved in at least one engine (SQLite 3.53, Postgres 17, MySQL
-/// 8.4): MySQL's whole list and the other engines' words Rui SQL met. A
-/// word the grammar reads as a keyword everywhere (`grammar_words`) is no
-/// name, so it is left out unless `keywords` gives it a place.
 const reserved_names = blk: {
     @setEvalBranchQuota(100_000);
     var words: []const []const u8 = &other_reserved;
@@ -36,8 +16,6 @@ const reserved_names = blk: {
     break :blk words;
 };
 
-/// `reserved_names` by length, so a word costs a comparison only with
-/// names as long as itself.
 const reserved_lookup = blk: {
     @setEvalBranchQuota(100_000);
     var pairs: [reserved_names.len]struct { []const u8 } = undefined;
@@ -45,11 +23,8 @@ const reserved_lookup = blk: {
     break :blk std.StaticStringMapWithEql(void, std.static_string_map.eqlAsciiIgnoreCase).initComptime(pairs);
 };
 
-/// Words reserved on SQLite or Postgres but not on MySQL 8.4.
 const other_reserved = [_][]const u8{ "user", "offset" };
 
-/// MySQL 8.4's reserved words, as its manual lists them ("Keywords and
-/// Reserved Words", the words marked (R)).
 const mysql_reserved = [_][]const u8{
     "accessible",     "add",                 "all",                "alter",              "analyze",       "and",           "as",             "asc",
     "asensitive",     "before",              "between",            "bigint",             "binary",        "blob",          "both",           "by",
@@ -91,24 +66,15 @@ fn hasPlace(word: []const u8) bool {
     return false;
 }
 
-/// Where a reserved word is a keyword rather than a name.
 const Place = enum {
-    /// Directly before `BY`.
     before_by,
-    /// Directly before a parameter or a number.
     before_count,
-    /// Directly after `WITH`.
     after_with,
-    /// Directly before `(`: a window function's call.
     call,
-    /// Directly inside the parentheses after `OVER`: a frame's unit.
     window,
-    /// Directly after `AS` inside the parentheses after `CAST`: a type.
     cast_type,
 };
 
-/// The reserved words text may use as keywords, each in its one place.
-/// `of` has none: no checked text uses it.
 const keywords = [_]struct { word: []const u8, place: Place }{
     .{ .word = "order", .place = .before_by },
     .{ .word = "limit", .place = .before_count },
@@ -125,7 +91,6 @@ const keywords = [_]struct { word: []const u8, place: Place }{
     .{ .word = "integer", .place = .cast_type },
 };
 
-/// Words some engine lacks or reads differently, each with the portable form.
 const forbidden_words = [_]struct { word: []const u8, fix: []const u8 }{
     .{ .word = "GLOB", .fix = "write @charset(column,'set') or @initial(column,'set')" },
     .{ .word = "typeof", .fix = "test IS NULL or IS NOT NULL" },
@@ -146,24 +111,14 @@ const forbidden_words = [_]struct { word: []const u8, fix: []const u8 }{
     .{ .word = "iif", .fix = "write CASE WHEN ... THEN ... ELSE ... END" },
 };
 
-/// Why `text` is not portable Rui SQL, or null; reserved names and
-/// `rowid` count only when `reserved`. String literals are not inspected;
-/// comments and quoted identifiers are refused, so nothing else escapes
-/// the scan.
-/// `reserved` mirrors `identifierError`'s on purpose: both take `reserved_names_checked`, one switch for names and text.
 pub fn portabilityError(comptime text: []const u8, comptime reserved: bool) ?[]const u8 {
     comptime {
-        // A word's lookup in `reserved_lookup` takes up to a few hundred branches.
         @setEvalBranchQuota(500 * text.len + 1000);
         var index: usize = 0;
-        // The word just scanned, or "" after any other token.
         var previous: []const u8 = "";
         var depth: usize = 0;
-        // The depth of the open `OVER (` group, if any.
         var window_depth: ?usize = null;
-        // The depth of the open `CAST(` group, if any.
         var cast_depth: ?usize = null;
-        // Whether a leading WITH has not yet reached its statement.
         var leading_with = false;
         var first_word = true;
         while (index < text.len) {
@@ -232,7 +187,6 @@ pub fn portabilityError(comptime text: []const u8, comptime reserved: bool) ?[]c
     }
 }
 
-/// Whether reserved `word`, which ends at `end`, stands in its keyword place.
 fn isKeyword(comptime text: []const u8, comptime word: []const u8, comptime end: usize, comptime previous: []const u8, comptime in_window: bool, comptime in_cast: bool) bool {
     for (keywords) |keyword| {
         if (!std.ascii.eqlIgnoreCase(word, keyword.word)) continue;
@@ -249,56 +203,17 @@ fn isKeyword(comptime text: []const u8, comptime word: []const u8, comptime end:
     return false;
 }
 
-/// The word after any space from `from`, or "" when a non-word follows.
 fn nextWord(comptime text: []const u8, comptime from: usize) []const u8 {
     const start = skipSpace(text, from);
     return text[start..wordEnd(text, start)];
 }
 
-/// Why `name` cannot name a table, column or index on every engine, or null.
 pub fn identifierError(comptime name: []const u8, comptime reserved: bool) ?[]const u8 {
     if (!reserved) return null;
     if (reserved_lookup.has(name)) return "rsql: '" ++ name ++ "' is reserved on some engine; rename it";
     return null;
 }
 
-/// `text` in `dialect`'s spelling. Fails the build on text that is not
-/// portable or on an unknown or malformed marker. SQLite's spelling of
-/// each marker:
-///
-///   @bytes(x)            exact bytes: CAST to BLOB (SQLite) or BINARY (MySQL)
-///   @octets(x)           bytes in x: `length(CAST(x AS BLOB))`
-///   @charset(c,'set')    only these characters: `(c NOT GLOB '*[^set]*' AND
-///                        length(c)=length(CAST(c AS BLOB)))`. GLOB stops
-///                        at a NUL; the set is ASCII, so characters equal
-///                        bytes exactly when no NUL hides the rest
-///   @initial(c,'set')    first character in the set: `c GLOB '[set]*'`
-///   @same(a,b)           null-safe equality: `(a IS b)`
-///   @distinct(a,b)       its negation: `(a IS NOT b)`
-///   @count_where(c)      the rows where c holds: `count(*) FILTER (WHERE c)`
-///   @max_where(x,c)      the greatest x of those rows: `max(x) FILTER (WHERE c)`
-///   @list(x)             the rows' x joined by commas, in no set order,
-///                        NULL for none: `group_concat(x,',')`. An order
-///                        would sort; MySQL cuts the text at
-///                        `group_concat_max_len`, which
-///                        `schema.mysql_session` sets
-///   @served(x)           the opening serves provider x: `rui_served(x)`,
-///                        the function each opening registers
-///   @payload(t)          `t.payload`: the bytes of content row t, which its text keeps
-///                        to one MySQL chunk (`schema.content_chunk_bytes`)
-///                        by bounding byte_length or taking a bounded `substr`: `payload`
-///   @after(c1,..,ck,?a1,..,?ak)  the key (c1..ck) after (?a1..?ak), in
-///                        key order: `c1>?a1` for one column, else
-///                        `(c1,..,ck)>(?a1,..,?ak)`. A Page writes it on
-///                        its walked index's key, and only a Page's gates
-///                        hold it to an index (`Page`)
-///
-/// MySQL's are `mysqlTemplate`'s. Text rendered here binds nothing, so
-/// MySQL text with a slot fails the build too. MySQL seeks only the
-/// equality prefix of a row value (8.4 manual, Row Constructor Expression
-/// Optimization), so its `@after` is the expanded
-/// `(c1>?a1 OR (c1=?a1 AND c2>?a2))`, which its range optimizer reads as k
-/// intervals of one range.
 pub fn render(comptime dialect: Dialect, comptime text: []const u8) []const u8 {
     comptime {
         if (portabilityError(text, reserved_names_checked)) |message| @compileError(message ++ ": " ++ text);
@@ -313,24 +228,8 @@ pub fn render(comptime dialect: Dialect, comptime text: []const u8) []const u8 {
     }
 }
 
-// Typed statements. Each is a type made by `Read` or `Write`. Its Rui SQL is
-// parsed at comptime (`Parser`) in the grammar Rui writes, and text outside
-// that grammar is refused, so no rule meets a shape it was not written for.
-// The rules then read the parsed tree, each doc saying exactly what it checks:
-// - `parameterError`: Args fields bind ?1..?N, in field order;
-// - `rowError`: a read's Row fields name the columns it returns, in order;
-// - `sessionError`: a write names each Session it writes on that Session's
-//   own column (`schema.sessionColumns`);
-// - `compoundError`: a compound SELECT stands only where `.compound` says so;
-// - `returnsOneRow`: when a read needs no step to rule out a second row;
-// - the markers, as they are parsed (`Parser.marker`, `Parser.source`).
-
-/// Bytes a statement binds as a blob, read in place like text.
 pub const Bytes = struct { bytes: []const u8 };
 
-/// A stored blob of at most `capacity` bytes, read by value. Unlike text
-/// (`Bounded`), its bytes are not checked to be UTF-8; a value
-/// that is not a blob, or is longer, is `CorruptStore`.
 pub fn Blob(comptime capacity: usize) type {
     return struct {
         bytes: [capacity]u8 = undefined,
@@ -344,12 +243,10 @@ pub fn Blob(comptime capacity: usize) type {
     };
 }
 
-/// Whether `T` is a `Blob`: bytes up to its capacity.
 pub fn isBlob(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @hasDecl(T, "blob_capacity") and T == Blob(T.blob_capacity);
 }
 
-/// A stored integer that is never 0 or negative: an id or a position.
 pub const Positive = enum(u64) {
     _,
 
@@ -362,18 +259,11 @@ pub const Positive = enum(u64) {
         return @backingInt(self);
     }
 
-    /// A nullable column's value, null when the row holds none.
     pub fn optional(value: ?Positive) ?u64 {
         return if (value) |positive| positive.get() else null;
     }
 };
 
-/// A Session as a round loaded it: its reference, its Workspace's key and
-/// its next position, from the columns `session_ref,workspace_key,
-/// next_position`. A write names each Session it writes with one, through
-/// the marker `@session(?k)`, which binds its reference; the Access that
-/// queues the write records the touch from each without a read.
-/// A SessionHead's columns, in order, from a read that joins `session s`.
 pub const session_head_columns = "s.session_ref,s.workspace_key,s.next_position";
 
 pub const SessionHead = struct {
@@ -382,19 +272,10 @@ pub const SessionHead = struct {
     next_position: Positive,
 };
 
-/// How many rows a read returns. Nothing is unbounded. A row past the
-/// first is looked for only when the text does not already rule it out
-/// (`returnsOneRow`).
 pub const Cardinality = union(enum) {
-    /// Exactly one; none, or a second, is `CorruptStore`.
     one,
-    /// None or one; a second is `CorruptStore`.
     optional,
-    /// Up to this many; one more is `CorruptStore`.
     at_most: u16,
-    /// Each row in turn to the visitor of `Access.readEach`, which steps
-    /// at most the limit it is given. The bound is not a `LIMIT ?k`: a
-    /// bound LIMIT would make SQLite re-prepare the statement on every use.
     each,
 };
 
@@ -409,14 +290,9 @@ pub fn Rows(comptime Row: type, comptime max: u16) type {
     };
 }
 
-/// The rows a write must change, or its round fails before COMMIT.
 pub const Expect = union(enum) {
     exact: struct { rows: u32, otherwise: anyerror },
-    /// More is `CorruptStore`.
     at_most: u32,
-    /// Exactly the count its caller states when it queues the write
-    /// (`Access.writeCount`), a count known only at run time; any other
-    /// is `otherwise`.
     counted: struct { otherwise: anyerror },
 };
 
@@ -425,8 +301,6 @@ pub const ReadSpec = struct {
     Args: type,
     Row: type,
     cardinality: Cardinality,
-    /// Whether the text holds a compound SELECT (UNION, INTERSECT or
-    /// EXCEPT); such a read never counts as one row.
     compound: bool = false,
 };
 pub const WriteSpec = struct { sql: []const u8, Args: type, expect: Expect };
@@ -434,17 +308,11 @@ pub const WriteSpec = struct { sql: []const u8, Args: type, expect: Expect };
 pub fn Read(comptime spec: ReadSpec) type {
     const parsed = comptime accepted(.read, spec.sql, spec.Args, spec.Row, spec.compound);
     comptime {
-        // `.one` and `.at_most` decode in place. `Access.readEach` refuses
-        // an `.each` Row over 1 KiB unless its visitor owns the decoded row, and
-        // `Access.read` a big `.optional`.
-        // An `.each` Row may point there too: its visitor owns the decoded
-        // row (`Access.eachVisitorError`), so the pointers are the visitor's.
         if (fillsInPlace(spec.Row) and spec.cardinality != .optional and spec.cardinality != .each)
             @compileError("rsql: a Row that points into its caller's memory is read .optional, with Access.readInto, or .each into its visitor's decoded row: " ++ spec.sql);
     }
     return struct {
         pub const kind: StatementKind = .read;
-        /// What `isStatement` checks this type was made from.
         pub const made_from = spec;
         pub const Args = spec.Args;
         pub const Row = spec.Row;
@@ -456,13 +324,8 @@ pub fn Read(comptime spec: ReadSpec) type {
             .each => void,
         };
         pub const sql = renderStatement(spec.sql, fieldCount(Args));
-        /// The text in MySQL's spelling (`mysqlRendering`), rendered only
-        /// where something reads it: `Store.cachedTyped` in test builds.
         pub const mysql: Template = mysqlTemplate(spec.sql);
         pub const uses_now = parsed.uses_now;
-        /// Whether the text alone limits the result to one row
-        /// (`returnsOneRow`), so a read need not step again to prove there
-        /// is no second.
         pub const single_row = returnsOneRow(parsed.statement.select);
     };
 }
@@ -473,32 +336,19 @@ pub fn Write(comptime spec: WriteSpec) type {
     comptime if (deleteError(parsed.statement, @import("builtin").is_test)) |message| @compileError(message ++ ": " ++ spec.sql);
     return struct {
         pub const kind: StatementKind = .write;
-        /// What `isStatement` checks this type was made from.
         pub const made_from = spec;
         pub const Args = spec.Args;
         pub const expect = spec.expect;
-        /// Whether the rows it changes can differ from `expect` without
-        /// the statement failing: an INSERT ... VALUES inserts its one row
-        /// or fails, and every other write changes what its text finds.
         pub const guarded = parsed.statement != .insert or parsed.statement.insert.values != .row;
         pub const sql = renderStatement(spec.sql, fieldCount(Args));
-        /// The text in MySQL's spelling (`mysqlRendering`), rendered only
-        /// where something reads it: `Store.cachedTyped` in test builds.
         pub const mysql: Template = mysqlTemplate(spec.sql);
         pub const uses_now = parsed.uses_now;
-        /// The Args fields the write's `@session` markers bind, in Args'
-        /// order: none, or one per Session it names.
         pub const session_fields: []const []const u8 = sessionFields(Args);
     };
 }
 
 pub const StatementKind = enum { read, write };
 
-/// A derived frontier projection, not a domain mutation: the SELECT supplies
-/// (session_ref, saved_since, owed_since). This constructor can change only
-/// session.obligation_since; ordinary Session writes retain every head/tie rule.
-/// Grouping materializes the source before MySQL updates its source table
-/// (error 1093), and gives each target key exactly one minimum owed time.
 pub const ObligationProjectionSpec = struct { sql: []const u8, Args: type };
 pub fn ObligationProjection(comptime spec: ObligationProjectionSpec) type {
     const R = Read(.{
@@ -522,15 +372,10 @@ pub fn ObligationProjection(comptime spec: ObligationProjectionSpec) type {
         pub const sql = renderStatement(text, fieldCount(Args));
         pub const mysql: Template = mysqlTemplate(mysql_text);
         pub const uses_now = R.uses_now;
-        // Access already holds the changed domain heads. The projection's
-        // owner streams ancestor hints in the same batch, without new heads.
         pub const session_fields: []const []const u8 = &.{};
     };
 }
 
-/// Whether `S` is the type a checked constructor made, so its text passed every
-/// check. A struct that copies a statement's declarations, `made_from`
-/// included, is not: `S` must be the very type its spec makes.
 pub fn isStatement(comptime S: type) bool {
     comptime {
         if (@typeInfo(S) != .@"struct" or !@hasDecl(S, "kind") or !@hasDecl(S, "made_from")) return false;
@@ -542,10 +387,6 @@ pub fn isStatement(comptime S: type) bool {
     }
 }
 
-/// Whether a Row has a pointer field, which decodes into the caller's
-/// memory it points to, so the caller's struct fills in place without a
-/// copy. Its pointers must be set before the round runs: only
-/// `Access.readInto` reads such a Row, from the caller's own Row.
 pub fn fillsInPlace(comptime Row: type) bool {
     comptime {
         for (@typeInfo(Row).@"struct".field_types) |Field| if (@typeInfo(Field) == .pointer) return true;
@@ -553,7 +394,6 @@ pub fn fillsInPlace(comptime Row: type) bool {
     }
 }
 
-/// Why a typed statement's text is refused, or null.
 pub fn statementError(comptime kind: StatementKind, comptime sql: []const u8, comptime Args: type, comptime Row: type) ?[]const u8 {
     return switch (check(kind, sql, Args, Row, false)) {
         .refused => |message| message,
@@ -561,7 +401,6 @@ pub fn statementError(comptime kind: StatementKind, comptime sql: []const u8, co
     };
 }
 
-/// Why a write's text, or its `expect`, is refused, or null.
 fn writeError(comptime sql: []const u8, comptime Args: type, comptime expect: Expect) ?[]const u8 {
     return switch (check(.write, sql, Args, void, false)) {
         .refused => |message| message,
@@ -569,14 +408,6 @@ fn writeError(comptime sql: []const u8, comptime Args: type, comptime expect: Ex
     };
 }
 
-/// Why a write's `expect` does not fit its text, or null. An INSERT ...
-/// VALUES writes one row: it declares `.at_most`, or `.exact` with at most
-/// 1 row, never `.counted`. An INSERT ... SELECT inserts the rows its
-/// SELECT returns: one whose SELECT returns at most one row
-/// (`returnsOneRow`) declares `.exact` 1 or `.at_most` 1, and any other
-/// declares `.counted`, so its caller states the count. An UPDATE or
-/// DELETE may declare any Expect. The guard checks the count again when
-/// the write runs.
 fn expectError(comptime statement: Statement, comptime expect: Expect) ?[]const u8 {
     if (statement != .insert) return null;
     const select = switch (statement.insert.values) {
@@ -598,8 +429,6 @@ fn expectError(comptime statement: Statement, comptime expect: Expect) ?[]const 
     return null;
 }
 
-/// Why `statement` may not run in a build, or null: the MySQL login has
-/// no DELETE (D202), so only test builds delete.
 fn deleteError(comptime statement: Statement, comptime is_test: bool) ?[]const u8 {
     if (statement != .delete or is_test) return null;
     return "rsql: the Store's MySQL login may not DELETE (D202); only tests delete";
@@ -616,7 +445,6 @@ fn accepted(comptime kind: StatementKind, comptime sql: []const u8, comptime Arg
     };
 }
 
-/// Parses a typed statement, then holds it to every rule.
 fn check(comptime kind: StatementKind, comptime sql: []const u8, comptime Args: type, comptime Row: type, comptime compound: bool) Checked {
     comptime {
         @setEvalBranchQuota(1000 * sql.len + 20_000);
@@ -661,11 +489,6 @@ fn parseAs(comptime sql: []const u8, comptime fixture: bool) Checked {
 
 const written_read_message = "rsql: MySQL refuses a write whose subquery reads the table it writes (error 1093); read the value first and bind it";
 
-/// Whether `statement` writes a table that another of its `queries` reads,
-/// which MySQL 8.4 refuses ("Restrictions on Subqueries"): an UPDATE or
-/// DELETE whose subquery reads its table, or an INSERT ... VALUES whose
-/// row does. An INSERT ... SELECT may read its own table: MySQL buffers
-/// the SELECT first.
 fn readsWrittenTable(comptime statement: Statement, comptime queries: []const Query) bool {
     const table: []const u8, const own: ?usize = switch (statement) {
         .select => return false,
@@ -683,13 +506,6 @@ fn readsWrittenTable(comptime statement: Statement, comptime queries: []const Qu
     return false;
 }
 
-/// Why `text`, a test fixture's SQL, is not Rui SQL, or null: each of
-/// its statements, split at `;`, is held to the grammar and rules
-/// product statements are (`parse`), without their typed Args, Row and
-/// Session rules. So a fixture the build takes is one MySQL takes as the
-/// Store's own statements are. Two allowances are not about dialects: an
-/// UPDATE or DELETE may write every row, and an UPDATE may take
-/// `length` of its table's `.bytes` columns.
 pub fn fixtureError(comptime text: []const u8) ?[]const u8 {
     comptime {
         @setEvalBranchQuota(1000 * text.len + 20_000);
@@ -715,31 +531,17 @@ pub fn fixtureError(comptime text: []const u8) ?[]const u8 {
     }
 }
 
-/// The most parameters a statement binds: the Store's
-/// `SQLITE_LIMIT_VARIABLE_NUMBER` (`Store.open`), which a settlement's wide
-/// duplicate read reaches, its Operation and 64 digests.
 pub const max_parameters = 65;
 
-/// A typed statement as the rules read it, and what its parse counted.
 const Parsed = struct {
     statement: Statement,
-    /// How many times the text uses each of ?1..?`max_parameters`,
-    /// markers included.
     uses: [max_parameters]usize,
-    /// The k of each `@session(?k)`, wherever it stands.
     sessions: []const usize,
     uses_now: bool,
-    /// The compound SELECTs anywhere in the text, subqueries included.
     compounds: usize,
-    /// Every query in the text (`Query`), in the order each ends.
     queries: []const Query,
 };
 
-/// One query of a statement: a SELECT core anywhere in the text (a
-/// subquery, a WITH body, each core of a compound), or the table an UPDATE
-/// or DELETE writes, with that statement's WHERE. `parent` is the query
-/// whose text holds it, which its columns may name; the outermost has
-/// none. An INSERT's VALUES row is no query, so a subquery there has none.
 const Query = struct { id: usize, parent: ?usize, sources: []const Source, where: ?Expr };
 
 const Statement = union(enum) {
@@ -749,73 +551,48 @@ const Statement = union(enum) {
         columns: []const []const u8,
         values: union(enum) { row: []const Expr, select: Select },
     },
-    /// `query`: the id of the `Query` its own table stands in.
     update: struct { table: []const u8, assigned: []const []const u8, where: Expr, query: usize },
     delete: struct { table: []const u8, where: Expr, query: usize },
 };
 
 const Select = struct {
-    /// The first SELECT of a compound, whose names the result takes.
     first: Core,
     compound: bool,
-    /// Whether it ends in `LIMIT 1`.
     limit_one: bool,
 };
 
-/// `query`: the id of the `Query` it is.
 const Core = struct { results: []const Result, sources: []const Source, where: ?Expr, query: usize };
 
 const Result = struct { value: Expr, alias: ?[]const u8 };
 
-/// How a source joins the sources before it: `first` is the FROM table;
-/// `inner` is JOIN or INNER JOIN.
 const Join = enum { first, left, inner, cross };
 
 const Source = struct {
     table: []const u8,
-    /// The table's own name when it has no alias.
     alias: []const u8,
-    /// A name a WITH defined, never a table's (`Parser.select`).
     defined: bool,
-    /// `.left` is a LEFT JOIN: its ON chooses only its own rows, and every
-    /// row on its left stays.
     join: Join,
-    /// The `@index(name)` after the table, an index of that table.
     index: ?[]const u8 = null,
     on: ?Expr,
 };
 
 const Column = struct { table: ?[]const u8, name: []const u8 };
 
-/// An expression as the rules read it. Parts no rule reads are parsed in
-/// full (their parameters, markers and subqueries count) and kept as
-/// `other`; parentheses leave no node.
 const Expr = union(enum) {
     column: Column,
     parameter: usize,
-    /// A number, a string literal or NULL, as written.
     constant: []const u8,
-    /// `@session(?k)`: k.
     session: usize,
-    /// `a AND b AND ...`, nested ANDs flattened.
     conjunction: []const Expr,
-    /// `a = b`.
     equality: *const [2]Expr,
-    /// `column IS NULL`.
     is_null: Column,
-    /// `@after(c1,..,ck,?a1,..,?ak)`: the key (c1..ck) is greater than
-    /// (?a1..?ak), lexicographically.
     after: struct { columns: []const Column, parameters: []const usize },
     other,
 };
 
-/// A lexical token. A marker is its `@name`; its arguments follow as
-/// tokens of their own. String literals are single tokens, so nothing
-/// reads inside one.
 const Token = struct {
     kind: enum { word, parameter, number, literal, marker, symbol, end },
     text: []const u8,
-    /// Where `text` starts in the tokenized text.
     start: usize = 0,
 
     fn is(token: Token, word: []const u8) bool {
@@ -869,7 +646,6 @@ fn tokenize(comptime sql: []const u8) []const Token {
     }
 }
 
-/// The words the grammar reads as keywords; none of them is a name.
 const grammar_words = [_][]const u8{
     "SELECT", "DISTINCT", "ALL",    "FROM",  "WHERE",   "GROUP",     "BY",      "HAVING",    "ORDER", "ASC",
     "DESC",   "LIMIT",    "OFFSET", "UNION", "EXCEPT",  "INTERSECT", "WITH",    "AS",        "JOIN",  "LEFT",
@@ -883,7 +659,6 @@ fn isGrammarWord(text: []const u8) bool {
     return false;
 }
 
-/// The `.bytes` columns of schema table `name`.
 fn bytesColumns(comptime name: []const u8) []const []const u8 {
     var bytes: []const []const u8 = &.{};
     for (schema.tables) |table| if (std.mem.eql(u8, table.name, name)) {
@@ -906,35 +681,6 @@ fn isIndexOf(table: []const u8, name: []const u8) bool {
 
 const Refused = error{Refused};
 
-/// A recursive descent parser for the SQL Rui writes, run at comptime:
-///
-///   statement := select | insert | update | delete
-///   select    := [WITH [RECURSIVE] name [(names)] AS (select), ...]
-///                core {UNION [ALL] | INTERSECT | EXCEPT core}
-///                [ORDER BY expr [ASC|DESC], ...] [LIMIT expr [OFFSET expr]]
-///   core      := SELECT [DISTINCT|ALL] expr [AS name], ... [FROM source
-///                {[LEFT [OUTER] | INNER | CROSS] JOIN source}]
-///                [WHERE expr] [GROUP BY expr, ... [HAVING expr]]
-///   source    := table [[AS] alias] [@index(name)] [ON expr]
-///   insert    := INSERT INTO table (names) (VALUES (expr, ...) | select)
-///   update    := UPDATE table SET name=expr, ... WHERE expr
-///   delete    := DELETE FROM table WHERE expr
-///
-/// Expressions take OR, AND, NOT, the comparisons (`=`, `==`, `<>`, `!=`,
-/// `<`, `<=`, `>`, `>=`, IS [NOT] NULL, [NOT] IN (list or select),
-/// [NOT] BETWEEN a AND b), `+`,
-/// `-`, `*`, `/`, `%`, unary `-` and `+`, at SQLite's precedence; and as
-/// operands columns, `?N`, numbers, string literals, NULL, markers,
-/// calls of the `functions` table's functions, CASE, EXISTS and parenthesized expressions or
-/// subqueries. The one window is `row_number() OVER (ORDER BY expr
-/// [ASC|DESC], ...)`, which every engine runs. Anything else (a named
-/// parameter, `*` as a column, a comma join, an unknown table, LIKE,
-/// COLLATE, another window, CAST, a function `functions` lacks) is refused
-/// with the token it stopped at. Two more refusals hold on every dialect,
-/// for MySQL's sake: a call to `length` except on one of `bytes_columns`,
-/// because it counts characters of text on SQLite and bytes on MySQL; and
-/// an UPDATE whose SET value reads a column an earlier assignment of the
-/// same SET writes (`readsAssigned`), because MySQL reads the new value.
 const Parser = struct {
     tokens: []const Token,
     at: usize = 0,
@@ -943,24 +689,16 @@ const Parser = struct {
     sessions: []const usize = &.{},
     uses_now: bool = false,
     compounds: usize = 0,
-    /// The names WITH clauses define for the select being parsed.
     defined: []const []const u8 = &.{},
     queries: []const Query = &.{},
-    /// The id of the query whose text is being parsed.
     scope: ?usize = null,
     next_query: usize = 0,
-    /// Every column the text names as an operand, in order.
     columns: []const Column = &.{},
-    /// The columns `length` may count: a schema table's `.bytes` columns
-    /// (`expressionError`), the table a fixture's UPDATE writes, and none
-    /// in a typed statement.
     bytes_columns: []const []const u8 = &.{},
-    /// Parsing a test fixture's text (`fixtureError`).
     fixture: bool = false,
 
     const Opened = struct { id: usize, parent: ?usize };
 
-    /// Starts a query: the text parsed until `close` stands in it.
     fn open(p: *Parser) Opened {
         const opened: Opened = .{ .id = p.next_query, .parent = p.scope };
         p.next_query += 1;
@@ -973,7 +711,6 @@ const Parser = struct {
         p.queries = p.queries ++ .{Query{ .id = opened.id, .parent = opened.parent, .sources = sources, .where = where }};
     }
 
-    /// The query an UPDATE or DELETE stands in: its own table, unaliased.
     fn writtenTable(table: []const u8) []const Source {
         return &.{Source{ .table = table, .alias = table, .defined = false, .join = .first, .on = null }};
     }
@@ -1012,7 +749,6 @@ const Parser = struct {
         if (!p.acceptSymbol(symbol)) return p.refuse("'" ++ symbol ++ "'");
     }
 
-    /// Refuses the text at the next token, where `wanted` should stand.
     fn refuse(p: *Parser, wanted: []const u8) error{Refused} {
         const token = p.peek();
         return p.refuseWith("rsql: expected " ++ wanted ++ (if (token.kind == .end) " at the end" else " at '" ++ token.text ++ "'"));
@@ -1082,9 +818,6 @@ const Parser = struct {
         return parsed;
     }
 
-    /// An UPDATE's or DELETE's WHERE. A fixture may write every row of
-    /// its table, which every engine runs alike; its missing WHERE stands
-    /// as `.other`, which no rule a fixture meets reads.
     fn writtenWhere(p: *Parser) Refused!Expr {
         if (p.fixture and p.peek().kind == .end) return .other;
         try p.expect("WHERE");
@@ -1114,9 +847,6 @@ const Parser = struct {
         return .{ .insert = .{ .table = table_name, .columns = columns, .values = .{ .select = try p.select() } } };
     }
 
-    /// A WITH name is visible to the rest of its select, subqueries
-    /// included, and is never a table's name, so a source names one or
-    /// the other.
     fn select(p: *Parser) Refused!Select {
         const outer_defined = p.defined;
         if (p.accept("WITH")) {
@@ -1160,7 +890,6 @@ const Parser = struct {
         return .{ .first = first, .compound = compound, .limit_one = limit_one };
     }
 
-    /// `( select )`, parsed and counted, its tree dropped.
     fn subquery(p: *Parser) Refused!void {
         try p.expectSymbol("(");
         _ = try p.select();
@@ -1203,8 +932,6 @@ const Parser = struct {
         return .{ .results = results, .sources = sources, .where = where, .query = opened.id };
     }
 
-    /// A table or WITH name and its alias. The only marker that may
-    /// follow them is `@index(name)`, naming an index of that same table.
     fn source(p: *Parser, join: Join) Refused!Source {
         const written = try p.name();
         const defined = for (p.defined) |each| {
@@ -1361,7 +1088,6 @@ const Parser = struct {
             return .other;
         }
         if (p.peek().is("CAST")) return p.refuseWith(cast_message);
-        // X'hex' is a blob on every engine: an even count of hex digits.
         const quoted = p.peekAt(1);
         if (token.is("X") and quoted.kind == .literal and quoted.start == token.start + 1) {
             const digits = quoted.text[1 .. quoted.text.len - 1];
@@ -1380,7 +1106,6 @@ const Parser = struct {
             };
             try p.expectSymbol(")");
             if (std.ascii.eqlIgnoreCase(first, "length") and !p.lengthOfBytes(values)) return p.refuseWith(length_message);
-            // A windowed call answers to the window rule, which owns it.
             if (p.accept("OVER")) {
                 try p.window(std.ascii.eqlIgnoreCase(first, "row_number") and count == 0);
             } else if (knownFunction(first, count) == null) return p.refuseWith(functionMessage(first, count));
@@ -1391,16 +1116,12 @@ const Parser = struct {
         return .{ .column = column };
     }
 
-    /// Whether `length`'s arguments are one bare column of `bytes_columns`,
-    /// whose bytes it counts on every engine.
     fn lengthOfBytes(p: *const Parser, values: []const Expr) bool {
         if (values.len != 1 or values[0] != .column or values[0].column.table != null) return false;
         for (p.bytes_columns) |bytes_column| if (std.mem.eql(u8, bytes_column, values[0].column.name)) return true;
         return false;
     }
 
-    /// The `(ORDER BY expr [ASC|DESC], ...)` after `OVER`, which only
-    /// `row_number()` takes: no PARTITION BY, no frame.
     fn window(p: *Parser, row_number: bool) Refused!void {
         const refused = "rsql: the one window is row_number() OVER (ORDER BY ...), with no PARTITION BY or frame";
         if (!row_number) return p.refuseWith(refused);
@@ -1415,8 +1136,6 @@ const Parser = struct {
         if (!p.acceptSymbol(")")) return p.refuseWith(refused);
     }
 
-    /// `?N`, N from 1 to 64; SQLite's other forms (`?`, `:name`, `@name`,
-    /// `$name`) are refused, so every parameter is counted.
     fn parameter(p: *Parser, token: Token) Refused!usize {
         const number = std.fmt.parseInt(usize, token.text[1..], 10) catch return p.refuseWith("rsql: write parameters as ?N");
         if (number == 0 or number > p.uses.len) return p.refuseWith(std.fmt.comptimePrint("rsql: a parameter is ?1 to ?{d}", .{max_parameters}));
@@ -1424,10 +1143,6 @@ const Parser = struct {
         return number;
     }
 
-    /// A marker in an expression: `@now` takes no arguments; `@session`
-    /// takes one parameter ?k; each of `expression_markers` takes its
-    /// arity in expressions. `@index` stands only after a table (`source`),
-    /// and any other name is refused.
     fn marker(p: *Parser) Refused!Expr {
         const written = p.next().text;
         const marker_name = written[1..];
@@ -1455,8 +1170,6 @@ const Parser = struct {
         return .other;
     }
 
-    /// `@after`'s arguments: k qualified columns, then k parameters ?N,
-    /// k at least 1.
     fn after(p: *Parser) Refused!Expr {
         const refused = "rsql: @after takes k qualified columns, then k parameters ?N";
         try p.expectSymbol("(");
@@ -1478,10 +1191,6 @@ const Parser = struct {
     }
 };
 
-/// The first of `read` that an UPDATE of `table` reads after an earlier
-/// assignment of `assigned` wrote it, or null. It compares names: a column
-/// read bare, or qualified by `table`, anywhere in the value, subqueries
-/// included, so a subquery's own column of that name counts too.
 fn readsAssigned(comptime read: []const Column, comptime table: []const u8, comptime assigned: []const []const u8) ?[]const u8 {
     for (read) |column| {
         if (column.table) |qualifier| if (!std.mem.eql(u8, qualifier, table)) continue;
@@ -1490,14 +1199,12 @@ fn readsAssigned(comptime read: []const Column, comptime table: []const u8, comp
     return null;
 }
 
-/// The refusal of a row value, which names the portable form.
 const row_value_message = "rsql: a row value is outside the grammar; write a keyset as an rsql.Page, with @after";
 
 fn fieldCount(comptime T: type) usize {
     return @typeInfo(T).@"struct".field_names.len;
 }
 
-/// The SessionHead fields of Args, in order.
 fn sessionFields(comptime Args: type) []const []const u8 {
     comptime {
         var fields: []const []const u8 = &.{};
@@ -1509,19 +1216,12 @@ fn sessionFields(comptime Args: type) []const []const u8 {
     }
 }
 
-/// A compound SELECT (UNION, INTERSECT or EXCEPT), anywhere in the text,
-/// stands only in a read that declares `.compound = true`, and that
-/// declaration only with one. A write holds none.
 fn compoundError(comptime kind: StatementKind, comptime parsed: Parsed, comptime compound: bool) ?[]const u8 {
     if (parsed.compounds == 0) return if (compound) "rsql: .compound = true, but the text has no compound SELECT" else null;
     if (kind == .write) return "rsql: a write holds no compound SELECT";
     return if (compound) null else "rsql: a read with a compound SELECT declares .compound = true";
 }
 
-/// Args fields bind ?1..?N in field order. Parameters carry no names, so
-/// what is checked is the count: the text uses each of ?1..?N, N being
-/// Args' field count, and no higher. The parser admits no other
-/// parameter form.
 fn parameterError(comptime uses: [max_parameters]usize, comptime Args: type) ?[]const u8 {
     const arguments = fieldCount(Args);
     var highest: usize = 0;
@@ -1533,20 +1233,11 @@ fn parameterError(comptime uses: [max_parameters]usize, comptime Args: type) ?[]
     return null;
 }
 
-/// A read binds no SessionHead and writes no `@session`: it names a
-/// Session by its reference text.
 fn readSessionError(comptime parsed: Parsed, comptime Args: type) ?[]const u8 {
     if (sessionFields(Args).len != 0 or parsed.sessions.len != 0) return "rsql: a read binds no SessionHead; it names a Session by its reference text";
     return null;
 }
 
-/// Why `Row` does not name, in order, the columns the first SELECT of
-/// `core`'s statement returns, or null. A column's name is its alias after
-/// AS, or a bare or qualified column's own name; any other column needs an
-/// AS. A SessionHead field takes the three columns `session_ref,
-/// workspace_key,next_position`, and a Row holds at most one, so no two
-/// fields of one type can trade places. Types are not compared with the
-/// schema's; `sqlite.decodeRow` refuses a value its field cannot hold.
 fn rowError(comptime core: Core, comptime Row: type) ?[]const u8 {
     comptime {
         var expected: []const []const u8 = &.{};
@@ -1571,40 +1262,6 @@ fn rowError(comptime core: Core, comptime Row: type) ?[]const u8 {
     }
 }
 
-/// Why a write's Sessions are unnamed, or named anywhere but on their own
-/// columns, or a table it reads is not tied to them, or null. It checks
-/// exactly this. A write to a table that carries no Sessions
-/// (`schema.carriesSessions`) binds no SessionHead and writes no marker,
-/// and nothing more is checked of it. A write to one that does:
-/// - binds the k of each `@session(?k)` to a SessionHead field of Args,
-///   uses ?k only in such markers, and binds every SessionHead field so;
-///   its markers name at least one k, and at most one per column of
-///   `schema.sessionColumns` (exactly one where it has one column);
-/// - as an INSERT ... VALUES (`insertSessionError`), gives each Session
-///   column a lone marker, or NULL (written, or by leaving the column out)
-///   where the column is nullable, and gives each SessionHead as one
-///   Session column's value;
-/// - as an INSERT ... SELECT, writes to a table whose one Session column
-///   is session_ref, NOT NULL, and copies it from a table its SELECT reads
-///   (`copyError`);
-/// - as an UPDATE, ties the table it writes (`tiedRefs`), which it can do
-///   only by the top-level WHERE conjunct `c=@session(?k)` for that
-///   table's first Session column `c`, and assigns no Session column. In
-///   a table that names two Sessions, a second marker is the conjunct
-///   `sender_session_ref=@session(?j)` (`ties`); and a column its sender
-///   reads (`schema.ReadBy.both`) is assigned only under that conjunct or
-///   the top-level conjunct `sender_session_ref IS NULL` (`nulls`);
-/// - as a DELETE, ties its table so, and deletes from a table with one
-///   Session column only;
-/// - ties every reference to a table that carries Sessions anywhere in its
-///   text (`tableRefs`, `tiedRefs`): FROM, JOIN, and every subquery.
-/// A conjunct is a term of an AND chain, parentheses dropped, so it holds
-/// of every row its query reads. No write holds a compound SELECT
-/// (`compoundError`). So every row a write reads or inserts in a table
-/// that carries Sessions belongs to a Session its heads name, an UPDATE or
-/// DELETE changes only such rows, and an UPDATE changes only columns those
-/// Sessions read; the Access that queues it touches each. `expectError`
-/// holds a copy's Expect to its row count.
 fn sessionError(comptime parsed: Parsed, comptime Args: type) ?[]const u8 {
     comptime {
         const table = switch (parsed.statement) {
@@ -1629,7 +1286,6 @@ fn sessionError(comptime parsed: Parsed, comptime Args: type) ?[]const u8 {
                 return if (columns.len == 1) "rsql: @session(?k) binds the one SessionHead field of Args" else "rsql: @session(?k) binds a SessionHead field of Args";
             if (parsed.uses[k - 1] != occurrences(parsed.sessions, k)) return "rsql: the SessionHead ?k binds is used only in @session(?k)";
         }
-        // Each k binds its own head: equal counts leave none unbound.
         if (heads != named.len) return "rsql: every SessionHead of Args is bound by its own @session(?k)";
         const refs = tableRefs(parsed.queries);
         const tied = tiedRefs(parsed.queries);
@@ -1672,7 +1328,6 @@ fn sessionError(comptime parsed: Parsed, comptime Args: type) ?[]const u8 {
     }
 }
 
-/// The k of each marker, once each, in the order first written.
 fn distinct(comptime markers: []const usize) []const usize {
     comptime {
         var named: []const usize = &.{};
@@ -1698,8 +1353,6 @@ fn untiedMessage(comptime table: []const u8, comptime alias: []const u8) []const
     }
 }
 
-/// The slot of `column` in an INSERT's column list, or null when it is not
-/// listed; listed twice is an error.
 fn sessionSlot(comptime listed: []const []const u8, comptime column: []const u8) error{Twice}!?usize {
     var slot: ?usize = null;
     for (listed, 0..) |name, index| if (std.mem.eql(u8, name, column)) {
@@ -1709,12 +1362,6 @@ fn sessionSlot(comptime listed: []const []const u8, comptime column: []const u8)
     return slot;
 }
 
-/// See `sessionError`: an INSERT's one VALUES row gives one value per
-/// listed column; each Session column's value is a lone `@session(?k)`, or
-/// NULL (the constant, or the column left out) where `schema.isNullable`
-/// says the column is; no two Session columns take the same k; and they
-/// take all `heads` of Args. A marker elsewhere in the row (a subquery's
-/// tie) is held to the walk (`tiedRefs`) like any other.
 fn insertSessionError(
     comptime table: []const u8,
     comptime columns: []const []const u8,
@@ -1744,17 +1391,6 @@ fn insertSessionError(
 
 const copied_message = "rsql: an INSERT ... SELECT copies session_ref as the session_ref column of a table its SELECT reads";
 
-/// See `sessionError`: an INSERT ... SELECT whose target's one Session
-/// column is session_ref. It checks exactly this: the SELECT gives one
-/// value per listed column, and the value in session_ref's slot is a
-/// column named session_ref of a source of the SELECT's first core (bare
-/// where that core reads one source, or qualified by the source's alias)
-/// that is a table carrying Sessions, not a WITH name. A table with a
-/// session_ref column lists it first (`schema.sessionColumns`), so the
-/// walk ties that column (`tiedRefs`) to the write's one Session, and
-/// every copied value is the reference its head binds (a table without
-/// it fails to prepare); a LEFT JOIN's or an aggregate's row with no source row copies
-/// NULL, which session_ref refuses.
 fn copyError(comptime queries: []const Query, comptime select: Select, comptime column: usize, comptime columns: usize) ?[]const u8 {
     const core = select.first;
     if (core.results.len != columns) return "rsql: an INSERT gives one value per column";
@@ -1767,15 +1403,8 @@ fn copyError(comptime queries: []const Query, comptime select: Select, comptime 
     return null;
 }
 
-/// One table reference: source `source` of query `query` (an index into
-/// `Parsed.queries`).
 const Ref = struct { query: usize, source: usize };
 
-/// Every table reference of a statement, wherever it stands: each source
-/// of each query (`Query`) that names a table, not a WITH name. The parser
-/// records a query for every SELECT core (subqueries in any expression,
-/// WITH bodies, IN lists) and for an UPDATE's or DELETE's own table, so
-/// this is every table the text reads or writes.
 fn tableRefs(comptime queries: []const Query) []const Ref {
     comptime {
         var refs: []const Ref = &.{};
@@ -1796,9 +1425,6 @@ fn queryAt(comptime queries: []const Query, comptime id: usize) usize {
     unreachable;
 }
 
-/// The source `column` names from query `q`: a qualified column the
-/// source with that alias in the innermost query, from q outward, that
-/// has one; a bare column q's source when q reads one, and otherwise none.
 fn resolve(comptime queries: []const Query, comptime q: usize, comptime column: Column) ?Ref {
     const qualifier = column.table orelse return if (queries[q].sources.len == 1) .{ .query = q, .source = 0 } else null;
     var at: ?usize = q;
@@ -1809,14 +1435,6 @@ fn resolve(comptime queries: []const Query, comptime q: usize, comptime column: 
     return null;
 }
 
-/// Which of `tableRefs(queries)` are tied to a Session the write names.
-/// A reference r to a table that carries Sessions, standing in query q,
-/// whose first Session column is c (`schema.sessionColumns`), is tied when
-/// a conjunct of q's WHERE, of r's own ON, or of an inner join's ON in q
-/// is `r.c=@session(?k)`, or `r.c=s.d` for another tied reference s that q
-/// or a query holding q reads, d being s's first Session column (either
-/// way round; columns name sources as `resolve` says). A reference to a
-/// table without Sessions is never tied, and no rule asks it to be.
 fn tiedRefs(comptime queries: []const Query) []const bool {
     comptime {
         @setEvalBranchQuota(1_000_000);
@@ -1838,7 +1456,6 @@ fn tiedRefs(comptime queries: []const Query) []const bool {
     }
 }
 
-/// See `tiedRefs`: whether a conjunct of `ref`'s query ties it.
 fn tiesRef(comptime queries: []const Query, comptime refs: []const Ref, comptime tied: []const bool, comptime ref: Ref) bool {
     const query = queries[ref.query];
     for (query.sources, 0..) |source, s| if (source.on) |on| if (source.join != .left or s == ref.source) {
@@ -1871,8 +1488,6 @@ fn equates(comptime queries: []const Query, comptime refs: []const Ref, comptime
     return false;
 }
 
-/// Whether `where` has the conjunct `column=@session(?k)`, its column bare
-/// or qualified by `table`, the written table's name.
 fn ties(comptime where: Expr, comptime table: []const u8, comptime column: []const u8) bool {
     for (conjuncts(where)) |term| {
         if (term != .equality) continue;
@@ -1883,8 +1498,6 @@ fn ties(comptime where: Expr, comptime table: []const u8, comptime column: []con
     return false;
 }
 
-/// Whether `where` has the conjunct `column IS NULL`, its column bare or
-/// qualified by `table`.
 fn nulls(comptime where: Expr, comptime table: []const u8, comptime column: []const u8) bool {
     for (conjuncts(where)) |term| {
         if (term == .is_null and std.mem.eql(u8, term.is_null.name, column) and
@@ -1897,8 +1510,6 @@ fn conjuncts(comptime condition: Expr) []const Expr {
     return if (condition == .conjunction) condition.conjunction else &[1]Expr{condition};
 }
 
-/// Whether a SELECT returns at most one row: it is not compound, and it
-/// ends in `LIMIT 1`, or it has no FROM, or its keys pin it (`pinsOneRow`).
 fn returnsOneRow(comptime select: Select) bool {
     comptime {
         if (select.compound) return false;
@@ -1906,13 +1517,6 @@ fn returnsOneRow(comptime select: Select) bool {
     }
 }
 
-/// Whether a SELECT core returns at most one row because of keys alone:
-/// every source is a table pinned, on all columns of one of its
-/// `schema.keys`, by `=` conjuncts to a parameter, a constant, or a
-/// column of another source already pinned. A conjunct of the WHERE or of
-/// an inner join's ON may pin any source; a LEFT JOIN's ON pins only its
-/// own, since every row on its left stays. A bare column counts only with
-/// one source. A WITH name is never pinned.
 fn pinsOneRow(comptime core: Core) bool {
     comptime {
         @setEvalBranchQuota(100_000);
@@ -1948,9 +1552,6 @@ fn pinsOneRow(comptime core: Core) bool {
     }
 }
 
-/// Whether `condition` is `column = value` (either way round) for source
-/// `index`'s `column`, where the value is a parameter (`@session(?k)`
-/// binds one), a constant, or a column of another pinned source.
 fn fixes(comptime condition: Expr, comptime sources: []const Source, comptime pinned: []const bool, comptime index: usize, comptime column: []const u8) bool {
     if (condition != .equality) return false;
     const sides = condition.equality.*;
@@ -1967,17 +1568,11 @@ fn fixes(comptime condition: Expr, comptime sources: []const Source, comptime pi
     return false;
 }
 
-/// Whether `side` is exactly source `index`'s `column`: qualified by its
-/// alias, or bare when it is the only source.
 fn names(comptime side: Expr, comptime sources: []const Source, comptime index: usize, comptime column: []const u8) bool {
     if (side != .column or !std.mem.eql(u8, side.column.name, column)) return false;
     return if (side.column.table) |table| std.mem.eql(u8, table, sources[index].alias) else sources.len == 1;
 }
 
-/// Typed statement text in SQLite's spelling: `@now` binds the Access's
-/// second as the parameter after Args, `@session(?k)` is `?k`,
-/// `@index(name)` is `INDEXED BY name` for an index the schema has, and
-/// the other markers as `render`.
 fn renderStatement(comptime sql: []const u8, comptime arguments: usize) [:0]const u8 {
     comptime {
         @setEvalBranchQuota(200 * sql.len + 10_000 + schema.objects_quota);
@@ -2049,13 +1644,6 @@ fn renderSqlite(comptime text: []const u8) []const u8 {
     }
 }
 
-/// The markers an expression may hold, each with its argument count and
-/// its spelling per dialect. In a spelling, `arg_a` and `arg_b` stand for
-/// the first and second argument as rendered, `arg_set` for the second
-/// argument's character set (`characterSet`), and `served_slots` for one
-/// slot per `provider_name.Provider`, joined with commas. `@now`,
-/// `@session` and `@index` are not expressions: the parser and each
-/// renderer handle them on their own.
 const ExpressionMarker = struct { name: []const u8, arity: usize, sqlite: []const u8, mysql: []const u8 };
 const arg_a = "\x01";
 const arg_b = "\x02";
@@ -2104,35 +1692,20 @@ fn marker(comptime name: []const u8, comptime arguments: []const []const u8, com
     return out;
 }
 
-/// A place in MySQL text where PR 8's engine writes a literal, and where
-/// PREPARE writes `?`.
 pub const Slot = union(enum) {
-    /// Args field k-1, for `?k` and for `@session(?k)`'s reference.
     argument: usize,
-    /// The Access's second, for `@now`.
     now,
-    /// This provider's place in `@served(x)`'s list, bound as
-    /// `servedBinding` gives.
     served: provider_name.Provider,
 };
 
-/// What an engine binds to a `served` slot: the provider's label when the
-/// opening serves it, else the empty string, which no stored label equals
-/// (`schema` checks a label's length is at least 1). Never NULL: `x IN
-/// (...,NULL)` is NULL where x matches nothing, so `NOT @served(x)` would be
-/// NULL where SQLite's `rui_served` makes it true. For a NULL x both
-/// spellings differ anyway: `rui_served(NULL)` is 0 and `NULL IN (...)` NULL.
 pub fn servedBinding(provider: provider_name.Provider, served: bool) []const u8 {
     return if (served) @tagName(provider) else "";
 }
 
-/// Text in MySQL 8.4's spelling, with a slot between each two parts.
 pub const Template = struct {
-    /// One more than `slots`.
     parts: []const []const u8,
     slots: []const Slot,
 
-    /// The parts joined with `?`, the text MySQL PREPAREs.
     pub fn prepared(comptime template: Template) [:0]const u8 {
         comptime {
             var text: []const u8 = template.parts[0];
@@ -2145,8 +1718,6 @@ pub const Template = struct {
 
 pub const MysqlRendering = union(enum) { refused: []const u8, rendered: Template };
 
-/// `text` in MySQL's spelling, failing the build where `mysqlRendering`
-/// refuses it.
 fn mysqlTemplate(comptime text: []const u8) Template {
     return switch (comptime mysqlRendering(text)) {
         .refused => |message| @compileError(message ++ ": " ++ text),
@@ -2154,37 +1725,6 @@ fn mysqlTemplate(comptime text: []const u8) Template {
     };
 }
 
-/// Portable Rui SQL in MySQL 8.4's spelling, or why it has none. Text
-/// between tokens is copied, and string literals are copied whole. It
-/// replaces:
-///
-///   ?k, @session(?k)     a slot for Args field k-1
-///   @now                 a slot for the Access's second
-///   @index(name)         FORCE INDEX (name), only for real-column MySQL indexes
-///   @served(x)           `(x IN (?,...))`, a slot per `provider_name.Provider`
-///   @payload(t)          t's first `content_chunk`, or X'' when it has none
-///   @octets(x)           `OCTET_LENGTH(x)`
-///   @charset(c,'set')    `(NOT REGEXP_LIKE(c,'[^set]','c'))`: no character
-///                        outside the set; `'c'` compares case-sensitively
-///   @initial(c,'set')    `REGEXP_LIKE(c,'^[set]','c')`
-///   @same(a,b)           `(a <=> b)`
-///   @distinct(a,b)       `(NOT (a <=> b))`
-///   @count_where(c)      `count(CASE WHEN c THEN 1 END)`
-///   @max_where(x,c)      `max(CASE WHEN c THEN x END)`
-///   @list(x)             `GROUP_CONCAT(x SEPARATOR ',')`
-///   ==                   `=`
-///   /                    ` DIV `: SQLite divides two integers to an integer,
-///                        truncated, as DIV does, where MySQL's `/` gives a
-///                        decimal. Rui SQL divides only integers: the grammar
-///                        reads no decimal literal and the schema has no REAL
-///                        column
-///   a function call      its `functions` entry's MySQL name
-///
-/// String literals are copied unchanged, which reads them as SQLite does
-/// only under `schema.mysql_session`'s NO_BACKSLASH_ESCAPES. It refuses
-/// text `portabilityError` refuses, a call no `functions` entry names with
-/// that many arguments, and an unknown or malformed marker; the parser
-/// refuses those calls, and CAST, in every build before any rendering.
 pub fn mysqlRendering(comptime text: []const u8) MysqlRendering {
     comptime {
         @setEvalBranchQuota(200 * text.len + 10_000);
@@ -2200,14 +1740,6 @@ pub fn mysqlRendering(comptime text: []const u8) MysqlRendering {
     }
 }
 
-/// The functions Rui SQL may call, by name and argument count (null: any),
-/// with each one's MySQL name and the arguments MySQL's takes before
-/// Rui SQL's. The parser refuses any other call in every build, in typed
-/// statements and schema expressions alike (`Parser.operand`). `zeroblob(n)`
-/// is `REPEAT(X'00',n)`, the same n zero bytes, built where SQLite reserves
-/// them; it is NULL above MySQL's `max_allowed_packet`, and PR 8 writes
-/// MySQL content in chunks instead. `length` stands only on a schema
-/// table's `.bytes` column (`Parser.lengthOfBytes`).
 const functions = [_]struct { name: []const u8, arguments: ?usize, mysql: []const u8, leading: []const u8 = "" }{
     .{ .name = "abs", .arguments = 1, .mysql = "abs" },
     .{ .name = "coalesce", .arguments = null, .mysql = "coalesce" },
@@ -2241,10 +1773,6 @@ fn functionMessage(comptime name: []const u8, comptime count: usize) []const u8 
 const cast_message = "rsql: CAST converts differently on each engine";
 const length_message = "rsql: length() counts characters of text on SQLite and bytes on MySQL; write @octets(x)";
 
-/// Why schema expression `text`, a CHECK or an index predicate on a table
-/// whose `.bytes` columns are `bytes_columns`, is refused, or null: the
-/// same rules a typed statement's expressions meet (`portabilityError`
-/// and `Parser.expr`), with `length` allowed on those columns.
 pub fn expressionError(comptime text: []const u8, comptime bytes_columns: []const []const u8) ?[]const u8 {
     comptime {
         @setEvalBranchQuota(1000 * text.len + 20_000);
@@ -2258,10 +1786,6 @@ pub fn expressionError(comptime text: []const u8, comptime bytes_columns: []cons
     }
 }
 
-/// The token ranges MySQL's text leaves out of an INSERT ... VALUES of a
-/// row: each column the schema has only on other engines
-/// (`schema.Engines`), with its value and a comma. An INSERT ... SELECT
-/// that names one is refused: its SELECT would need the same cut.
 fn lackedByMysql(comptime tokens: []const Token) union(enum) { refused: []const u8, skips: []const [2]usize } {
     comptime {
         if (tokens.len < 4 or !tokens[0].is("INSERT") or !tokens[1].is("INTO") or !tokens[3].isSymbol("(")) return .{ .skips = &.{} };
@@ -2280,7 +1804,6 @@ fn lackedByMysql(comptime tokens: []const Token) union(enum) { refused: []const 
         if (values.len != columns.len) return .{ .refused = refused };
         if (lacked[0] == 0) return .{ .refused = "rsql: an INSERT's first column is on every engine" };
         var skips: []const [2]usize = &.{};
-        // Each with the comma before it.
         for ([_][]const [2]usize{ columns, values }) |ranges| for (lacked) |position| {
             skips = skips ++ .{[2]usize{ ranges[position][0] - 1, ranges[position][1] }};
         };
@@ -2291,7 +1814,6 @@ fn lackedByMysql(comptime tokens: []const Token) union(enum) { refused: []const 
 const MysqlRenderer = struct {
     text: []const u8,
     tokens: []const Token,
-    /// Token ranges left out (`lackedByMysql`).
     skips: []const [2]usize = &.{},
     parts: []const []const u8 = &.{},
     current: []const u8 = "",
@@ -2313,13 +1835,11 @@ const MysqlRenderer = struct {
         return error.Refused;
     }
 
-    /// The end of the skip that starts at token `at`, or null.
     fn skipped(r: *const MysqlRenderer, at: usize) ?usize {
         for (r.skips) |skip| if (skip[0] == at) return skip[1];
         return null;
     }
 
-    /// Renders `tokens[from..to]`, with the text between them copied.
     fn range(r: *MysqlRenderer, from: usize, to: usize) Refused!void {
         var at = from;
         while (at < to) {
@@ -2335,7 +1855,6 @@ const MysqlRenderer = struct {
         }
     }
 
-    /// Renders the token at `at` and any it governs; returns the index after them.
     fn token(r: *MysqlRenderer, at: usize, to: usize) Refused!usize {
         const current = r.tokens[at];
         switch (current.kind) {
@@ -2415,9 +1934,6 @@ const MysqlRenderer = struct {
         return end + 1;
     }
 
-    /// `@after(c1..ck,?a1..?ak)` expanded, since MySQL seeks only a row
-    /// value's equality prefix: `c1>?a1` for one column, else
-    /// `(c1>?a1 OR (c1=?a1 AND c2>?a2) OR ...)`.
     fn after(r: *MysqlRenderer, arguments: []const [2]usize) Refused!void {
         if (arguments.len < 2 or arguments.len % 2 != 0) return r.refuse("rsql: @after takes k columns, then k parameters");
         const k = arguments.len / 2;
@@ -2439,16 +1955,12 @@ const MysqlRenderer = struct {
         if (k > 1) r.emit(")");
     }
 
-    /// A character set argument: one literal, held to `characterSet`.
     fn set(r: *MysqlRenderer, argument: [2]usize) Refused![]const u8 {
         if (argument[1] != argument[0] + 1 or r.tokens[argument[0]].kind != .literal) return r.refuse("rsql: a character set is one quoted literal");
         return characterSet(r.tokens[argument[0]].text, r.text);
     }
 };
 
-/// Whether the word at `at` calls a function: a name that is no grammar
-/// word, before `(`, and neither the table of `INTO table(` nor a WITH
-/// name before its column list (`name(...) AS (`).
 fn isCall(comptime tokens: []const Token, comptime at: usize, comptime to: usize) bool {
     const word = tokens[at];
     if (word.kind != .word or isGrammarWord(word.text)) return false;
@@ -2458,7 +1970,6 @@ fn isCall(comptime tokens: []const Token, comptime at: usize, comptime to: usize
     return !(close + 2 < to and tokens[close + 1].is("AS") and tokens[close + 2].isSymbol("("));
 }
 
-/// The index of the `)` that closes the `(` at `open`, before `to`.
 fn closingToken(comptime tokens: []const Token, comptime open: usize, comptime to: usize) ?usize {
     var depth: usize = 0;
     for (tokens[open..to], open..) |each, index| {
@@ -2471,8 +1982,6 @@ fn closingToken(comptime tokens: []const Token, comptime open: usize, comptime t
     return null;
 }
 
-/// The token ranges of the arguments between `(` at `open` and `)` at
-/// `close`, split at their own commas; none when nothing stands between.
 fn argumentRanges(comptime tokens: []const Token, comptime open: usize, comptime close: usize) []const [2]usize {
     comptime {
         if (close == open + 1) return &.{};
@@ -2491,10 +2000,6 @@ fn argumentRanges(comptime tokens: []const Token, comptime open: usize, comptime
     }
 }
 
-/// SQLite's spelling of `@after`: `c1>?a1` for one column, else the row
-/// value `(c1,..,ck)>(?a1,..,?ak)`, which SQLite seeks on after the
-/// equality prefix (`whereRangeVectorLen`) and also tests on every row it
-/// walks.
 fn renderAfterSqlite(comptime arguments: []const []const u8, comptime text: []const u8) []const u8 {
     comptime {
         if (arguments.len < 2 or arguments.len % 2 != 0) @compileError("rsql: @after takes k columns, then k parameters: " ++ text);
@@ -2510,8 +2015,6 @@ fn renderAfterSqlite(comptime arguments: []const []const u8, comptime text: []co
     }
 }
 
-/// The characters of a set literal such as 'a-z0-9_-': ranges and single
-/// characters only, so every engine's bracket expression reads it alike.
 fn characterSet(comptime literal: []const u8, comptime text: []const u8) []const u8 {
     if (literal.len < 3 or literal[0] != '\'' or literal[literal.len - 1] != '\'') @compileError("rsql: a character set is one quoted literal: " ++ text);
     const set = literal[1 .. literal.len - 1];
@@ -2568,7 +2071,6 @@ fn closingParenthesis(comptime text: []const u8, comptime open: usize) usize {
     @compileError("rsql: unclosed parenthesis: " ++ text);
 }
 
-/// The index just past the string literal opening at `open` ('' escapes a quote).
 fn literalEnd(comptime text: []const u8, comptime open: usize) usize {
     var index = open + 1;
     while (index < text.len) : (index += 1) {
@@ -2598,107 +2100,40 @@ fn skipSpace(comptime text: []const u8, comptime from: usize) usize {
     return index;
 }
 
-// Pages. A Full list's rows are a keyset-paged read of one Session: each
-// chunk starts after the last row the one before took. A Page derives that
-// read from the index each of its arms walks, so the key is written once,
-// in the schema's index, and never again by hand: its columns, the WHERE
-// that seeks to it, the ORDER BY, the next chunk's Args, and the check that
-// rows ascend all come from it.
-
-/// Where an arm's rows come from, in key order.
 pub const Ordered = union(enum) {
-    /// A named index in `schema.indexes`; its table is the arm's table.
     index: []const u8,
-    /// A WITHOUT ROWID table's primary key, the table's own B-tree. No
-    /// `@index` renders: SQLite cannot name it.
     primary_key: []const u8,
 };
 
-/// An index column after the Session column that an arm fixes to a
-/// constant, e.g. core_command_target_order's `kind`.
 pub const Fixed = struct { column: []const u8, value: []const u8 };
 
-/// One table's rows of a list.
 pub const Arm = struct {
     on: Ordered,
     alias: []const u8,
-    /// The index columns after column 0, in index order.
     fixed: []const Fixed = &.{},
-    /// Rui SQL: the result columns after the key, which the Page selects
-    /// first. Correlated subqueries are allowed; the plan test refuses a
-    /// SCAN or a temporary B-tree in any of them.
     columns: []const u8,
-    /// Rui SQL: LEFT JOINs only (`pageError`). There is no `where`:
-    /// nothing but the index's prefix, its predicate and `@after`
-    /// constrains the walked table.
     joins: []const u8 = "",
 };
 
 pub const PageSpec = struct {
-    /// One arm per table; two or more merge by the key (UNION ALL).
     arms: []const Arm,
-    /// Its first fields are the key, named as arm 0's key columns; the
-    /// first is `Positive`.
     Row: type,
-    /// The rows a chunk takes; the text reads one more (LIMIT take+1).
     take: u16,
 };
 
-/// What a Page walks: the data each engine's plan test formats its
-/// expectation from, and what `next` compares.
 pub const Walk = struct {
     pub const Arm = struct {
         table: []const u8,
         alias: []const u8,
-        /// null for a primary key.
         index: ?[]const u8,
-        /// Column 0 (bound to ?1, the Session), then the fixed columns.
         prefix: []const []const u8,
-        /// This arm's key columns, in index order, without DESC.
         key: []const []const u8,
-        /// Every key column DESC: the engine walks the index backward for
-        /// the list's ascending order.
         backward: bool,
     };
-    /// The key's names: the Row's first fields, ORDER BY, and Args'
-    /// fields after `session`.
     names: []const []const u8,
     arms: []const Walk.Arm,
 };
 
-/// A keyset-paged read of a Session's list, derived from one index per
-/// arm. It is a typed read: it holds every declaration `Read` makes, and
-/// `Access.readEach` runs it. Per arm it renders
-///
-///   SELECT <alias>.<key_i> AS <name_i>,..,<columns>
-///   FROM <table> <alias>[ @index(<index>)] <joins>
-///   WHERE <alias>.<column 0>=?1[ AND <alias>.<fixed>=<value>..]
-///     [ AND <the index's predicate, its columns qualified by alias>]
-///     AND @after(<alias>.<key_1>,..,?2,..)
-///
-/// joined by UNION ALL, then ORDER BY <names> LIMIT <take+1>.
-///
-/// Gates, all comptime unless noted:
-/// - `keysetOf`: the index exists on its table (a primary key, on a
-///   WITHOUT ROWID table); `fixed` names the columns after column 0 in
-///   order; the key is non-empty, of `.int` columns, all ASC or all DESC;
-///   every key column after the first is NOT NULL in the schema, or the
-///   index's predicate has `<col> IS NOT NULL` as a conjunct; every arm's
-///   key has arm 0's length; the Row's key fields are `Positive` or u64,
-///   the first `Positive`, so Args' zero default precedes every row. A row
-///   whose first key column is NULL is outside every range: the list's
-///   first read must account for such rows (Messages' does).
-/// - `Read`'s own checks on the rendered text: portability, ?1..?N, Row
-///   columns in order (so the Row leads with the key), compound.
-/// - `pageError` on the parsed tree: each arm's first source is its walked
-///   table under its walked index, and every later source is a LEFT JOIN.
-///   A missing joined row reads as NULLs, which a text field
-///   (`Bounded`) reads as empty and every other field that is
-///   not optional refuses (`CorruptStore`; an enum, as no tag), so a list
-///   whose joined fields are all text checks them itself
-///   (`report.Interruptions.check`).
-/// - run time, every row: `next` refuses a row not strictly after the last
-///   one taken, the look-ahead row included.
 pub fn Page(comptime spec: PageSpec) type {
     const walk = comptime switch (keysetOf(spec)) {
         .refused => |message| @compileError(message),
@@ -2715,8 +2150,6 @@ pub fn Page(comptime spec: PageSpec) type {
     });
     return struct {
         pub const kind = R.kind;
-        /// What `isStatement` checks this type was made from: its text is
-        /// a `Read`'s, checked as one.
         pub const made_from = spec;
         pub const Args = R.Args;
         pub const Row = R.Row;
@@ -2729,15 +2162,8 @@ pub fn Page(comptime spec: PageSpec) type {
 
         pub const page_walk: Walk = walk;
         pub const take: u16 = spec.take;
-        /// The visitor limit `Access.readEach` takes: the text's LIMIT.
         pub const limit: u16 = spec.take + 1;
 
-        /// The Args of the chunk after `row`: its key, with `after`'s
-        /// Session. Null when `row`'s key is not strictly greater than
-        /// `after`'s, which a sound Store never returns: the caller answers
-        /// `CorruptStore`. Called on every row a chunk sees, the look-ahead
-        /// row included, so every adjacent pair of the (merged) stream is
-        /// compared, chunk boundaries too.
         pub fn next(after: Args, row: *const Row) ?Args {
             var result: Args = .{ .session = after.session };
             var order: std.math.Order = .eq;
@@ -2755,8 +2181,6 @@ fn keyValue(value: anytype) u64 {
     return if (@TypeOf(value) == Positive) value.get() else value;
 }
 
-/// Why `spec` is not a Page, or null: `keysetOf`'s refusal, then
-/// `pageError`'s, then `Read`'s, as `Page` would fail the build.
 pub fn pageSpecError(comptime spec: PageSpec) ?[]const u8 {
     comptime {
         const walk = switch (keysetOf(spec)) {
@@ -2774,8 +2198,6 @@ pub fn pageSpecError(comptime spec: PageSpec) ?[]const u8 {
 
 const Keyset = union(enum) { refused: []const u8, walk: Walk };
 
-/// An arm's walked rows: its table, the index (null for a primary key),
-/// that index's columns and its predicate.
 const Walked = struct { table: []const u8, index: ?[]const u8, columns: []const []const u8, where: ?[]const u8 };
 
 fn walkedBy(comptime on: Ordered) union(enum) { refused: []const u8, walked: Walked } {
@@ -2802,15 +2224,12 @@ fn schemaColumn(comptime table: []const u8, comptime name: []const u8) ?schema.C
     return null;
 }
 
-/// Whether `predicate` has `term` as a top-level conjunct, as written.
 fn states(comptime predicate: ?[]const u8, comptime term: []const u8) bool {
     var terms = std.mem.splitSequence(u8, predicate orelse return false, " AND ");
     while (terms.next()) |conjunct| if (std.mem.eql(u8, std.mem.trim(u8, conjunct, " "), term)) return true;
     return false;
 }
 
-/// Reads each arm's index (or primary key) from `schema` and splits its
-/// columns into prefix and key. Holds the `keysetOf` gates (see `Page`).
 fn keysetOf(comptime spec: PageSpec) Keyset {
     comptime {
         @setEvalBranchQuota(100_000);
@@ -2860,7 +2279,6 @@ fn keysetOf(comptime spec: PageSpec) Keyset {
     }
 }
 
-/// The Rui SQL of a Page, as `Page` shows it.
 fn pageText(comptime spec: PageSpec, comptime walk: Walk) []const u8 {
     comptime {
         @setEvalBranchQuota(100_000);
@@ -2888,9 +2306,6 @@ fn pageText(comptime spec: PageSpec, comptime walk: Walk) []const u8 {
     }
 }
 
-/// `predicate` (an index's Rui SQL `where`) with each bare column of
-/// `table` qualified by `alias`, so a joined table's same-named column
-/// cannot capture it; in parentheses when it holds an OR.
 fn qualify(comptime alias: []const u8, comptime table: []const u8, comptime predicate: []const u8) []const u8 {
     comptime {
         @setEvalBranchQuota(100 * predicate.len + 10_000);
@@ -2928,8 +2343,6 @@ fn qualify(comptime alias: []const u8, comptime table: []const u8, comptime pred
     }
 }
 
-/// `struct { session: []const u8, <name>: u64 = 0, ... }`, built with
-/// `@Struct` (as `command.CancelArgs` does), field defaults 0.
 fn KeyArgs(comptime key: []const []const u8) type {
     var field_names: [key.len + 1][]const u8 = undefined;
     var types: [key.len + 1]type = undefined;
@@ -2945,11 +2358,6 @@ fn KeyArgs(comptime key: []const []const u8) type {
     return @Struct(.auto, null, &field_names, &types, &attrs);
 }
 
-/// Why a Page's parsed text breaks its structure, or null: for each
-/// compound core (arm) i, `sources[0]` is `walk.arms[i].table` with
-/// `.index == walk.arms[i].index`, and every `sources[1..]` has `.join ==
-/// .left`. The Page wrote the WHERE, so a list's `joins` holding a WHERE
-/// already failed to parse.
 fn pageError(comptime text: []const u8, comptime walk: Walk) ?[]const u8 {
     comptime {
         const parsed = switch (parse(text)) {
@@ -3099,13 +2507,11 @@ test "a statement calls only the functions every engine spells, by argument coun
     try std.testing.expectEqualStrings("payload=REPEAT(X'00',byte_length)", comptime render(.mysql, "payload=zeroblob(byte_length)"));
     try std.testing.expectEqualStrings("substr(content.payload,1,1024)", comptime render(.sqlite, "substr(@payload(content),1,1024)"));
     try std.testing.expectEqualStrings("SUBSTRING(coalesce((SELECT bytes FROM content_chunk WHERE content_chunk.content_id=content.content_id AND content_chunk.chunk_index=0),X''),1,1024)", comptime render(.mysql, "substr(@payload(content),1,1024)"));
-    // Neither a WITH name's column list nor an INSERT's table is a call.
     const text = "INSERT INTO turn(turn_id) WITH recent(turn_id) AS (SELECT count(*) AS n FROM turn) SELECT turn_id FROM recent";
     try std.testing.expectEqualStrings(text, comptime mysqlRendering(text).rendered.parts[0]);
 }
 
 test "fixture SQL meets the Store's own grammar, so MySQL takes what the build takes" {
-    // Fixture texts MySQL 8.4 refused in CI before they were rewritten.
     const written_read = "rsql: MySQL refuses a write whose subquery reads the table it writes (error 1093); read the value first and bind it";
     try std.testing.expectEqualStrings(written_read, comptime fixtureError("UPDATE session SET loaded_tool_set_id=(SELECT tool_set_id FROM session WHERE session_ref=?1) WHERE session_ref=?2").?);
     try std.testing.expectEqualStrings(written_read, comptime fixtureError("UPDATE message_admission SET admitted_at=2000 WHERE admission_id=(SELECT max(admission_id) FROM message_admission)").?);
@@ -3118,7 +2524,6 @@ test "fixture SQL meets the Store's own grammar, so MySQL takes what the build t
     try std.testing.expectEqualStrings("rsql: CAST converts differently on each engine", comptime fixtureError("SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'").?);
     try std.testing.expectEqualStrings("rsql: expected SELECT at 'VALUES'", comptime fixtureError("WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<2) SELECT value FROM sequence").?);
     try std.testing.expectEqualStrings("rsql: X'...' holds an even count of hex digits", comptime fixtureError("SELECT count(*) FROM content WHERE payload=X'ABC'").?);
-    // Their rewrites, and what a fixture may do that a product statement may not.
     try std.testing.expectEqual(@as(?[]const u8, null), comptime fixtureError("INSERT INTO turn(turn_id) WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<2) SELECT value FROM sequence"));
     try std.testing.expectEqual(@as(?[]const u8, null), comptime fixtureError("INSERT INTO model_operation(operation_id,turn_id) SELECT 100+operation_id,turn_id FROM model_operation WHERE operation_id=?1"));
     try std.testing.expectEqual(@as(?[]const u8, null), comptime fixtureError("UPDATE session SET next_position=next_position+1; DELETE FROM action_operation"));
@@ -3140,7 +2545,6 @@ test "a served slot never binds NULL, so NOT @served(x) agrees with rui_served" 
     const statement = try sqlite.prepare(database.?, text);
     defer _ = c.sqlite3_finalize(statement);
     const providers = comptime std.enums.values(provider_name.Provider);
-    // Each provider as x, with only `served_one` served: NOT @served(x) holds exactly when x is not it.
     for (providers) |served_one| for (providers) |x| {
         _ = c.sqlite3_reset(statement);
         try sqlite.bindText(statement, 1, @tagName(x));
@@ -3149,7 +2553,6 @@ test "a served slot never binds NULL, so NOT @served(x) agrees with rui_served" 
         try std.testing.expectEqual(c.SQLITE_INTEGER, c.sqlite3_column_type(statement, 0));
         try std.testing.expectEqual(@as(i64, @intFromBool(x != served_one)), c.sqlite3_column_int64(statement, 0));
     };
-    // The binding it replaces: NULL for an unserved provider leaves NOT @served(x) NULL, not true.
     _ = c.sqlite3_reset(statement);
     try sqlite.bindText(statement, 1, @tagName(providers[0]));
     for (2..providers.len + 2) |index| _ = c.sqlite3_bind_null(statement, @intCast(index));
@@ -3162,7 +2565,6 @@ test "MySQL expands @after, since it seeks only a row value's equality prefix" {
     try std.testing.expectEqualStrings("SELECT 1 WHERE (c.a>? OR (c.a=? AND c.b>?))", comptime mysqlRendering("SELECT 1 WHERE @after(c.a,c.b,?2,?3)").rendered.prepared());
     const three = comptime mysqlRendering("SELECT 1 WHERE @after(a,b,c,?1,?2,?3)").rendered;
     try std.testing.expectEqualStrings("SELECT 1 WHERE (a>? OR (a=? AND b>?) OR (a=? AND b=? AND c>?))", comptime three.prepared());
-    // Each `?` binds its Args field, so ?1 binds three times.
     var arguments: [6]usize = undefined;
     var count: usize = 0;
     for (three.slots) |slot| switch (slot) {
@@ -3252,12 +2654,10 @@ test "only a type Read, Write or Page made counts as a typed statement" {
         pub const made_from = Projection.made_from;
         pub const sql: [:0]const u8 = "UPDATE session SET parent_ref=NULL";
     }));
-    // Open text in a struct shaped like a statement.
     try std.testing.expect(!comptime isStatement(struct {
         pub const kind: StatementKind = .write;
         pub const sql: [:0]const u8 = "ROLLBACK";
     }));
-    // A copy of a real statement's declarations around other text.
     try std.testing.expect(!comptime isStatement(struct {
         pub const kind = Real.kind;
         pub const made_from = Real.made_from;
@@ -3277,7 +2677,6 @@ test "every word MySQL 8.4 reserves is a name Rui SQL refuses, unless the gramma
 }
 
 test "a reserved word is a keyword only in its own place, and a name anywhere else" {
-    // Its OVER texts scan past portabilityError's own quota of 100 per byte.
     @setEvalBranchQuota(20_000);
     const Case = struct { sql: []const u8, word: []const u8 };
     inline for ([_]Case{
@@ -3361,7 +2760,6 @@ test "a write names its Session with @session on its table's own session_ref" {
     const Turn = struct { turn_id: u64, session: SessionHead };
     const once = "rsql: a write to turn names its Session exactly once, as @session(?k)";
     const misplaced = "rsql: an UPDATE or DELETE names its Session as the conjunct session_ref=@session(?k) of its WHERE";
-    // The review's input: a head is bound, but nothing ties it to the row.
     try std.testing.expectEqualStrings(once, comptime statementError(.write, "UPDATE turn SET outcome_at=@now WHERE turn_id=?1 AND ?2 IS NOT NULL", Turn, void).?);
     try std.testing.expectEqualStrings("rsql: the SessionHead ?k binds is used only in @session(?k)", comptime statementError(.write, "UPDATE turn SET outcome_at=@now WHERE turn_id=?1 AND session_ref=@session(?2) AND ?2 IS NOT NULL", Turn, void).?);
     try std.testing.expectEqualStrings(misplaced, comptime statementError(.write, "UPDATE turn SET outcome_at=1 WHERE turn_id=?1 OR session_ref=@session(?2)", Turn, void).?);
@@ -3382,11 +2780,9 @@ test "a write names its Session with @session on its table's own session_ref" {
     const copied = copied_message;
     try std.testing.expectEqualStrings(copied, comptime statementError(.write, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) SELECT ?1,@session(?2),?3,0,@now", Stop, void).?);
 
-    // A copy of one Session's row: its key pins the row the WHERE names.
     const Copy = struct { session: SessionHead, key: []const u8 };
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision,?2 FROM session WHERE session_ref=@session(?1)", Copy, void));
     try std.testing.expectEqualStrings(copied, comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT ?2,revision,?2 FROM session WHERE session_ref=@session(?1)", Copy, void).?);
-    // The source's alias qualifies its columns.
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT s.session_ref,revision,?2 FROM session s WHERE session_ref=@session(?1)", Copy, void));
     try std.testing.expectEqualStrings(copied, comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision,?2 FROM session JOIN turn ON turn.session_ref=session.session_ref WHERE session_ref=@session(?1)", Copy, void).?);
     try std.testing.expectEqualStrings(comptime untiedMessage("session", "session"), comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision,?2 FROM session WHERE session_ref=@session(?1) OR revision=1", Copy, void).?);
@@ -3403,8 +2799,6 @@ test "a Message's write names its two Sessions, each on its own column" {
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) VALUES(?1,@session(?2),?3,?4,?5,@now)", Person, void));
     try std.testing.expectEqual(2, Write(.{ .sql = columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,@session(?6),?7)", .Args = Sent, .expect = .{ .at_most = 1 } }).session_fields.len);
 
-    // Wrong ties: a sender bound but written as text, a head moved to
-    // another column or wrapped, one head for both, the target left NULL.
     const sender = "rsql: an INSERT names its Session as the sender_session_ref value of its VALUES row";
     try std.testing.expectEqualStrings("rsql: every SessionHead of Args is bound by its own @session(?k)", comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,?6,?7)", Sent, void).?);
     try std.testing.expectEqualStrings(sender, comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,?7,@session(?6))", Sent, void).?);
@@ -3415,19 +2809,14 @@ test "a Message's write names its two Sessions, each on its own column" {
     try std.testing.expectEqualStrings("rsql: a write to message_admission names each of its Sessions at most once, and one at least, as @session(?k)", comptime statementError(.write, columns ++ "VALUES(?1,?2,?3,?4,?5,@now,NULL,NULL)", struct { id: u64, session: []const u8, key: []const u8, content_id: u64, position: u64 }, void).?);
     try std.testing.expectEqualStrings("rsql: an INSERT ... SELECT copies one Session's row; message_admission names its Sessions otherwise", comptime statementError(.write, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admitted_at) SELECT ?1,session_ref,?3,?4,@now FROM session WHERE session_ref=@session(?2)", struct { id: u64, session: SessionHead, key: []const u8, content_id: u64 }, void).?);
 
-    // An update names the admission's own Session, and never moves either.
     const Update = struct { turn_id: u64, session: SessionHead };
     const tie = "rsql: an UPDATE or DELETE names its Session as the conjunct session_ref=@session(?k) of its WHERE";
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "UPDATE message_admission SET turn_id=?1 WHERE session_ref=@session(?2) AND turn_id IS NULL", Update, void));
     try std.testing.expectEqualStrings(tie, comptime statementError(.write, "UPDATE message_admission SET turn_id=?1 WHERE sender_session_ref=@session(?2)", Update, void).?);
     try std.testing.expectEqualStrings(tie, comptime statementError(.write, "UPDATE message_admission SET sender_session_ref=NULL,turn_id=?1 WHERE session_ref=@session(?2)", Update, void).?);
-    // A row-value SET is outside the grammar.
     try std.testing.expectEqualStrings("rsql: expected a name at '('", comptime statementError(.write, "UPDATE message_admission SET (sender_session_ref,turn_id)=(NULL,?1) WHERE session_ref=@session(?2)", Update, void).?);
-    // A further conjunct on the sender's column only narrows the rows the tie holds of.
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "UPDATE message_admission SET turn_id=?1 WHERE session_ref=@session(?2) AND sender_session_ref IS NULL", Update, void));
     try std.testing.expectEqualStrings("rsql: a DELETE from message_admission would drop two Sessions' facts; no writer deletes them", comptime statementError(.write, "DELETE FROM message_admission WHERE session_ref=@session(?2) AND turn_id=?1", Update, void).?);
-    // A column the sender reads: the review's input changes the sender's
-    // page without touching the sender.
     const sender_reads = "rsql: message_admission.admitted_at is read by its sender too; an UPDATE of it has the conjunct sender_session_ref=@session(?j) or sender_session_ref IS NULL";
     try std.testing.expectEqualStrings(sender_reads, comptime statementError(.write, "UPDATE message_admission SET admitted_at=@now WHERE session_ref=@session(?1)", struct { session: SessionHead }, void).?);
     try std.testing.expectEqualStrings(sender_reads, comptime statementError(.write, "UPDATE message_admission SET admitted_at=@now WHERE session_ref=@session(?1) AND sender_session_ref IS NOT NULL", struct { session: SessionHead }, void).?);
@@ -3439,7 +2828,6 @@ test "a Message's write names its two Sessions, each on its own column" {
     try std.testing.expectEqualStrings("rsql: an UPDATE of message_admission names its second Session as the conjunct sender_session_ref=@session(?j) of its WHERE", comptime statementError(.write, "UPDATE message_admission SET turn_id=?1 WHERE session_ref=@session(?2) AND turn_id IN (SELECT turn_id FROM turn WHERE session_ref=@session(?3))", struct { turn_id: u64, session: SessionHead, sender: SessionHead }, void).?);
     try std.testing.expectEqualStrings("rsql: an UPDATE or DELETE names its Session as the conjunct session_ref=@session(?k) of its WHERE", comptime statementError(.write, "UPDATE turn SET session_ref=(SELECT session_ref FROM session) WHERE turn_id=?1 AND session_ref=@session(?2)", Update, void).?);
 
-    // A rejected send names only its sender, on its one Session column.
     const Rejected = struct { key: []const u8, sender: SessionHead, position: u64 };
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,@session(?2),?3,@now)", Rejected, void));
     try std.testing.expectEqualStrings("rsql: an INSERT names its Session as the sender_session_ref value of its VALUES row", comptime statementError(.write, "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,NULL,?3,@session(?2))", Rejected, void).?);
@@ -3450,7 +2838,6 @@ test "a write to a table that carries no Sessions names no Session" {
     try std.testing.expectEqualStrings("rsql: content carries no Sessions; bind no SessionHead", comptime statementError(.write, "DELETE FROM content WHERE content_id=?1 AND ?2 IS NOT NULL", struct { id: u64, session: SessionHead }, void).?);
     try std.testing.expectEqualStrings("rsql: a write to sent_rejection names its Session exactly once, as @session(?k)", comptime statementError(.write, "DELETE FROM sent_rejection WHERE sender_session_ref=?1", struct { ref: []const u8 }, void).?);
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "INSERT INTO content(content_id) VALUES(?1)", struct { turn_id: u64 }, void));
-    // A command's target text, which need not name a Session.
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "DELETE FROM model_interruption_command WHERE session_ref=?1", struct { target: []const u8 }, void));
 }
 
@@ -3463,7 +2850,6 @@ test "typed statements are held to the dialect rules" {
     try std.testing.expectEqualStrings("rsql: 'IS' compares only with NULL; write @same(a,b) or @distinct(a,b)", comptime statementError(.write, "UPDATE content SET private=1 WHERE private IS 0", None, void).?);
 }
 
-/// Whether the read `sql`, parsed, counts as one row.
 fn oneRow(comptime sql: []const u8) bool {
     return returnsOneRow(parse(sql).accepted.statement.select);
 }
@@ -3473,8 +2859,6 @@ test "a read is keyed to one row only when keys pin every table it reads" {
     try std.testing.expect(comptime oneRow("SELECT s.session_ref FROM turn t JOIN session s ON s.session_ref=t.session_ref WHERE t.turn_id=?1 AND (?2 IS NULL OR t.operation_id=?2)"));
     try std.testing.expect(comptime oneRow("SELECT o.turn_id FROM action_operation a JOIN model_operation o ON o.operation_id=a.parent_operation_id WHERE a.action_id=?1"));
     try std.testing.expect(comptime oneRow("SELECT a.action_id FROM action_operation a LEFT JOIN turn t ON t.turn_id=?2 WHERE (a.action_id=?1)"));
-    // Not every column of a key, a key column compared with <, an OR, a
-    // partial unique index, a bare column among two tables, an unpinned join.
     try std.testing.expect(!comptime oneRow("SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2"));
     try std.testing.expect(!comptime oneRow("SELECT turn_id FROM turn WHERE turn_id<=?1"));
     try std.testing.expect(!comptime oneRow("SELECT turn_id FROM turn WHERE turn_id=?1 OR turn_id=?2"));
@@ -3488,19 +2872,14 @@ test "a read is keyed to one row only when keys pin every table it reads" {
 }
 
 test "a copy's @session(?k) pins a key column as a parameter does" {
-    // session_ref is session's key, so this copy is one row; before 5c-2 a
-    // marker pinned nothing and the same text counted as many.
     const copy = "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision,?2 FROM session WHERE session_ref=@session(?1)";
     try std.testing.expect(comptime returnsOneRow(parse(copy).accepted.statement.insert.values.select));
-    // turn's key is turn_id; its unique index on session_ref is partial, so pins nothing.
     const turns = "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,turn_id,?2 FROM turn WHERE session_ref=@session(?1)";
     try std.testing.expect(!comptime returnsOneRow(parse(turns).accepted.statement.insert.values.select));
 }
 
 test "the review's two inputs are refused" {
-    // A compound read as .one stepped once and never saw its second row.
     try std.testing.expectEqualStrings("rsql: a read with a compound SELECT declares .compound = true", comptime statementError(.read, "SELECT 1 AS a UNION ALL SELECT 2 AS a", struct {}, struct { a: u64 }).?);
-    // A compound copy wrote a row for a Session the write never touched.
     try std.testing.expectEqualStrings("rsql: a write holds no compound SELECT", comptime statementError(
         .write,
         "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision,?2 FROM session WHERE session_ref=@session(?1) AND 1 UNION ALL SELECT 'zzzzzz',1,?2",
@@ -3516,12 +2895,7 @@ test "a compound SELECT stands only where the read declares it, and never counts
     try std.testing.expectEqualStrings("rsql: a read with a compound SELECT declares .compound = true", comptime statementError(.read, "SELECT turn_id FROM turn WHERE turn_id IN (SELECT 1 UNION SELECT 2)", struct {}, struct { turn_id: u64 }).?);
 }
 
-// The first input of each test below passed the token checks the parser
-// replaced (a probe against them showed it; see PR #807); each rule now
-// refuses it.
-
 test "the Session tie reads the WHERE's conjuncts, not the tokens around the marker" {
-    // Every Session but ?2's matches the CASE's ELSE.
     try std.testing.expectEqualStrings(
         "rsql: an UPDATE or DELETE names its Session as the conjunct session_ref=@session(?k) of its WHERE",
         comptime statementError(.write, "UPDATE turn SET outcome_at=1 WHERE CASE WHEN turn_id=?1 AND session_ref=@session(?2) AND outcome_code IS NULL THEN 0 ELSE 1 END", struct { turn_id: u64, session: SessionHead }, void).?,
@@ -3534,7 +2908,6 @@ test "a copy's SELECT is one Session's row" {
 }
 
 test "a LEFT JOIN's ON pins only its own table" {
-    // Every action row stays, whatever the ON says of it.
     try std.testing.expect(!comptime oneRow("SELECT a.action_id FROM action_operation a LEFT JOIN turn t ON a.action_id=?1 AND t.turn_id=?2"));
     try std.testing.expect(comptime oneRow("SELECT a.action_id FROM action_operation a LEFT JOIN turn t ON t.turn_id=a.action_id WHERE a.action_id=?1"));
     try std.testing.expect(!comptime oneRow("SELECT 1 AS a UNION ALL SELECT 2 AS a"));
@@ -3545,7 +2918,6 @@ test "a compound's column names are its first SELECT's" {
 }
 
 test "every parameter is ?N, so the count sees each one" {
-    // SQLite would number :x after ?1, where @now binds.
     try std.testing.expectEqualStrings("rsql: expected an expression at ':'", comptime statementError(.read, "SELECT turn_id FROM turn WHERE turn_id=?1 AND operation_id=:x", struct { id: u64 }, struct { turn_id: u64 }).?);
     try std.testing.expectEqualStrings("rsql: write parameters as ?N", comptime statementError(.read, "SELECT turn_id FROM turn WHERE turn_id=?", struct { id: u64 }, struct { turn_id: u64 }).?);
 }
@@ -3588,11 +2960,9 @@ test "@after is one comparison for one key column, and a row value for more" {
         "rsql: @after takes k qualified columns, then k parameters ?N",
         comptime statementError(.read, "SELECT t.turn_id FROM turn t WHERE t.session_ref=?1 AND @after(turn_id,?2)", struct { session: []const u8, a: u64 }, Turn).?,
     );
-    // A row value is refused, naming the form that seeks on every engine.
     try std.testing.expectEqualStrings(row_value_message, comptime statementError(.read, "SELECT turn_id FROM turn WHERE session_ref=?1 AND (turn_id,input_cutoff)>(?2,?3)", Two, Turn).?);
 }
 
-/// Calls' Page, as `report.full_calls` declares it, with one column.
 const TestCalls = Page(.{
     .arms = &.{.{ .on = .{ .index = "model_tool_call_session_order" }, .alias = "tool_call", .columns = "tool_call.item_ordinal" }},
     .Row = struct { operation_id: Positive, call_ordinal: u64, item_ordinal: u64 },
@@ -3621,7 +2991,7 @@ test "a Page derives its text, Args and next keyset from the index it walks" {
             "WHERE tool_call.session_ref=?1 AND tool_call.acceptance_position IS NOT NULL AND (tool_call.operation_id,tool_call.acceptance_position)>(?2,?3) " ++
             "UNION ALL SELECT action.parent_operation_id AS operation_id,action.acceptance_position AS acceptance_position,action.call_ordinal " ++
             "FROM action_operation action INDEXED BY action_operation_session_results " ++
-            "WHERE action.session_ref=?1 AND action.acceptance_position IS NOT NULL AND (action.parent_operation_id,action.acceptance_position)>(?2,?3) " ++
+            "WHERE action.session_ref=?1 AND action.acceptance_position IS NOT NULL AND action.background_position IS NULL AND (action.parent_operation_id,action.acceptance_position)>(?2,?3) " ++
             "ORDER BY operation_id,acceptance_position LIMIT 9",
         Results.sql,
     );
@@ -3702,9 +3072,6 @@ test "row_number() OVER (ORDER BY ...) is the one window" {
     try std.testing.expectEqualStrings(window, comptime statementError(.read, "SELECT turn_id,row_number() OVER () AS n FROM turn WHERE session_ref=?1", Turn, Numbered).?);
 }
 
-/// The Messages projection's text, as admission writes it, with `select`
-/// in place of its SELECT's session_ref value and `source` after its other
-/// values.
 fn messagesCopy(comptime select: []const u8, comptime source: []const u8) []const u8 {
     return comptime entry_columns ++ messagesSelect(select, source);
 }
@@ -3722,20 +3089,14 @@ const tied_messages = "FROM message_admission WHERE session_ref=@session(?1) AND
 const SessionCopy = struct { session: SessionHead, key: []const u8 };
 const one_copy: Expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } };
 
-/// The Messages projection with `content` as its content_id value.
 fn messagesWithContent(comptime content: []const u8, comptime source: []const u8) []const u8 {
     return comptime entry_columns ++ "SELECT session_ref,?3+row_number() OVER (ORDER BY admission_id),?4+row_number() OVER (ORDER BY admission_id)-1,1,?2,admission_id,NULL,NULL," ++
         content ++ ",@now " ++ source;
 }
 
-/// A refused write and a legal one that differs from it only in the
-/// property `rule` checks, with the message it is refused with.
 const SessionCase = struct { name: []const u8, rule: []const u8, legal: []const u8, refused: []const u8, Args: type, expect: Expect, message: []const u8 };
 
-/// Every refusal of the copy slot and the walk. The probe in PR 5c-2's
-/// body runs each `refused` through rsql with its `rule` switched off.
 const session_cases = [_]SessionCase{
-    // The copy's session_ref slot (`copyError`).
     .{ .name = "1 a parameter in the slot", .rule = "slot", .legal = messagesCopy("session_ref", tied_messages), .refused = messagesCopy("?2", tied_messages), .Args = MessagesCopy, .expect = counted_copy, .message = copied_message },
     .{ .name = "2 the marker in the slot", .rule = "slot", .legal = messagesCopy("session_ref", tied_messages), .refused = messagesCopy("@session(?1)", tied_messages), .Args = MessagesCopy, .expect = counted_copy, .message = copied_message },
     .{ .name = "4 the sender's column in the slot", .rule = "slot", .legal = messagesCopy("session_ref", tied_messages), .refused = messagesCopy("sender_session_ref", tied_messages), .Args = MessagesCopy, .expect = counted_copy, .message = copied_message },
@@ -3763,7 +3124,6 @@ const session_cases = [_]SessionCase{
     .{ .name = "14b a bare column among two sources", .rule = "slot", .legal = messagesSelectJoin("m.session_ref", "turn t ON t.session_ref=m.session_ref"), .refused = messagesSelectJoin("session_ref", "turn t ON t.session_ref=m.session_ref"), .Args = MessagesCopy, .expect = counted_copy, .message = copied_message },
     .{ .name = "15a an expression of the column", .rule = "slot", .legal = messagesCopy("session_ref", tied_messages), .refused = messagesCopy("coalesce(session_ref,'x')", tied_messages), .Args = MessagesCopy, .expect = counted_copy, .message = copied_message },
     .{ .name = "15b an aggregate of the column", .rule = "slot", .legal = messagesCopy("session_ref", tied_messages), .refused = messagesCopy("max(session_ref)", tied_messages), .Args = MessagesCopy, .expect = counted_copy, .message = copied_message },
-    // Every table the write reads is tied (`tiedRefs`).
     .{
         .name = "3 the tie on the sender's column",
         .rule = "walk",
@@ -3868,13 +3228,11 @@ const session_cases = [_]SessionCase{
     },
 };
 
-/// The Messages projection reading message_admission m joined with `join`.
 fn messagesSelectJoin(comptime select: []const u8, comptime join: []const u8) []const u8 {
     return comptime messagesCopy(select, "FROM message_admission m JOIN " ++ join ++ " WHERE m.session_ref=@session(?1) AND m.turn_id=?2 AND m.admission_id>=?5");
 }
 
 test "a copy takes session_ref from a table its SELECT reads, and every table a write reads is tied to its Session" {
-    // Admission's two projections, and the one-row copy.
     try std.testing.expectEqual(@as(?[]const u8, null), comptime writeError(messagesCopy("session_ref", tied_messages ++ " ORDER BY admission_id"), MessagesCopy, counted_copy));
     try std.testing.expectEqual(@as(?[]const u8, null), comptime writeError(
         entry_columns ++ "SELECT session_ref,?3+row_number() OVER (ORDER BY revision),?4+row_number() OVER (ORDER BY revision)-1,2,?2,NULL,revision,NULL,instructions_content_id,@now " ++
@@ -3894,22 +3252,18 @@ test "a copy takes session_ref from a table its SELECT reads, and every table a 
 
 test "a copy's other refusals come from the rule that owns each" {
     const tied = "FROM message_admission WHERE session_ref=@session(?1) AND turn_id=?2 AND admission_id>=?5";
-    // 10. A compound source, 5a's failing input.
     try std.testing.expectEqualStrings("rsql: a write holds no compound SELECT", comptime writeError(messagesCopy("session_ref", tied ++ " UNION ALL SELECT 'zzzzzz',1,1,1,?2,1,NULL,NULL,1,1"), MessagesCopy, counted_copy).?);
-    // 13. A target with two Session columns.
     try std.testing.expectEqualStrings("rsql: an INSERT ... SELECT copies one Session's row; message_admission names its Sessions otherwise", comptime writeError(
         "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admitted_at) SELECT ?1,session_ref,?3,?4,@now FROM message_admission WHERE session_ref=@session(?2)",
         struct { id: u64, session: SessionHead, key: []const u8, content_id: u64 },
         counted_copy,
     ).?);
-    // 16. The head's reference reused where main read the ordinal base.
     try std.testing.expectEqualStrings("rsql: the SessionHead ?k binds is used only in @session(?k)", comptime writeError(
         entry_columns ++ "SELECT session_ref,coalesce((SELECT max(entry_ordinal) FROM conversation_entry WHERE session_ref=?1),0)+row_number() OVER (ORDER BY admission_id)," ++
             "?3+row_number() OVER (ORDER BY admission_id)-1,1,?2,admission_id,NULL,NULL,content_id,@now FROM message_admission WHERE session_ref=@session(?1) AND turn_id=?2 AND admission_id>=?4",
         struct { session: SessionHead, turn_id: u64, position_base: u64, first_admission: u64 },
         counted_copy,
     ).?);
-    // 17. Another window: PARTITION BY, a frame, another function.
     const window = "rsql: the one window is row_number() OVER (ORDER BY ...), with no PARTITION BY or frame";
     inline for (comptime .{
         "row_number() OVER (PARTITION BY turn_id ORDER BY admission_id)",
@@ -3920,21 +3274,18 @@ test "a copy's other refusals come from the rule that owns each" {
         MessagesCopy,
         counted_copy,
     ).?);
-    // 18. A copy's Expect follows its row count.
     try std.testing.expectEqualStrings("rsql: an INSERT ... SELECT of more than one row declares .counted, so its caller states the count", comptime writeError(messagesCopy("session_ref", tied), MessagesCopy, .{ .exact = .{ .rows = 1, .otherwise = error.ProjectionFailed } }).?);
     try std.testing.expectEqualStrings("rsql: an INSERT ... SELECT of at most one row declares .exact or .at_most 1", comptime writeError(
         "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision,?2 FROM session WHERE session_ref=@session(?1)",
         struct { session: SessionHead, key: []const u8 },
         counted_copy,
     ).?);
-    // An INSERT ... VALUES writes one row.
     const Stop = struct { key: []const u8, session: SessionHead, turn_id: u64 };
     const stop = "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) VALUES(?1,@session(?2),?3,0,@now)";
     try std.testing.expectEqual(@as(?[]const u8, null), comptime writeError(stop, Stop, one_copy));
     try std.testing.expectEqual(@as(?[]const u8, null), comptime writeError(stop, Stop, .{ .at_most = 1 }));
     try std.testing.expectEqualStrings(values_message, comptime writeError(stop, Stop, .{ .counted = .{ .otherwise = error.CorruptStore } }).?);
     try std.testing.expectEqualStrings(values_message, comptime writeError(stop, Stop, .{ .exact = .{ .rows = 2, .otherwise = error.CorruptStore } }).?);
-    // 19. A counted bind that also assigns what the sender reads, with no sender tie.
     const Bind = struct { turn_id: u64, session: SessionHead };
     const counted_bind: Expect = .{ .counted = .{ .otherwise = error.SelectionChanged } };
     try std.testing.expectEqual(@as(?[]const u8, null), comptime writeError("UPDATE message_admission SET turn_id=?1 WHERE session_ref=@session(?2) AND turn_id IS NULL", Bind, counted_bind));
@@ -3968,7 +3319,6 @@ test "@index forces only named real-column MySQL indexes, after the table or ali
     inline for (.{
         .{ "SELECT revision FROM session_revision @index(session_revision_instructions) WHERE session_ref=?1 AND instructions_content_id=?2", "SELECT revision FROM session_revision FORCE INDEX (session_revision_instructions) WHERE session_ref=? AND instructions_content_id=?" },
         .{ "SELECT r.revision FROM session_revision r @index(session_revision_output_schema) WHERE r.session_ref=?1 AND r.output_schema_content_id=?2", "SELECT r.revision FROM session_revision r FORCE INDEX (session_revision_output_schema) WHERE r.session_ref=? AND r.output_schema_content_id=?" },
-        // A unique IS NOT NULL predicate needs no generated key on MySQL.
         .{ "SELECT m.admission_id FROM message_admission AS m @index(message_admission_sent) WHERE m.sender_session_ref=?1 AND m.sender_position>?2", "SELECT m.admission_id FROM message_admission AS m FORCE INDEX (message_admission_sent) WHERE m.sender_session_ref=? AND m.sender_position>?" },
         .{ "SELECT a.action_id FROM action_operation a @index(action_operation_executable) WHERE a.action_id>?1 AND a.attempt_at<=?2", "SELECT a.action_id FROM action_operation a  WHERE a.action_id>? AND a.attempt_at<=?" },
         .{ "SELECT t.turn_id FROM turn t @index(turn_one_active_per_session) WHERE t.session_ref=?1 AND t.turn_id>?2 AND t.outcome_code IS NULL", "SELECT t.turn_id FROM turn t  WHERE t.session_ref=? AND t.turn_id>? AND t.outcome_code IS NULL" },

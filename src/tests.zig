@@ -124,6 +124,7 @@ test {
     _ = @import("request_encoding.zig");
     _ = @import("tools.zig");
     _ = @import("core_tools.zig");
+    _ = @import("read_action_tool.zig");
     _ = @import("read_transcript.zig");
     _ = @import("find_tools.zig");
     _ = @import("find_tools_tests.zig");

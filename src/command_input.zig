@@ -29,7 +29,6 @@ pub fn Commands(comptime Custody: type) type {
     };
 }
 
-/// Exact peer address. The issuing Host authenticates the sender separately.
 pub const Address = struct {
     store: Bounded(max_store_bytes) = .{},
     session: Bounded(max_session_bytes) = .{},
@@ -62,20 +61,12 @@ fn ContentFieldOf(comptime Custody: type) type {
         const ContentField = @This();
 
         state: FieldState = .omitted,
-        // A parsed request owns an unlinked file descriptor. The Store imports
-        // through this sealed custody; no pathname can be swapped after capture.
         file: ?Custody.File = null,
-        /// D113: bounded start_agent content borrows its call arena through commit;
-        /// `length` counts it. Wire content still uses sealed file custody; this
-        /// pointer is never saved. A bare pointer keeps ContentField, which the
-        /// configure path copies, no larger than one word.
         borrowed: ?[*]const u8 = null,
         scratch_budget: ?Custody.Budget = null,
         charged: u64 = 0,
         length: u64 = 0,
         digest: [32]u8 = @splat(0),
-        /// While a request is parsed, which Ingress capture holds this value,
-        /// counted from 1 in arrival order; 0 once it holds its own file.
         capture: u8 = 0,
 
         pub fn borrowedBytes(self: *const ContentField) ?[]const u8 {
@@ -87,7 +78,6 @@ fn ContentFieldOf(comptime Custody: type) type {
             return self.file != null;
         }
 
-        /// Releases the custody this value holds, and leaves it omitted.
         pub fn removeTemporaryContent(self: *ContentField, io: Custody.Io) !void {
             Custody.release(self.file, self.scratch_budget, self.charged, io);
             self.charged = 0;
@@ -98,9 +88,6 @@ fn ContentFieldOf(comptime Custody: type) type {
     };
 }
 
-/// A `tools` list: tool names, sorted by bytes with none repeated, so one
-/// list has one spelling and one digest. The names are held one space
-/// apart. The parser checks the Host offers each one.
 pub const ToolsField = struct {
     state: FieldState = .omitted,
     count: u8 = 0,
@@ -110,14 +97,12 @@ pub const ToolsField = struct {
         return std.mem.tokenizeScalar(u8, self.names.slice(), ' ');
     }
 
-    /// A list of `names`, which must be sorted and valid.
     pub fn of(names: []const []const u8) error{ InvalidToolName, InvalidJsonShape }!ToolsField {
         var out: ToolsField = .{ .state = .value };
         for (names) |name| try out.append(name);
         return out;
     }
 
-    /// Adds one name in canonical order, refusing duplicates and bound overflow.
     pub fn insert(self: *ToolsField, name: []const u8) error{ InvalidToolName, InvalidJsonShape }!void {
         if (!validToolName(name)) return error.InvalidToolName;
         var names = self.iterator();
@@ -140,9 +125,6 @@ pub const ToolsField = struct {
         self.count += 1;
     }
 
-    /// Appends `name`, which must sort after every name already held. A
-    /// name outside the grammar is `InvalidToolName`; one out of order,
-    /// repeated, or past a limit is `InvalidJsonShape`.
     pub fn append(self: *ToolsField, name: []const u8) error{ InvalidToolName, InvalidJsonShape }!void {
         if (!validToolName(name)) return error.InvalidToolName;
         if (self.count == max_tools) return error.InvalidJsonShape;
@@ -151,7 +133,6 @@ pub const ToolsField = struct {
             const last = held[if (std.mem.lastIndexOfScalar(u8, held, ' ')) |space| space + 1 else 0..];
             if (std.mem.order(u8, last, name) != .lt) return error.InvalidJsonShape;
         }
-        // The limit counts name bytes only, not the separators.
         if (held.len - (self.count -| 1) + name.len > max_tool_list_name_bytes) return error.InvalidJsonShape;
         var at = held.len;
         if (self.count != 0) {
@@ -180,9 +161,7 @@ fn ConfigurationOf(comptime Custody: type) type {
         compaction_trigger: OptionalBounded(20) = .{},
         output_reservation: OptionalBounded(20) = .{},
         reasoning_effort: OptionalBounded(16) = .{},
-        /// Display text only: never model input, an address or a selector.
         label: OptionalBounded(max_label_bytes) = .{},
-        /// Creation relation, never a revisioned setting.
         parent: OptionalBounded(6) = .{},
 
         comptime {
@@ -224,7 +203,6 @@ fn ConfigureCommandOf(comptime Custody: type) type {
         key: Bounded(max_key_bytes) = .{},
         session: Bounded(max_session_bytes) = .{},
         configuration: Configuration = .{},
-        /// Host-memory creation seed; its resolution or refusal is supplied to the Store.
         preset: ?Bounded(max_preset_name_bytes) = null,
         require_model: bool = false,
         reload_skills: bool = false,
@@ -242,8 +220,6 @@ fn ConfigureCommandOf(comptime Custody: type) type {
             return hash.finalResult();
         }
 
-        /// A preset refusal binds the unresolved request, including its name;
-        /// unlike an accepted creation, it has no resolved spec to identify.
         pub fn presetRequestDigest(self: *const ConfigureCommand) [32]u8 {
             var hash = std.crypto.hash.sha2.Sha256.init(.{});
             hashField(&hash, "rui/core/configure-preset-request/v1");
@@ -255,8 +231,6 @@ fn ConfigureCommandOf(comptime Custody: type) type {
     };
 }
 
-/// The digest of a Configure command with these parts; a creating Message
-/// binds its initial configuration through the same digest.
 fn configureDigest(session: []const u8, configuration: anytype, require_model: bool) [32]u8 {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hashField(&hash, "rui/core/configure/v1");
@@ -266,8 +240,6 @@ fn configureDigest(session: []const u8, configuration: anytype, require_model: b
         if (comptime entry.digest == .always) hashSetting(&hash, entry, &@field(configuration, name));
     }
     hash.update(&.{@intFromBool(require_model)});
-    // Omission retains the pre-loaded-tools digest, including creating
-    // Messages: saved requests must still replay after a Store upgrade.
     inline for (session_settings.entries) |entry| {
         if (comptime entry.digest == .unless_omitted) {
             const name = entry.field;
@@ -302,15 +274,10 @@ fn MessageCommandOf(comptime Custody: type) type {
         store: Bounded(max_store_bytes) = .{},
         key: Bounded(max_key_bytes) = .{},
         session: Bounded(max_session_bytes) = .{},
-        // The full sending address; null when a human or script sends.
         sender: ?Address = null,
         sender_handle: ?Bounded(max_sender_handle_bytes) = null,
         text: ContentField = .{},
-        // Non-null means create a fresh Session and admit this first Message in
-        // one transaction. The requested Session must then be empty; its spec
-        // carries the same instruction and schema custody as configure.
         configuration: ?Configuration = null,
-        // A creating Message only: create nothing unless the Host has a model.
         require_model: bool = false,
 
         pub fn removeTemporaryContent(self: *MessageCommand, io: Custody.Io) !void {
@@ -337,7 +304,6 @@ fn MessageCommandOf(comptime Custody: type) type {
             if (self.sender_handle) |handle| hashField(&hash, handle.slice());
             hashContent(&hash, &self.text);
             if (self.configuration) |*configuration| {
-                // The creation's own digest covers its capability condition.
                 hashField(&hash, "initial-configuration");
                 hash.update(&configureDigest("", configuration, self.require_model));
             }
@@ -426,6 +392,23 @@ pub const PermissionDecisionCommand = struct {
         std.mem.writeInt(u64, &value, self.action_id, .big);
         hash.update(&value);
         hashField(&hash, @tagName(self.decision));
+        return hash.finalResult();
+    }
+};
+
+pub const ActionBackgroundCommand = struct {
+    store: Bounded(max_store_bytes) = .{},
+    key: Bounded(max_key_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    action_id: u64 = 0,
+
+    pub fn semanticDigest(self: *const ActionBackgroundCommand) [32]u8 {
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hashField(&hash, "rui/core/action-background/v1");
+        hashField(&hash, self.session.slice());
+        var value: [8]u8 = undefined;
+        std.mem.writeInt(u64, &value, self.action_id, .big);
+        hash.update(&value);
         return hash.finalResult();
     }
 };

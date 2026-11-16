@@ -1,27 +1,37 @@
 name: Restore and save the build caches
-description: The compiler, build, package and build-runner cache pairs, keyed on the native tools
+description: Restore native caches at setup; invoke save-only after compilation, including failures
 inputs:
   check-part:
     description: Full-check partition, keeping concurrent cache writers separate
-    required: true
+    default: all
   cold:
     description: Use genuinely empty build, package and global compiler caches
-    required: true
+    default: 'false'
   compiled:
     description: A verified same-run artifact supplies emitted executables and pinned package sources
-    required: true
+    default: 'false'
   publish-caches:
-    description: Save caches after the job; otherwise restore only
-    required: true
+    description: Allow the later save-only invocation to publish these restored keys
+    default: 'false'
+  save-only:
+    description: Save the keys captured by setup; run with always() after compilation
+    default: 'false'
+  setup-outcome:
+    description: Outcome of setup and any prerequisite fetch or artifact restore
+    default: ''
+  work-outcome:
+    description: Outcome of the bounded compile or configure step
+    default: ''
 outputs:
   build-hit:
     description: Whether the build cache restored an exact key
-    value: ${{ steps.build-cache.outputs.cache-hit || steps.build-cache-restore.outputs.cache-hit }}
+    value: ${{ steps.build-cache.outputs.cache-hit }}
 runs:
   using: composite
   steps:
     - name: Identify the actual native build tools
       id: tools
+      if: ${{ inputs.save-only != 'true' }}
       shell: bash
       run: |
         set -euo pipefail
@@ -52,7 +62,7 @@ runs:
         echo "cpu=$(printf '%s' "$cpu" | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
     - name: Name the build cache keys
       id: build-keys
-      if: ${{ inputs.cold != 'true' && inputs.compiled != 'true' }}
+      if: ${{ inputs.save-only != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
       shell: bash
       env:
         PREFIX: rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ steps.tools.outputs.identity }}-
@@ -76,7 +86,7 @@ runs:
         } >> "$GITHUB_OUTPUT"
     - name: Name the build runner cache keys
       id: runner-keys
-      if: ${{ inputs.cold != 'true' && inputs.compiled == 'true' }}
+      if: ${{ inputs.save-only != 'true' && inputs.cold != 'true' && inputs.compiled == 'true' }}
       shell: bash
       env:
         CPU: rui-runner-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ steps.tools.outputs.identity }}-${{ steps.tools.outputs.cpu }}-
@@ -86,23 +96,18 @@ runs:
           echo "key=$CPU$BUILD"
           echo "prefix-cpu=$CPU"
         } >> "$GITHUB_OUTPUT"
-    # Each cache is a pair: save where the token may write, else only restore.
-    # A `cache-mode: read` token refuses saves, so those workflows pass 'false'.
-    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      if: ${{ inputs.publish-caches == 'true' }}
+    # Restore for readers and writers alike. Only main's publishers capture
+    # missing exact keys for the explicit, failure-safe save after compilation.
+    # Build/test execution is side-effectful; caches contain no acceptance.
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      id: compiler-cache
+      if: ${{ inputs.save-only != 'true' }}
       with:
         path: ${{ runner.temp }}/rui-zig
         key: rui-compiler-${{ runner.os }}-${{ runner.arch }}-0.17.1
     - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      if: ${{ inputs.publish-caches != 'true' }}
-      with:
-        path: ${{ runner.temp }}/rui-zig
-        key: rui-compiler-${{ runner.os }}-${{ runner.arch }}-0.17.1
-    # Build pair: build.zig marks every Zig test run side-effectful, so no
-    # acceptance manifests are written/read. Output-producing build steps stay cached.
-    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       id: build-cache
-      if: ${{ inputs.publish-caches == 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
+      if: ${{ inputs.save-only != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
       with:
         path: |
           ~/.cache/zig
@@ -115,54 +120,79 @@ runs:
           ${{ steps.build-keys.outputs.prefix-part }}
           ${{ steps.build-keys.outputs.prefix-seed }}
     - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      id: build-cache-restore
-      if: ${{ inputs.publish-caches != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
+      id: packages-cache
+      if: ${{ inputs.save-only != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
+      with:
+        path: zig-pkg
+        key: rui-packages-v1-${{ hashFiles('build.zig.zon') }}
+        restore-keys: rui-packages-v1-
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      id: runner-cache
+      if: ${{ inputs.save-only != 'true' && inputs.cold != 'true' && inputs.compiled == 'true' }}
+      with:
+        path: |
+          ~/.cache/zig
+          .zig-cache
+          !.zig-cache/o/ci-compiled
+        key: ${{ steps.runner-keys.outputs.key }}
+        restore-keys: ${{ steps.runner-keys.outputs.prefix-cpu }}
+    - name: Capture missing exact keys for the later save
+      if: ${{ always() && inputs.save-only != 'true' }}
+      shell: bash
+      env:
+        PUBLISH: ${{ inputs.publish-caches }}
+        COMPILER_KEY: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+        COMPILER_HIT: ${{ steps.compiler-cache.outputs.cache-hit }}
+        BUILD_KEY: ${{ steps.build-cache.outputs.cache-primary-key }}
+        BUILD_HIT: ${{ steps.build-cache.outputs.cache-hit }}
+        PACKAGES_KEY: ${{ steps.packages-cache.outputs.cache-primary-key }}
+        PACKAGES_HIT: ${{ steps.packages-cache.outputs.cache-hit }}
+        RUNNER_KEY: ${{ steps.runner-cache.outputs.cache-primary-key }}
+        RUNNER_HIT: ${{ steps.runner-cache.outputs.cache-hit }}
+      run: |
+        set -euo pipefail
+        for cache in COMPILER BUILD PACKAGES RUNNER; do
+          key_var=${cache}_KEY
+          hit_var=${cache}_HIT
+          key=${!key_var}
+          if [ "$PUBLISH" != true ] || [ "${!hit_var}" = true ]; then key=; fi
+          echo "RUI_CACHE_${cache}_KEY=$key" >> "$GITHUB_ENV"
+        done
+    - name: Select publication keys from completed work
+      id: save-keys
+      if: ${{ always() && inputs.save-only == 'true' }}
+      shell: bash
+      env:
+        SETUP_OUTCOME: ${{ inputs.setup-outcome }}
+        WORK_OUTCOME: ${{ inputs.work-outcome }}
+        JOB_SUCCESS: ${{ job.status == 'success' }}
+      run: node .github/actions/setup/caches/save-keys.cjs
+    # A composite has no post hook. Call this same owner with save-only: true
+    # under always() after the bounded compile step, before slow diagnostics.
+    - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ always() && inputs.save-only == 'true' && steps.save-keys.outputs.compiler-key != '' }}
+      with:
+        path: ${{ runner.temp }}/rui-zig
+        key: ${{ steps.save-keys.outputs.compiler-key }}
+    - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ always() && inputs.save-only == 'true' && steps.save-keys.outputs.build-key != '' }}
       with:
         path: |
           ~/.cache/zig
           .zig-cache
           zig-pkg
           screen-emulator/zig-pkg
-        key: ${{ steps.build-keys.outputs.key }}
-        restore-keys: |
-          ${{ steps.build-keys.outputs.prefix-deps }}
-          ${{ steps.build-keys.outputs.prefix-part }}
-          ${{ steps.build-keys.outputs.prefix-seed }}
-    # Package pair: pinned package sources depend only on build.zig.zon, so a
-    # tool, image or build-input change that misses every build snapshot reads
-    # them here instead of from codeberg.org and GitHub, whose 504s and stalls
-    # failed producers. A repinned package restores the newest earlier set, so
-    # only the repinned one comes from its host; the fetch below downloads only
-    # packages still missing.
-    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      if: ${{ inputs.publish-caches == 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
+        key: ${{ steps.save-keys.outputs.build-key }}
+    - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ success() && inputs.save-only == 'true' && steps.save-keys.outputs.packages-key != '' }}
       with:
         path: zig-pkg
-        key: rui-packages-v1-${{ hashFiles('build.zig.zon') }}
-        restore-keys: rui-packages-v1-
-    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      if: ${{ inputs.publish-caches != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
-      with:
-        path: zig-pkg
-        key: rui-packages-v1-${{ hashFiles('build.zig.zon') }}
-        restore-keys: rui-packages-v1-
-    # Runner pair: consumers compile only the build runner and configuration; executables
-    # come from the verified artifact and test runs are never cached.
-    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      if: ${{ inputs.publish-caches == 'true' && inputs.cold != 'true' && inputs.compiled == 'true' }}
+        key: ${{ steps.save-keys.outputs.packages-key }}
+    - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ always() && inputs.save-only == 'true' && steps.save-keys.outputs.runner-key != '' }}
       with:
         path: |
           ~/.cache/zig
           .zig-cache
           !.zig-cache/o/ci-compiled
-        key: ${{ steps.runner-keys.outputs.key }}
-        restore-keys: ${{ steps.runner-keys.outputs.prefix-cpu }}
-    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      if: ${{ inputs.publish-caches != 'true' && inputs.cold != 'true' && inputs.compiled == 'true' }}
-      with:
-        path: |
-          ~/.cache/zig
-          .zig-cache
-          !.zig-cache/o/ci-compiled
-        key: ${{ steps.runner-keys.outputs.key }}
-        restore-keys: ${{ steps.runner-keys.outputs.prefix-cpu }}
+        key: ${{ steps.save-keys.outputs.runner-key }}

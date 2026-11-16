@@ -1,5 +1,3 @@
-//! Session Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -20,7 +18,6 @@ const testingBytesContent = shared_fixtures.testingBytesContent;
 test "Store allocates six character IDs atomically retries collisions and replays creation" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            // A rerun draws its Session ID again.
             if (case.rerun) return;
             const Entropy = struct {
                 var draws: usize = 0;
@@ -61,8 +58,6 @@ test "Store allocates six character IDs atomically retries collisions and replay
             try std.testing.expect(replay.replayed and replay.created);
             try std.testing.expectEqualStrings(b.session.slice(), replay.session.slice());
             try std.testing.expectEqual(@as(usize, 3), Entropy.draws);
-            // The schema refuses a noncanonical reference that the production
-            // insert binds; "short" and "1234567" are not a SessionHead's 6 bytes.
             const current = (try store_core.readSessionForTesting(&storage, a.session.slice())).?;
             try insertSessionForTesting(&storage, &current, "k7m2qz");
             for ([_]*const [protocol.session_id_bytes]u8{ "K7m2qx", "k7m2qi", "k7m\x00qx" }) |invalid| {
@@ -142,8 +137,6 @@ test "Store distinguishes noncanonical Session references from canonical unknown
     }.run);
 }
 
-/// Runs the production INSERT of a created Session under `ref`, then rolls
-/// it back, so a test sees what the schema accepts without keeping it.
 fn insertSessionForTesting(storage: *Store, current: *const configuration_domain.CurrentConfiguration, ref: *const [protocol.session_id_bytes]u8) !void {
     const Insert = struct {
         pub const Guards = error{};

@@ -1,5 +1,3 @@
-//! Content Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -10,7 +8,7 @@ const historical_domain = @import("../domain/historical.zig");
 const store_testing = @import("../testing.zig");
 const ContentReader = content_domain.ContentReader;
 const ContentReference = content_domain.ContentReference;
-const HistoricalReader = historical_domain.HistoricalReader;
+const TestingReader = store_testing.TestingReader;
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
 const configureTestSession = store_testing.configureTestSession;
@@ -174,7 +172,6 @@ test "content verification failure rolls back new imports and deduplicated input
                     const content = &command.configuration.instructions;
                     switch (case) {
                         .digest => {
-                            // A dedup hit must check supplied bytes, not trust the claimed digest.
                             content.digest = initial.configuration.instructions.digest;
                         },
                         .short => content.length += 1,
@@ -199,7 +196,6 @@ test "content verification failure rolls back new imports and deduplicated input
 test "content import reads once and rolls back sources that change during reading" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            // A rerun reads its source again.
             if (case.rerun) return;
             const Probe = struct {
                 const Change = enum { none, truncate, grow };
@@ -331,11 +327,9 @@ test "large raw content opens without materializing its payload" {
 
 test "content readers hold no decode window" {
     try std.testing.expect(@sizeOf(ContentReader) <= 512);
-    try std.testing.expect(@sizeOf(HistoricalReader) <= 1024);
+    try std.testing.expect(@sizeOf(TestingReader) <= 1024);
 }
 
-/// Tests use the production transaction runner and raw Content sink. The
-/// range borrows its descriptor; importing never assumes its cleanup.
 const ImportRange = struct {
     const transition = @import("../transition.zig");
     const custody = @import("../../content_custody.zig");
@@ -436,7 +430,6 @@ test "sealed Content range failures roll back raw rows and leave descriptor cust
             const Damage = enum { offset, overflow, sealed_length, changed_bytes, read_failure, write_failure };
             for ([_]bool{ false, true }) |existing| {
                 for (std.enums.values(Damage)) |damage| {
-                    // Deduplication verifies the input but writes no payload.
                     if (existing and damage == .write_failure) continue;
                     var tmp = std.testing.tmpDir(.{});
                     defer tmp.cleanup();
@@ -469,7 +462,6 @@ test "sealed Content range failures roll back raw rows and leave descriptor cust
                     try std.testing.expectError(expected, transition.apply(&storage, ImportRange, .{ .range = range, .faults = faults }, .{}));
                     try std.testing.expectEqual(before, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
                     try std.testing.expect(storage.isFenced());
-                    // The same live borrowed descriptor still belongs to this scope.
                     try std.testing.expectEqual(@as(u64, original.len), try file.length(std.testing.io));
                 }
             }
@@ -477,8 +469,6 @@ test "sealed Content range failures roll back raw rows and leave descriptor cust
     }.run);
 }
 
-/// Each lookup follows the preceding insert in the same transaction, like
-/// ordered input saving. The fixture retains only its current borrowed range.
 const ImportSequence = struct {
     const transition = @import("../transition.zig");
     const capture = @import("../../InputCapture.zig");

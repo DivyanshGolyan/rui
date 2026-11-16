@@ -1,5 +1,3 @@
-//! Shared screen composition. The overview and Session keep their own workers
-//! and input policy; this owner places content above input, facts and status.
 const std = @import("std");
 const vxfw = @import("vaxis").vxfw;
 const InputArea = @import("InputArea.zig");
@@ -7,7 +5,6 @@ const Stack = @import("widgets/Stack.zig");
 const Layer = @import("widgets/Layer.zig");
 
 pub const Overview = Screen(@import("GroupedList.zig"));
-/// A Session switches between the feed and independent panel widgets.
 pub const Content = struct {
     shown: vxfw.Widget,
 
@@ -27,12 +24,9 @@ fn Screen(comptime Body: type) type {
         header: ?vxfw.Widget = null,
         tail: ?vxfw.Widget = null,
         host: ?vxfw.Widget = null,
-        /// One feed gutter in either shell layout; input keeps its own margin.
         content_gutter: bool = false,
         marker: ?vxfw.Widget = null,
         overlay: ?vxfw.Widget = null,
-        /// Reserve a natural panel's rows before drawing the remaining feed.
-        /// Floating palettes leave the feed's allocation unchanged.
         overlay_reserves_space: bool = false,
         userdata: *anyopaque,
         on_event: *const fn (*anyopaque, *vxfw.EventContext, vxfw.Event) anyerror!void,
@@ -74,8 +68,6 @@ fn Screen(comptime Body: type) type {
             };
             const size = ctx.max.size();
             if (size.width == 0 or size.height == 0) return .empty(own);
-            // Nest columns to retain the existing height priority: input,
-            // header, tail, marker, then the remaining content.
             const lower = try ctx.arena.create(Stack);
             const lower_children = try ctx.arena.alloc(Stack.Child, 4);
             var count: usize = 1;
@@ -122,8 +114,6 @@ fn Screen(comptime Body: type) type {
             const input_index = column_children.len - 1;
             if (part != .list) column_children[input_index] = .{ .widget = self.input };
             column.* = .{ .children = column_children };
-            // Stack measures from the bottom: input first, panel second, feed
-            // last. Layer then paints the very same panel surface, once.
             var base = try column.widget().draw(ctx);
             try groundBase(ctx, &base, self.style, if (reserved) |slot| slot.spaceWidget() else null);
             const panels = try ctx.arena.alloc(Layer.Panel, if (overlay != null) 1 else 0);
@@ -138,17 +128,12 @@ fn Screen(comptime Body: type) type {
             const layer = try ctx.arena.create(Layer);
             layer.* = .{ .base = column.widget(), .panels = panels };
             var surface = try layer.drawAbove(ctx, base);
-            // Existing screen policy still owns events; these parts change
-            // composition without changing how panels or input handle keys.
             surface.widget = own;
             return surface;
         }
     };
 }
 
-/// AppScreen's transparent base consists of disjoint row bands and padding.
-/// Keep that layout/event tree intact; add inert surfaces only in its gaps.
-/// Layer owns overlapping panels separately, including the reserved slot.
 fn groundBase(ctx: vxfw.DrawContext, base: *vxfw.Surface, style: @import("vaxis").Style, reserved: ?vxfw.Widget) std.mem.Allocator.Error!void {
     const arena = ctx.arena;
     var ground: Ground = .{ .arena = arena, .cell_arena = ctx.cell_arena, .style = style, .reserved = reserved };
@@ -182,8 +167,6 @@ const Ground = struct {
     fn collect(self: *Ground, surface: vxfw.Surface, origin: vxfw.RelativePoint, size: vxfw.Size) std.mem.Allocator.Error!void {
         if (size.width == 0 or size.height == 0 or surface.buffer.len != 0) return;
         if (self.reserved) |slot| if (surface.widget.eql(slot)) return;
-        // Input facts can follow status on screen, and list indicators can
-        // precede the first child. Order references, never the event tree.
         const rows = try self.arena.alloc(*const vxfw.SubSurface, surface.children.len);
         for (surface.children, rows) |*child, *row| row.* = child;
         std.mem.sort(*const vxfw.SubSurface, rows, {}, above);
@@ -195,7 +178,6 @@ const Ground = struct {
             const height = @min(child.surface.size.height, size.height - top);
             const width = @min(child.surface.size.width, size.width - left);
             if (height == 0) continue;
-            // This is a column/padding walk, not overlapping-region algebra.
             std.debug.assert(top >= bottom);
             try self.strip(.{ .row = origin.row + bottom, .col = origin.col }, .{ .width = size.width, .height = top - bottom });
             try self.strip(.{ .row = origin.row + top, .col = origin.col }, .{ .width = left, .height = height });
@@ -207,8 +189,6 @@ const Ground = struct {
     }
 };
 
-/// Draw-arena custody of one measured panel. Stack reserves its actual rows;
-/// Layer paints its retained surface over that space without drawing it again.
 const ReservedPanel = struct {
     child: vxfw.Widget,
     drawn: vxfw.Surface = undefined,
@@ -310,7 +290,6 @@ test "App screens compose content input facts status and an overlay without owni
     const upper = column.children[0].surface;
     const lower = upper.children[1];
     try std.testing.expectEqual(@as(i17, 18), lower.origin.row + lower.surface.children[2].origin.row);
-    // The marker owns a whole row above the tail; the content ends above it.
     const marker_row = lower.surface.children[1];
     try std.testing.expectEqual(vxfw.RelativePoint{ .row = 17, .col = 0 }, vxfw.RelativePoint{ .row = lower.origin.row + marker_row.origin.row, .col = marker_row.origin.col });
     try std.testing.expectEqual(@as(u16, 80), marker_row.surface.size.width);
@@ -389,8 +368,6 @@ test "App screens render the original composition with painted marker rows" {
             std.hash.autoHash(&hash, cell.style);
         }
     };
-    // c347313's composition with grounded marker rows and no empty status slot,
-    // across all optional rows and tiny, narrow and wide terminals.
     try std.testing.expectEqual(@as(u64, 9710008619075226950), hash.final());
 }
 
@@ -422,9 +399,6 @@ test "App screens update layout state through exhausted resizes for every option
     document.* = .{};
     const rows: [4]GroupedList.Row = @splat(.{ .segments = &.{.{ .text = "Session", .style = .{} }} });
 
-    // The original composition (c347313) draws header, tail and content even
-    // at zero remaining height; only the marker needs a free row. Sweep both
-    // exhaustion boundaries (input/header and tail/marker) and partial layouts.
     for (0..8) |flags| for (1..11) |small_height| {
         var all: []const GroupedList.Row = rows[0..3];
         var list: GroupedList = .{ .rows = .of(&all) };
@@ -440,15 +414,12 @@ test "App screens update layout state through exhausted resizes for every option
             screen.tail = if (flags & 2 != 0) tail.widget() else null;
             screen.marker = if (flags & 4 != 0) marker.widget() else null;
             const heights = [_]u16{ 24, @intCast(small_height), @intCast(small_height), @intCast(small_height), @intCast(small_height), 24 };
-            // Remove, replace and grow the list while the terminal stays small.
             for (heights, [_]usize{ 3, 3, 0, 1, 4, 4 }) |height, count| {
                 var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
                 defer arena.deinit();
                 all = rows[0..count];
                 list.rows = .of(&all);
                 const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = height }, .cell_size = .{} };
-                // InputArea still owns input height. The rest is the original
-                // screen's allocation rule, independent of the Stack tree.
                 const input_height = (try input.widget().draw(ctx)).size.height;
                 const header_room = height - input_height;
                 const header_height = if (screen.header != null) @min(1, header_room) else 0;
@@ -578,8 +549,6 @@ test "App screens allocate cells once for a covered pane and its gutter" {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const drawn = try screen.drawPart(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} }, part);
-        // All children in this frame partition the pane. A full-pane ground
-        // beneath them would double the cell allocation, even at wide sizes.
         try std.testing.expectEqual(@as(usize, width) * height, Body.cells(drawn));
         try std.testing.expectEqual(@as(usize, 0), drawn.buffer.len);
     };
@@ -595,8 +564,6 @@ test "App screens ground gutter short rows and empty space without changing hit 
     };
     var hit_widget = text.widget();
     hit_widget.eventHandler = Handler.event;
-    // A natural-width row, a gutter beside a taller body, and leftover rows.
-    // Visit the children out of visual order, as InputArea and List can do.
     for ([_]u16{ 1, 2, 7, 46, 120, 250 }) |width| for ([_]u16{ 1, 2, 5, 40, 70 }) |height| for (0..3) |mode| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
@@ -630,8 +597,6 @@ test "App screens ground gutter short rows and empty space without changing hit 
     };
 }
 
-// A frame-wide ground allocation would double these cells; putting even one
-// strip on the metadata arena would leave its pointer outside cell_storage.
 test "App screens allocate uncovered ground strips only in cell_arena" {
     const vaxis = @import("vaxis");
     const text: vxfw.Text = .{ .text = "" };

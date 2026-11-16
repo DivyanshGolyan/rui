@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# Installs the pinned actionlint into $1. The release tarball comes from the
-# workflow cache when it hit and its digest matches, else from GitHub, so a
-# cached tarball is trusted no more than a download.
 set -euo pipefail
 dir=$1
 tarball="$dir/actionlint_1.7.7_linux_amd64.tar.gz"

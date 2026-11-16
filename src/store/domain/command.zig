@@ -1,6 +1,3 @@
-//! Commands a person or peer sends a Session (messages, Session stops, model
-//! interruptions, permission decisions), their replay, and their observed results.
-
 const std = @import("std");
 const model_attempt = @import("model_attempt.zig");
 const command_reply = @import("../../command_reply.zig");
@@ -99,20 +96,15 @@ const MessageProjection = struct {
     },
 };
 
-/// The Session of the attempted, unresolved Action that holds
-/// `sender_handle`, while no stop selected its Turn. The partial unique
-/// index action_operation_sender_handle holds one row per handle, so
-/// LIMIT 1 drops nothing.
 const message_sender = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "JOIN session s ON s.session_ref=action.session_ref WHERE action.sender_handle=?1 AND action.attempt_ordinal=1 AND action.resolution_code IS NULL " ++
-        "AND NOT EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) LIMIT 1",
+        "AND NOT " ++ action_domain.actionStoppedSql("action", "operation") ++ " LIMIT 1",
     .Args = struct { handle: []const u8 },
     .Row = struct { session: rsql.SessionHead },
     .cardinality = .optional,
 });
 
-/// A saved Message's admission and the identity of its text.
 const message_replay = rsql.Read(.{
     .sql = "SELECT m.admission_id,m.session_ref,m.content_id,content.byte_length AS length,content.digest FROM message_admission m " ++
         "JOIN content ON content.content_id=m.content_id WHERE m.command_key=?1",
@@ -121,8 +113,6 @@ const message_replay = rsql.Read(.{
     .cardinality = .one,
 });
 
-/// Saves the peer's command before queuing its admission; the caller
-/// then saves the skills its text bound (`skills_domain.SavingBound`).
 fn admitFromSession(
     a: anytype,
     sender: *const rsql.SessionHead,
@@ -152,28 +142,20 @@ fn sentDigest(comptime domain: []const u8, content_digest: *const [32]u8) [32]u8
     return digest.finalResult();
 }
 
-/// A peer's rejected Message, at its sender's next position.
 const reject_sent = rsql.Write(.{
     .sql = "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,@session(?2),?3,@now)",
     .Args = struct { key: []const u8, sender: rsql.SessionHead, position: u64 },
-    // A replay was classified first, so the key is free.
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// What every Message reads in round 1, besides its Session or its
-/// creation, and keeps until commit.
 pub const MessageReads = struct {
     digest: [32]u8,
     saved: saved_command.Result = undefined,
     sender: message_sender.Result = null,
-    /// The text's identity, and the row its lookup found.
     text: content_domain.Import,
-    /// The skills the text's `/name` words bound, saved with the admission.
     bound: []const skills_domain.BoundSkill = &.{},
 };
 
-/// The handle a peer Message's sender claims, when its address names this
-/// Store: only then can an Action of this Store hold it.
 fn claimedHandle(command: *const content_custody.MessageCommand, selector: []const u8) ?[]const u8 {
     const handle = if (command.sender_handle) |*value| value else return null;
     const claimed = if (command.sender) |*value| value else return null;
@@ -181,8 +163,6 @@ fn claimedHandle(command: *const content_custody.MessageCommand, selector: []con
     return handle.slice();
 }
 
-/// Whether the Message's sender is what its handle proves: no sender and
-/// no handle, or the Session of the Action `found` holds the handle.
 fn senderValid(command: *const content_custody.MessageCommand, selector: []const u8, found: message_sender.Result) bool {
     if (command.sender_handle == null) return command.sender == null;
     if (claimedHandle(command, selector) == null) return false;
@@ -195,20 +175,6 @@ fn readMessage(a: anytype, selector: []const u8, command: *const content_custody
     if (claimedHandle(command, selector)) |handle| a.read(message_sender, .{ .handle = handle }, &reads.sender);
 }
 
-/// A Message to an existing Session, or one that creates its Session.
-/// Only an authenticated Action can acquire a sender position; an exact
-/// replay needs no still-live handle.
-///
-/// Round `.facts` reads the saved answer and the sender's Action, with
-/// the Session and the text's content row, or for a creation the rows its
-/// configuration needs (`configuration.prepareConfiguration`). An accepted
-/// replay reads its admission and text in `.replay`. A creation's
-/// validation and application add their own rounds (`.model` to
-/// `.loaded`, `configuration.validateStep`; `.creation` and `.catalog`,
-/// `configuration.applyStep`), then the text's lookup is `.text`, which
-/// also runs the creation's writes. A refusal with a diagnostic looks its
-/// row up in `.failure`. An admitted Message saves the skills its text
-/// bound, one `.skill` round each. The commit round saves the rest.
 pub const SubmitMessage = struct {
     pub const rounds = transition.rounds(.{
         .facts = .{.always},
@@ -227,19 +193,15 @@ pub const SubmitMessage = struct {
     pub const round_budget = 2;
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = .facts;
-    /// Each is the caller's, which outlives the transition.
     pub const Input = struct {
         io: std.Io,
         served: provider_route.Routes,
         tools: *const store_core.HostTools,
-        /// This Store's selector, which a peer sender's address names.
         selector: []const u8,
         command: *const content_custody.MessageCommand,
         committed: ?MessageCommitted,
         initial_skills: ?*const skills_domain.Initial,
         captured: ?*const skills_domain.MessageCapture,
-        /// Where the answer goes, in the caller's frame: a step's result
-        /// stays one word wide.
         reply: *MessageReply,
     };
     pub const Result = void;
@@ -248,28 +210,19 @@ pub const SubmitMessage = struct {
     pub const Declined = error{};
 
     input: Input,
-    /// A plain Message's reads; a creation's are its configure reads'.
     plain: MessageReads = undefined,
     target: target_session.Result = null,
-    /// A creation's configure reads, leased from the Store's scratch.
     creation: *configuration_domain.ConfigurationReads = undefined,
     sender_valid: bool = false,
     rejection: message_admission.Rejection = undefined,
-    /// The command's answer, whose code its write reads in place.
     answer: StoredAnswer = undefined,
-    /// The admitted Session, whose reference the command's write reads in
-    /// place.
     head: rsql.SessionHead = undefined,
-    /// What the rounds after the decision keep, as one path runs them: a
-    /// replay's admission, a creation's saved tool selection, a refusal's
-    /// diagnostic or the admitted Message's skills.
     later: union {
         replay: message_replay.Result,
         saved: tool_set.SavedSelection,
         failure: skills_domain.ImportingFailure,
         skills: skills_domain.SavingBound,
     } = undefined,
-    /// The admission the commit saves, or 0 for a refusal.
     admission_id: u64 = 0,
 
     pub fn step(t: *SubmitMessage, r: *transition.Round(SubmitMessage), ran: ?rounds.At) !transition.Next(SubmitMessage) {
@@ -296,12 +249,10 @@ pub const SubmitMessage = struct {
         }
     }
 
-    /// After `.failure`: the refusal, with its diagnostic's row.
     noinline fn rejectDiagnosed(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
         return t.reject(r, try t.later.failure.import(r, r.faults()));
     }
 
-    /// After `.skill`: the skill it looked up, then the next.
     noinline fn saveSkill(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
         try t.later.skills.save(r, r.faults());
         return t.saveSkills(r);
@@ -311,13 +262,9 @@ pub const SubmitMessage = struct {
         return if (t.input.command.configuration != null) &t.creation.message else &t.plain;
     }
 
-    // The steps that run a round's work are noinline, so none sits under
-    // another on the engine thread's chain.
     noinline fn start(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) transition.Next(SubmitMessage) {
         const command = t.input.command;
         if (command.configuration != null) {
-            // Creation's configuration and Message facts have one address in
-            // the Store's scratch until this transaction settles.
             t.creation = r.configurationReads();
             t.creation.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
         }
@@ -333,8 +280,6 @@ pub const SubmitMessage = struct {
         return .{ .round = .facts };
     }
 
-    /// After `.facts`: a replay answers what was saved; a fresh Message
-    /// is refused or goes on.
     noinline fn decide(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
         const command = t.input.command;
         const message = t.reads();
@@ -366,7 +311,6 @@ pub const SubmitMessage = struct {
         else
             null;
         if (rejection) |code| return t.refuse(r, code, null);
-        // The Host bound the text's `/name` words to skills, or found none.
         if (t.input.captured) |captured| switch (captured.*) {
             .failed => |failure| return t.refuse(r, failure.rejection(), failure.bytes),
             .bound => |bound| message.bound = bound,
@@ -376,8 +320,6 @@ pub const SubmitMessage = struct {
         return t.admit(r, null);
     }
 
-    /// After `.replay`: the saved admission, which must be the one the
-    /// command saved.
     noinline fn replayed(t: *SubmitMessage) !transition.Next(SubmitMessage) {
         const command = t.input.command;
         const message = t.reads();
@@ -395,13 +337,11 @@ pub const SubmitMessage = struct {
         } });
     }
 
-    /// Answers `reply` without writing.
     fn done(t: *SubmitMessage, reply: MessageReply) transition.Next(SubmitMessage) {
         t.input.reply.* = reply;
         return .{ .done = {} };
     }
 
-    /// A creating Message's own refusals, then its configuration's.
     fn decideCreation(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
         const command = t.input.command;
         const creation = t.creation;
@@ -415,11 +355,9 @@ pub const SubmitMessage = struct {
             null;
         if (rejection) |code| return t.refuse(r, code, null);
         t.later = .{ .saved = undefined };
-        // Validation's first step asks for the model's facts or refuses.
         return (try t.validate(r, null)).?;
     }
 
-    /// What the creation's configuration steps read besides its rows.
     fn request(t: *SubmitMessage) configuration_domain.Request {
         return .{
             .io = t.input.io,
@@ -432,9 +370,6 @@ pub const SubmitMessage = struct {
         };
     }
 
-    /// Configuration's validation owns ordinary refusal precedence: no
-    /// configuration, content or Session write exists when it refuses.
-    /// Null once the configuration is valid.
     noinline fn validate(t: *SubmitMessage, r: *transition.Round(SubmitMessage), ran: ?configuration_domain.ValidationRound) !?transition.Next(SubmitMessage) {
         return switch (try configuration_domain.validateStep(r, &t.request(), t.creation, ran)) {
             .round => |round| .{ .round = switch (round) {
@@ -445,10 +380,7 @@ pub const SubmitMessage = struct {
         };
     }
 
-    /// Once the configuration is valid: a skill the text could not bind
-    /// refuses it, before any configuration, content or Session write.
     noinline fn applyValidated(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
-        // The Host bound the text's `/name` words to skills, or found none.
         if (t.input.captured) |captured| switch (captured.*) {
             .failed => |failure| return t.refuse(r, failure.rejection(), failure.bytes),
             .bound => |bound| t.creation.message.bound = bound,
@@ -467,7 +399,6 @@ pub const SubmitMessage = struct {
         return .{ .round = .text };
     }
 
-    /// A refusal; one with a diagnostic looks its row up in `.failure`.
     fn refuse(t: *SubmitMessage, r: *transition.Round(SubmitMessage), code: message_admission.Rejection, diagnostic: ?[]const u8) !transition.Next(SubmitMessage) {
         t.rejection = code;
         const bytes = diagnostic orelse return t.reject(r, null);
@@ -476,8 +407,6 @@ pub const SubmitMessage = struct {
         return .{ .round = .failure };
     }
 
-    /// Saves the refused Message; a peer's refusal takes its sender's next
-    /// position.
     fn reject(t: *SubmitMessage, r: *transition.Round(SubmitMessage), outcome_id: ?u64) !transition.Next(SubmitMessage) {
         const command = t.input.command;
         const message = t.reads();
@@ -492,9 +421,6 @@ pub const SubmitMessage = struct {
         return .commit;
     }
 
-    /// After the text's lookup round: imports the text and saves the
-    /// command (with the Session revision `configured` wrote, when it
-    /// created the Session) and the admission at `head`'s next position.
     noinline fn admit(
         t: *SubmitMessage,
         r: *transition.Round(SubmitMessage),
@@ -515,16 +441,12 @@ pub const SubmitMessage = struct {
         return t.saveSkills(r);
     }
 
-    /// A `.skill` round for the next bound skill, or the commit once every
-    /// one is saved.
     fn saveSkills(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
         if (t.later.skills.lookupNext(r)) return .{ .round = .skill };
         if (r.faults().before_commit) return error.InjectedCommitFailure;
         return .commit;
     }
 
-    /// Commit before announcing an admission: in a batch, once the batch
-    /// commits (`Store.admitted`).
     pub fn announced(t: *const SubmitMessage) ?store_core.Announcement {
         if (t.admission_id == 0) return null;
         const callback = t.input.committed orelse return null;
@@ -546,7 +468,6 @@ pub const SubmitMessage = struct {
             .accepted = .{
                 .replayed = false,
                 .admission_id = t.admission_id,
-                // The text's row was found or written under exactly this identity.
                 .content = .{ .length = message.text.length, .digest = message.text.digest },
                 .session = if (command.configuration != null) t.creation.applied.session else command.session,
             },
@@ -554,7 +475,6 @@ pub const SubmitMessage = struct {
     }
 };
 
-/// The skills a door's capture bound; none for no capture or a failed one.
 fn boundOf(captured: ?*const skills_domain.MessageCapture) []const skills_domain.BoundSkill {
     const value = captured orelse return &.{};
     return switch (value.*) {
@@ -563,40 +483,21 @@ fn boundOf(captured: ?*const skills_domain.MessageCapture) []const skills_domain
     };
 }
 
-/// What running a `message_agent` call did.
 pub const AgentDelivery = enum {
-    /// The Message was admitted to its Session and the call succeeded.
     delivered,
-    /// Nothing was sent, and the call failed with a result saying why.
     failed,
-    /// A stop selected the call's Turn, or its Session owes one, and the
-    /// stop resolves the call.
     stopped,
 };
 
-/// The command key a `message_agent` call's Message is saved under. Keys a
-/// person or script sends are theirs; a taken key fails the call.
 fn agentMessageKey(buffer: *[idempotency_key.max_bytes]u8, action_id: u64) []const u8 {
     return std.fmt.bufPrint(buffer, "rui.core/message_agent/{d}", .{action_id}) catch unreachable;
 }
 
-/// Runs a `message_agent` call as one core command (D24, D41): admits
-/// `text` to the Session `target` names, from the call's own Session, and
-/// resolves the call with what happened, in one transaction. A Message it
-/// sends carries no client environment (D169).
-///
-/// Round `.facts` reads the call's Action, the saved answer of the call's
-/// key, the receiving Session and the text's content row; `.outcome` reads
-/// the call's result text's row. A delivered Message is admitted, then
-/// saves the skills its text bound, one `.skill` round each, which also
-/// runs the writes queued before it. The commit round resolves the call.
 pub const DeliverAgentMessage = struct {
     pub const rounds = transition.rounds(.{ .facts = .{.always}, .outcome = .{.always}, .skill = .{.paged} });
     pub const round_budget = 3;
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = .facts;
-    /// `target`, `text` and what `captured` binds are the caller's, which
-    /// outlive the transition.
     pub const Input = struct {
         binding: action_domain.ActionAttemptBinding,
         target: []const u8,
@@ -609,14 +510,12 @@ pub const DeliverAgentMessage = struct {
     pub const Declined = error{};
 
     input: Input,
-    /// The command key, which its writes read in place.
     key_buffer: [idempotency_key.max_bytes]u8 = undefined,
     key: []const u8 = &.{},
     facts: action_domain.core_facts.Result = undefined,
     saved: saved_command.Result = undefined,
     receiver: target_session.Result = null,
     message: content_domain.Import = undefined,
-    /// The call's result, which its content write reads in place.
     result_buffer: [160]u8 = undefined,
     result: []const u8 = &.{},
     outcome: content_domain.Import = undefined,
@@ -656,12 +555,9 @@ pub const DeliverAgentMessage = struct {
         }
     }
 
-    /// After `.facts`: a stopped call ends; any other is delivered, or
-    /// fails with a result saying why nothing was sent.
     fn decide(t: *DeliverAgentMessage, r: *transition.Round(DeliverAgentMessage)) !transition.Next(DeliverAgentMessage) {
         if (t.facts.?.stopped) return .{ .done = .stopped };
         const target = t.input.target;
-        // The Host bound the text's `/name` words to the receiver's skills.
         const unreadable: ?skills_domain.MessageFailure = if (t.input.captured) |value| switch (value.*) {
             .failed => |failure| failure,
             .bound => null,
@@ -682,8 +578,6 @@ pub const DeliverAgentMessage = struct {
         return .{ .round = .outcome };
     }
 
-    /// A `.skill` round for the next bound skill, or the call's
-    /// resolution once every one is saved.
     fn saveSkills(t: *DeliverAgentMessage, r: *transition.Round(DeliverAgentMessage)) !transition.Next(DeliverAgentMessage) {
         if (t.skills.lookupNext(r)) return .{ .round = .skill };
         return t.resolve(r);
@@ -705,8 +599,6 @@ fn childEndingKey(buffer: *[idempotency_key.max_bytes]u8, turn_id: u64) []const 
     return std.fmt.bufPrint(buffer, "rui.core/ending/{d}", .{turn_id}) catch unreachable;
 }
 
-/// The owed ending of `turn_id`: its child's Session, its parent, and how
-/// its Turn ended, with the answer's digest when done or its bounded report.
 const owed_ending_facts = rsql.Read(.{
     .sql = "SELECT child.session_ref,child.workspace_key,child.next_position,child.parent_ref AS parent,t.outcome_code,t.outcome_content_id,c.digest,CASE WHEN t.outcome_content_id IS NOT NULL AND t.outcome_code<>'completed' THEN @payload(c) ELSE NULL END AS report," ++
         action_domain.ending_stop_sql ++ " FROM session_forward e JOIN turn t ON t.turn_id=e.source_id " ++
@@ -731,8 +623,6 @@ const settle_owed_ending = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// What the parent of a child that ended without an answer reads, as a
-/// Message from the child (D161).
 fn endingText(buffer: []u8, ending: turn_ending.TurnEnding, report: ?[]const u8) []const u8 {
     return std.fmt.bufPrint(buffer, "[Rui: this agent's Turn ended without an answer: {s}.]{s}{s}", .{
         @tagName(ending),
@@ -741,31 +631,13 @@ fn endingText(buffer: []u8, ending: turn_ending.TurnEnding, report: ?[]const u8)
     }) catch unreachable;
 }
 
-/// Delivers the ending of an attached child's Turn `turn_id` to its parent
-/// as a Message from the child (D39), which wakes the parent, and settles
-/// what was owed, in one transaction. A done Turn's Message is its saved
-/// answer itself, so nothing is copied; any other ending is a short line
-/// naming it and the saved provider report, if any. An ending its parent's
-/// own stop caused only settles (D139).
-/// False when nothing was owed any more. Its `rui.core/` key is free:
-/// clients cannot use one, and settling marks the row with the admission.
-///
-/// Round `.owed` reads what is owed. Unless the ending is quiet, `.parent`
-/// reads the parent and the ending line's content row, and runs the
-/// settling write. The Message is admitted, then saves the skills its text
-/// bound, one `.skill` round each; the commit round runs the rest.
 pub const DeliverChildEnding = struct {
     pub const rounds = transition.rounds(.{ .owed = .{.always}, .parent = .{.branch}, .skill = .{.paged} });
     pub const round_budget = 2;
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = .owed;
-    /// What `captured` binds and `ending` are the caller's, which outlive
-    /// the transition.
     pub const Input = struct { turn_id: u64, captured: ?*const skills_domain.MessageCapture, ending: *Ending };
 
-    /// What is owed and the ending line, over 1 KiB together, so held in
-    /// the caller's frame. `.parent`'s read reads the parent's reference in
-    /// place, and the line's content write reads the line.
     pub const Ending = struct {
         owed: owed_ending_facts.Result,
         text_buffer: [96 + outcome_code.max_report_bytes]u8,
@@ -776,7 +648,6 @@ pub const DeliverChildEnding = struct {
     pub const Declined = error{};
 
     input: Input,
-    /// The command key, which its writes read in place.
     key_buffer: [idempotency_key.max_bytes]u8 = undefined,
     key: []const u8 = &.{},
     outcome: TurnOutcome = undefined,
@@ -794,8 +665,6 @@ pub const DeliverChildEnding = struct {
         switch (at) {
             .owed => {
                 const found = if (t.input.ending.owed) |*row| row else return .{ .done = false };
-                // Even a quiet ending transfers an owed Message without a
-                // Session-column write. Keep that transfer in the same owner.
                 r.obligationsChanged(found.child);
                 r.write(settle_owed_ending, .{ .turn_id = t.input.turn_id });
                 if (found.quiet) return finish(r);
@@ -816,7 +685,6 @@ pub const DeliverChildEnding = struct {
                     else => .{ try content_domain.importBytes(r, &t.message, t.text), content_string.digest(t.text) },
                 };
                 const digest = sentDigest("rui/core/child_ending/v1", &content_digest);
-                // An owed ending cannot be refused; unreadable skills leave it unbound.
                 const admission_id = try admitFromSession(r, &found.child, &parent.session, t.key, content_id, &digest, null, &.{ .accepted = true });
                 t.skills = .{ .admission_id = admission_id, .bound = boundOf(t.input.captured) };
             },
@@ -836,36 +704,12 @@ pub const DeliverChildEnding = struct {
     }
 };
 
-/// What running a `start_agent` call did.
 pub const AgentStart = enum {
-    /// The agent's Session was created with the task as its first Message,
-    /// and the call succeeded.
     started,
-    /// Nothing was started, and the call failed with a result saying why.
     failed,
-    /// A stop selected the call's Turn, or its Session owes one, and the
-    /// stop resolves the call.
     stopped,
 };
 
-/// The calling Session's settings a `start_agent` call inherits or may
-/// only narrow. Its Workspace fills the creating Configuration in place.
-/// Runs a `start_agent` call as one core command (D24, D122): creates a
-/// Session with the call's configuration in the caller's Workspace and with
-/// its provider (D122, D221), as its child when `attached`, admits the task
-/// to it from the caller, and resolves the call with what happened, in one
-/// transaction. The spec may only narrow the caller's tools and permission
-/// mode. The configuration is the caller's; its parent, Workspace and
-/// provider are filled here.
-///
-/// Round `.facts` reads the call's Action, the saved answer of the call's
-/// key and the rows the configuration needs (`configuration.prepareConfiguration`).
-/// A start nothing refuses validates and applies the configuration in their
-/// own rounds (`.model` to `.loaded`, `configuration.validateStep`;
-/// `.creation` and `.catalog`, `configuration.applyStep`). `.outcome` reads
-/// the call's result text's row, with the task's when the agent starts. A
-/// started agent saves the skills its task bound, one `.skill` round each.
-/// The commit round resolves the call.
 pub const StartAgent = struct {
     pub const rounds = transition.rounds(.{
         .facts = .{.always},
@@ -882,7 +726,6 @@ pub const StartAgent = struct {
     pub const round_budget = 3;
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = .facts;
-    /// Each is the caller's, which outlives the transition.
     pub const Input = struct {
         io: std.Io,
         served: provider_route.Routes,
@@ -891,13 +734,10 @@ pub const StartAgent = struct {
         caller: []const u8,
         task: []const u8,
         attached: bool,
-        /// The agent's spec, which the start completes.
         configuration: *content_custody.Configuration,
         committed: ?MessageCommitted,
         initial_skills: ?*const skills_domain.Initial,
         captured: ?*const skills_domain.MessageCapture,
-        /// Where the call's result text is written, in the caller's frame;
-        /// the text's content write reads it in place.
         result_buffer: *[tool_defs.HostToolSet.max_refusal_message_bytes]u8,
     };
     pub const Result = AgentStart;
@@ -906,30 +746,21 @@ pub const StartAgent = struct {
     pub const Declined = error{};
 
     input: Input,
-    /// The command key, which its writes read in place.
     key_buffer: [idempotency_key.max_bytes]u8 = undefined,
     key: []const u8 = &.{},
     facts: action_domain.core_facts.Result = undefined,
-    /// The creation's configure reads, leased from the Store's scratch.
     creation: *configuration_domain.ConfigurationReads = undefined,
-    /// The call's result, which its content write reads in place.
     result: []const u8 = &.{},
-    /// The created Session's settings, once applied.
     applied: ?*const configuration_domain.Applied = null,
     message: content_domain.Import = undefined,
     outcome: content_domain.Import = undefined,
     rows: content_domain.Pair = .{ .first = null, .second = null },
-    /// The task's answer, whose fields its command write reads in place.
     answer: StoredAnswer = undefined,
-    /// What each round keeps, as one path runs them: the key's saved
-    /// answer, the saved tool selection validation reads, then the task's
-    /// skills.
     later: union {
         taken: saved_command.Result,
         saved: tool_set.SavedSelection,
         skills: skills_domain.SavingBound,
     } = undefined,
-    /// The task's admission, or 0 when nothing started.
     admission_id: u64 = 0,
 
     pub fn step(t: *StartAgent, r: *transition.Round(StartAgent), ran: ?rounds.At) !transition.Next(StartAgent) {
@@ -947,8 +778,6 @@ pub const StartAgent = struct {
         }
     }
 
-    // The steps that run a round's work are noinline, so none sits under
-    // another on the engine thread's chain.
     noinline fn start(t: *StartAgent, r: *transition.Round(StartAgent)) !transition.Next(StartAgent) {
         const binding = t.input.binding;
         const configuration = t.input.configuration;
@@ -959,7 +788,6 @@ pub const StartAgent = struct {
         lookupCommand(r, t.key, &t.later.taken);
         configuration.parent.state = .value;
         try configuration.parent.value.set(t.input.caller);
-        // Over 4.6 KB, so held where the Store owns it, as a configure does.
         t.creation = r.configurationReads();
         t.creation.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
         t.creation.attach_parent = t.input.attached;
@@ -967,8 +795,6 @@ pub const StartAgent = struct {
         return .{ .round = .facts };
     }
 
-    /// After `.facts`: a stopped call ends; a refused one fails with a
-    /// result saying why; any other validates its configuration.
     noinline fn decide(t: *StartAgent, r: *transition.Round(StartAgent)) !transition.Next(StartAgent) {
         const found = if (t.facts) |*row| row else return error.StaleActionAttemptBinding;
         if (!std.mem.eql(u8, &found.session.ref, t.input.caller)) return error.CorruptStore;
@@ -989,14 +815,12 @@ pub const StartAgent = struct {
             if (creation.parent_failure) |failure| return t.fail(r, failure.text(buffer, "started"));
             return t.fail(r, std.fmt.bufPrint(buffer, "Rui could not start the agent ({s}). Nothing was started.", .{@tagName(code)}) catch unreachable);
         }
-        // The Host bound the task's `/name` words to the new Session's skills.
         if (t.input.captured) |value| if (value.* == .failed)
             return t.fail(r, std.fmt.bufPrint(buffer, "{s} Nothing was started.", .{value.failed.bytes[0..@min(value.failed.bytes.len, 150)]}) catch unreachable);
         t.later = .{ .saved = undefined };
         return t.validate(r, null);
     }
 
-    /// What the creation's configuration steps read besides its rows.
     fn request(t: *StartAgent) configuration_domain.Request {
         return .{
             .io = t.input.io,
@@ -1009,8 +833,6 @@ pub const StartAgent = struct {
         };
     }
 
-    /// Validation refuses the configuration, which fails the call, or
-    /// readies it for application.
     noinline fn validate(t: *StartAgent, r: *transition.Round(StartAgent), ran: ?configuration_domain.ValidationRound) !transition.Next(StartAgent) {
         return switch (try configuration_domain.validateStep(r, &t.request(), t.creation, ran)) {
             .round => |round| .{ .round = switch (round) {
@@ -1021,8 +843,6 @@ pub const StartAgent = struct {
         };
     }
 
-    /// Applies the valid configuration; once the Session is created, looks
-    /// up the task's and the result's rows.
     noinline fn apply(t: *StartAgent, r: *transition.Round(StartAgent), ran: ?configuration_domain.ApplyRound) !transition.Next(StartAgent) {
         const applied = switch (try configuration_domain.applyStep(r, &t.request(), r.faults(), t.creation, ran)) {
             .round => |round| return .{ .round = switch (round) {
@@ -1038,7 +858,6 @@ pub const StartAgent = struct {
         return .{ .round = .outcome };
     }
 
-    /// Fails the call with `result`, once `.outcome` looks its row up.
     fn fail(t: *StartAgent, r: *transition.Round(StartAgent), result: []const u8) transition.Next(StartAgent) {
         t.result = result;
         t.outcome = .ofBytes(result, false);
@@ -1046,8 +865,6 @@ pub const StartAgent = struct {
         return .{ .round = .outcome };
     }
 
-    /// After `.outcome`: a started agent's task is admitted from the
-    /// caller, then its skills are saved; a failed call is resolved.
     noinline fn settle(t: *StartAgent, r: *transition.Round(StartAgent)) !transition.Next(StartAgent) {
         const applied = t.applied orelse {
             if (r.faults().content_import) return error.InjectedContentImportFailure;
@@ -1064,20 +881,16 @@ pub const StartAgent = struct {
         return t.saveSkills(r);
     }
 
-    /// After `.skill`: the skill it looked up, then the next.
     noinline fn saveSkill(t: *StartAgent, r: *transition.Round(StartAgent)) !transition.Next(StartAgent) {
         try t.later.skills.save(r, r.faults());
         return t.saveSkills(r);
     }
 
-    /// A `.skill` round for the next bound skill, or the call's resolution
-    /// once every one is saved.
     fn saveSkills(t: *StartAgent, r: *transition.Round(StartAgent)) !transition.Next(StartAgent) {
         if (t.later.skills.lookupNext(r)) return .{ .round = .skill };
         return t.resolve(r);
     }
 
-    /// Imports the result and resolves the call, then commits.
     fn resolve(t: *StartAgent, r: *transition.Round(StartAgent)) !transition.Next(StartAgent) {
         const outcome_id = try content_domain.importBytes(r, &t.outcome, t.result);
         try action_domain.queueResolution(r, t.input.binding, t.facts.?.session, if (t.applied != null) .succeeded else .failed, outcome_id);
@@ -1085,8 +898,6 @@ pub const StartAgent = struct {
         return .commit;
     }
 
-    /// Commit before announcing the task's admission: in a batch, once
-    /// the batch commits (`Store.admitted`).
     pub fn announced(t: *const StartAgent) ?store_core.Announcement {
         if (t.admission_id == 0) return null;
         const callback = t.input.committed orelse return null;
@@ -1102,24 +913,6 @@ pub const StartAgent = struct {
     }
 };
 
-/// Applies a configure command in one transaction: creates a Session, or
-/// updates one, or reloads its skills catalog, or saves why it refused.
-/// A configuration that requires a model is refused when the Host does
-/// not serve its Session's provider.
-///
-/// Round `.facts` reads the command's saved answer, the Session's saved
-/// configuration and the content lookups its instructions and output
-/// schema need (`configuration.prepareConfiguration`). A fresh
-/// configuration validates and applies in their own rounds (`.model` to
-/// `.loaded`, `configuration.validateStep`; `.creation` and `.catalog`,
-/// `configuration.applyStep`): a creation reads whether each drawn
-/// reference is taken after the replay check, so a replay draws none. A
-/// skills reload reads the Session's catalog in `.skills`, then its bytes
-/// one `.skills_window` each, appends a changed one in `.skills_append`
-/// (`skills.Reloading`), and looks its result's row up in `.outcome`. A
-/// refusal with a diagnostic looks its row up in `.failure`. The commit
-/// round saves the Session, the command and its revision, and a creation
-/// is announced once it commits.
 pub const Configure = struct {
     pub const rounds = transition.rounds(.{
         .facts = .{.always},
@@ -1139,7 +932,6 @@ pub const Configure = struct {
     pub const round_budget = 2;
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = .facts;
-    /// Each is the caller's, which outlives the transition.
     pub const Input = struct {
         io: std.Io,
         served: provider_route.Routes,
@@ -1148,38 +940,22 @@ pub const Configure = struct {
         preset: ?*const configuration_domain.PresetDecision,
         initial_skills: ?*const skills_domain.Initial,
         reload_capture: ?*const skills_domain.Capture,
-        /// What a skills reload allocates from, in an arena this frees.
         allocator: std.mem.Allocator,
         committed: ?Store.CreationCommitted,
-        /// Where the answer goes, in the caller's frame: a step's result
-        /// stays one word wide.
         reply: *configuration_domain.ConfigureReply,
     };
     pub const Result = void;
-    /// Running out of memory, the caller's for a reload or the engine's,
-    /// rolls the write back cleanly and is the caller's to answer.
     pub const Ordinary = error{OutOfMemory};
     pub const Guards = error{SessionUpdateFailed};
     pub const Declined = error{};
 
     input: Input,
-    /// The configure reads, leased from the Store's scratch, which also
-    /// hold the command's digest and answer.
     reads: *configuration_domain.ConfigurationReads = undefined,
-    /// The refusal the commit saves, if it saves one.
     rejection: ?configuration_admission.Rejection = null,
-    /// A skills reload's result, once reloaded.
     reloaded: ?skills_domain.Result = null,
-    /// The reload result's row.
     outcome: content_domain.Import = undefined,
-    /// A reload's scratch, from the caller's allocator; `deinit` frees it.
     memory: ?std.heap.ArenaAllocator = null,
-    /// A creation's parent refusal's diagnostic, which its content write
-    /// reads in place.
     parent_text: [256]u8 = undefined,
-    /// What the rounds after the decision keep, as one path runs them: the
-    /// saved tool selection validation reads, a refusal's diagnostic, or
-    /// the reload.
     later: union {
         saved: tool_set.SavedSelection,
         failure: skills_domain.ImportingFailure,
@@ -1204,11 +980,8 @@ pub const Configure = struct {
         }
     }
 
-    // The steps that run a round's work are noinline, so none sits under
-    // another on the engine thread's chain.
     noinline fn start(t: *Configure, r: *transition.Round(Configure)) transition.Next(Configure) {
         const command = t.input.command;
-        // Over 4.6 KB, so held where the Store owns it.
         t.reads = r.configurationReads();
         t.reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
         lookupCommand(r, command.key.slice(), &t.reads.saved_command);
@@ -1216,8 +989,6 @@ pub const Configure = struct {
         return .{ .round = .facts };
     }
 
-    /// After `.facts`: a replay answers what was saved; a fresh command is
-    /// refused, reloads skills or validates its configuration.
     noinline fn decide(t: *Configure, r: *transition.Round(Configure)) !transition.Next(Configure) {
         const command = t.input.command;
         const reads = t.reads;
@@ -1245,13 +1016,11 @@ pub const Configure = struct {
         return t.validate(r, null);
     }
 
-    /// Answers `reply` without writing.
     fn done(t: *Configure, reply: configuration_domain.ConfigureReply) transition.Next(Configure) {
         t.input.reply.* = reply;
         return .{ .done = {} };
     }
 
-    /// What the configuration steps read besides its rows.
     fn request(t: *Configure) configuration_domain.Request {
         return .{
             .io = t.input.io,
@@ -1264,7 +1033,6 @@ pub const Configure = struct {
         };
     }
 
-    /// Validation refuses the configuration or readies it for application.
     noinline fn validate(t: *Configure, r: *transition.Round(Configure), ran: ?configuration_domain.ValidationRound) !transition.Next(Configure) {
         return switch (try configuration_domain.validateStep(r, &t.request(), t.reads, ran)) {
             .round => |round| .{ .round = switch (round) {
@@ -1275,8 +1043,6 @@ pub const Configure = struct {
         };
     }
 
-    /// Applies the valid configuration, then saves the command and its
-    /// revision.
     noinline fn apply(t: *Configure, r: *transition.Round(Configure), ran: ?configuration_domain.ApplyRound) !transition.Next(Configure) {
         const applied = switch (try configuration_domain.applyStep(r, &t.request(), r.faults(), t.reads, ran)) {
             .round => |round| return .{ .round = switch (round) {
@@ -1292,9 +1058,6 @@ pub const Configure = struct {
         return .commit;
     }
 
-    /// Native reload has its own atomic result and catalog settlement:
-    /// after replay, a reload names an existing Session and nothing else,
-    /// and carries a catalog the Host captured.
     noinline fn startReload(t: *Configure, r: *transition.Round(Configure)) !transition.Next(Configure) {
         const command = t.input.command;
         const reads = t.reads;
@@ -1318,7 +1081,6 @@ pub const Configure = struct {
         }
     }
 
-    /// The reload's next round; once reloaded, its result's lookup.
     noinline fn reload(t: *Configure, r: *transition.Round(Configure), ran: ?skills_domain.ReloadRound) !transition.Next(Configure) {
         const result = switch (try t.later.reload.step(r, r.faults(), ran)) {
             .round => |round| return .{ .round = switch (round) {
@@ -1334,7 +1096,6 @@ pub const Configure = struct {
         return .{ .round = .outcome };
     }
 
-    /// After `.outcome`: saves the reload's result and command.
     noinline fn settleReload(t: *Configure, r: *transition.Round(Configure)) !transition.Next(Configure) {
         const command = t.input.command;
         const reads = t.reads;
@@ -1348,8 +1109,6 @@ pub const Configure = struct {
         return .commit;
     }
 
-    /// A refusal; one with a diagnostic, its own or a creation's parent's,
-    /// looks its row up in `.failure`.
     fn refuse(t: *Configure, r: *transition.Round(Configure), code: configuration_admission.Rejection, diagnostic: ?[]const u8) !transition.Next(Configure) {
         t.rejection = code;
         const bytes = diagnostic orelse if (t.reads.parent_failure) |parent| parent.text(&t.parent_text, "created") else return t.reject(r, null);
@@ -1358,12 +1117,10 @@ pub const Configure = struct {
         return .{ .round = .failure };
     }
 
-    /// After `.failure`: the refusal, with its diagnostic's row.
     noinline fn rejectDiagnosed(t: *Configure, r: *transition.Round(Configure)) !transition.Next(Configure) {
         return t.reject(r, try t.later.failure.import(r, r.faults()));
     }
 
-    /// Saves the refused command.
     fn reject(t: *Configure, r: *transition.Round(Configure), outcome_id: ?u64) !transition.Next(Configure) {
         const command = t.input.command;
         const reads = t.reads;
@@ -1374,8 +1131,6 @@ pub const Configure = struct {
         return .commit;
     }
 
-    /// Commit before announcing a creation: in a batch, once the batch
-    /// commits (`Store.created`).
     pub fn announced(t: *const Configure) ?store_core.Announcement {
         if (t.rejection != null or t.reloaded != null or t.input.command.session.len != 0) return null;
         const callback = t.input.committed orelse return null;
@@ -1399,16 +1154,11 @@ pub const Configure = struct {
     }
 };
 
-/// Resolves a core tool call and lets its Turn continue in one transaction.
-/// A call whose Turn a stop selected is left to the stop. Round `.facts`
-/// reads the call's Action and its result's content row; the commit round
-/// resolves it.
 pub const ResolveCoreCall = struct {
     pub const rounds = transition.rounds(.{ .facts = .{.always} });
     pub const round_budget = 2;
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = .facts;
-    /// `result` is the caller's, which outlives the transition.
     pub const Input = struct { binding: action_domain.ActionAttemptBinding, code: action_domain.ActionResolutionCode, result: []const u8 };
     pub const Result = bool;
     pub const Ordinary = store_core.Ordinary.action_attempt;
@@ -1442,11 +1192,11 @@ pub const ResolveCoreCall = struct {
     }
 };
 
-/// The Session a stop names, and the last Message admitted to it: the
-/// stop excludes every Message up to that one. Also the stop it owes, if
-/// any: the cause and position its owed key names.
 const stop_target = rsql.Read(.{
     .sql = "SELECT session_ref,workspace_key,next_position,(SELECT coalesce(max(admission_id),0) FROM message_admission WHERE session_ref=?1) AS admission_cutoff," ++
+        "(SELECT coalesce(max(action_id),0) FROM action_operation WHERE session_ref=?1) AS action_cutoff," ++
+        "(SELECT count(*) FROM action_operation WHERE session_ref=?1 AND resolution_code IS NULL AND attempt_ordinal=0) AS cancellable," ++
+        "EXISTS(SELECT 1 FROM action_operation WHERE session_ref=?1 AND resolution_code IS NULL AND attempt_ordinal=1) AS in_flight," ++
         turn_domain.unowedChildrenSql("?1") ++ " AS unowed_children," ++
         "(SELECT cause_ref FROM session_stop_owed WHERE child_ref=?1 AND settled=0) AS owed_cause,(SELECT cause_position FROM session_stop_owed WHERE child_ref=?1 AND settled=0) AS owed_position " ++
         "FROM session WHERE session_ref=?1",
@@ -1454,11 +1204,13 @@ const stop_target = rsql.Read(.{
     .Row = struct {
         session: rsql.SessionHead,
         admission_cutoff: u64,
+        action_cutoff: u64,
+        cancellable: u64,
+        in_flight: bool,
         unowed_children: u64,
         owed_cause: ?Bounded(session_id.bytes),
         owed_position: ?u64,
 
-        /// Whether `key` is the key of the stop this Session owes now.
         fn owedUnder(row: *const @This(), key: []const u8) bool {
             const cause = row.owed_cause orelse return false;
             var buffer: [idempotency_key.max_bytes]u8 = undefined;
@@ -1469,10 +1221,6 @@ const stop_target = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// The Session's open Turn: its Operation, whether that still runs, how
-/// many of its Actions a stop cancels (unresolved and never attempted),
-/// and whether an attempted one is unresolved, which keeps the Turn open
-/// until its Attempt settles.
 const stop_turn = rsql.Read(.{
     .sql = "SELECT t.turn_id,t.operation_id,o.resolution_code IS NULL AS running," ++
         "(SELECT count(*) FROM action_operation a WHERE a.parent_operation_id=t.operation_id AND a.resolution_code IS NULL AND a.attempt_ordinal=0) AS cancellable," ++
@@ -1483,20 +1231,17 @@ const stop_turn = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// The Actions of `operation_id` a stop cancels, in call order, from the
-/// call `after` on.
 const cancellable_actions = rsql.Read(.{
-    .sql = "SELECT action_id,call_ordinal FROM action_operation WHERE parent_operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=0 " ++
-        "AND call_ordinal>=?2 ORDER BY call_ordinal",
-    .Args = struct { operation_id: u64, after: u64 },
-    .Row = struct { action_id: rsql.Positive, call_ordinal: u64 },
+    .sql = "SELECT action_id FROM action_operation WHERE session_ref=?1 AND resolution_code IS NULL AND attempt_ordinal=0 " ++
+        "AND action_id>=?2 AND action_id<=?3 ORDER BY action_id",
+    .Args = struct { session: []const u8, after: u64, cutoff: u64 },
+    .Row = struct { action_id: rsql.Positive },
     .cardinality = .each,
 });
 
 const insert_stop = rsql.Write(.{
-    .sql = "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position,stopped_at,parent_caused) VALUES(?1,@session(?2),?3,?4,?5,@now,?6)",
-    .Args = struct { key: []const u8, session: rsql.SessionHead, selected_turn_id: ?u64, admission_cutoff: u64, position: u64, parent_caused: bool },
-    // A replay was classified first, so the key is free.
+    .sql = "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position,stopped_at,parent_caused,action_cutoff) VALUES(?1,@session(?2),?3,?4,?5,@now,?6,?7)",
+    .Args = struct { key: []const u8, session: rsql.SessionHead, selected_turn_id: ?u64, admission_cutoff: u64, position: u64, parent_caused: bool, action_cutoff: u64 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -1506,11 +1251,6 @@ const settle_owed_stop = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// The most Actions one cancelling write names: the largest count whose
-/// ids, with the content, first position and Session before them and @now
-/// after, fit 17 parameters: 3 + 13 + 1. The Store allows 65 since a
-/// settlement batch holds 64 items (SQLITE_LIMIT_VARIABLE_NUMBER, as in
-/// `Store.open`); this chunk keeps main's 13.
 const cancel_chunk = 13;
 
 /// `cancel_actions[n - 1]` cancels the `n` Actions it names, keyed from
@@ -1558,31 +1298,28 @@ fn CancelArgs(comptime n: usize) type {
     return @Struct(.auto, null, &names, &types, &@splat(.{}));
 }
 
-/// Collects one `cancellable_actions` page, of at most one write's ids.
 const CancelChunk = struct {
     action_ids: [cancel_chunk]u64 = undefined,
     len: usize = 0,
-    /// The call the next chunk starts from.
     next: u64 = 0,
 
     pub fn visit(chunk: *CancelChunk, row: *const cancellable_actions.Row) bool {
         chunk.action_ids[chunk.len] = row.action_id.get();
         chunk.len += 1;
-        chunk.next = row.call_ordinal + 1;
+        chunk.next = row.action_id.get() + 1;
         return chunk.len < cancel_chunk;
     }
 };
 
-/// A stop's saved selection, and whether the Turn it selected has closed.
 const stop_selection = rsql.Read(.{
-    .sql = "SELECT stop.selected_turn_id,stop.admission_cutoff,t.outcome_code IS NOT NULL AS turn_closed FROM session_stop stop " ++
+    .sql = "SELECT stop.selected_turn_id,stop.admission_cutoff,stop.action_cutoff," ++
+        action_domain.stopCompletedSql("stop", "t", "NULL") ++ " AS completed FROM session_stop stop " ++
         "LEFT JOIN turn t ON t.turn_id=stop.selected_turn_id WHERE stop.command_key=?1",
     .Args = struct { key: []const u8 },
-    .Row = struct { selected_turn_id: ?rsql.Positive, admission_cutoff: u64, turn_closed: bool },
+    .Row = struct { selected_turn_id: ?rsql.Positive, admission_cutoff: u64, action_cutoff: u64, completed: bool },
     .cardinality = .one,
 });
 
-/// The Operation a stop interrupted, if any.
 const stop_interrupted = rsql.Read(.{
     .sql = "SELECT operation_id FROM model_operation WHERE interrupted_by_command_key=?1",
     .Args = struct { key: []const u8 },
@@ -1591,33 +1328,12 @@ const stop_interrupted = rsql.Read(.{
 });
 
 fn stopObservation(row: *const stop_selection.Row) SessionStopObservation {
-    const turn = row.selected_turn_id orelse return .{ .selection = .{ .admission_cutoff = row.admission_cutoff }, .completion = .completed };
     return .{
-        .selection = .{ .selected_turn_id = turn.get(), .admission_cutoff = row.admission_cutoff },
-        .completion = if (row.turn_closed) .completed else .pending,
+        .selection = .{ .selected_turn_id = if (row.selected_turn_id) |turn| turn.get() else null, .admission_cutoff = row.admission_cutoff },
+        .completion = if (row.completed) .completed else .pending,
     };
 }
 
-/// A Session stop, the stop an attached child owes (D38), or an archive's
-/// stop. Round `.facts` reads the saved answer, the Session with its
-/// admission cutoff, and its open Turn with its Actions' counts. A replay
-/// reads the saved selection and the Operation it interrupted in
-/// `.replay`, and ends.
-///
-/// Otherwise the writes are queued in this order: the command, the stop,
-/// the interruption of a running Operation, the cancelled Actions and the
-/// Turn's close (unless an attempted Action keeps it open). When Actions
-/// are cancelled, the cancellation text's row and the first page of up to
-/// `cancel_chunk` Actions are read in `.cancel` (they depend on the Turn),
-/// which also runs the command, stop and interruption writes queued
-/// before it. Each further page is one more `.page` round, which runs the
-/// previous page's write (the first one with the cancellation text's
-/// insert, when the text is new). The last page's write and the Turn's
-/// close run in the commit round, with the position advance. With no
-/// Actions to cancel, every write runs at commit.
-///
-/// A stop's own interruption finding the Operation changed fails it, as
-/// the stop's selection changing would.
 pub const StopSession = struct {
     pub const rounds = transition.rounds(.{ .facts = .{.always}, .replay = .{.branch}, .cancel = .{.branch}, .page = .{.paged} });
     pub const round_budget = 2;
@@ -1628,20 +1344,11 @@ pub const StopSession = struct {
     pub const Guards = error{ InterruptionTargetChanged, StopSelectionChanged };
     pub const Declined = error{};
 
-    /// The stop a command asks for. Its key and Session are the caller's,
-    /// which outlive the transition.
     pub const Input = struct {
         key: []const u8,
         session: []const u8,
         digest: [32]u8,
-        /// An owed stop runs only while its obligation stands: a stop
-        /// under another key, or a newer obligation, settled or replaced
-        /// it. Clients cannot use `rui.core/` keys
-        /// (`idempotency_key.reserved_prefix`), so the key is free while
-        /// the obligation stands; an owed stop whose key is not the one
-        /// owed now runs nothing and answers conflict.
         owed: bool = false,
-        /// It also archives the Session.
         archive: bool = false,
 
         pub fn ofStop(command: *const command_input.SessionStopCommand, owed: bool) Input {
@@ -1665,13 +1372,9 @@ pub const StopSession = struct {
     archive_endings: archive_ending_count.Row = .{ .count = 0 },
     selection: stop_selection.Result = undefined,
     interrupted: stop_interrupted.Result = undefined,
-    /// The command's write reads its code in place.
     answer: StoredAnswer = undefined,
-    /// The cancellation text's identity: its queued row reads the digest
-    /// in place until commit.
     cancellation: content_domain.Import = unattempted_stop_content,
     chunk: CancelChunk = .{},
-    cancellation_id: u64 = 0,
     cancelled: u64 = 0,
     reply: SessionStopReply = undefined,
     trace: ?store_core.ControlTrace = null,
@@ -1703,7 +1406,7 @@ pub const StopSession = struct {
             },
             .cancel => {
                 if (r.faults().content_import) return error.InjectedContentImportFailure;
-                t.cancellation_id = try content_domain.importBytes(r, &t.cancellation, unattempted_stop_text);
+                _ = try content_domain.importBytes(r, &t.cancellation, unattempted_stop_text);
                 return t.cancelPage(r);
             },
             .page => return t.cancelPage(r),
@@ -1743,15 +1446,13 @@ pub const StopSession = struct {
         try queueCommand(r, key, kind, session, &t.input.digest, null, null, &t.answer);
         const selection = SessionStopSelection{ .selected_turn_id = if (t.turn) |open| open.turn_id.get() else null, .admission_cutoff = found.admission_cutoff };
         const stop_position = try positions.take(1);
-        r.write(insert_stop, .{ .key = key, .session = head.*, .selected_turn_id = selection.selected_turn_id, .admission_cutoff = selection.admission_cutoff, .position = stop_position, .parent_caused = found.owed_cause != null });
+        r.write(insert_stop, .{ .key = key, .session = head.*, .selected_turn_id = selection.selected_turn_id, .admission_cutoff = selection.admission_cutoff, .position = stop_position, .parent_caused = found.owed_cause != null, .action_cutoff = found.action_cutoff });
         if (t.input.archive) {
             r.write(clear_pin, .{ .session = head.* });
             r.write(insert_archive_command, .{ .key = key, .archived = true });
             if (t.archive_existing != null) r.write(update_archive, .{ .session = head.*, .key = key }) else r.write(insert_archive, .{ .session = head.*, .key = key });
             if (t.archive_endings.count != 0) r.writeCount(suppress_archive_endings, .{ .parent = &head.ref }, t.archive_endings.count);
         }
-        // A stop settles any stop this Session owed, and its attached children
-        // now owe theirs (D38).
         if (found.owed_cause != null) r.write(settle_owed_stop, .{ .session = &head.ref });
         turn_domain.queueOwedStops(r, &head.ref, stop_position, found.unowed_children);
         t.trace = r.faults().control_trace;
@@ -1761,31 +1462,24 @@ pub const StopSession = struct {
                 interrupt_operation.queue(r, .{ .operation_id = open.operation_id.get(), .command_key = key, .session = head.* });
                 t.reply.accepted.interrupted_operation_id = open.operation_id.get();
             }
-            if (open.cancellable != 0) {
-                content_domain.lookup(r, &t.cancellation);
-                r.readEach(cancellable_actions, .{ .operation_id = open.operation_id.get(), .after = 0 }, cancel_chunk, &t.chunk);
-                return .{ .round = .cancel };
-            }
+        }
+        if (found.cancellable != 0) {
+            content_domain.lookup(r, &t.cancellation);
+            r.readEach(cancellable_actions, .{ .session = session, .after = 0, .cutoff = found.action_cutoff }, cancel_chunk, &t.chunk);
+            return .{ .round = .cancel };
         }
         return t.finish(r);
     }
 
-    /// After a round that read a page of the open Turn's cancellable
-    /// Actions: cancels them in call order, each at the Session's next
-    /// position, with the stop's cancellation text. A statement binds when
-    /// it is queued, so `cancel_actions[n - 1]` runs once a round: the next
-    /// page reads in the round that runs this page's write. The count says
-    /// when the last page was read, so a multiple of `cancel_chunk` costs no
-    /// empty round.
     fn cancelPage(t: *StopSession, r: *transition.Round(StopSession)) !transition.Next(StopSession) {
-        const open = t.turn.?;
+        const target = t.target.?;
         const chunk = &t.chunk;
         if (chunk.len != 0) {
             switch (chunk.len) {
                 inline 1...cancel_chunk => |n| {
                     @setEvalBranchQuota(100_000);
                     var args: CancelArgs(n) = undefined;
-                    args.content_id = t.cancellation_id;
+                    args.content_id = (t.cancellation.found orelse return error.CorruptStore).content_id.get();
                     args.first_position = try (try r.positions(t.target.?.session)).take(n);
                     args.session = t.target.?.session;
                     inline for (0..n) |k| @field(args, cancelField(k)) = chunk.action_ids[k];
@@ -1794,25 +1488,21 @@ pub const StopSession = struct {
                 else => unreachable,
             }
             t.cancelled += chunk.len;
-            if (t.cancelled < open.cancellable and chunk.len == cancel_chunk) {
+            if (t.cancelled < target.cancellable and chunk.len == cancel_chunk) {
                 chunk.len = 0;
-                r.readEach(cancellable_actions, .{ .operation_id = open.operation_id.get(), .after = chunk.next }, cancel_chunk, chunk);
+                r.readEach(cancellable_actions, .{ .session = t.input.session, .after = chunk.next, .cutoff = target.action_cutoff }, cancel_chunk, chunk);
                 return .{ .round = .page };
             }
         }
-        // Main checked that the cancelling UPDATE changed as many rows as it
-        // counted.
-        if (t.cancelled != open.cancellable) return error.StopSelectionChanged;
+        if (t.cancelled != target.cancellable) return error.StopSelectionChanged;
         return t.finish(r);
     }
 
-    /// The stop now selects the Turn and has resolved every Action never
-    /// attempted, so the Turn is ready (`turn.stopped_turn`) unless an
-    /// attempted Action is unresolved; then the commit.
     fn finish(t: *StopSession, r: *transition.Round(StopSession)) !transition.Next(StopSession) {
         if (t.turn) |open| {
             if (open.in_flight) t.reply.accepted.completion = .pending else try turn_domain.queueClose(r, try r.positions(t.target.?.session), open.turn_id.get(), .cancelled);
         }
+        if (t.target.?.in_flight) t.reply.accepted.completion = .pending;
         if (r.faults().before_commit) return error.InjectedCommitFailure;
         return .commit;
     }
@@ -1823,9 +1513,6 @@ pub const StopSession = struct {
     }
 };
 
-/// All unattempted runners use the same bytes today. Prove that before
-/// sharing one content import and one cancellation batch, without another
-/// read or a runner column. A runner that changes this must split the batch.
 const unattempted_stop_text = blk: {
     const runners = @import("../../tool_record.zig").Runner;
     const text = runners.bash.beforeAdmissionStopText();
@@ -1856,7 +1543,7 @@ const suppress_archive_endings = rsql.Write(.{
 
 pub const archive_state_sql =
     "CASE WHEN EXISTS(SELECT 1 FROM session_archive ar JOIN session_stop astop ON astop.command_key=ar.command_key " ++
-    "JOIN turn aturn ON aturn.turn_id=astop.selected_turn_id WHERE ar.session_ref=session.session_ref AND aturn.outcome_code IS NULL) THEN 'archiving' " ++
+    "LEFT JOIN turn aturn ON aturn.turn_id=astop.selected_turn_id WHERE ar.session_ref=session.session_ref AND NOT (" ++ action_domain.stopCompletedSql("astop", "aturn", "NULL") ++ ")) THEN 'archiving' " ++
     "WHEN EXISTS(SELECT 1 FROM session_archive ar WHERE ar.session_ref=session.session_ref AND ar.command_key IS NOT NULL) THEN 'archived' ELSE 'active' END";
 
 const insert_archive_command = rsql.Write(.{
@@ -1897,10 +1584,6 @@ const archive_request = rsql.Read(.{
     .cardinality = .one,
 });
 
-/// Archives a Session through its stop (`StopSession`), or restores it.
-/// A restore's round reads the saved answer and the Session; its commit
-/// saves the command, clears the archive and advances the Session's
-/// position.
 pub const ArchiveSession = struct {
     pub const rounds = StopSession.rounds;
     pub const round_budget = StopSession.round_budget;
@@ -1957,7 +1640,6 @@ pub const ArchiveSession = struct {
         digest: [32]u8 = undefined,
         saved: saved_command.Result = undefined,
         target: target_session.Result = null,
-        /// The command's write reads its code in place.
         answer: StoredAnswer = undefined,
         rejection: ?mutation_answer.SessionArchiveRejection = null,
 
@@ -2104,8 +1786,6 @@ pub const PinSession = struct {
     }
 };
 
-/// A Session a command names, as a round reads it: its head, and the
-/// provider a Message's model check needs.
 const target_session = rsql.Read(.{
     .sql = "SELECT session_ref,workspace_key,next_position,provider," ++ archive_state_sql ++ " AS archive_state FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
@@ -2113,20 +1793,15 @@ const target_session = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// Queues reading the Session `session` names when it is a valid
-/// reference; otherwise `destination` is null at once.
 fn readTarget(a: anytype, session: []const u8, destination: *target_session.Result) void {
     destination.* = null;
     if (session_id.valid(session)) a.read(target_session, .{ .session = session }, destination);
 }
 
-/// Whether a command's Turn, Operation or Action id can name a row.
 fn validId(id: u64) bool {
     return id != 0 and id <= std.math.maxInt(i64);
 }
 
-/// The Operation an interruption names: its Turn and Session, whether it
-/// is unresolved, and whether it is still its open Turn's Operation.
 const interruption_operation = rsql.Read(.{
     .sql = "SELECT o.turn_id,o.session_ref,o.resolution_code IS NULL AS unresolved,EXISTS(SELECT 1 FROM turn t WHERE t.turn_id=o.turn_id " ++
         "AND t.session_ref=o.session_ref AND t.operation_id=o.operation_id AND t.outcome_code IS NULL) AS current FROM model_operation o WHERE o.operation_id=?1",
@@ -2135,8 +1810,6 @@ const interruption_operation = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// Whether the Session has a Message that no Turn took and no Session
-/// stop excludes, which an interrupted Turn leaves open to take.
 const applicable_pending = rsql.Read(.{
     .sql = "SELECT EXISTS(SELECT 1 FROM message_admission WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>coalesce((" ++
         session_stop_cutoff_sql ++ "),0)) AS pending",
@@ -2145,8 +1818,6 @@ const applicable_pending = rsql.Read(.{
     .cardinality = .one,
 });
 
-/// What an interruption names, saved with its command. Ids are text, as
-/// a rejected command's may name no row.
 const interruption_target = rsql.Read(.{
     .sql = "SELECT session_ref,turn_id,operation_id FROM model_interruption_command WHERE command_key=?1",
     .Args = struct { key: []const u8 },
@@ -2157,12 +1828,9 @@ const interruption_target = rsql.Read(.{
 const save_interruption = rsql.Write(.{
     .sql = "INSERT INTO model_interruption_command(command_key,session_ref,turn_id,operation_id) VALUES(?1,?2,?3,?4)",
     .Args = struct { key: []const u8, session: []const u8, turn_id: []const u8, operation_id: []const u8 },
-    // A replay was classified first, so the key is free.
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// Interrupts the unresolved Operation `operation_id` of `session`'s
-/// Session, for the command `command_key`.
 const interrupt_operation = model_attempt.Write(.{
     .end = .resolution,
     .set = "retry_due_at_ms=NULL," ++ store_schema.resolutionIs("resolution_code", .interrupted) ++ ",interrupted_by_command_key=?2",
@@ -2194,12 +1862,6 @@ fn interruptionRejection(
     return null;
 }
 
-/// Round `.facts` reads the saved answer, the Session, the Operation with
-/// its Turn, and whether a pending Message keeps the Turn open. A replay
-/// reads the saved target in `.replay` and ends. The decision is
-/// `interruptionRejection`; the commit round saves the command and its
-/// target, interrupts the Operation and closes the Turn when nothing is
-/// pending.
 pub const InterruptModel = struct {
     pub const rounds = transition.rounds(.{ .facts = .{.always}, .replay = .{.branch} });
     pub const round_budget = 2;
@@ -2218,7 +1880,6 @@ pub const InterruptModel = struct {
     operation: interruption_operation.Result = null,
     pending: applicable_pending.Result = .{ .pending = false },
     saved_target: interruption_target.Result = undefined,
-    /// The command's writes read these in place.
     answer: StoredAnswer = undefined,
     turn_text: [20]u8 = undefined,
     operation_text: [20]u8 = undefined,
@@ -2285,9 +1946,8 @@ pub const InterruptModel = struct {
     }
 };
 
-/// The Action a permission decision names, with its Turn.
 const decision_action = rsql.Read(.{
-    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,a.authorized,a.resolution_code IS NULL AS unresolved,t.outcome_code IS NULL AS turn_open,t.turn_id," ++
+    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,a.authorized,a.resolution_code IS NULL AS unresolved,(t.outcome_code IS NULL OR a.background_position IS NOT NULL) AS turn_open,t.turn_id," ++
         "EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=?2 AND f.kind=1 AND f.source_id=a.action_id AND f.position IS NOT NULL) AS forwarded " ++
         "FROM action_operation a JOIN session s ON s.session_ref=a.session_ref " ++
         "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=operation.turn_id WHERE a.action_id=?1",
@@ -2299,7 +1959,6 @@ const decision_action = rsql.Read(.{
 const save_decision = rsql.Write(.{
     .sql = "INSERT INTO permission_decision_command(command_key,action_id,decision) VALUES(?1,?2,?3)",
     .Args = struct { key: []const u8, action_id: []const u8, decision: mutation_answer.PermissionDecision },
-    // A replay was classified first, so the key is free.
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -2316,10 +1975,8 @@ const deny_action = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.ActionSelectionChanged } },
 });
 
-/// A denied Action's result.
 const denial_text = "Permission denied.";
 
-/// `denial_text`'s identity, hashed when the Host is built.
 const denial: content_domain.Import = blk: {
     @setEvalBranchQuota(1_000_000);
     break :blk .ofBytes(denial_text, false);
@@ -2339,10 +1996,6 @@ fn decisionRejection(
     return null;
 }
 
-/// Round `.facts` reads the saved answer, the Session, the Action with its
-/// Turn and, for a denial, its result text's row. The decision is
-/// `decisionRejection`; the commit round saves the command and its target,
-/// then authorizes or denies the Action.
 pub const DecidePermission = struct {
     pub const rounds = transition.rounds(.{ .facts = .{.always} });
     pub const round_budget = 2;
@@ -2359,9 +2012,7 @@ pub const DecidePermission = struct {
     saved: saved_command.Result = undefined,
     target: target_session.Result = null,
     action: decision_action.Result = null,
-    /// The denial's content row, which its import reads in place.
     content: content_domain.Import = denial,
-    /// The command's writes read these in place.
     answer: StoredAnswer = undefined,
     action_text: [20]u8 = undefined,
     rejection: ?mutation_answer.PermissionDecisionRejection = null,
@@ -2431,7 +2082,6 @@ const ExistingCommand = struct {
 
 fn Replay(comptime Rejection: type) type {
     return union(enum) {
-        /// No saved command; the caller's transaction stays open.
         fresh,
         conflict,
         accepted: ExistingCommand,
@@ -2439,7 +2089,6 @@ fn Replay(comptime Rejection: type) type {
     };
 }
 
-/// A command's saved answer, by its key.
 pub const saved_command = rsql.Read(.{
     .sql = "SELECT kind,target,input_digest,accepted,code,revision,created,primary_content_id FROM core_command WHERE command_key=?1",
     .Args = struct { key: []const u8 },
@@ -2456,14 +2105,10 @@ pub const saved_command = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// Queues reading the saved answer of the command `key`; `classify`
-/// follows its round. noinline, like `queueCommand`, so each Held
-/// body's frame stays its own whatever callers share the instance.
 pub noinline fn lookupCommand(a: anytype, key: []const u8, destination: *saved_command.Result) void {
     a.read(saved_command, .{ .key = key }, destination);
 }
 
-/// Each command kind's stored code.
 fn kindCode(kind: cli_value.CommandKind) u8 {
     return switch (kind) {
         .configure => 1,
@@ -2473,10 +2118,10 @@ fn kindCode(kind: cli_value.CommandKind) u8 {
         .permission_decision => 5,
         .session_archive => 6,
         .session_pin => 7,
+        .action_background => 8,
     };
 }
 
-/// The answer a `lookupCommand` round found, or null.
 fn savedAnswer(saved: *const saved_command.Result) error{CorruptStore}!?ExistingCommand {
     const row = if (saved.*) |*row| row else return null;
     return .{
@@ -2493,9 +2138,6 @@ fn savedAnswer(saved: *const saved_command.Result) error{CorruptStore}!?Existing
     };
 }
 
-/// Classifies a keyed command against the saved answer `lookupCommand`
-/// read. Any saved answer is a replay, and its caller ends the
-/// transaction without writing.
 pub fn classify(
     comptime Rejection: type,
     saved: *const saved_command.Result,
@@ -2510,9 +2152,6 @@ pub fn classify(
     return .{ .rejected = std.meta.stringToEnum(Rejection, existing.code.slice()) orelse return error.CorruptStore };
 }
 
-/// The Messages of the Session ?1 that no Turn took, after the latest
-/// stop's cutoff ?2 (`stop_cutoff`, 0 without a stop): main's count,
-/// whose one row main stepped once.
 pub const pending_messages = rsql.Read(.{
     .sql = pending_message_count_sql,
     .Args = struct { session: []const u8, cutoff: u64 },
@@ -2520,7 +2159,6 @@ pub const pending_messages = rsql.Read(.{
     .cardinality = .each,
 });
 
-/// The Session's latest stop's admission cutoff, stepped once.
 pub const stop_cutoff = rsql.Read(.{
     .sql = session_stop_cutoff_sql,
     .Args = struct { session: []const u8 },
@@ -2544,13 +2182,9 @@ const insert_command = rsql.Write(.{
         created: bool,
         command_seq: u64,
     },
-    // A replay was classified first, so the key is free.
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// Queues saving the command `key` with its `answer`, which, like `key`
-/// and `target`, must outlive the round; `digest` is copied. noinline:
-/// its locals stay off configure's frame on the engine's deepest chain.
 pub noinline fn queueCommand(
     a: anytype,
     key: []const u8,
@@ -2576,18 +2210,12 @@ pub noinline fn queueCommand(
     });
 }
 
-// The Session's Operations are admitted in Turn order. The bound Turn's
-// first/current Operation range excludes both older and later Turns. The
-// existing turn-history index makes its lower bound a single bounded seek.
 const recovery_range_sql =
     "a.session_ref=m.session_ref AND a.resolution_code='indeterminate' " ++
     "AND a.parent_operation_id BETWEEN (SELECT first_operation.operation_id " ++
     "FROM model_operation first_operation @index(model_operation_turn_history) " ++
     "WHERE first_operation.turn_id=m.turn_id ORDER BY first_operation.operation_id LIMIT 1) AND t.operation_id";
 
-/// An accepted Message's admission, the Turn that applied it, the stop
-/// that excluded it while no Turn did, and the metadata of its text and
-/// of its answer, with its Session's creation time for its progress.
 const message_observation = rsql.Read(.{
     .sql = "SELECT m.session_ref,m.content_id,m.admission_id,m.command_key,m.turn_id,t.operation_id,o.attempt_ordinal," ++
         "t.outcome_code,t.outcome_content_id,CASE WHEN m.turn_id IS NULL THEN (" ++
@@ -2624,7 +2252,6 @@ const message_observation = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// The Action and decision a permission decision saved.
 const permission_target = rsql.Read(.{
     .sql = "SELECT action_id,decision FROM permission_decision_command WHERE command_key=?1",
     .Args = struct { key: []const u8 },
@@ -2632,20 +2259,11 @@ const permission_target = rsql.Read(.{
     .cardinality = .one,
 });
 
-/// Round 1 reads the saved command. Its kind picks what round 2 reads,
-/// keyed on the command alone: a dependent round, one more network round
-/// trip, run only for a kind that saved more than its answer. A queued or
-/// processing Message's progress is its Session's work, which round 1
-/// reads too while a Turn is active (`readMessageWork`).
 pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservation) !void {
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
-    // Most observed commands are Messages, so the command's round also
-    // reads the Message it accepted: both are keyed by the command key.
     var message: message_observation.Result = undefined;
     a.read(message_observation, .{ .key = key }, &message);
-    // A pending Message's progress is its Session's work, whose active
-    // Turn is keyed by the command too.
     var work: report_domain.WorkRead = .{ .session = "" };
     work.queuePending(a, key);
     try store_access.runNamed(a, report_domain.pending_failures, error.StatementFailed);
@@ -2711,6 +2329,9 @@ pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservat
             try a.run();
             observation.kind = .{ .model_interruption = try modelInterruptionTarget(&row) };
         },
+        .action_background => {
+            observation.kind = .{ .action_background = try @import("action_control.zig").readSaved(a, key) };
+        },
         .permission_decision => {
             var row: permission_target.Row = undefined;
             a.read(permission_target, .{ .key = key }, &row);
@@ -2723,7 +2344,6 @@ pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservat
     }
 }
 
-/// Where an accepted Message stands in its Session's queue.
 fn messageQueue(row: *const message_observation.Row) !AcceptedMessageQueue {
     const projection = try projectMessage(row, if (row.excluding_stop) |*stop| stop.slice() else null);
     return switch (projection.state) {
@@ -2751,10 +2371,6 @@ fn messageQueue(row: *const message_observation.Row) !AcceptedMessageQueue {
     };
 }
 
-/// A pending Message's progress is its Session's work: its own active
-/// Turn, or the work ahead of it in the queue. The observation's round
-/// read an active Turn (`queuePending`); with none, the stop and queue
-/// stages follow in their own rounds.
 fn readMessageWork(a: *report_domain.ReadAccess, read: *report_domain.WorkRead, session_ref: []const u8, created_at: u64, state: AcceptedMessageQueue.State) !session_work.Work {
     read.session = session_ref;
     try read.advance();
@@ -2764,9 +2380,6 @@ fn readMessageWork(a: *report_domain.ReadAccess, read: *report_domain.WorkRead, 
     return work;
 }
 
-/// Newest Actions first (Operation, then call), not recovery wall-clock
-/// order: sibling Actions can resolve out of order. Only five indexed rows
-/// are visited; the fifth proves `more`.
 const recovery_actions = rsql.Read(.{
     .sql = "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.resolved_at,c.description " ++
         "FROM message_admission m JOIN turn t ON t.turn_id=m.turn_id " ++
@@ -2797,8 +2410,6 @@ fn readRecovery(a: anytype, key: []const u8, out: *reads_domain.Recovery) !void 
     }
 }
 
-/// An accepted Message's outcome, whether a stop excluded it, and its
-/// answer's metadata.
 const message_result = rsql.Read(.{
     .compound = true,
     .sql = "SELECT t.outcome_code,t.outcome_content_id,EXISTS(" ++
@@ -2824,13 +2435,9 @@ const message_result = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// One round: an ordinary command outcome, or the Message's eventual answer.
-/// Captured skill refusals and idle reload acknowledgements are saved content;
-/// retrieving them never rereads the filesystem or admits model work.
 pub fn commandResult(a: anytype, key: []const u8) !ContentReference {
     var result: message_result.Result = null;
     a.read(message_result, .{ .key = key }, &result);
-    // The Host's fence names this read, as on main.
     try store_access.runAs(a, error.ResultReadFailed);
     const row = result orelse return error.ResultNotFound;
     if (row.direct) {
@@ -2847,10 +2454,6 @@ pub fn commandResult(a: anytype, key: []const u8) !ContentReference {
     }
 }
 
-/// Where a Message stands, from `row`'s admission_id, command_key,
-/// content_id, turn_id, operation_id, attempt_ordinal, outcome_code and
-/// outcome_content_id: applied by a Turn, excluded by the stop
-/// `excluding_stop`, or pending.
 pub fn projectMessage(row: anytype, excluding_stop: ?[]const u8) !MessageProjection {
     var projection: MessageProjection = .{
         .admission_id = row.admission_id.get(),

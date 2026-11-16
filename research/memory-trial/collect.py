@@ -21,7 +21,6 @@ def run(*args):
 def capture(*args):
     return subprocess.check_output(args, cwd=root, text=True).strip()
 
-# Build before copying, so the measured executable belongs to this checkout.
 run('zig', 'build', '-Doptimize=ReleaseSafe')
 binary = out / 'rui'
 shutil.copy2(root / 'zig-out/bin/rui', binary)

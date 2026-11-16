@@ -1,5 +1,3 @@
-//! Private integration-only owner observations. No retries, reader acknowledgments,
-//! or diagnostic custody: a lost observation fails evidence, never semantic work.
 const std = @import("std");
 const c = @import("posix");
 const Int = @import("json_scalar.zig").Int;
@@ -13,8 +11,6 @@ const TestHold = struct {
 pub const Plan = enum { control, control_peers, status, stop, list, transport, dispatch, interrupt, recovery, managed, bash_cleanup, bash_pipes, execution, sqlite, request_wait };
 pub const record_bytes = 512; // POSIX minimum atomic pipe-write size.
 const header_bytes = 28;
-// Fixture-owned unlinked backing. Fixture mutation is only atomic admission
-// sealing; immutable final readback survives SIGKILL without a footer or ack.
 const Shared = extern struct {
     version: u64,
     process: u64,
@@ -23,11 +19,7 @@ const Shared = extern struct {
     active: std.atomic.Value(u64),
 };
 pub const state_bytes = @sizeOf(Shared);
-// Fixture disposal revokes publication admission, not semantic work. Existing
-// handles retain their low-bit count; a selected attempt after sealing is loss.
 pub const sealed = @as(u64, 1) << 63;
-// Stable private fixture IDs. Keep encoded meanings independent of Record's
-// declaration order; tests/ci/test_harness_contracts.py checks the Python codec.
 const FieldId = enum(u8) {
     rui_test_phase = 0,
     at_ns = 1,
@@ -118,7 +110,6 @@ const Record = struct {
 };
 
 comptime {
-    // Neither a new parsed field without an ID nor a stale ID may be silent.
     if (std.meta.fieldNames(Record).len != std.meta.fieldNames(FieldId).len)
         @compileError("observation fields and IDs differ");
     for (std.meta.fieldNames(Record)) |name| {
@@ -129,8 +120,6 @@ comptime {
 fd: c_int,
 plan: Plan,
 run: u64,
-// Reserve sequence and snapshot sticky loss in one atomic operation. Arrival
-// may be reordered by descheduling; collectors order by this sequence.
 shared: *Shared,
 lifecycle_due: std.atomic.Value(bool) = .init(true),
 stop_classification_due: std.atomic.Value(bool) = .init(false),
@@ -145,8 +134,6 @@ pub fn init(fd: c_int, state_fd: c_int, plan: Plan, run: u64) !Self {
     if (flags < 0 or flags & c.O_NONBLOCK == 0 or c.fstat(fd, &info) != 0 or
         info.st_mode & c.S_IFMT != c.S_IFIFO or c.fpathconf(fd, c._PC_PIPE_BUF) < record_bytes)
         return error.InvalidTestObservationDescriptor;
-    // The fixture transferred this private descriptor, not an fd2 alias. It
-    // must not survive exec into effects. Host owns close after writer joins.
     if (c.fcntl(fd, c.F_SETFD, @as(c_int, c.FD_CLOEXEC)) != 0)
         return error.InvalidTestObservationDescriptor;
     if (c.fstat(state_fd, &info) != 0 or info.st_mode & c.S_IFMT != c.S_IFREG or info.st_size != state_bytes)
@@ -163,13 +150,10 @@ pub fn close(self: *Self) void {
     _ = c.munmap(self.shared, state_bytes);
 }
 
-// Selection uses owning native values, before optional JSON construction.
 pub fn begin(self: *Self, phase: []const u8, subject: ?[]const u8) ?Publication {
     if (!self.selected(phase, subject)) return null;
     const previous = self.shared.active.fetchAdd(1, .acq_rel);
     if (previous & sealed != 0) {
-        // Increment first: SIGKILL before sticky loss still leaves custody.
-        // No observer acknowledgment, wait or effect on semantic execution.
         if (@import("builtin").is_test) if (TestHold.before_sealed_loss) |hold| hold();
         _ = self.shared.state.fetchOr(1, .acq_rel);
         _ = self.shared.active.fetchSub(1, .acq_rel);
@@ -185,7 +169,6 @@ pub const Publication = struct {
         const owner = self.owner.?;
         owner.record(json);
         if (@import("builtin").is_test) if (TestHold.before_retirement) |hold| hold();
-        // Native custody ends before optional stderr can be attempted.
         self.owner = null;
         _ = owner.shared.active.fetchSub(1, .acq_rel);
     }
@@ -204,8 +187,6 @@ fn selected(self: *Self, phase: []const u8, subject: ?[]const u8) bool {
         std.mem.eql(u8, phase, "request_observation_tier2");
     if (self.plan == .sqlite) return std.mem.eql(u8, phase, "sqlite_diagnostic");
     if (self.plan == .execution) {
-        // Every service boundary and every interval endpoint: gaps are derived
-        // from the complete sequence, so no sampling.
         inline for (.{ "lifecycle_boundary", "preparation_started", "preparation_completed", "preparation_advance_started", "preparation_advance_completed", "preparation_advance_failed", "validation_started", "validation_completed", "validation_failed", "settlement_lock_requested", "settlement_complete" }) |name| {
             if (std.mem.eql(u8, phase, name)) return true;
         }
@@ -280,8 +261,6 @@ fn selected(self: *Self, phase: []const u8, subject: ?[]const u8) bool {
 }
 
 fn record(self: *Self, json: []const u8) void {
-    // Fixed decoding storage only when explicitly enabled. Internal trace
-    // construction is trusted; malformed/oversized instrumentation is loss.
     var decoding: [2048]u8 = undefined;
     var allocator = std.heap.FixedBufferAllocator.init(&decoding);
     const parsed = std.json.parseFromSlice(Record, allocator.allocator(), json, .{
@@ -346,7 +325,6 @@ test "private owner observations remain bounded under full and closed credit" {
     try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, bytes[4..12], .little));
     try std.testing.expectEqual(@as(u64, 37), std.mem.readInt(u64, bytes[12..20], .little));
     try std.testing.expectEqual(@as(u8, 0), bytes[3]);
-    // Independent schema bytes, despite Record declaring at_ns after subject.
     try std.testing.expectEqualSlices(u8, "\x00\x20\x00ordinary_classification_released" ++
         "\x01\x07\x001234567\x02\x05\x00route\x03\x07\x00message", bytes[header_bytes..@intCast(read)]);
     const unselected = "{"; // Native phase is unselected; malformed optional text cannot taint evidence.
@@ -437,7 +415,6 @@ test "private owner observations preserve selected custody through SIGKILL" {
             const pid = c.fork();
             try std.testing.expect(pid >= 0);
             if (pid == 0) {
-                // Only fixed native selection/atomic operations after fork.
                 _ = owner.begin(if (selected_kill) phase else "lifecycle_service_observation", null);
                 if (c.write(ready[1], "R", 1) != 1) c._exit(1);
                 while (true) _ = c.pause();
@@ -454,8 +431,6 @@ test "private owner observations preserve selected custody through SIGKILL" {
             reaped = true;
             try std.testing.expect(c.WIFSIGNALED(status) and c.WTERMSIG(status) == c.SIGKILL);
             try std.testing.expectEqual(@as(isize, state_bytes), c.pread(c.fileno(backing), &bytes, state_bytes, 0));
-            // The complete selected prefix survives both kills. Only a selected
-            // unfinished construction invalidates that prefix after reap.
             try std.testing.expectEqual(@as(u64, 2), std.mem.readInt(u64, bytes[24..32], .little));
             try std.testing.expectEqual(@as(u64, @intFromBool(selected_kill)), std.mem.readInt(u64, bytes[32..40], .little));
         }
@@ -527,8 +502,6 @@ test "private owner observations seal admission without forgiving held or late p
             try std.testing.expectEqual(@as(c_int, 1), c.poll(&ready_poll, 1, 3000));
             try std.testing.expectEqual(@as(isize, 1), c.read(ready[0], &bytes, 1));
             if (kind != 2) {
-                // The entire last frame is already observable, but its actual
-                // Publication.record call has not retired custody.
                 try std.testing.expect(c.read(descriptors[0], &bytes, bytes.len) > header_bytes);
                 try std.testing.expectEqual(@as(u64, 1), owner.shared.active.fetchOr(sealed, .acq_rel));
                 try std.testing.expectEqual(@as(u64, 2), owner.shared.state.load(.acquire));
@@ -550,7 +523,6 @@ test "private owner observations seal admission without forgiving held or late p
                 try std.testing.expectEqual(sealed, owner.shared.active.load(.acquire));
             } else {
                 try std.testing.expect(c.WIFSIGNALED(status) and c.WTERMSIG(status) == c.SIGKILL);
-                // Even interruption before late-attempt loss retains custody.
                 try std.testing.expectEqual(@as(u64, if (kind == 1) 2 else 0), owner.shared.state.load(.acquire));
             }
         }

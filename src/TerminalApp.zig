@@ -1,4 +1,3 @@
-//! One App owns terminal custody for the overview and every Session it opens.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const alert = @import("attention.zig");
@@ -25,17 +24,11 @@ pub fn init(self: *Self, io: std.Io, environ: *std.process.Environ.Map) !void {
 }
 
 pub fn deinit(self: *Self) void {
-    // A partial status write may have reached the terminal. Clear Rui's
-    // record tree before restoring modes, without preventing restoration
-    // if the output channel has failed.
     self.attention.clear() catch |err| std.log.err("clearing Rui terminal status: {}", .{err});
     self.app.deinit();
     self.restoreSignals(.keep_hangup);
 }
 
-/// Exit continues past App. When the terminal closes, its shell forwards a
-/// hangup to Rui, which may arrive only after App saw the end of input and
-/// released the terminal; Rui's handler then keeps it from ending that exit.
 fn restoreSignals(self: *Self, which: enum { all, keep_hangup }) void {
     inline for (Signals.handled, 0..) |signal, index| {
         if (which == .all or signal != std.posix.SIG.HUP) std.posix.sigaction(signal, &self.previous[index], null);
@@ -46,24 +39,18 @@ pub fn run(self: *Self, root: vaxis.vxfw.Widget) !void {
     self.app.run(root, .{}) catch |err| if (!hungUp(err, self.app.tty.tty_writer.err)) return err;
 }
 
-/// A terminal can close while a frame is on its way. That frame's write
-/// fails before App reads the end of input, and it is the same ending: the
-/// terminal is gone, so App stops as it does at the end of input.
 fn hungUp(ended: anyerror, write: ?anyerror) bool {
     return ended == error.WriteFailed and write != null and write.? == error.InputOutput;
 }
 
 test "a frame the closed terminal refused ends App as the end of input does; any other failure stays one" {
     try std.testing.expect(hungUp(error.WriteFailed, error.InputOutput));
-    // A write that failed for another reason, and a failure that was no write.
     try std.testing.expect(!hungUp(error.WriteFailed, error.NoSpaceLeft));
     try std.testing.expect(!hungUp(error.WriteFailed, null));
     try std.testing.expect(!hungUp(error.OutOfMemory, error.InputOutput));
     try std.testing.expect(!hungUp(error.InputOutput, null));
 }
 
-/// Guidance after App has released the terminal. The shared nonblocking
-/// stderr writer cannot hold exit behind a hung-up or backpressured TTY.
 pub fn detached(store: []const u8, opened: ?[]const u8, action: ?u64) void {
     const protocol = @import("protocol.zig");
     const Text = @import("TerminalText.zig");
@@ -92,16 +79,11 @@ pub fn detached(store: []const u8, opened: ?[]const u8, action: ?u64) void {
     _ = @import("stderr.zig").write(notice.buffered());
 }
 
-/// The terminal's attention channel beside App's frames: each Session's
-/// program status record (OSC 7501). Records go out whether or not the
-/// terminal answered the query; one that does not take them ignores them.
 pub const Attention = struct {
     vx: *vaxis.Vaxis,
     out: *std.Io.Writer,
     statuses_shown: bool = false,
 
-    /// True once the record went out. The overview then marks its value as
-    /// delivered, without a second frame ledger.
     pub fn report(self: *Attention, session: *const [session_id.bytes]u8, name: []const u8, status: ?alert.Status) !bool {
         var id: ["rui/".len + session_id.bytes]u8 = undefined;
         @memcpy(id[0..4], "rui/");
@@ -134,8 +116,6 @@ pub const Attention = struct {
     }
 };
 
-/// The root samples this on its recurring tick and requests ctx.quit. The
-/// handler never writes to the TTY or runs disposal in signal context.
 pub fn interrupted() bool {
     return Signals.stopped.load(.acquire);
 }
@@ -149,8 +129,6 @@ const Signals = struct {
     }
 };
 
-/// Test-only accounting of page-rounded backing storage, not process RSS.
-/// Forward every operation so measuring does not change allocator behavior.
 const TestMemory = struct {
     used: usize = 0,
     peak: usize = 0,

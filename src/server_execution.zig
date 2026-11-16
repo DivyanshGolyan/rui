@@ -4,6 +4,7 @@ const bash = @import("bash.zig");
 const codecs = @import("codecs.zig");
 const execution = @import("execution.zig");
 const failure_class = @import("failure_class.zig");
+const DispatchCapacity = @import("execution.zig").DispatchCapacity;
 const execution_turn = @import("execution_turn.zig");
 const failed_responses = @import("failed_responses.zig");
 const model_adapter = @import("model_adapter.zig");
@@ -34,6 +35,7 @@ const SessionEnvironments = @import("SessionEnvironments.zig");
 const child_environment = @import("child_environment.zig");
 const find_tools = @import("find_tools.zig");
 const h2 = @import("h2");
+const read_action_tool = @import("read_action_tool.zig");
 const read_transcript = @import("read_transcript.zig");
 const session_skills = @import("session_skills.zig");
 const Host = server_host.Host;
@@ -728,7 +730,7 @@ const NativeTurn = struct {
         return self.host.providers.any();
     }
 
-    pub fn dispatchCapacity(self: *const NativeTurn) execution.DispatchCapacity {
+    pub fn dispatchCapacity(self: *const NativeTurn) DispatchCapacity {
         return self.host.custody.dispatchCapacity(!self.mcp.full());
     }
 
@@ -841,7 +843,7 @@ const NativeTurn = struct {
         };
     }
 
-    pub fn scanWork(self: *NativeTurn, paused: bool, capacity: execution.DispatchCapacity) error{Fence}!execution_turn.Work {
+    pub fn scanWork(self: *NativeTurn, paused: bool, capacity: DispatchCapacity) error{Fence}!execution_turn.Work {
         const found = self.host.store.dispatchWork(paused, capacity) catch |err| {
             fenceDispatch(self.host, "dispatch work read", err);
             self.fenced = true;
@@ -1339,6 +1341,7 @@ noinline fn runNextCoreAction(host: *Host, mcp: *server_mcp.Calls) execution_tur
         .action => |*input| switch (input.tool) {
             .find_tools => runFindTools(host, input),
             .message_agent => runMessageAgent(host, input),
+            .read_action => runReadAction(host, input),
             .read_transcript => runReadTranscript(host, input),
             .start_agent => runStartAgent(host, input),
             .skill => runSkill(host, input),
@@ -1483,6 +1486,20 @@ noinline fn runReadTranscript(host: *Host, input: *const store_module.CoreAction
     return .admitted;
 }
 
+noinline fn runReadAction(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
+    var arena: std.heap.ArenaAllocator = .init(host.allocator);
+    defer arena.deinit();
+    read_action_tool.run(host.store, arena.allocator(), input, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+        error.OutOfMemory => return .retry_later,
+        error.StaleActionAttemptBinding => return .admitted,
+        else => {
+            fenceDispatch(host, "read_action core command", err);
+            return .retry_later;
+        },
+    };
+    return .admitted;
+}
+
 noinline fn runSkill(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
     defer memory.deinit();
@@ -1570,8 +1587,12 @@ fn admitBashAttempt(
     slot: *ExecutionSlot,
     workspace: *Workspace,
 ) AdmissionProgress {
-    const token = host.custody.reserve() orelse return .no_work;
-    var admission = host.store.admitNextActionAttempt(host.bash_timeout_ms, host.hooks.storeFaults(.attempt_admission)) catch |err| {
+    const selected = (host.store.nextAction(.bash, host.custody.dispatchCapacity(false)) catch |err| {
+        fenceDispatch(host, "Bash Action selection", err);
+        return .retry_later;
+    }) orelse return .no_work;
+    const token = (if (selected.background) host.custody.reserveLeaving(1) else host.custody.reserve()) orelse return .no_work;
+    var admission = host.store.admitActionAttempt(selected, host.bash_timeout_ms, host.hooks.storeFaults(.attempt_admission)) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "Bash Attempt admission", err);
         return .retry_later;
@@ -1902,7 +1923,7 @@ fn admitNewAttempt(
     const token = host.custody.reserve() orelse return .no_work;
     // The slot's preparation is free (`modelPreparationOpen`), so the
     // admission starts the request in it: the settings ride its commit.
-    var admission = host.store.admitModelAttemptInto(kind, host.hooks.storeFaults(.attempt_admission), .{ .view = &preparation.view, .settings = &preparation.settings, .remembered = model_adapter.remembered(&host.history_memos) }) catch |err| {
+    var admission = host.store.admitModelAttemptInto(kind, host.hooks.storeFaults(.attempt_admission), .{ .view = &preparation.page, .settings = &preparation.settings, .remembered = model_adapter.remembered(&host.history_memos) }) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "Attempt admission", err);
         return .retry_later;
@@ -1942,19 +1963,19 @@ fn beginAdmittedAttempt(
     token: execution.CustodyToken,
     permit: *store_module.DispatchPermit,
     preparation: *model_adapter.Preparation,
-    /// The admission already opened the preparation's view and read its
+    /// The admission already opened the preparation's page and read its
     /// settings (`Store.admitModelAttemptInto`).
     started: bool,
 ) AdmissionProgress {
     const binding = attachSlot(host, slot, token, permit) catch |err| {
-        if (started) preparation.view.close();
+        if (started) preparation.page.close();
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "custody attachment", err);
         return .admitted;
     };
-    // The view opens where it lives for the whole preparation; it never
+    // The page opens where it lives for the whole preparation; it never
     // moves.
-    if (!started) host.store.openHistoricalView(binding, &preparation.view);
+    if (!started) preparation.page.open(binding);
     var retained_scratch: ?named_scratch.Owner = null;
     preparation.init(
         host.io,
@@ -1997,9 +2018,18 @@ fn advanceModelPreparation(
         return true;
     }
     traceOperation(host, "preparation_advance_started", owner.binding);
-    const progress = preparation.advance(byte_allowance, item_allowance);
+    var progress = preparation.advance(byte_allowance, item_allowance);
+    // The Store reads what the request's page asks, and the advance goes on.
+    while (progress == .read) {
+        host.store.readRequestPage(&preparation.page) catch |err| {
+            progress = .{ .failed = err };
+            break;
+        };
+        progress = preparation.proceed();
+    }
     const stats = preparation.advanceStats();
     switch (progress) {
+        .read => unreachable,
         .pending => {
             tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
             pause(host, .preparation_advanced);
@@ -3894,7 +3924,7 @@ test "preparing slots belong to their live preparations" {
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: model_adapter.Preparation = undefined;
-    storage.openHistoricalView(binding_a, &preparation.view);
+    preparation.page.open(binding_a);
     try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     var preparation_active = true;
     defer if (preparation_active) preparation.cancel();
@@ -4137,7 +4167,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
         const binding = try host.custody.attach(token, &permit);
         var preparation: model_adapter.Preparation = undefined;
         var retained: ?named_scratch.Owner = null;
-        preparation.view = .{ .store = undefined, .binding = binding };
+        preparation.page = .{ .binding = binding };
         try preparation.init(
             std.testing.io,
             root,
@@ -4164,7 +4194,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
             host.limits.request_preparation_byte_allowance,
             host.limits.request_preparation_item_allowance,
         ));
-        try std.testing.expect(!preparation.state.active and !preparation.view.active);
+        try std.testing.expect(!preparation.state.active and !preparation.page.active);
         try std.testing.expect(slots[0] == .free);
         try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
         try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
@@ -4230,7 +4260,7 @@ test "an encode failure settles unanswered and releases request scratch" {
     var slots = [_]ExecutionSlot{.{ .model_preparing = .{ .token = token, .binding = binding } }};
     var preparation: model_adapter.Preparation = undefined;
     var retained: ?named_scratch.Owner = null;
-    storage.openHistoricalView(binding, &preparation.view);
+    preparation.page.open(binding);
     try preparation.init(
         std.testing.io,
         root,
@@ -4250,7 +4280,7 @@ test "an encode failure settles unanswered and releases request scratch" {
         try std.testing.expect(advanceModelPreparation(&host, null, &slots, &preparation, &listings, 64, 4));
     }
     try std.testing.expect(advances > 1);
-    try std.testing.expect(!preparation.state.active and !preparation.view.active);
+    try std.testing.expect(!preparation.state.active and !preparation.page.active);
     try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
     try std.testing.expect(!storage.isFenced() and host.launchAllowed());
@@ -4516,7 +4546,7 @@ test "Host resolves MCP calls without Bash admission and continues the Turn" {
         .encoded_arguments = "{}",
         .decoded_arguments = "{}",
     }});
-    try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
+    try std.testing.expect((try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})) == null);
     {
         const pending = try store_module.testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
         defer std.testing.allocator.free(pending);
@@ -4586,7 +4616,7 @@ test "a skill tool reload under heap exhaustion runs again later without fencing
         .encoded_arguments = "{\\\"operation\\\":\\\"reload\\\"}",
         .decoded_arguments = "{\"operation\":\"reload\"}",
     }});
-    const input = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
+    const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     // Each allocation in turn fails, the settlement's held write included,
     // until the call settles: the call waits, and nothing fences.

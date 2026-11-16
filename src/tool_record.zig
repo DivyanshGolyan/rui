@@ -21,6 +21,12 @@ pub const find_tools_description = "Find and load tools available to this Sessio
 pub const find_tools_schema = "{\"type\":\"object\",\"properties\":{\"words\":{\"type\":\"string\",\"description\":\"One to eight search words separated by ASCII spaces; each word is at most 64 bytes.\"}},\"required\":[\"words\"],\"additionalProperties\":false}";
 
 // Prompt text: written here, and given no tests (D141).
+pub const read_action_description = "Read an Action in your own Session by its decimal action ID. Pending Actions report waiting_approval, queued or attempted. A resolved Action returns its immutable final Resolution and up to 4096 UTF-8 bytes, with byte offsets and a more flag. Continue with the returned next offset; reading never consumes or stops the Action. This is polling, not a subscription.";
+pub const read_action_schema = "{\"type\":\"object\",\"properties\":{" ++
+    "\"action\":{\"type\":\"string\",\"pattern\":\"^[1-9][0-9]*$\",\"maxLength\":19,\"description\":\"Action ID in your own Session; positive decimal, at most 9223372036854775807.\"}," ++
+    std.fmt.comptimePrint("\"offset\":{{\"type\":\"string\",\"pattern\":\"^(0|[1-9][0-9]*)$\",\"maxLength\":10,\"description\":\"UTF-8 byte cursor, at most {d}; omitted means zero. Pending Actions require zero.\"}}", .{@import("content_string.zig").max_bytes}) ++
+    "},\"required\":[\"action\"],\"additionalProperties\":false}";
+
 pub const read_transcript_description = "Read any Rui Session's public transcript, newest first. Omit id to read your own. Outline lines give entry addresses, kinds, people or tools, call notes, result codes, byte sizes and quoted first-line previews (at most 100 bytes). Use before to page older entries. Open an entry with full and continue its 16 KiB text windows with offset; call entries show the tool name and arguments JSON. Use query for ASCII-case-insensitive word search with quoted snippets; query cannot be combined with full. Private content is never shown.";
 const transcript_kind_schema = blk: {
     var names: []const u8 = "";
@@ -329,6 +335,13 @@ pub const message_agent_record: Record = .{
     .input_schema = message_agent_schema,
 };
 
+pub const read_action_record: Record = .{
+    .name = "read_action",
+    .owner = .rui,
+    .description = read_action_description,
+    .input_schema = read_action_schema,
+};
+
 pub const read_transcript_record: Record = .{
     .name = "read_transcript",
     .owner = .rui,
@@ -404,6 +417,7 @@ pub const built_in_rows = std.enums.EnumArray(Tool, BuiltInRow).init(.{
     .bash = .{ .record = &bash_record, .runner = .bash },
     .find_tools = .{ .record = &find_tools_record, .runner = .core },
     .message_agent = .{ .record = &message_agent_record, .runner = .core },
+    .read_action = .{ .record = &read_action_record, .runner = .core },
     .read_transcript = .{ .record = &read_transcript_record, .runner = .core },
     .skill = .{ .record = &skill_record, .runner = .core },
     .start_agent = .{ .record = &start_agent_record, .runner = .core },
