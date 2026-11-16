@@ -2220,7 +2220,24 @@ const Spans = struct {
 pub const Keep = enum { head, tail };
 
 pub fn fitted(arena: Allocator, caps: Caps, bytes: []const u8, room: usize, keep: Keep) error{OutOfMemory}!Piece {
-    if (room == 0) return .{ .bytes = "", .cells = 0 };
+    return (try fittedMarked(arena, caps, bytes, room, keep, null)).piece;
+}
+
+/// A half-open byte interval in source text or its fitted display text.
+pub const ByteSpan = struct { start: usize, len: usize };
+
+pub const MarkedPiece = struct {
+    piece: Piece,
+    /// Only retained display bytes whose source intersects the requested
+    /// span, expanded to complete display pieces; never the ellipsis.
+    span: ?ByteSpan = null,
+};
+
+/// Fit through the same terminal-safe pieces as `fitted`, translating one
+/// source span as those pieces are retained. Normalization can change byte
+/// lengths before or within a match, so output equality is not provenance.
+pub fn fittedMarked(arena: Allocator, caps: Caps, bytes: []const u8, room: usize, keep: Keep, source_span: ?ByteSpan) error{OutOfMemory}!MarkedPiece {
+    if (room == 0) return .{ .piece = .{ .bytes = "", .cells = 0 } };
     const glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs;
     const total = measured(caps, glyphs, bytes);
     const ellipsis = glyphs.ellipsis;
@@ -2234,21 +2251,30 @@ pub fn fitted(arena: Allocator, caps: Caps, bytes: []const u8, room: usize, keep
     }
     var skip = if (keep == .tail) total - budget else 0;
     var pieces: Pieces = .{ .bytes = bytes, .caps = caps, .glyphs = glyphs };
-    while (pieces.next()) |piece| {
+    var displayed: ?ByteSpan = null;
+    while (true) {
+        const source_start = pieces.at;
+        const piece = pieces.next() orelse break;
         if (skip > 0) {
             skip -|= piece.cells;
             continue;
         }
         if (cells + piece.cells > budget) break;
+        const display_start = used;
         @memcpy(out[used..][0..piece.bytes.len], piece.bytes);
         used += piece.bytes.len;
         cells += piece.cells;
+        if (source_span) |mark| {
+            if (mark.len != 0 and mark.start < pieces.at and source_start < mark.start +| mark.len) {
+                if (displayed) |*mapped| mapped.len = used - mapped.start else displayed = .{ .start = display_start, .len = used - display_start };
+            }
+        }
     }
     if (keep == .head and total > room) {
         @memcpy(out[used..][0..ellipsis.len], ellipsis);
         used += ellipsis.len;
     }
-    return .{ .bytes = out[0..used], .cells = cells + @intFromBool(total > room) };
+    return .{ .piece = .{ .bytes = out[0..used], .cells = cells + @intFromBool(total > room) }, .span = displayed };
 }
 
 fn measured(caps: Caps, glyphs: Glyphs, bytes: []const u8) usize {
@@ -5617,6 +5643,68 @@ test "Overview list Right does not create or open Settings and clicks share resu
     try std.testing.expectEqual(@as(usize, 1), resumes);
 }
 
+test "the shared row fitter translates source marks through normalization and clipping" {
+    const Case = struct {
+        text: []const u8,
+        source: ?ByteSpan,
+        room: usize = 40,
+        keep: Keep = .head,
+        unicode: bool = true,
+        shown: []const u8,
+        span: ?ByteSpan = null,
+    };
+    const cases = [_]Case{
+        .{ .text = "Verify", .source = .{ .start = 0, .len = 6 }, .shown = "Verify", .span = .{ .start = 0, .len = 6 } },
+        .{ .text = "界 Verify the project", .source = .{ .start = 4, .len = 6 }, .shown = "界 Verify the project", .span = .{ .start = 4, .len = 6 } },
+        .{ .text = "界 Verify the project", .source = .{ .start = 4, .len = 6 }, .unicode = false, .shown = "? Verify the project", .span = .{ .start = 2, .len = 6 } },
+        .{ .text = "Verify 界", .source = .{ .start = 0, .len = 6 }, .shown = "Verify 界", .span = .{ .start = 0, .len = 6 } },
+        .{ .text = "Verify 界", .source = .{ .start = 0, .len = 6 }, .unicode = false, .shown = "Verify ?", .span = .{ .start = 0, .len = 6 } },
+        .{ .text = "界Verify", .source = .{ .start = 0, .len = 9 }, .shown = "界Verify", .span = .{ .start = 0, .len = 9 } },
+        .{ .text = "界Verify", .source = .{ .start = 0, .len = 9 }, .unicode = false, .shown = "?Verify", .span = .{ .start = 0, .len = 7 } },
+        .{ .text = "\tVerify", .source = .{ .start = 1, .len = 6 }, .shown = " Verify", .span = .{ .start = 1, .len = 6 } },
+        .{ .text = "\tVerify", .source = .{ .start = 1, .len = 6 }, .unicode = false, .shown = " Verify", .span = .{ .start = 1, .len = 6 } },
+        .{ .text = "\x01 Verify", .source = .{ .start = 2, .len = 6 }, .shown = "? Verify", .span = .{ .start = 2, .len = 6 } },
+        .{ .text = "\xff Verify", .source = .{ .start = 2, .len = 6 }, .shown = "? Verify", .span = .{ .start = 2, .len = 6 } },
+        .{ .text = "Ver\tify", .source = .{ .start = 0, .len = 7 }, .shown = "Ver ify", .span = .{ .start = 0, .len = 7 } },
+        .{ .text = "Ver\nify", .source = .{ .start = 0, .len = 7 }, .shown = "Ver↵ify", .span = .{ .start = 0, .len = 9 } },
+        .{ .text = "Ver\nify", .source = .{ .start = 0, .len = 7 }, .unicode = false, .shown = "Ver|ify", .span = .{ .start = 0, .len = 7 } },
+        .{ .text = "界 Verify the project", .source = .{ .start = 4, .len = 6 }, .room = 9, .shown = "界 Verif…", .span = .{ .start = 4, .len = 5 } },
+        .{ .text = "界 Verify the project", .source = .{ .start = 4, .len = 6 }, .room = 9, .unicode = false, .shown = "? Verify.", .span = .{ .start = 2, .len = 6 } },
+        .{ .text = "界 Verify the project", .source = .{ .start = 4, .len = 6 }, .room = 3, .shown = "界…" },
+        .{ .text = "界 Verify the project", .source = .{ .start = 4, .len = 6 }, .room = 3, .unicode = false, .shown = "? ." },
+        .{ .text = "Verify", .source = .{ .start = 0, .len = 6 }, .room = 0, .shown = "" },
+        .{ .text = "Verify", .source = .{ .start = 0, .len = 6 }, .room = 1, .shown = "…" },
+        .{ .text = "Verify", .source = .{ .start = 0, .len = 6 }, .room = 1, .unicode = false, .shown = "." },
+        .{ .text = "Verify", .source = .{ .start = 0, .len = 6 }, .room = 1, .keep = .tail, .shown = "…" },
+        .{ .text = "Verify", .source = .{ .start = 0, .len = 6 }, .room = 1, .keep = .tail, .unicode = false, .shown = "." },
+        .{ .text = "界 Verify", .source = .{ .start = 4, .len = 6 }, .room = 6, .keep = .tail, .shown = "…erify", .span = .{ .start = 3, .len = 5 } },
+        .{ .text = "界 Verify", .source = .{ .start = 4, .len = 6 }, .room = 6, .keep = .tail, .unicode = false, .shown = ".erify", .span = .{ .start = 1, .len = 5 } },
+        .{ .text = "界 Verify", .source = .{ .start = 0, .len = 3 }, .room = 6, .keep = .tail, .shown = "…erify" },
+        .{ .text = "界 Verify", .source = .{ .start = 0, .len = 3 }, .room = 6, .keep = .tail, .unicode = false, .shown = ".erify" },
+        .{ .text = "Verify 界", .source = .{ .start = 0, .len = 10 }, .room = 4, .keep = .tail, .shown = "… 界", .span = .{ .start = 3, .len = 4 } },
+        .{ .text = "Verify 界", .source = .{ .start = 0, .len = 10 }, .room = 4, .keep = .tail, .unicode = false, .shown = ".y ?", .span = .{ .start = 1, .len = 3 } },
+        .{ .text = "e\u{301}clair", .source = .{ .start = 0, .len = 1 }, .room = 5, .shown = "e\u{301}cla…", .span = .{ .start = 0, .len = 3 } },
+        .{ .text = "e\u{301}clair", .source = .{ .start = 0, .len = 1 }, .room = 5, .unicode = false, .shown = "e?cl.", .span = .{ .start = 0, .len = 1 } },
+        .{ .text = "e\u{301}clair", .source = .{ .start = 1, .len = 2 }, .room = 5, .shown = "e\u{301}cla…", .span = .{ .start = 0, .len = 3 } },
+        .{ .text = "e\u{301}clair", .source = .{ .start = 1, .len = 2 }, .room = 5, .unicode = false, .shown = "e?cl.", .span = .{ .start = 1, .len = 1 } },
+        .{ .text = "Verify", .source = null, .shown = "Verify" },
+        .{ .text = "Verify", .source = .{ .start = 0, .len = 0 }, .shown = "Verify" },
+        .{ .text = "Verify", .source = .{ .start = 99, .len = 1 }, .shown = "Verify" },
+        .{ .text = "Verify", .source = .{ .start = 5, .len = std.math.maxInt(usize) }, .shown = "Verify", .span = .{ .start = 5, .len = 1 } },
+    };
+    for (std.enums.values(gwidth.Method)) |method| for (cases) |case| {
+        errdefer std.debug.print("source={s} unicode={} room={} keep={t} method={t}\n", .{ case.text, case.unicode, case.room, case.keep, method });
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const caps: Caps = .{ .unicode = case.unicode, .width = method };
+        const shown = try fittedMarked(arena.allocator(), caps, case.text, case.room, case.keep, case.source);
+        try std.testing.expectEqualStrings(case.shown, shown.piece.bytes);
+        try std.testing.expectEqualDeep(case.span, shown.span);
+        const plain = try fitted(arena.allocator(), caps, case.text, case.room, case.keep);
+        try std.testing.expectEqualDeep(plain, shown.piece);
+    };
+}
+
 test "the shared row fitter handles no description cells without allocating or underflowing" {
     for ([_]Keep{ .head, .tail }) |keep| {
         var storage: [0]u8 = .{};
@@ -5624,6 +5712,9 @@ test "the shared row fitter handles no description cells without allocating or u
         const shown = try fitted(fixed.allocator(), .{}, "description", 0, keep);
         try std.testing.expectEqualStrings("", shown.bytes);
         try std.testing.expectEqual(@as(usize, 0), shown.cells);
+        const marked = try fittedMarked(fixed.allocator(), .{}, "description", 0, keep, .{ .start = 0, .len = 6 });
+        try std.testing.expectEqualDeep(shown, marked.piece);
+        try std.testing.expectEqual(@as(?ByteSpan, null), marked.span);
     }
 }
 
