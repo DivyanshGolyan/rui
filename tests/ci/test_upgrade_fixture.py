@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, call, patch
@@ -50,6 +51,32 @@ class UpgradeEmptyChatTest(unittest.TestCase):
         frame = f"│ › conversation β draft\n│ {model} · low    {footer}"
         self.screen.observe = lambda: frame
         return self.screen.empty_chat(self.case, self.session, expected_notice=notice)
+
+    def test_case_disk_lifetime_follows_successful_process_retirement(self):
+        for body_fails, cleanup_fails in ((False, False), (True, False), (False, True)):
+            with self.subTest(body_fails=body_fails, cleanup_fails=cleanup_fails), tempfile.TemporaryDirectory() as root:
+                directory = Path(root) / "case"
+                directory.mkdir()
+                (directory / "diagnostics").write_text("retained on failure")
+                def retire():
+                    self.assertTrue(directory.exists(), "files removed before process retirement")
+                    if cleanup_fails:
+                        raise RuntimeError("cleanup")
+                value = SimpleNamespace(root=directory, close=Mock(side_effect=retire))
+                releases = SimpleNamespace(gates={}, status={}, latest_location="old", sums_name="old")
+                with patch.object(self.fixture, "Case", return_value=value):
+                    try:
+                        with self.fixture.case(Path(root), None, releases, "case"):
+                            if body_fails:
+                                raise ValueError("body")
+                    except (RuntimeError, ValueError):
+                        self.assertTrue(body_fails or cleanup_fails)
+                    else:
+                        self.assertFalse(body_fails or cleanup_fails)
+                value.close.assert_called_once_with()
+                self.assertEqual(directory.exists(), body_fails or cleanup_fails)
+                self.assertIsNone(releases.latest_location)
+                self.assertIsNone(releases.sums_name)
 
     def test_initial_info_action_and_explicit_relaunch_notice(self):
         self.assertIn("alt+i info", self.observe("alt+i info"))

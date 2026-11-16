@@ -311,8 +311,10 @@ class Case:
 @contextlib.contextmanager
 def case(root, binary, releases, name):
     value = Case(root, binary, releases, name)
+    complete = False
     try:
         yield value
+        complete = True
     finally:
         for gate in releases.gates.values():
             gate.release.set()
@@ -322,6 +324,11 @@ def case(root, binary, releases, name):
             releases.latest_location = None
             releases.sums_name = None
         dispose_all(value.close, reset_publication)
+        # Bound disk lifetime to the case, like process lifetime. Keep the
+        # failed case (including cleanup failures) for diagnosis, not every
+        # successfully retired installation from the preceding matrices.
+        if complete:
+            shutil.rmtree(value.root)
 
 
 def peer_pid(path):
