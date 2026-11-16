@@ -929,7 +929,8 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
         },
         .take_row => {
             self.notice = null;
-            try self.takeRow(shown.?);
+            if (input.key == .tab) self.screen.commands = shown.?;
+            try self.takeRow(&shown.?);
         },
         .edit => |edit| {
             self.notice = null;
@@ -2957,20 +2958,20 @@ fn runLine(self: *Self) !void {
 }
 
 /// The highlighted row Enter or Tab takes from the latest frame.
-fn shownRow(self: *Self, drawn: ?slash_commands_shared.Shown.Pick) ?*slash_commands_shared.Shown {
+fn shownRow(self: *Self, drawn: ?slash_commands_shared.Shown.Pick) ?slash_commands_shared.Shown {
     // A rejected line is the editor's to refuse and clear.
     if (self.input.editors[self.input.active].rejected != null) return null;
     if (drawn) |pick| {
-        const stored = &self.screen.commands;
-        return slash_commands_shared.Shown.pickedNow(stored, self.nextCommands(stored.*), pick);
+        var stored = self.screen.commands;
+        return (slash_commands_shared.Shown.pickedNow(&stored, self.nextCommands(stored), pick) orelse return null).*;
     }
-    return self.shownCommands();
+    return (self.shownCommands() orelse return null).*;
 }
 
 /// Enter, Tab or a click on the list's highlighted row, as `skill_completion`
 /// reads it: the row's word goes into the draft, and a row that runs then
 /// runs the line, admitted as a typed command is.
-fn takeRow(self: *Self, shown: *slash_commands_shared.Shown) !void {
+fn takeRow(self: *Self, shown: *const slash_commands_shared.Shown) !void {
     const draft = self.input.composition();
     const refused = switch (skill_completion.enter(draft.bytes, draft.cursor, shown)) {
         .run => |rest| {
@@ -4627,6 +4628,7 @@ test "the /requests page lists its rows over an empty draft, Enter takes a row a
     try std.testing.expectEqualStrings("/result " ++ original, held.screen.commands.?.list.entries[0].word);
     // Tab leaves the highlighted row and draft intact; Enter retains its action.
     try held.keys("\x1b[B\t");
+    try std.testing.expectEqual(@as(usize, 1), held.screen.commands.?.highlight);
     try std.testing.expectEqualStrings("", self.input.composition().bytes);
     try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
     try held.keys("\x07\r");
