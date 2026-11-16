@@ -149,7 +149,7 @@ pub const Settings = struct {
         const text_width = @import("display_text.zig").width(update.text, .terminal);
         const fits = text_width + 1 <= size.width;
         const right = if (fits) try std.fmt.allocPrint(ctx.arena, "{s} ", .{update.text}) else "";
-        const memory = try @import("memory_text.zig").sidebar(ctx.arena, self.memory, size.width -| @as(u16, @intCast((if (fits) text_width + 1 else 0) + 4)));
+        const memory = try @import("memory_text.zig").sidebar(ctx.arena, self.memory, if (fits) size.width -| @as(u16, @intCast(text_width + 5)) else 0);
         const footer: @import("widgets/Footer.zig") = .{ .left = if (memory.len > 0) try std.fmt.allocPrint(ctx.arena, "  {s}", .{memory}) else "", .right = right, .style = widget_style.of(self.caps, .{ .colour = .quiet }) };
         const drawn = try footer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 }));
         @memcpy(surface.buffer[size.width..], drawn.buffer);
@@ -235,6 +235,7 @@ test "sidebar bottom separates Settings memory and update targets across geometr
                 for (width - label_width - 1..width - 1) |column| try std.testing.expectEqual(style, frame.readCell(@intCast(column), 1).style);
                 try std.testing.expectEqual(width >= label_width + 10, std.mem.startsWith(u8, bottom, "  38 MB"));
             }
+            if (height >= 2 and width < label_width + 1) try std.testing.expect(std.mem.indexOf(u8, try cells(arena.allocator(), frame, 1), "38 MB") == null);
             const expected_target: ?Hover.Rect = if (height >= 2 and width >= label_width + 1 and !busy) .{ .row = 1, .col = @intCast(width - label_width - 1), .width = @intCast(label_width) } else null;
             try std.testing.expectEqual(expected_target, settings.update_target);
             const drawn_identity: @import("upgrade_status.zig").Target = .{ .available = settings.available, .run = run };
