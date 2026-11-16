@@ -98,6 +98,24 @@ class PrepushTest(unittest.TestCase):
             self.assertNotIn("generated files", self.commands(["src/Root.zig"]))
             self.assertIn("generated files", self.commands(["openapi.json"]))
 
+    def test_core_boundary_uses_registered_cores_in_every_mode(self):
+        graph = select_tests.tree_graph()
+        self.assertTrue(graph.cores)
+        expected = ["zig", "build", "-j1", "test-logic-only",
+                    "-Dtest-filter=functional cores stay within the core boundary"]
+        with patch.object(prepush, "tree_graph", return_value=graph):
+            for mode in ("default", "quick", "full"):
+                for path in sorted(graph.cores):
+                    with self.subTest(mode=mode, path=path):
+                        # No files exist in this test's root: deleted cores
+                        # still select their owning boundary check.
+                        commands = dict(prepush.checks([path], AVAILABLE, "BASE", mode))
+                        self.assertIn("core boundary", commands)
+                        self.assertEqual(commands["core boundary"], expected)
+                for path in ("src/server.zig", "docs/example.md", "tests/ci/prepush.py"):
+                    with self.subTest(mode=mode, path=path):
+                        self.assertNotIn("core boundary", dict(prepush.checks([path], AVAILABLE, "BASE", mode)))
+
     def test_client_changes_defer_broad_client_checks(self):
         commands = self.commands(["clients/ts/src/index.ts"])
         self.assertNotIn("TypeScript client", commands)

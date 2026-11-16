@@ -323,7 +323,8 @@ def local_fetch(git, repository, *refspecs):
 
 def export(inputs, repository, gid):
     """Fetch the lane's refs from root's repository (and origin's tags) into the bare `repository`."""
-    git = ["git", f"--git-dir={repository}"]
+    # Fetch can start background maintenance that races the permission walk below.
+    git = ["git", "-c", "maintenance.auto=false", "-c", "gc.auto=0", f"--git-dir={repository}"]
     if not repository.is_dir():
         subprocess.run(["git", "init", "--quiet", "--bare", "--template=", str(repository)], check=True)
     subprocess.run(local_fetch(git, inputs.source, f"+{inputs.sha}:refs/heads/fixture"), check=True)
