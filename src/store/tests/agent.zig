@@ -333,16 +333,21 @@ test "start_agent narrows configured tool names including unloaded MCP members" 
 
 // One boundary test for every caller of the Session-message writer. A stop
 // does not close a Session: new input to it must still be admitted (D41).
-test "session message writer covers peer message_agent start_agent and ending with wake and refusal" {
+test "session message writer covers person peer message_agent start_agent and ending with wake and refusal" {
     // Ownership is part of this regression: correct rows alone did not catch
     // four private copies of this transition. Pair the structural invariant
     // with the durable behavior of every caller below.
-    const owner = @embedFile("../domain/command.zig");
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, owner, "a.write(admit_sent_message,"));
-    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, owner, "try admitFromSession("));
+    const command_owner = @embedFile("../domain/command.zig");
+    const admission_owner = @embedFile("../domain/sourced_input.zig");
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, command_owner, "INSERT INTO message_admission"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, command_owner, "identity(.admission_id)"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, command_owner, "sourced_input.admit("));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, admission_owner, "a.write(admit_message,"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, admission_owner, "a.write(admit_sent_message,"));
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, command_owner, "try admitFromSession("));
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            const Source = enum { peer, message_agent, start_agent, ending };
+            const Source = enum { person, peer, message_agent, start_agent, ending };
             inline for (std.enums.values(Source)) |source| {
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
@@ -357,7 +362,7 @@ test "session message writer covers peer message_agent start_agent and ending wi
                 const sender = (try storage.configure(&create, .{})).accepted.session;
                 var receiver = try configureTestSession(&storage, "writer-target");
                 // Existing stopped receivers accept fresh input on both send paths.
-                if (source == .peer or source == .message_agent) {
+                if (source == .person or source == .peer or source == .message_agent) {
                     var stop = try completeSessionStop("writer-target-stop", receiver.slice());
                     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
                 }
@@ -369,7 +374,9 @@ test "session message writer covers peer message_agent start_agent and ending wi
                 var key: []const u8 = undefined;
                 var action: action_domain.CoreActionInput = undefined;
                 var peer: ActionExecutionInput = undefined;
-                if (source == .peer) {
+                if (source == .person) {
+                    key = "writer-person-send";
+                } else if (source == .peer) {
                     try settleTwoActionsForTesting(&storage, &tmp, model, "writer-peer-calls");
                     const binding = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
                     try storage.readActionExecutionInput(.bash, binding, &peer);
@@ -397,14 +404,16 @@ test "session message writer covers peer message_agent start_agent and ending wi
                 defer storage.commitWake().store(null, .release);
                 var commits: TestingCommits = .{};
                 switch (source) {
-                    .peer => {
+                    .person, .peer => {
                         const file = try tmp.dir.createFile(std.testing.io, "peer-content", .{ .read = true });
                         try file.writeStreamingAll(std.testing.io, text);
                         try file.sync(std.testing.io);
                         var command = try completeMessage(key, receiver.slice(), file, text);
                         defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-                        command.sender = .{ .store = storage.selector, .session = sender };
-                        command.sender_handle = peer.sender_handle;
+                        if (source == .peer) {
+                            command.sender = .{ .store = storage.selector, .session = sender };
+                            command.sender_handle = peer.sender_handle;
+                        }
                         try std.testing.expect(storage.submitMessageWithModel(&command, commits.callback(), .{}) == .accepted);
                     },
                     .message_agent => try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(action.binding, receiver.slice(), text, .{})),
@@ -417,12 +426,17 @@ test "session message writer covers peer message_agent start_agent and ending wi
                     .ending => try std.testing.expect(try storage.deliverChildEnding(model.turn_id, .{})),
                 }
                 try std.testing.expect(wake.isSet());
-                if (source == .peer or source == .start_agent) {
+                if (source == .person or source == .peer or source == .start_agent) {
                     try std.testing.expectEqual(@as(usize, 1), commits.count);
-                    try std.testing.expect(commits.calls[0].from_peer);
+                    try std.testing.expectEqual(source != .person, commits.calls[0].from_peer);
                     try std.testing.expectEqualStrings(receiver.slice(), commits.calls[0].session.slice());
                 }
-                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission m JOIN content c ON c.content_id=m.content_id WHERE m.command_key=?1 AND m.session_ref=?2 AND m.sender_session_ref=?3 AND m.sender_position=?4 AND c.digest=?5", .{ key, receiver.slice(), sender.slice(), sender_position, store_testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
+                if (source == .person) {
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission m JOIN content c ON c.content_id=m.content_id WHERE m.command_key=?1 AND m.session_ref=?2 AND m.sender_session_ref IS NULL AND m.sender_position IS NULL AND c.digest=?3", .{ key, receiver.slice(), store_testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
+                    try std.testing.expectEqual(sender_position, try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{sender.slice()}));
+                } else {
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission m JOIN content c ON c.content_id=m.content_id WHERE m.command_key=?1 AND m.session_ref=?2 AND m.sender_session_ref=?3 AND m.sender_position=?4 AND c.digest=?5", .{ key, receiver.slice(), sender.slice(), sender_position, store_testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
+                }
                 const content_id = try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE command_key=?1", .{key});
                 try expectContent(&storage, try testingContentReference(&storage, content_id), text);
                 // Positions belong to the receiving Session, not the sender.
