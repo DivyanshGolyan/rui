@@ -192,7 +192,7 @@ const publications_sql = "WITH publications AS (SELECT operation.operation_id," 
 /// foreign key.
 const resolved_actions = rsql.Read(.{
     .sql = publications_sql ++ "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.resolution_code,a.acceptance_position," ++
-        "result.byte_length AS result_length,result.digest AS result_digest,tool_call.description,publications.publication " ++
+        "result.byte_length AS result_length,result.digest AS result_digest,tool_call.description," ++ tool_fulfillment.resolutionPublicationSql("a", "publications.publication") ++ " AS publication " ++
         "FROM turn active @index(turn_one_active_per_session) " ++
         "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
         "CROSS JOIN action_operation a ON a.parent_operation_id=operation.operation_id " ++

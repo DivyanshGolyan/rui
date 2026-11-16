@@ -25,3 +25,9 @@ pub fn timeSql(comptime action: []const u8, comptime operation: []const u8) []co
 pub fn codeSql(comptime call: []const u8, comptime action: []const u8) []const u8 {
     return "coalesce(" ++ call ++ ".rejection_code,CASE WHEN " ++ action ++ ".background_position IS NOT NULL THEN 'background' ELSE " ++ action ++ ".resolution_code END)";
 }
+
+/// A final shares the call group's publication only when it fulfilled that
+/// call. A background receipt fulfilled it earlier; its final stays separate.
+pub fn resolutionPublicationSql(comptime action: []const u8, comptime publication: []const u8) []const u8 {
+    return "CASE WHEN " ++ action ++ ".acceptance_position=" ++ actionPositionSql(action) ++ " THEN " ++ publication ++ " END";
+}
