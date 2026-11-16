@@ -648,7 +648,7 @@ test "a list page's rows share their rounds, so eight rows take as many as one" 
     }.run);
 }
 
-test "a list row's failed Actions read answers main's ActionReadFailed" {
+test "a list Action table fault names the earliest failed statement and fences" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -663,7 +663,11 @@ test "a list row's failed Actions read answers main's ActionReadFailed" {
             try settleCallsForTesting(&storage, &tmp, binding, "list-actions-output", &call);
             try store_testing.failReadsOf(&storage, "action_operation");
             var used = std.atomic.Value(u64).init(0);
-            try std.testing.expectError(error.ActionReadFailed, testingSessionList(&storage, &tmp, .{}, &used, 5));
+            const expected = switch (storage.engine) {
+                .sqlite => error.ActionReadFailed,
+                .mysql => error.SessionReadFailed,
+            };
+            try std.testing.expectError(expected, testingSessionList(&storage, &tmp, .{}, &used, 5));
             try std.testing.expect(storage.isFenced());
         }
     }.run);

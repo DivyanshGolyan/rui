@@ -236,15 +236,19 @@ fn listStatementForTesting(comptime failed: anyerror, comptime fragment: []const
 
 /// Fails the statement whose text is `sql` as a one-row list page reads
 /// it, and expects `expected`: main's name for that read's failed step.
-fn expectListStepFailure(sql: [:0]const u8, expected: anyerror) !void {
+fn expectListStepFailure(sql: [:0]const u8, expected: anyerror, comptime work: enum { queued, awaiting }) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    // A queued Message: the work reads its latest Turn, then the queue.
-    const session = try configureTestSession(&storage, "list-names-config");
-    try submitTestMessage(&storage, &tmp, "list-names-input", "list-names-message", session.slice(), "q");
+    switch (work) {
+        .queued => {
+            const session = try configureTestSession(&storage, "list-names-config");
+            try submitTestMessage(&storage, &tmp, "list-names-input", "list-names-message", session.slice(), "q");
+        },
+        .awaiting => _ = try TestingWorkShape.awaiting.make(&storage, &tmp, "list-names-awaiting"),
+    }
     var used = std.atomic.Value(u64).init(0);
     var fault: TestingStatementFault = .{ .sql = sql };
     fault.arm(storage.sqliteDatabase());
@@ -255,21 +259,25 @@ fn expectListStepFailure(sql: [:0]const u8, expected: anyerror) !void {
 }
 
 test "a list page whose page read fails answers main's SessionReadFailed" {
-    try expectListStepFailure(listStatementForTesting(error.SessionReadFailed, "FROM session WHERE created_seq>?1"), error.SessionReadFailed);
+    try expectListStepFailure(listStatementForTesting(error.SessionReadFailed, "FROM session WHERE created_seq>?1"), error.SessionReadFailed, .queued);
+}
+
+test "a list row whose Action statement fails answers ActionReadFailed" {
+    try expectListStepFailure(listStatementForTesting(error.ActionReadFailed, "FROM action_operation a LEFT JOIN session_revision"), error.ActionReadFailed, .awaiting);
 }
 
 test "a list row whose latest Turn read fails answers main's TurnReadFailed" {
-    try expectListStepFailure(listStatementForTesting(error.TurnReadFailed, "SELECT t.turn_id,t.operation_id"), error.TurnReadFailed);
+    try expectListStepFailure(listStatementForTesting(error.TurnReadFailed, "SELECT t.turn_id,t.operation_id"), error.TurnReadFailed, .queued);
 }
 
 test "a list row whose queue read fails answers main's MessageAdmissionReadFailed" {
-    try expectListStepFailure(listStatementForTesting(error.MessageAdmissionReadFailed, "admission_id>?2"), error.MessageAdmissionReadFailed);
+    try expectListStepFailure(listStatementForTesting(error.MessageAdmissionReadFailed, "admission_id>?2"), error.MessageAdmissionReadFailed, .queued);
 }
 
 test "a list row whose settings read fails answers SessionReadFailed" {
     // Main named a failed settings step so, and a failed first Message
     // step CorruptStore; this one read holds both.
-    try expectListStepFailure(listStatementForTesting(error.SessionReadFailed, "JOIN message_admission m"), error.SessionReadFailed);
+    try expectListStepFailure(listStatementForTesting(error.SessionReadFailed, "JOIN message_admission m"), error.SessionReadFailed, .queued);
 }
 
 test "a list row that fails to render reports its error before a later row's failed step" {

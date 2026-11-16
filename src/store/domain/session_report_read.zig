@@ -144,7 +144,7 @@ const unresolved_actions = rsql.Read(.{
         "CROSS JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
         "CROSS JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
         "CROSS JOIN content call_name ON call_name.content_id=tool_call.name_content_id " ++
-        "WHERE a.session_ref=?1 AND " ++ action_domain.unresolvedSql("a") ++ " ORDER BY a.action_id",
+        "WHERE a.session_ref=?1 AND a.acceptance_position IS NULL AND " ++ action_domain.unresolvedSql("a") ++ " ORDER BY a.action_id",
     .Args = struct { session: []const u8 },
     .Row = struct {
         action_id: rsql.Positive,

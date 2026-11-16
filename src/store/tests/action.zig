@@ -594,6 +594,7 @@ test "Action read covers permission queue attempt and immutable final paging" {
                 var deny: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = sibling, .decision = .deny };
                 try deny.key.set("read-deny");
                 try std.testing.expect(storage.decidePermission(&deny, .{}) == .accepted);
+                try NativePromotion.expectCount(&storage, &tmp, session.slice(), "2");
                 try storage.readAction(&.{ .session = session, .action_id = sibling }, &result);
                 try std.testing.expect(result.status == .resolved);
                 try std.testing.expectEqualStrings("denied", result.status.resolved.resolution.code.slice());
@@ -614,6 +615,7 @@ test "Action read covers permission queue attempt and immutable final paging" {
                 try std.testing.expect(result.status == .pending and result.status.pending == .attempted);
                 try std.testing.expectError(error.InvalidActionResult, storage.settleActionAttempt(binding, .succeeded, "", .{}));
                 try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(binding, .succeeded, bytes, .{}));
+                try NativePromotion.expectCount(&storage, &tmp, session.slice(), "2");
                 try storage.readAction(&request, &result);
                 try std.testing.expect(result.status == .resolved);
                 const first = result.status.resolved;
@@ -642,6 +644,27 @@ test "Action read covers permission queue attempt and immutable final paging" {
 }
 
 const NativePromotion = struct {
+    fn expectCount(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, expected: []const u8) !void {
+        const bytes = try testingSessionReport(storage, tmp, session, 1024 * 1024);
+        defer std.testing.allocator.free(bytes);
+        const report = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, bytes, .{ .ignore_unknown_fields = true });
+        defer report.deinit();
+        try std.testing.expectEqualStrings(expected, report.value.actions.count);
+    }
+
+    fn uncoveredBytes(storage: *Store, session: []const u8, covered: u64) !u64 {
+        const admission = @import("../domain/model_admission.zig");
+        const Query = admission.compaction_failures[3][0];
+        const entry = try store_core.enter(storage, .none);
+        defer entry.release();
+        var access: @import("../domain/reads.zig").ReadAccess = .open(&entry);
+        defer access.deinit();
+        var row: Query.Result = undefined;
+        access.read(Query, .{ .session = session, .covered = covered, .frontier = 0, .results = 0 }, &row);
+        try entry.finish(store_core.Ordinary.none, access.run());
+        return row.uncovered_bytes;
+    }
+
     fn propose(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8) !u64 {
         var key_buffer: [64]u8 = undefined;
         const key = try std.fmt.bufPrint(&key_buffer, "task-{s}", .{session});
@@ -749,8 +772,17 @@ test "native promotion keeps one attempted invocation and its immutable receipt 
             try std.testing.expectEqualDeep(arguments, input.arguments);
             try std.testing.expectEqual(@as(u64, 30_000), input.timeout_ms);
             const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try NativePromotion.expectCount(&storage, &tmp, session.slice(), "1");
             try NativePromotion.finishModel(&storage, &tmp, continuation);
+            try NativePromotion.expectCount(&storage, &tmp, session.slice(), "1");
+            const uncovered_before = try NativePromotion.uncoveredBytes(&storage, session.slice(), receipt_position - 1);
+            const covered_before = try NativePromotion.uncoveredBytes(&storage, session.slice(), receipt_position);
+            const receipt_bytes = try store_testing.queryU64(&storage, "SELECT byte_length FROM content WHERE content_id=?1", .{receipt_content});
+            try std.testing.expectEqual(receipt_bytes, uncovered_before - covered_before);
             try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(binding, .succeeded, "One invocation's final", .{}));
+            try NativePromotion.expectCount(&storage, &tmp, session.slice(), "0");
+            try std.testing.expectEqual(uncovered_before, try NativePromotion.uncoveredBytes(&storage, session.slice(), receipt_position - 1));
+            try std.testing.expectEqual(covered_before, try NativePromotion.uncoveredBytes(&storage, session.slice(), receipt_position));
             free = 0;
             const replay = storage.backgroundAction(&command, NativePromotion.capacity(1, &free), .{});
             try std.testing.expect(replay == .accepted and replay.accepted.replayed);
@@ -821,6 +853,11 @@ test "native promotion preserves old Turn approval discovery without launching b
                 try NativePromotion.expectReported(&storage, &tmp, session.slice(), action, true, true);
                 try NativePromotion.finishModel(&storage, &tmp, continuation);
                 try NativePromotion.expectReported(&storage, &tmp, session.slice(), action, true, true);
+                try submitTestMessage(&storage, &tmp, "queued-after-terminal-file", "queued-after-terminal", session.slice(), "Continue later.");
+                const queued = try store_testing.observeCommandForTesting(&storage, "queued-after-terminal");
+                try std.testing.expectEqual(action, queued.kind.message.?.work.?.first_action.?);
+                const next_turn = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try NativePromotion.finishModel(&storage, &tmp, next_turn);
                 try std.testing.expect((try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})) == null);
                 if (choice == .stop) {
                     var stop = try completeSessionStop("stop-pending", session.slice());

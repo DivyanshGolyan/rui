@@ -533,6 +533,7 @@ fn costFixtureForTesting(storage: *Store, tmp: *std.testing.TmpDir, cycles: usiz
 }
 
 test "a Current report and inspection do no more work than main at the cost fixture" {
+    var failure: ?anyerror = null;
     // Main's counts at 72db6de9, each the second, cached, run on this
     // fixture: statements run and VM steps, the report then inspection.
     inline for (.{
@@ -557,9 +558,10 @@ test "a Current report and inspection do no more work than main at the cost fixt
         try std.testing.expect(report.statements > 0 and inspection.statements > 0);
         std.testing.expect(report.statements <= main[0] and report.steps <= main[1] and inspection.statements <= main[2] and inspection.steps <= main[3]) catch |err| {
             std.debug.print("report {d} statements, {d} steps; inspection {d}, {d}\n", .{ report.statements, report.steps, inspection.statements, inspection.steps });
-            return err;
+            failure = err;
         };
     }
+    if (failure) |err| return err;
 }
 
 test "a Current report's work grows linearly in one Operation's calls, as main's did" {
