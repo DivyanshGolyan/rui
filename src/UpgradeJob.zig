@@ -25,7 +25,7 @@ operation: Operation = .check,
 checked: ?upgrade.Check = null,
 result: ?upgrade.Result = null,
 cleanup: upgrade.CleanupReceipts = .{},
-download: upgrade.DownloadDiagnostic = .{},
+download: upgrade.Download = .{},
 failure: ?anyerror = null,
 outcome: Outcome = .unchanged,
 /// A stop was asked for: an Esc that `gate` let through, or leaving the

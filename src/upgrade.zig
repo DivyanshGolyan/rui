@@ -64,7 +64,7 @@ pub const CleanupReceipts = struct {
     }
 };
 
-pub const DownloadDiagnostic = process.DownloadDiagnostic;
+pub const Download = process.Download;
 
 pub const Check = struct {
     candidate: release.ReleaseCandidate,
@@ -103,7 +103,7 @@ pub const Result = struct {
     }
 };
 
-pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []const u8, cancellation: ?*client.Cancellation, diagnostic: *DownloadDiagnostic) !Check {
+pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []const u8, cancellation: ?*client.Cancellation, diagnostic: *Download) !Check {
     const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
     const endpoint = if (init.environ_map.get("RUI_TEST_UPGRADE_RELEASES_URL")) |base| try std.fmt.allocPrint(allocator, "{s}/latest", .{base}) else null;
     defer if (endpoint) |url| allocator.free(url);
@@ -148,7 +148,7 @@ const ActivationProgress = struct {
     }
 };
 
-pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *const Check, cancellation: ?*client.Cancellation, progress: ?Progress, cleanup: *CleanupReceipts, diagnostic: *DownloadDiagnostic) !Result {
+pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *const Check, cancellation: ?*client.Cancellation, progress: ?Progress, cleanup: *CleanupReceipts, diagnostic: *Download) !Result {
     try process.check(cancellation);
     if (!canInstall(checked)) return error.UpgradeIneligible;
     const store = try allocator.dupe(u8, checked.store);
