@@ -2358,5 +2358,133 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                         self.assertEqual({status for _, status in records}, {"0", "42"} if fail else {"0"})
 
 
+
+class BinarySourceSelectionTest(unittest.TestCase):
+    def test_committed_binary_changes_and_unchanged_binary(self):
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            archive = subprocess.run(["git", "archive", "HEAD"], cwd=root, check=True, stdout=subprocess.PIPE).stdout
+            subprocess.run(["tar", "-xf", "-", "-C", str(repo)], input=archive, check=True)
+            shutil.copyfile(root / "tests/ci/select_tests.py", repo / "tests/ci/select_tests.py")
+
+            def git(*args):
+                return subprocess.check_output(["git", *args], cwd=repo, stderr=subprocess.PIPE).decode().strip()
+
+            git("init", "-q")
+            git("config", "user.email", "selection@example.invalid")
+            git("config", "user.name", "Selection test")
+            git("add", ".")
+            git("commit", "-qm", "baseline")
+            baseline = git("rev-parse", "HEAD")
+
+            def plan(base):
+                result = subprocess.run([sys.executable, "tests/ci/select_tests.py", "--base", base,
+                                         "--phase", "review"], cwd=repo, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                selection = json.loads(result.stdout)
+                return {key: value for key, value in selection.items() if key not in {"base", "head"}}
+
+            for path, reason in (("src/model_instructions.txt", "Import graph:"),
+                                 ("src/unmapped-fixture.bin", "Source no import or rule reaches:")):
+                for operation in ("add", "edit", "delete"):
+                    with self.subTest(path=path, operation=operation):
+                        outcomes = []
+                        for byte in (b"x", b"\x80"):
+                            git("reset", "--hard", "-q", baseline)
+                            target = repo / path
+                            if operation == "add" and target.exists():
+                                target.unlink()
+                                git("add", "-A")
+                                git("commit", "-qm", "without fixture")
+                            if operation != "add":
+                                target.write_bytes(b'"A fixture message"\r\n' + byte)
+                                git("add", "-A")
+                                git("commit", "-qm", "before")
+                            base = git("rev-parse", "HEAD")
+                            if operation == "delete":
+                                target.unlink()
+                            else:
+                                target.write_bytes(b'"Another fixture message"\r\n' + byte)
+                            git("add", "-A")
+                            git("commit", "-qm", "after")
+                            outcome = plan(base)
+                            self.assertTrue(any(item.startswith(reason) for item in outcome["reasons"]), outcome)
+                            self.assertTrue(outcome["targets"])
+                            self.assertTrue(outcome["native_required"])
+                            outcomes.append(outcome)
+                        self.assertEqual(*outcomes)
+
+            git("reset", "--hard", "-q", baseline)
+            (repo / "src/unmapped-fixture.bin").write_bytes(b"\x80\xff\r\n")
+            (repo / "src/binary.zig").write_bytes(b"// \x80\xff\n")
+            bad_name = os.fsencode(repo / "src") + b"/invalid-\xff.bin"
+            with open(bad_name, "wb") as binary:
+                binary.write(b"\x80")
+            git("add", "-A")
+            git("commit", "-qm", "unchanged binary")
+            base = git("rev-parse", "HEAD")
+            with (repo / "src/keymap.zig").open("a") as source:
+                source.write("\n// edit\n")
+            git("add", "-A")
+            git("commit", "-qm", "text edit")
+            outcome = plan(base)
+            self.assertIn("Asserted text: a fixture waits for text this file draws", outcome["reasons"])
+            self.assertIn("human-cli-integration", outcome["targets"])
+
+    def test_uncommon_text_counts_binary_source_without_dropping_it(self):
+        from select_tests import tree_uncommon_texts
+
+        text = "A fixture waits for this message"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            names = [f"src/owner{index}.bin" for index in range(3)]
+            for name in names:
+                (root / name).write_bytes(b"\x80\xff\n" + json.dumps(text).encode())
+            tracked = "\0".join(names).encode() + b"\0"
+            with (patch("select_tests.ROOT", root),
+                  patch("select_tests.subprocess.check_output", return_value=tracked)):
+                self.assertEqual(tree_uncommon_texts.__wrapped__((text,)), set())
+
+    def test_tracked_paths_and_graph_source_preserve_bytes(self):
+        from select_tests import tree_graph, tree_uncommon_texts
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            (root / "src").mkdir()
+            name = os.fsdecode(b"src/invalid-\xff.zig")
+            (root / name).write_bytes(b'\x80"A fixture waits for this message"')
+            subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            with (patch("select_tests.ROOT", root),
+                  patch("select_tests.Graph", side_effect=lambda names, read: {n: read(n) for n in names})):
+                graph = tree_graph.__wrapped__()
+                self.assertEqual(graph[name].encode("utf-8", "surrogateescape"),
+                                 b'\x80"A fixture waits for this message"')
+                self.assertEqual(tree_uncommon_texts.__wrapped__(("A fixture waits for this message",)),
+                                 {"A fixture waits for this message"})
+
+    def test_revision_text_preserves_bytes_and_universal_newlines(self):
+        from select_tests import revision_text
+
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "selection@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Selection test"], check=True)
+            (repo / "bytes.bin").write_bytes(b"a\x80\xff\r\nb\rc\n")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "bytes"], check=True)
+            previous = os.getcwd()
+            try:
+                os.chdir(repo)
+                text = revision_text("HEAD", "bytes.bin")
+                self.assertEqual(text.encode("utf-8", "surrogateescape"), b"a\x80\xff\nb\nc\n")
+                self.assertIsNone(revision_text("HEAD", "missing"))
+            finally:
+                os.chdir(previous)
+
+
 if __name__ == "__main__":
     unittest.main()

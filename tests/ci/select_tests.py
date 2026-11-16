@@ -324,8 +324,8 @@ class Graph:
 
 @cache
 def tree_graph():
-    tracked = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "-z"]).decode().split("\0")
-    return Graph([name for name in tracked if name and (ROOT / name).is_file()], lambda name: (ROOT / name).read_text())
+    tracked = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "-z"]).decode("utf-8", "surrogateescape").split("\0")
+    return Graph([name for name in tracked if name and (ROOT / name).is_file()], lambda name: (ROOT / name).read_text(encoding="utf-8", errors="surrogateescape"))
 
 
 def script_literals(source, suffix):
@@ -369,11 +369,11 @@ def tree_uncommon_texts(candidates):
     if not candidates:
         return frozenset()
     counts = dict.fromkeys(candidates, 0)
-    tracked = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "-z", "src/"]).decode().split("\0")
+    tracked = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "-z", "src/"]).decode("utf-8", "surrogateescape").split("\0")
     for name in tracked:
         if not name or matches(name, TEST_CODE) or not (ROOT / name).is_file():
             continue
-        source = source_strings((ROOT / name).read_text())
+        source = source_strings((ROOT / name).read_text(encoding="utf-8", errors="surrogateescape"))
         for text, count in counts.items():
             if count < 3 and text in source:
                 counts[text] += 1
@@ -980,7 +980,7 @@ def changed_paths(base, head):
 
 def revision_text(commit, path):
     """The path's text at commit, or None where the commit has no such file."""
-    shown = subprocess.run(["git", "show", f"{commit}:{path}"], capture_output=True, text=True)
+    shown = subprocess.run(["git", "show", f"{commit}:{path}"], capture_output=True, text=True, encoding="utf-8", errors="surrogateescape")
     return shown.stdout if shown.returncode == 0 else None
 
 
