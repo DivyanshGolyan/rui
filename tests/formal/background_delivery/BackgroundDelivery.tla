@@ -3,7 +3,7 @@
 (* A background Action's final result as Session input: exactly once,     *)
 (* stop wins, and the credit it keeps.                                     *)
 (*                                                                         *)
-(* Code (feature/final-delivery, #1550, head 96a2611f):                    *)
+(* Code (feature/final-delivery, #1550, shared saved/owed-stop predicate):                    *)
 (*   src/action_control.zig            choose: promotion keeps its credit  *)
 (*   src/store/domain/sourced_input.zig Final.admit                        *)
 (*   src/store/domain/action.zig        SettleAttempt, RecoverUncertain,   *)
@@ -25,7 +25,7 @@ CONSTANTS
     Actions,     \* the Session's Actions that may run in background
     Credits,     \* the Host's custody credits
     \* The fix under test: final admission also treats an owed parent stop
-    \* as stopped, as eligibleSql and core_facts already do. FALSE is #1550.
+    \* as stopped. TRUE matches action.stoppedSql shared by every reader.
     AdmitChecksOwed,
     \* Mutations that remove a guard #1550 has. All FALSE describes it.
     BreakStoppedCheck,   \* Final.admit ignores `stopped`

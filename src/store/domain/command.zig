@@ -1947,12 +1947,12 @@ pub const InterruptModel = struct {
 };
 
 const decision_action = rsql.Read(.{
-    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,a.authorized,a.resolution_code IS NULL AS unresolved,(t.outcome_code IS NULL OR a.background_position IS NOT NULL) AS turn_open,t.turn_id," ++
+    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,a.authorized,a.background_position IS NOT NULL AS background," ++ action_domain.actionStoppedSql("a", "operation") ++ " AS stopped,a.resolution_code IS NULL AS unresolved,(t.outcome_code IS NULL OR a.background_position IS NOT NULL) AS turn_open,t.turn_id," ++
         "EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=?2 AND f.kind=1 AND f.source_id=a.action_id AND f.position IS NOT NULL) AS forwarded " ++
         "FROM action_operation a JOIN session s ON s.session_ref=a.session_ref " ++
         "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=operation.turn_id WHERE a.action_id=?1",
     .Args = struct { action_id: u64, target: []const u8 },
-    .Row = struct { session: rsql.SessionHead, authorized: bool, unresolved: bool, turn_open: bool, turn_id: rsql.Positive, forwarded: bool },
+    .Row = struct { session: rsql.SessionHead, authorized: bool, background: bool, stopped: bool, unresolved: bool, turn_open: bool, turn_id: rsql.Positive, forwarded: bool },
     .cardinality = .optional,
 });
 
@@ -2008,6 +2008,7 @@ pub const DecidePermission = struct {
     pub const Declined = error{};
 
     input: Input,
+    final_input: sourced_input.Final = .{},
     digest: [32]u8 = undefined,
     saved: saved_command.Result = undefined,
     target: target_session.Result = null,
@@ -2044,7 +2045,7 @@ pub const DecidePermission = struct {
         try queueCommand(r, command.key.slice(), .permission_decision, session, &t.digest, null, null, &t.answer);
         r.write(save_decision, .{ .key = command.key.slice(), .action_id = try std.fmt.bufPrint(&t.action_text, "{d}", .{command.action_id}), .decision = command.decision });
         if (t.rejection == null) {
-            const found = t.action.?;
+            const found = &t.action.?;
             const head = found.session;
             switch (command.decision) {
                 .allow_once => r.write(allow_action, .{ .action_id = command.action_id, .session = head }),
@@ -2053,6 +2054,7 @@ pub const DecidePermission = struct {
                     const positions = try r.positions(head);
                     const content_id = try content_domain.importBytes(r, &t.content, denial_text);
                     r.write(deny_action, .{ .action_id = command.action_id, .content_id = content_id, .position = try positions.take(1), .session = head });
+                    try t.final_input.admit(r, &found.session, command.action_id, content_id, .{ .background = found.background, .stopped = found.stopped });
                     turn_domain.queueContinuation(r, found.turn_id.get(), head);
                 },
             }

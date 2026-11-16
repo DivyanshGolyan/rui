@@ -58,13 +58,8 @@ test "read_action core reads own pending and immutable final windows without cre
             const target = try storage.testing.queryU64(&database, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1", .{first_model.operation_id});
             var background: @import("command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = target };
             try background.key.set("read-background");
-            const free: usize = 2;
-            const capacity: storage.ActionCapacityView = .{ .total = 2, .context = &free, .freeFn = struct {
-                fn read(context: *const anyopaque) usize {
-                    return @as(*const usize, @ptrCast(@alignCast(context))).*;
-                }
-            }.read };
-            try std.testing.expect(database.backgroundAction(&background, capacity, .{}) == .accepted);
+
+            try std.testing.expect(database.backgroundAction(.{ .command = &background }, .{}) == .accepted);
             var own: action_read.Read = undefined;
             try database.readAction(&.{ .session = session, .action_id = target }, &own);
             try std.testing.expect(own.status == .pending and own.status.pending == .waiting_approval);
@@ -111,7 +106,9 @@ test "read_action core reads own pending and immutable final windows without cre
             const continuation = try std.fmt.allocPrint(arena, "{{\"action\":\"{d}\",\"offset\":\"4096\"}}", .{target});
             const eof = try std.fmt.allocPrint(arena, "{{\"action\":\"{d}\",\"offset\":\"{d}\"}}", .{ target, text.len });
             const invalid_utf8 = try std.fmt.allocPrint(arena, "{{\"action\":\"{d}\",\"offset\":\"2\"}}", .{target});
-            const final_model = ((try database.admitModelAttempt(.tool_continuation, .{})) orelse return error.ExpectedFinalReadContinuation).permit.binding;
+            const final_model = ((try database.admitModelAttempt(.message, .{})) orelse return error.ExpectedFinalReadContinuation).permit.binding;
+            try std.testing.expectEqual(first_model.turn_id, final_model.turn_id);
+            try std.testing.expectEqual(@as(u64, 1), try storage.testing.queryU64(&database, "SELECT count(*) FROM message_admission WHERE source_action_id=?1 AND turn_id=?2", .{ target, final_model.turn_id }));
             try queueCallsForTesting(&database, &tmp, arena, final_model, "final", "read_action", &.{ pending_args, continuation, eof, invalid_utf8, pending_args });
             var first: []const u8 = undefined;
             for (0..5) |index| {

@@ -207,14 +207,10 @@ const PromotedAction = struct {
             .decoded_arguments = arguments,
         }});
         const action = try store.testing.queryU64(storage, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1", .{model.operation_id});
-        const free: usize = 2;
+
         var promote: @import("command_input.zig").ActionBackgroundCommand = .{ .action_id = action, .session = session };
         try promote.key.set("promote");
-        const promoted = storage.backgroundAction(&promote, .{ .total = 2, .context = &free, .freeFn = struct {
-            fn read(context: *const anyopaque) usize {
-                return @as(*const usize, @ptrCast(@alignCast(context))).*;
-            }
-        }.read }, .{});
+        const promoted = storage.backgroundAction(.{ .command = &promote }, .{});
         try std.testing.expect(promoted == .accepted);
         return .{ .session = session, .action = action, .receipt_position = promoted.accepted.selection.position };
     }
@@ -281,6 +277,35 @@ const PromotedAction = struct {
         try std.testing.expectEqual(@as(usize, if (stage == .pending) 1 else 0), sink.unresolved);
         try std.testing.expectEqual(@as(usize, if (stage == .resolved_open) 1 else 0), sink.resolved);
         try std.testing.expect(!storage.isFenced());
+    }
+
+    fn expectFinalInput(self: PromotedAction, storage: *store.Store, text: []const u8) !void {
+        const page = try std.testing.allocator.create(protocol_reply.ActivityPage);
+        defer std.testing.allocator.destroy(page);
+        try readNativeActivity(storage, &.{ .session = self.session, .kinds = .initOne(.received) }, page);
+        try std.testing.expectEqual(@as(usize, 1), page.facts.count);
+        const message = page.facts.items[0].value.received;
+        try std.testing.expectEqual(@as(?u64, self.action), message.source_action);
+        try std.testing.expect(message.sender == null);
+        try std.testing.expectEqual(@as(u64, text.len), message.content.length);
+        try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &message.content.digest);
+
+        const produced = try std.testing.allocator.create(@import("command_reply.zig").PublicConversationPage);
+        defer std.testing.allocator.destroy(produced);
+        try storage.publicConversationPage(&.{ .session = self.session }, produced);
+        var rendered: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer rendered.deinit();
+        try @import("host_reply.zig").renderConversationPage(.{ .writer = &rendered.writer }, produced);
+        const parsed = try protocol_reply.ConversationPage.parse(rendered.written(), .{ .end = 0 });
+        var sources: usize = 0;
+        for (parsed.items[0..parsed.count]) |item| if (item.source_action) |source| {
+            try std.testing.expectEqual(self.action, source);
+            try std.testing.expect(item.sender == null);
+            try std.testing.expectEqual(@as(u64, text.len), item.content.bytes);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &item.content.digest);
+            sources += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), sources);
     }
 
     fn receipt(self: PromotedAction, storage: *store.Store) !@import("activity_facts.zig").Item.Content {
@@ -351,13 +376,8 @@ test "saved invalid Action targets round trip through Store observation and exac
         var command: @import("command_input.zig").ActionBackgroundCommand = .{ .action_id = target };
         try command.key.set("invalid-action-target");
         try command.session.set("k7m2qx");
-        const free: usize = 2;
-        const capacity: store.ActionCapacityView = .{ .total = 2, .context = &free, .freeFn = struct {
-            fn read(context: *const anyopaque) usize {
-                return @as(*const usize, @ptrCast(@alignCast(context))).*;
-            }
-        }.read };
-        const refused = storage.backgroundAction(&command, capacity, .{});
+
+        const refused = storage.backgroundAction(.{ .command = &command }, .{});
         try std.testing.expect(refused == .rejected and refused.rejected.code == .invalid_target and !refused.rejected.replayed);
         const observed = try store.testing.observeCommandForTesting(&storage, command.key.slice());
         var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -366,7 +386,7 @@ test "saved invalid Action targets round trip through Store observation and exac
         const decoded = try protocol_reply.CommandObservation.parse(.{ .status = 200, .body = output.written() }, command.key.slice());
         try std.testing.expectEqual(target, decoded.action_target.?);
         try std.testing.expectEqualStrings("invalid_target", decoded.failureCode().?);
-        const replay = storage.backgroundAction(&command, capacity, .{});
+        const replay = storage.backgroundAction(.{ .command = &command }, .{});
         try std.testing.expect(replay == .rejected and replay.rejected.code == .invalid_target and replay.rejected.replayed);
     }
 }
@@ -390,10 +410,21 @@ test "native Current separates background fulfillment from final Resolution acro
         if (settle == .during) _ = try storage.settleActionAttempt(binding, .succeeded, "Sole final result", .{});
         try promoted.expectCurrent(&storage, &tmp, if (settle == .after) .pending else .resolved_open);
         try PromotedAction.finish(&storage, &tmp, continuation);
+        if (settle == .during) {
+            try promoted.expectCurrent(&storage, &tmp, .resolved_open);
+            const boundary = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(continuation.turn_id, boundary.turn_id);
+            try PromotedAction.finish(&storage, &tmp, boundary);
+        }
         try promoted.expectCurrent(&storage, &tmp, if (settle == .after) .pending else .resolved_closed);
         if (settle == .after) _ = try storage.settleActionAttempt(binding, .succeeded, "Sole final result", .{});
         try promoted.expectCurrent(&storage, &tmp, .resolved_closed);
         try std.testing.expectEqualDeep(original, try promoted.receipt(&storage));
+        if (settle == .after) {
+            const delivered = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try PromotedAction.finish(&storage, &tmp, delivered);
+        }
+        try promoted.expectFinalInput(&storage, "Sole final result");
     }
 }
 

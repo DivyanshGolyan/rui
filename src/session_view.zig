@@ -1137,13 +1137,19 @@ test "a queued Message is labelled only while work under way holds it" {
     inline for (.{ .queued, .excluded, .applied }) |state| try std.testing.expect(messageLabel(state, .none) == null);
 }
 
+fn inputPrefix(sink: anytype, colour: bool, admitted_at: u64, action: ?u64) !void {
+    if (action) |id| {
+        try print(sink, "{s}Background Action {d}{s}\n", .{ Style.quiet.code(colour), id, Style.normal.code(colour) });
+    } else try userPrefix(sink, colour, admitted_at);
+}
+
 pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool) !void {
     if (messageLabel(value.state, labels)) |text| {
         try print(sink, "{s}{s}{s}\n", .{ Style.quiet.code(colour), text, Style.normal.code(colour) });
     }
     if (value.sender) |sender| return peerLine(sink, .inbound, sender, value.admitted_at);
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
-    try userPrefix(sink, colour, value.admitted_at);
+    try inputPrefix(sink, colour, value.admitted_at, value.source_action);
     var body: UserBody(@TypeOf(sink)) = undefined;
     try body.init(sink, value.content.length, false);
     try content(requests, store, session, item, value.content, &body);
@@ -1501,7 +1507,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
         },
         .received => |value| try message(requests, store, session, item, value, .none, sink, colour),
         .user => |value| {
-            if (value.sender != null) return false;
+            if (value.sender != null or value.source_action != null) return false;
             try message(requests, store, session, item, value, .none, sink, colour);
         },
         .assistant => |assistant| {
@@ -1763,4 +1769,17 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
     const projection = Consent.project(screen.consent, .{ .action_page = true, .read = true }, false);
     try std.testing.expect(projection.approval == .preview);
     try std.testing.expect(Consent.offered(screen.consent, projection.approval) == null);
+}
+
+test "background final input prefix names the Action instead of a person" {
+    const Sink = struct {
+        bytes: std.Io.Writer.Allocating,
+        pub fn feed(self: *@This(), text: []const u8) !void {
+            try self.bytes.writer.writeAll(text);
+        }
+    };
+    var sink: Sink = .{ .bytes = .init(std.testing.allocator) };
+    defer sink.bytes.deinit();
+    try inputPrefix(&sink, false, 1, 42);
+    try std.testing.expectEqualStrings("Background Action 42\n", sink.bytes.written());
 }

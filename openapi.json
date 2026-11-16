@@ -1454,6 +1454,7 @@
                       "unknown_action",
                       "target_mismatch",
                       "source_stopped",
+                      "action_not_backgroundable",
                       "background_unavailable"
                     ]
                   }
@@ -1610,6 +1611,16 @@
                           }
                         ]
                       },
+                      "source_action": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "content": {
                         "$ref": "#/components/schemas/ActivityItemContent"
                       }
@@ -1621,6 +1632,7 @@
                       "state",
                       "admitted_at",
                       "sender",
+                      "source_action",
                       "content"
                     ],
                     "additionalProperties": false
@@ -1697,6 +1709,16 @@
                           }
                         ]
                       },
+                      "source_action": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "content": {
                         "$ref": "#/components/schemas/ActivityItemContent"
                       }
@@ -1708,6 +1730,7 @@
                       "state",
                       "admitted_at",
                       "sender",
+                      "source_action",
                       "content"
                     ],
                     "additionalProperties": false
@@ -2307,6 +2330,16 @@
                           }
                         ]
                       },
+                      "source_action": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "content": {
                         "$ref": "#/components/schemas/ActivityItemContent"
                       }
@@ -2318,6 +2351,7 @@
                       "state",
                       "admitted_at",
                       "sender",
+                      "source_action",
                       "content"
                     ],
                     "additionalProperties": false
@@ -3841,6 +3875,16 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "source_action": {
+                          "anyOf": [
+                            {
+                              "$ref": "#/components/schemas/Decimal"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -3849,7 +3893,8 @@
                         "kind",
                         "content",
                         "admitted_at",
-                        "sender"
+                        "sender",
+                        "source_action"
                       ],
                       "additionalProperties": false
                     },
@@ -4150,6 +4195,16 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "source_action": {
+                          "anyOf": [
+                            {
+                              "$ref": "#/components/schemas/Decimal"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -4158,7 +4213,8 @@
                         "kind",
                         "content",
                         "admitted_at",
-                        "sender"
+                        "sender",
+                        "source_action"
                       ],
                       "additionalProperties": false
                     },
@@ -5405,6 +5461,12 @@
                 "minimum": 0,
                 "maximum": 18446744073709551615,
                 "description": "How many Turns may run at once."
+              },
+              "backgroundAfterMs": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9223372036854775807,
+                "description": "Background a live Host-run Action after this many milliseconds."
               },
               "paused": {
                 "type": "boolean",
