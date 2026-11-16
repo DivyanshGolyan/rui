@@ -799,20 +799,46 @@ def saved_settings(root, env):
     piped = run_start(root / "saved-pipe", env, "--settings", "-")
     assert piped.returncode != 0 and "rui host serve --settings -" in piped.stderr, piped
 
-    # Settings that move the Host out of its directory are refused before any launch.
-    moved = root / "saved-moved"
-    # An interface directory holds the socket, so its path is bounded (94
-    # bytes); a sibling of root can exceed that under a long TMPDIR.
-    elsewhere = pathlib.Path(tempfile.mkdtemp(prefix="rui-if-", dir="/tmp")).resolve()
-    try:
-        host_ok(env, "set", "--store", moved, "interface.dir", elsewhere)
-        too_long = host_command(env, "set", "--store", moved, "interface.dir", "/" + "d" * 94)
-        assert too_long.returncode == 2 and "interface.dir: path is longer than 94 bytes" in too_long.stderr, too_long
-    finally:
-        os.rmdir(elsewhere)
-    refused = run_start(moved, env)
-    assert refused.returncode != 0 and "interface.dir: bare rui and rui host start reach only" in refused.stderr, refused
-    assert "[settings_invalid]" in refused.stderr and not matching_processes(moved), refused
+    # Saved placement is shared by foreground intake, the starter and clients.
+    # A short interface remains necessary even under CI's long TMPDIR.
+    for relocate_store in (False, True):
+        moved = root / ("saved-moved-store" if relocate_store else "saved-moved")
+        elsewhere = pathlib.Path(tempfile.mkdtemp(prefix="rui-if-", dir="/tmp")).resolve()
+        try:
+            host_ok(env, "set", "--store", moved, "interface.dir", elsewhere)
+            if relocate_store:
+                host_ok(env, "set", "--store", moved, "store.sqlite.dir", moved / "data")
+            too_long = host_command(env, "set", "--store", moved, "interface.dir", "/" + "d" * 94)
+            assert too_long.returncode == 2 and "interface.dir: path is longer than 94 bytes" in too_long.stderr, too_long
+            started = run_start(moved, env)
+            assert started.returncode == 0, started
+            info = status(moved, env)
+            assert instance(info, DEFAULT_ACTIVE_CAPACITY)
+            assert (elsewhere / "rui.sock").is_socket()
+            record = root / ("moved-store-request.json" if relocate_store else "moved-request.json")
+            command = subprocess.run([RUI, "session", "start", "--store", str(moved),
+                                      "--record", str(record), "--key", "placement-start",
+                                      "--provider", "codex", "--model", "gpt-5.5", "--workspace", str(root)],
+                                     env=env, text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
+            assert command.returncode == 0, command
+            receipt = json.loads(command.stdout)
+            expected_store = (moved / "data" if relocate_store else moved).resolve()
+            assert receipt["context"]["store"] == str(expected_store), receipt
+            observed = subprocess.run([RUI, "request", "inspect", "--store", str(moved), "--key", "placement-start"],
+                                      env=env, text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
+            assert observed.returncode == 0, observed
+            replay = subprocess.run([RUI, "request", "recover", "--store", str(moved), "--record", str(record), "--kind", "configure"],
+                                    env=env, text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
+            assert replay.returncode == 0, replay
+            paused = host_command(env, "pause", "--store", moved)
+            assert paused.returncode == 0 and json.loads(paused.stdout)["retirement"] == "confirmed", paused
+        finally:
+            forced_crash_cleanup(moved)
+            shutil.rmtree(elsewhere)
+
+    # Placement overrides cannot leave later directory clients guessing.
+    unsaved = run_start(root / "unsaved-placement", env, "--set", f"interface.dir={root}")
+    assert unsaved.returncode != 0 and "rui host set" in unsaved.stderr, unsaved
 
     # A started Host runs in `/`: a path typed relative is taken from the
     # caller's directory, and a relative path saved in host.json, which has no

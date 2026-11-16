@@ -1298,7 +1298,9 @@ test "Host start explicit providers replace automatic defaults and MySQL keeps i
     var fixtures: providers.Fixtures = .{};
     try fillAt(init, &parsed, dir, settings, &fixtures, &failure);
     try std.testing.expectEqual(start_report.Store.mysql, storeKind(settings));
-    try std.testing.expectEqualStrings(dir, settings.interface.dir.slice());
+    try anchorPlacement(init, settings, dir, &failure);
+    var runtime: [platform.max_socket_path_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(try platform.defaultMysqlInterface(dir, &runtime), settings.interface.dir.slice());
     try selectStore(init, settings, dir, false, &failure);
     try std.testing.expectEqual(start_report.Store.mysql, storeKind(settings));
 }

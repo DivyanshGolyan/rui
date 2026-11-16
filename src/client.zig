@@ -637,12 +637,21 @@ pub const HostControlObservation = struct {
 };
 
 pub fn observeHostForUpgrade(io: std.Io, store_path: []const u8, deadline: ?i128) !HostControlObservation {
+    const paths = try platform.resolveClientPaths(io, store_path);
+    return observeHostForUpgradeAt(io, &paths, deadline);
+}
+
+fn observeHostForUpgradeAt(io: std.Io, paths: *const platform.Paths, deadline: ?i128) !HostControlObservation {
     // Every known profile shares one absolute discovery budget, including connection.
     const until = hostObservationDeadline(io, deadline);
     for (std.enums.values(protocol_reply.HostInfoProfile)) |profile| {
-        return observeHostForUpgradeProfile(io, store_path, profile, until) catch |err| switch (err) {
+        const reading = readHostControlAt(io, paths, profile, until, .strict) catch |err| switch (err) {
             error.WrongWireVersion => continue,
             else => return err,
+        };
+        return switch (reading) {
+            .compatible => |observed| observed,
+            .incompatible => error.WrongWireVersion,
         };
     }
     return error.WrongWireVersion;
@@ -700,10 +709,7 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
     if (!std.fs.path.isAbsolute(supplied)) return error.HostServeStoreRelative;
     const paths = try platform.resolveClientPaths(io, supplied);
     if (!std.mem.eql(u8, paths.socket.slice(), socket_path)) return error.HostSocketStoreMismatch;
-    const observed = switch (try readHostControlAt(io, &paths, .current, until, .strict)) {
-        .compatible => |observed| observed,
-        .incompatible => return error.WrongWireVersion,
-    };
+    const observed = try observeHostForUpgradeAt(io, &paths, until);
     if (observed.pid != pid) return error.HostPeerPidMismatch;
     return observed;
 }

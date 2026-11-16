@@ -363,8 +363,8 @@ pub fn mysqlClientPaths(io: std.Io, store: []const u8, runtime: []const u8) !Pat
 fn interfacePaths(kind: Kind, store: []const u8, runtime: []const u8) !Paths {
     var paths: Paths = .{ .kind = kind };
     try paths.store.set(store);
-    try paths.socket.set(try std.fmt.bufPrint(&paths.socket.bytes, "{s}/rui.sock", .{runtime}));
-    try paths.scratch.set(try std.fmt.bufPrint(&paths.scratch.bytes, "{s}/scratch", .{runtime}));
+    paths.socket.len = (try std.fmt.bufPrint(&paths.socket.bytes, "{s}/rui.sock", .{runtime})).len;
+    paths.scratch.len = (try std.fmt.bufPrint(&paths.scratch.bytes, "{s}/scratch", .{runtime})).len;
     return paths;
 }
 
