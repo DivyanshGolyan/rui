@@ -792,7 +792,7 @@ def saved_settings(root, env):
             assert instance(info, DEFAULT_ACTIVE_CAPACITY)
             if explicit:
                 assert (elsewhere / "rui.sock").is_socket()
-            defaults = subprocess.run([RUI, "defaults", "show"], env=selected_env,
+            defaults = subprocess.run([RUI, "defaults", "inspect"], env=selected_env,
                                       text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
             assert defaults.returncode == 0 and json.loads(defaults.stdout)["host"]["status"] == "ready", defaults
             retained = run_start(moved, selected_env, "--set", "execution.activeCapacity=3")
