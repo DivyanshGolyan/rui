@@ -329,9 +329,9 @@ fn restoreScalarUpgradeInput(storage: *Store) !void {
     const unique_input = "(SELECT INDEX_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='core_command' AND NON_UNIQUE=0 GROUP BY INDEX_NAME HAVING GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX SEPARATOR ',')='command_key,kind,input_part_count')";
     if (storage.engine == .mysql) {
         inline for (checks) |check| {
-            try std.testing.expectEqual(@as(u64, check[2]), try mysql_testing.queryU64(storage, "SELECT count(*) AS value" ++ catalog ++ "'" ++ check[0] ++ "' AND " ++ check[1], .{}));
+            try std.testing.expectEqual(@as(u64, check[2]), try mysql_testing.rawQueryU64(storage, "SELECT count(*) AS value" ++ catalog ++ "'" ++ check[0] ++ "' AND " ++ check[1]));
         }
-        try std.testing.expectEqual(@as(u64, 1), try mysql_testing.queryU64(storage, "SELECT count(*) AS value FROM " ++ unique_input ++ " rewind_index", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try mysql_testing.rawQueryU64(storage, "SELECT count(*) AS value FROM " ++ unique_input ++ " rewind_index"));
         inline for (checks) |check| {
             try Native.exec(storage, "SET @rui_rewind_ddl=(SELECT CONCAT('ALTER TABLE " ++ check[0] ++ " ',GROUP_CONCAT(CONCAT('DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') ORDER BY tc.CONSTRAINT_NAME SEPARATOR ', '))" ++ catalog ++ "'" ++ check[0] ++ "' AND " ++ check[1] ++ ")");
             try Native.exec(storage, "PREPARE rui_rewind FROM @rui_rewind_ddl");

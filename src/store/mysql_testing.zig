@@ -268,6 +268,15 @@ pub fn rawExec(storage: *Store, sql: []const u8) !void {
     try run(sql);
 }
 
+/// Fixture-only catalog reads, alongside raw server controls.
+pub fn rawQueryU64(storage: *Store, sql: []const u8) !u64 {
+    mutex.lockUncancelable(std.testing.io);
+    defer mutex.unlock(std.testing.io);
+    try use(storage);
+    try root.query(sql);
+    return readU64();
+}
+
 fn globalValue(comptime name: []const u8) !protocol.Bounded(32) {
     try root.query("SELECT @@global." ++ name);
     const Row = struct { value: protocol.Bounded(32) };
