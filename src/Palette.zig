@@ -111,7 +111,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const count = commands.named(list.count, placed.content.height);
     const first = list.firstShown(self.shown.highlight, placed.content.height);
     self.first = first;
-    self.drawn = self.shown.pick(first);
+    self.drawn = self.shown.pick(self.shown.highlight);
     const targets = try ctx.arena.alloc(Hover.Rect, if (self.on_select != null) count else 0);
     for (targets, 0..) |*rect, index| rect.* = placed.row(index);
     self.hover.targets = targets;

@@ -869,8 +869,10 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
     if (self.leaving != null) return;
     self.shown_notice.dismiss();
     const input: session_keys.Input = .{ .key = sessionKey(event), .pasted = delivery.pasted };
-    // Only Enter takes a row, so only Enter reads the list.
-    const shown = if (input.key == .enter and !input.pasted) self.shownRow() else null;
+    const shown = if ((input.key == .enter or input.key == .tab) and !input.pasted)
+        self.shownRow(if (input.key == .tab) self.app_palette.drawn else null)
+    else
+        null;
     const previous = self.app_consent.row;
     const consent: ?*ActionConsent = if (self.app_consent.request != null) &self.app_consent else null;
     const take = session_keys.step(.{ .footer = &self.footer, .consent = consent }, .{
@@ -927,7 +929,8 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
         },
         .take_row => {
             self.notice = null;
-            try self.takeRow(shown.?);
+            if (input.key == .tab) self.screen.commands = shown.?;
+            try self.takeRow(&shown.?);
         },
         .edit => |edit| {
             self.notice = null;
@@ -2954,17 +2957,21 @@ fn runLine(self: *Self) !void {
     try self.slashCommand(self.input.composition().bytes);
 }
 
-/// The list whose highlighted row Enter takes: one the latest frame drew.
-fn shownRow(self: *Self) ?*slash_commands_shared.Shown {
+/// The highlighted row Enter or Tab takes from the latest frame.
+fn shownRow(self: *Self, drawn: ?slash_commands_shared.Shown.Pick) ?slash_commands_shared.Shown {
     // A rejected line is the editor's to refuse and clear.
     if (self.input.editors[self.input.active].rejected != null) return null;
-    return self.shownCommands();
+    if (drawn) |pick| {
+        var stored = self.screen.commands;
+        return (slash_commands_shared.Shown.pickedNow(&stored, self.nextCommands(stored), pick) orelse return null).*;
+    }
+    return (self.shownCommands() orelse return null).*;
 }
 
-/// Enter or a click on the list's highlighted row, as `skill_completion`
+/// Enter, Tab or a click on the list's highlighted row, as `skill_completion`
 /// reads it: the row's word goes into the draft, and a row that runs then
 /// runs the line, admitted as a typed command is.
-fn takeRow(self: *Self, shown: *slash_commands_shared.Shown) !void {
+fn takeRow(self: *Self, shown: *const slash_commands_shared.Shown) !void {
     const draft = self.input.composition();
     const refused = switch (skill_completion.enter(draft.bytes, draft.cursor, shown)) {
         .run => |rest| {
@@ -4303,19 +4310,218 @@ test "a key on a draft changed since the latest frame acts on that draft's list 
     try std.testing.expect(held.screen.commands == null);
 }
 
-test "Tab focuses footer without completing a command and Enter still takes drawn command choices" {
+test "Tab accepts the drawn slash row exactly as Enter without submitting a Message" {
+    const Case = struct {
+        text: []const u8,
+        caret: ?usize = null,
+        cursor: ?usize = null,
+        down: bool = false,
+        draft: []const u8,
+        command: ?[]const u8 = null,
+    };
+    const cases = [_]Case{
+        .{ .text = "/eff", .draft = "/effort " },
+        .{ .text = "/r", .down = true, .draft = "/rename " },
+        .{ .text = "/set", .draft = "", .command = "/setup" },
+        .{ .text = "/setup --mo", .draft = "/setup --model " },
+        .{ .text = "/setup --permission-mode a", .draft = "", .command = "/setup --permission-mode ask" },
+        .{ .text = "/eff later", .caret = "/eff".len, .cursor = "/effort".len, .draft = "/effort later" },
+    };
+    for (cases) |case| for ([_][]const u8{ "\r", "\t", "\x1b[9u" }) |key| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        errdefer std.debug.print("row acceptance: text={s} key={any}\n", .{ case.text, key });
+        _ = self.input.append(case.text);
+        self.input.editors[self.input.active].setCursor(case.caret orelse case.text.len);
+        _ = try held.draw();
+        try std.testing.expect(self.shownRow(null) != null);
+        if (case.down) {
+            try held.keys("\x1b[B");
+            _ = try held.draw();
+        }
+        try held.keys(key);
+        try std.testing.expectEqualStrings(case.draft, self.input.composition().bytes);
+        try std.testing.expectEqual(case.cursor orelse case.draft.len, self.input.composition().cursor);
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try std.testing.expect(self.submission.intent == null);
+        if (case.command) |command| {
+            try std.testing.expectEqualStrings(command, self.input.takeCommand().?);
+            try std.testing.expect(self.input.takeCommand() == null);
+        } else try std.testing.expect(self.input.queuedCommand() == null);
+    };
+}
+
+test "Tab accepts drawn skill names and arguments at the caret exactly as Enter" {
+    const entries = [_]skill_suggestions.Entry{
+        .{ .name = "recap", .description = "Summarise" },
+        .{ .name = "review", .description = "Review a change" },
+    };
+    const Case = struct {
+        text: []const u8,
+        caret: ?usize = null,
+        down: bool = false,
+        draft: []const u8,
+        cursor: usize,
+    };
+    for ([_]Case{
+        .{ .text = "/rev", .draft = "/review ", .cursor = "/review ".len },
+        .{ .text = "Use /re", .down = true, .draft = "Use /review ", .cursor = "Use /review ".len },
+        .{ .text = "/rev this change", .caret = "/rev".len, .draft = "/review this change", .cursor = "/review".len },
+        .{ .text = "please /rev now", .caret = "please /rev".len, .draft = "please /review now", .cursor = "please /review".len },
+        .{ .text = "please /review now", .caret = "please /r".len, .draft = "please /review now", .cursor = "please /review".len },
+    }) |case| for ([_][]const u8{ "\r", "\t", "\x1b[9u" }) |key| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        errdefer std.debug.print("skill row acceptance: text={s} key={any}\n", .{ case.text, key });
+        defer _ = self.skills.reset();
+        try std.testing.expect(self.skills.answer(self.skills.ask("").?.read, .{ .entries = @constCast(&entries), .total = entries.len }, "") == null);
+        _ = self.input.append(case.text);
+        self.input.editors[self.input.active].setCursor(case.caret orelse case.text.len);
+        _ = try held.draw();
+        try std.testing.expect(self.shownRow(null) != null);
+        if (case.down) {
+            try held.keys("\x1b[B");
+            _ = try held.draw();
+        }
+        try held.keys(key);
+        try std.testing.expectEqualStrings(case.draft, self.input.composition().bytes);
+        try std.testing.expectEqual(case.cursor, self.input.composition().cursor);
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try std.testing.expect(self.submission.intent == null);
+        try std.testing.expect(self.input.queuedCommand() == null);
+    };
+}
+
+test "Tab cannot take a stale row after draft caret or skill source changes" {
+    const entries = [_]skill_suggestions.Entry{.{ .name = "review", .description = "Review" }};
+    const Change = enum { narrowed, changed, caret, source };
+    for ([_]Change{ .narrowed, .changed, .caret, .source }) |change| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        defer _ = self.skills.reset();
+        try std.testing.expect(self.skills.answer(self.skills.ask("").?.read, .{ .entries = @constCast(&entries), .total = entries.len }, "") == null);
+        _ = self.input.append("please /rev");
+        _ = try held.draw();
+        try std.testing.expect(self.shownRow(self.app_palette.drawn) != null);
+        switch (change) {
+            .narrowed => _ = self.input.append("i"),
+            .changed => {
+                self.input.clear();
+                _ = self.input.append("please /re");
+            },
+            .caret => self.input.editors[self.input.active].setCursor("please ".len),
+            .source => _ = self.skills.reset(),
+        }
+        const draft = self.input.composition();
+        const expected = try std.testing.allocator.dupe(u8, draft.bytes);
+        defer std.testing.allocator.free(expected);
+        try std.testing.expect(self.shownRow(self.app_palette.drawn) == null);
+        try held.keys("\t");
+        try std.testing.expectEqualStrings(expected, self.input.composition().bytes);
+        try std.testing.expectEqual(draft.cursor, self.input.composition().cursor);
+        try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
+        try std.testing.expect(self.submission.intent == null);
+        try std.testing.expect(self.input.queuedCommand() == null);
+    }
+}
+
+test "Tab takes the highlighted skill actually drawn while Enter retains pending arrow behavior" {
+    const entries = [_]skill_suggestions.Entry{
+        .{ .name = "recap", .description = "Summarise" },
+        .{ .name = "review", .description = "Review" },
+    };
+    for ([_][]const u8{ "\r", "\t", "\x1b[9u" }) |key| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        defer _ = self.skills.reset();
+        try std.testing.expect(self.skills.answer(self.skills.ask("").?.read, .{ .entries = @constCast(&entries), .total = entries.len }, "") == null);
+        _ = self.input.append("Use /re");
+        _ = try held.draw();
+        try held.keys("\x1b[B");
+        try held.keys(key);
+        try std.testing.expectEqualStrings(if (key[0] == '\r') "Use /review " else "Use /recap ", self.input.composition().bytes);
+        try std.testing.expect(self.submission.intent == null);
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+    }
+}
+
+test "Tab and pointer refuse effort rows from the previous model until repaint" {
+    for ([_]bool{ false, true }) |pointer| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        self.line.read = .{ .revision = 1, .end = 1 };
+        try self.line.model.set("unlisted-model");
+        _ = self.input.append("/effort ");
+        _ = try held.draw();
+        const pick = self.app_palette.drawn;
+        try std.testing.expectEqualStrings("none", self.screen.commands.?.list.entries[pick.index].word);
+        try self.line.model.set("gpt-4o");
+        if (pointer) {
+            var ctx = held.context();
+            try appSelectCommand(self, &ctx, pick);
+        } else try held.keys("\t");
+        try std.testing.expectEqualStrings("/effort ", self.input.composition().bytes);
+        try std.testing.expect(self.input.queuedCommand() == null);
+        try std.testing.expect(self.info_edit == null);
+        try std.testing.expect(self.submission.intent == null);
+        self.footer.focus = .input;
+        _ = try held.draw();
+        const fresh = self.app_palette.drawn;
+        try std.testing.expectEqualStrings("default", self.screen.commands.?.list.entries[fresh.index].word);
+        if (pointer) {
+            var ctx = held.context();
+            try appSelectCommand(self, &ctx, fresh);
+        } else try held.keys("\t");
+        try std.testing.expectEqualStrings("/effort default", self.input.takeCommand().?);
+        try std.testing.expectEqualStrings("", self.input.composition().bytes);
+        try std.testing.expect(self.submission.intent == null);
+    }
+}
+
+test "Tab outside a drawn slash row retains footer navigation and the draft" {
+    const Case = struct { text: []const u8, draw: bool = true, closed: bool = false, rejected: bool = false };
+    for ([_]Case{
+        .{ .text = "" },
+        .{ .text = "ordinary text" },
+        .{ .text = "/genuinely-unknown" },
+        .{ .text = "/rename my chat" },
+        .{ .text = "/eff", .draw = false },
+        .{ .text = "/eff", .closed = true },
+        .{ .text = "/eff", .rejected = true },
+    }) |case| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        _ = self.input.append(case.text);
+        if (case.draw) _ = try held.draw();
+        if (case.closed) self.screen.commands.?.close();
+        if (case.rejected) self.input.editors[self.input.active].rejected = .invalid;
+        try std.testing.expect(self.shownRow(null) == null);
+        try held.keys("\t");
+        try std.testing.expectEqualStrings(case.text, self.input.composition().bytes);
+        try std.testing.expectEqual(case.text.len, self.input.composition().cursor);
+        try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
+        try std.testing.expect(self.submission.intent == null);
+        try std.testing.expect(self.input.queuedCommand() == null);
+    }
+}
+
+test "pasted Tab beside a drawn row stays in the draft" {
     const held = try HeldFrontend.create();
     defer held.destroy();
-    const self = &held.self;
-    try held.settle();
-    try stepKeys(held, "/set\t");
-    try std.testing.expectEqualStrings("/set", self.input.composition().bytes);
-    try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
-    try held.keys("\x07");
-    try held.settle();
-    try held.keys("\r");
-    try std.testing.expectEqualStrings("/setup", self.input.takeCommand().?);
-    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+    _ = held.self.input.append("/eff");
+    _ = try held.draw();
+    try std.testing.expect(held.self.shownRow(null) != null);
+    try held.keys("\x1b[200~\t\x1b[201~");
+    try std.testing.expectEqualStrings("/eff\t", held.self.input.composition().bytes);
+    try std.testing.expectEqual(session_chrome.FooterFocus.input, held.self.footer.focus);
+    try std.testing.expect(held.self.submission.intent == null);
+    try std.testing.expect(held.self.input.queuedCommand() == null);
 }
 
 test "a key before a new Session's first frame finds no list the previous Session drew" {
@@ -4422,6 +4628,7 @@ test "the /requests page lists its rows over an empty draft, Enter takes a row a
     try std.testing.expectEqualStrings("/result " ++ original, held.screen.commands.?.list.entries[0].word);
     // Tab leaves the highlighted row and draft intact; Enter retains its action.
     try held.keys("\x1b[B\t");
+    try std.testing.expectEqual(@as(usize, 1), held.screen.commands.?.highlight);
     try std.testing.expectEqualStrings("", self.input.composition().bytes);
     try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
     try held.keys("\x07\r");
