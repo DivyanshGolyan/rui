@@ -337,6 +337,48 @@ test "ordered input incapable Text readers validate compound identity before ord
     }.run);
 }
 
+test "session list verifies the first unsupported Message when later rows decode" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            const Later = enum { empty, text, compound, damaged_compound };
+            inline for (std.enums.values(Later)) |later_shape| {
+                inline for (.{ false, true }) |first_damaged| {
+                    var tmp = std.testing.tmpDir(.{});
+                    defer tmp.cleanup();
+                    var used = std.atomic.Value(u64).init(0);
+                    var capture: InputCapture = undefined;
+                    const loan = try captureInto(&capture, tmp.dir, .{ .used = &used, .limit = 8192 }, &mixed);
+                    defer capture.close();
+                    var storage: Store = undefined;
+                    try testing.testingStore(case, &storage, &tmp, std.testing.io);
+                    defer storage.close() catch unreachable;
+                    const first = try testing.configureTestSession(&storage, "list-first-config");
+                    const later = try testing.configureTestSession(&storage, "list-later-config");
+                    const first_command = try commandFor("list-first-message", first.slice());
+                    const later_command = try commandFor("list-later-message", later.slice());
+                    try std.testing.expect(storage.submitMessageInput(&first_command, .{ .parts = loan }, null, null, null, .{}) == .accepted);
+                    switch (later_shape) {
+                        .empty => {},
+                        .text => try testing.submitTestMessage(&storage, &tmp, "list-later-input", later_command.key.slice(), later.slice(), "later text"),
+                        .compound, .damaged_compound => try std.testing.expect(storage.submitMessageInput(&later_command, .{ .parts = loan }, null, null, null, .{}) == .accepted),
+                    }
+                    _ = (try storage.admitNextModelAttempt(.{})).?;
+                    if (later_shape != .empty) _ = (try storage.admitNextModelAttempt(.{})).?;
+                    if (first_damaged) try damage(&storage, first_command.key.slice());
+                    if (later_shape == .damaged_compound) try damage(&storage, later_command.key.slice());
+                    try std.testing.expectError(if (first_damaged) error.CorruptStore else error.InputPartsNotSupported, readTextDoor(&storage, &tmp, &first_command, 0, .list));
+                    try std.testing.expectEqual(first_damaged, storage.isFenced());
+                }
+            }
+        }
+
+        fn damage(storage: *Store, key: []const u8) !void {
+            const replacement = try testing.queryU64(storage, "SELECT content_id FROM input_part WHERE command_key=?1 AND ordinal=0", .{key});
+            try testing.exec(storage, "UPDATE input_part SET content_id=?1 WHERE command_key=?2 AND ordinal=2", .{ replacement, key });
+        }
+    }.run);
+}
+
 test "ordered input frozen history validates compound facts before floors and excludes later arrivals" {
     try testing.forEachEngine(struct {
         fn run(case: *testing.Case) !void {
