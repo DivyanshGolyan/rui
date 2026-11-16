@@ -2582,7 +2582,7 @@ def frame_initial_ready(terminal, first_wait=None, allow_exit=False):
                   and re.search(r"^ *(?:Close {2,}\S|\[ Close \] *$)", text, re.M) is not None
                   and re.search(r"^ *(?:Navigation {2,})?Tab / Shift-Tab", text, re.M) is not None)
         return (("›" in text or all(marker in text for marker in
-                 ("+ New Session", "Settings", "enter open")) or guided)
+                 ("+ New Session", "Settings")) or guided)
                 and "Opening…" not in text and (not first_wait or first_wait in text))
 
     terminal.wait(ready, "initial screen ready" + (f" with {first_wait!r}" if first_wait else ""),
