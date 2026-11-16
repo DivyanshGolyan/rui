@@ -4,6 +4,7 @@ const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
 const core_tools = @import("core_tools.zig");
 const start_report = @import("start_report.zig");
+const expectToolSetNames = @import("store/tests.zig").expectToolSetNames;
 
 fn checkPreset(gpa: std.mem.Allocator, spec: std.json.ObjectMap) error{OutOfMemory}!?[]const u8 {
     const configuration = try gpa.create(wire_request.Configuration);
@@ -68,6 +69,9 @@ test "settings presets resolve MCP tools through the same tool set as configure"
                     try std.testing.expect(ordinary == .accepted);
                     try std.testing.expect(preset == .accepted);
                     for ([_]@TypeOf(ordinary.accepted.session){ ordinary.accepted.session, preset.accepted.session }) |session| {
+                        const saved = try storage.inspectSessionForTesting(session.slice());
+                        try expectToolSetNames(&storage, saved.tool_set_id, &.{"fetch_page"});
+                        try std.testing.expectEqualStrings("ask", saved.permission_mode.slice());
                         try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session s JOIN tool_set_member m ON m.tool_set_id=s.tool_set_id " ++
                             "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{session.slice()}));
                     }

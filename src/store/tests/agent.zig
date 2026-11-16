@@ -312,6 +312,9 @@ test "start_agent narrows configured tool names including unloaded MCP members" 
                     try std.testing.expectEqual(command_domain.AgentStart.started, result);
                     const child = try storage.inspectSessionForTesting(capture.child.slice());
                     try expectToolSetNames(&storage, child.tool_set_id, entry.names);
+                    try std.testing.expectEqualStrings("ask", child.permission_mode.slice());
+                    try std.testing.expectEqualStrings(create.configuration.workspace.value.slice(), child.workspace.slice());
+                    try std.testing.expectEqual(protocol.Provider.codex, child.provider.?);
                     started += 1;
                 }
                 try std.testing.expectEqual(1 + started, try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
@@ -772,6 +775,9 @@ test "configure parent inherits binding without a task, uses the create round bu
                 if (case.engine == .mysql) try std.testing.expectEqual(measured.shape.expected(), measured.shape.queries);
             }
             const session = result.accepted.session;
+            const configured = try storage.inspectSessionForTesting(session.slice());
+            try expectToolSetNames(&storage, configured.tool_set_id, &.{"bash"});
+            try std.testing.expectEqualStrings("ask", configured.permission_mode.slice());
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND parent_ref=?2 AND workspace=?3 AND provider='codex'", .{ session.slice(), parent.slice(), workspace }));
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{session.slice()}));
             const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 128 * 1024, .current);

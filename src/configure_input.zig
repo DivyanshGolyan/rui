@@ -44,7 +44,10 @@ pub const ConfigureInput = struct {
     pub fn completeCreation(self: *ConfigureInput, provider: Provider, model: []const u8, saved_effort: ?ReasoningEffort, saved_permission: ?PermissionMode, compaction: *[20]u8) void {
         self.reasoning_effort = creationEffort(model, self.reasoning_effort, saved_effort);
         if (!self.compaction_trigger.present or self.compaction_trigger.value == null) self.compaction_trigger = .{ .present = true, .value = compactionTrigger(provider, model, compaction) };
-        if (self.tools == null) self.tools = product_defaults.tools;
+        if (self.tools == null) {
+            self.tools = product_defaults.tools;
+            if (self.loaded_tools == null) self.loaded_tools = product_defaults.loaded_tools;
+        }
         if (!self.permission_mode.present) self.permission_mode = .{ .present = true, .value = if (saved_permission) |mode| @tagName(mode) else product_defaults.permission_mode };
     }
 
@@ -92,6 +95,7 @@ test "a fresh Session sends concrete defaults where its caller named none" {
     try std.testing.expectEqualStrings("115200", input.compaction_trigger.value.?);
     try std.testing.expectEqualStrings(product_defaults.reasoning_effort, input.reasoning_effort.value.?);
     try std.testing.expectEqualStrings(product_defaults.tools, input.tools.?);
+    try std.testing.expectEqualStrings(product_defaults.loaded_tools, input.loaded_tools.?);
     try std.testing.expectEqualStrings(product_defaults.permission_mode, input.permission_mode.value);
     try std.testing.expect(!input.workspace.present and !input.output_reservation.present and !input.label.present);
 
@@ -164,4 +168,28 @@ test "an update resets only the settings it names to default" {
     reset.completeReset(.openai, "gpt-6-luna", &compaction);
     try std.testing.expectEqualStrings("low", reset.reasoning_effort.value.?);
     try std.testing.expect(!reset.compaction_trigger.present);
+}
+
+test "fresh creation preserves explicitly restricted tool selections" {
+    var compaction: [20]u8 = undefined;
+    for ([_]struct { tools: []const u8, loaded: ?[]const u8 }{
+        .{ .tools = "bash", .loaded = null },
+        .{ .tools = "bash,find_tools", .loaded = "find_tools" },
+        .{ .tools = "none", .loaded = "none" },
+    }) |case| {
+        var input: ConfigureInput = .{ .store = "", .session = .create, .tools = case.tools, .loaded_tools = case.loaded };
+        input.completeCreation(.codex, "unlisted-model", null, null, &compaction);
+        try std.testing.expectEqualStrings(case.tools, input.tools.?);
+        if (case.loaded) |loaded| {
+            try std.testing.expectEqualStrings(loaded, input.loaded_tools.?);
+        } else try std.testing.expect(input.loaded_tools == null);
+    }
+}
+
+test "fresh creation preserves explicitly loaded tools with default allowed tools" {
+    var compaction: [20]u8 = undefined;
+    var input: ConfigureInput = .{ .store = "", .session = .create, .loaded_tools = "find_tools" };
+    input.completeCreation(.codex, "unlisted-model", null, null, &compaction);
+    try std.testing.expectEqualStrings(product_defaults.tools, input.tools.?);
+    try std.testing.expectEqualStrings("find_tools", input.loaded_tools.?);
 }

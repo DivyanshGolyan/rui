@@ -1,10 +1,20 @@
+const std = @import("std");
+
 pub const active_capacity: usize = 100;
 
 pub const intake_capacity: usize = 100;
 
 pub const host_shutdown_seconds = 10;
 
-pub const tools = "bash,skill,web_search";
+pub const tools = blk: {
+    var names: []const u8 = "";
+    for (std.meta.fieldNames(@import("built_in_tool.zig").BuiltInTool), 0..) |field, index| {
+        names = names ++ (if (index == 0) "" else ",") ++ field;
+    }
+    break :blk names;
+};
+
+pub const loaded_tools = "bash,find_tools,skill,web_search";
 
 pub const permission_mode = "bypass";
 
@@ -25,10 +35,12 @@ pub const unlisted_context_window: u64 = 128000;
 pub const output_reservation: u64 = 0;
 
 test "approved product defaults" {
-    const std = @import("std");
     try std.testing.expectEqual(@as(usize, 100), active_capacity);
     try std.testing.expectEqual(@as(usize, 100), intake_capacity);
-    try std.testing.expectEqualStrings("bash,skill,web_search", tools);
+    var allowed = std.mem.splitScalar(u8, tools, ',');
+    for (std.meta.fieldNames(@import("built_in_tool.zig").BuiltInTool)) |name| try std.testing.expectEqualStrings(name, allowed.next().?);
+    try std.testing.expect(allowed.next() == null);
+    try std.testing.expectEqualStrings("bash,find_tools,skill,web_search", loaded_tools);
     try std.testing.expectEqualStrings("bypass", permission_mode);
     try std.testing.expectEqualStrings("codex", provider);
     try std.testing.expectEqualStrings("gpt-6.1-sol", recommended_model);
