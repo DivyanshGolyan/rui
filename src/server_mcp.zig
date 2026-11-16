@@ -204,7 +204,7 @@ noinline fn prepare(host: *Host, active: *Active) !void {
     var turn: std.Io.Writer.Allocating = .init(arena);
     try protocol.writeShape(&turn.writer, .{protocol.Hole.decimal}, .{active.binding.turn_id});
     try host.custody.consumeLaunchAuthority(active.token, .{ .action = active.binding }, std.Io.Clock.Timestamp.now(host.io, .awake));
-    try active.running.start(host.allocator, .{
+    const start: Running.Input = .{
         .server = .{ .target = config.target, .bearer_token = config.token },
         .client = offered.client,
         .name = input.runner.mcp.name.slice(),
@@ -225,8 +225,14 @@ noinline fn prepare(host: *Host, active: *Active) !void {
             .action_id = active.binding.action_id,
             .attempt_ordinal = @import("attempt.zig").action_attempt_ordinal,
         },
-    }, nowMs(host));
-    active.started = true;
+    };
+    try host.store.withActionLaunchHandoff(active.binding, .{ .host = host, .active = active, .input = start }, struct {
+        fn handoff(context: anytype, cutoff: u64) !void {
+            try context.active.running.start(context.host.allocator, context.input, nowMs(context.host));
+            context.active.started = true;
+            try context.host.custody.watchMessages(context.active.token, cutoff);
+        }
+    }.handoff);
 }
 
 fn readContent(host: *Host, allocator: std.mem.Allocator, reference: store.ContentReference) ![]const u8 {

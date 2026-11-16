@@ -732,6 +732,14 @@ pub const Store = struct {
         return self.noteControl(transition.apply(self, command_domain.DecidePermission, .{ .command = command }, faults) catch .infrastructure_failure);
     }
 
+    pub fn declineForMessage(self: *Store, command: *const command_input.PermissionDecisionCommand, faults: Faults) PermissionDecisionReply {
+        return self.queue().write(declineForMessageHeld, .{ self, command, faults });
+    }
+
+    fn declineForMessageHeld(self: *Store, command: *const command_input.PermissionDecisionCommand, faults: Faults) PermissionDecisionReply {
+        return self.noteControl(transition.apply(self, command_domain.DecidePermission, .{ .command = command, .denial_reason = "declined: a new message arrived; ask again if still needed" }, faults) catch .infrastructure_failure);
+    }
+
     pub fn backgroundAction(self: *Store, source: action_control_domain.Control.Source, faults: Faults) @import("../action_control.zig").Reply {
         EntryTrace.fromControl(faults.control_trace).mark(.requested);
         return self.queue().write(backgroundActionHeld, .{ self, source, faults });
@@ -1113,17 +1121,35 @@ pub const Store = struct {
         context: anytype,
         comptime handoff: anytype,
     ) !void {
-        try self.queue().callHeld(withActionDispatchHandoffHeld, .{ self, binding });
+        _ = try self.queue().callHeld(withActionDispatchHandoffHeld, .{ self, binding });
         defer self.queue().release();
         try handoff(context);
     }
 
-    fn withActionDispatchHandoffHeld(self: *Store, binding: ActionAttemptBinding) !void {
+    pub fn withActionLaunchHandoff(self: *Store, binding: ActionAttemptBinding, context: anytype, comptime handoff: anytype) !void {
+        const cutoff = try self.queue().callHeld(withActionDispatchHandoffHeld, .{ self, binding });
+        defer self.queue().release();
+        try handoff(context, cutoff);
+    }
+
+    fn withActionDispatchHandoffHeld(self: *Store, binding: ActionAttemptBinding) !u64 {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        try entry.finish(Ordinary.action_dispatch, action_domain.validateActionDispatch(&access, binding));
+        return entry.finish(Ordinary.action_dispatch, action_domain.validateActionDispatch(&access, binding));
+    }
+
+    pub fn messageAfterActionLaunch(self: *Store, binding: ActionAttemptBinding, cutoff: u64) !bool {
+        return self.queue().run(messageAfterActionLaunchHeld, .{ self, binding, cutoff });
+    }
+
+    fn messageAfterActionLaunchHeld(self: *Store, binding: ActionAttemptBinding, cutoff: u64) !bool {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, action_domain.messageAfterLaunch(&access, binding, cutoff));
     }
 
     pub fn settleActionAttempt(

@@ -2001,7 +2001,7 @@ pub const DecidePermission = struct {
     pub const round_budget = 2;
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = .facts;
-    pub const Input = struct { command: *const command_input.PermissionDecisionCommand };
+    pub const Input = struct { command: *const command_input.PermissionDecisionCommand, denial_reason: ?[]const u8 = null };
     pub const Result = PermissionDecisionReply;
     pub const Ordinary = store_core.Ordinary.none;
     pub const Guards = error{ActionSelectionChanged};
@@ -2029,7 +2029,10 @@ pub const DecidePermission = struct {
                 readTarget(r, session, &t.target);
                 if (session_id.valid(session)) r.read(decision_action, .{ .action_id = command.action_id, .target = session }, &t.action);
             }
-            if (command.decision == .deny) content_domain.lookup(r, &t.content);
+            if (command.decision == .deny) {
+                if (t.input.denial_reason) |reason| t.content = .ofBytes(reason, false);
+                content_domain.lookup(r, &t.content);
+            }
             return .{ .round = .facts };
         }
         switch (try classify(mutation_answer.PermissionDecisionRejection, &t.saved, .permission_decision, session, &t.digest)) {
@@ -2052,7 +2055,7 @@ pub const DecidePermission = struct {
                 .deny => {
                     if (r.faults().content_import) return error.InjectedContentImportFailure;
                     const positions = try r.positions(head);
-                    const content_id = try content_domain.importBytes(r, &t.content, denial_text);
+                    const content_id = try content_domain.importBytes(r, &t.content, t.input.denial_reason orelse denial_text);
                     r.write(deny_action, .{ .action_id = command.action_id, .content_id = content_id, .position = try positions.take(1), .session = head });
                     try t.final_input.admit(r, &found.session, command.action_id, content_id, .{ .background = found.background, .stopped = found.stopped });
                     turn_domain.queueContinuation(r, found.turn_id.get(), head);
