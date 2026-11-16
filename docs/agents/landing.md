@@ -6,7 +6,7 @@
 ## Publish and merge
 
 Before publishing, establish or reuse the relevant focused evidence in [Evidence](../../CODING_STANDARDS.md#evidence).
-A PR description has a Summary, the Evidence it was checked with, and its Merge danger.
+A PR description has a [Goal](../../CODING_STANDARDS.md#goal), a Summary, the Evidence it was checked with, and its Merge danger.
 The description lists every behavior change in the diff, small ones included, so the summary and the diff agree.
 PRs changing `src/` follow [Shape before code](../../CODING_STANDARDS.md#shape-before-code); the plan checks the description, and review checks the shape.
 Every PR commit states its actual test commands and results.

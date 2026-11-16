@@ -13,17 +13,46 @@ import pr_shape
 
 
 ROOT = Path(__file__).resolve().parents[2]
+GOAL = "Goal: #123 Explain the intended change\n"
+
+
+def refusal(paths, body, **kwargs):
+    return pr_shape.refusal(paths, GOAL + body, **kwargs)
+
+
+class GoalTest(unittest.TestCase):
+    def test_goal_is_required_for_all_paths(self):
+        cases = (
+            ("Goal: #12 Support the workstream goal", True),
+            ("Goal: https://github.com/owner/repo/issues/123 Support the workstream goal", True),
+            ("Goal: Support the workstream goal", False),
+            ("Goal: #12", False),
+            ("Goal: #12 one two", False),
+            ("No issue: Routine housekeeping", True),
+            ("No issue:   ", False),
+            ("```text\nGoal: #12 Support the workstream goal\n```", False),
+            ("<!-- Goal: #12 Support the workstream goal -->", False),
+            ("~~~\nNo issue: housekeeping\n~~~", False),
+        )
+        for paths in (["docs/guide.md"], ["src/cli.zig"]):
+            for body, accepted in cases:
+                with self.subTest(paths=paths, body=body):
+                    reason = pr_shape.refusal(paths, body + "\n## Shape")
+                    self.assertEqual(reason is None, accepted, reason)
+                    if not accepted:
+                        self.assertIn("Body edits do not re-trigger", reason)
+                        self.assertIn("re-run the failed jobs", reason)
 
 
 class PrShapeTest(unittest.TestCase):
     def assertRefused(self, paths, body):
-        reason = pr_shape.refusal(paths, body)
+        reason = refusal(paths, body)
         self.assertIsInstance(reason, str)
         self.assertIn("## Shape", reason)
         self.assertEqual(len(reason.splitlines()), 1)
 
     def test_refusal_explains_edit_and_rerun(self):
-        reason = pr_shape.refusal(["src/cli.zig"], "")
+        reason = refusal(["src/cli.zig"], "")
         self.assertIn("Add a ## Shape section to the PR body", reason)
         self.assertIn("re-run the failed jobs of this run", reason)
         self.assertIn("no push needed", reason)
@@ -40,7 +69,7 @@ class PrShapeTest(unittest.TestCase):
             for body in (heading, heading + "\n", "Summary\n" + heading + "\nDetails",
                          "Summary\r\n" + heading + "\r\nDetails"):
                 with self.subTest(body=body):
-                    self.assertIsNone(pr_shape.refusal(["src/cli.zig"], body))
+                    self.assertIsNone(refusal(["src/cli.zig"], body))
 
     def test_summary_sketch_replaces_a_separate_shape_heading(self):
         sketches = (
@@ -54,7 +83,7 @@ class PrShapeTest(unittest.TestCase):
                 body = ("## Summary\n\n" + sketch + "\n\n## Evidence\nBefore and after.\n\n"
                         "## Merge Danger\nTwo-way. Authentication.").replace("\n", newline)
                 with self.subTest(sketch=sketch, newline=newline):
-                    self.assertIsNone(pr_shape.refusal(["src/cli.zig"], body))
+                    self.assertIsNone(refusal(["src/cli.zig"], body))
 
     def test_summary_needs_a_nonempty_closed_sketch_in_its_own_section(self):
         bodies = (
@@ -91,7 +120,7 @@ class PrShapeTest(unittest.TestCase):
                       ["src"], ["src-other/cli.zig"], ["clients/ts/src/wire.ts"]):
             for body in ("", "Summary", "## shape", "## Shape"):
                 with self.subTest(paths=paths, body=body):
-                    self.assertIsNone(pr_shape.refusal(paths, body))
+                    self.assertIsNone(refusal(paths, body))
 
 
 class ScreenEvidenceTest(unittest.TestCase):
@@ -105,7 +134,7 @@ class ScreenEvidenceTest(unittest.TestCase):
             for path in ("src/overview_view.zig", "src/SessionScreen.zig",
                          ".claude/skills/verify-rui/scripts/frames.json"):
                 with self.subTest(evidence=evidence, path=path):
-                    self.assertIsNone(pr_shape.refusal([path], "## Shape\n" + evidence))
+                    self.assertIsNone(refusal([path], "## Shape\n" + evidence))
 
     def test_ui_requires_visible_embed_or_nonempty_reason(self):
         for evidence in ("", "No screen change:", "No screen change:   ", "No screen change:\n",
@@ -122,19 +151,19 @@ class ScreenEvidenceTest(unittest.TestCase):
                          "```\nNo screen change: hidden reason\n```"):
             for path in ("src/overview_view.zig", ".claude/skills/verify-rui/scripts/frames.json"):
                 with self.subTest(evidence=evidence, path=path):
-                    reason = pr_shape.refusal([path], "## Shape\n" + evidence)
+                    reason = refusal([path], "## Shape\n" + evidence)
                     self.assertIsInstance(reason, str)
                     self.assertIn("verify-rui publish", reason)
 
     def test_non_ui_does_not_need_media(self):
         for path in ("src/server.zig", "src/store/Store.zig", "src/cli.zig", "docs/agents/landing.md"):
             with self.subTest(path=path):
-                self.assertIsNone(pr_shape.refusal([path], "## Shape"))
+                self.assertIsNone(refusal([path], "## Shape"))
 
     def test_repository_page_links_do_not_replace_embedded_media(self):
         for ref in ("a" * 40, "main", "pr-evidence"):
             for view in ("tree", "blob"):
-                self.assertIsInstance(pr_shape.refusal(["src/overview_view.zig"],
+                self.assertIsInstance(refusal(["src/overview_view.zig"],
                     f"## Shape\n[Screens](https://github.com/owner/repo/{view}/{ref}/capture)"), str)
 
     def test_graph_classifies_transitive_ui_but_excludes_host_and_test_imports(self):
@@ -153,7 +182,7 @@ class ScreenEvidenceTest(unittest.TestCase):
 
     def test_deleted_ui_paths_use_base_graph(self):
         with patch.object(pr_shape, "revision_ui_paths", return_value={"src/removed_screen.zig"}) as base:
-            reason = pr_shape.refusal(["src/removed_screen.zig"], "## Shape", base="old")
+            reason = refusal(["src/removed_screen.zig"], "## Shape", base="old")
             self.assertIsInstance(reason, str)
             self.assertIn("verify-rui publish", reason)
             base.assert_called_once_with("old")
@@ -193,11 +222,11 @@ class PrShapeMainTest(unittest.TestCase):
         )
         for payload, live, failure, expected, source in cases:
             with self.subTest(payload=payload, live=live, failure=failure), \
-                 patch.dict(os.environ, {"BASE": "base", "PR_BODY": payload,
+                 patch.dict(os.environ, {"BASE": "base", "PR_BODY": GOAL + payload,
                                          "GITHUB_REPOSITORY": "owner/repo", "PR_NUMBER": "42"}, clear=True), \
                  patch.object(sys, "argv", ["pr_shape.py"]), \
                  patch.object(pr_shape, "changed_paths", return_value=(["src/cli.zig"], "base")), \
-                 patch.object(pr_shape, "github", return_value=live, side_effect=failure) as api, \
+                 patch.object(pr_shape, "github", return_value=({"body": GOAL + live["body"]} if live and live["body"] is not None else live), side_effect=failure) as api, \
                  redirect_stdout(io.StringIO()) as stdout, redirect_stderr(io.StringIO()):
                 self.assertEqual(pr_shape.main(), expected)
                 api.assert_called_once_with("GET", "repos/owner/repo/pulls/42")
@@ -206,7 +235,7 @@ class PrShapeMainTest(unittest.TestCase):
     def test_argument_overrides_base_environment_and_body_stays_data(self):
         for body, expected in (("", 1), ("Summary\n## Shape\n$(exit 99)", 0)):
             with self.subTest(body=body), \
-                 patch.dict(os.environ, {"BASE": "environment-base", "PR_BODY": body}, clear=True), \
+                 patch.dict(os.environ, {"BASE": "environment-base", "PR_BODY": GOAL + body}, clear=True), \
                  patch.object(sys, "argv", ["pr_shape.py", "argument-base"]), \
                  patch.object(pr_shape, "changed_paths", return_value=(["src/cli.zig"], "base")) as changed, \
                  redirect_stderr(io.StringIO()) as stderr:
@@ -223,9 +252,9 @@ class PrShapeMainTest(unittest.TestCase):
              patch.object(sys, "argv", ["pr_shape.py"]), \
              patch.object(pr_shape, "changed_paths", return_value=(["README.md"], "base")) as changed, \
              redirect_stderr(io.StringIO()) as stderr:
-            self.assertEqual(pr_shape.main(), 0)
+            self.assertEqual(pr_shape.main(), 1)
             changed.assert_called_once_with("environment-base", "HEAD")
-            self.assertEqual(stderr.getvalue(), "")
+            self.assertIn("Goal:", stderr.getvalue())
 
     def test_deleted_src_file_still_requires_shape(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -254,7 +283,7 @@ class PrShapeMainTest(unittest.TestCase):
             for body, expected in (("", 1), ("## Shape", 0)):
                 with self.subTest(body=body):
                     result = subprocess.run([sys.executable, "-B", str(ROOT / "tests/ci/pr_shape.py")],
-                                            cwd=directory, env={**os.environ, "BASE": base, "PR_BODY": body},
+                                            cwd=directory, env={**os.environ, "BASE": base, "PR_BODY": GOAL + body},
                                             capture_output=True, text=True, timeout=30)
                     self.assertEqual(result.returncode, expected, result.stderr)
                     self.assertEqual(result.stdout, "")

@@ -49,9 +49,8 @@ def revision_ui_paths(revision):
     return ui_paths(Graph(sources, lambda name: sources[name].decode()))
 
 
-def screen_evidence(body):
-    # A plain link to an image is not an embed. Ignore examples in fences and
-    # comments, so the reviewer actually sees the claimed evidence.
+def visible_lines(body):
+    """Return lines outside HTML comments and fenced code blocks."""
     visible = re.sub(r"<!--.*?-->", "", body, flags=re.S)
     lines, fence = [], None
     for line in visible.splitlines():
@@ -62,6 +61,12 @@ def screen_evidence(body):
             fence = opened[1]
         else:
             lines.append(line)
+    return lines
+
+
+def screen_evidence(body):
+    # A plain link to an image is not an embed.
+    lines = visible_lines(body)
     visible = "\n".join(lines)
     if re.search(r"^No screen change:[ \t]*\S[^\n]*$", visible, re.M):
         return True
@@ -69,7 +74,26 @@ def screen_evidence(body):
                and "https://github.com/user-attachments/" in line for line in lines)
 
 
+def goal_present(body):
+    issue = re.compile(r"(?<![\w/])(?:#[0-9]+|https://github\.com/[^/\s]+/[^/\s]+/issues/[0-9]+)(?![\w/])")
+    for line in visible_lines(body):
+        if re.match(r"^No issue:[ \t]*\S", line):
+            return True
+        if line.startswith("Goal:"):
+            text = line[len("Goal:"):]
+            for match in issue.finditer(text):
+                explanation = text[:match.start()] + " " + text[match.end():]
+                if len(re.findall(r"\b[^\W_]+\b", explanation)) >= 3:
+                    return True
+    return False
+
+
 def refusal(changed_paths, body, *, base=None) -> str | None:
+    if not goal_present(body):
+        return ("Add a visible line 'Goal: #123 <how this change serves the issue>' "
+                "(or use its full GitHub issue URL), with at least three explanation words, "
+                "or 'No issue: <reason>' to the PR body. Body edits do not re-trigger the check; "
+                "re-run the failed jobs of this run after editing the body; no push needed.")
     if any(path.startswith("src/") for path in changed_paths) and not (
             re.search(r"^##\s+Shape\s*$", body, re.M) or summary_sketch(body)):
         return ("PRs changing src/ need a nonempty fenced sketch in ## Summary or a legacy ## Shape section "
