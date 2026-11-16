@@ -426,11 +426,11 @@ pub const HistoricalView = struct {
         std.debug.assert(self.active and self.tool_set_id != 0);
         if (self.next_tool == self.tool_count) return false;
         // The settings counted this member: a missing one is `CorruptStore`.
-        const row = try self.toolFrom(.{ .set = self.tool_set_id, .position = 0 }, self.next_tool) orelse
+        const row = try self.toolFrom(.{ .set = self.tool_set_id, .position = 0 }, self.next_tool);
+        if (row == null or row.?.ordinal != self.next_tool)
             return store_core.fence(self.store, error.CorruptStore);
-        if (row.ordinal != self.next_tool) return store_core.fence(self.store, error.CorruptStore);
         self.next_tool += 1;
-        return self.serveTool(row, out);
+        return self.serveTool(row.?, out);
     }
 
     /// Fills `out`; on error its bytes mean nothing.
