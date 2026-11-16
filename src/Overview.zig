@@ -1607,7 +1607,7 @@ const HostState = enum {
 };
 
 fn hostState(self: *const Self) HostState {
-    if (self.state.holdsHost()) return .paused;
+    if (self.state.upgrading()) return .paused;
     if (self.hostStarting()) return .starting;
     return switch (self.host_observation) {
         .unread => .ready,
@@ -3227,12 +3227,12 @@ test "Host line and Settings tail show together without overlap at wide and narr
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "Host stopped ·"));
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "  Settings"));
         try std.testing.expectEqual(at.list.end, at.settings.start);
-        try std.testing.expectEqual(@as(u16, 2), at.settings.len());
+        try std.testing.expectEqual(@as(u16, 3), at.settings.len());
         try std.testing.expectEqual(at.settings.end, at.host.start);
         try std.testing.expectEqual(@as(u16, 1), at.host.len());
         try std.testing.expectEqual(at.host.end, at.input);
-        try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start), "  Settings"));
-        try std.testing.expectEqualStrings(@import("transport_options").version, std.mem.trim(u8, try shown.line(at.settings.start + 1), " "));
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start + 1), "  Settings"));
+        try std.testing.expectEqualStrings(@import("transport_options").version, std.mem.trim(u8, try shown.line(at.settings.start + 2), " "));
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.host.start), "■ Host stopped ·"));
         try std.testing.expect(std.mem.endsWith(u8, try shown.line(at.input), "enter open"));
         for (at.list.start..at.list.end) |row| {
@@ -3379,7 +3379,7 @@ test "Host recovery paused shutting down and upgrading offer no start gesture" {
         try std.testing.expect(hostNotice(overview) == null);
         overview.host_observation = .{ .stopped = .asked };
         overview.state.upgrade.after = .blocked;
-        try std.testing.expectEqual(HostState.paused, overview.hostState());
+        try std.testing.expectEqual(HostState.stopped, overview.hostState());
         try std.testing.expect(!try requestHostStart(overview, &ctx));
         try std.testing.expectEqual(@as(usize, 0), HostRecovery.starts);
     }
@@ -3478,7 +3478,7 @@ test "Host recovery waits across upgrade swap and reobservation before offering 
     try std.testing.expect(!try requestHostStart(overview, &ctx));
     overview.state.upgrade.run = null;
     overview.state.upgrade.after = .reobserving;
-    try std.testing.expectEqual(HostState.paused, overview.hostState());
+    try std.testing.expectEqual(HostState.stopped, overview.hostState());
     try std.testing.expect(!try requestHostStart(overview, &ctx));
     overview.state.listing = true;
     overview.state.listing_archive = overview.state.archive;
@@ -3611,7 +3611,7 @@ test "Host recovery renders the launch result cause without confusing failure an
         var held = try rig.shown(140, 26);
         defer held.deinit();
         const text = try held.text();
-        try std.testing.expect(std.mem.indexOf(u8, text, "■ Host paused") != null);
+        try std.testing.expectEqual(after == .stopping, std.mem.indexOf(u8, text, "■ Host paused") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "· retry") == null);
     };
 }
@@ -3661,7 +3661,7 @@ test "a Host that stopped unasked starts again once by itself; any other stop wa
             try std.testing.expect(std.mem.indexOf(u8, text, "r start") == null);
         } else {
             const held: HostState = switch (case.availability) {
-                .stopped => if (case.upgrading) .paused else .stopped,
+                .stopped => .stopped,
                 .stopping => .paused,
                 .incompatible => .incompatible,
                 .unreadable => .unreadable,
@@ -4416,7 +4416,7 @@ test "a click on a Session row, as a terminal sends it, opens the row under it a
         const line = try shown.line(@intCast(at));
         if (std.mem.indexOf(u8, line, "Fix the flaky test") != null and std.mem.endsWith(u8, line, "13s")) break @intCast(at);
     } else return error.TestExpectedRow;
-    const quiet_row = view.layout(&rig.overview.state).settings.start + 1;
+    const quiet_row = view.layout(&rig.overview.state).settings.start + 2;
     const quiet = try shown.line(quiet_row);
     try std.testing.expectEqualStrings(@import("transport_options").version, std.mem.trim(u8, quiet, " "));
     try std.testing.expect(quiet.len > 10 and quiet[10] == ' ');
@@ -5860,7 +5860,7 @@ test "Overview mouse Settings hover persists across frames and never changes sel
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
     try rig.overview.app_settings_line.widget().handleEvent(&ctx, .mouse_enter);
-    try rig.overview.app_settings_line.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 4, .row = 0, .button = .none, .type = .motion, .mods = .{} } });
+    try rig.overview.app_settings_line.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 4, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
     var hovered = try rig.shown(80, 24);
     defer hovered.deinit();
     try std.testing.expectEqual(@import("widget_style.zig").of(rig.overview.caps, .{ .background = .hover }).bg, hovered.screen.readCell(4, row).?.style.bg);
@@ -7616,7 +7616,7 @@ test "Session pin drawn Root gestures preserve composer focus draft and caret ac
             }, .{ .row = 0, .col = 0 }) orelse return error.TestExpectedDrawnTarget;
             point.col += 4;
             switch (target) {
-                .settings => {},
+                .settings => point.row += 1,
                 .session => {
                     point.row += for (overview.app_sessions.shown_at) |span| {
                         if (span.target) |meaning| {
@@ -7753,4 +7753,46 @@ test "background discovery reaches the production version widget without request
         try overview.appDiscoverUpgrade(&ctx);
         try std.testing.expect(!job.started);
     }
+}
+
+test "upgrade attempt presentation domain ends synthetic pause and publishing without lifting recovery holds" {
+    const found: upgrade_status.Found = .{ .host = .none };
+    const target: upgrade_status.Version = .{ .schema = 61, .patch = 2 };
+    const runs = [_]upgrade_status.Run{
+        .checking,
+        .{ .installing = .{ .found = found } },
+        .{ .installing = .{ .found = found, .step = .publishing } },
+        .{ .installing = .{ .found = found, .step = .restarting } },
+        .cancelling,
+        .{ .ended = .{ .how = .{ .up_to_date = target }, .outcome = .unchanged } },
+        .{ .ended = .{ .how = .superseded, .outcome = .compatible } },
+        .{ .ended = .{ .how = .{ .refused = .source_build }, .outcome = .unchanged } },
+        .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } },
+        .{ .ended = .{ .how = .{ .failed = .download }, .outcome = .unchanged } },
+        .{ .ended = .{ .how = .{ .failed = .release }, .outcome = .unchanged } },
+        .{ .ended = .{ .how = .{ .failed = .other }, .outcome = .unchanged } },
+        .{ .ended = .{ .how = .{ .upgraded = .{ .version = target, .restarted = true } }, .outcome = .compatible } },
+        .{ .ended = .{ .how = .{ .incompatible = target }, .outcome = .incompatible } },
+    };
+    const rig = try openOverview();
+    defer rig.close();
+    const overview = rig.overview;
+    for (runs) |run| for (std.enums.values(session_upgrade.After)) |after| for ([_]bool{ false, true }) |observed_paused| {
+        overview.state.upgrade = .{ .run = run, .after = after };
+        overview.host_observation = .{ .ready = .{ .facts = .{ .started_at = 1, .slots = 4, .slots_in_use = 0 }, .paused = observed_paused } };
+        const paused = run.going() or observed_paused;
+        try std.testing.expectEqual(paused, overview.hostState() == .paused);
+        try std.testing.expectEqual(run.going() or after != .open, overview.state.holdsHost());
+        try std.testing.expectEqual(paused, hostNotice(overview) != null);
+        for ([_]u16{ 140, 46 }) |width| {
+            var shown = try rig.shown(width, 30);
+            defer shown.deinit();
+            const text = try shown.text();
+            try std.testing.expectEqual(paused, std.mem.indexOf(u8, text, "■ Host paused") != null);
+            try std.testing.expectEqual(run == .installing and run.installing.step == .publishing, std.mem.indexOf(u8, text, "Publishing; cancelling no longer rolls back") != null);
+            if (run == .ended and run.ended.how == .incompatible) {
+                try std.testing.expect(std.mem.indexOf(u8, text, "restart rui") != null);
+            }
+        }
+    };
 }

@@ -2164,7 +2164,7 @@ pub fn layout(state: *const State) Layout {
     return .{ .top = top, .list = .{ .start = top, .end = settings }, .settings = .{ .start = settings, .end = host }, .host = .{ .start = host, .end = input }, .input = input };
 }
 
-const settings_rows = 2;
+const settings_rows = 3;
 
 fn statusRows(state: *const State) u16 {
     var buffer: StatusBuffer = undefined;

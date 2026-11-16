@@ -88,6 +88,7 @@ fn newerRelease(running_text: []const u8, candidate: @import("release_candidate.
 
 fn progress(raw: *anyopaque, phase: upgrade.Phase) void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    std.debug.assert(!self.finished);
     if (phase == .publishing) {
         if (self.gate.cmpxchgStrong(.open, .committed, .acq_rel, .acquire) != null) {
             self.task.cancellation.requestStop();
@@ -552,7 +553,13 @@ test "how a run ends, as the status bar names it" {
         job.started = true;
         job.checked = news_check;
         job.finish();
-        try std.testing.expectEqualDeep(upgrade_status.Run{ .ended = .{ .how = case.ended, .outcome = case.outcome } }, job.status());
+        for (std.enums.values(upgrade.Phase)) |phase| {
+            job.phase.store(phase, .release);
+            try std.testing.expectEqualDeep(upgrade_status.Run{ .ended = .{ .how = case.ended, .outcome = case.outcome } }, job.status());
+            var buffer: [upgrade_status.max_line_bytes]u8 = undefined;
+            try std.testing.expect(std.mem.indexOf(u8, upgrade_status.line(job.status(), &buffer, .unicode).text, "Publishing") == null);
+            try std.testing.expect(std.mem.indexOf(u8, upgrade_status.fieldTail(job.status(), &buffer), "publishing") == null);
+        }
         job.result = null;
         job.checked = null;
         if (job.failure != null) try std.testing.expectEqualDeep(case.ended, job.ending());

@@ -69,6 +69,7 @@ def pinned_settings():
         rows = frame.split("\n")
         settings = next(i for i, line in enumerate(rows) if "Settings" in line)
         assert settings == len(rows) - 3, frame
+        assert set(rows[settings - 1].strip()) <= {"─", "-"} and rows[settings - 1].strip(), frame
         assert re.search(r"0\.\d+\.\d+", rows[settings + 1]), frame
         assert "rui " not in rows[settings + 1] and "tools " not in rows[settings + 1], frame
         assert rows[-1].rstrip().endswith("enter open"), frame

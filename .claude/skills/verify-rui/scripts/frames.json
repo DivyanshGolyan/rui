@@ -130,17 +130,18 @@
       "steps": [],
       "expect": [
         "Settings",
-        "Update failed"
+        "Update failed: Couldn't reach GitHub"
       ],
       "absent": [
-        "Notifications"
+        "Notifications",
+        "Host paused"
       ],
       "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
       "expect_next": {
-        "Settings": "Update failed"
+        "Settings": "Update failed: Couldn't reach GitHub"
       },
       "expect_regex": [
-        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Update failed\\s*$"
+        "^\\s*(?:\\d+(?:\\.\\d+)? (?:MB|GB)\\s+)?Update failed: Couldn't reach GitHub\\s*$"
       ],
       "comparison": {
         "before": {
@@ -160,7 +161,8 @@
             "Update failed"
           ]
         }
-      }
+      },
+      "expect_last": "enter open"
     },
     {
       "name": "chat-after-upgrade",
@@ -351,17 +353,18 @@
       "steps": [],
       "expect": [
         "Settings",
-        "Update failed"
+        "Update failed: Couldn't reach GitHub"
       ],
       "absent": [
-        "Notifications"
+        "Notifications",
+        "Host paused"
       ],
       "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
       "expect_next": {
-        "Settings": "Update failed"
+        "Settings": "Update failed: Couldn't reach GitHub"
       },
       "expect_regex": [
-        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Update failed\\s*$"
+        "^\\s*(?:\\d+(?:\\.\\d+)? (?:MB|GB)\\s+)?Update failed: Couldn't reach GitHub\\s*$"
       ],
       "comparison": {
         "before": {
@@ -381,7 +384,8 @@
             "Update failed"
           ]
         }
-      }
+      },
+      "expect_last": "enter open"
     },
     {
       "name": "day-chat-after-upgrade",

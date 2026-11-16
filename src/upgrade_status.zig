@@ -69,6 +69,15 @@ pub const Control = struct {
     text: []const u8,
     tone: enum { quiet, link, warning },
     enabled: bool,
+    fallback: ?[]const u8 = null,
+
+    pub fn fit(self: Control, columns: usize) Control {
+        var fitted = self;
+        if (self.fallback) |fallback| if (self.text.len > columns) {
+            fitted.text = fallback;
+        };
+        return fitted;
+    }
 };
 
 pub fn control(current: []const u8, available: ?Version, run: ?Run, buffer: *[max_line_bytes]u8, script: Script) Control {
@@ -76,7 +85,8 @@ pub fn control(current: []const u8, available: ?Version, run: ?Run, buffer: *[ma
     if (run) |active| {
         if (active.going()) return .{ .text = if (script == .unicode) "Updating…" else "Updating...", .tone = .quiet, .enabled = false };
         switch (active.ended.how) {
-            .failed, .refused => return .{ .text = "Update failed", .tone = .warning, .enabled = true },
+            .failed => |why| return failedControl(failure_words.get(why), buffer),
+            .refused => |why| return failedControl(refusals.get(why), buffer),
             .upgraded => |done| selected = done.version,
             .incompatible, .up_to_date => |version| selected = version,
             .cancelled, .superseded => {},
@@ -88,6 +98,10 @@ pub fn control(current: []const u8, available: ?Version, run: ?Run, buffer: *[ma
     }
     if (selected) |version| return .{ .text = std.fmt.bufPrint(buffer, "{f}", .{version}) catch unreachable, .tone = .quiet, .enabled = true };
     return .{ .text = current, .tone = .quiet, .enabled = true };
+}
+
+fn failedControl(reason: []const u8, buffer: *[max_line_bytes]u8) Control {
+    return .{ .text = std.fmt.bufPrint(buffer, "Update failed: {s}", .{reason}) catch unreachable, .tone = .warning, .enabled = true, .fallback = "Update failed" };
 }
 
 pub fn line(run: Run, buffer: *[max_line_bytes]u8, script: Script) Line {
@@ -345,7 +359,7 @@ test "update control spans every run outcome and available state" {
             try std.testing.expect(ended.enabled);
             switch (how) {
                 .failed, .refused => {
-                    try std.testing.expectEqualStrings("Update failed", ended.text);
+                    try std.testing.expectEqualStrings(if (how == .failed) "Update failed: Couldn't reach GitHub" else "Update failed: a source build", ended.text);
                     try std.testing.expect(ended.tone == .warning);
                 },
                 .upgraded, .up_to_date, .incompatible => {
@@ -369,4 +383,23 @@ test "completed update control retains selected version until a newer release is
         }, shown.text);
         try std.testing.expectEqual(index >= 2, shown.tone == .link);
     }
+}
+
+test "failed update controls preserve owner reasons and fit to retry across widths" {
+    const Case = struct { how: Ended, text: []const u8 };
+    const cases = [_]Case{
+        .{ .how = .{ .failed = .download }, .text = "Update failed: Couldn't reach GitHub" },
+        .{ .how = .{ .failed = .release }, .text = "Update failed: Upgrade failed" },
+        .{ .how = .{ .failed = .other }, .text = "Update failed: Upgrade failed" },
+        .{ .how = .{ .refused = .first_install }, .text = "Update failed: no managed install" },
+        .{ .how = .{ .refused = .source_build }, .text = "Update failed: a source build" },
+        .{ .how = .{ .refused = .unknown_build }, .text = "Update failed: an unknown build" },
+        .{ .how = .{ .refused = .package_managed }, .text = "Update failed: installed by another tool" },
+    };
+    var buffer: [max_line_bytes]u8 = undefined;
+    for (cases) |case| for (std.enums.values(Script)) |script| for (0..80) |width| {
+        const shown = control("0.75.1", null, .{ .ended = .{ .how = case.how, .outcome = .unchanged } }, &buffer, script).fit(width);
+        try std.testing.expectEqualStrings(if (width >= case.text.len) case.text else "Update failed", shown.text);
+        try std.testing.expect(shown.enabled and shown.tone == .warning);
+    };
 }

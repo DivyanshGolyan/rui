@@ -42,3 +42,5 @@ The subsystem references keep accepted behavior and required evidence together. 
 - [Host ownership and lifetime](docs/contracts/host.md#required-evidence).
 - [Resources and selection progress](docs/contracts/resources.md#required-evidence).
 - [Diagnostic records and stderr](docs/contracts/diagnostics.md#required-evidence).
+
+Sidebar fix-round verification covers the retained divider, owner-supplied compact failure reason and whole-label fallback at narrow widths, and transient paused/publication lines ending with the attempt. Day and night failure recipes wait for the same settled overview hint before capture; the Settings Version row retains the complete diagnostic.

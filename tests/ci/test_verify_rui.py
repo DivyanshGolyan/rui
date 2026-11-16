@@ -2604,6 +2604,31 @@ class UpgradeFramesTest(unittest.TestCase):
                 if state["upgrade"] == "updating":
                     self.assertIn("Publishing; cancelling no longer rolls back", before["expect"])
 
+    def test_failure_frames_wait_for_the_same_settled_overview_in_both_themes_and_sizes(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        reason = "Update failed: Couldn't reach GitHub"
+        for state in (entry for entry in scenario["states"] if entry.get("upgrade") == "failure"):
+            self.assertEqual(state["expect_last"], "enter open")
+            self.assertIn("Host paused", state["absent"])
+            self.assertIn(reason, state["expect"])
+            self.assertEqual(state["expect_next"], {"Settings": reason})
+            for size in state["sizes"]:
+                memory = "7 MB " if size[0] == 140 else ""
+                rows = f"Settings\n{memory}{reason}\n"
+                screens = [rows + "\n", rows + "Host paused\nenter open", rows + "\nenter open"]
+                observed = []
+                def wait(predicate, _description, **_kwargs):
+                    for index, plain in enumerate(screens):
+                        observed.append(index)
+                        if predicate(types.SimpleNamespace(completed=plain)):
+                            return
+                    self.fail("settled failure frame was not accepted")
+                with self.subTest(theme=state["theme"], size=size):
+                    self.helper["frame_ready"](types.SimpleNamespace(wait=wait), state)
+                    self.assertEqual(observed, [0, 1, 2])
+                    self.assertIsNotNone(self.helper["frame_row_failure"](state, rows + "\n"))
+                    self.assertIsNotNone(self.helper["frame_row_failure"](state, "Settings\nrui 7 MB " + reason + "\nenter open"))
+
     def test_compact_row_oracle_rejects_old_memory_labels_and_nonliteral_version(self):
         row_failure = self.helper["frame_row_failure"]
         state = {"expect_regex": [r"^\s*\d+(?:\.\d+)? (?:MB|GB)\s+0\.70\.10000\s*$"]}
