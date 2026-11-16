@@ -268,7 +268,7 @@ pub fn UserBody(comptime Sink: type) type {
 
         pub fn init(self: *Self, sink: Sink, length: u64, whole: bool) !void {
             self.* = .{ .out = .{ .sink = sink }, .escaped = undefined, .length = length, .whole = whole };
-            self.escaped = .{ .sink = &self.out, .text = .{ .mode = .multiline } };
+            self.escaped = .{ .sink = &self.out, .text = .{ .mode = .multiline }, .authored = true };
             try self.out.feed(Mark.body);
         }
 
@@ -288,8 +288,8 @@ pub fn UserBody(comptime Sink: type) type {
             return self.finishTarget(null);
         }
 
-        pub fn finishMessage(self: *Self, target: Collapsed) anyerror!void {
-            _ = try self.finishTarget(target);
+        pub fn finishMessage(self: *Self, target: Collapsed) anyerror!bool {
+            return self.finishTarget(target);
         }
 
         fn finishTarget(self: *Self, target: ?Collapsed) anyerror!bool {
@@ -303,7 +303,7 @@ pub fn UserBody(comptime Sink: type) type {
             } else {
                 if (self.length <= collapse_bytes) try self.scan(self.small[0..self.length]);
                 try self.endLine();
-                if (self.shown != 0) try self.out.feed("\n");
+                if (self.shown != 0) try self.out.body("\n");
                 var count: [96]u8 = undefined;
                 const hidden = self.nonblank - self.shown;
                 var number: [32]u8 = undefined;
@@ -345,7 +345,7 @@ pub fn UserBody(comptime Sink: type) type {
             if (self.line_blank) return;
             self.nonblank += 1;
             if (self.shown == preview_lines) return;
-            if (self.shown != 0) try self.out.feed("\n");
+            if (self.shown != 0) try self.out.body("\n");
             self.shown += 1;
             const kept = self.line[0..@intCast(@min(self.line_bytes, self.line.len))];
             const cut = if (self.line_bytes <= preview_bytes) kept.len else graphemeCut(kept, preview_bytes);
@@ -669,25 +669,35 @@ pub fn Indented(comptime Sink: type) type {
         line_start: bool = false,
         sgr: bool = false,
         pub fn feed(self: *@This(), bytes: []const u8) anyerror!void {
+            try self.write(bytes, false);
+        }
+        pub fn body(self: *@This(), bytes: []const u8) anyerror!void {
+            try self.write(bytes, true);
+        }
+        fn emit(self: *@This(), bytes: []const u8, authored: bool) !void {
+            const sink = if (@typeInfo(Sink) == .pointer) self.sink else &self.sink;
+            if (authored) try Text.writeBody(sink, bytes) else try sink.feed(bytes);
+        }
+        fn write(self: *@This(), bytes: []const u8, authored: bool) anyerror!void {
             var storage: [4096]u8 = undefined;
             var out = std.Io.Writer.fixed(&storage);
             for (bytes) |byte| {
-                if (storage.len - out.end < self.prefix.len + 1) {
-                    try self.sink.feed(out.buffered());
+                if (out.end == storage.len) {
+                    try self.emit(out.buffered(), authored);
                     out.end = 0;
                 }
-                if (self.line_start and byte == '\n' and self.marks_empty) {
-                    try out.writeAll(std.mem.trimEnd(u8, self.prefix, " "));
-                } else if (self.line_start and byte != '\n') {
-                    try out.writeAll(self.prefix);
-                    self.line_start = false;
+                if (self.line_start and (byte != '\n' or self.marks_empty)) {
+                    try self.emit(out.buffered(), authored);
+                    out.end = 0;
+                    try self.sink.feed(if (byte == '\n') std.mem.trimEnd(u8, self.prefix, " ") else self.prefix);
+                    if (byte != '\n') self.line_start = false;
                 }
                 if (self.sgr or byte == 0x1b) {
                     self.sgr = byte != 'm';
                 } else if (byte == '\n') self.line_start = true;
                 try out.writeByte(byte);
             }
-            if (out.end != 0) try self.sink.feed(out.buffered());
+            if (out.end != 0) try self.emit(out.buffered(), authored);
         }
         pub fn collapsedSummary(self: *@This(), value: Collapsed, bytes: []const u8) !void {
             if (self.line_start) try self.sink.feed(self.prefix);
@@ -1032,8 +1042,13 @@ pub fn Escaped(comptime Sink: type) type {
     return struct {
         sink: Sink,
         text: Text,
+        authored: bool = false,
         storage: [256]u8 = undefined,
         used: usize = 0,
+        fn emit(self: *@This(), bytes: []const u8) !void {
+            const sink = if (@typeInfo(Sink) == .pointer) self.sink else &self.sink;
+            if (self.authored) try Text.writeBody(sink, bytes) else try sink.feed(bytes);
+        }
         pub fn writeAll(self: *@This(), bytes: []const u8) anyerror!void {
             try self.feed(bytes);
         }
@@ -1042,7 +1057,7 @@ pub fn Escaped(comptime Sink: type) type {
             out.end = self.used;
             for (bytes) |byte| {
                 if (self.storage.len - out.end < 16) {
-                    try self.sink.feed(out.buffered());
+                    try self.emit(out.buffered());
                     out.end = 0;
                 }
                 try self.text.feed(&out, &.{byte});
@@ -1053,11 +1068,11 @@ pub fn Escaped(comptime Sink: type) type {
             var out = std.Io.Writer.fixed(&self.storage);
             out.end = self.used;
             if (self.storage.len - out.end < 16) {
-                try self.sink.feed(out.buffered());
+                try self.emit(out.buffered());
                 out.end = 0;
             }
             try self.text.finish(&out);
-            if (out.end != 0) try self.sink.feed(out.buffered());
+            if (out.end != 0) try self.emit(out.buffered());
             self.used = 0;
         }
     };
@@ -1089,7 +1104,8 @@ pub fn Answer(comptime Sink: type) type {
         }
         fn forward(self: *@This(), bytes: []const u8) std.Io.Writer.Error!void {
             if (bytes.len == 0) return;
-            self.sink.feed(bytes) catch |err| {
+            const sink = if (@typeInfo(Sink) == .pointer) self.sink else &self.sink;
+            Text.writeBody(sink, bytes) catch |err| {
                 self.failure = err;
                 return error.WriteFailed;
             };
@@ -1237,8 +1253,9 @@ pub fn message(requests: client.Requests, store: []const u8, session: []const u8
     var body: UserBody(@TypeOf(sink)) = undefined;
     try body.init(sink, value.content.length, false);
     try content(requests, store, session, item, value.content, &body);
-    try body.finishMessage(block);
-    try sink.feed("\n");
+    if (try body.finishMessage(block)) {
+        try sink.feed("\n");
+    } else try Text.writeBody(sink, "\n");
 }
 
 fn content(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, reference: protocol.ActivityItem.Content, target: anytype) !void {
@@ -1625,7 +1642,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             answer.init(sink, home, colour, destination);
             try content(requests, store, session, item, assistant.content, &answer);
             try answer.finish();
-            try sink.feed("\n");
+            try Text.writeBody(sink, "\n");
         },
         .tool_result => |result| {
             var scan: ToolHeaderScan = .{};
