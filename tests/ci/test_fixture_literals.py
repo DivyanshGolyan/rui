@@ -1,21 +1,3 @@
-"""Fixtures and tests do not restate values another file owns.
-
-A copy of an owned value strands its test when the owner changes on purpose.
-Each rule takes its forbidden values from the owner itself, so it follows
-every change without edits here:
-
-- numbers src/product_defaults.zig and the shipped catalog decide (default
-  capacities, each listed model's context window and default compaction
-  triggers): read them through tests/integration/product_defaults.py;
-- caller-error catalog prose (src/caller_error.zig `says` and `next`): match
-  the line's stable `[code]` and the context the invocation supplies;
-- the complete built-in tool list (src/built_in_tool.zig): read the owner;
-- a default effort stated as a word beside its "model default" source: read
-  product_defaults.start_effort(model).
-
-The Store format and the wire version have their own checks
-(test_store_schema_fixtures.py, test_wire_version.py).
-"""
 from pathlib import Path
 import re
 import sys
@@ -23,14 +5,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = (("tests/integration", (".py", ".sh")),)
-# Zig tests outside the owner, and every fixture.
 TOOL_LIST_SCANNED = (("src", (".zig",)), ("tests", (".py", ".sh", ".zig", ".go")))
 TOOL_OWNER = "src/built_in_tool.zig"
-# A shared run of this many words is a copy of catalog prose, not a
-# coincidence: "That is not an ID" or "A required option or selector".
 PROSE_WORDS = 5
-# Smaller owned numbers (capacities, percents) are too common to tell apart,
-# and smaller catalog windows coincide with buffer sizes such as 8192.
 SMALLEST_NUMBER = 1000
 SMALLEST_WINDOW = 100_000
 STRING = re.compile(r'''[rbfu]{0,2}"((?:[^"\\\n]|\\.)*)"|[rbfu]{0,2}'((?:[^'\\\n]|\\.)*)\'''')
@@ -45,7 +22,6 @@ def files(root, scanned, skip=()):
 
 
 def owned_numbers(root):
-    """Each owned number a fixture could pin, with the owner to read instead."""
     sys.path.insert(0, str(root / "tests/integration"))
     try:
         import product_defaults as owner
@@ -69,7 +45,6 @@ def owned_numbers(root):
 
 
 def number_findings(root, numbers):
-    """Each owned number, as digits or grouped by commas as screens print it."""
     spellings = {spelled: value for value in numbers for spelled in (str(value), f"{value:,}")}
     pattern = re.compile(r"(?<![\w.,])(" + "|".join(map(re.escape, sorted(spellings, key=len, reverse=True)))
                          + r")(?![\w]|[.,]\d)")
@@ -86,9 +61,6 @@ def words(text):
 
 
 def catalog_prose(root):
-    """The opening PROSE_WORDS words of each caller-error sentence, with the
-    codes that say it. Openings, not any run, so other CLI prose that happens
-    to share a phrase mid-sentence is not mistaken for the catalog's."""
     source = (root / "src/caller_error.zig").read_text()
     entry = re.compile(r'^\s*\.(\w+) => \.\{.*?\.says = "((?:[^"\\]|\\.)*)", \.next = "((?:[^"\\]|\\.)*)"', re.MULTILINE)
     codes = {}
@@ -118,7 +90,6 @@ def prose_findings(root, runs):
 
 
 def effort_default_findings(root):
-    """An effort word written where the source says the model default chose it."""
     grammar = re.search(r"pub const ReasoningEffort = enum \{([^}]*)\}", (root / "src/model_catalog.zig").read_text())
     if grammar is None:
         raise AssertionError("src/model_catalog.zig declares no ReasoningEffort")
@@ -181,7 +152,6 @@ class FixtureLiteralsTest(unittest.TestCase):
                 'assert compact.startswith("244,800 tokens")',
                 '(("--model", "m"), "m", "low", "model_default"),',
                 'assert row == "low model default"',
-                # Clean: owner reads, codes, near numbers and short phrases.
                 "value = str(compaction_trigger('codex', model))",
                 'assert "[option_unknown]" in stderr and "not supported" in stderr',
                 "port = 1244800; size = 128000.5; name = 'a_128000'; grouped = '1,244,800'",
@@ -208,8 +178,6 @@ class FixtureLiteralsTest(unittest.TestCase):
                              [("src/store/pinned_tests.zig", 1), ("tests/integration/pinned.py", 5)])
 
     def test_readers_see_every_owner(self):
-        """An owner whose form the readers stop parsing must fail here, not
-        leave a rule silently empty."""
         sys.path.insert(0, str(ROOT / "tests/integration"))
         try:
             from product_defaults import DEFAULTS, context_window

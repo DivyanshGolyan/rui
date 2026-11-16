@@ -20,10 +20,6 @@ pub fn main(init: std.process.Init) !void {
         try std.Io.File.stdout().writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), @tagName(result));
         return;
     }
-    // `untimed STORE` reads time from a clock that never advances, so no
-    // Host-info deadline expires and the status depends only on the bytes
-    // the peer sends. A loaded runner can schedule a fixture's peer after
-    // the real 1 s budget (#967); only probes of that budget run timed.
     const untimed = args.len == 3 and std.mem.eql(u8, args[1], "untimed");
     if (args.len != 2 and !untimed) return error.ExpectedStorePath;
     const Frozen = struct {

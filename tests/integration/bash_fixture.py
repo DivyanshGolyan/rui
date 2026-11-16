@@ -1,6 +1,3 @@
-"""Bash Action helpers that several fixtures share: model exchanges, Session
-configuration, Action and process reads, the owner case's staging and disposal,
-and the recovery case's gated start and finish."""
 import base64
 from collections import Counter
 import json
@@ -17,14 +14,10 @@ import model_fixture as fixture
 
 
 def assert_cleanup_population(diagnostics, *, actions, models, inspection_limit):
-    # Reap/drain validates final native loss and sequence first. Endpoints cannot
-    # be supplied by this census after their original waits have expired.
     def owners(phase):
         return Counter((r.get("turn"), r.get("operation"), r.get("attempt"), r.get("action"))
                        for r in diagnostics.matching(phase))
 
-    # Only Bash delivery closure starts delayed, gated cleanup; a model
-    # Attempt releases custody when it completes.
     started = owners("cleanup_started")
     assert all(count == 1 for count in started.values()), started
     assert Counter(owner[3] for owner in started) == Counter(map(str, actions)), started
@@ -56,7 +49,6 @@ def start_detached_shell(command, ready_path):
 
 
 def publish_pid(path, value="$$"):
-    """Publish a fixture-owned shell PID expression atomically for exists waits."""
     temporary = shlex.quote(str(path.with_suffix(".tmp")))
     return (
         f'printf "%s" "{value}" > {temporary} && '
@@ -205,7 +197,6 @@ def dispose_owner_case(host, endpoint, thread):
             try:
                 endpoint.shutdown()
             except BaseException:
-                # A pre-effect refusal still owns a live serving thread.
                 dispose_all(endpoint.shutdown)
                 raise
 

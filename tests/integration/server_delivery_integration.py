@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""Real 60-second reply inactivity, release, control headroom and Host drain.
-
-Run directly with a ReleaseSafe Rui binary; no Client/schema/test-hook changes.
-"""
 
 import fcntl
 import hashlib
@@ -38,7 +34,7 @@ def hold_reply(sock, store, route, kind, **fields):
                      f"X-Rui-Wire-Version: {host_process.WIRE_VERSION}\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
         header = bytearray()
         while not header.endswith(b"\r\n\r\n"):
-            byte = peer.recv(1)  # Do not drain any body or unblock its writer.
+            byte = peer.recv(1)
             assert byte, header
             header.extend(byte)
             assert len(header) <= 512
@@ -55,14 +51,13 @@ def hold_reply(sock, store, route, kind, **fields):
 def resources(pid):
     root = pathlib.Path(f"/proc/{pid}")
     if not root.exists():
-        return None  # Not native Mac footprint evidence.
+        return None
     status = (root / "status").read_text()
     rss = int(next(line.split()[1] for line in status.splitlines() if line.startswith("VmRSS:")))
     return {"rss_kib": rss, "fds": len(os.listdir(root / "fd"))}
 
 
 def checkpoint_readers(repetitions=12_000, *, chunk_sizes=None):
-    """Slow canonical replies cannot prevent WAL reuse by unrelated commits."""
     with tempfile.TemporaryDirectory(prefix="rui-reader-checkpoint-") as root:
         state = canonical_fixture_root(root)
         store = state / "store"
@@ -81,7 +76,6 @@ def checkpoint_readers(repetitions=12_000, *, chunk_sizes=None):
             peers = PeerCensus(HostDiagnostics(host))
             sock = ready["socket"]
             session = peers.call("configure", lambda: model.configure(state, store, "config", None, "gpt-6-sol"))
-            # The trigger sits at the model's whole window, so these large payloads exercise WAL readers, not compaction.
             policy = peers.call("configure", lambda: model.command(
                 "session", "configure", "--store", store, "--session", session,
                 "--record", state / "checkpoint-policy.json", "--key", "checkpoint-policy",
@@ -121,8 +115,6 @@ def checkpoint_readers(repetitions=12_000, *, chunk_sizes=None):
                     writer_session = peers.call("configure", lambda: model.configure(state, store, f"write-{case}-{index}",
                                                 writer_session, "gpt-6-sol", instructions=f"{case}:{index}:" + "x" * (1024 * 1024)))
                     sizes.append((store / "rui.sqlite3-wal").stat().st_size)
-                # This is reuse/reset, not a 4-MiB quota: a large transaction
-                # can exceed journal_size_limit before a later WAL reset.
                 reused.append(any(after <= before for before, after in zip(sizes[-4:], sizes[-3:])))
                 print(json.dumps({"reader": kind, "fields": fields, "bytes": length,
                                   "wal_sizes": sizes, "wal_reused_while_held": reused[-1]}), flush=True)
@@ -202,13 +194,10 @@ def main():
             discovery_head, discovery_body = read("/v1/host-info", "host_info")
             assert discovery_head.startswith(b"HTTP/1.1 200 "), discovery_head
             assert json.loads(discovery_body)["store"] == str(store), discovery_body
-            # A committed idle stop progresses while all ten ordinary writers
-            # remain held; it cannot revoke the saved answer.
             assert peers.call("session_stop", lambda: control.stop_session(
                 state, store, "reply-stop", session))["answer"]["status"] == "accepted"
-            # Disconnect releases one exchange, not the committed result.
             deadline = time.monotonic() + 8
-            held.pop(0)[0].close()  # Whole-stream Conversation reader.
+            held.pop(0)[0].close()
             peers.release(held_requests.pop(0), deadline)
             head, body = read("/v1/read-result", "read_result", key="reply-message")
             assert head.startswith(b"HTTP/1.1 200 ") and body == expected
@@ -220,11 +209,7 @@ def main():
             peers.started(held_requests[-1], deadline)
             peers.held(held_requests)
             print(json.dumps({"phase": "held", "baseline": baseline, "held": full}), flush=True)
-            # No reader rescue: ten unread peers remain open for the real
-            # production inactivity interval. Shutdown must drain them itself.
             started = time.monotonic()
-            # The held readers keep the lease past pause's retirement wait,
-            # so pause returns after that whole bound, unconfirmed.
             stop_deadline = started + DEFAULTS.host_shutdown_seconds + 5
             stop_requests = [peers.expect("host_info"), peers.expect("host_stop")]
             stopped = subprocess.run([control.RUI, "host", "pause", "--store", store],
@@ -261,9 +246,6 @@ def main():
             stop_process(host)
             peers.finish(time.monotonic())
             host = None
-            # Restart and public reads prove the timed-out delivery did not
-            # reject/cancel/alter committed work. Fresh accounting is checked
-            # separately; it is not proof of the old process's exact refund.
             host, ready = control.start_host(store, observations="control_peers")
             diagnostics = HostDiagnostics(host)
             peers = PeerCensus(diagnostics)
@@ -289,7 +271,5 @@ def main():
 if __name__ == "__main__":
     host_process.enter()
     checkpoint_readers()
-    # Keep tiny-fragment coverage above; the large cohort measures held readers,
-    # not millions of flushed provider writes inside the same setup deadline.
     checkpoint_readers(48_000, chunk_sizes=(4093, 8191, 16381))
     main()

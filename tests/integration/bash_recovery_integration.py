@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Fresh-Host Bash recovery cuts prove durable facts never restore a permit."""
 
 import json
 import os
@@ -79,7 +78,6 @@ def prove_effect_without_result_becomes_indeterminate(state):
             human.read_terminal(master, "› ")
             info = human.chat_info_frame(master)
             assert "Model" in info and "Tools" in info, info
-            # Indeterminate execution is an Action fact, not a settings field.
             report = json.loads(human.run(home, "session", "inspect", "--store", store,
                                          "--session", session, "--profile", "full"))
             action, = report["full"]["actions"]

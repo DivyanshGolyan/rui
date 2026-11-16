@@ -1,6 +1,3 @@
-"""The canonical failure reply proxy and invocation helpers that the canonical
-failure, human CLI, Current, request-wait, session-list and terminal-restoration
-fixtures share."""
 import json
 import os
 import pathlib
@@ -26,7 +23,6 @@ def invoke(home, *args, input=None):
 
 
 def announced(result):
-    """Generated capture identity: the first stderr line, before transmission."""
     first = result.stderr.splitlines()[0] if result.stderr else ""
     match = re.fullmatch(r"request: (\S+) \(wait: rui request wait \1; if unconfirmed: rui request recover \1\)", first)
     assert match, result
@@ -35,12 +31,8 @@ def announced(result):
 
 
 class ReplyProxy(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
-    """Forward requests; count and rewrite only the selected route and record fields."""
     def __init__(self, host, route, rewrite=None, *, before_forward=None, match_record=None):
         self.path = pathlib.Path(host.rui_ready_fields["socket"])
-        # Exchanges connect to the backend name and the proxy binds its
-        # staging name, so both are exactly as long as the Host's: wherever
-        # the Host could bind (macOS allows 103 path bytes), they fit too.
         self.backend = self.path.with_name("=" + self.path.name[1:])
         self.route = route
         self.rewrite = rewrite
@@ -48,9 +40,6 @@ class ReplyProxy(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         self.match_record = match_record
         self.exchanges = []
         self.mutations = []
-        # A running client may connect at any moment, so the public path
-        # always names a listening socket: the Host's until the proxy is
-        # renamed over it, and the Host's again once it is renamed back.
         staging = self.path.with_name("~" + self.path.name[1:])
         os.link(self.path, self.backend)
         bound = False
@@ -60,8 +49,6 @@ class ReplyProxy(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             os.chmod(staging, 0o600)
             os.rename(staging, self.path)
         except BaseException:
-            # Before the rename the Host still owns the public path: remove
-            # only what this proxy added, keeping the original error primary.
             for cleanup in ((self.server_close,) if bound else ()) + (
                     lambda: staging.unlink(missing_ok=True), self.backend.unlink):
                 try:
@@ -73,9 +60,6 @@ class ReplyProxy(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         self.thread.start()
 
     def close(self, *, after_restore=None):
-        # New connections reach the Host first; accepted ones still forward
-        # through the backend name until their handlers join. A test may release
-        # an already-drained reply only after the direct socket is restored.
         restored = self.path.with_suffix(".canonical-restore")
         os.link(self.backend, restored)
         os.rename(restored, self.path)
@@ -104,14 +88,12 @@ class Exchange(socketserver.BaseRequestHandler):
             assert part, "truncated request body"
             body += part
         route = head.split(b" ")[1].decode()
-        # A Message's client environment precedes its saved record bytes;
-        # the record is what callers compare.
         record = body[int(fields.get(b"X-Rui-Environment-Bytes", b"0")):]
         if route in ("/v1/message", "/v1/control/permission-decision"):
             self.server.mutations.append((route, record))
         if route == self.server.route and self.server.before_forward is not None:
             if not self.server.before_forward(record):
-                return  # Held full request was cancelled before Host admission.
+                return
         with os_semantics.unix_stream() as backend:
             backend.settimeout(15)
             backend.connect(str(self.server.backend))
@@ -135,5 +117,5 @@ class Exchange(socketserver.BaseRequestHandler):
                 response = (b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n"
                     b"X-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\nConnection: close\r\nContent-Length: "
                     + str(len(ERROR_BYTES)).encode() + b"\r\n\r\n" + ERROR_BYTES)
-        if response is not None:  # An explicitly held cancellation peer sends nothing.
+        if response is not None:
             self.request.sendall(response)

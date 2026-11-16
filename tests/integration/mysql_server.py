@@ -24,23 +24,11 @@ import sys
 import host_process
 import live_engines
 
-# The unit binary's server lives one job. Its data sits in memory, so commits
-# still flush with the durability settings Rui checks, but to no disk. Its
-# optimizer statistics update as each test's tables fill: persistent ones
-# recompute in the background at most every ten seconds, so a table that
-# grows from empty in a second is planned as empty and an indexed lookup
-# becomes a scan (one test took 386 s instead of 26).
 UNIT_SERVER = ("--tmpfs", "/var/lib/mysql")
 UNIT_SERVER_COMMAND = ("--innodb-stats-persistent=OFF",)
 IMAGE = "mysql:8.4.13@sha256:a0225d1ea6631c8bc2385dc4c2faba17bbf1834ecf369e1659a9a382bd8d5dd7"
 READY_SECONDS = 180
-# The oldest ProxySQL release whose handshake offers what Rui's driver
-# requires (CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA; 3.0.5 does not).
 PROXY_IMAGE = "proxysql/proxysql:3.0.11@sha256:a504b3624312497f493a37426329af8efa044373906b8f9733c111b510285844"
-# ProxySQL as it ships, multiplexing on, with the two settings a Rui Store
-# needs of it: the sign-in Rui's driver speaks, which is not ProxySQL's
-# default, and the server version it announces. It reaches the server and
-# serves clients over Unix sockets in the one shared directory.
 PROXY_CONFIG = """datadir="/var/lib/proxysql"
 mysql_variables=
 {{
@@ -59,7 +47,6 @@ mysql_users=
     {{ username="root", password={password}, default_hostgroup=0, active=1 }}
 )
 """
-# Where the proxy's container sees the directory that holds both sockets.
 PROXY_MOUNT = "/var/run/mysqld"
 
 
@@ -72,27 +59,20 @@ def socket_path(socket_dir):
 
 
 def start(name, socket_dir, root_password, *arguments, command=()):
-    """Starts the image detached; `arguments` go to `docker run` before it,
-    and `command` to mysqld after it."""
-    # mysqld in the container runs as its own user and creates the socket here.
     os.chmod(socket_dir, 0o777)
     docker("run", "--detach", "--name", name, "--env", f"MYSQL_ROOT_PASSWORD={root_password}",
            "--volume", f"{socket_dir}:/var/run/mysqld", *arguments, IMAGE, *command, capture_output=True)
 
 
 def proxy_socket_path(socket, name):
-    """Where ProxySQL `name` serves clients: beside the server's `socket`."""
     return os.path.join(os.path.dirname(socket), f"{name}.sock")
 
 
 def config_string(value):
-    """`value` as a quoted string of ProxySQL's configuration file."""
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def proxy_config(socket, name, root_password):
-    """ProxySQL `name`'s configuration in front of the server at `socket`,
-    whose directory its container mounts at PROXY_MOUNT."""
     return PROXY_CONFIG.format(
         interface=config_string(f"{PROXY_MOUNT}/{os.path.basename(proxy_socket_path(socket, name))}"),
         server=config_string(f"{PROXY_MOUNT}/{os.path.basename(socket)}"),
@@ -100,9 +80,6 @@ def proxy_config(socket, name, root_password):
 
 
 def start_proxy(name, socket, root_password, config_path):
-    """Starts ProxySQL detached in front of the server at `socket`,
-    writing its settings to `config_path`, and returns once it listens on
-    `proxy_socket_path`, where it serves root's clients."""
     path = proxy_socket_path(socket, name)
     with open(config_path, "w", encoding="utf-8") as config:
         config.write(proxy_config(socket, name, root_password))
@@ -119,7 +96,6 @@ def start_proxy(name, socket, root_password, config_path):
 
 
 def wait_ready(name):
-    # The entrypoint first runs a setup server on port 0, then the real one.
     def observe():
         running = docker("inspect", "--format", "{{.State.Running}}", name, capture_output=True).stdout.strip()
         if running != "true":

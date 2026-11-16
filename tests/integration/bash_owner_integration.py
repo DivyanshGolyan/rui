@@ -79,8 +79,6 @@ def prove_timeout_feedback(state):
             assert instructions == fixture.model_instructions(workspace, store=store, session=session, model="gpt-6-sol"), instructions
             assert fixture.instructions_workspace(instructions) == str(workspace), instructions
             if effective is None:
-                # The model and the saved result get exactly the outcome and the
-                # nonempty stream: no empty stderr section, no retirement note.
                 assert result == f"Bash succeeded. Exit code: 0.\nstdout:\n{workspace}", result
             else:
                 expected = (
@@ -110,7 +108,6 @@ def main():
     completed = False
     try:
         prove_timeout_feedback(state)
-        # One byte over the command limit fails after incremental decoding.
         preparation_session, preparation_action = stage_action(
             state, store, "preparation-failure", ":" + " " * (120 * 1024)
         )
@@ -191,7 +188,6 @@ def main():
         retention_store = root / "retention-store"
         first_session, first_action = stage_action(
             state, retention_store, "retention-first",
-            # Paths are named only for truncated streams: truncate both.
             "head -c 20001 /dev/zero | tr '\\0' o; head -c 20001 /dev/zero | tr '\\0' e >&2",
         )
         second_session, second_action = stage_action(
@@ -231,8 +227,6 @@ def main():
             if line.startswith(("Full stdout: ", "Full stderr: "))
         ]
         assert len(retained_paths) == 2 and all(path.exists() for path in retained_paths)
-        # Completed inspection replies may still own charged report scratch.
-        # Only the retained files belong in this scenario's idle accounting.
         retained_bytes = sum(path.stat().st_size for path in retained_paths)
         fixture.wait_for(
             lambda: execution_idle(
@@ -256,9 +250,6 @@ def main():
             retention_store, second_session
         )
         assert second_result.endswith("current\nFull output was not retained.\n"), second_result
-        # Optional retention failure occurs after canonical settlement. Both
-        # saved answers must remain byte-identical when read again; neither
-        # the failed eviction nor the unavailable new paths may rewrite them.
         assert (
             bash_fixture.result_text(retention_store, first_session)
             == first_result
@@ -267,9 +258,6 @@ def main():
             bash_fixture.result_text(retention_store, second_session)
             == second_result
         )
-        # The public Conversation projection reads the same canonical Tool
-        # Result despite optional full-output retention failure. No spillover
-        # pathname is needed to address or complete this content.
         session = second_session
         page_request = {"version": host_process.WIRE_VERSION, "kind": "conversation_page",
                         "store": str(retention_store), "session": session, "end": "0",
@@ -279,7 +267,6 @@ def main():
         assert head.startswith(b"HTTP/1.1 200 "), (head, body)
         page = json.loads(body)
         result_item = next(item for item in page["items"] if item["kind"] == "tool_result")
-        # The truncated result spans several content windows; read them all.
         content = b""
         while True:
             content_request = {"version": host_process.WIRE_VERSION, "kind": "conversation_content",

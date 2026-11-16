@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Observe allocator environment before main, not after a too-late setenv."""
 
 import os
 from pathlib import Path
@@ -61,8 +60,6 @@ def main():
         for index, (overrides, expected, count) in enumerate(cases):
             store, log = root / f"store-{index}", root / f"log-{index}"
             env = dict(base, **overrides, RUI_ALLOCATOR_PROBE=str(log), RUI_ALLOCATOR_STORE=str(store))
-            # The second image must preserve argv, cwd, stdio and the PID that
-            # the supervising caller owns. A relative Store also checks cwd.
             relative_store = os.path.relpath(store)
             with patch.dict(os.environ, env, clear=True):
                 process, _ = start_ready_process(
@@ -80,7 +77,6 @@ def main():
             finally:
                 stop_process(process)
 
-        # Ordinary CLI invocations do not change allocator policy or re-exec.
         log = root / "cli-log"
         env = dict(base, RUI_ALLOCATOR_PROBE=str(log), RUI_ALLOCATOR_STORE=str(root / "unused"))
         subprocess.run([binary], env=env, capture_output=True, timeout=10)
@@ -88,8 +84,6 @@ def main():
         assert len(rows) == 1 and rows[0][1:] == ["absent", "absent", "0"], rows
 
         if macos:
-            # Make executable-path resolution/replacement fail before Store
-            # effects, without any production fault hook or restart marker.
             removed = root / "removed-rui"
             shutil.copy2(binary, removed)
             store, log = root / "failed-store", root / "failed-log"

@@ -107,8 +107,6 @@ class PrepushTest(unittest.TestCase):
             for mode in ("default", "quick", "full"):
                 for path in sorted(graph.cores):
                     with self.subTest(mode=mode, path=path):
-                        # No files exist in this test's root: deleted cores
-                        # still select their owning boundary check.
                         commands = dict(prepush.checks([path], AVAILABLE, "BASE", mode))
                         self.assertIn("core boundary", commands)
                         self.assertEqual(commands["core boundary"], expected)
@@ -163,7 +161,6 @@ class PrepushTest(unittest.TestCase):
 
     def test_full_runs_a_live_need_only_through_its_own_root_and_skips_every_other(self):
         no_root = "no target runs only these tests"
-        # path: (roots the live MySQL step runs, text each CI-only skip names, or None for no such skip)
         cases = {
             "src/request_encoding.zig": (None, None),
             "src/store/rsql.zig": (["test-store"], None),
@@ -171,10 +168,8 @@ class PrepushTest(unittest.TestCase):
             "src/store/Store.zig": (["test-store"], None),
             "tests/integration/settings_integration.py": (["settings-integration"], None),
             "src/host_start.zig": (["settings-integration"], None),
-            # forEachEngine tests in the native root: no root runs only them.
             "src/find_tools_tests.zig": (None, [no_root]),
             "src/read_transcript.zig": (None, [no_root]),
-            # Roots that need Postgres, or start their own MySQL in Docker.
             "src/store/wire/pg.zig": (None, ["(test-pg)"]),
             "src/store/wire/mysql_connection.zig": (["test-store"], ["(mysql-wire-integration)"]),
         }
@@ -196,7 +191,6 @@ class PrepushTest(unittest.TestCase):
                 self.assertFalse({"live MySQL", "live, CI only"} & set(default))
 
     def test_the_live_mysql_step_never_runs_a_whole_suite(self):
-        # Every path a live rule names, and every native forEachEngine file.
         candidates = {path for patterns, *_ in select_tests.LIVE_RULES for path in patterns if "*" not in path and not path.startswith("!")}
         candidates |= {"src/store/rsql.zig", "src/store/Store.zig", "src/store/schema.zig", "src/store.zig"}
         candidates |= select_tests.tree_graph().live_conformance
@@ -305,12 +299,10 @@ class PrepushTest(unittest.TestCase):
         self.git("checkout", "-qb", "feature")
         head = self.commit("b", "1\n", "feature")
         tree = self.git("rev-parse", "HEAD^{tree}")
-        # One probe per changed diff, as checks() plans nothing for an empty one.
         planned = patch.object(prepush, "checks", side_effect=lambda paths, *_: iter([("probe", ["true"])] if paths else [])).start()
 
         def run(*argv, pushed=None):
             environ = {"RUI_PREPUSH_PUSHED": f" {pushed}"} if pushed else {}
-            # select_tests.changed_paths reads the repository it runs in.
             with patch("sys.argv", ["prepush.py", *argv]), patch.dict(os.environ, environ), contextlib.chdir(self.root), \
                     redirect_stdout(io.StringIO()) as output, self.assertRaises(SystemExit) as result:
                 prepush.main()
@@ -352,7 +344,6 @@ class PrepushTest(unittest.TestCase):
         self.file("edited.md", "one\ntwo \n")
         self.git("add", "-A")
         self.git("commit", "-qm", "whitespace")
-        # An uncommitted edit moves HEAD's line numbers; that file is its author's to fix.
         self.file("edited.md", "zero\none\ntwo \n")
         with redirect_stdout(io.StringIO()) as output:
             self.assertEqual(prepush.fix_whitespace(base), 1)

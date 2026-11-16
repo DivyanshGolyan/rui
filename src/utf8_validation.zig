@@ -1,9 +1,5 @@
-//! UTF-8 boundaries and incremental validation.
 const std = @import("std");
 
-/// The longest prefix of `bytes` that is valid UTF-8. A valid prefix is
-/// whole code points, so it ends at the start of the first one that does not
-/// decode: one pass, and a cut at the end drops at most three bytes.
 pub fn validPrefix(bytes: []const u8) []const u8 {
     if (std.unicode.utf8ValidateSlice(bytes)) return bytes;
     var end: usize = 0;
@@ -16,16 +12,11 @@ pub fn validPrefix(bytes: []const u8) []const u8 {
     return bytes[0..end];
 }
 
-/// `bytes` without a code point cut at its end, or null when anything other
-/// than such a cut (at most three bytes) is invalid.
 pub fn wholePrefix(bytes: []const u8) ?[]const u8 {
     const valid = validPrefix(bytes);
     return if (bytes.len - valid.len > 3) null else valid;
 }
 
-/// `bytes` without a final code point that its end cuts short. Unlike
-/// `wholePrefix` nothing else is checked: other invalid bytes stay. A lead
-/// byte is at most three continuation bytes back, so at most four are read.
 pub fn completePrefix(bytes: []const u8) []const u8 {
     var start = bytes.len;
     while (start != 0 and bytes.len - start < 4) {
@@ -37,8 +28,6 @@ pub fn completePrefix(bytes: []const u8) []const u8 {
     return if (start + length > bytes.len) bytes[0..start] else bytes;
 }
 
-/// The start of the code point holding byte `at`, so a cut there keeps whole
-/// code points. An `at` at or past the end is returned unchanged.
 pub fn scalarStart(bytes: []const u8, at: usize) usize {
     var start = at;
     while (start > 0 and start < bytes.len and bytes[start] & 0xc0 == 0x80) start -= 1;
@@ -81,8 +70,6 @@ test "validPrefix keeps the longest valid prefix" {
 }
 
 test "validPrefix agrees with the longest validating prefix on every short input" {
-    // Lead, continuation and refused bytes at each class boundary: ASCII,
-    // continuations, overlong and surrogate leads, the four-byte limit.
     const alphabet = [_]u8{ 'a', 0x7f, 0x80, 0x8f, 0x90, 0x9f, 0xa0, 0xbf, 0xc0, 0xc2, 0xe0, 0xed, 0xef, 0xf0, 0xf4, 0xf5, 0xff };
     var bytes: [4]u8 = undefined;
     for (0..bytes.len + 1) |len| {
@@ -108,7 +95,6 @@ test "validPrefix steps back at most three bytes from a cut in valid text" {
         try std.testing.expect(end - kept <= 3);
         try std.testing.expectEqual(scalarStart(text, end), kept);
     }
-    // An early invalid byte ends the prefix there, however long the tail.
     const tail: [4096]u8 = @splat('b');
     const long = "a\xff" ++ tail;
     try std.testing.expectEqualStrings("a", validPrefix(long));
@@ -127,8 +113,6 @@ test "completePrefix drops only a cut final code point and keeps other bytes" {
     try std.testing.expectEqualStrings("a", completePrefix("a\xc3"));
     try std.testing.expectEqualStrings("a", completePrefix("a\xf0\x9f\x98"));
     try std.testing.expectEqualStrings("a\xf0\x9f\x98\x80", completePrefix("a\xf0\x9f\x98\x80"));
-    // Not a cut: a stray continuation, a run longer than any code point, an
-    // invalid lead and invalid bytes before the end all stay.
     try std.testing.expectEqualStrings("a\x80", completePrefix("a\x80"));
     try std.testing.expectEqualStrings("\x80\x80\x80\x80\x80", completePrefix("\x80\x80\x80\x80\x80"));
     try std.testing.expectEqualStrings("a\xff", completePrefix("a\xff"));

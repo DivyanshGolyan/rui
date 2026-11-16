@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""The settings-document contract against CI's live MySQL Store.
-
-No server is started locally. Like the Store's live tests, this skips when
-RUI_TEST_MYSQL_* is absent, and fails when CI requires MySQL but omitted it.
-"""
 import contextlib
 import json
 import os
@@ -34,13 +29,10 @@ def main():
     rui, admin = map(lambda arg: str(pathlib.Path(arg).resolve()), sys.argv[1:3])
     root = host_process.canonical_fixture_root(tempfile.mkdtemp(prefix="rui-mysql-launch-"))
     database = "rui_launch_" + secrets.token_hex(6)
-    # This URL exists only in the fixture's memory and the child's stdin.
     url = f"mysql://root:{quote(password, safe='')}@{quote(socket, safe='')}/{database}"
     runtime = root / "run"
     runtime.mkdir(mode=0o700)
     sock = runtime / "rui.sock"
-    # Use the SQLite launch fixture's preset creation shape: the preset supplies
-    # the required model, compaction trigger, tools, permission mode and effort.
     preset = {"model": "gpt-6.1-sol", "effort": "low", "compactAt": 100000,
               "tools": [], "permissionMode": "ask", "label": "Review"}
     good = {"store": {"mysql": {"url": {"value": url}}},
@@ -55,7 +47,6 @@ def main():
         return subprocess.run([admin], input=text, text=True, capture_output=True, check=True).stdout.strip()
 
     def launch(value):
-        # The CI fixture credentials are not inherited by the Host itself.
         env = {key: os.environ[key] for key in ("PATH", "HOME", "TMPDIR") if key in os.environ}
         child = subprocess.Popen([rui, "host", "serve", "--settings", "-"], stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
@@ -65,8 +56,6 @@ def main():
         return child
 
     def released():
-        # MySQL ends an exited Host's session, and its GET_LOCK, a little
-        # after the socket closes, so a relaunch waits for the lock to free.
         host_process.wait_for(lambda: sql(f"SELECT IS_FREE_LOCK('{database}')") == "1",
                               "the exited Host's Store lock", timeout=20)
 
@@ -118,8 +107,6 @@ def main():
         ddl = subprocess.run([rui, "store", "schema", "--engine", "mysql"], check=True, capture_output=True, text=True).stdout
         assert "CREATE TABLE store_meta" in ddl
         sql(f"USE {database};" + ddl)
-        # Each refusal must precede metadata repair and ownership writes.
-        # Leave other metadata absent so even a repair is observable.
         sql(f"INSERT INTO {database}.store_owner VALUES(1,7,9)")
 
         def admission_snapshot():
@@ -131,7 +118,6 @@ def main():
             ("format", "0", "the MySQL Store format is older than this build; apply its forward migrations"),
             ("format", "4294967295", "the MySQL Store format is newer than this build; use a compatible build"),
             ("format", "not-a-number", "the MySQL Store format metadata is not a valid number"),
-            # Format 74 retired the Store's wire label: its row is an unknown key.
             ("wire_version", "retired-wire", "the MySQL Store metadata contains an unexpected key"),
             ("unexpected", "unexpected-value", "the MySQL Store metadata contains an unexpected key"),
             ("store_id", "not-an-id", "the MySQL Store identity metadata or connection target is invalid"),
@@ -157,8 +143,6 @@ def main():
                     sql(f"ALTER TABLE {database}.store_meta ALTER CHECK store_meta_chk_1 ENFORCED")
         host = launch(good)
         store_id = ready(host)
-        # Only private host-info discovery may omit the identity. Once known,
-        # the exact opaque id works; database names and other ids never do.
         discovered = frame_host.host_info(sock, "")
         exact = frame_host.host_info(sock, store_id)
         assert exact["store"] == store_id and exact["instance"] == discovered["instance"], exact
@@ -187,13 +171,11 @@ def main():
         assert saved["model"] == preset["model"] and saved["tools"] == [] and saved["label"] is None, saved
         assert saved["compaction_trigger_override"] == "100000", saved
         assert saved["reasoning_effort"] == "low" and saved["reasoning_effort_override"] == "low", saved
-        # CLI/Bash peers route by the non-secret runtime hint, never the URL.
         env = dict(os.environ, RUI_RUNTIME_DIR=str(runtime))
         status = subprocess.run([rui, "host", "status", "--store", store_id], env=env, text=True, capture_output=True, check=True)
         status = json.loads(status.stdout)
         assert status["store"] == store_id and status["innodb_doublewrite"] == sql("SELECT @@global.innodb_doublewrite")
         assert status["diagnostics"] == str(runtime / "diagnostics")
-        # A bad hint is refused, never retried as a relative SQLite directory.
         for hint in ("relative-runtime", ""):
             invalid = subprocess.run([rui, "host", "status", "--store", store_id],
                                      cwd=root, env=dict(env, RUI_RUNTIME_DIR=hint), text=True, capture_output=True, timeout=10)
@@ -207,8 +189,6 @@ def main():
         private(host)
         close(host)
         released()
-        # Post-login access checks cover both ownership writes: SELECT-only
-        # cannot INSERT, and SELECT+INSERT still cannot advance the epoch.
         for user, privileges in limited_logins:
             limited_password = secrets.token_hex(24)
             sql(f"CREATE USER '{user}'@'localhost' IDENTIFIED BY '{limited_password}';"
@@ -240,22 +220,16 @@ def main():
         released()
         assert admission_snapshot() == before, "mismatched selector admission wrote durable state"
         assert not sock.exists(), "the refused Host retained its socket"
-        # Restore the canonical selector before testing restart and fencing.
         sql(f"UPDATE {database}.store_meta SET meta_value='{database}' WHERE meta_key='store_selector'")
         host = launch(good)
         assert ready(host) == store_id, "the Store id changed across a Host restart"
         assert frame_host.post(sock, "inspect-session", request)["session"]["reference"] == session
         private(host)
-        # A read that finds its connection killed fences the Store. A write
-        # batch that finds it first (the Host's own, such as a saved model
-        # list) reconnects and reruns instead, by design, and the read then
-        # succeeds on the new connection: kill that one and read again.
         code = None
         for _ in range(5):
             connection = sql(f"SELECT ID FROM information_schema.PROCESSLIST WHERE DB='{database}'")
             assert connection.isdecimal(), "expected one Host connection"
             sql(f"KILL CONNECTION {connection}")
-            # Drive a canonical read so the Store observes the killed connection.
             with contextlib.suppress(OSError, AssertionError):
                 frame_host.post(sock, "inspect-session", request)
             try:
@@ -265,7 +239,6 @@ def main():
                 continue
         assert code == 1, f"a fenced MySQL Store exited {code}, not 1: {frame_host.output(host)!r}"
         out, err = frame_host.output(host)
-        # stdout holds the readiness line, then exactly one named exit (D211).
         assert b"internal_unexpected" not in err, f"a fenced Host was reported as an internal fault: {err!r}"
         lines = out.decode().splitlines()
         assert len(lines) == 2 and lines[0].startswith("ready ") and json.loads(lines[1])["rui_start_error"]["code"] == "store_fenced", \
@@ -304,5 +277,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    # The Store's MySQL round-trip budget needs the same live server.
     store_rounds_cases.run(*(str(pathlib.Path(arg).resolve()) for arg in sys.argv[1:3]))

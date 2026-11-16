@@ -1,10 +1,3 @@
-"""The wire version has one owner, src/wire_version.zig, and moves only past a release.
-
-Every Zig test, fixture and qualification harness reads the owner, so a bump
-edits one line. A new release-gated number is spent only once per release:
-concurrent PRs share main's unreleased number instead of racing to bump it.
-Changes to the generated wire contract since that release require a newer number.
-"""
 from pathlib import Path
 from copy import deepcopy
 import json
@@ -22,11 +15,9 @@ GO_OWNER_FILE = "tests/qualification/measurement/measurement.go"
 TS_OWNER = re.compile(r'^export const WIRE_VERSION = "(\d+)";$', re.MULTILINE)
 TS_OWNER_FILE = "clients/ts/src/transport.ts"
 OWNER_FILE = "src/wire_version.zig"
-# Where releases cut before the owner moved declared it.
 EARLIER_OWNER_FILE = "src/protocol.zig"
 NAME = "wire_version"
 HEADER = r'Wire-Version\\?"?\s*:\s*\\?"?\d'
-# Literal version digits, per language, in the forms the wire takes in source.
 LITERALS = (
     ("src", (".zig",), re.compile(r'\\"(?:version|vers\\\\u0069on)\\":\s*(?:\\")?\d|\.version\s*=\s*"\d|' + HEADER, re.I)),
     ("tests/integration", (".py", ".sh"), re.compile(
@@ -44,7 +35,6 @@ def wire_version(source):
 
 
 def wire_version_at(revision):
-    """The wire version a commit declares, from the owner file it had."""
     for path in (OWNER_FILE, EARLIER_OWNER_FILE):
         if subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e", f"{revision}:{path}"],
                           capture_output=True).returncode == 0:
@@ -53,9 +43,7 @@ def wire_version_at(revision):
 
 
 def normalized_contract(document):
-    """Ignore annotations, never schema names or literal wire data."""
     documentation = {"description", "summary", "example", "examples"}
-    # These objects index named entries; their keys are not annotations.
     named_maps = {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas",
                   "dependentRequired", "paths", "webhooks", "responses", "content", "headers",
                   "encoding", "callbacks", "links", "variables", "mapping", "scopes", "parameters"}
@@ -83,7 +71,6 @@ def normalized_contract(document):
 
 
 def first_difference(released, candidate, path="$"):
-    """The first differing JSON path, in deterministic object-key order."""
     if type(released) is not type(candidate):
         return path
     if isinstance(released, dict):
@@ -107,7 +94,6 @@ def first_difference(released, candidate, path="$"):
 
 
 def wire_contract_error(tag, released, candidate, released_document, candidate_document):
-    """A changed released contract requires a newer owner-declared wire version."""
     difference = first_difference(normalized_contract(released_document),
                                   normalized_contract(candidate_document))
     if difference is not None and candidate <= released:

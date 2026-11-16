@@ -1,5 +1,3 @@
-/* Diagnostic preload only. Its worker/stdio allocations perturb the process;
- * never use this library for uninstrumented memory or CPU qualification. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
