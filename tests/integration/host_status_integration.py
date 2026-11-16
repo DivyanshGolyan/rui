@@ -736,4 +736,5 @@ def main():
 
 if __name__ == "__main__":
     host_process.enter()
-    main()
+    with live_engines.mysql_lease(os.environ):
+        main()

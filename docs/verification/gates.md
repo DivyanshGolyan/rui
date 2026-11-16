@@ -19,6 +19,7 @@ Anything else runs through `python3 tests/integration/host_process.py exec COMMA
 Entering stops a root process with that instruction, whether a build step or a person launched it.
 It also replaces the process environment with the variables `INHERITED` names there (PATH, HOME, TMPDIR, locale and named fixture inputs, each with its reason) plus `TERM=xterm-256color`, so a caller's `RUI_*`, TLS trust or proxy settings cannot change what a fixture proves.
 A fixture sets its own variables after entering, and its children inherit only those.
+`host_process.py exec-mysql COMMAND...` additionally holds the shared MySQL socket lease across exec; the TypeScript process tests use it to exclude the Store shard-zero tests that change server-global settings.
 Importing host_process changes nothing, so tests/ci and fixture libraries can use it freely.
 `FixtureEntryTest` in [test_harness_contracts.py](../../tests/ci/test_harness_contracts.py) finds every fixture entry (each shell script, and each Python module with a main block), runs it with root simulated and requires that refusal.
 It also requires that every `measure-*` step goes through the exec entry.
@@ -116,14 +117,19 @@ Syntax checks, probe compilation and unrelated product tests do not qualify a re
 
 `check` runs formatting, ReleaseSafe native tests and process integrations, a Debug artifact and recovery smoke, ReleaseSmall deliverables and, on x86-64 Linux, `stack-frames`.
 Required functional assertions stay required when their fixture changes.
-Native and process suites run concurrently, except short-deadline Host-startup and Debug smoke cases, which follow the parallel batch.
+Native, Store and process suites run concurrently, except short-deadline Host-startup and Debug smoke cases, which follow the parallel batch.
+The Store unit root compiles once and runs as four concurrent processes through [the shared shard launcher](../../tests/ci/store_shards.py); native and each Store process retain separate 1200-second deadlines.
+Shard zero first runs the seven tests that change MySQL server-global settings under an exclusive socket lease, then releases the other shards; native and live MySQL process fixtures share the ordinary phase.
+[Native unit roots](../../tests/ci/unit-roots.md) owns timing-based assignment, MySQL isolation and record aggregation.
+Explicit `-Dtest-filter` runs retain one filtered aggregate process.
 The Debug smoke covers streamed-capture failure and recovery, Store-lease exclusion, committed-but-lost Message replies, changed-source capture preservation and same-key configuration and Message replay after a Host crash.
 
 Human CLI caller, renderer, terminal-restoration and canonical-failure cases run as separate parallel peers in `check` and the `callers` partition.
 The driver waits for every peer before isolated cases and fails if any peer fails.
 The unsplit serial gate retains its original case order and assertions.
 
-`zig build check-full` runs routine native tests and process integrations serially after formatting and production builds.
+`zig build check-full` runs the native/Store unit group before its serial process integrations, after formatting and production builds.
+Within that group native and the four Store shard processes overlap, with the same per-process deadlines and MySQL isolation as `test` and `check`.
 Selected CI runs it on Linux for build or dependency changes; promotion runs it on macOS, and manual qualification runs it on request.
 Run the unsplit default locally for release qualification and isolated process-latency claims.
 It is not an every-edit gate.
@@ -131,7 +137,7 @@ Serial execution reduces unrelated load but does not establish scheduler order; 
 
 Linux Selected CI and each platform's qualification run the full gate as `-Dcheck-part=execution` and `-Dcheck-part=callers` on two isolated runners at the same revision.
 Both must pass.
-The execution partition overlaps native tests with its serial process fixtures; the unsplit gate remains serial.
+The execution partition overlaps the native/Store unit group with its serial process fixtures; the unsplit gate finishes the group before starting those fixtures.
 Their disjoint fixtures cover the full gate once; callers run Host-process, allocator, launch and Debug smoke cases serially after the parallel batch.
 [qualification.py](../../tests/ci/qualification.py) packs other Linux targets so a Selected run never exceeds ten shards.
 A long gate (`check`, `check-full`, `test`, `stack-frames`) runs alone, and beside one the short targets share three shards: they end inside the gate's run, so more shards would only repeat setup.

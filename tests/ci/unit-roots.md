@@ -16,7 +16,7 @@ Native tests that call the Store's engine-conformance seam also keep `test`
 for native-only changes in their import closure, so their MySQL pass runs in
 Linux CI. Drafts run the roots a change reaches on Linux too, as review does;
 shared Store inputs select both roots, as `test`, in either phase.
-The Store root alone starts and verifies the live MySQL dialect check in Linux CI.
+The Store root supplies the verified live MySQL dialect record in Linux CI.
 
 The value-only `url` module owns URL parsing and host bounds. Native, logic
 and semantic-check roots import the same module instance as their HTTP/2 and
@@ -24,12 +24,44 @@ TLS modules, so URL types are never compiled into two modules in one binary.
 The import-architecture test lists this named value module among its module
 roots; path-only traversal cannot follow its shared named import.
 
-Module ownership preserves each module's process globals. Executions are
-**serial, Store last**: the MySQL dialect fixture uses fixed schema names and
-rewrites `RUI_TEST_MYSQL_RECORD`. The final record remains the Store owner's
-positive prepare/migration/conformance evidence, not a suite-wide counter sum.
-An earlier failure stops the chain. The check shard gives the entire chain the
-original **one 1200-second deadline**, entering `host_process.py` for each binary.
+Module ownership preserves each module's process globals. Native and Store
+execute concurrently. The Store root compiles once; `test-store`, `test`, `check`
+and the `check-full` execution part run that binary as concurrent shards through
+[store_shards.py](store_shards.py). Its single default shard-count constant is
+four. `check` enters `host_process.py` before the launcher for each root. The
+launcher gives the native process and each Store shard its own **1200-second
+deadline**; `run_selected.py` retains its existing per-process `--test-timeout`.
+Each peer reports its result, and a failure still waits for the other peers.
+
+The generated runner embeds the committed per-test seconds from
+[store_test_times.json](store_test_times.json). The partition owner in
+`src/unit_test_partition.zig` assigns the complete owned name list at runtime,
+using longest-processing-time-first greedy assignment with deterministic ties.
+Tests absent from the timing file use a stable hash shard and the median
+recorded duration as their weight; removed tests contribute no work. Metadata
+and test execution use the same selection. Without `RUI_UNIT_SHARD=i/K`, the
+binary exposes its complete root, preserving unsharded measurements and
+inventory comparisons. Explicit `-Dtest-filter` runs retain one process.
+
+Seven MySQL tests change server-global admission settings or packet limits.
+The partition owner pins them to shard zero and places them first in that
+process. The launcher holds an exclusive lease on the shared MySQL socket
+until the stock runner starts shard zero's first ordinary test, after all seven
+have restored their settings. It then starts the other three shards and
+downgrades to a shared lease. Native, the TypeScript settings process tests and the live settings/Host-status fixtures
+also hold that shared lease, so they can overlap all ordinary Store tests.
+A source-domain test checks that every server-global mutator belongs to this
+prelude. No extra Store test process or binary is needed.
+
+The launcher's process-specific MySQL namespaces isolate dialect-check schemas
+between native and every Store shard. The fixed-name MySQL session tests stay together on Store shard zero; dialect and migration tests use the process namespace and participate in balancing;
+conformance accounts are named per process too. The existing MySQL test
+allocator uses server-side locks to prevent different processes from leasing
+the same conformance database. Each Store shard writes its own dialect record;
+the launcher merges their counters into `RUI_TEST_MYSQL_RECORD` after all shards
+pass, preserving `live_engine_step.py verify mysql` as the acceptance owner.
+The native process writes a separate record so it cannot replace Store evidence.
+Filtered aggregate runs keep the original record path and a unique namespace.
 
 Compiler filters reduce sema/codegen, but Zig always includes anonymous tests
 and matches filter substrings anywhere in a name. A generated adaptation of the
@@ -64,6 +96,21 @@ unit producer and all PR/stable/qualification target names remain unchanged.
 Artifact receipts validate both independently named executables.
 
 ## Verification and measurements
+
+Refresh the timing file against CI's MySQL 8.4 service, with its required-engine,
+socket, password and record environment, as a non-root fixture user:
+
+```sh
+python3 tests/ci/store_shards.py measure PATH/TO/unit-store-tests \
+  --timeout 1800 --output tests/ci/store_test_times.json
+```
+
+The measurement command runs the complete Store root in terminal mode. Its larger
+measurement budget allows a complete baseline when the unsharded root exceeds
+1200 seconds; normal shard execution retains its 1200-second deadline. Existing
+split-compilation measurements below predate runtime sharding and do not
+establish its speedup; compare unsharded and concurrent Store wall times on the
+same machine with the same engine settings.
 
 Measurements were run as non-root `tester`, Zig 0.17.0, Linux x86_64, four
 2.10 GHz Xeon cores, 15 GiB RAM, no swap. LLVM is a Linux stand-in for the Mac
@@ -113,17 +160,17 @@ SHA-256 of the sorted names joined with `\n` (no trailing newline):
 `0e840ca23af9f583ccc9d8d184d694567f162b220f5d2a36e4e5da8c0abb380c`.
 The earlier `a8647bcf` comparison independently matched all 1,908 names.
 
-The final runtime uses CI's pinned MySQL server with a tmpfs datadir and
+The split runtime at that revision used CI's pinned MySQL server with a tmpfs datadir and
 `--innodb-stats-persistent=OFF`, required `sqlite,mysql`, the unchanged engine
 credentials/record environment, non-root `tester`, and the actual check native
-helper's shared 1200-second deadline. The local account needed its soft file
+helper's then-shared 1200-second deadline. The local account needed its soft file
 descriptor limit raised from 1,024 to its available 20,000; an earlier attempt
 exhausted the lower fixture budget. No test assertions or skips were changed.
-The CI Python harness suite passes: 353 tests, with only the explicitly opt-in
-compiler probe skipped (the initial probe was also exercised during development).
-Generator, metadata, serial execution/shared-deadline and multipart executable
-integrity regressions are included. `zig fmt --check --ast-check`, shell syntax
-and `git diff --check` pass. The rebased full run **passed in 434.3 seconds**: native 1,368 passed plus
+The CI Python harness suite at that revision passed 353 tests, with only the
+explicitly opt-in compiler probe skipped (the initial probe was also exercised
+during development). Generator, metadata, serial execution/shared-deadline and
+multipart executable integrity regressions were included. `zig fmt --check
+--ast-check`, shell syntax and `git diff --check` passed. The rebased full run **passed in 434.3 seconds**: native 1,368 passed plus
 its two existing skips (macOS-only `path_helper` and the separate real-time
 inactivity witness), Store all 560 passed; **1,928 passed, 2 unchanged skips,
 0 failures**. CI's MySQL verification passed with `ddl=118`, `prepares=448`,
