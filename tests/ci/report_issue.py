@@ -32,6 +32,7 @@ RECORD = re.compile(r"^([a-z0-9-]+) (passed|failed): exit=\d+.*$", re.M)
 COMMAND = re.compile(r"^error: process (?:exited with code \d+|terminated with signal \w+)\n"
                      r"failed command: (.+)$", re.M)
 SCRIPT = re.compile(r"tests/integration/[\w./-]+\.py")
+FAILED_COMMAND = re.compile(r"^failed command: (.+)$", re.M)
 ZIG_CRASH = re.compile(r"^error: '(.+?)' (terminated with signal \w+|failed)", re.M)
 # A failing assertion can print its diagnostics between the test's name and its
 # FAIL record; the record never lies past the next numbered test.
@@ -63,6 +64,7 @@ class Cause:
     detail: str = ""
     zig_test: str = ""
     python_test: str = ""
+    zig_binary: str = ""
 
 
 def gh(*args):
@@ -108,9 +110,39 @@ def tracebacks(log):
 
 
 def zig_paths(test):
-    """The one source file whose name is the test's module, or none if ambiguous."""
-    matches = sorted(Path("src").rglob(test.split(".", 1)[0] + ".zig"))
+    """Resolve the complete module namespace before falling back to a basename."""
+    module = re.split(r"\.(?:decltest|test)\.", test, maxsplit=1)[0]
+    if "." in module:
+        path = Path("src", module.replace(".", "/") + ".zig")
+        if path.is_file():
+            return [str(path)]
+    matches = sorted(Path("src").rglob(module.split(".", 1)[0] + ".zig"))
     return [str(matches[0])] if len(matches) == 1 else []
+
+
+def zig_binary(log, start):
+    """The failed command following a Zig diagnostic, before a fixture boundary.
+
+    Generic test namespaces (notably tests.test.*) need the executable identity
+    to distinguish the native, HTTP/2 and Postgres roots in a composed gate.
+    """
+    command = FAILED_COMMAND.search(log, start)
+    if command is None or RECORD.search(log, start, command.start()):
+        return ""
+    previous = [match.end() for match in FAILED_COMMAND.finditer(log, 0, start)]
+    previous += [match.end() for match in RECORD.finditer(log, 0, start)]
+    lower = max(previous, default=0)
+    diagnostics = list(ZIG_CRASH.finditer(log, lower, command.start()))
+    diagnostics += list(ZIG_FAIL.finditer(log, lower, command.start()))
+    if len(diagnostics) != 1:
+        # Concurrent unit steps can interleave before either prints its command.
+        # Without one complete diagnostic/command block, identity is unproven.
+        return ""
+    try:
+        words = shlex.split(command[1])
+    except ValueError:
+        return ""
+    return Path(words[0]).name if words else ""
 
 
 def raising_line(parsed, path):
@@ -185,9 +217,11 @@ def failure_causes(log, cases, keep_unexplained=False):
         # The test's stderr follows, indented: the failed expectation, then the panic.
         following = log[crash.end():].split("\n")[1:4]
         detail = "\n".join(line.strip() for line in following if line.startswith("  "))
-        found.append(Cause(f"zig test '{test}' {how}", zig_paths(test), detail, zig_test=test))
-    for test, error in ZIG_FAIL.findall(log):
-        found.append(Cause(f"zig test '{test}' failed ({error})", zig_paths(test), zig_test=test))
+        found.append(Cause(f"zig test '{test}' {how}", zig_paths(test), detail, zig_test=test, zig_binary=zig_binary(log, crash.end())))
+    for failure in ZIG_FAIL.finditer(log):
+        test, error = failure.groups()
+        found.append(Cause(f"zig test '{test}' failed ({error})", zig_paths(test), zig_test=test,
+                           zig_binary=zig_binary(log, failure.end())))
     for test, output in UNITTEST.findall(log):
         modules = sorted(Path("tests").rglob(test.split(".", 1)[0] + ".py"))
         paths = [str(modules[0])] if len(modules) == 1 else []
@@ -205,7 +239,7 @@ def failure_causes(log, cases, keep_unexplained=False):
     found += [cause for cause in unparsed if keep_unexplained or cause.paths or not found]
     unique = {}
     for cause in found:
-        unique.setdefault(cause.signature, cause)
+        unique.setdefault((cause.signature, cause.zig_binary), cause)
     return list(unique.values())
 
 

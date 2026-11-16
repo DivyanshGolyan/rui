@@ -175,6 +175,34 @@ class CauseTest(unittest.TestCase):
         self.assertEqual(gate.signature,
                          'renderer mutation gate failed: mark-collision: expected exactly one anchor, found 0')
 
+    def test_zig_binary_identity_stays_with_each_failed_root(self):
+        [h2] = report_issue.failure_causes(ZIG_CRASH, self.cases)
+        self.assertEqual(h2.zig_binary, "test-h2")
+        log = ZIG_CRASH + ZIG_CRASH.replace("test-h2", "test-pg")
+        causes = report_issue.failure_causes(log, self.cases)
+        self.assertEqual([cause.zig_binary for cause in causes], ["test-h2", "test-pg"])
+        numbered = logged("1/2 tests.test.shared...FAIL (TestUnexpectedResult)",
+                          "failed command: ./.zig-cache/o/ci-compiled/test-h2 --listen=-")
+        self.assertEqual(report_issue.failure_causes(numbered, self.cases)[0].zig_binary, "test-h2")
+        # The next fixture's command cannot supply a unit test's identity.
+        separated = ZIG_FAIL + logged("failed command: ./.zig-cache/o/ci-compiled/test-pg --listen=-")
+        self.assertEqual(report_issue.failure_causes(separated, self.cases)[0].zig_binary, "")
+
+    def test_interleaved_unit_diagnostics_cannot_borrow_a_peer_binary(self):
+        for first, second in (("test-pg", "unit-native-tests"), ("unit-native-tests", "test-pg")):
+            log = logged("error: 'tests.test.native failure' failed",
+                         "error: 'tests.test.pg failure' failed",
+                         f"failed command: /tmp/{first} --listen=-",
+                         f"failed command: /tmp/{second} --listen=-")
+            causes = report_issue.failure_causes(log, self.cases)
+            self.assertEqual(len(causes), 2)
+            self.assertEqual([cause.zig_binary for cause in causes], ["", ""])
+
+    def test_zig_source_uses_complete_nested_module_namespace(self):
+        self.assertEqual(report_issue.zig_paths("store.tests.activity.test.queued input"), ["src/store/tests/activity.zig"])
+        self.assertEqual(report_issue.zig_paths("store.sqlite_tests.report.test.read"), ["src/store/sqlite_tests/report.zig"])
+        self.assertEqual(report_issue.zig_paths("tests.test.ambiguous"), [])
+
     def test_a_whitespace_check_names_its_files(self):
         [cause] = report_issue.failure_causes(WHITESPACE, self.cases)
         self.assertEqual(cause.signature, "whitespace check (git diff --check) failed")

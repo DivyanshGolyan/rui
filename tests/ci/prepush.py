@@ -33,7 +33,7 @@ from urllib.parse import quote
 import failure_cause
 import report_issue
 from pr_overlap import repo_from_remote
-from select_tests import FIXTURES, UNIT_ROOTS
+from select_tests import CHECK_COVERS, FIXTURES, UNIT_ROOTS
 
 import build_files
 from caller_errors import inventory_path
@@ -156,6 +156,67 @@ class Skipped(NamedTuple):
     reason: str
 
 
+class NeedsMySQL(NamedTuple):
+    """A filtered unit command whose hosted MySQL rounds must remain accounted for."""
+    command: list
+    sqlite: bool
+
+
+def red_record(name, command):
+    if isinstance(command, NeedsMySQL):
+        return {"name": name, "mysql": command.command, "sqlite": command.sqlite}
+    if isinstance(command, Skipped):
+        return {"name": name, "skipped": command.reason}
+    return {"name": name, "command": command}
+
+
+def local_red_checks(planned, mysql):
+    """Resolve live obligations on every push, including cached derived plans."""
+    for name, command in planned:
+        if not isinstance(command, NeedsMySQL):
+            yield name, command
+        elif mysql:
+            yield name, ["env", f"{live_engines.REQUIRE}=mysql", *command.command]
+        else:
+            if command.sqlite:
+                unset = [arg for variable in live_engines.ENGINES["mysql"] for arg in ("-u", variable)]
+                yield name + " (SQLite subset)", ["env", *unset, f"{live_engines.REQUIRE}=sqlite", *command.command]
+            yield name + " (MySQL rounds)", Skipped("MySQL rounds not evaluated: no reachable configured local MySQL server")
+
+
+def unit_target(targets, cause, graph):
+    """Resolve the failed root inside standalone, packed and composed targets."""
+    selected = set(targets)
+    if selected.intersection({"check", "check-full", "full-execution"}):
+        selected |= CHECK_COVERS
+    units = selected.intersection({*UNIT_ROOTS, "test", "test-full"})
+    binary = cause.zig_binary
+    # build/ci.zig appends the root source stem to default test names; native
+    # partition binaries are named unit-{partition}-tests by build/unit.zig.
+    if binary in units:
+        return binary
+    if binary.startswith("unit-") and binary.endswith("-tests"):
+        partition = "test-" + binary.removeprefix("unit-").removesuffix("-tests")
+        if partition in units or "test" in units:
+            return partition
+    if binary:
+        candidates = [target for target in units if target in UNIT_ROOTS
+                      and binary == "test-" + Path(UNIT_ROOTS[target][0]).stem]
+        if len(candidates) == 1:
+            return candidates[0]
+    if len(units) == 1:
+        return next(iter(units))
+    reached = {target for target in units if any(path in graph.reached.get(target, ()) for path in cause.paths)}
+    if not reached:
+        return None
+    # A shared imported module cannot prove that a live round was a local one.
+    if reached.intersection({"test-pg", "mysql-wire-integration"}):
+        return None
+    if reached <= {"test-native", "test-store", "test"}:
+        return "test" if "test" in units or len(reached) > 1 else next(iter(reached))
+    return next(iter(reached)) if len(reached) == 1 else None
+
+
 def red_command(job, cause, available, *, compile_targets=(), graph=None):
     """Translate a shared parsed cause, preserving the failing job's target."""
     name = job["name"]
@@ -179,25 +240,26 @@ def red_command(job, cause, available, *, compile_targets=(), graph=None):
     part = name.partition("(")[2].removesuffix(")")
     targets = part.split("+") if part else []
     if cause.zig_test:
-        units = [target for target in targets if target in UNIT_ROOTS or target in ("test", "test-full")]
-        if not units and any(target in ("check", "check-full", "full-execution") for target in targets):
-            units = ["test"]
-        if len(units) > 1:
-            if set(units) <= {"test", "test-native", "test-store"}:
-                units = ["test"]
-            else:
-                graph = graph or tree_graph()
-                reached = [target for target in units if any(path in graph.reached.get(target, ()) for path in cause.paths)]
-                # Never choose a local subset over a plausible live-engine root.
-                live = [target for target in reached if target in ("test-pg", "mysql-wire-integration")]
-                units = live[:1] or reached[:1]
-        if len(units) != 1:
-            return Skipped("cannot identify a unit target from the failed matrix part")
-        if units[0] == "test-pg":
+        graph = graph or tree_graph()
+        target = unit_target(targets, cause, graph)
+        if target is None:
+            return Skipped("cannot identify the failing unit root from the log and selected targets")
+        if target == "test-pg":
             return Skipped("test-pg requires CI's live TLS Postgres server")
-        if units[0] == "mysql-wire-integration":
+        if target == "mysql-wire-integration":
             return Skipped("mysql-wire-integration requires CI's live MySQL server")
-        return [*zig, units[0], f"-Dtest-filter={cause.zig_test}", "--summary", "line"]
+        command = [*zig, target, f"-Dtest-filter={cause.zig_test}", "--summary", "line"]
+        if target in ("test", "test-native", "test-store"):
+            store = cause.zig_test.startswith("store.") or any(path.startswith("src/store/") for path in cause.paths)
+            native_live = any(path in graph.live_conformance for path in cause.paths)
+            if store or native_live:
+                mysql_only = any(path in ("src/store/mysql_dialect_check.zig", "src/store/mysql_testing.zig", "src/store/mysql_session_tests.zig") for path in cause.paths)
+                sqlite_only = cause.paths and all(path == "src/store/sqlite_tests.zig" or path.startswith("src/store/sqlite_tests/") for path in cause.paths)
+                if not sqlite_only:
+                    return NeedsMySQL(command, not mysql_only)
+            elif not cause.paths:
+                return Skipped("test source is ambiguous, so its live-engine requirements are unknown")
+        return command
     if cause.python_test:
         module, _, test = cause.python_test.partition(".")
         if f"tests/ci/{module}.py" not in cause.paths:
@@ -235,6 +297,7 @@ def red_revision():
     graph = tree_graph()
     digest.update(json.dumps({target: sorted(reached) for target, reached in graph.reached.items()}, sort_keys=True).encode())
     digest.update(json.dumps(sorted(graph.live_mysql)).encode())
+    digest.update(json.dumps(sorted(graph.live_conformance)).encode())
     digest.update(str((ROOT, sys.executable, sys.platform)).encode())
     return digest.hexdigest()
 
@@ -268,6 +331,10 @@ def previous_red(available):
                 continue
             identities.append(identity)
             planned.extend(derived)
+        if any(isinstance(command, NeedsMySQL) for _, command in planned):
+            environment = [os.environ.get(variable) for variable in live_engines.VARIABLES]
+            identities.append(hashlib.sha256(json.dumps(environment).encode()).hexdigest())
+            planned = list(local_red_checks(planned, mysql_reachable(os.environ)))
         return identities if any(identity is not None for identity in identities) else None, planned
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as error:
         red_warning(error)
@@ -302,7 +369,8 @@ def remote_red(repository, ref, head, revision, available):
     except (OSError, ValueError):
         saved = {}
     if saved.get("identity") == identity:
-        return identity, [(item["name"], Skipped(item["skipped"]) if "skipped" in item else item["command"])
+        return identity, [(item["name"], NeedsMySQL(item["mysql"], item["sqlite"]) if "mysql" in item
+                          else Skipped(item["skipped"]) if "skipped" in item else item["command"])
                           for item in saved["checks"]]
     derived, logs = [], {}
     def log_of(job):
@@ -328,9 +396,7 @@ def remote_red(repository, ref, head, revision, available):
                 derived.append(item)
     if all(log is not None for log in logs.values()):
         cache.mkdir(parents=True, exist_ok=True)
-        cache_file.write_text(json.dumps({"identity": identity, "checks": [
-            {"name": name, "skipped": command.reason} if isinstance(command, Skipped)
-            else {"name": name, "command": command} for name, command in derived]}))
+        cache_file.write_text(json.dumps({"identity": identity, "checks": [red_record(name, command) for name, command in derived]}))
     return identity, derived
 
 

@@ -57,6 +57,7 @@ print(value if isinstance(value, str) else json.dumps(value))
             prepush.REMOTE_URL: "https://github.com/owner/repo.git"}).start()
         patch.object(prepush, "git", side_effect=lambda *args: str(self.directory / "cache")).start()
         patch.object(report_issue, "LOG_RETRY_DELAYS", ()).start()
+        self.mysql = patch.object(prepush, "mysql_reachable", return_value=False).start()
         self.data = {}
         self.configure()
 
@@ -93,9 +94,12 @@ print(value if isinstance(value, str) else json.dumps(value))
                        "1/2 store.tests.test.ending migration...FAIL (TestUnexpectedResult)\n")
         identity, checks, warning = self.plan()
         self.assertEqual(warning, "")
-        self.assertEqual(len(checks), 2)
-        for (_, command), test in zip(checks, ("queued input is pending", "ending migration")):
-            self.assertEqual(command[:4], ["zig", "build", "-j1", "test-store"])
+        commands = [command for _, command in checks if not isinstance(command, prepush.Skipped)]
+        self.assertEqual(len(commands), 2)
+        self.assertEqual(sum(isinstance(command, prepush.Skipped) for _, command in checks), 2)
+        for command, test in zip(commands, ("queued input is pending", "ending migration")):
+            start = command.index("zig")
+            self.assertEqual(command[start:start + 4], ["zig", "build", "-j1", "test-store"])
             self.assertIn(f"-Dtest-filter=store.tests.test.{test}", command)
         before = self.calls.read_text().splitlines()
         self.assertEqual(self.plan()[:2], (identity, checks))
@@ -191,16 +195,17 @@ AssertionError
     def test_unexplained_record_stays_visible_beside_parsed_failure(self):
         self.configure(log="error: 'store.test.foo' failed\nunknown-case failed: exit=1\n")
         checks = self.plan()[1]
-        self.assertEqual(len(checks), 2)
-        self.assertIsInstance(checks[1][1], prepush.Skipped)
+        self.assertEqual(len(checks), 3)
+        self.assertIsInstance(checks[-1][1], prepush.Skipped)
 
     def test_packed_unit_jobs_rerun_the_named_test(self):
         for matrix, target in (("test-native+test-store", "test"), ("test-store+test-logic", "test-store")):
             with self.subTest(matrix=matrix):
                 cause = report_issue.Cause("store failed", paths=["src/store.zig"], zig_test="store.tests.test.foo")
                 command = prepush.red_command(job(f"linux suites ({matrix})"), cause, AVAILABLE)
-                self.assertEqual(command[3], target)
-                self.assertIn("-Dtest-filter=store.tests.test.foo", command)
+                self.assertIsInstance(command, prepush.NeedsMySQL)
+                self.assertEqual(command.command[3], target)
+                self.assertIn("-Dtest-filter=store.tests.test.foo", command.command)
 
     def test_ambiguous_live_root_cannot_be_replaced_by_local_subset(self):
         cause = report_issue.Cause("TLS failed", paths=["src/tls_client/tls_client.zig"], zig_test="tls.test.foo")
@@ -222,8 +227,8 @@ AssertionError
         self.configure(log="error: 'store.test.foo' failed\n")
         with patch.dict(os.environ, {prepush.REMOTE_REFS: f"refs/heads/feature/red {HEAD} refs/heads/new {'0' * 40}"}):
             identity, checks, warning = self.plan()
-        self.assertIsNone(identity[-1])
-        self.assertEqual(len(checks), 1)
+        self.assertIn(None, identity)
+        self.assertEqual(len(checks), 2)
         self.assertIn("no previous", warning)
 
     def test_standalone_lookup_uses_remote_head_not_local_head(self):
@@ -288,6 +293,95 @@ AssertionError
                     prepush.main()
                 self.assertEqual(result.exception.code, 0)
                 self.assertEqual(len(commands), calls)
+
+    def test_composed_and_packed_parts_preserve_each_failed_binary(self):
+        roots = (("unit-native-tests", "codex_auth.test.refresh", "test-native"),
+                 ("test-h2", "tests.test.a read cap defers expiry only for streams on that connection", "test-h2"),
+                 ("test-pg", "pg.test.live query", None))
+        for matrix in ("check", "check-full", "full-execution", "check+test-logic", "test-native+test-store+test-h2+test-pg"):
+            for index, (binary, test, target) in enumerate(roots):
+                with self.subTest(matrix=matrix, binary=binary):
+                    self.configure(jobs=[job(f"linux suites ({matrix})")], run=dict(RUN, run_attempt=len(matrix) * 10 + index),
+                                   log=f"error: '{test}' failed\nfailed command: ./.zig-cache/o/ci-compiled/{binary} --listen=-\n")
+                    checks = self.plan()[1]
+                    commands = [command for _, command in checks if not isinstance(command, prepush.Skipped)]
+                    if target is None:
+                        self.assertFalse(commands)
+                        self.assertIn("Postgres", checks[0][1].reason)
+                    else:
+                        self.assertEqual(len(commands), 1)
+                        start = commands[0].index("zig")
+                        self.assertEqual(commands[0][start + 3], target)
+                        self.assertIn(f"-Dtest-filter={test}", commands[0])
+        for binary, test, _ in roots:
+            cause = report_issue.Cause("a red", zig_test=test, zig_binary=binary)
+            self.assertIsInstance(prepush.red_command(job("linux suites (full-callers)"), cause, AVAILABLE), prepush.Skipped)
+
+    def test_mysql_only_and_conformance_rounds_are_explicit_in_every_unit_target(self):
+        mixed = report_issue.Cause("mixed", ["src/store/tests/activity.zig"], zig_test="store.tests.activity.test.queued input")
+        mysql_only = report_issue.Cause("mysql only", ["src/store/mysql_dialect_check.zig"], zig_test="store.mysql_dialect_check.test.migration")
+        sqlite_only = report_issue.Cause("sqlite only", ["src/store/sqlite_tests/report.zig"], zig_test="store.sqlite_tests.report.test.read")
+        for target in ("test", "test-native", "test-store"):
+            for cause in (mixed, mysql_only):
+                with self.subTest(target=target, cause=cause.signature):
+                    planned = prepush.red_command(job(f"linux suites ({target})"), cause, AVAILABLE)
+                    self.assertIsInstance(planned, prepush.NeedsMySQL)
+                    unavailable = list(prepush.local_red_checks([("last CI red: " + cause.signature, planned)], False))
+                    self.assertIsInstance(unavailable[-1][1], prepush.Skipped)
+                    self.assertIn("MySQL rounds", unavailable[-1][0])
+                    if cause is mixed:
+                        self.assertEqual(len(unavailable), 2)
+                        self.assertIn("SQLite subset", unavailable[0][0])
+                        self.assertIn(prepush.live_engines.REQUIRE + "=sqlite", unavailable[0][1])
+                        for variable in prepush.live_engines.ENGINES["mysql"]:
+                            self.assertIn(variable, unavailable[0][1])
+                    else:
+                        self.assertEqual(len(unavailable), 1)
+                    available = list(prepush.local_red_checks([("red", planned)], True))
+                    self.assertEqual(len(available), 1)
+                    self.assertEqual(available[0][1][:2], ["env", prepush.live_engines.REQUIRE + "=mysql"])
+            self.assertIsInstance(prepush.red_command(job(f"linux suites ({target})"), sqlite_only, AVAILABLE), list)
+
+    def test_every_mysql_only_owner_has_no_runnable_sqlite_subset(self):
+        for module in ("mysql_dialect_check", "mysql_testing", "mysql_session_tests"):
+            with self.subTest(module=module):
+                cause = report_issue.Cause("live only", [f"src/store/{module}.zig"], zig_test=f"store.{module}.test.live")
+                command = prepush.red_command(job("linux suites (test-store)"), cause, AVAILABLE)
+                self.assertIsInstance(command, prepush.NeedsMySQL)
+                unavailable = list(prepush.local_red_checks([("red", command)], False))
+                self.assertEqual(len(unavailable), 1)
+                self.assertIsInstance(unavailable[0][1], prepush.Skipped)
+
+    def test_native_conformance_and_unknown_source_cannot_omit_live_obligations(self):
+        graph = type("Graph", (), {"live_conformance": {"src/session_view_store_tests.zig"}, "reached": {}})()
+        cause = report_issue.Cause("native mixed", ["src/session_view_store_tests.zig"], zig_test="session_view_store_tests.test.view")
+        command = prepush.red_command(job("linux suites (test-native)"), cause, AVAILABLE, graph=graph)
+        self.assertIsInstance(command, prepush.NeedsMySQL)
+        unknown = report_issue.Cause("unknown source", zig_test="ambiguous.test.view")
+        self.assertIsInstance(prepush.red_command(job("linux suites (test-native)"), unknown, AVAILABLE, graph=graph), prepush.Skipped)
+
+    def test_cached_commands_resolve_live_availability_again(self):
+        self.configure(log="error: 'store.tests.activity.test.queued input' failed\n")
+        first = self.plan()
+        self.assertEqual(len(first[1]), 2)
+        before = len(self.calls.read_text().splitlines())
+        self.mysql.return_value = True
+        second = self.plan()
+        self.assertEqual(len(second[1]), 1)
+        self.assertEqual(second[1][0][1][:2], ["env", prepush.live_engines.REQUIRE + "=mysql"])
+        self.assertEqual(len(self.calls.read_text().splitlines()) - before, 1, "no logs refetched when only local availability changed")
+
+    def test_sqlite_subset_clears_ambient_mysql_and_receipt_keeps_missing_rounds_skipped(self):
+        code = "import os; assert os.environ['RUI_TEST_REQUIRE_ENGINES'] == 'sqlite'; assert 'RUI_TEST_MYSQL_SOCKET' not in os.environ"
+        planned = [("last CI red: mixed", prepush.NeedsMySQL([sys.executable, "-c", code], True))]
+        checks = list(prepush.local_red_checks(planned, False))
+        receipt_path = self.directory / "receipt"
+        with patch.object(prepush, "clean_tree", return_value="tree"), patch.object(prepush, "receipt_path", return_value=receipt_path), \
+                patch.dict(os.environ, {prepush.live_engines.MYSQL_SOCKET: "unreachable"}), redirect_stdout(io.StringIO()):
+            results = prepush.run(checks, "quick", "base")
+        self.assertEqual(results[0]["exit"], 0)
+        self.assertNotIn("exit", results[1])
+        self.assertIn("MySQL rounds", results[1]["name"])
 
     def test_live_and_upgrade_checks_are_skipped(self):
         for name in ("linux suites (test-pg)", "previous_release_upgrade"):
