@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from host_settings_locality import ROOT, declaration_members, facts, scan, surfaces, violations, vocabulary
+from host_settings_locality import ROOT, declaration_members, facts, scan, surfaces, violations, vocabulary, running_source_violations
 
 
 class HostSettingsLocalityTest(unittest.TestCase):
@@ -154,3 +154,37 @@ fn read(settings: *SessionSettings) void { _ = settings.tools; }
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunningSourceLocalityTest(unittest.TestCase):
+    def test_duplicate_reader_mutation_turns_gate_red(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "src").mkdir()
+            (root / "src/serve_grammar.zig").write_text(
+                "pub fn currentArguments() void {}\n"
+                "pub fn previousProviders() void {}\n"
+                "pub fn runningSources() void { currentArguments(); }\n")
+            consumer = root / "src/HostLifecycle.zig"
+            consumer.write_text("fn finish() void { previousProviders(); }\n")
+            self.assertEqual(running_source_violations(root), [])
+            consumer.write_text(consumer.read_text() + "fn injected() void { serve_grammar.currentArguments(); }\n")
+            found = running_source_violations(root)
+            self.assertEqual(len(found), 1, found)
+            self.assertIn("currentArguments must have one production caller", found[0])
+            consumer.write_text("fn finish() void { previousProviders(); }\n"
+                                'test "test reader" { currentArguments(); }\n'
+                                'const words = "currentArguments()";\n')
+            self.assertEqual(running_source_violations(root), [])
+
+    def test_duplicate_provider_transition_mutation_turns_gate_red(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "src").mkdir()
+            (root / "src/serve_grammar.zig").write_text(
+                "fn runningSources() void { currentArguments(); }\n")
+            consumer = root / "src/HostLifecycle.zig"
+            consumer.write_text("fn finish() void { previousProviders(); previousProviders(); }\n")
+            found = running_source_violations(root)
+            self.assertEqual(len(found), 1, found)
+            self.assertIn("previousProviders must have one production caller", found[0])

@@ -76,6 +76,43 @@ pub fn currentArguments(arena: std.mem.Allocator, args: []const []const u8) erro
     return out;
 }
 
+/// A running Host's source spellings. Values borrow argv or `arena`; the
+/// assignment slice and retired translations belong to `arena`. Callers must
+/// wipe that arena because assignments may name private sources or values.
+/// No document, path anchoring, provider policy or process authority lives here.
+pub const RunningSources = struct {
+    dir: ?[]const u8,
+    settings_file: ?[]const u8,
+    assignments: []const []const u8,
+    /// Discovery still needs the directory of a Host whose serve-only flags
+    /// make it ineligible for restart. This is syntax eligibility, not start
+    /// admission: stdin/relative settings are decided by host_start.
+    restartable: bool,
+};
+
+/// The single reader of supported releases' running `host serve` argv. Fresh
+/// typed argv is still parsed by its command definition, never translated.
+pub fn runningSources(arena: std.mem.Allocator, argv: []const []const u8) !RunningSources {
+    if (argv.len < 3 or !std.mem.eql(u8, argv[1], "host") or !std.mem.eql(u8, argv[2], "serve")) return error.HostPeerNotServing;
+    const arguments = try currentArguments(arena, argv[3..]);
+    var problem: grammar.Refusal = undefined;
+    const parsed = try definition.parseSyntax(arguments, arena, &problem);
+    var restartable = !parsed.help and parsed.missing() == null and parsed.repeat_count < parsed.repeats.len;
+    parsed.validateValues(&problem) catch {
+        restartable = false;
+    };
+    for (definition.options) |option| {
+        if (std.mem.eql(u8, option.hex_of orelse option.name, "store")) continue;
+        if (option.hidden and parsed.hasNamed(option.name)) restartable = false;
+    }
+    return .{
+        .dir = parsed.get("store"),
+        .settings_file = parsed.get("settings"),
+        .assignments = try arena.dupe([]const u8, parsed.all("set")),
+        .restartable = restartable,
+    };
+}
+
 /// The provider set a previous release served when no layer of its Host's
 /// launch named providers, which replay passes first so that an upgrade never
 /// changes what a running Host serves: a Host started without --settings
@@ -179,4 +216,49 @@ comptime {
         }
         if (count != 1) @compileError("Host serve visible options must each appear once");
     }
+}
+
+test "running Host sources have one syntax owner across current and retired argv" {
+    const cases = [_]struct {
+        argv: []const []const u8,
+        dir: ?[]const u8 = null,
+        settings: ?[]const u8 = null,
+        assignments: []const []const u8 = &.{},
+        restartable: bool = true,
+    }{
+        .{ .argv = &.{ "rui", "host", "serve" } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", "/host" }, .dir = "/host" },
+        .{ .argv = &.{ "rui", "host", "serve", "--store-hex", "2f686f73742dff", "--settings", "/document-\xff" }, .dir = "/host-\xff", .settings = "/document-\xff" },
+        .{ .argv = &.{ "rui", "host", "serve", "--settings", "/document", "--set", "providers={}", "--set", "execution.activeCapacity=3" }, .settings = "/document", .assignments = &.{ "providers={}", "execution.activeCapacity=3" } },
+        .{ .argv = &.{ "rui", "host", "serve", "--provider", "codex", "--provider", "openai", "--active-capacity", "4", "--bash-path", "/bin/bash", "--bash-timeout-ms", "1000", "--provider-ca-file", "/network-ca" }, .assignments = &.{ "providers.codex={}", "providers.openai={}", "execution.activeCapacity=4", "tools.bash.path=/bin/bash", "tools.bash.timeoutMs=1000", "network.caFile=/network-ca" } },
+        // Syntax keeps source spellings; only admission can decide whether
+        // their effective settings reproduce in a detached replacement.
+        .{ .argv = &.{ "rui", "host", "serve", "--settings", "-" }, .settings = "-" },
+        .{ .argv = &.{ "rui", "host", "serve", "--settings", "relative.json" }, .settings = "relative.json" },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", "/host", "--fault", "injected" }, .dir = "/host", .restartable = false },
+        .{ .argv = &.{ "rui", "host", "serve", "--help" }, .restartable = false },
+    };
+    for (cases) |case| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const sources = try runningSources(arena.allocator(), case.argv);
+        try std.testing.expectEqual(case.restartable, sources.restartable);
+        if (case.dir) |dir| try std.testing.expectEqualStrings(dir, sources.dir.?) else try std.testing.expect(sources.dir == null);
+        if (case.settings) |file| try std.testing.expectEqualStrings(file, sources.settings_file.?) else try std.testing.expect(sources.settings_file == null);
+        try std.testing.expectEqual(case.assignments.len, sources.assignments.len);
+        for (case.assignments, sources.assignments) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
+    }
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.HostPeerNotServing, runningSources(arena.allocator(), &.{ "rui", "session", "start" }));
+    try std.testing.expectError(error.InvalidArguments, runningSources(arena.allocator(), &.{ "rui", "host", "serve", "--provider" }));
+    const limit = @as(grammar.Parsed, undefined).repeats.len;
+    var full: [3 + 2 * limit][]const u8 = undefined;
+    @memcpy(full[0..3], &[_][]const u8{ "rui", "host", "serve" });
+    for (0..limit) |index| {
+        full[3 + 2 * index] = "--set";
+        full[4 + 2 * index] = "execution.activeCapacity=2";
+    }
+    try std.testing.expect(!(try runningSources(arena.allocator(), &full)).restartable);
+    try std.testing.expect((try runningSources(arena.allocator(), full[0 .. full.len - 2])).restartable);
 }

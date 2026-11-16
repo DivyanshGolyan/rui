@@ -707,14 +707,14 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
     const pid = try identity.peer(fd);
     var snapshot = try identity.snapshot(allocator, pid);
     defer snapshot.deinit(allocator);
-    if (snapshot.argv.len < 3 or !std.mem.eql(u8, snapshot.argv[1], "host") or !std.mem.eql(u8, snapshot.argv[2], "serve")) return error.HostPeerNotServing;
-    var arena = std.heap.ArenaAllocator.init(allocator);
+    var wiping: @import("secret_value.zig").WipingAllocator = .{ .backing = allocator };
+    var arena = std.heap.ArenaAllocator.init(wiping.allocator());
     defer arena.deinit();
-    var problem: @import("cli_grammar.zig").Refusal = undefined;
-    const serve_grammar = @import("serve_grammar.zig");
-    const arguments = serve_grammar.currentArguments(arena.allocator(), snapshot.argv[3..]) catch return error.HostServeArgumentsUnreadable;
-    const parsed = serve_grammar.definition.parseSyntax(arguments, arena.allocator(), &problem) catch return error.HostServeArgumentsUnreadable;
-    const supplied = parsed.get("store") orelse return error.HostServeStoreMissing;
+    const sources = @import("serve_grammar.zig").runningSources(arena.allocator(), snapshot.argv) catch |err| {
+        if (err == error.HostPeerNotServing) return error.HostPeerNotServing;
+        return error.HostServeArgumentsUnreadable;
+    };
+    const supplied = sources.dir orelse return error.HostServeStoreMissing;
     // A relative argv path is not relative to this client. Without a verified
     // canonical identity, report it rather than probing a guessed Store.
     if (!std.fs.path.isAbsolute(supplied)) return error.HostServeStoreRelative;

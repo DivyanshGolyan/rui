@@ -39,6 +39,7 @@ pub const LaunchSpecification = struct {
 
     fn deinit(self: *const LaunchSpecification, allocator: std.mem.Allocator) void {
         allocator.free(self.options);
+        std.crypto.secureZero(u8, self.values);
         allocator.free(self.values);
     }
 };
@@ -200,35 +201,20 @@ pub fn awaitRetirement(io: std.Io, store: []const u8) !bool {
 }
 
 fn deriveLaunch(allocator: std.mem.Allocator, argv: []const []const u8) !LaunchSpecification {
-    if (argv.len < 3 or !std.mem.eql(u8, argv[1], "host") or !std.mem.eql(u8, argv[2], "serve")) return error.UnsupportedHostConfiguration;
-    var scratch = std.heap.ArenaAllocator.init(allocator);
+    var wiping: @import("secret_value.zig").WipingAllocator = .{ .backing = allocator };
+    var scratch = std.heap.ArenaAllocator.init(wiping.allocator());
     defer scratch.deinit();
-    const grammar = comptime cli_args.Command.host_serve.definition();
-    var problem: cli_args.Refusal = undefined;
-    // A Host a previous release started names retired flags; serve_grammar
-    // reads them as the assignments that replace them.
-    const arguments = serve_grammar.currentArguments(scratch.allocator(), argv[3..]) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.InvalidArguments => return error.UnsupportedHostConfiguration,
+    const sources = serve_grammar.runningSources(scratch.allocator(), argv) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return error.UnsupportedHostConfiguration;
     };
-    const parsed = try grammar.parseSyntax(arguments, scratch.allocator(), &problem);
-    try parsed.validateValues(&problem);
-    // Whether the settings reproduce in `/` is host_start.replayable's, at activation.
-    if (parsed.help or parsed.missing() != null) return error.UnsupportedHostConfiguration;
-    // Relaunch appends one authoritative capacity assignment. Refuse before
-    // disruption when the target parser would have no repeat slot for it.
-    if (parsed.repeat_count == parsed.repeats.len) return error.UnsupportedHostConfiguration;
+    if (!sources.restartable) return error.UnsupportedHostConfiguration;
+    // Temporary adapter for the existing activation path. Source syntax has
+    // one owner even while target-starter compatibility blocks its removal.
     var options: std.ArrayList(LaunchOption) = .empty;
     errdefer options.deinit(allocator);
-    for (grammar.options) |option| {
-        if (std.mem.eql(u8, option.hex_of orelse option.name, "store")) continue;
-        if (option.hidden and parsed.hasNamed(option.name)) return error.UnsupportedHostConfiguration;
-        if (option.repeated) {
-            for (parsed.allNamed(option.name)) |value| try options.append(allocator, .{ .name = option.name, .value = value });
-        } else if (parsed.hasNamed(option.name)) {
-            try options.append(allocator, .{ .name = option.name, .value = parsed.getNamed(option.name) });
-        }
-    }
+    if (sources.settings_file) |file| try options.append(allocator, .{ .name = "settings", .value = file });
+    for (sources.assignments) |assignment| try options.append(allocator, .{ .name = "set", .value = assignment });
     var size: usize = 0;
     for (options.items) |option| size += if (option.value) |value| value.len else 0;
     const values = try allocator.alloc(u8, size);
