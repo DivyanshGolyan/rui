@@ -34,6 +34,8 @@ const chords = std.enums.EnumArray(Key, []const Chord).init(.{
     .home = &.{.{ .code = vaxis.Key.home }},
     .end = &.{.{ .code = vaxis.Key.end }},
     .ctrl_end = &.{.{ .code = vaxis.Key.end, .mods = .{ .ctrl = true } }},
+    .tab = &.{.{ .code = vaxis.Key.tab }},
+    .shift_tab = &.{.{ .code = vaxis.Key.tab, .mods = .{ .shift = true } }},
 });
 const Chord = struct { code: u21, mods: vaxis.Key.Modifiers = .{} };
 
@@ -52,9 +54,11 @@ pub fn classify(value: vaxis.Key) Press {
     // Every binding matches exact modifiers. Vaxis's looser match accepts a
     // key's associated text or shifted key and drops Shift, so Ctrl-Shift-J
     // with text j would send and Shift-Enter with text CR would too.
+    // Root names Tab for focus traversal; the draft still edits it through
+    // its completion/literal-tab path when the screen routes it here.
+    if (value.matchExact(vaxis.Key.tab, .{})) return .{ .edit = .tab };
     if (named(value)) |key_name| return .{ .key = key_name };
     if (isEnter(value)) return .enter;
-    if (value.matchExact(vaxis.Key.tab, .{})) return .{ .edit = .tab };
     // Alt-Enter adds a line in every form: Ghostty and other terminals send
     // Shift-Enter as ESC CR, which decodes exactly as Kitty's Alt-Enter.
     if (value.matchExact(vaxis.Key.enter, .{ .shift = true }) or value.matchExact(vaxis.Key.enter, .{ .alt = true }) or value.matchExact('j', .{ .ctrl = true })) return .{ .edit = .newline };
@@ -190,4 +194,13 @@ test "Option session navigation rejects additional chord modifiers" {
             try std.testing.expect(classify(key) == .chord);
         }
     }
+}
+
+test "Tab names are central while the draft retains its Tab edit" {
+    const tab: vaxis.Key = .{ .codepoint = vaxis.Key.tab };
+    const previous: vaxis.Key = .{ .codepoint = vaxis.Key.tab, .mods = .{ .shift = true } };
+    try std.testing.expectEqual(Key.tab, named(tab).?);
+    try std.testing.expectEqual(Key.shift_tab, named(previous).?);
+    try std.testing.expectEqual(Press{ .edit = .tab }, classify(tab));
+    try std.testing.expect(named(.{ .codepoint = vaxis.Key.tab, .mods = .{ .ctrl = true } }) == null);
 }

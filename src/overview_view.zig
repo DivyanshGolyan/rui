@@ -122,6 +122,9 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .down = .next,
     .left = null,
     .right = .open_session,
+    // Focus order's keys, which `app_input.keys` takes first.
+    .tab = null,
+    .shift_tab = null,
     .shift_up = .select_previous,
     .shift_down = .select_next,
     .page_up = null,
@@ -132,7 +135,7 @@ pub const keys: keymap.Keymap(Action) = .init(.{
 });
 
 test "keys list covers both screens without unbound or duplicate keys" {
-    try std.testing.expectEqual(@as(?keymap.ListError, null), keymap.listError(.{ keys, @import("session_keys.zig").keys }));
+    try std.testing.expectEqual(@as(?keymap.ListError, null), keymap.listError(.{ keys, @import("session_keys.zig").keys, @import("app_input.zig").keys }));
 }
 
 pub const Input = union(enum) { action: Action, enter, left, ignored };
@@ -141,6 +144,7 @@ pub const InputDelivery = struct {
     key: Input,
     under: bool = false,
     pasted: bool = false,
+    wide: bool = false,
 };
 
 pub const Delta = enum {
@@ -295,6 +299,7 @@ pub const CreateResult = union(enum) {
 
 pub const Event = union(enum) {
     input: InputDelivery,
+    list_settled: struct { wide: bool, focused: bool },
 
     resized: Size,
 
@@ -536,6 +541,7 @@ pub const Size = struct { width: u16 = 0, height: u16 = 0 };
 pub const IntentAdmission = enum { admitted, refused };
 
 pub const Effects = struct {
+    browse_open: bool = false,
     intent_admission: IntentAdmission = .refused,
     items: [3]Effect = undefined,
     len: usize = 0,
@@ -653,6 +659,8 @@ pub const State = struct {
     lines: Vec(Bounded(max_line_bytes)) = .{},
 
     selected: Selection = .new_session,
+    /// Coalesce moves until the existing application tick; no feed cache.
+    browse_pending: bool = false,
 
     conversing: ?Reference = null,
     read_instance: ?[16]u8 = null,
@@ -1134,6 +1142,11 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
     var effects: Effects = .{};
     switch (event) {
         .input => |input| try listInput(state, input, &effects),
+        .list_settled => |frame| {
+            const pending = state.browse_pending;
+            state.browse_pending = false;
+            if (pending and frame.wide and frame.focused) try activateList(state, .browse, &effects);
+        },
         .tick => |now_ms| try tick(state, now_ms, &effects),
         .list => |reply| switch (reply) {
             .page => |page| try listPage(state, page, &effects),
@@ -1760,18 +1773,25 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
         return;
     }
     if (delivery.under or state.creating()) return;
+    const before = state.selected;
     switch (input) {
         .ignored => unreachable,
-        .enter => try enter(state, effects),
+        .enter => {
+            state.browse_pending = false;
+            try activateList(state, .enter, effects);
+        },
         .left => if (state.selected == .archived) {
             state.selected = .sessions;
         },
         .action => |action| switch (action) {
             .exit => unreachable,
-            .open_session => switch (state.selected) {
-                .session => try enter(state, effects),
-                .sessions => state.selected = .archived,
-                .new_session, .archived, .settings => {},
+            .open_session => {
+                state.browse_pending = false;
+                switch (state.selected) {
+                    .session => try activateList(state, .open_session, effects),
+                    .sessions => state.selected = .archived,
+                    .new_session, .archived, .settings => {},
+                }
             },
             .clear => {
                 state.notice = null;
@@ -1788,6 +1808,9 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
                 select(state, action);
             },
         },
+    }
+    if (input == .action and (input.action == .previous or input.action == .next)) {
+        state.browse_pending = delivery.wide and (state.browse_pending or !std.meta.eql(before, state.selected));
     }
 }
 
@@ -1810,7 +1833,15 @@ fn adjacentSession(state: *State, direction: Action, effects: *Effects) error{Ou
 }
 
 fn enter(state: *State, effects: *Effects) error{OutOfMemory}!void {
+    try activateList(state, .enter, effects);
+}
+
+/// Enter activates any row; Right (`open_session`) and a settled browse
+/// act only on a Session row.
+const ListIntent = enum { enter, open_session, browse };
+fn activateList(state: *State, intent: ListIntent, effects: *Effects) error{OutOfMemory}!void {
     if (state.creating()) return;
+    if (intent != .enter and state.selected != .session) return;
     if (state.selected == .settings) {
         effects.add(.open_settings);
         return;
@@ -1818,7 +1849,7 @@ fn enter(state: *State, effects: *Effects) error{OutOfMemory}!void {
     if (state.selected == .sessions) return selectView(state, .active, effects);
     if (state.selected == .archived) return selectView(state, .archived, effects);
     if (state.selected == .session) if (state.conversing) |open| if (std.mem.eql(u8, &state.selected.session, &open)) {
-        effects.add(.focus_chat);
+        if (intent != .browse) effects.add(.focus_chat);
         return;
     };
     if (!admitHostRequest(state)) return;
@@ -1830,6 +1861,7 @@ fn enter(state: *State, effects: *Effects) error{OutOfMemory}!void {
         .settings, .sessions, .archived => unreachable,
         .session => if (state.selectedRow()) |row| {
             effects.add(.{ .open = row.reference });
+            effects.browse_open = intent == .browse;
         },
         .new_session => {
             if (state.request(.create, null)) effects.add(.{ .create = state.nextStart() });
@@ -5641,6 +5673,90 @@ test "Overview list Right does not create or open Settings and clicks share resu
         try std.testing.expect(effect != .open);
     }
     try std.testing.expectEqual(@as(usize, 1), resumes);
+}
+
+test "Overview browse settles only the last wide list move and never activates controls" {
+    const rows = [_]Listed{
+        session("aaaaaa", .{ .idle = ago(1) }, .{ .label = "One" }),
+        session("bbbbbb", .{ .idle = ago(2) }, .{ .label = "Two" }),
+        session("cccccc", .{ .idle = ago(3) }, .{ .label = "Three" }),
+        session("dddddd", .{ .idle = ago(4) }, .{ .label = "Four" }),
+    };
+    for ([_]bool{ false, true }) |wide| for (std.enums.values(enum { chat, new_session, settings, rapid })) |landing| {
+        var state = try opened(&rows);
+        defer state.deinit();
+        _ = try step(&state, .{ .conversation = "aaaaaa".* });
+        state.selected = .{ .session = "aaaaaa".* };
+        if (landing == .settings) state.selected = .{ .session = "dddddd".* };
+        const moves: usize = if (landing == .rapid) 3 else 1;
+        var reads: usize = 0;
+        for (0..moves) |_| {
+            const effects = try step(&state, .{ .input = .{ .wide = wide, .key = .{ .action = if (landing == .new_session) .previous else .next } } });
+            for (effects.slice()) |effect| {
+                if (effect == .open) reads += 1;
+                try std.testing.expect(effect != .create and effect != .open_settings);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 0), reads);
+        const settled = try step(&state, .{ .list_settled = .{ .wide = wide, .focused = true } });
+        for (settled.slice()) |effect| {
+            if (effect == .open) {
+                reads += 1;
+                try std.testing.expectEqualStrings(if (landing == .rapid) "dddddd" else "bbbbbb", &effect.open);
+            }
+            try std.testing.expect(effect != .create and effect != .open_settings and effect != .focus_chat);
+        }
+        const expected = wide and (landing == .chat or landing == .rapid);
+        try std.testing.expectEqual(@as(usize, @intFromBool(expected)), reads);
+        try std.testing.expectEqual(expected, settled.browse_open);
+        try std.testing.expectEqual(@as(usize, 0), (try step(&state, .{ .list_settled = .{ .wide = wide, .focused = true } })).len);
+    };
+}
+
+test "Overview browse explicit Enter and Right share activation and focus departure cancels settle" {
+    for ([_]bool{ false, true }) |wide| for ([_]Input{ .enter, .{ .action = .open_session } }) |key| for ([_]Selection{ .new_session, .settings, .{ .session = "b2c3d4".* }, .{ .session = "g7h8j9".* } }) |selection| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        _ = try step(&state, .{ .conversation = "b2c3d4".* });
+        state.selected = selection;
+        state.browse_pending = true;
+        const effects = try step(&state, .{ .input = .{ .wide = wide, .key = key } });
+        try std.testing.expect(!state.browse_pending and !effects.browse_open);
+        const expected: std.meta.Tag(Effect) = switch (selection) {
+            .sessions, .archived => unreachable,
+            .new_session => if (key == .enter) .new_session else continue,
+            .settings => if (key == .enter) .open_settings else continue,
+            .session => |reference| if (std.mem.eql(u8, &reference, "b2c3d4")) .focus_chat else .open,
+        };
+        var count: usize = 0;
+        for (effects.slice()) |effect| if (std.meta.activeTag(effect) == expected) {
+            count += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), count);
+    };
+    var state = try opened(&mixed);
+    defer state.deinit();
+    _ = try step(&state, .{ .input = .{ .wide = true, .key = .{ .action = .next } } });
+    try std.testing.expect(state.browse_pending);
+    const cancelled = try step(&state, .{ .list_settled = .{ .wide = true, .focused = false } });
+    try std.testing.expectEqual(@as(usize, 0), cancelled.len);
+    try std.testing.expect(!state.browse_pending);
+}
+
+test "Overview browse New Session never activates until Enter and remains reachable from chat lists" {
+    for ([_]bool{ false, true }) |wide| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        state.selected = .new_session;
+        state.browse_pending = true;
+        const settled = try step(&state, .{ .list_settled = .{ .wide = wide, .focused = true } });
+        try std.testing.expectEqual(@as(usize, 0), settled.len);
+        _ = try step(&state, .{ .conversation = "b2c3d4".* });
+        _ = try step(&state, .{ .input = .{ .wide = wide, .key = .{ .action = .first } } });
+        try std.testing.expect(state.selected == .new_session);
+        _ = try step(&state, .{ .input = .{ .wide = wide, .key = .{ .action = .previous } } });
+        try std.testing.expect(state.selected == .new_session);
+    }
 }
 
 test "the shared row fitter translates source marks through normalization and clipping" {

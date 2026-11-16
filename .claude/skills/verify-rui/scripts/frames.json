@@ -3102,17 +3102,17 @@
       "expect": [
         "enter    open / send",
         "esc      back",
-        "\u21e7enter   new line",
+        "⇧enter   new line",
         "ctrl+x   stop",
-        "\u2191\u2193       scroll",
+        "↑↓       scroll",
         "ctrl+o   tool output",
         "ctrl+p   earlier message",
         "ctrl+r   retry",
         "/        skills",
         "alt+a    archive",
         "ctrl+c   leave",
-        "next panel/footer field",
-        "previous panel/footer field",
+        "next focus",
+        "previous focus",
         "list/chat · info actions"
       ],
       "absent": [
@@ -3124,8 +3124,8 @@
         "Esc returns",
         "Browsing",
         "Keys",
-        "\u2191\u2193 \u00b7 enter change \u00b7 esc close",
-        "\u2039 Rui \u00b7 settings",
+        "↑↓ · enter change · esc close",
+        "‹ Rui · settings",
         "ctrl+g",
         "ctrl+d",
         "ctrl+n",
@@ -3141,7 +3141,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -4636,6 +4636,365 @@
       ],
       "absent_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "focus-seed-earlier",
+      "note": "Keep the two fixture completion seconds distinct so newest-first order has no random-ID tie.",
+      "sizes": [
+        "140x40"
+      ],
+      "cast": [
+        {
+          "label": "Alternate focus audit",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Alternate focus task: Give a chat info specimen summarizing the retry deadline fix."
+          ]
+        }
+      ],
+      "open": "Alternate focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "sleep": 1.2
+        }
+      ],
+      "expect": [
+        "Alternate focus task",
+        "The retry draft is ready."
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "focus-browse-wide",
+      "note": "Wide keyboard list selection settles through the existing open transition; the highlighted other chat is already in the main pane.",
+      "sizes": [
+        "140x40"
+      ],
+      "open": "Current focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Left",
+            "Home",
+            "Down",
+            "Down",
+            "Down"
+          ]
+        },
+        {
+          "sleep": 0.3
+        }
+      ],
+      "expect": [
+        "Alternate focus task",
+        "The retry draft is ready."
+      ],
+      "absent": [
+        "Current focus task",
+        "Opening…"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ],
+      "cast": [
+        {
+          "label": "Current focus audit",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Current focus task: Give a chat info specimen summarizing the retry deadline fix."
+          ]
+        }
+      ]
+    },
+    {
+      "name": "focus-browse-narrow",
+      "note": "Narrow Down selects only: the chat feed stays closed until explicit activation.",
+      "sizes": [
+        "46x30"
+      ],
+      "open": "Current focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Left",
+            "Home",
+            "Down",
+            "Down",
+            "Down"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Alternate focus audit",
+        "Settings",
+        "enter open"
+      ],
+      "absent": [
+        "Current focus task",
+        "Alternate focus task",
+        "The retry draft is ready."
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "focus-tab-list",
+      "note": "List focus: selected row, quiet chat prompt and no caret.",
+      "sizes": [
+        "140x40"
+      ],
+      "open": "Current focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Left"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Current focus task",
+        "The retry draft is ready.",
+        "Settings",
+        "gpt-6.1-sol"
+      ],
+      "absent": [
+        "Opening…"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "focus-tab-settings",
+      "note": "Tab from the list visits the drawn Settings row before the main pane.",
+      "sizes": [
+        "140x40"
+      ],
+      "open": "Current focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Left"
+          ]
+        },
+        {
+          "keys": [
+            "Tab"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Current focus task",
+        "The retry draft is ready.",
+        "Settings",
+        "gpt-6.1-sol"
+      ],
+      "absent": [
+        "Opening…"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "focus-tab-input",
+      "note": "Next Tab visits the chat input, restoring its prompt and caret.",
+      "sizes": [
+        "140x40"
+      ],
+      "open": "Current focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Left"
+          ]
+        },
+        {
+          "keys": [
+            "Tab",
+            "Tab"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Current focus task",
+        "The retry draft is ready.",
+        "Settings",
+        "gpt-6.1-sol"
+      ],
+      "absent": [
+        "Opening…"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "focus-tab-model",
+      "note": "Next Tab visits the first footer button, Model; draft and feed are unchanged.",
+      "sizes": [
+        "140x40"
+      ],
+      "open": "Current focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Left"
+          ]
+        },
+        {
+          "keys": [
+            "Tab",
+            "Tab",
+            "Tab"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Current focus task",
+        "The retry draft is ready.",
+        "Settings",
+        "gpt-6.1-sol"
+      ],
+      "absent": [
+        "Opening…"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "focus-tab-narrow-input",
+      "note": "Narrow chat: only drawn controls are in the order; the input holds focus first.",
+      "sizes": [
+        "46x30"
+      ],
+      "open": "Current focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Current focus task",
+        "The retry draft is ready."
+      ],
+      "absent": [
+        "Opening\u2026",
+        "Alternate focus audit"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "focus-tab-narrow-back",
+      "note": "Narrow Tab from the input visits the drawn back button; the hidden list is not in the order.",
+      "sizes": [
+        "46x30"
+      ],
+      "open": "Current focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Tab"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Current focus task",
+        "The retry draft is ready."
+      ],
+      "absent": [
+        "Opening\u2026",
+        "Alternate focus audit"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "focus-tab-narrow-model",
+      "note": "Narrow second Tab visits the footer Model button; draft and feed are unchanged.",
+      "sizes": [
+        "46x30"
+      ],
+      "open": "Current focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Tab",
+            "Tab"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Current focus task",
+        "The retry draft is ready."
+      ],
+      "absent": [
+        "Opening\u2026",
+        "Alternate focus audit"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {

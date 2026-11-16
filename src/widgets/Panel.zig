@@ -13,6 +13,7 @@ pub const CustomChoice = struct {
     field: usize,
     widget: vxfw.Widget,
     value_widget: ?vxfw.Widget = null,
+    reset_draw: ?*const fn (*anyopaque) void = null,
     height: u16 = 8,
 };
 const Target = struct { row: u16, start: u16, end: u16, index: usize, choice: bool = false };
@@ -107,6 +108,26 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     try self.eventFor(ctx, input, null);
 }
 
+/// Applies a semantic traversal using the caller's sole order algorithm.
+pub fn traverse(self: *Self, ctx: *vxfw.EventContext, reverse: bool, comptime nextTarget: anytype) !void {
+    const order = try ctx.alloc.alloc(usize, self.targets.len);
+    defer ctx.alloc.free(order);
+    var count: usize = 0;
+    for (self.targets) |target| {
+        if (target.choice != (self.choice != null)) continue;
+        if (!target.choice and !self.selectable(target.index)) continue;
+        if (target.end <= target.start) continue;
+        if (std.mem.indexOfScalar(usize, order[0..count], target.index) != null) continue;
+        order[count] = target.index;
+        count += 1;
+    }
+    const current = if (self.choice) |choice| choice.selected else self.selected;
+    if (nextTarget(usize, order[0..count], current, reverse)) |next| {
+        if (self.choice) |*choice| choice.selected = next else self.selected = next;
+    }
+    ctx.consumeAndRedraw();
+}
+
 fn eventFor(self: *Self, ctx: *vxfw.EventContext, input: vxfw.Event, only: ?usize) !void {
     if (self.custom_choice) |choice| {
         try self.hover.handleEvent(ctx, .mouse_leave);
@@ -182,6 +203,7 @@ fn activeRow(self: *const Self) usize {
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const available = ctx.max.size();
+    if (self.custom_choice) |choice| if (choice.reset_draw) |reset| reset(choice.widget.userdata);
     self.targets = &.{};
     self.body = .{};
     self.custom_origin = 0;
@@ -317,6 +339,7 @@ fn bindTargets(self: *Self, arena: std.mem.Allocator, targets: []const Target) s
 }
 
 pub fn drawChoice(self: *Self, ctx: vxfw.DrawContext, index: usize) std.mem.Allocator.Error!vxfw.Surface {
+    if (self.custom_choice) |choice| if (choice.reset_draw) |reset| reset(choice.widget.userdata);
     self.targets = &.{};
     self.body = .{};
     self.hover.targets = &.{};

@@ -18,6 +18,10 @@ pub const Key = enum {
     down,
     left,
     right,
+    /// Tab and Shift-Tab: `app_input.keys` moves focus through the drawn
+    /// order with them before any screen sees them.
+    tab,
+    shift_tab,
     shift_up,
     shift_down,
     page_up,
@@ -108,33 +112,50 @@ pub const every: Keymap(Key) = blk: {
     break :blk map;
 };
 
+/// Input named by a reference row. Submission, newline editing and the
+/// skills trigger are not screen-table keys; naming them here does not
+/// change how the editor or command parser classifies them.
+pub const ReferenceInput = union(enum) {
+    key: Key,
+    enter,
+    newline,
+    slash,
+};
+
+/// The app's one reference list, in pairs across a fitting panel. Every row
+/// names its inputs, including those handled outside screen keymaps. Screen
+/// keys may also be explicitly grouped under a listed key as aliases.
 pub const Reference = struct {
     key: []const u8,
     meaning: []const u8,
-    keys: []const Key = &.{},
+    keys: []const ReferenceInput = &.{},
     aliases: []const Key = &.{},
 };
 
 pub const list = [_]Reference{
-    .{ .key = "enter", .meaning = "open / send" },
-    .{ .key = "esc", .meaning = "back", .keys = &.{.escape}, .aliases = &.{.ctrl_g} },
-    .{ .key = "⇧enter", .meaning = "new line" },
-    .{ .key = "tab", .meaning = "next panel/footer field" },
-    .{ .key = "⇧tab", .meaning = "previous panel/footer field" },
-    .{ .key = "ctrl+x", .meaning = "stop", .keys = &.{.ctrl_x} },
-    .{ .key = "↑↓", .meaning = "scroll", .keys = &.{ .up, .down }, .aliases = &.{ .shift_up, .shift_down, .page_up, .page_down, .home, .end, .ctrl_end } },
-    .{ .key = "←→", .meaning = "list/chat · info actions", .keys = &.{.right} },
-    .{ .key = "ctrl+o", .meaning = "tool output", .keys = &.{.ctrl_o} },
-    .{ .key = "ctrl+p", .meaning = "earlier message", .keys = &.{.ctrl_p}, .aliases = &.{.ctrl_n} },
-    .{ .key = "ctrl+r", .meaning = "retry", .keys = &.{.ctrl_r} },
-    .{ .key = "/", .meaning = "skills" },
-    .{ .key = "alt+↑↓", .meaning = "switch chat", .keys = &.{ .alt_up, .alt_down } },
-    .{ .key = "alt+a", .meaning = "archive", .keys = &.{.alt_a} },
-    .{ .key = "ctrl+c", .meaning = "leave", .keys = &.{.ctrl_c}, .aliases = &.{.ctrl_d} },
+    .{ .key = "enter", .meaning = "open / send", .keys = &.{.enter} },
+    .{ .key = "esc", .meaning = "back", .keys = &.{.{ .key = .escape }}, .aliases = &.{.ctrl_g} },
+    .{ .key = "⇧enter", .meaning = "new line", .keys = &.{.newline} },
+    .{ .key = "tab", .meaning = "next focus", .keys = &.{.{ .key = .tab }} },
+    .{ .key = "⇧tab", .meaning = "previous focus", .keys = &.{.{ .key = .shift_tab }} },
+    .{ .key = "ctrl+x", .meaning = "stop", .keys = &.{.{ .key = .ctrl_x }} },
+    .{ .key = "↑↓", .meaning = "scroll", .keys = &.{ .{ .key = .up }, .{ .key = .down } }, .aliases = &.{ .shift_up, .shift_down, .page_up, .page_down, .home, .end, .ctrl_end } },
+    .{ .key = "←→", .meaning = "list/chat · info actions", .keys = &.{.{ .key = .right }} },
+    .{ .key = "ctrl+o", .meaning = "tool output", .keys = &.{.{ .key = .ctrl_o }} },
+    .{ .key = "ctrl+p", .meaning = "earlier message", .keys = &.{.{ .key = .ctrl_p }}, .aliases = &.{.ctrl_n} },
+    .{ .key = "ctrl+r", .meaning = "retry", .keys = &.{.{ .key = .ctrl_r }} },
+    .{ .key = "/", .meaning = "skills", .keys = &.{.slash} },
+    .{ .key = "alt+↑↓", .meaning = "switch chat", .keys = &.{ .{ .key = .alt_up }, .{ .key = .alt_down } } },
+    .{ .key = "alt+a", .meaning = "archive", .keys = &.{.{ .key = .alt_a }} },
+    .{ .key = "ctrl+c", .meaning = "leave", .keys = &.{.{ .key = .ctrl_c }}, .aliases = &.{.ctrl_d} },
 };
 
-pub const ListError = enum { missing_bound_key, unbound_row, duplicate_key };
+pub const ListError = enum { empty_row, missing_bound_key, unbound_row, duplicate_key };
 
+/// Check the union: every bound key is listed or explicitly aliased exactly
+/// once; neither a row nor an alias can name a key neither screen binds.
+/// Every row must name input, even when it is not a screen-table key. The
+/// caller supplies actual maps, keeping this value-only owner independent.
 pub fn listError(maps: anytype) ?ListError {
     return referenceError(&list, maps);
 }
@@ -147,11 +168,27 @@ fn referenceError(rows: []const Reference, maps: anytype) ?ListError {
         };
     }
     var shown: std.enums.EnumSet(Key) = .empty;
-    for (rows) |row| for ([_][]const Key{ row.keys, row.aliases }) |keys| for (keys) |key| {
-        if (shown.contains(key)) return .duplicate_key;
-        if (!bound.contains(key)) return .unbound_row;
-        shown.insert(key);
-    };
+    var other_inputs: std.enums.EnumSet(std.meta.Tag(ReferenceInput)) = .empty;
+    for (rows) |row| {
+        if (row.keys.len == 0) return .empty_row;
+        for (row.keys) |input| switch (input) {
+            .key => |key| {
+                if (shown.contains(key)) return .duplicate_key;
+                if (!bound.contains(key)) return .unbound_row;
+                shown.insert(key);
+            },
+            .enter, .newline, .slash => {
+                const tag = std.meta.activeTag(input);
+                if (other_inputs.contains(tag)) return .duplicate_key;
+                other_inputs.insert(tag);
+            },
+        };
+        for (row.aliases) |key| {
+            if (shown.contains(key)) return .duplicate_key;
+            if (!bound.contains(key)) return .unbound_row;
+            shown.insert(key);
+        }
+    }
     return if (shown.eql(bound)) null else .missing_bound_key;
 }
 
@@ -209,4 +246,20 @@ test "keys reference aliases are explicit under their listed rows" {
     var unbound = bindable;
     unbound.meanings.set(.ctrl_g, null);
     try std.testing.expectEqual(@as(?ListError, .unbound_row), referenceError(&list, .{unbound}));
+}
+
+test "every keys reference row names its input including non-table input" {
+    for (list, 0..) |row, index| {
+        try std.testing.expect(row.keys.len > 0);
+        var empty = list;
+        empty[index].keys = &.{};
+        try std.testing.expectEqual(@as(?ListError, .empty_row), referenceError(&empty, .{bindable}));
+    }
+    try std.testing.expectEqual(std.meta.Tag(ReferenceInput).enter, std.meta.activeTag(list[0].keys[0]));
+    try std.testing.expectEqual(std.meta.Tag(ReferenceInput).newline, std.meta.activeTag(list[2].keys[0]));
+    try std.testing.expectEqual(std.meta.Tag(ReferenceInput).slash, std.meta.activeTag(list[11].keys[0]));
+    for ([_]usize{ 0, 2, 11 }) |index| {
+        const duplicate = list ++ .{list[index]};
+        try std.testing.expectEqual(@as(?ListError, .duplicate_key), referenceError(&duplicate, .{bindable}));
+    }
 }

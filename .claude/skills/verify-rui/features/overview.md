@@ -8,6 +8,7 @@ Overview lists saved chats under **Sessions**, with **+ New Session**, **Archive
 - Long lists show **↑**, **↓** and **more**. Long names fit within their row.
 - Finished and working chats without a message from you appear dimmer. Chats needing approval stay prominent.
 - Left from an empty draft focuses the list beside a wide chat. Right on the open row returns to its input. Clicking the list or chat also moves focus.
+- At wide widths, keyboard list selection opens the selected chat in the main pane. At narrow widths, selection stays in the list until Enter or Right opens it.
 - Alt-Up/Alt-Down switch chats. Ctrl-X stops work on the selected chat; Alt-A archives it.
 
 ## How to get to it (user POV)
@@ -21,6 +22,10 @@ Capture the states listed below with `$V frames FULLSHA --only quiet-person,quie
 Frame states: `quiet-person`, `quiet-overview`, `quiet-sidebar`, `start-empty`, `start`, `list-hover`, `settings-hover`, `start-busy`, `overview-printable-ignored`, `long-labels`, `many-sessions`, `many-sessions-middle`, `many-sessions-end`, `many-sessions-pinned-end`, `chat-no-new-session`, `chat-sidebar-rows`, `focus-chat`, `left-to-list`, `focus-list-A`, `list-to-chat`
 
 Compare 140×40 with 46×30. Check pinned actions at the middle and end of a long list. Compare the caret and selected row before Left and after Right; the open chat's messages must stay in place. Hover must leave the selected row unchanged.
+
+Run the ordered browsing fixture with `$V frames FULLSHA --only focus-seed-earlier,focus-browse-wide,focus-browse-narrow`. The seed finishes the alternate chat earlier so newest-first ordering is deterministic. Wide Down settles on the alternate chat's feed; narrow Down shows its selected list row and **enter open**, with neither chat's feed visible.
+
+Frame states: `focus-seed-earlier`, `focus-browse-wide`, `focus-browse-narrow`
 
 ## Gotchas
 

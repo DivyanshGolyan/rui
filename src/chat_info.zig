@@ -399,13 +399,21 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         }
     }
     self.bind();
+    if (!self.pasting and !self.model_choice.active and input == .key_press) {
+        if (keypress.named(input.key_press)) |name| if (@import("app_input.zig").keys.get(name)) |direction| {
+            if (self.standalone == null or self.standalone.?.phase != .pending)
+                return self.panel.traverse(ctx, direction == .previous, @import("app_input.zig").tabNextValue);
+        };
+    }
     if (self.standalone) |shown| {
         if (shown.phase == .pending) return;
         try self.panel.choiceEvent(ctx, input, if (shown.row == .model) 4 else 0);
     } else {
         if (!self.hasChoice() and input == .key_press) {
             if (focusMove(input.key_press)) |move| {
-                self.panel.selected = @backingInt(focus.step(if (self.panel.stacked_actions) .stacked else .horizontal, @fromBackingInt(@intCast(self.panel.selected)), move));
+                const current: focus.Focus = @fromBackingInt(@intCast(self.panel.selected));
+                const next = focus.step(if (self.panel.stacked_actions) .stacked else .horizontal, current, move);
+                self.panel.selected = @backingInt(next);
                 ctx.consumeAndRedraw();
                 return;
             }
@@ -419,8 +427,6 @@ fn focusMove(key: vaxis.Key) ?focus.Move {
     if (key.matches(vaxis.Key.down, .{})) return .down;
     if (key.matches(vaxis.Key.left, .{})) return .left;
     if (key.matches(vaxis.Key.right, .{})) return .right;
-    if (key.matches(vaxis.Key.tab, .{})) return .next;
-    if (key.matches(vaxis.Key.tab, .{ .shift = true })) return .previous;
     return null;
 }
 
@@ -975,7 +981,7 @@ test "Chat info model choice is a full-width field and saves a typed model" {
         try std.testing.expectEqualStrings("5", screen.readCell(19, 6).?.char.grapheme);
         try std.testing.expectEqualStrings("C", screen.readCell(3, 7 + page.panel.custom_height).?.char.grapheme);
     }
-    const id = page.model_choice.menu.entries[page.model_choice.selected.?].id;
+    const id = page.model_choice.menu.entries[page.model_choice.focus.selected().?].id;
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expectEqualStrings(id, fixture.edit.?.model);
     try std.testing.expect(!page.hasChoice());
@@ -1842,6 +1848,8 @@ test "Chat info routes horizontal and forward reverse Tab without opening choice
     try press(&page, &ctx, vaxis.Key.down);
     try press(&page, &ctx, vaxis.Key.right);
     try std.testing.expectEqual(@as(usize, 7), page.panel.selected);
+    // Tab is defined only over the controls actually drawn this frame.
+    _ = try dumpWidget(page.bodyWidget(), arena.allocator(), 99, 20);
     try press(&page, &ctx, vaxis.Key.tab);
     try std.testing.expectEqual(@as(usize, 8), page.panel.selected);
     try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.tab, .mods = .{ .shift = true } } });
