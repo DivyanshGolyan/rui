@@ -950,12 +950,120 @@ def prove_native_background(state, *, deadline=None):
     return outcomes
 
 
+
+def prove_model_action_read(state, *, deadline=None):
+    from bash_fixture import dispose_owner_case
+
+    deadline = time.monotonic() + 180 if deadline is None else deadline
+    case = state / "model-action-read"
+    case.mkdir()
+    workspace = case / "workspace"
+    workspace.mkdir()
+    store = case / "store"
+    gate = ReleaseGate(workspace / "producer-gate")
+    producer = (
+        "import os,pathlib,secrets; "
+        "f=open('launches','a'); f.write(str(os.getpid())+'\\n'); f.flush(); os.fsync(f.fileno()); f.close(); "
+        "pathlib.Path('ready.tmp').write_text(str(os.getpid())); os.replace('ready.tmp','ready'); "
+        "g=open('producer-gate','rb'); g.read(); g.close(); "
+        "value='model-read-'+secrets.token_hex(16)+' é😀\\n'; "
+        "f=open('expected-final','w'); f.write(value); f.flush(); os.fsync(f.fileno()); f.close(); "
+        "print(value,end='')"
+    )
+    responses = []
+    add_exchange(responses, "read-target", "exec " + shlex.join([sys.executable, "-c", producer]), answer="producer accepted", timeout_ms=30000)
+    endpoint = fixture.SuccessEndpoint(responses)
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    host = session = pid = None
+    evidence = {}
+
+    def command(*args, **options):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("model Action read body deadline")
+        return fixture.command(*args, timeout=min(15, remaining), **options)
+
+    def wait_for(observe, description):
+        return fixture.wait_for(observe, description, deadline=deadline)
+
+    def model_read(label, native):
+        arguments = json.dumps({"action": identity}, separators=(",", ":"))
+        with endpoint.lock:
+            endpoint.responses.extend([
+                fixture.sse_tool_calls(label + "-calls", [("read_action", label + "-call", arguments)]),
+                fixture.sse_answer(label + "-answer", label + "-reason", label + "-message", label + " observed")[0],
+            ])
+        fixture.message(case, store, label, session, "Inspect your Action with read_action")
+        wait_for(lambda: fixture.completed_observation(store, label), label + " model read continuation")
+        assert fixture.read_result(store, label) == (label + " observed").encode()
+        body = json.loads(endpoint.requests[-1])
+        outputs = [item for item in body["input"] if item.get("type") == "function_call_output" and item.get("call_id") == label + "-call"]
+        assert len(outputs) == 1, outputs
+        assert json.loads(outputs[0]["output"]) == native, outputs
+        evidence[label] = {"native": native, "provider_output": outputs[0]}
+
+    try:
+        thread.start()
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses", active_capacity=2)
+        configured = command(
+            "session", "configure", "--store", store, "--key", "configure", "--record", case / "configure.json",
+            "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol",
+            "--tools", "bash,read_action", "--permission-mode", "ask",
+        )
+        assert configured["answer"]["status"] == "accepted", configured
+        session = configured["context"]["session"]
+        fixture.message(case, store, "target", session, "Start the ordinary gated Bash target")
+        target = wait_for(lambda: action_for(store, session), "ordinary Bash awaiting approval")
+        identity = target["action"]
+        pending = command("action", "read", "--store", store, "--session", session, "--action", identity)
+        assert pending["state"] == "waiting_approval" and pending["final"] is None, pending
+        promoted = command("action", "background", "--store", store, "--session", session, "--action", identity, "--key", "promote", "--record", case / "promote.json")
+        assert promoted["answer"]["status"] == "accepted", promoted
+        wait_for(lambda: fixture.completed_observation(store, "target"), "original receipt continuation")
+        assert len(endpoint.requests) == 2 and not (workspace / "launches").exists()
+        first = json.loads(endpoint.requests[0])
+        offered = [tool["name"] for item in first["input"] if item.get("type") == "additional_tools" for tool in item["tools"]]
+        assert "read_action" in offered, first
+        pending = command("action", "read", "--store", store, "--session", session, "--action", identity)
+        model_read("pending-read", pending)
+        assert len(endpoint.requests) == 4 and not (workspace / "launches").exists()
+        allow(case, store, "allow", session, identity)
+        wait_for(lambda: (workspace / "ready").exists(), "fsynced single producer launch")
+        pid = int((workspace / "launches").read_text())
+        assert process_exists(pid)
+        gate.release()
+        final = wait_for(
+            lambda: value if (value := command("action", "read", "--store", store, "--session", session, "--action", identity))["state"] == "resolved" else None,
+            "sole target Resolution",
+        )
+        assert final["final"]["code"] == "succeeded", final
+        assert final["final"]["window"]["text"].encode() == (workspace / "expected-final").read_bytes()
+        model_read("final-read", final)
+        assert len(endpoint.requests) == 6
+        assert (workspace / "launches").read_text() == f"{pid}\n"
+        wait_for(lambda: not process_exists(pid), "exact producer retirement")
+        wait_for(lambda: execution_custody_idle(store, session), "model read and producer custody retirement")
+        evidence.update(action=identity, pid=pid, launches=1, requests=len(endpoint.requests))
+    finally:
+        failed = sys.exception() is not None
+        dispose_all(
+            gate.release,
+            lambda: command("session", "stop", "--store", store, "--session", session, "--key", "dispose", "--record", case / "dispose.json") if failed and session is not None and host is not None and host.poll() is None else None,
+            lambda: fixture.wait_for(lambda: not process_exists(pid), "owned model-read producer disposal", timeout=5) if pid is not None else None,
+            lambda: dispose_owner_case(host, endpoint, thread),
+            lambda: (case / "witness.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n"),
+            lambda: (case / "provider-requests.json").write_text(json.dumps([json.loads(body) for body in endpoint.requests], ensure_ascii=False, indent=2) + "\n"),
+        )
+    return evidence
+
+
 def main():
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-bash."))
     fixture_home = state / "home"
     fixture_home.mkdir()
     os.environ["HOME"] = str(fixture_home)
     prove_native_background(state)
+    prove_model_action_read(state)
     prove_stdin(state)
     prove_reused_session(state)
     responses = []
