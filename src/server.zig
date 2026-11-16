@@ -1644,6 +1644,45 @@ noinline fn configureCapturedSkills(host: *Host, command: *const wire_request.Co
     return host.store.configureWithCreationCommitted(command, preset, initial_skills, if (reload_capture) |*value| value else null, host.allocator, inheritance.creationCallback(), host.hooks.storeFaults(.command));
 }
 
+fn submitControl(host: *Host, comptime kind: command_spec.CommandKind, command: *const @FieldType(wire_request.Request, @tagName(kind)), faults: store_module.Faults) host_reply.MutationResult(kind) {
+    return switch (kind) {
+        .session_stop => host.store.stopSession(command, faults),
+        .session_archive => host.store.archiveSession(command, faults),
+        .session_pin => host.store.pinSession(command, faults),
+        .model_interruption => host.store.interruptModel(command, faults),
+        .permission_decision => host.store.decidePermission(command, faults),
+        .action_background => host.store.backgroundAction(.{ .command = command }, faults),
+        .configure, .message => @compileError("control admission requires a control kind"),
+    };
+}
+
+fn controlSubject(comptime kind: command_spec.CommandKind, command: *const @FieldType(wire_request.Request, @tagName(kind))) host_reply.MutationSubject(kind) {
+    return switch (kind) {
+        .session_stop, .session_archive, .session_pin => command.session.slice(),
+        .model_interruption => .{ .session = command.session, .turn_id = command.turn_id, .operation_id = command.operation_id },
+        .permission_decision => .{ .session = command.session, .action_id = command.action_id, .decision = command.decision },
+        .action_background => .{ .session = command.session, .action_id = command.action_id },
+        .configure, .message => @compileError("control subject requires a control kind"),
+    };
+}
+
+// Returns false only for the deliberate post-commit drop, so controls keep the
+// original timing lifetime even when reply allocation itself cannot succeed.
+fn answerMutation(host: *Host, fd: *Reply, header: Header, comptime kind: command_spec.CommandKind, subject: host_reply.MutationSubject(kind), result: host_reply.MutationResult(kind)) !bool {
+    if (result == .infrastructure_failure) fenceDispatch(host, command_spec.spec(kind).fence_message, error.CanonicalStoreFailure);
+    if (header.drop == .after_commit and result != .infrastructure_failure) return false;
+    try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderMutationReply(kind), .{ subject, result });
+    return true;
+}
+
+fn answerControl(host: *Host, fd: *Reply, header: Header, comptime kind: command_spec.CommandKind, subject: host_reply.MutationSubject(kind), result: host_reply.MutationResult(kind), timing: ControlTiming) !void {
+    comptime std.debug.assert(command_spec.spec(kind).is_control);
+    // Acceptance and infrastructure failure are disjoint. The hint precedes
+    // every reply effect, including the deliberate post-commit drop.
+    if (result == .accepted) publishControlHint(host, timing.command_key.slice());
+    if (try answerMutation(host, fd, header, kind, subject, result)) fd.timing = timing;
+}
+
 fn matchesStore(kind: std.meta.Tag(wire_request.Request), supplied: []const u8, expected: []const u8) bool {
     return (kind == .host_info and supplied.len == 0) or std.mem.eql(u8, supplied, expected);
 }
@@ -1701,84 +1740,16 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             if (header.drop != .after_commit) try fd.json(200, protocol.host_stop_ack.len, protocol.JsonOut.append, .{protocol.host_stop_ack});
         },
         .configure => |*command| {
-            const result = try submitConfigure(host, command);
-            if (result == .infrastructure_failure) {
-                fenceDispatch(host, "configuration save", error.CanonicalStoreFailure);
-            }
-            if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderConfigureReply, .{ command.session.slice(), result });
+            _ = try answerMutation(host, fd, header, .configure, command.session.slice(), try submitConfigure(host, command));
         },
         .message => |*command| {
-            const result = try submitMessage(host, command, client_environment.?);
-            if (result == .infrastructure_failure) {
-                fenceDispatch(host, "message save", error.CanonicalStoreFailure);
-            }
-            if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderMessageReply, .{ command.session.slice(), result });
+            _ = try answerMutation(host, fd, header, .message, command.session.slice(), try submitMessage(host, command, client_environment.?));
         },
-        .session_stop => |*command| {
-            var timing = ControlTiming.init(host, command.key, "session_stop", accepted_at_ns);
-            const result = host.store.stopSession(command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
-            if (result == .infrastructure_failure) {
-                fenceDispatch(host, "Session stop save", error.CanonicalStoreFailure);
-            }
-            if (result == .accepted) publishControlHint(host, command.key.slice());
-            if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderSessionStopReply, .{ command.session.slice(), result });
-            fd.timing = timing;
-        },
-        .session_archive => |*command| {
-            var timing = ControlTiming.init(host, command.key, "session_archive", accepted_at_ns);
-            const result = host.store.archiveSession(command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
-            if (result == .infrastructure_failure) {
-                fenceDispatch(host, "Session archive save", error.CanonicalStoreFailure);
-            }
-            if (result == .accepted) publishControlHint(host, command.key.slice());
-            if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderSessionArchiveReply, .{ command.session.slice(), result });
-            fd.timing = timing;
-        },
-        .session_pin => |*command| {
-            var timing = ControlTiming.init(host, command.key, "session_pin", accepted_at_ns);
-            const result = host.store.pinSession(command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
-            if (result == .infrastructure_failure) {
-                fenceDispatch(host, "Session pin save", error.CanonicalStoreFailure);
-            }
-            if (result == .accepted) publishControlHint(host, command.key.slice());
-            if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderSessionPinReply, .{ command.session.slice(), result });
-            fd.timing = timing;
-        },
-        .model_interruption => |*command| {
-            var timing = ControlTiming.init(host, command.key, "model_interruption", accepted_at_ns);
-            const result = host.store.interruptModel(command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
-            if (result == .infrastructure_failure) {
-                fenceDispatch(host, "model interruption save", error.CanonicalStoreFailure);
-            }
-            if (result == .accepted) publishControlHint(host, command.key.slice());
-            if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderModelInterruptionReply, .{ store_module.ModelInterruptionTarget{ .session = command.session, .turn_id = command.turn_id, .operation_id = command.operation_id }, result });
-            fd.timing = timing;
-        },
-        .permission_decision => |*command| {
-            var timing = ControlTiming.init(host, command.key, "permission_decision", accepted_at_ns);
-            const result = host.store.decidePermission(command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
-            if (result == .infrastructure_failure) {
-                fenceDispatch(host, "permission decision save", error.CanonicalStoreFailure);
-            }
-            if (result == .accepted) publishControlHint(host, command.key.slice());
-            if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderPermissionDecisionReply, .{ host_reply.PermissionTarget{ .session = command.session, .action_id = command.action_id, .decision = command.decision }, result });
-            fd.timing = timing;
-        },
-        .action_background => |*command| {
-            var timing = ControlTiming.init(host, command.key, "action_background", accepted_at_ns);
-            const result = host.store.backgroundAction(.{ .command = command }, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
-            if (result == .infrastructure_failure) fenceDispatch(host, "Action background save", error.CanonicalStoreFailure);
-            if (result == .accepted) publishControlHint(host, command.key.slice());
-            if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderActionBackgroundReply, .{ host_reply.ActionBackgroundTarget{ .session = command.session, .action_id = command.action_id }, result });
-            fd.timing = timing;
+        inline .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background => |*command, tag| {
+            const kind = comptime @field(command_spec.CommandKind, @tagName(tag));
+            var timing = ControlTiming.init(host, command.key, @tagName(kind), accepted_at_ns);
+            const result = submitControl(host, kind, command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
+            try answerControl(host, fd, header, kind, controlSubject(kind, command), result, timing);
         },
         .observe_command => |*command| {
             var observation: store_module.Observed = undefined;
@@ -2167,150 +2138,13 @@ const HeaderReader = struct {
 
 test "canonical failure classifier accepts every production mutation failure envelope" {
     const protocol_reply = @import("protocol_reply.zig");
-    inline for (.{ host_reply.renderConfigureReply, host_reply.renderMessageReply, host_reply.renderSessionStopReply, host_reply.renderSessionArchiveReply, host_reply.renderModelInterruptionReply, host_reply.renderPermissionDecisionReply }) |render| {
+    inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
+        const render = host_reply.renderMutationReply(kind);
         const Subject = @typeInfo(@TypeOf(render)).@"fn".param_types[1].?;
         var response = protocol.ResponseBuffer{};
         try response.render(render, .{ std.mem.zeroes(Subject), .infrastructure_failure });
         try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}", response.slice());
         try std.testing.expectError(error.CanonicalStoreFailure, protocol_reply.checkCanonicalFailure(.{ .status = 500, .body = response.slice() }));
-    }
-}
-
-fn expectMutationFieldPresence(body: []const u8, status: u16, session: []const u8, target: @import("protocol_reply.zig").MutationTarget) !void {
-    const protocol_reply = @import("protocol_reply.zig");
-    const allocator = std.testing.allocator;
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
-    defer parsed.deinit();
-    const Section = struct { path: []const []const u8, fields: []const []const u8 };
-    const sections = [_]Section{
-        .{ .path = &.{}, .fields = &.{ "version", "type", "code", "answer", "input", "queue", "execution", "completion" } },
-        .{ .path = &.{"answer"}, .fields = &.{ "status", "replayed", "session", "code", "revision", "created", "admission", "archived", "action", "decision", "selection", "target" } },
-        .{ .path = &.{"input"}, .fields = &.{ "type", "bytes", "sha256" } },
-        .{ .path = &.{"queue"}, .fields = &.{ "status", "admission" } },
-        .{ .path = &.{"execution"}, .fields = &.{ "status", "reason" } },
-        .{ .path = &.{"completion"}, .fields = &.{"status"} },
-        .{ .path = &.{ "answer", "selection" }, .fields = &.{ "turn", "admission_cutoff" } },
-        .{ .path = &.{ "answer", "target" }, .fields = &.{ "session", "turn", "operation" } },
-    };
-    for (sections) |section| {
-        var object = &parsed.value;
-        for (section.path) |part| object = object.object.getPtr(part) orelse break else {
-            for (section.fields) |field| {
-                const original = object.object.get(field);
-                try object.object.put(parsed.arena.allocator(), field, .null);
-                const encoded = try std.json.Stringify.valueAlloc(allocator, parsed.value, .{});
-                defer allocator.free(encoded);
-                const decoded = protocol_reply.decodeMutationReply(.{ .status = status, .body = encoded }, session, target);
-                const nullable_turn = section.path.len == 2 and std.mem.eql(u8, section.path[1], "selection") and std.mem.eql(u8, field, "turn");
-                if (nullable_turn) {
-                    try std.testing.expectEqual(@as(?u64, null), (try decoded.answer).result.accepted.session_stop.turn);
-                } else {
-                    std.testing.expectError(error.InvalidResponse, decoded.answer) catch |err| {
-                        std.debug.print("null witness: operation={s}, HTTP={d}, path={any}, field={s}\n", .{ @tagName(target), status, section.path, field });
-                        return err;
-                    };
-                    try std.testing.expect(!decoded.isAccepted());
-                    try std.testing.expect(decoded.diagnostic == null);
-                    try std.testing.expectEqualStrings(session, decoded.context.session.slice());
-                }
-                _ = object.object.orderedRemove(field);
-                if (original) |value| {
-                    const omitted = try std.json.Stringify.valueAlloc(allocator, parsed.value, .{});
-                    defer allocator.free(omitted);
-                    try std.testing.expectError(error.InvalidResponse, protocol_reply.decodeMutationReply(.{ .status = status, .body = omitted }, session, target).answer);
-                    try object.object.put(parsed.arena.allocator(), field, value);
-                }
-            }
-        }
-    }
-}
-
-test "mutation decoder validates every actual producer and preserved domain answers" {
-    const protocol_reply = @import("protocol_reply.zig");
-    const session = "k7m2qx";
-    const content: store_module.ContentReference = .{ .length = 9, .digest = protocol.contentDigest("seven\nµ!") };
-    inline for (.{ host_reply.renderConfigureReply, host_reply.renderMessageReply, host_reply.renderSessionStopReply, host_reply.renderModelInterruptionReply, host_reply.renderPermissionDecisionReply, host_reply.renderSessionArchiveReply, host_reply.renderSessionPinReply }, 0..) |render, index| {
-        const MutationReply = @typeInfo(@TypeOf(render)).@"fn".param_types[2].?;
-        var named: protocol.Bounded(protocol.max_session_bytes) = .{};
-        try named.set(session);
-        const subject = switch (index) {
-            3 => store_module.ModelInterruptionTarget{ .session = named, .turn_id = 3, .operation_id = 11 },
-            4 => host_reply.PermissionTarget{ .session = named, .action_id = 7, .decision = .deny },
-            else => @as([]const u8, session),
-        };
-        const target: protocol_reply.MutationTarget = switch (index) {
-            0 => .configure,
-            1 => .{ .message = .{ .bytes = content.length, .digest = content.digest } },
-            2 => .session_stop,
-            3 => .{ .model_interruption = .{ .turn = 3, .operation = 11 } },
-            4 => .{ .permission_decision = .{ .action = 7, .decision = .deny } },
-            5 => .{ .session_archive = .{ .archived = true } },
-            6 => .{ .session_pin = .{ .pinned = false } },
-            else => unreachable,
-        };
-        const accepted: MutationReply = switch (index) {
-            0 => .{ .accepted = .{ .replayed = true, .revision = 13, .created = false, .session = named } },
-            1 => .{ .accepted = .{ .replayed = true, .admission_id = 17, .content = content, .session = named } },
-            2 => .{ .accepted = .{ .replayed = true, .selection = .{ .selected_turn_id = 19, .admission_cutoff = 23 }, .completion = .pending } },
-            3, 4 => .{ .accepted = .{ .replayed = true } },
-            5 => .{ .accepted = .{ .replayed = true, .archived = true, .completion = .pending } },
-            6 => .{ .accepted = .{ .replayed = true, .pinned = false } },
-            else => unreachable,
-        };
-        const rejected: MutationReply = if (index == 1)
-            .{ .rejected = .{ .replayed = true, .code = .unknown_session, .content = content } }
-        else
-            .{ .rejected = .{ .replayed = true, .code = .invalid_session_reference } };
-        for ([_]MutationReply{ accepted, rejected, .conflict, .infrastructure_failure }) |initial| {
-            for ([_]bool{ false, true }) |replayed| {
-                var result = initial;
-                switch (result) {
-                    .accepted => |*value| value.replayed = replayed,
-                    .rejected => |*value| value.replayed = replayed,
-                    else => {},
-                }
-                var response: protocol.ResponseBuffer = .{};
-                try response.render(render, .{ subject, result });
-                const status: u16 = if (result == .conflict) 409 else if (result == .infrastructure_failure) 500 else 200;
-                const decoded = protocol_reply.decodeMutationReply(.{ .status = status, .body = response.slice() }, session, target);
-                try std.testing.expectEqual(status, decoded.status);
-                try expectMutationFieldPresence(response.slice(), status, session, target);
-                if (result == .infrastructure_failure) {
-                    try std.testing.expectError(error.CanonicalStoreFailure, decoded.answer);
-                    continue;
-                }
-                const answer = try decoded.answer;
-                try std.testing.expectEqualStrings(@tagName(result), @tagName(answer.result));
-                try std.testing.expectEqual(result != .conflict and replayed, answer.replayed);
-                try std.testing.expectError(error.RequestBindingMismatch, protocol_reply.decodeMutationReply(.{ .status = status, .body = response.slice() }, "p9q8rs", target).answer);
-                if (result == .accepted) switch (answer.result.accepted) {
-                    .configure => |value| try std.testing.expectEqual(@as(u64, 13), value.revision),
-                    .message => |value| try std.testing.expectEqual(@as(u64, 17), value.admission),
-                    .session_stop => |value| {
-                        try std.testing.expectEqual(@as(?u64, 19), value.turn);
-                        try std.testing.expectEqual(@as(u64, 23), value.admission_cutoff);
-                        try std.testing.expectEqual(.pending, value.completion);
-                    },
-                    .session_archive => |value| {
-                        try std.testing.expect(value.archived);
-                        try std.testing.expectEqual(.pending, value.completion);
-                    },
-                    .session_pin => |value| try std.testing.expect(!value.pinned),
-                    .model_interruption, .permission_decision, .action_background => {},
-                };
-            }
-        }
-        if (index == 2) {
-            var idle = accepted;
-            idle.accepted.selection.selected_turn_id = null;
-            idle.accepted.completion = .completed;
-            var response: protocol.ResponseBuffer = .{};
-            try response.render(render, .{ subject, idle });
-            const answer = try protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, session, target).answer;
-            try std.testing.expectEqual(@as(?u64, null), answer.result.accepted.session_stop.turn);
-            try std.testing.expectEqual(.completed, answer.result.accepted.session_stop.completion);
-            try expectMutationFieldPresence(response.slice(), 200, session, target);
-        }
     }
 }
 
@@ -2330,7 +2164,6 @@ test "initial Message reply binds its allocated Session and original input befor
     const reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", target);
     try std.testing.expect(reply.isAccepted());
     try std.testing.expectEqualStrings("k7m2qx", reply.context.session.slice());
-    try expectMutationFieldPresence(response.slice(), 200, "", target);
     try std.testing.expectError(error.RequestBindingMismatch, protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "111111", target).answer);
     var changed = target;
     changed.message.digest[0] ^= 1;
@@ -2919,7 +2752,9 @@ test "reply delivery interrupted poll consumes the existing inactivity budget" {
 
 test "delayed control replies retain command identity after request storage reuse" {
     const native = @import("posix");
-    inline for (.{ "session_stop", "session_archive", "session_pin", "model_interruption", "permission_decision" }) |kind| {
+    inline for (comptime std.meta.tags(command_spec.CommandKind)) |control_kind| {
+        if (comptime !command_spec.spec(control_kind).is_control) continue;
+        const kind = @tagName(control_kind);
         var descriptors: [2]c_int = undefined;
         try std.testing.expectEqual(@as(c_int, 0), native.pipe(&descriptors));
         defer _ = native.close(descriptors[0]);
@@ -3179,7 +3014,7 @@ test "control response variants fit exact worst-case JSON bounds" {
             expected: usize,
         ) !void {
             var response: protocol.ResponseBuffer = .{};
-            try response.render(host_reply.renderSessionStopReply, .{ command.session.slice(), result });
+            try response.render(host_reply.renderMutationReply(.session_stop), .{ command.session.slice(), result });
             try std.testing.expectEqual(expected, response.len);
         }
 
@@ -3189,7 +3024,7 @@ test "control response variants fit exact worst-case JSON bounds" {
             expected: usize,
         ) !void {
             var response: protocol.ResponseBuffer = .{};
-            try response.render(host_reply.renderModelInterruptionReply, .{ store_module.ModelInterruptionTarget{ .session = command.session, .turn_id = command.turn_id, .operation_id = command.operation_id }, result });
+            try response.render(host_reply.renderMutationReply(.model_interruption), .{ store_module.ModelInterruptionTarget{ .session = command.session, .turn_id = command.turn_id, .operation_id = command.operation_id }, result });
             try std.testing.expectEqual(expected, response.len);
         }
 
@@ -3213,7 +3048,7 @@ test "control response variants fit exact worst-case JSON bounds" {
         .completion = .completed,
     } }, protocol.shapeBytes(protocol.session_stop_reply.accepted));
     var pending_response: protocol.ResponseBuffer = .{};
-    try pending_response.render(host_reply.renderSessionStopReply, .{ stop_command.session.slice(), store_module.SessionStopReply{ .accepted = .{
+    try pending_response.render(host_reply.renderMutationReply(.session_stop), .{ stop_command.session.slice(), store_module.SessionStopReply{ .accepted = .{
         .replayed = false,
         .selection = .{
             .selected_turn_id = std.math.maxInt(u64),
@@ -4515,7 +4350,7 @@ test "session archive renders accepted intent and completion for both archive an
         for (std.meta.tags(protocol.SessionStopCompletion)) |completion| {
             for ([_]bool{ false, true }) |replayed| {
                 var response: protocol.ResponseBuffer = .{};
-                try response.render(host_reply.renderSessionArchiveReply, .{ command.session.slice(), store_module.SessionArchiveReply{ .accepted = .{
+                try response.render(host_reply.renderMutationReply(.session_archive), .{ command.session.slice(), store_module.SessionArchiveReply{ .accepted = .{
                     .replayed = replayed,
                     .archived = archived,
                     .completion = completion,
@@ -4524,13 +4359,12 @@ test "session archive renders accepted intent and completion for both archive an
                 try std.testing.expectEqual(replayed, decoded.replayed);
                 try std.testing.expectEqual(archived, decoded.result.accepted.session_archive.archived);
                 try std.testing.expectEqual(completion, decoded.result.accepted.session_archive.completion);
-                try expectMutationFieldPresence(response.slice(), 200, "k7m2qx", .{ .session_archive = .{ .archived = archived } });
             }
         }
     }
     for (std.meta.tags(protocol.SessionArchiveRejection)) |code| {
         var response: protocol.ResponseBuffer = .{};
-        try response.render(host_reply.renderSessionArchiveReply, .{ command.session.slice(), store_module.SessionArchiveReply{ .rejected = .{ .replayed = true, .code = code } } });
+        try response.render(host_reply.renderMutationReply(.session_archive), .{ command.session.slice(), store_module.SessionArchiveReply{ .rejected = .{ .replayed = true, .code = code } } });
         const decoded = try protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "k7m2qx", .{ .session_archive = .{ .archived = true } }).answer;
         try std.testing.expectEqualStrings(@tagName(code), decoded.result.rejected.slice());
     }
@@ -4944,4 +4778,567 @@ test "a stop signal handler racing detach never writes to the closed or a reused
         for (&hammers) |*hammer| hammer.advance(1);
         for (reused) |fd| try std.testing.expect(std.c.read(fd, &bytes, bytes.len) < 0);
     }
+}
+
+// Captured against 5472ccf5 before the decoder refactor. This oracle checks
+// exact producer bytes and complete typed outcomes for matching/mismatched
+// bindings. ReplyDomainWitness independently freezes individual field edits.
+const MutationWitness = struct {
+    const reply = @import("protocol_reply.zig");
+    const session = "k7m2qx";
+    const content: store_module.ContentReference = .{ .length = 9, .digest = .{ 0xc8, 0x84, 0x92, 0x9e, 0xdd, 0xc9, 0x45, 0x02, 0xb8, 0x37, 0x7e, 0x33, 0x3d, 0xcd, 0x72, 0x80, 0x64, 0xdc, 0xb2, 0xc4, 0x57, 0xe1, 0x0c, 0x4a, 0x3c, 0xc9, 0x82, 0xde, 0xde, 0xfd, 0xcb, 0xcd } };
+    const Hash = std.crypto.hash.sha2.Sha256;
+
+    fn named() protocol.Bounded(protocol.max_session_bytes) {
+        var value: protocol.Bounded(protocol.max_session_bytes) = .{};
+        value.set(session) catch unreachable;
+        return value;
+    }
+
+    fn subject(comptime kind: command_spec.CommandKind) @typeInfo(@TypeOf(host_reply.renderMutationReply(kind))).@"fn".param_types[1].? {
+        return switch (kind) {
+            .model_interruption => .{ .session = named(), .turn_id = 3, .operation_id = 11 },
+            .permission_decision => .{ .session = named(), .action_id = 7, .decision = .deny },
+            .action_background => .{ .session = named(), .action_id = 7 },
+            else => session,
+        };
+    }
+
+    fn target(comptime kind: command_spec.CommandKind, wrong: bool) reply.MutationTarget {
+        return switch (kind) {
+            .configure => if (wrong) .session_stop else .configure,
+            .message => .{ .message = .{ .bytes = content.length + @intFromBool(wrong), .digest = content.digest } },
+            .session_stop => if (wrong) .configure else .session_stop,
+            .session_archive => .{ .session_archive = .{ .archived = !wrong } },
+            .session_pin => .{ .session_pin = .{ .pinned = wrong } },
+            .model_interruption => .{ .model_interruption = .{ .turn = 3, .operation = if (wrong) 12 else 11 } },
+            .permission_decision => .{ .permission_decision = .{ .action = 7, .decision = if (wrong) .allow_once else .deny } },
+            .action_background => .{ .action_background = if (wrong) 8 else 7 },
+        };
+    }
+
+    fn accepted(comptime kind: command_spec.CommandKind) @typeInfo(@TypeOf(host_reply.renderMutationReply(kind))).@"fn".param_types[2].? {
+        return .{ .accepted = switch (kind) {
+            .configure => .{ .replayed = false, .revision = 13, .created = false, .session = named() },
+            .message => .{ .replayed = false, .admission_id = 17, .content = content, .session = named() },
+            .session_stop => .{ .replayed = false, .selection = .{ .selected_turn_id = 19, .admission_cutoff = 23 }, .completion = .pending },
+            .session_archive => .{ .replayed = false, .archived = true, .completion = .pending },
+            .session_pin => .{ .replayed = false, .pinned = false },
+            .model_interruption, .permission_decision => .{ .replayed = false },
+            .action_background => .{ .replayed = false, .action_id = 7, .selection = .{ .kind = .background, .position = 29 } },
+        } };
+    }
+
+    fn observe(hash: *Hash, body: []const u8, status: u16, supplied_session: []const u8, binding: reply.MutationTarget) !void {
+        const decoded = reply.decodeMutationReply(.{ .status = status, .body = body }, supplied_session, binding);
+        if (decoded.answer) |answer| {
+            hash.update(@tagName(answer.result));
+            hash.update(&.{@intFromBool(answer.replayed)});
+            switch (answer.result) {
+                .accepted => |value| {
+                    const bytes = try std.json.Stringify.valueAlloc(std.testing.allocator, value, .{});
+                    defer std.testing.allocator.free(bytes);
+                    hash.update(bytes);
+                },
+                .rejected => |code| hash.update(code.slice()),
+                .conflict => {},
+            }
+            const input = try std.json.Stringify.valueAlloc(std.testing.allocator, answer.input, .{});
+            defer std.testing.allocator.free(input);
+            hash.update(input);
+        } else |err| hash.update(@errorName(err));
+        hash.update("\x00");
+        hash.update(decoded.context.session.slice());
+        hash.update("\x00");
+        if (decoded.diagnostic) |diagnostic| {
+            hash.update(diagnostic.type.slice());
+            hash.update(diagnostic.code.slice());
+        }
+        hash.update("\x00");
+    }
+
+    const Field = struct { path: []const []const u8, value: []const u8 };
+    const fields = [_]Field{
+        .{ .path = &.{"version"}, .value = "\"" ++ protocol.wire_version ++ "\"" },
+        .{ .path = &.{"type"}, .value = "\"session_pin_reply\"" },
+        .{ .path = &.{"code"}, .value = "\"canonical_store_failure\"" },
+        .{ .path = &.{"answer"}, .value = "{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\"}" },
+        .{ .path = &.{"input"}, .value = "{\"type\":\"text\",\"bytes\":\"9\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}" },
+        .{ .path = &.{"queue"}, .value = "{\"status\":\"queued\",\"admission\":\"17\"}" },
+        .{ .path = &.{"execution"}, .value = "{\"status\":\"queued\"}" },
+        .{ .path = &.{"completion"}, .value = "{\"status\":\"pending\"}" },
+        .{ .path = &.{ "answer", "status" }, .value = "\"accepted\"" },
+        .{ .path = &.{ "answer", "replayed" }, .value = "true" },
+        .{ .path = &.{ "answer", "session" }, .value = "\"k7m2qx\"" },
+        .{ .path = &.{ "answer", "code" }, .value = "\"unknown_session\"" },
+        .{ .path = &.{ "answer", "message" }, .value = "\"detail\"" },
+        .{ .path = &.{ "answer", "revision" }, .value = "\"13\"" },
+        .{ .path = &.{ "answer", "created" }, .value = "false" },
+        .{ .path = &.{ "answer", "skills" }, .value = "\"unchanged\"" },
+        .{ .path = &.{ "answer", "admission" }, .value = "\"17\"" },
+        .{ .path = &.{ "answer", "archived" }, .value = "true" },
+        .{ .path = &.{ "answer", "pinned" }, .value = "false" },
+        .{ .path = &.{ "answer", "action" }, .value = "\"7\"" },
+        .{ .path = &.{ "answer", "decision" }, .value = "\"deny\"" },
+        .{ .path = &.{ "answer", "selection" }, .value = "{\"turn\":\"19\",\"admission_cutoff\":\"23\"}" },
+        .{ .path = &.{ "answer", "action_selection" }, .value = "{\"kind\":\"background\",\"position\":\"29\"}" },
+        .{ .path = &.{ "answer", "target" }, .value = "{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"11\"}" },
+        .{ .path = &.{ "input", "type" }, .value = "\"text\"" },
+        .{ .path = &.{ "input", "bytes" }, .value = "\"9\"" },
+        .{ .path = &.{ "input", "sha256" }, .value = "\"0000000000000000000000000000000000000000000000000000000000000000\"" },
+        .{ .path = &.{ "queue", "status" }, .value = "\"queued\"" },
+        .{ .path = &.{ "queue", "admission" }, .value = "\"17\"" },
+        .{ .path = &.{ "execution", "status" }, .value = "\"unavailable\"" },
+        .{ .path = &.{ "execution", "reason" }, .value = "\"direct_reply_does_not_wait_for_model_processing\"" },
+        .{ .path = &.{ "completion", "status" }, .value = "\"completed\"" },
+        .{ .path = &.{ "answer", "selection", "turn" }, .value = "null" },
+        .{ .path = &.{ "answer", "selection", "admission_cutoff" }, .value = "\"23\"" },
+        .{ .path = &.{ "answer", "target", "session" }, .value = "\"k7m2qx\"" },
+        .{ .path = &.{ "answer", "target", "turn" }, .value = "\"3\"" },
+        .{ .path = &.{ "answer", "target", "operation" }, .value = "\"11\"" },
+        .{ .path = &.{ "answer", "action_selection", "kind" }, .value = "\"final\"" },
+        .{ .path = &.{ "answer", "action_selection", "position" }, .value = "\"29\"" },
+    };
+};
+
+test "mutation decoder preserves base bytes and the entire command domain" {
+    var covered: u16 = 0;
+    inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
+        covered |= @as(u16, 1) << @backingInt(kind);
+        const render = host_reply.renderMutationReply(kind);
+        const Result = @typeInfo(@TypeOf(render)).@"fn".param_types[2].?;
+        const accepted = MutationWitness.accepted(kind);
+        const rejected: Result = if (kind == .message)
+            .{ .rejected = .{ .replayed = false, .code = .unknown_session, .content = MutationWitness.content } }
+        else
+            .{ .rejected = .{ .replayed = false, .code = .invalid_session_reference } };
+        var hash = MutationWitness.Hash.init(.{});
+        for ([_]Result{ accepted, rejected, .conflict, .infrastructure_failure }) |initial| {
+            for ([_]bool{ false, true }) |replayed| {
+                var result = initial;
+                switch (result) {
+                    .accepted => |*value| value.replayed = replayed,
+                    .rejected => |*value| value.replayed = replayed,
+                    else => {},
+                }
+                var response: protocol.ResponseBuffer = .{};
+                try response.render(render, .{ MutationWitness.subject(kind), result });
+                const status: u16 = switch (result) {
+                    .accepted, .rejected => 200,
+                    .conflict => 409,
+                    .infrastructure_failure => 500,
+                };
+                hash.update(response.slice());
+                hash.update("\x00");
+                for ([_]bool{ false, true }) |wrong_session| {
+                    for ([_]bool{ false, true }) |wrong_target| {
+                        try MutationWitness.observe(&hash, response.slice(), status, if (wrong_session) "p9q8rs" else MutationWitness.session, MutationWitness.target(kind, wrong_target));
+                    }
+                }
+            }
+        }
+        // Other renderer branches: skills reload, idle stop, restored/unpinned
+        // intent, final Action selection, and initial Session allocation.
+        var alternate = accepted;
+        switch (kind) {
+            .configure => alternate.accepted.skills = .unchanged,
+            .session_stop => {
+                alternate.accepted.selection.selected_turn_id = null;
+                alternate.accepted.completion = .completed;
+            },
+            .session_archive => alternate.accepted.archived = false,
+            .session_pin => alternate.accepted.pinned = true,
+            .action_background => alternate.accepted.selection.kind = .final,
+            else => {},
+        }
+        var response: protocol.ResponseBuffer = .{};
+        try response.render(render, .{ MutationWitness.subject(kind), alternate });
+        hash.update(response.slice());
+        var binding = MutationWitness.target(kind, false);
+        if (kind == .session_archive) binding.session_archive.archived = false;
+        if (kind == .session_pin) binding.session_pin.pinned = true;
+        try MutationWitness.observe(&hash, response.slice(), 200, MutationWitness.session, binding);
+        if (kind == .configure or kind == .message) {
+            var initial = accepted;
+            if (kind == .configure) initial.accepted.created = true;
+            if (kind == .message) binding.message.creates_session = true;
+            response = .{};
+            try response.render(render, .{ @as([]const u8, ""), initial });
+            hash.update(response.slice());
+            try MutationWitness.observe(&hash, response.slice(), 200, "", binding);
+        }
+        const expected = switch (kind) {
+            .configure => "adca102951c1f18dc2ce00f9b558a24b2beaaec0c3e2e863316f44a6efb03321",
+            .message => "3be943056ed34a9f484210e35c3aed5397a28a4fd2f52536d9bab4333101b562",
+            .session_stop => "a98107ee7efe29d5c2480097568daa514649c76e9c7c1cc740ed5fbc697cbc90",
+            .session_archive => "91da63974ced68e1596b479409b543ae90ec8161c1612840b3e26a0eca02acb3",
+            .model_interruption => "54ed6236f058bb77a9b8039bb9a2bc144a5066bf742084c9ceb7ff7e73f890e1",
+            .permission_decision => "f66bb4623f2b0d67ae3ddafb8ead166b83daf53877ab965918108eceac49a3e8",
+            .session_pin => "aa74b927c4314f8576e070e3c2cff253fa4c6aeb1de6a93410f535fd255d1230",
+            .action_background => "36da16c3d5ecd7bb88bdb3612c921f3dfc3eb2114fa974f9274e957356061b7f",
+        };
+        const actual = std.fmt.bytesToHex(hash.finalResult(), .lower);
+        std.testing.expectEqualStrings(expected, &actual) catch |err| {
+            std.debug.print("base mutation witness changed for {s}\n", .{@tagName(kind)});
+            return err;
+        };
+    }
+    try std.testing.expectEqual(@as(u16, 0xff), covered);
+}
+test "every accepted control publishes exactly one hint before reply handling" {
+    const native = @import("posix");
+    const Probe = struct {
+        host: *Host,
+        observation: *TestObservation,
+        accepted: bool,
+        allocations: usize = 0,
+        ordered: bool = true,
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+        }
+
+        fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.allocations += 1;
+            self.ordered = self.ordered and self.host.controls_changed.load(.acquire) == self.accepted and
+                self.observation.shared.state.load(.acquire) == @as(u64, if (self.accepted) 2 else 0);
+            return std.testing.allocator.rawAlloc(len, alignment, ret_addr);
+        }
+
+        fn resize(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+            return std.testing.allocator.rawResize(memory, alignment, new_len, ret_addr);
+        }
+
+        fn remap(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+            return std.testing.allocator.rawRemap(memory, alignment, new_len, ret_addr);
+        }
+
+        fn free(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+            std.testing.allocator.rawFree(memory, alignment, ret_addr);
+        }
+    };
+    var covered: u16 = 0;
+    inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
+        if (comptime !command_spec.spec(kind).is_control) continue;
+        covered |= @as(u16, 1) << @backingInt(kind);
+        const Result = host_reply.MutationResult(kind);
+        const rejected: Result = .{ .rejected = .{ .replayed = false, .code = .invalid_session_reference } };
+        for ([_]Result{ MutationWitness.accepted(kind), rejected, .conflict, .infrastructure_failure }) |initial| {
+            for ([_]bool{ false, true }) |replayed| {
+                for ([_]bool{ false, true }) |drop| {
+                    var descriptors: [2]c_int = undefined;
+                    try std.testing.expectEqual(@as(c_int, 0), native.pipe(&descriptors));
+                    defer _ = native.close(descriptors[0]);
+                    for (descriptors) |fd| try std.testing.expectEqual(@as(c_int, 0), native.fcntl(fd, native.F_SETFL, @as(c_int, native.O_NONBLOCK)));
+                    const backing = native.tmpfile() orelse return error.TestUnexpectedResult;
+                    defer _ = native.fclose(backing);
+                    try std.testing.expectEqual(@as(c_int, 0), native.ftruncate(native.fileno(backing), TestObservation.state_bytes));
+                    var observation = try TestObservation.init(descriptors[1], native.dup(native.fileno(backing)), .control, 37);
+                    defer observation.close();
+                    var host = Host{
+                        .io = std.testing.io,
+                        .allocator = std.testing.allocator,
+                        .lease = undefined,
+                        .store = undefined,
+                        .hooks = .{ .phase_trace = true },
+                        .test_observation = &observation,
+                    };
+                    var result = initial;
+                    switch (result) {
+                        .accepted => |*value| value.replayed = replayed,
+                        .rejected => |*value| value.replayed = replayed,
+                        else => {},
+                    }
+                    const accepted = result == .accepted;
+                    var probe: Probe = .{ .host = &host, .observation = &observation, .accepted = accepted };
+                    var reply = Reply{ .io = std.testing.io, .allocator = probe.allocator() };
+                    defer reply.deinit();
+                    const key = try protocol.Bounded(protocol.max_key_bytes).from("control-domain");
+                    const timing = ControlTiming.init(&host, key, @tagName(kind), 1);
+                    const header = Header{ .route = @field(Route, @tagName(kind)), .content_length = 0, .drop = if (drop) .after_commit else .none };
+                    try answerControl(&host, &reply, header, kind, MutationWitness.subject(kind), result, timing);
+                    try std.testing.expectEqual(accepted, host.controls_changed.load(.acquire));
+                    try std.testing.expectEqual(@as(u64, if (accepted) 2 else 0), observation.shared.state.load(.acquire));
+                    try std.testing.expect(probe.ordered);
+                    const dropped = drop and result != .infrastructure_failure;
+                    try std.testing.expectEqual(dropped, reply.body == .none);
+                    try std.testing.expectEqual(!dropped, reply.timing != null);
+                    try std.testing.expectEqual(!dropped, probe.allocations != 0);
+                    try std.testing.expectEqual(result != .infrastructure_failure, host.launchAllowed());
+                    var bytes: [TestObservation.record_bytes]u8 = undefined;
+                    const count = native.read(descriptors[0], &bytes, bytes.len);
+                    if (accepted) {
+                        try std.testing.expect(count > 0);
+                        try std.testing.expect(std.mem.indexOf(u8, bytes[0..@intCast(count)], "control_hint_published") != null);
+                        try std.testing.expect(std.mem.indexOf(u8, bytes[0..@intCast(count)], key.slice()) != null);
+                    } else try std.testing.expect(count < 0 and std.posix.errno(count) == .AGAIN);
+                }
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(u16, 0xfc), covered);
+}
+
+// Each symbol below is captured by the old decoders at 5472ccf5, independently
+// of command_spec's field tables. Keep the baseline artifact frozen; accepted
+// behavior changes are explicit exceptions in the comparison below.
+// Rows: label, then unedited outcome and set/remove/null for each listed field.
+// a/A = accepted, r/R = rejected (uppercase = replayed), c = conflict,
+// f = CanonicalStoreFailure, h = HostInvocationFailed, i = InvalidResponse,
+// o = InvalidObservation, b = RequestBindingMismatch, x = absent.
+// Captured with: zb zig build -j1 test -Dtest-filter="reply decoder frozen field domain"
+// in an isolated git archive of 5472ccf5; 102 rows cover 11,856 outcomes.
+const ReplyDomainWitness = struct {
+    const reply = @import("protocol_reply.zig");
+    const fixture = @embedFile("fixtures/command-reply-domain.txt");
+    const Field = MutationWitness.Field;
+    const observation_fields = [_]Field{
+        .{ .path = &.{"version"}, .value = "\"" ++ protocol.wire_version ++ "\"" },
+        .{ .path = &.{"type"}, .value = "\"command_observation\"" },
+        .{ .path = &.{"key"}, .value = "\"k\"" },
+        .{ .path = &.{"delta"}, .value = "\"full\"" },
+        .{ .path = &.{"since"}, .value = "null" },
+        .{ .path = &.{"observation"}, .value = "{\"status\":\"absent\"}" },
+        .{ .path = &.{ "observation", "status" }, .value = "\"accepted\"" },
+        .{ .path = &.{ "observation", "kind" }, .value = "\"configure\"" },
+        .{ .path = &.{ "observation", "target" }, .value = "\"k7m2qx\"" },
+        .{ .path = &.{ "observation", "code" }, .value = "\"unknown_session\"" },
+        .{ .path = &.{ "observation", "revision" }, .value = "\"31\"" },
+        .{ .path = &.{ "observation", "created" }, .value = "true" },
+        .{ .path = &.{ "observation", "input" }, .value = "{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}" },
+        .{ .path = &.{ "observation", "state" }, .value = "\"queued\"" },
+        .{ .path = &.{ "observation", "queue" }, .value = "{\"admission\":\"23\",\"admitted_at\":\"1762329000\"}" },
+        .{ .path = &.{ "observation", "binding" }, .value = "{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"}" },
+        .{ .path = &.{ "observation", "result" }, .value = "{\"status\":\"cancelled\",\"code\":\"cancelled\"}" },
+        .{ .path = &.{ "observation", "work" }, .value = "{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null}" },
+        .{ .path = &.{ "observation", "recovery" }, .value = "{\"unknown_outcomes\":[],\"more\":false}" },
+        .{ .path = &.{ "observation", "selection" }, .value = "{\"turn\":null,\"admission_cutoff\":\"0\"}" },
+        .{ .path = &.{ "observation", "archived" }, .value = "false" },
+        .{ .path = &.{ "observation", "pinned" }, .value = "false" },
+        .{ .path = &.{ "observation", "completion" }, .value = "{\"status\":\"completed\"}" },
+        .{ .path = &.{ "observation", "interruption_target" }, .value = "{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"7\"}" },
+        .{ .path = &.{ "observation", "permission_target" }, .value = "{\"action\":\"29\",\"decision\":\"allow_once\"}" },
+        .{ .path = &.{ "observation", "action_target" }, .value = "{\"action\":\"29\"}" },
+        .{ .path = &.{ "observation", "action_selection" }, .value = "{\"kind\":\"background\",\"position\":\"31\"}" },
+    };
+
+    const message_fields = observation_fields ++ [_]Field{
+        .{ .path = &.{ "observation", "work", "state" }, .value = "{\"kind\":\"approval\",\"since\":\"1762329010\"}" },
+        .{ .path = &.{ "observation", "work", "state", "kind" }, .value = "\"approval\"" },
+        .{ .path = &.{ "observation", "work", "state", "since" }, .value = "\"1762329010\"" },
+        .{ .path = &.{ "observation", "work", "state", "call" }, .value = "\"0\"" },
+        .{ .path = &.{ "observation", "work", "state", "description" }, .value = "\"Run tests\"" },
+        .{ .path = &.{ "observation", "work", "state", "running" }, .value = "\"1\"" },
+        .{ .path = &.{ "observation", "work", "state", "approvals" }, .value = "\"1\"" },
+        .{ .path = &.{ "observation", "work", "state", "future" }, .value = "{\"items\":[true,null,17]}" },
+        .{ .path = &.{ "observation", "work", "first_action" }, .value = "\"57\"" },
+        .{ .path = &.{ "observation", "work", "future" }, .value = "{\"items\":[true,null,17]}" },
+        .{ .path = &.{ "observation", "recovery", "unknown_outcomes" }, .value = "[{\"action\":\"57\",\"operation\":\"39\",\"call\":\"0\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"}]" },
+        .{ .path = &.{ "observation", "recovery", "more" }, .value = "true" },
+        .{ .path = &.{ "observation", "binding", "turn" }, .value = "\"37\"" },
+        .{ .path = &.{ "observation", "binding", "operation" }, .value = "\"41\"" },
+        .{ .path = &.{ "observation", "binding", "attempt" }, .value = "\"0\"" },
+        .{ .path = &.{ "observation", "result", "status" }, .value = "\"cancelled\"" },
+        .{ .path = &.{ "observation", "result", "code" }, .value = "\"cancelled\"" },
+        .{ .path = &.{ "observation", "result", "text" }, .value = "{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}" },
+    };
+    const message_edges = [_]struct { name: []const u8, fields: []const u8 }{
+        .{ .name = "waiting-bound", .fields = ",\"state\":\"waiting_for_permission\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
+        .{ .name = "waiting-unbound", .fields = ",\"state\":\"waiting_for_permission\",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
+        .{ .name = "waiting-wrong-work", .fields = ",\"state\":\"waiting_for_permission\",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
+        .{ .name = "waiting-no-action", .fields = ",\"state\":\"waiting_for_permission\",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":null}" },
+        .{ .name = "queued-approval", .fields = ",\"state\":\"queued\",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
+        .{ .name = "processing-approval", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
+        .{ .name = "processing-bash", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1762329010\",\"call\":\"0\",\"description\":\"Run tests\",\"running\":\"1\",\"approvals\":\"1\"},\"first_action\":\"57\"}" },
+        .{ .name = "queued-bash", .fields = ",\"state\":\"queued\",\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1762329010\",\"call\":\"0\",\"description\":\"Run tests\",\"running\":\"1\",\"approvals\":\"0\"},\"first_action\":null}" },
+        .{ .name = "processing-working", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null}" },
+        .{ .name = "queued-pending", .fields = ",\"state\":\"queued\",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1762329010\"},\"first_action\":null}" },
+        .{ .name = "processing-unknown-state-field", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\",\"future\":{\"numbers\":[true,null,17]}},\"first_action\":null}" },
+        .{ .name = "processing-unknown-work-field", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null,\"future\":{\"values\":[1,null,false]}}" },
+        .{ .name = "processing-bad-bash", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1762329010\",\"call\":\"0\",\"description\":\"Run tests\",\"running\":\"0\",\"approvals\":\"1\"},\"first_action\":null}" },
+        .{ .name = "processing-recovery", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null},\"recovery\":{\"unknown_outcomes\":[{\"action\":\"57\",\"operation\":\"39\",\"call\":\"0\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"}],\"more\":false}" },
+        .{ .name = "completed-recovery", .fields = ",\"state\":\"completed\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}},\"recovery\":{\"unknown_outcomes\":[{\"action\":\"57\",\"operation\":\"39\",\"call\":\"0\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"}],\"more\":false}" },
+        .{ .name = "failed", .fields = ",\"state\":\"failed\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\"}" },
+        .{ .name = "cancelled-unbound", .fields = ",\"state\":\"cancelled\",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}" },
+        .{ .name = "empty-recovery", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null},\"recovery\":{\"unknown_outcomes\":[],\"more\":false}" },
+        .{ .name = "short-more-recovery", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null},\"recovery\":{\"unknown_outcomes\":[{\"action\":\"57\",\"operation\":\"39\",\"call\":\"0\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"}],\"more\":true}" },
+        .{ .name = "duplicate-recovery", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null},\"recovery\":{\"unknown_outcomes\":[{\"action\":\"57\",\"operation\":\"39\",\"call\":\"0\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"},{\"action\":\"57\",\"operation\":\"39\",\"call\":\"0\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"}],\"more\":false}" },
+        .{ .name = "unbound-recovery", .fields = ",\"state\":\"queued\",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null},\"recovery\":{\"unknown_outcomes\":[{\"action\":\"57\",\"operation\":\"39\",\"call\":\"0\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"}],\"more\":false}" },
+        .{ .name = "full-recovery", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null},\"recovery\":{\"unknown_outcomes\":[{\"action\":\"57\",\"operation\":\"39\",\"call\":\"0\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"},{\"action\":\"56\",\"operation\":\"39\",\"call\":\"1\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"},{\"action\":\"55\",\"operation\":\"39\",\"call\":\"2\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"},{\"action\":\"54\",\"operation\":\"39\",\"call\":\"3\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"}],\"more\":true}" },
+    };
+
+    fn failure(err: anyerror) u8 {
+        return switch (err) {
+            error.InvalidResponse => 'i',
+            error.InvalidObservation => 'o',
+            error.RequestBindingMismatch => 'b',
+            error.CanonicalStoreFailure => 'f',
+            error.HostInvocationFailed => 'h',
+            else => std.debug.panic("unrecorded domain error: {s}", .{@errorName(err)}),
+        };
+    }
+
+    fn mutation(body: []const u8, status: u16, binding: reply.MutationTarget) u8 {
+        const decoded = reply.decodeMutationReply(.{ .status = status, .body = body }, MutationWitness.session, binding);
+        const answer = decoded.answer catch |err| return failure(err);
+        return switch (answer.result) {
+            .accepted => if (answer.replayed) 'A' else 'a',
+            .rejected => if (answer.replayed) 'R' else 'r',
+            .conflict => 'c',
+        };
+    }
+
+    fn observation(body: []const u8) u8 {
+        const observed = reply.CommandObservation.parse(.{ .status = 200, .body = body }, "k") catch |err| return failure(err);
+        return switch (observed.status) {
+            .accepted => 'a',
+            .rejected => 'r',
+            .absent => 'x',
+        };
+    }
+
+    fn editField(parsed: *std.json.Parsed(std.json.Value), field: Field, edit: usize) ![]const u8 {
+        const allocator = parsed.arena.allocator();
+        var object = &parsed.value;
+        for (field.path[0 .. field.path.len - 1]) |part| {
+            if (object.object.getPtr(part) == null) try object.object.put(allocator, part, .{ .object = .empty });
+            object = object.object.getPtr(part).?;
+            if (object.* != .object) object.* = .{ .object = .empty };
+        }
+        const name = field.path[field.path.len - 1];
+        switch (edit) {
+            0 => {
+                const value = try std.json.parseFromSlice(std.json.Value, allocator, field.value, .{ .allocate = .alloc_always });
+                try object.object.put(allocator, name, value.value);
+            },
+            1 => _ = object.object.orderedRemove(name),
+            2 => try object.object.put(allocator, name, .null),
+            else => unreachable,
+        }
+        return std.json.Stringify.valueAlloc(allocator, parsed.value, .{});
+    }
+
+    fn check(lines: *std.mem.SplitIterator(u8, .scalar), label: []const u8, actual: []const u8, fields: []const Field, tighten_pinned: bool) !void {
+        const line = lines.next() orelse return error.MissingDomainBaseline;
+        const split = std.mem.indexOfScalar(u8, line, ' ') orelse return error.InvalidDomainBaseline;
+        try std.testing.expectEqualStrings(label, line[0..split]);
+        const expected = line[split + 1 ..];
+        try std.testing.expectEqual(expected.len, actual.len);
+        for (expected, actual, 0..) |base, got, index| {
+            const field = if (index == 0) null else fields[(index - 1) / 3];
+            const edit = if (index == 0) 0 else (index - 1) % 3;
+            // Slice 3 intentionally closes the old session_pin rejection/conflict
+            // hole: a present pinned value is accepted-only, even for its owner.
+            const want: u8 = if (tighten_pinned and field != null and edit == 0 and
+                std.mem.eql(u8, field.?.path[field.?.path.len - 1], "pinned")) 'i' else base;
+            if (want != got) {
+                std.debug.print("domain {s}: field {any}, edit {s}: base={c}, expected={c}, actual={c}\n", .{
+                    label, if (field) |value| value.path else @as([]const []const u8, &.{"<unedited>"}),
+                    @as([]const u8, switch (edit) {
+                        0 => "set",
+                        1 => "remove",
+                        2 => "null",
+                        else => unreachable,
+                    }),
+                    base,  want,
+                    got,
+                });
+                return error.ReplyDomainChanged;
+            }
+        }
+    }
+
+    fn run() !void {
+        @setEvalBranchQuota(20_000);
+        var lines = std.mem.splitScalar(u8, fixture, '\n');
+        inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
+            const render = host_reply.renderMutationReply(kind);
+            const Result = @typeInfo(@TypeOf(render)).@"fn".param_types[2].?;
+            const rejected: Result = if (kind == .message)
+                .{ .rejected = .{ .replayed = false, .code = .unknown_session, .content = MutationWitness.content } }
+            else
+                .{ .rejected = .{ .replayed = false, .code = .invalid_session_reference } };
+            for ([_]Result{ MutationWitness.accepted(kind), rejected, .conflict, .infrastructure_failure }) |initial| {
+                for ([_]bool{ false, true }) |replayed| {
+                    var result = initial;
+                    switch (result) {
+                        .accepted => |*value| value.replayed = replayed,
+                        .rejected => |*value| value.replayed = replayed,
+                        else => {},
+                    }
+                    var response: protocol.ResponseBuffer = .{};
+                    try response.render(render, .{ MutationWitness.subject(kind), result });
+                    const status: u16 = switch (result) {
+                        .accepted, .rejected => 200,
+                        .conflict => 409,
+                        .infrastructure_failure => 500,
+                    };
+                    var actual: [1 + MutationWitness.fields.len * 3]u8 = undefined;
+                    actual[0] = mutation(response.slice(), status, MutationWitness.target(kind, false));
+                    for (MutationWitness.fields, 0..) |field, index| {
+                        for (0..3) |edit| {
+                            var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, response.slice(), .{});
+                            defer parsed.deinit();
+                            actual[1 + index * 3 + edit] = mutation(try editField(&parsed, field, edit), status, MutationWitness.target(kind, false));
+                        }
+                    }
+                    var label_buffer: [128]u8 = undefined;
+                    const label = try std.fmt.bufPrint(&label_buffer, "mutation/{s}/{s}/{d}", .{ @tagName(kind), @tagName(result), @intFromBool(replayed) });
+                    try check(&lines, label, &actual, &MutationWitness.fields, kind == .session_pin and (result == .rejected or result == .conflict));
+                }
+            }
+            inline for (.{ false, true }) |accepted| {
+                const fields = if (accepted) switch (kind) {
+                    .configure => ",\"revision\":\"31\",\"created\":true",
+                    .message => ",\"state\":\"queued\",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"queue\":{\"admission\":\"23\",\"admitted_at\":\"1762329000\"},\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null}",
+                    .session_stop => ",\"selection\":{\"turn\":null,\"admission_cutoff\":\"0\"},\"completion\":{\"status\":\"completed\"}",
+                    .session_archive => ",\"archived\":false,\"completion\":{\"status\":\"completed\"}",
+                    .session_pin => ",\"pinned\":false",
+                    .model_interruption => ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"7\"}",
+                    .permission_decision => ",\"permission_target\":{\"action\":\"29\",\"decision\":\"allow_once\"}",
+                    .action_background => ",\"action_target\":{\"action\":\"29\"},\"action_selection\":{\"kind\":\"background\",\"position\":\"31\"}",
+                } else switch (kind) {
+                    .message => ",\"state\":\"rejected\"",
+                    .model_interruption => ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"0\",\"operation\":\"0\"}",
+                    .permission_decision => ",\"permission_target\":{\"action\":\"0\",\"decision\":\"deny\"}",
+                    .action_background => ",\"action_target\":{\"action\":\"29\"}",
+                    else => "",
+                };
+                const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{\"kind\":\"" ++ @tagName(kind) ++ "\",\"target\":\"k7m2qx\",\"status\":\"" ++ (if (accepted) "accepted\"" else "rejected\",\"code\":\"unknown_session\"") ++ fields ++ "}}";
+                var actual: [1 + observation_fields.len * 3]u8 = undefined;
+                actual[0] = observation(body);
+                for (observation_fields, 0..) |field, index| {
+                    for (0..3) |edit| {
+                        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+                        defer parsed.deinit();
+                        actual[1 + index * 3 + edit] = observation(try editField(&parsed, field, edit));
+                    }
+                }
+                try check(&lines, "observation/" ++ @tagName(kind) ++ "/" ++ (if (accepted) "accepted" else "rejected"), &actual, &observation_fields, false);
+            }
+        }
+        for (message_edges) |edge| {
+            const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"k7m2qx\",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"queue\":{\"admission\":\"23\",\"admitted_at\":\"1762329000\"}";
+            const body = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, edge.fields, "}}" });
+            defer std.testing.allocator.free(body);
+            var actual: [1 + message_fields.len * 3]u8 = undefined;
+            actual[0] = observation(body);
+            for (message_fields, 0..) |field, index| {
+                for (0..3) |edit| {
+                    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+                    defer parsed.deinit();
+                    actual[1 + index * 3 + edit] = observation(try editField(&parsed, field, edit));
+                }
+            }
+            const label = try std.mem.concat(std.testing.allocator, u8, &.{ "message/", edge.name });
+            defer std.testing.allocator.free(label);
+            try check(&lines, label, &actual, &message_fields, false);
+        }
+        try std.testing.expectEqualStrings("", lines.rest());
+    }
+};
+
+test "reply decoder frozen field domain from 5472ccf5" {
+    try ReplyDomainWitness.run();
 }

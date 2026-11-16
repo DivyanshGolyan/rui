@@ -673,11 +673,18 @@ class TerminalScreen:
     def send(self, text):
         os.write(self.master, text.encode())
 
+    def launch_overview(self):
+        frame = wait_for(self.observe, "wide launch chat beside the overview", timeout=15,
+                         ready=lambda screen: "+ New Session" in screen and "│" in screen
+                         and "Type a task" in screen and self.capture.draft("", 2))
+        assert "Settings" in frame, frame
+        self.send("\x1b")
+        return self.overview()
+
     def overview(self, *, ready=True):
         frame = wait_for(self.observe, "terminal overview list and footer", timeout=15,
                          ready=lambda screen: all(shown(marker, screen) for marker in
                                                   ("+ New Session", "Settings"))
-                         and (not ready or shown("enter open", screen))
                          and "Notifications" not in screen
                          and "Type a task" not in screen
                          and not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", screen))
@@ -1018,7 +1025,7 @@ def terminal_cases(root, binary, releases, artifacts):
         c.env["RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"] = str(published)
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
-            screen.overview()
+            screen.launch_overview()
             screen.start_upgrade()
             screen.until(gate.entered.is_set, "terminal installation archive gate")
             screen.contains("preparing Upgrade")
@@ -1035,7 +1042,7 @@ def terminal_cases(root, binary, releases, artifacts):
             assert screen.entries == screen.restorations == 1, "cancelled Upgrade relaunched"
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
-            screen.overview()
+            screen.launch_overview()
             screen.start_upgrade()
             screen.contains(" · publishing")
             screen.close_settings()
@@ -1134,7 +1141,7 @@ def escape_after_publication(root, binary, releases, artifacts):
         c.env["RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"] = str(gate)
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
-            screen.overview()
+            screen.launch_overview()
             screen.start_upgrade()
             screen.until(lambda: c.link.resolve() != c.original, "publication before terminal Escape")
             installed = c.link.resolve()
@@ -1164,7 +1171,7 @@ def terminal_download_recovery(root, binary, releases, artifacts):
         gate = releases.gate_archive()
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
-            screen.overview()
+            screen.launch_overview()
             screen.start_upgrade()
             screen.until(gate.entered.is_set, "Settings download recovered and reached archive")
             screen.contains("preparing Upgrade")
@@ -1201,7 +1208,7 @@ def terminal_download_failure(root, binary, releases, artifacts):
         releases.status["/releases/latest"] = 403
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
-            screen.overview()
+            screen.launch_overview()
             screen.start_upgrade()
             screen.contains(" · couldn't reach GitHub")
             assert os_semantics.process_executable(process.pid) == binary, "failed check replaced the client"
@@ -1226,7 +1233,7 @@ def terminal_cancellation_guidance(root, binary, releases, artifacts):
         gate = releases.gate_archive()
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
-            screen.overview()
+            screen.launch_overview()
             screen.start_upgrade()
             screen.until(gate.entered.is_set, "archive held before cancellation guidance")
             screen.send("\x1b")
@@ -1256,7 +1263,7 @@ def terminal_path_guidance(root, binary, releases, artifacts):
         c.env["PATH"] = f"{shadow.parent}:{c.env['PATH']}"
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
-            screen.overview()
+            screen.launch_overview()
             screen.start_upgrade()
             screen.contains(f" · upgraded to {releases.version}")
             screen.close_settings()
@@ -1310,6 +1317,7 @@ def startup_cases(root, binary, releases, artifacts):
                     if screen_kind == "resume":
                         screen.empty_chat(c, session)
                     else:
+                        screen.launch_overview()
                         screen.empty_overview(c, session, ready=True)
                     screen.start_upgrade()
                     screen.contains(" · publishing")
@@ -1374,7 +1382,7 @@ def signal_during_check(root, binary, releases, artifacts):
         gate = releases.gates["/releases/latest"] = Gate()
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
-            screen.overview()
+            screen.launch_overview()
             screen.start_upgrade()
             screen.until(gate.entered.is_set, "release check held before terminal signal")
             screen.contains("checking for updates")
@@ -1396,7 +1404,7 @@ def signal_after_publication(root, binary, releases, artifacts):
         c.env["RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"] = str(gate)
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
-            screen.overview()
+            screen.launch_overview()
             screen.start_upgrade()
             screen.until(lambda: c.link.resolve() != c.original, "publication before SIGINT")
             installed = c.link.resolve()
@@ -1440,7 +1448,7 @@ def cancel_selected_version_check(root, binary, releases, artifacts):
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             try:
                 screen = TerminalScreen(master, process)
-                screen.overview()
+                screen.launch_overview()
                 screen.start_upgrade()
 
                 def child_started():
@@ -1491,7 +1499,7 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
         try:
             with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
                 screen = TerminalScreen(master, process)
-                screen.overview()
+                screen.launch_overview()
                 screen.start_upgrade()
                 screen.until(gate.entered.is_set, "real archive request after stage creation")
                 stages = list(parent.glob("install.*"))

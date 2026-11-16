@@ -106,15 +106,25 @@ class World:
         return json.loads(self.run("session", "inspect", "--store", self.store, "--session", session))
 
     @contextmanager
-    def overview(self, *args, columns=COLUMNS, rows=ROWS):
+    def overview(self, *args, columns=COLUMNS, rows=ROWS, keep_launch=False):
         master, slave = open_pty(columns, rows)
         process = None
         try:
             process = spawn([str(fixture.RUI), *map(str, args)], env=self.env, cwd=self.workspace,
                             stdin=slave, stdout=slave, stderr=slave)
             screen = Screen(process, master, columns, rows)
-            screen.wait(lambda frame: "+ New Session" in frame and "Settings" in frame and "enter open" in frame,
-                        "the overview's pinned rows and footer")
+            if columns >= 100 and not args:
+                launched = screen.wait(lambda frame: "+ New Session" in frame and "Settings" in frame
+                                       and "Type a task" in frame and "enter open" not in frame
+                                       and screen.capture.draft("", 2),
+                                       "the wide launch chat beside the list")
+                assert "│" in launched, launched
+                if not keep_launch:
+                    screen.keys(b"\x1b")
+            if not keep_launch:
+                screen.wait(lambda frame: "+ New Session" in frame and "Settings" in frame
+                            and "Type a task" not in frame and "│" not in frame,
+                            "the full overview and its pinned rows")
             yield screen
             if process.poll() is None:
                 screen.keys(b"\x04")

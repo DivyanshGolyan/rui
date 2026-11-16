@@ -217,7 +217,7 @@ test "sidebar bottom separates Settings memory and update targets across geometr
     defer arena.deinit();
     const status = @import("upgrade_status.zig");
     for ([_]?status.Run{ null, .checking, .cancelling, .{ .installing = .{ .found = .{ .host = .none } } }, .{ .ended = .{ .how = .{ .failed = .download }, .outcome = .unchanged } }, .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 76, .patch = 0 }, .restarted = true } }, .outcome = .compatible } } }) |run| {
-        for ([_]?status.Version{ null, .{ .schema = 76, .patch = 0 } }) |available| for ([_]overview_view.Caps{ .{}, .{ .unicode = false }, .{ .background = .{ 255, 255, 255 } }, .{ .unicode = false, .background = .{ 255, 255, 255 } } }) |caps| for ([_]bool{ false, true }) |selected| for ([_]u16{ 0, 1, 8, 9, 10, 12, 13, 14, 15, 16, 17, 20, 21, 22, 23, 24, 25, 26, 28, 29, 34, 35, 36, 37, 44, 45, 46, 140 }) |width| for ([_]u16{ 0, 1, 2, 3, 4 }) |height| {
+        for ([_]?status.Version{ null, .{ .schema = 76, .patch = 0 } }) |available| for ([_]overview_view.Caps{ .{}, .{ .unicode = false }, .{ .background = .{ 255, 255, 255 } }, .{ .unicode = false, .background = .{ 255, 255, 255 } } }) |caps| for ([_]bool{ false, true }) |selected| for ([_]u16{ 0, 1, 8, 9, 10, 12, 13, 14, 15, 16, 17, 20, 21, 22, 23, 24, 25, 26, 28, 29, 30, 31, 34, 35, 36, 37, 44, 45, 46, 140 }) |width| for ([_]u16{ 0, 1, 2, 3, 4 }) |height| {
             defer _ = arena.reset(.retain_capacity);
             var clicks: Clicks = .{};
             var settings: Settings = .{ .selected = selected, .caps = caps, .userdata = &clicks, .on_click = Clicks.take, .run = run, .available = available, .memory = .{ .rui = 38 * overview_view.mib, .tools = 120 * overview_view.mib } };

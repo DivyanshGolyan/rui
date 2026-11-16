@@ -58,7 +58,13 @@ def main():
         catalog = AppModelCatalog(host)
         caller = spawn([str(fixture.RUI), "--store", str(store)], cwd=state,
                        env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-        overview_frame(master, overview_title)
+        launch = read_terminal(master, "Type a task", composer=True)
+        assert "+ New Session" in launch and "│" in launch, launch
+        initial = host_process.wait_for(
+            lambda: json.loads(cli("session", "list", "--store", store, "--all"))["sessions"],
+            "wide launch Session")
+        assert len(initial) == 1, initial
+        overview_frame(master, overview_title, b"\x1b")
         app_model_open(master, b"luna", catalog=catalog)
         preferences = config / "preferences"
         original = preferences.read_bytes()
@@ -73,7 +79,9 @@ def main():
 
         def created_session():
             rows = json.loads(cli("session", "list", "--store", store, "--all"))["sessions"]
-            return rows[0]["reference"] if len(rows) == 1 else None
+            references = {row["reference"] for row in rows}
+            fresh = references - {initial[0]["reference"]}
+            return fresh.pop() if len(rows) == 2 and len(fresh) == 1 else None
 
         session = host_process.wait_for(created_session, "Session after failed save")
         report = json.loads(cli("session", "inspect", "--store", store, "--session", session))

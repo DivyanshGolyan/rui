@@ -72,7 +72,7 @@ def pinned_settings():
         assert set(rows[settings - 1].strip()) <= {"─", "-"} and rows[settings - 1].strip(), frame
         assert re.search(r"0\.\d+\.\d+", rows[settings + 1]), frame
         assert "rui " not in rows[settings + 1] and "tools " not in rows[settings + 1], frame
-        assert rows[-1].rstrip().endswith("enter open"), frame
+        assert "enter open" not in frame, frame
         assert "Type a task" not in frame and "gpt-6-luna" not in frame, frame
         before = requests(w)
         screen.keys(b"/nope\x1b[200~pasted task\x1b[201~\x1b[F\r")
@@ -114,13 +114,13 @@ def unconfirmed_status():
             key = saved.pop()
             screen.keys(b"\x1b")
             line = f"! Not confirmed · rui request recover {key}"
-            frame = screen.wait(lambda f: line in f and "Settings" in f and "enter open" in f, line)
+            frame = screen.wait(lambda f: line in f and "Settings" in f and "Type a task" not in f, line)
             rows = screen.rows()
             status = next(at for at, row in enumerate(rows) if line in row)
             settings = next(at for at, row in enumerate(rows) if "Settings" in row)
             assert status > settings and "Type a task" not in frame, frame
             assert rows[status].strip() == line, frame
-            assert rows[status + 1].rstrip().endswith("enter open"), frame
+            assert "enter open" not in frame, frame
             assert screen.style("! Not confirmed").fg is not None, frame
     print("overview counts: an unconfirmed send shows on its own row above the Footer with "
           "rui request recover and its saved key", flush=True)

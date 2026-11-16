@@ -941,7 +941,7 @@ while True:
     def test_regex_absences_reject_dynamic_rows_in_readiness_and_saved_captures(self):
         state = {"name": "no-empty-rows", "steps": [], "expect": ["Settings"],
                  "absent_regex": [r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"]}
-        clean = "  + New Session\n ✓ Existing conversation  3h\n  Settings\nenter open"
+        clean = "  + New Session\n ✓ Existing conversation  3h\n  Settings"
         run = types.SimpleNamespace(meta={"sha": "a" * 40})
         for size in ((140, 40), (46, 30)):
             for sid, age in (("9xt4vy", "42s"), ("emged6", "7m"), ("000000", "3h"), ("zzzzzz", "12d"),
@@ -1009,7 +1009,7 @@ while True:
             self.assertTrue(state["first_frame"])
             self.assertIn("Type a task", state["absent"])
             self.assertIn("Existing conversation", state["expect"])
-            self.assertEqual(state["steps"][-1], {"wait": "enter open"})
+            self.assertEqual(state["steps"][-1], {"gone": "Type a task"})
         model = states["empty-chat-model-left"]["steps"]
         opened = model.index({"mouse": {"at": "gpt-6.1-sol", "do": "click"}})
         typed = model.index({"text": "ter"})
@@ -1025,12 +1025,29 @@ while True:
         self.assertTrue(states["empty-chat-left"]["cast"][0]["messages"])
         self.assertTrue(states["empty-chat-two-left"]["cast"][0]["messages"])
 
+    def test_launch_frames_distinguish_resized_chat_and_fresh_narrow_overview(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = {state["name"]: state for state in scenario["states"]}
+        wide, narrow = states["wide-launch"], states["narrow-launch"]
+        self.assertIn({"wait": "+ New Session"}, wide["steps"])
+        self.assertIn({"wait": "Type a task", "min_columns": 100}, wide["steps"])
+        self.assertEqual(wide["expect"], ["Type a task"])
+        self.assertIn("enter open", wide["absent"])
+        self.assertEqual(narrow["sizes"], [(46, 30)])
+        self.assertEqual(narrow["expect"], ["+ New Session", "Settings"])
+        self.assertIn("Type a task", narrow["absent"])
+        self.assertIn("enter open", narrow["absent"])
+
     def test_settings_frame_opens_the_list_row_and_waits_for_the_page(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         state = next(state for state in scenario["states"] if state["name"] == "settings")
         self.assertEqual(state["open"], "overview")
         self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
         self.assertEqual(state["steps"], [
+            {"wait": "+ New Session"},
+            {"wait": "Type a task", "min_columns": 100},
+            {"keys": ["Esc"]},
+            {"gone": "Type a task"},
             {"keys": ["End", "Enter"]},
             {"wait": "Rui"}, {"wait": "Notifications"},
         ])
@@ -1587,7 +1604,7 @@ while True:
                 self.assertTrue(records[0]["ok"])
 
     def test_initial_readiness_accepts_editorless_list_and_legacy_prompt(self):
-        listed = "  + New Session\n  Settings\nenter open"
+        listed = "  + New Session\n  Settings"
         self.assertNotIn("Type a task", listed)
         def accepts_list(predicate, _description, **_kwargs):
             self.assertTrue(predicate(types.SimpleNamespace(completed=listed)),
@@ -1597,7 +1614,6 @@ while True:
             ([listed], None, 1),
             ([listed.replace("+ New Session", ""), listed], None, 2),
             ([listed.replace("Settings", ""), listed], None, 2),
-            ([listed.replace("enter open", ""), listed], None, 2),
             ([listed + " Opening…", listed], None, 2),
             ([listed, listed + " Ready"], "Ready", 2),
             ([" › Type a task"], None, 1),
@@ -1627,7 +1643,7 @@ while True:
         )
         cases = [("", False), ("Sign in to Rui", False), (modal, True),
                  (modal + "Opening…", False),
-                 ("  + New Session\n  Settings\nenter open", True), (" › Type a task", True)]
+                 ("  + New Session\n  Settings", True), (" › Type a task", True)]
         cases.extend((modal.replace(label, ""), False) for label in
                      ("Sign in to Rui", "ChatGPT", "API key", "Close", "Tab / Shift-Tab"))
 
@@ -2604,18 +2620,36 @@ class UpgradeFramesTest(unittest.TestCase):
                 if state["upgrade"] == "updating":
                     self.assertIn("Publishing; cancelling no longer rolls back", before["expect"])
 
-    def test_failure_frames_wait_for_the_same_settled_overview_in_both_themes_and_sizes(self):
-        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+    def test_failure_frames_wait_for_public_chat_readiness_without_open_hints(self):
+        settle = self.helper["frame_failure_settled"]
         reason = "Update failed: Couldn't reach GitHub"
+        for before in (False, True):
+            marker = "! Couldn't reach GitHub; nothing changed" if before else reason
+            screens = [marker + "\nReading this Session… alt+i info", marker + "\nHost paused alt+i info",
+                       marker + ("\n" if before else "\nalt+i info")]
+            observed = []
+            def wait(predicate, _description):
+                for index, plain in enumerate(screens):
+                    observed.append(index)
+                    if predicate(types.SimpleNamespace(completed=plain)):
+                        return
+                self.fail("settled failure conversation was not accepted")
+            with self.subTest(before=before):
+                settle(types.SimpleNamespace(wait=wait), before)
+                self.assertEqual(observed, [0, 1, 2])
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         for state in (entry for entry in scenario["states"] if entry.get("upgrade") == "failure"):
-            self.assertEqual(state["expect_last"], "enter open")
+            self.assertNotIn("expect_last", state)
             self.assertIn("Host paused", state["absent"])
+            self.assertIn("Reading this Session", state["absent"])
+            self.assertIn("enter open", state["absent"])
+            self.assertIn("enter open", state["comparison"]["before"]["absent"])
             self.assertIn(reason, state["expect"])
             self.assertEqual(state["expect_next"], {"Settings": reason})
             for size in state["sizes"]:
-                memory = "7 MB " if size[0] == 140 else ""
-                rows = f"Settings\n{memory}{reason}\n"
-                screens = [rows + "\n", rows + "Host paused\nenter open", rows + "\nenter open"]
+                suffix = "│ actual chat" if size[0] == 140 else ""
+                rows = f"Settings{suffix}\n{reason}{suffix}\n"
+                screens = [rows + "Reading this Session…", rows + "Host paused", rows]
                 observed = []
                 def wait(predicate, _description, **_kwargs):
                     for index, plain in enumerate(screens):
@@ -2626,8 +2660,54 @@ class UpgradeFramesTest(unittest.TestCase):
                 with self.subTest(theme=state["theme"], size=size):
                     self.helper["frame_ready"](types.SimpleNamespace(wait=wait), state)
                     self.assertEqual(observed, [0, 1, 2])
-                    self.assertIsNotNone(self.helper["frame_row_failure"](state, rows + "\n"))
-                    self.assertIsNotNone(self.helper["frame_row_failure"](state, "Settings\nrui 7 MB " + reason + "\nenter open"))
+                    self.assertIsNotNone(self.helper["frame_row_failure"](state, "Settings\nrui 7 MB " + reason))
+                    self.assertIsNotNone(self.helper["frame_row_failure"](state, "Settings\nUpdate failed" + suffix))
+                    self.assertIsNone(self.helper["frame_row_failure"](state, f"Settings{suffix}\n7 MB {reason}{suffix}"))
+
+    def test_narrow_upgrade_resize_reveals_the_list_without_closing_chat_specimens(self):
+        reveal = self.helper["frame_upgrade_viewport"]
+        calls = []
+        terminal = types.SimpleNamespace(frame=types.SimpleNamespace(columns=46),
+                                         capture=types.SimpleNamespace(completed="Type a task"))
+        with patch.dict(reveal.__globals__, {"frame_steps": lambda _run, _terminal, steps: calls.extend(steps)}):
+            reveal(None, terminal, {"upgrade": "updating"})
+            self.assertEqual(calls, [{"keys": ["Esc"]}, {"wait": "Settings"}])
+            calls.clear()
+            reveal(None, terminal, {"upgrade": "chat"})
+            terminal.capture.completed = "Settings"
+            reveal(None, terminal, {"upgrade": "failure"})
+            terminal.frame.columns = 140
+            terminal.capture.completed = "Type a task"
+            reveal(None, terminal, {"upgrade": "available"})
+            self.assertEqual(calls, [])
+
+    def test_split_sidebar_rows_bound_their_exact_version_before_chat_content(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        current = next(state for state in scenario["states"] if state["name"] == "sidebar-current")
+        row_failure = self.helper["frame_row_failure"]
+        after = {"expect_regex": [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in current["expect_regex"]]}
+        before = {"expect_regex": [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in current["comparison"]["before"]["expect_regex"]]}
+        for ending in ("", "│ Type a task 0.99.99999"):
+            self.assertIsNone(row_failure(after, " 7 MB     0.78.10000 " + ending))
+            self.assertIsNone(row_failure(before, " Settings rui 7 MB 0.78.10000 " + ending))
+            self.assertIsNotNone(row_failure(after, " rui 7 MB 0.78.10000 " + ending))
+            self.assertIsNotNone(row_failure(after, " 7 MB 0x78x10000 " + ending))
+            self.assertIsNotNone(row_failure(before, " Settings 0x78x10000 " + ending))
+        self.assertIsNotNone(row_failure(after, " 7 MB 0.77.10000 │ 0.78.10000"))
+        self.assertIsNotNone(row_failure(before, " Settings 0.77.10000 │ 0.78.10000"))
+
+    def test_held_upgrade_after_readiness_uses_publication_and_control_not_chat_status(self):
+        drive = self.helper["frame_drive_upgrade"]
+        events = []
+        def wait(predicate, description, **_kwargs):
+            self.assertTrue(predicate(types.SimpleNamespace(completed="Updating…")))
+            events.append(description)
+        terminal = types.SimpleNamespace(wait=wait, mouse=lambda event: events.append(event["at"]))
+        with tempfile.TemporaryDirectory() as directory, patch.dict(drive.__globals__, {
+                "frame_wait": lambda _run, _terminal, marker, **_kwargs: events.append(marker)}):
+            run = types.SimpleNamespace(home=Path(directory))
+            drive(run, terminal, {"upgrade": "updating", "comparison_side": "after"}, (None, object(), "0.78.10000"))
+        self.assertEqual(events, ["Type a task", "0.78.10000", "0.78.10000", "published release held before Host activation"])
 
     def test_compact_row_oracle_rejects_old_memory_labels_and_nonliteral_version(self):
         row_failure = self.helper["frame_row_failure"]

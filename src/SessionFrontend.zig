@@ -24,7 +24,6 @@ const Submission = @import("SessionSubmission.zig");
 const original_state = @import("submission_state.zig");
 const Task = @import("ClientTask.zig");
 const Screen = @import("SessionScreen.zig");
-const Editor = @import("DraftEditor.zig");
 const keymap = @import("keymap.zig");
 const keypress = @import("keypress.zig");
 const overview_view = @import("overview_view.zig");
@@ -59,6 +58,7 @@ const work_line = @import("work_line.zig");
 const queued_line = @import("queued_line.zig");
 const status_page = @import("status_page.zig");
 const ChatInfo = @import("chat_info.zig");
+const info_save = @import("chat_info_save.zig");
 const ModelChoice = @import("model_choice.zig");
 pub const Command = reads.Command;
 pub const Requests = reads.Requests;
@@ -91,7 +91,7 @@ app_card: PermissionCard = undefined,
 app_palette: Palette = .{ .menu = undefined },
 app_info: ChatInfo = undefined,
 info_open: bool = false,
-info_effect: enum { idle, configure, refreshing, copy, archive, saved, failed } = .idle,
+info_effect: info_save.Effect = .idle,
 info_edit: ?ChatInfo.Edit = null,
 info_bytes: [@max(status_page.max_label_bytes, status_page.max_model_bytes)]u8 = undefined,
 app_hooks: AppHooks = .{ .root = undefined, .context = undefined, .leave = undefined, .copy = undefined, .on_open = undefined },
@@ -503,34 +503,34 @@ fn infoBackend(self: *Self) ChatInfo.Backend {
                 else => {},
             }
             frontend.info_edit = held;
-            frontend.info_effect = .configure;
+            frontend.info_effect = info_save.step(frontend.info_effect, .{ .started = .edit });
             frontend.dirty = true;
         }
         fn archive(raw: *anyopaque) !overview_view.IntentAdmission {
             const frontend = owner(raw);
             frontend.infoMaySave() catch return .refused;
             const admission = try frontend.archive();
-            if (admission == .admitted) frontend.info_effect = .archive;
+            if (admission == .admitted) frontend.info_effect = info_save.step(frontend.info_effect, .{ .started = .archive });
             return admission;
         }
         fn copy(raw: *anyopaque, _: *vxfw.EventContext) !void {
             const frontend = owner(raw);
             try frontend.infoMaySave();
             try frontend.clickCommand("/copy");
-            frontend.info_effect = .copy;
+            frontend.info_effect = info_save.step(frontend.info_effect, .{ .started = .copy });
         }
         fn state(raw: *anyopaque) ChatInfo.SaveState {
             const frontend = owner(raw);
-            return switch (frontend.info_effect) {
-                .idle => .idle,
-                .configure, .refreshing, .copy => .pending,
+            if (frontend.info_effect == .archive) return if (frontend.lender.archive_state) |read_state| switch (read_state(frontend.lender.context)) {
+                .idle, .pending => .pending,
                 .saved => .saved,
                 .failed => .failed,
-                .archive => if (frontend.lender.archive_state) |read_state| switch (read_state(frontend.lender.context)) {
-                    .idle, .pending => .pending,
-                    .saved => .saved,
-                    .failed => .failed,
-                } else .pending,
+            } else .pending;
+            return switch (info_save.saveState(frontend.info_effect)) {
+                .idle => .idle,
+                .pending => .pending,
+                .saved => .saved,
+                .failed => .failed,
             };
         }
         fn models(raw: *anyopaque) ModelChoice.Snapshot {
@@ -550,15 +550,15 @@ fn infoBackend(self: *Self) ChatInfo.Backend {
 
 pub fn archiveAnswered(self: *Self, result: overview_view.ArchiveResult) void {
     if (self.info_effect != .archive or !std.mem.eql(u8, self.session, &result.request.reference)) return;
-    self.info_effect = switch (result.outcome) {
-        .requested => .saved,
+    self.info_effect = info_save.step(self.info_effect, .{ .archive_answered = switch (result.outcome) {
+        .requested => .requested,
         .failed, .unconfirmed => .failed,
-    };
+    } });
     self.dirty = true;
 }
 
 fn infoMaySave(self: *const Self) !void {
-    if (self.hostHeld() or self.upgradeHeld() or self.reading.opening or self.commandActive() or self.submission.intent != null) return error.Busy;
+    return info_save.maySave(.{ .host = self.hostHeld(), .upgrade = self.upgradeHeld(), .opening = self.reading.opening, .command = self.commandActive(), .intent = self.submission.intent != null });
 }
 
 fn showSubmissionFailure(self: *Self) !void {
@@ -1470,7 +1470,6 @@ fn draftSafeToLeave(self: *const Self) bool {
 fn startInput(self: *Self) void {
     self.footer = .{};
     self.input.init();
-    self.input.complete(.{ .context = self, .add = tabCompletion });
     self.menu.reset();
 }
 
@@ -2305,18 +2304,6 @@ fn finishRetry(self: *Self) !void {
     }
 }
 
-fn tabCompletion(context: *const anyopaque, draft: []const u8, caret: usize) ?Editor.Replacement {
-    const self: *Self = @ptrCast(@alignCast(@constCast(context)));
-    if (draft.len == 0) {
-        const rows = self.menu.frame(self.menuSource()) orelse return null;
-        return .append(draft, rows.completion());
-    }
-    const shown = self.menu.frame(self.menuSource()) orelse
-        return if (slash_commands.suggest(draft, .{}) != null) .append(draft, "") else null;
-    const change = skill_completion.edit(draft, caret, shown);
-    return .{ .start = change.start, .end = change.end, .text = change.text };
-}
-
 const status_capacity = 2048;
 
 fn statusLines(buffer: *[status_capacity]u8, context: []const u8, base: []const u8, archive_state: protocol.SessionArchiveState) []const u8 {
@@ -2753,13 +2740,13 @@ fn settleReader(self: *Self) !void {
     const phase = self.reading.phase;
     const panel_copy = phase == .inspection and self.info_effect == .copy;
     if (phase == .inspection and self.info_effect == .configure and self.job.info_edit != null) {
-        self.info_effect = if (end == .complete and self.job.result.info_saved) .refreshing else .failed;
+        self.info_effect = info_save.step(self.info_effect, .{ .worker_done = .{ .kind = .edit, .ok = end == .complete and self.job.result.info_saved } });
         if (self.info_effect == .refreshing) {
             self.inspection.status_requested = true;
             self.poll_at = 0;
         }
     } else if (panel_copy) {
-        self.info_effect = if (end == .complete and self.job.result.copied == .clipboard) .saved else .failed;
+        self.info_effect = info_save.step(self.info_effect, .{ .worker_done = .{ .kind = .copy, .ok = end == .complete and self.job.result.copied == .clipboard } });
     }
     defer if (phase == .retry and end != .absent) {
         self.retry_fence = null;
@@ -3166,7 +3153,7 @@ fn showInspection(self: *Self) !void {
 
 fn showCopy(self: *Self, answers: session_chrome.NoticeAnswers) !void {
     errdefer if (answers == .panel_copy) {
-        self.info_effect = .failed;
+        self.info_effect = info_save.step(self.info_effect, .copy_failed);
     };
     self.dirty = true;
     self.notice = switch (self.job.result.copied) {
@@ -3192,7 +3179,7 @@ fn applyStatus(self: *Self) !void {
     if (!self.job.result.status and self.inspection.status == null) return;
     if (self.job.result.status) self.inspection.status = @intFromBool(self.job.status_taken == &self.inspection.sessions[1]);
     self.inspection.status_requested = false;
-    if (self.info_effect == .refreshing) self.info_effect = .saved;
+    self.info_effect = info_save.step(self.info_effect, .status_refreshed);
     if ((self.info_open or self.footer.pending != null) and !self.app_info.hasChoice() and self.app_info.pending == null) self.app_info.refresh();
     self.dirty = true;
 }
@@ -9938,6 +9925,78 @@ test "App Session composer click recovers submission from every drawn focus targ
         try std.testing.expectEqual(width == 46, std.mem.indexOfScalar(focus.Target, visited.slice(), .back) != null);
         try std.testing.expectEqual(width == 140, std.mem.indexOfScalar(focus.Target, visited.slice(), .list) != null);
     }
+}
+
+test "App Session Tab encodings preserve drafts except when accepting a drawn row" {
+    const entries = [_]skill_suggestions.Entry{.{ .name = "review", .description = "Review a change" }};
+    const Case = struct { text: []const u8, caret: ?usize = null, row: ?[]const u8 = null };
+    const cases = [_]Case{
+        .{ .text = "" },
+        .{ .text = "plain text" },
+        .{ .text = "/eff", .row = "/effort " },
+        .{ .text = "/review", .row = "/review " },
+        .{ .text = "please /review now", .caret = "please /review".len, .row = "please /review now" },
+        .{ .text = "/unknown" },
+        .{ .text = "//copy" },
+    };
+    const Tab = struct { bytes: []const u8, accepts: bool = true };
+    // Legacy, Kitty/CSI-u press and repeat, and tmux extended-key reports.
+    // A release is parsed but never dispatched as a press.
+    const tabs = [_]Tab{
+        .{ .bytes = "\t" },
+        .{ .bytes = "\x1b[9u" },
+        .{ .bytes = "\x1b[9;1u" },
+        .{ .bytes = "\x1b[9;1:1u" },
+        .{ .bytes = "\x1b[9;1:2u" },
+        .{ .bytes = "\x1b[27;1;9~" },
+        .{ .bytes = "\x1b[Z", .accepts = false },
+        .{ .bytes = "\x1b[9;2u", .accepts = false },
+        .{ .bytes = "\x1b[27;2;9~", .accepts = false },
+        .{ .bytes = "\x1b[9;1:3u", .accepts = false },
+    };
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |drawn| for (tabs) |tab| for (cases) |case| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        defer _ = self.skills.reset();
+        errdefer std.debug.print("Tab domain: width={d} drawn={} key={any} draft={s}\n", .{ width, drawn, tab.bytes, case.text });
+        held.size = .{ .width = width, .height = 30 };
+        try std.testing.expect(self.skills.answer(self.skills.ask("").?.read, .{ .entries = @constCast(&entries), .total = entries.len }, "") == null);
+        _ = self.input.append(case.text);
+        const caret = case.caret orelse case.text.len;
+        self.input.editors[self.input.active].setCursor(caret);
+        if (drawn) try held.frame();
+        try held.keys(tab.bytes);
+        const accepted = drawn and tab.accepts and case.row != null;
+        try std.testing.expectEqualStrings(if (accepted) case.row.? else case.text, self.input.composition().bytes);
+        try std.testing.expectEqual(if (accepted) (case.caret orelse case.row.?.len) else caret, self.input.composition().cursor);
+        try std.testing.expect(self.submission.intent == null and self.input.submitted == null);
+        try std.testing.expect(held.left == null);
+    };
+}
+
+test "App Session bracketed paste keeps Tab literal with drawn command and skill rows" {
+    const entries = [_]skill_suggestions.Entry{.{ .name = "review", .description = "Review a change" }};
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |drawn| for ([_][]const u8{ "", "plain", "/eff", "/review" }) |draft| for (0..draft.len + 1) |caret| for ([_][]const u8{ "", "\t", "\n", "a\tb\n/review" }) |paste| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        defer _ = self.skills.reset();
+        errdefer std.debug.print("paste domain: width={d} drawn={} caret={d} draft={s} paste={any}\n", .{ width, drawn, caret, draft, paste });
+        held.size = .{ .width = width, .height = 30 };
+        try std.testing.expect(self.skills.answer(self.skills.ask("").?.read, .{ .entries = @constCast(&entries), .total = entries.len }, "") == null);
+        _ = self.input.append(draft);
+        self.input.editors[self.input.active].setCursor(caret);
+        if (drawn) try held.frame();
+        var bytes: [128]u8 = undefined;
+        try held.keys(try std.fmt.bufPrint(&bytes, "\x1b[200~{s}\x1b[201~", .{paste}));
+        var expected: [128]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{s}{s}{s}", .{ draft[0..caret], paste, draft[caret..] }), self.input.composition().bytes);
+        try std.testing.expectEqual(caret + paste.len, self.input.composition().cursor);
+        try std.testing.expect(!held.root.input.pasting and !self.input.editors[self.input.active].pasting());
+        try std.testing.expect(self.submission.intent == null and self.input.submitted == null);
+        try std.testing.expect(held.left == null);
+    };
 }
 
 test "App Session paste completion preserves retained draft caret after empty newline and ordinary pastes" {

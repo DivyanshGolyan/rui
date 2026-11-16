@@ -2636,7 +2636,7 @@ def frame_initial_ready(terminal, first_wait=None, allow_exit=False):
                   and re.search(r"^ *(?:Close {2,}\S|\[ Close \] *$)", text, re.M) is not None
                   and re.search(r"^ *(?:Navigation {2,})?Tab / Shift-Tab", text, re.M) is not None)
         return (("›" in text or all(marker in text for marker in
-                 ("+ New Session", "Settings", "enter open")) or guided)
+                 ("+ New Session", "Settings")) or guided)
                 and "Opening…" not in text and (not first_wait or first_wait in text))
 
     terminal.wait(ready, "initial screen ready" + (f" with {first_wait!r}" if first_wait else ""),
@@ -2893,10 +2893,25 @@ def frame_upgrade_run(run, state, build):
             lambda: atomic_write(run.evidence / f"{state['name']}-release-requests.json", json.dumps(releases.requests, indent=2) + "\n") if releases is not None else None)
 
 
+def frame_upgrade_viewport(run, terminal, state):
+    if state.get("upgrade") and state["upgrade"] != "chat" and terminal.frame.columns < 100:
+        if "Settings" not in terminal.capture.completed:
+            frame_steps(run, terminal, [{"keys": ["Esc"]}, {"wait": "Settings"}])
+
+
+def frame_failure_settled(terminal, before):
+    marker = "! Couldn't reach GitHub; nothing changed" if before else "Update failed"
+    terminal.wait(lambda c: marker in c.completed and "Host paused" not in c.completed
+                  and "Reading this Session" not in c.completed
+                  and (before or "alt+i info" in c.completed), "failed Upgrade reread the open conversation")
+
+
 def frame_drive_upgrade(run, terminal, state, fixture):
     if fixture is None:
         return
     releases, gate, version = fixture
+    if state["upgrade"] != "chat":
+        frame_wait(run, terminal, "Type a task")
     before = state.get("comparison_side") == "before"
     if state["upgrade"] in ("current", "available"):
         if before:
@@ -2910,7 +2925,12 @@ def frame_drive_upgrade(run, terminal, state, fixture):
         frame_wait(run, terminal, version)
         terminal.mouse({"at": version, "do": "click"})
     if gate is not None:
-        frame_wait(run, terminal, "Publishing; cancelling no longer rolls back" if not before else " · publishing", timeout=40)
+        if before:
+            frame_wait(run, terminal, " · publishing", timeout=40)
+        else:
+            selected = run.home / ".local/bin/rui"
+            terminal.wait(lambda c: selected.resolve() != run.home / ".local/lib/rui/old/bin/rui"
+                          and "Updating…" in c.completed, "published release held before Host activation", timeout=40)
     elif state["upgrade"] == "failure":
         frame_wait(run, terminal, "couldn't reach GitHub" if before else "Update failed")
     else:
@@ -2926,6 +2946,8 @@ def frame_drive_upgrade(run, terminal, state, fixture):
         return
     if before:
         frame_steps(run, terminal, [{"keys": ["Esc"]}, {"gone": "Notifications"}])
+    if state["upgrade"] == "failure":
+        frame_failure_settled(terminal, before)
 
 
 def frame_finish_held_upgrade(run, terminal, fixture):
@@ -2964,7 +2986,7 @@ def frame_upgrade_journey(run, terminal, state, fixture, out, size):
         gate.release.set()
         selected = run.home / ".local/bin/rui"
         quiet = {"expect_next": {"Settings": version},
-                 "expect_regex": [rf"^\s*\d+(?:\.\d+)? (?:MB|GB)\s+{re.escape(version)}\s*$"]}
+                 "expect_regex": [rf"^\s*\d+(?:\.\d+)? (?:MB|GB)\s+{re.escape(version)}\s*(?:│.*)?$"]}
         terminal.wait(lambda c: selected.resolve() != run.home / ".local/lib/rui/old/bin/rui"
                       and frame_row_failure(quiet, c.completed) is None
                       and "Updating…" not in c.completed and "Update failed" not in c.completed
@@ -3082,7 +3104,10 @@ def run_frames(args):
                 run, state, upgrade_fixture = upgrade_scope.enter_context(frame_upgrade_run(run, state, build))
                 seed_cast(run, state.get("cast", []))
                 steps = state["steps"]
-                target = FrameTerminal(run, state, state_sizes[0])
+                launch_size = state_sizes[0]
+                if state.get("upgrade") and launch_size[0] < 100:
+                    launch_size = (140, launch_size[1])
+                target = FrameTerminal(run, state, launch_size)
                 opened = True
                 # Initial readiness is a committed Rui frame, not elapsed wall
                 # time or a terminal query. State-specific waits own later readiness.
@@ -3092,6 +3117,9 @@ def run_frames(args):
                 frame_initial_ready(target, first_wait, allow_exit=bool(stopped_marker))
                 frame_drive_upgrade(run, target, state, upgrade_fixture)
                 exiting = frame_steps(run, target, steps, exiting=bool(stopped_marker))
+                if launch_size != state_sizes[0]:
+                    target.resize(state_sizes[0])
+                frame_upgrade_viewport(run, target, state)
                 frame_ready(target, state, allow_exit=exiting, sessions=run.meta.get("sessions", {}))
             except (Exception, SystemExit) as error:
                 reason = str(error)
@@ -3117,6 +3145,7 @@ def run_frames(args):
                                 if target is None:
                                     raise FrameFailure("terminal did not launch")
                                 target.resize(size)
+                                frame_upgrade_viewport(run, target, state)
                                 frame_ready(target, state, allow_exit=exiting, sessions=run.meta.get("sessions", {}))
                             # The first viewport is already sized. Capture directly
                             # after its steps/wait, while a transient is still visible.
