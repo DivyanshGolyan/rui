@@ -336,7 +336,6 @@ test "coordinator refusal envelopes preserve both stages and semantic failure fi
     }
 }
 
-
 test "coordinator task routing preserves OS bytes through the existing JSON slice codec" {
     try expectRoundTrip(Task{ .home = "/home/\xff", .target = .{ .build = "/target/\xfe", .version = .{ .schema = 75, .patch = 1 } }, .report = .events });
 }

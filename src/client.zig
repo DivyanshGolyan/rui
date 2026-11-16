@@ -5914,7 +5914,6 @@ test "upgrade census merges socket hints and retains pathless identified failure
     try std.testing.expect(candidates.items[1].socket == null);
 }
 
-
 test "upgrade process retirement requires exact generation and complete census not lease release" {
     const pid: c_int = 42;
     const generation: u64 = 100;
@@ -5924,4 +5923,41 @@ test "upgrade process retirement requires exact generation and complete census n
     try std.testing.expect(try retirementReading("42 S\n80 R\n", pid, generation, generation + 1, generation + 1));
     try std.testing.expect(try retirementReading("80 R\n", pid, generation, null, null));
     for ([_][]const u8{ "", "42\n", "not-a-pid Z\n", "42 Z extra\n", "42 Z\n42 S\n" }) |malformed| try std.testing.expectError(error.HostProcessEnumerationFailed, retirementReading(malformed, pid, generation, generation, generation));
+}
+
+
+test "client upgrade retirement observes a live tail then an unreaped exit" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ "/bin/sh", "-c", "printf R; read gate" },
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    });
+    defer child.kill(io);
+    var buffer: [64]u8 = undefined;
+    var reader = child.stdout.?.readerStreaming(io, &buffer);
+    try std.testing.expectEqual(@as(u8, 'R'), try reader.interface.takeByte());
+    const pid = child.id.?;
+    const started = try @import("host_identity.zig").generation(pid);
+    const until = @import("test_poll").after(io, .fromSeconds(5));
+    try std.testing.expect(!try upgradeGenerationRetired(gpa, io, pid, started, until));
+    child.stdin.?.close(io);
+    child.stdin = null;
+    const Wait = struct {
+        gpa: std.mem.Allocator,
+        io: std.Io,
+        pid: c_int,
+        started: u64,
+        until: i128,
+        fn ready(self: *@This()) !bool {
+            return upgradeGenerationRetired(self.gpa, self.io, self.pid, self.started, self.until);
+        }
+    };
+    var wait: Wait = .{ .gpa = gpa, .io = io, .pid = pid, .started = started, .until = until };
+    try @import("test_poll").waitUntil(io, until, &wait, Wait.ready);
+    _ = try child.wait(io);
+    // PID absence uses the same complete-census proof, not kill(pid, 0).
+    try std.testing.expect(try upgradeGenerationRetired(gpa, io, pid, started, @import("test_poll").after(io, .fromSeconds(5))));
 }

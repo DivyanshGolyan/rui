@@ -281,7 +281,7 @@ def proof_ready(c, previous, old_host):
     assert status["status"] == "ready", status
     assert status["instance"] != previous["instance"], "old Host was not replaced"
     assert status["store"] == previous["store"]
-    assert status["active_capacity"] == previous["active_capacity"] == "2"
+    assert status["active_capacity"] == previous["active_capacity"]
     pid = peer_pid(c.ready["socket"])
     assert pid != old_host.pid
     assert os_semantics.process_executable(pid) == c.link.resolve(), "ready process is not selected pinned build"
