@@ -35,6 +35,7 @@ const SessionEnvironments = @import("SessionEnvironments.zig");
 const child_environment = @import("child_environment.zig");
 const find_tools = @import("find_tools.zig");
 const h2 = @import("h2");
+const read_action_tool = @import("read_action_tool.zig");
 const read_transcript = @import("read_transcript.zig");
 const session_skills = @import("session_skills.zig");
 const Host = server_host.Host;
@@ -1340,6 +1341,7 @@ noinline fn runNextCoreAction(host: *Host, mcp: *server_mcp.Calls) execution_tur
         .action => |*input| switch (input.tool) {
             .find_tools => runFindTools(host, input),
             .message_agent => runMessageAgent(host, input),
+            .read_action => runReadAction(host, input),
             .read_transcript => runReadTranscript(host, input),
             .start_agent => runStartAgent(host, input),
             .skill => runSkill(host, input),
@@ -1478,6 +1480,20 @@ noinline fn runReadTranscript(host: *Host, input: *const store_module.CoreAction
         error.StaleActionAttemptBinding => return .admitted,
         else => {
             fenceDispatch(host, "read_transcript core command", err);
+            return .retry_later;
+        },
+    };
+    return .admitted;
+}
+
+noinline fn runReadAction(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
+    var arena: std.heap.ArenaAllocator = .init(host.allocator);
+    defer arena.deinit();
+    read_action_tool.run(host.store, arena.allocator(), input, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+        error.OutOfMemory => return .retry_later,
+        error.StaleActionAttemptBinding => return .admitted,
+        else => {
+            fenceDispatch(host, "read_action core command", err);
             return .retry_later;
         },
     };

@@ -91,9 +91,9 @@ Call rejection, Action denial, failure, cancellation and uncertainty all produce
 #### Authorizing exact actions
 
 The model-visible **Tool Catalog** contains definitions/schema/result contracts, not execution authority.
-It holds `bash`, which Rui runs as Actions; `find_tools`, `message_agent`, `read_transcript`, `skill` and `start_agent`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
+It holds `bash`, which Rui runs as Actions; `find_tools`, `message_agent`, `read_action`, `read_transcript`, `skill` and `start_agent`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
 The CLI and TUI put `bash`, `skill` and `web_search` in a fresh Session's spec; the Host never supplies a tools list (D104).
-CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `find_tools`, `message_agent`, `read_transcript`, `skill`, `start_agent`, `web_search`).
+CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `find_tools`, `message_agent`, `read_action`, `read_transcript`, `skill`, `start_agent`, `web_search`).
 A Session's optional `loaded_tools` uses the same name-list grammar (`--loaded-tools a,b|none` in the CLI), defaults to all its `tools`, and records loaded-name intent; the Operation's projected, frozen offer is sent to the model and used to validate calls.
 Every loaded name must be in its resulting tools or configure refuses `loaded_tools_not_in_tools`; a strict subset must contain `find_tools` or configure refuses `loaded_tools_unreachable`.
 Changing tools without specifying loaded_tools keeps equality when the saved sets were equal; otherwise it intersects the saved loaded set with the new tools and applies the same checks.
@@ -106,6 +106,9 @@ It loads at most eight matches in name order, in one call-keyed command and one 
 A no-match call writes no revision.
 A strict `loaded_tools` subset must include `find_tools`; NULL in the saved loaded set means all configured tools.
 Newly loaded definitions join the next request as `additional_tools`; a call to an unloaded tool still settles as `unknown_tool`.
+`read_action(action, offset?)` accepts canonical decimal strings and reads only the caller's Session, using the same sole Resolution and bounded UTF-8 byte cursor as native `action read`.
+Pending calls report their approval, queued or attempted state; settled calls return the immutable final identity and up to 4096 bytes, with `next` and `more` for continued reads.
+Reading neither consumes nor stops an Action and does not subscribe to completion. The Operation's frozen offer controls availability; invalid arguments, foreign Actions and invalid cursors resolve the tool call failed when it runs.
 `read_transcript(id?, kinds?, before?, limit?, query?, full?, offset?)` reads any Session's public activity feed, defaulting to the caller, and resolves only its call: newest-first outlines page up to 16 entries, and `full` opens one entry in UTF-8-aligned 16 KiB windows.
 It uses the public activity visibility and provenance rules, never private provider material; invalid arguments, unknown Sessions and missing entries resolve failed when the core runs the call, not at settlement.
 `start_agent(task, attached, spec)` creates a Session configured by the full agent `spec` (model, effort, token-count compaction threshold, tools, initially loaded tools, Permission Mode, output reservation, instructions, output schema and label) in the caller's Workspace with its provider, admits `task` to it as its first Message from the caller under the key `rui.core/start_agent/<action>`, and resolves the call `Started ID.`, all in one transaction; an attached agent records the caller as its parent.

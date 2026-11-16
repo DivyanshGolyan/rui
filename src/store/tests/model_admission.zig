@@ -1074,9 +1074,15 @@ test "model admission work excludes usage-covered accepted tool and instruction 
             var bounded = true;
             for ([_]Measure.Population{ .rejection, .action, .instruction }) |kind| {
                 for ([_]bool{ false, true }) |compact| {
-                    const small = try Measure.run(case, 8, kind, compact);
-                    const large = try Measure.run(case, 128, kind, compact);
-                    bounded = bounded and large == small;
+                    var counts: [2]u16 = undefined;
+                    for ([_]usize{ 8, 128 }, 0..) |population, index| {
+                        counts[index] = Measure.run(case, population, kind, compact) catch |err| {
+                            std.debug.print("usage-history measurement failed engine={s} replay={} kind={s} compact={} population={d}: {s}\n", .{ @tagName(case.engine), case.rerun, @tagName(kind), compact, population, @errorName(err) });
+                            return err;
+                        };
+                    }
+                    if (counts[0] != counts[1]) std.debug.print("usage-history round bound failed engine={s} replay={} kind={s} compact={} small={d} large={d}\n", .{ @tagName(case.engine), case.rerun, @tagName(kind), compact, counts[0], counts[1] });
+                    bounded = bounded and counts[1] == counts[0];
                 }
             }
             try std.testing.expect(bounded);

@@ -14075,6 +14075,7 @@
                   "bash",
                   "find_tools",
                   "message_agent",
+                  "read_action",
                   "read_transcript",
                   "skill",
                   "start_agent",
