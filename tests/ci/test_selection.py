@@ -464,6 +464,16 @@ class BuildModuleTest(unittest.TestCase):
 
 
 class SelectionTest(unittest.TestCase):
+    def test_verify_rui_map_is_never_skipped_for_map_inputs(self):
+        for path in (".claude/skills/verify-rui/scripts/frames.json",
+                     ".claude/skills/verify-rui/features/README.md",
+                     ".claude/skills/verify-rui/features/frames.md",
+                     ".claude/skills/verify-rui/features/new-feature.md"):
+            for phase in ("development", "review"):
+                with self.subTest(path=path, phase=phase):
+                    skips = select([path], phase, AVAILABLE)["policy_skips"]
+                    self.assertFalse(any(unit.startswith("test_verify_rui_map") for unit in skips))
+
     def test_live_mysql_case_detection_ignores_forwarding_and_provisioning(self):
         for source in (
             'import live_engines\nsocket = env.get(live_engines.MYSQL_SOCKET)',
