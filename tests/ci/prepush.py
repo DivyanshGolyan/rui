@@ -156,6 +156,9 @@ def checks(paths, available, base, mode="default", mysql=False):
     if any(path.startswith("src/") for path in paths):
         graph = tree_graph()
         generation |= graph.closure(graph.production, ["src/openapi_main.zig"])
+        if graph.cores.intersection(paths):
+            yield "core boundary", ["zig", "build", "-j1", "test-logic-only",
+                                    "-Dtest-filter=functional cores stay within the core boundary"]
     if generation.intersection(paths):
         yield "generated files", [sys.executable, "-B", "tests/ci/prepush.py", "--regenerate"]
     policy = policy_tests(paths, broad=mode == "full")

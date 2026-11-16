@@ -122,6 +122,8 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         "Run the shared execution turn and portable owner tests without Host, Bash, or transport fixtures",
     );
     logic_test_step.dependOn(&run_logic_tests.step);
+    const logic_only_step = b.step("test-logic-only", "Run the logic test binary without auxiliary executables");
+    logic_only_step.dependOn(&run_logic_tests.step);
 
     // The fuzz tests of the parsers that read peer bytes. test-logic runs
     // their seeds, with Zig's runner so a filter for another root's test

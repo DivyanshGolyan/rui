@@ -11,19 +11,21 @@ import argparse
 import json
 import subprocess
 import sys
+from pathlib import Path
 from urllib.parse import quote
 
 from conflict_alert import gh, github
 from pr_overlap import branch_changes, origin_repo, overlaps, report
+from pr_shape import refusal as shape_refusal
 
 
-def create_args(repo, title, body_file, base, branch):
+def create_args(repo, title, body, base, branch):
     """REST `gh api` arguments creating a ready PR without draft conversion.
 
     `gh pr create`, `gh pr comment` and `gh pr list` use GraphQL, which cloud sessions are refused.
     """
     return ["api", "-X", "POST", f"repos/{repo}/pulls", "-f", f"title={title}", "-f", f"head={branch}",
-            "-f", f"base={base}", "-F", "draft=false", "-F", f"body=@{body_file}"]
+            "-f", f"base={base}", "-F", "draft=false", "-f", f"body={body}"]
 
 
 def open_refusal(local_head, pushed_head, dirty=False):
@@ -76,8 +78,17 @@ def main():
             if refusal := open_refusal(head, git("rev-parse", "--verify", "-q", f"origin/{branch}"), bool(git("status", "--porcelain"))):
                 print(refusal, file=sys.stderr)
                 return 1
-            report(overlaps(github, repo, branch, *branch_changes(f"origin/{args.base}")))
-            pr = json.loads(gh(*create_args(repo, args.title, args.body_file, args.base, branch)))
+            try:
+                body = Path(args.body_file).read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as error:
+                print(f"Cannot read PR body: {error}", file=sys.stderr)
+                return 1
+            paths, removed = branch_changes(f"origin/{args.base}")
+            if refusal := shape_refusal(paths, body):
+                print(refusal, file=sys.stderr)
+                return 1
+            report(overlaps(github, repo, branch, paths, removed))
+            pr = json.loads(gh(*create_args(repo, args.title, body, args.base, branch)))
             print(pr["html_url"])
             github("POST", f"repos/{repo}/issues/{pr['number']}/comments", [("body", "@codex review")])
             print("Opened ready and requested Codex review. Selected CI runs beside review. "
