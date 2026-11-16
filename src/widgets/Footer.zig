@@ -1,4 +1,3 @@
-//! One row: a left label and right-aligned state, with the right side taking priority.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -7,7 +6,6 @@ const Self = @This();
 
 left: []const u8,
 right: []const u8,
-/// A transient reply replaces the keys, never adding a row.
 notice: ?[]const u8 = null,
 style: vaxis.Style = .{},
 right_style: ?vaxis.Style = null,
@@ -16,7 +14,6 @@ pub fn widget(self: *const Self) vxfw.Widget {
     return .{ .userdata = @constCast(self), .drawFn = draw };
 }
 
-/// A reply replaces the keys; callers supply display-safe single-line text.
 pub fn rightText(self: *const Self) []const u8 {
     return self.notice orelse self.right;
 }

@@ -96,10 +96,10 @@ class PrShapeTest(unittest.TestCase):
 
 class ScreenEvidenceTest(unittest.TestCase):
     def test_ui_media_forms_and_exemption(self):
-        for evidence in ("![Overview 140x40](https://example.test/a.png)",
-                         '<img src="https://example.test/a.png" alt="Overview">',
-                         '<video src="https://example.test/a.mp4"></video>',
-                         "https://github.com/user-attachments/assets/123",
+        for evidence in ("![Overview 140x40](https://github.com/user-attachments/assets/123)",
+                         '  <img src="https://github.com/user-attachments/assets/123" alt="Overview">',
+                         '<video src="https://github.com/user-attachments/assets/123"></video>',
+                         "  ![Overview 140x40](https://github.com/user-attachments/assets/123)",
                          "No screen change: the refactor preserves all drawn cells.",
                          "No screen change: reason\r\n"):
             for path in ("src/overview_view.zig", "src/SessionScreen.zig",
@@ -111,7 +111,14 @@ class ScreenEvidenceTest(unittest.TestCase):
         for evidence in ("", "No screen change:", "No screen change:   ", "No screen change:\n",
                          "No screen change:\nthere is no reason on the line",
                          "[Overview](https://example.test/a.png)", "https://example.test/a.png",
-                         "<!-- ![Overview](a.png) -->", "```md\n![Overview](a.png)\n```",
+                         "![Overview](https://example.test/a.png)",
+                         '<img src="https://example.test/a.png">', '<video src="https://example.test/a.mp4">',
+                         "https://github.com/user-attachments/assets/123",
+                         "`![Overview](https://github.com/user-attachments/assets/123)`",
+                         "Example: ![Overview](https://github.com/user-attachments/assets/123)",
+                         "![Overview][screen]\n\n[screen]: https://github.com/user-attachments/assets/123",
+                         "<!--\n![Overview](https://github.com/user-attachments/assets/123)\n-->",
+                         "```md\n![Overview](https://github.com/user-attachments/assets/123)\n```",
                          "```\nNo screen change: hidden reason\n```"):
             for path in ("src/overview_view.zig", ".claude/skills/verify-rui/scripts/frames.json"):
                 with self.subTest(evidence=evidence, path=path):

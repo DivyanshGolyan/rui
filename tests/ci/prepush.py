@@ -78,7 +78,6 @@ SOURCE_POLICY = (
 
 
 def policy_tests(paths, *, broad=False):
-    """Return module-to-test filters, or None for the full policy suite."""
     focused = {}
     shared = False
     for path in paths:
@@ -100,13 +99,9 @@ def policy_tests(paths, *, broad=False):
     return None if broad and shared else focused
 
 
-# Generated from the wire types, then from openapi.json; CI fails when any is stale.
 GENERATED = ("openapi.json", "clients/ts/src/wire.ts", "clients/ts/src/settings-kinds.ts")
-# The two `git diff --check` problems with one fix; a patch's whitespace is its content.
 WHITESPACE_LINES = re.compile(r"^([^\s:][^:\n]*):(\d+): (trailing whitespace|new blank line at EOF)\.$", re.M)
 UNFIXABLE = ("*.patch", "*.diff")
-# Every worktree of a repository shares its hook, so the pushed commits travel
-# in the environment, which a checkout's older prepush.py ignores.
 PUSHED = "RUI_PREPUSH_PUSHED"
 REMOTE_REFS = "RUI_PREPUSH_REMOTE_REFS"
 REMOTE_URL = "RUI_PREPUSH_REMOTE_URL"
@@ -126,7 +121,6 @@ done
 export {PUSHED} {REMOTE_REFS} {REMOTE_URL}
 exec python3 "$top/tests/ci/prepush.py" --quick
 """
-# Earlier --install-hook texts, which --install-hook replaces as its own.
 PREVIOUS_HOOKS = ("""#!/bin/sh
 # Installed by tests/ci/prepush.py --install-hook; skip once with git push --no-verify.
 top=$(git rev-parse --show-toplevel) || exit 0
@@ -148,21 +142,16 @@ while read -r _ local_sha _ _; do
 done
 """,)
 
-# CI's unit producer compile (build_artifact.py for check.yml's compiled-unit
-# part): every unit root, unfiltered, without running a test.
 UNIT_COMPILE = ["zig", "build", "ci-build", "-Dci-targets=test", "-Dci-part=unit", "--summary", "line"]
-# check.yml's linux_codegen gate, one compile at a time.
 STACK_FRAMES = ["zig", "build", "-j1", "stack-frames", "-Dcpu=baseline", "--summary", "line"]
 RECEIPT = "rui-prepush-receipt.json"
 
 
 class Skipped(NamedTuple):
-    """A planned check this run cannot execute, and why."""
     reason: str
 
 
 class NeedsMySQL(NamedTuple):
-    """A filtered unit command whose hosted MySQL rounds must remain accounted for."""
     command: list
     sqlite: bool
 
@@ -176,7 +165,6 @@ def red_record(name, command):
 
 
 def local_red_checks(planned, mysql):
-    """Resolve live obligations on every push, including cached derived plans."""
     for name, command in planned:
         if not isinstance(command, NeedsMySQL):
             yield name, command
@@ -190,7 +178,6 @@ def local_red_checks(planned, mysql):
 
 
 def unit_target(targets, cause, graph, registry=None):
-    """Resolve only identities registered by the build, never a matrix fallback."""
     registry = build_files.unit_roots() if registry is None else registry
     selected = set(targets)
     candidates = [root for root in registry if selected.intersection(root["owners"])]
@@ -210,7 +197,6 @@ def unit_target(targets, cause, graph, registry=None):
 
 
 def red_command(job, cause, available, *, compile_targets=(), graph=None):
-    """Translate a shared parsed cause, preserving the failing job's target."""
     name = job["name"]
     zig = ["zig", "build", "-j1"]
     if name == "macos_typecheck":
@@ -263,7 +249,6 @@ def red_command(job, cause, available, *, compile_targets=(), graph=None):
     selected = candidates.intersection(targets)
     if len(selected) == 1:
         candidates = selected
-    # A composed check runs ordinary fixtures. Debug twins are separate gates.
     elif any(target in ("check", "check-full") for target in targets):
         candidates = {target for target in candidates if "-debug-" not in target}
     if len(candidates) != 1:
@@ -277,7 +262,6 @@ def red_command(job, cause, available, *, compile_targets=(), graph=None):
 
 
 def red_revision():
-    """All source inputs owning derived commands; shared caches never outlive them."""
     digest = hashlib.sha256()
     for path in ("prepush.py", "report_issue.py", "failure_cause.py", "select_tests.py", "build_files.py", "qualification.py"):
         digest.update((Path(__file__).parent / path).read_bytes())
@@ -297,11 +281,6 @@ def red_revision():
 
 
 def previous_red(available):
-    """Latest completed Selected checks on each destination's current remote head.
-
-    Return receipt authority and ordinary checks. Lookup failures fail open with
-    a visible warning; they never certify a stale run or cache missing logs.
-    """
     try:
         repository = repo_from_remote(os.environ.get(REMOTE_URL) or git("remote", "get-url", "origin"))
         refs = os.environ.get(REMOTE_REFS, "").split()
@@ -341,7 +320,6 @@ def red_warning(error):
 
 
 def remote_red(repository, ref, head, revision, available):
-    """Derive checks for one exact remote ref and completed workflow attempt."""
     if not ref.startswith("refs/heads/") or ref == "refs/heads/main" or not head.strip("0"):
         raise ValueError("no previous feature-branch head")
     pages = json.loads(report_issue.gh("api", "--paginate", "--slurp",
@@ -395,17 +373,12 @@ def remote_red(repository, ref, head, revision, available):
 
 
 def checks(paths, available, base, mode="default", mysql=False):
-    """(name, command or Skipped) pairs for the changed paths.
-
-    `mode` is "quick", "default" or "full"; `mysql` says RUI_TEST_MYSQL_* name a server.
-    """
     paths = sorted(set(paths))
     if not paths:
         return
     existing = [path for path in paths if (ROOT / path).is_file()]
     build_paths = [path for path in paths if not path.startswith("clients/ts/")]
     development = select(build_paths, "development", available)
-    # These targets require CI's live MySQL or Postgres rather than a local skip.
     targets = [target for target in development["targets"]
                if target not in development["server_targets"] and target != "upgrade-integration"]
     yield "whitespace", [sys.executable, "-B", "tests/ci/prepush.py", "--fix-whitespace", base]
@@ -426,7 +399,6 @@ def checks(paths, available, base, mode="default", mysql=False):
     if generation.intersection(paths):
         yield "generated files", [sys.executable, "-B", "tests/ci/prepush.py", "--regenerate"]
     policy = policy_tests(paths, broad=mode == "full")
-    # Focused discovery cannot depend on another test importing fixture helpers first.
     pythonpath = os.pathsep.join(filter(None, (str(ROOT / "tests/integration"), os.environ.get("PYTHONPATH"))))
     unittest = ["env", f"PYTHONPATH={pythonpath}", sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests/ci"]
     if policy is None:
@@ -458,14 +430,9 @@ def checks(paths, available, base, mode="default", mysql=False):
     zig_inputs = [path for path in paths if path.endswith((".zig", ".zon"))]
     if zig_inputs and select(zig_inputs, "review", available)["targets"]:
         yield "macOS type check", ["zig", "build", "typecheck-macos", "--summary", "line"]
-    # A filtered or narrower build never analyzes tests a merge brought back (#1245).
     if mode == "full":
         yield "unfiltered unit compile", UNIT_COMPILE
     yield "stack frames", STACK_FRAMES
-    # A live need runs here only through the one target that runs just its tests
-    # and reads RUI_TEST_MYSQL_*. Every other need is recorded as skipped, never
-    # as passed: one with no such target (its tests sit inside a whole suite),
-    # or one whose target needs Postgres or starts its own MySQL in Docker.
     reads_mysql = LIVE_MYSQL_DIALECT_TARGETS | set(development["mysql_suites"])
     live = sorted({root for root, _ in development["live_needs"] if root in reads_mysql})
     if live and mysql:
@@ -480,7 +447,6 @@ def checks(paths, available, base, mode="default", mysql=False):
 
 
 def mysql_reachable(environ):
-    """Whether the environment names a MySQL socket that accepts a connection."""
     path, password = environ.get(live_engines.MYSQL_SOCKET), environ.get(live_engines.MYSQL_ROOT_PASSWORD)
     if not path or not password:
         return False
@@ -502,7 +468,6 @@ def receipt_path():
 
 
 def clean_tree():
-    """HEAD's tree when the working tree matches it, untracked files included; else None."""
     return None if git("status", "--porcelain", "--untracked-files=all") else git("rev-parse", "HEAD^{tree}")
 
 
@@ -514,17 +479,11 @@ def read_receipt():
 
 
 def pushed_key(sha, ref):
-    """The pushed commit's (tree, merge base with `ref`), or None when the two share no history."""
     base = subprocess.run(["git", "merge-base", sha, ref], cwd=ROOT, capture_output=True, text=True)
     return None if base.returncode else (git("rev-parse", f"{sha}^{{tree}}"), base.stdout.strip())
 
 
 def receipt_covers(receipt, pushes):
-    """Whether the receipt records a run on every (tree, merge base) of `pushes` that ran a command and all passed.
-
-    The tree and the merge base together fix the diff a run selected its checks
-    from; a push with no merge base (None) is never covered.
-    """
     if receipt is None or receipt.get("tree") is None or set(pushes) != {(receipt["tree"], receipt.get("base"))}:
         return False
     ran = [result for result in receipt["results"] if "skipped" not in result]
@@ -532,7 +491,6 @@ def receipt_covers(receipt, pushes):
 
 
 def run(planned, mode, base, red=None):
-    """Run each planned command once, write the receipt and return its results."""
     before = clean_tree()
     results = []
     for name, command in planned:
@@ -542,7 +500,6 @@ def run(planned, mode, base, red=None):
             continue
         print(f"== {name}: {' '.join(command)}", flush=True)
         results.append({"name": name, "command": command, "exit": subprocess.run(command, cwd=ROOT).returncode})
-    # A check that changed the working tree checked what HEAD does not hold.
     tree = before if clean_tree() == before else None
     path = receipt_path()
     path.write_text(json.dumps({"tree": tree, "base": base, "mode": mode, "scope": "local-feedback", "red": red, "results": results}, indent=2) + "\n")
@@ -552,7 +509,6 @@ def run(planned, mode, base, red=None):
 
 
 def fix_whitespace(base):
-    """Fix `git diff --check`'s trailing whitespace and blank lines at EOF; 1 if anything was wrong."""
     report = subprocess.run(["git", "diff", "--check", base, "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout
     if not report:
         return 0
@@ -563,7 +519,6 @@ def fix_whitespace(base):
     fixed = []
     for path, problems in sorted(lines.items()):
         target = ROOT / path
-        # Line numbers are HEAD's; a file with uncommitted edits or a patch is left to its author.
         if (matches(path, UNFIXABLE) or not target.is_file()
                 or subprocess.run(["git", "diff", "--quiet", "HEAD", "--", path], cwd=ROOT).returncode):
             continue
@@ -583,7 +538,6 @@ def fix_whitespace(base):
 
 
 def regenerate():
-    """Regenerate openapi.json and TypeScript settings artifacts; 1 if any differs from HEAD's."""
     if subprocess.run(["zig", "build", "openapi", "--summary", "none"], cwd=ROOT).returncode:
         return 1
     if (ROOT / "clients/ts/node_modules").is_dir():
@@ -675,6 +629,5 @@ def main():
 
 
 if __name__ == "__main__":
-    # The pinned Python 3.12 environment that .agents/setup makes, when it exists (#1420).
     fixture_user.reexec_pinned(sys.argv)
     main()

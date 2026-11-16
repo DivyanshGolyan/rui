@@ -1,6 +1,3 @@
-// The three error types a caller sees (D116). Request failures are
-// RuiRequestError, a refusal at open is RuiStartError, and a call that finds
-// no running Host is RuiUnavailableError.
 
 import type { components } from "./wire.ts";
 
@@ -12,7 +9,6 @@ type Status<T> = T extends { status: infer S extends string } ? S : never;
 
 export type RequestAnswer = Answer<Reply>;
 export type RequestRejectionCode = Code<RequestAnswer>;
-/** HTTP ErrorReply deliberately accepts codes beyond the command rejection enums. */
 export type RequestErrorCode = RequestRejectionCode | Schemas["ErrorReply"]["code"];
 type RequestErrorType = Schemas["ErrorReply"]["type"] | Status<Extract<RequestAnswer, { code: string }>>;
 type StartErrorCode = Schemas["StartError"]["rui_start_error"]["code"];

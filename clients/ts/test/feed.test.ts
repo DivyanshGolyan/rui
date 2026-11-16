@@ -12,8 +12,6 @@ import type { components } from "../src/wire.ts";
 
 type Schemas = components["schemas"];
 
-// Compiled by npm run check, including the negative assertions: no index signature
-// or widened kind can satisfy these assignments and the exhaustive switch.
 function narrowed(entry: FeedEntry): void {
 	switch (entry.kind) {
 		case "admission": case "user": case "received": {
@@ -240,7 +238,6 @@ for (const state of ["idle", "finished", "failed", "stopped"] as const) {
 		t.mock.timers.tick(60_000);
 		await turn();
 		assert.equal(fake.pages(), 1, "idle must have no polling timer");
-		// A different Session and a different client must not wake this follower.
 		fake.link.activity?.notify("other");
 		new SessionNotifications().notify("s");
 		await turn();
@@ -402,7 +399,7 @@ test("releasing a failed watch again does not unregister a new follower after re
 	const old = notifications.watch("s");
 	notifications.fail(new RuiUnavailableError("the Rui Host could not restart"));
 	const fresh = notifications.watch("s");
-	old.close(); // The failed iterator's finally may run after a new follower starts.
+	old.close();
 	const controller = new AbortController();
 	const pending = fresh.wait(fresh.revision, controller.signal);
 	try {

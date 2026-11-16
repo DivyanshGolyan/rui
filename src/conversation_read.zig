@@ -1,4 +1,3 @@
-//! Public conversation read requests and their bounds.
 const Bounded = @import("bounded.zig").Bounded;
 const store_path = @import("store_path.zig");
 const session_id = @import("session_id.zig");

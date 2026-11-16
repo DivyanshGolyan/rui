@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""The model picker through a real PTY and committed terminal frames."""
 import json
 import os
 import shutil
@@ -59,7 +58,6 @@ def main():
         selected = panel_frame(master, lambda screen: not model_choice_shown(screen) and
                                "gpt-6-luna" in screen and "saving" not in screen, b"\r")
         assert "Model" in selected, selected
-        # Effort is a separate setting, not a model-row keyboard submode.
         panel_frame(master, lambda screen: "model default" in screen, b"\x1b[B\r")
         panel_frame(master, lambda screen: not model_choice_shown(screen) and "saving" not in screen
                     and any("Effort" in row and "medium" in row for row in screen.splitlines()),

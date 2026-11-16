@@ -1,5 +1,3 @@
-//! One Host-memory environment snapshot and install for both child doors.
-//! Nothing here enters Store records, request digests or diagnostics.
 const std = @import("std");
 const SessionEnvironments = @import("SessionEnvironments.zig");
 const Store = @import("store.zig").Store;

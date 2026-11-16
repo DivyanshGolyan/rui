@@ -1,7 +1,3 @@
-//! The shared plain-text input surface. The screen routes keys through the
-//! editor and owns submission; this widget draws the editor's TextArea
-//! between two rules, with the prompt, the hidden-line label and the
-//! placeholder around it.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -17,13 +13,9 @@ style: vaxis.Style = .{},
 quiet: vaxis.Style = .{ .dim = true },
 rule_style: vaxis.Style = .{ .dim = true },
 placeholder: []const u8 = "",
-/// Draw rules, marks and the prompt in ASCII, for a terminal without
-/// Unicode.
 ascii: bool = false,
-/// Show the terminal's cursor at the caret; false while keys cannot edit.
 caret: bool = true,
 
-/// The chat composer, which also draws New Session, keeps one draft surface independent of focus.
 pub fn setCaps(self: *Self, caps: view.Caps) void {
     self.style = widget_style.of(caps, .{ .background = .input_surface });
     self.quiet = widget_style.of(caps, .{ .colour = .quiet, .background = .input_surface });
@@ -44,7 +36,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const height = ctx.max.height.?;
     if (width == 0 or height == 0) return vxfw.Surface.init(ctx.cell_arena, self.widget(), .{});
     const rule: u16 = if (height >= 3) 1 else 0;
-    // One column of margin, as every line of the screen has, then the mark.
     const prefix: u16 = if (width >= 4) 3 else 0;
     const area = &self.editor.area;
     area.style = self.style;
@@ -54,8 +45,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const shown = area.viewport();
     var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = width, .height = text.size.height + 2 * rule });
     @memset(surface.buffer, .{ .style = self.style });
-    // One surface for the whole input: the screen grounds rows, not columns
-    // beside a child. The text's cells are borrowed glyphs, copied in place.
     for (0..text.size.height) |row| for (0..text.size.width) |col| {
         surface.writeCell(@intCast(col + prefix), @intCast(row + rule), text.readCell(col, row));
     };
@@ -91,7 +80,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             .style = if (self.caret) self.style else self.quiet,
         }, .{ .wrap = .none });
     }
-    // An empty draft shows the screen's placeholder where its text goes.
     if (self.editor.text().len == 0) _ = window.child(.{ .x_off = prefix, .y_off = rule, .height = 1 }).printSegment(.{ .text = self.placeholder, .style = self.quiet }, .{ .wrap = .none });
     if (self.caret) surface.cursor = .{ .row = text.cursor.?.row + rule, .col = text.cursor.?.col + prefix };
     return surface;
@@ -124,7 +112,6 @@ test "Composer keeps the caret visible between rules without changing draft byte
 test "Composer wraps and places the caret by its caps' width, whatever the frame's" {
     const draft = "a👩‍💻b";
     const methods = [_]vaxis.gwidth.Method{ .wcwidth, .unicode, .no_zwj };
-    // The frame's method is process-wide; leave it at its default after.
     defer vxfw.DrawContext.init(.unicode);
     for (methods) |method| for (methods) |frame| {
         if (frame == method) continue;
@@ -144,7 +131,6 @@ test "Composer wraps and places the caret by its caps' width, whatever the frame
         try std.testing.expectEqualStrings("b", wide.readCell(4 + emoji, 1).char.grapheme);
         try std.testing.expectEqual(@as(u16, 1), wide.cursor.?.row);
         try std.testing.expectEqual(4 + emoji + 1, wide.cursor.?.col);
-        // Exactly as wide as the prompt, "a" and the emoji: "b" wraps.
         const narrow = try composer.widget().draw(ctx.withConstraints(.{}, .{ .width = 4 + emoji, .height = 6 }));
         try std.testing.expectEqual(@as(u16, 4), narrow.size.height);
         try std.testing.expectEqualStrings("b", narrow.readCell(3, 2).char.grapheme);

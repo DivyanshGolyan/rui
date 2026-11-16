@@ -1,4 +1,3 @@
-/* Protocol-only credit probe: no sockets, TLS, scratch, or production code. */
 #include <nghttp2/nghttp2.h>
 #include <assert.h>
 #include <stdint.h>
@@ -72,7 +71,6 @@ static void run(int manual) {
   printf("{\"manual\":%d,\"phase\":\"withheld\",\"received\":[%zu,%zu]}\n", manual, received[0], received[1]);
   if (manual) {
     assert(received[0] == 16384 && received[1] == 16384);
-    /* Connection credit alone cannot reopen either exhausted stream. */
     assert(!nghttp2_session_consume_connection(client, 32768));
     pump(client, server);
     assert(received[0] == 16384 && received[1] == 16384);
@@ -82,7 +80,6 @@ static void run(int manual) {
     printf("{\"manual\":1,\"phase\":\"release_stream_1\",\"received\":[%zu,%zu]}\n", received[0], received[1]);
     for (int i = 0; i < 2; ++i) {
       size_t accounted = i == 0 ? 16384 : 0;
-      /* Initial connection consumption above covered each stream's first chunk. */
       size_t conn_accounted = 16384;
       while (received[i] < BODY) {
         size_t current = received[i];

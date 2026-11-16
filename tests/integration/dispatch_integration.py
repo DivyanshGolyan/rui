@@ -30,10 +30,8 @@ from model_fixture import dispose_dispatch, stop_endpoint
 
 
 def seed_future_retries(store, sessions):
-    """Stopped-Host retry populations use their real built-in Session offers."""
     database = sqlite3.connect(store / "rui.sqlite3")
     try:
-        # The selector-only population deliberately omits Turns, not offers.
         database.execute("PRAGMA foreign_keys=OFF")
         inserted = database.executemany(
             "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
@@ -49,14 +47,10 @@ def seed_future_retries(store, sessions):
 
 
 def history(items):
-    """A request's input without its tool declarations, which
-    openai-responses/2 writes at each Operation that offers new tools; the
-    projection test checks them."""
     return [item for item in items if item.get("type") != "additional_tools"]
 
 
 def without_prose(schema):
-    """Tool wording is prompt prose; compare the schema without it."""
     if isinstance(schema, list):
         return [without_prose(item) for item in schema]
     if isinstance(schema, dict):
@@ -72,8 +66,6 @@ def content_reference(text):
 
 
 def stored_message_parts(database):
-    """The first message item's saved parts: kind, text and bag bytes. Each
-    text part is the next text_length bytes of the item's message text."""
     text, operation, ordinal = database.execute(
         "SELECT t.payload,i.operation_id,i.item_ordinal FROM model_output_item i "
         "JOIN content t ON t.content_id=i.message_content_id WHERE i.item_kind=2 "
@@ -91,8 +83,6 @@ def stored_message_parts(database):
 
 
 def failed_response_records(store):
-    """Read back failed-response records in retention order, checking each
-    private body against its metadata's length and digest."""
     root = pathlib.Path(store) / "diagnostics" / "failed-responses"
     if not root.exists():
         return []
@@ -117,7 +107,6 @@ def failed_response_records(store):
 
 
 def assert_complete_failed_response(store, body, *, operation, code, http_status, request_id, diagnostic=None):
-    """One complete record of exactly the bytes the provider sent."""
     records = failed_response_records(store)
     assert len(records) == 1, records
     metadata, retained = records[0]
@@ -131,7 +120,6 @@ def assert_complete_failed_response(store, body, *, operation, code, http_status
 
 
 def failed_response_export_case(state, processes, endpoints):
-    """Production incomplete output and binary HTTP failure, public raw reads."""
     incomplete = encode_sse([{"type": "response.incomplete", "response": {"status": "incomplete"}}], done=False)
     binary = bytes(range(256)) * 1025 + b"\x00\xfftail\r\n"
     endpoint = SuccessEndpoint([incomplete, ResponseSpec(binary, {}, status=400)], chunk_sizes=(65536,))
@@ -170,8 +158,6 @@ def failed_response_export_case(state, processes, endpoints):
         return result.stdout
 
     def snapshot():
-        # Canonical values, not WAL/checkpoint housekeeping or filesystem atime.
-        # The Host's exclusive SQLite lease must be released for this audit.
         with sqlite3.connect(f"file:{store / 'rui.sqlite3'}?mode=ro", uri=True) as database:
             canonical = tuple(database.iterdump())
         retained = {path.name: (path.read_bytes(), path.stat().st_mtime_ns, path.stat().st_ctime_ns)
@@ -179,7 +165,6 @@ def failed_response_export_case(state, processes, endpoints):
         return canonical, retained
 
     before = snapshot()
-    # Restart with execution unavailable: inspection cannot fetch another body.
     host = start_host(store, None)
     processes.append(host)
     for metadata, expected in records:
@@ -199,9 +184,6 @@ def failed_response_export_case(state, processes, endpoints):
     host = start_host(store, None)
     processes.append(host)
 
-    # Perturb one real retained record, never a file-only replacement Store.
-    # Partial/omitted metadata is exported verbatim; a partial body is its
-    # exact retained prefix, while absent/corrupt/substituted bodies fail empty.
     metadata, expected = records[1]
     operation = metadata["operation"]
     body_path = root / metadata["body"]
@@ -254,9 +236,6 @@ def failed_response_export_case(state, processes, endpoints):
     stop_host(host)
     processes.remove(host)
     assert snapshot()[0] == before[0], "diagnostic error paths mutated canonical data"
-    # Export uses the same mandatory report-scratch disposal as inspection.
-    # An unlinked-name failure must stop dispatch, not accumulate uncharged
-    # files behind an ordinary diagnostic-unavailable reply.
     host = start_host(store, None, "--fault", "report-unlink")
     processes.append(host)
     export(records[0][0]["operation"], "body", error="report_scratch_cleanup_failed")
@@ -283,14 +262,11 @@ def failed_response_export_case(state, processes, endpoints):
 
 
 def empty_response_retention_case(state, processes, endpoints, status):
-    """Empty failures leave fresh diagnostics and a full retention FIFO untouched."""
     label = f"empty-http-{status}"
     store = state / label
     body = b'{"error":"nonempty retention control"}'
     empty = ResponseSpec(b"", {"X-Request-Id": label}, status=status)
     nonempty = ResponseSpec(body, {"X-Request-Id": "nonempty-control"}, status=400)
-    # A clean HTTP 200 close retries through the four-Attempt allowance;
-    # every empty capture must still leave the retention FIFO unchanged.
     empty_attempts = 1 if status == 400 else 4
     endpoint = SuccessEndpoint([*[empty] * empty_attempts, nonempty, *[empty] * empty_attempts, nonempty])
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
@@ -314,8 +290,6 @@ def empty_response_retention_case(state, processes, endpoints, status):
     assert retained == body and seed["status"] == "complete", seed
     assert seed["body"].startswith("response-1-"), seed
 
-    # Fill the production 256-record bound with private copies of this real
-    # record. Empty admission must return before prune could evict its oldest.
     for sequence in range(2, 257):
         stem = f"response-{sequence}-{seed['operation']}-{seed['attempt']}"
         metadata = dict(seed, body=stem + ".body")
@@ -330,8 +304,6 @@ def empty_response_retention_case(state, processes, endpoints, status):
     assert after == before, f"{label} changed the full retention FIFO"
     assert len(endpoint.requests) == 2 * empty_attempts + 1, len(endpoint.requests)
 
-    # A later nonempty failure still evicts exactly the oldest record and
-    # takes sequence 257, with no sequence or FIFO cost for either empty body.
     fail(label + "-after", "provider_http_400")
     records = failed_response_records(store)
     assert [int(record["body"].split("-")[1]) for record, _ in records] == list(range(2, 258))
@@ -350,7 +322,6 @@ def empty_response_retention_case(state, processes, endpoints, status):
 
 
 def decode_model_evidence(value):
-    """Independent oracle for the adapter's opaque v1 source certificate."""
     assert isinstance(value, bytes) and 7 <= len(value) <= 775, value
     assert value[0] == 1, value
     fields = []
@@ -367,7 +338,6 @@ def decode_model_evidence(value):
 
 
 def compaction_cases(state, processes, endpoints, releases):
-    """Exercise compaction through ordinary intake, transport and recovery."""
     def compact_response(label, *, extra=None):
         items = [
             {"type": "reasoning", "id": f"{label}-before", "summary": [], "encrypted_content": "discard-before-anchor"},
@@ -424,8 +394,6 @@ def compaction_cases(state, processes, endpoints, releases):
         wait_for(lambda: len(endpoint.requests) == 2, "overflow followed by explicit compaction")
         compaction = json.loads(endpoint.requests[1])
         assert history(compaction["input"])[-1] == {"type": "compaction_trigger"}, compaction
-        # The originating Operation's address and baseline survive overflow
-        # into its compaction Operation.
         address = model_instructions(ROOT, "baseline", store=store, session=session, model="gpt-6-sol")
         assert [json.loads(request)["instructions"] for request in endpoint.requests[:2]] == [address, address], endpoint.requests[:2]
         assert compaction["store"] is False and compaction["stream"] is True, compaction
@@ -433,7 +401,6 @@ def compaction_cases(state, processes, endpoints, releases):
         assert compaction["text"] == {"verbosity": "low"}, compaction
         assert compaction["parallel_tool_calls"] is True, compaction
         assert user_texts(compaction) == ["covered user input"], compaction
-        # Admission fixes coverage. Later settings and messages cannot enter it.
         patch(store, session, f"{route}-policy", "--compaction-trigger", "1", "--output-reservation", "0")
         configure(state, store, f"{route}-instructions", session, "gpt-6-sol", instructions="arrived during compaction")
         message(state, store, f"{route}-late", session, "pending input")
@@ -453,18 +420,15 @@ def compaction_cases(state, processes, endpoints, releases):
         report = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
         assert report["actions"]["count"] == "0", report
         assert b"private compaction tail" not in json.dumps(report).encode(), report
-        # The full canonical output is saved once, with no Conversation projection.
         stop_host(host)
         processes.remove(host)
         with sqlite3.connect(store / "rui.sqlite3") as database:
             assert database.execute("SELECT purpose,resolution_code FROM model_operation ORDER BY operation_id").fetchall() == [
                 (0, "context_overflow"), (1, "compacted"), (0, "answer")]
-            # Each overflow keeps the correlation its provider answer carried.
             assert database.execute("SELECT request_id FROM model_operation WHERE operation_id=1").fetchone()[0] == (
                 overflow_request_id if route == "http" else "request-1")
             assert database.execute("SELECT count(*) FROM model_output_item WHERE operation_id=2").fetchone()[0] == 3
             assert database.execute("SELECT count(*) FROM conversation_entry WHERE source_operation_id=2").fetchone()[0] == 0
-        # Reset recovers default selection, then restart reconstructs the same base.
         followup, _, _ = sse_answer(f"{route}-followup", f"{route}-r2", f"{route}-m2", "after restart")
         endpoint.responses.append(followup)
         host = start_host(store, url)
@@ -486,7 +450,6 @@ def compaction_cases(state, processes, endpoints, releases):
         assert execution["scratch_used_bytes"] == "0" and not execution["dispatch_fenced"], execution
         stop_host(host)
         processes.remove(host)
-        # Corruption after the base must not silently shorten the suffix.
         with sqlite3.connect(store / "rui.sqlite3") as database:
             database.execute("DELETE FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_operation) AND item_ordinal=0")
         host = start_host(store, url)
@@ -501,10 +464,6 @@ def compaction_cases(state, processes, endpoints, releases):
         processes.remove(host)
         stop_endpoint(endpoint, endpoints)
 
-    # Proactive compaction holds the new input outside its frozen view. The
-    # multibyte, quote- and backslash-bearing Store does not leak into the
-    # allocated Session's self-address. The Store path stays space-free
-    # because Host readiness is space-delimited.
     first, _, _ = sse_answer("auto-first", "auto-r", "auto-m", "original answer")
     compact, _ = compact_response("auto")
     last, _, _ = sse_answer("auto-last", "auto-r2", "auto-m2", "automatic answer")
@@ -530,8 +489,6 @@ def compaction_cases(state, processes, endpoints, releases):
     processes.remove(host)
     stop_endpoint(endpoint, endpoints)
 
-    # A valid base followed by overflow of unchanged input is irreducible;
-    # a second compaction would only repeat the same covered context forever.
     compact, _ = compact_response("irreducible")
     endpoint, url = endpoint_for([overflow_sse, compact, overflow_sse])
     store = state / "compaction-irreducible"
@@ -548,7 +505,6 @@ def compaction_cases(state, processes, endpoints, releases):
     processes.remove(host)
     stop_endpoint(endpoint, endpoints)
 
-    # Compaction can never grant tool authority, even after a valid anchor.
     forbidden_effect = state / "compaction-forbidden-effect"
     compact, _ = compact_response("unexpected-action", extra={
         "type": "function_call", "id": "forbidden", "name": "bash", "call_id": "forbidden-call",
@@ -574,7 +530,6 @@ def compaction_cases(state, processes, endpoints, releases):
 
 
 def http_quota_cases(state, processes, endpoints):
-    """A quota refusal settles once and keeps its code/reset through reopen."""
     for index, (provider_code, refusal) in enumerate((("usage_limit_reached", "quota"), ("insufficient_quota", "quota"),
                                                      ("usage_not_included", "plan"))):
         reset = 1_800_000_123 + index
@@ -614,7 +569,6 @@ def http_quota_cases(state, processes, endpoints):
         assert operation["resolution"]["code"] == code, operation
         diagnostic = operation["resolution"]["content"]["text"]
         assert json.loads(diagnostic) == {"refusal": refusal, "resets_at": reset}, diagnostic
-        # The Turn keeps the provider's words as its report instead.
         assert report["full"]["turns"][0]["outcome"]["content"] == content_reference(
             f"{provider_code}: Provider prose stays out of the diagnostic."), report
         assert observe(store, key)["result"] == result["result"]
@@ -645,8 +599,6 @@ def http_quota_cases(state, processes, endpoints):
     processes.remove(host)
     assert len(endpoint.requests) == 2, endpoint.requests
     stop_endpoint(endpoint, endpoints)
-    # A known refusal code is permanent at any status; any other code keeps
-    # its status code. Either way the Turn keeps the provider's words.
     for status, error, code, words in (
         (404, {"code": "model_not_found", "message": "The model `gpt-x` does not exist."},
          "provider_model_unavailable", "model_not_found: The model `gpt-x` does not exist."),
@@ -678,7 +630,6 @@ def http_quota_cases(state, processes, endpoints):
 
 
 def failure_correlation_cases(state, processes, endpoints, selected="all"):
-    """Bounded Debug coverage for inline failure provenance through SQLite."""
     for label, status, schema, code, request_id in (
         (*variant, request_id)
         for variant in (
@@ -753,7 +704,6 @@ def failure_correlation_cases(state, processes, endpoints, selected="all"):
 
 
 def empty_answer_cases(state, processes, endpoints):
-    """Completed empty results preserve exact messages and replay after restart."""
     for phased in (True, False):
         label = "empty-phased" if phased else "empty-unphased"
         texts = ["", [" ", "\t\r\n\u00a0\u2003"], [" \té", "\n "]]
@@ -769,7 +719,6 @@ def empty_answer_cases(state, processes, endpoints):
                      "status": "completed", "output": [reasoning, item]}},
                 ])
             bodies.append(body)
-            # created_by is response-only metadata, never a request field.
             reasoning.pop("created_by")
             items.extend((reasoning, item))
         endpoint = SuccessEndpoint(bodies)
@@ -811,7 +760,6 @@ def empty_answer_cases(state, processes, endpoints):
 
 
 def stream_failure_cases(state, processes, endpoints):
-    """Sealed SSE failures retry only when their parsed meaning permits it."""
     answer = sse_answer("retry-answer", "reasoning", "answer", "recovered")[0]
     partial = encode_sse([{"type": "response.output_item.done", "output_index": 0,
                            "item": {"type": "message", "id": "partial", "role": "assistant",
@@ -864,7 +812,6 @@ def stream_failure_cases(state, processes, endpoints):
         if label == "exhausted":
             detail = json.loads(operation["resolution"]["content"]["text"])
             assert detail == {"reason": "TemporaryProviderFailure", "stage": "event", "byte_offset": "6", "output_index": None}, detail
-        # A failed Turn keeps the provider's own words as its report.
         outcome = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")["full"]["turns"][0]["outcome"]
         if code.startswith("provider_"):
             provider_code = label.split("-", 1)[1]
@@ -888,7 +835,6 @@ def stream_failure_cases(state, processes, endpoints):
 
 
 def refusal_cases(state, processes, endpoints):
-    """Refusal text is observable; canonical and replay content stays a refusal."""
     for phased in (False, True):
         label = "refusal-phased" if phased else "refusal-unphased"
         refusal = "I cannot help with that. é\n\x00End.\n"
@@ -950,8 +896,6 @@ def refusal_cases(state, processes, endpoints):
         assert replay[1] == {key: value for key, value in item.items() if key != "created_by"}, replay
         stop_host(host)
         processes.remove(host)
-        # Public reads are projections; the saved parts keep the refusal kind
-        # and each block's unknown members in its bag.
         with sqlite3.connect(store / "rui.sqlite3") as database:
             parts = stored_message_parts(database)
         refusal_part = (2, refusal.encode(), b'"future":{"retained":true}')
@@ -963,10 +907,8 @@ def refusal_cases(state, processes, endpoints):
 
 
 def sse_framing_cases(state, processes, endpoints):
-    """Spec framing, exact decoded replay, and immutable raw failure evidence."""
     state = state / "sse-framing-cases"
     state.mkdir(mode=0o700)
-    # Replay is written canonically and parses equal to what was received.
     reasoning = b'{"type":"reasoning","id":"r","encrypted_content":"' + b"x" * 9001 + b'","future":{\n"raw":true}}'
     item = b'{"type":"message","id":"m","role":"assistant","content":[{\n"type":"output_text","text":"Hi \\u00e9\\n"}]}'
     notification = b'data: {"type":"response.future.notice","item":{"type":"future_tool"}}\r\r'
@@ -1046,10 +988,6 @@ def sse_framing_cases(state, processes, endpoints):
 
 
 def phased_message_cases(state, processes, endpoints):
-    """Synthetic gpt-6-luna-shaped streams, not recovered live captures."""
-    # partial_answer shape: synthetic first-party openai/codex fixture at
-    # 970111f6cb62cc02fe36a82ea7d71b37a2889c97,
-    # codex-rs/codex-api/src/sse/responses.rs:759-798; not live capture proof.
     def text_item(identity, text, phase):
         item = {"type": "message", "id": identity, "role": "assistant",
                 "content": [{"type": "output_text", "text": text, "annotations": []}]}
@@ -1080,14 +1018,11 @@ def phased_message_cases(state, processes, endpoints):
         first_items = [text_item("before", "Inspecting files", nonfinal), calls[0],
                        text_item("between", "Checking sibling calls", nonfinal), calls[1],
                        text_item("after", "Waiting for tool results", nonfinal)]
-        # Identical visible text in distinct messages deliberately exercises
-        # content dedup without losing exact item provenance.
         final_items = [text_item("repeated", "Inspecting files", nonfinal),
                        text_item("summary", "Tools settled", "commentary" if phased else None),
                        text_item("final", "Canonical answer é", final)]
         later_items = [text_item("later", "Newer answer", final)]
         if phased:
-            # An explicit final wins even when later text remains visible.
             later_items.append(text_item("tail", "After final commentary", nonfinal))
         endpoint = SuccessEndpoint([response("tools", first_items), response("answer", final_items),
                                     response("later", later_items)])
@@ -1138,7 +1073,6 @@ def phased_message_cases(state, processes, endpoints):
         positions = public_messages()
         crash_host(host, state, f"{label}-saved")
         processes.remove(host)
-        # The Host owns SQLite exclusively; inspect provenance only after reap.
         with sqlite3.connect(store / "rui.sqlite3") as database:
             rows = database.execute("SELECT e.session_position,e.source_item_ordinal,i.item_ordinal "
                 "FROM conversation_entry e JOIN model_output_item i ON i.operation_id=e.source_operation_id "
@@ -1195,9 +1129,6 @@ def phased_message_cases(state, processes, endpoints):
 
 
 def held_message_denial_cases(state, processes, endpoints):
-    """A Message admitted while a Bash call waits for approval is held until
-    its call group settles, then reaches the model in the same request as the
-    group's results, after them."""
     def bash_call(label, ordinal, command_text):
         return ("bash", f"{label}-call-{ordinal}", json.dumps(
             {"cmd": command_text, "timeout_ms": None, "description": f"Run {label} command {ordinal}"},
@@ -1226,7 +1157,6 @@ def held_message_denial_cases(state, processes, endpoints):
         assert all(action["authorization"] == "pending" for action in actions), actions
         actions.sort(key=lambda action: int(action["call_ordinal"]))
 
-        # The person's reason is admitted first, while every Action waits.
         message(state, store, f"{label}-reason", session, "Don't run that; use the cached copy instead")
         assert observe(store, f"{label}-reason").get("result") is None
         assert len(endpoint.requests) == 1, endpoint.requests
@@ -1234,8 +1164,6 @@ def held_message_denial_cases(state, processes, endpoints):
         command("action", "deny", "--store", store, "--session", session, "--action", actions[0]["action"],
                 "--record", state / f"{label}-deny.json", "--key", f"{label}-deny")
         if siblings == 2:
-            # The group is incomplete: the reason stays held. Settle the
-            # sibling by running it; its output must precede the reason too.
             assert len(endpoint.requests) == 1, endpoint.requests
             assert observe(store, f"{label}-reason").get("result") is None
             command("action", "allow", "--store", store, "--session", session, "--action", actions[1]["action"],
@@ -1245,7 +1173,6 @@ def held_message_denial_cases(state, processes, endpoints):
             wait_for(lambda key=key: completed_observation(store, key), f"{key} result")
             assert read_result(store, key) == b"Understood"
         assert not forbidden.exists(), "denied Bash was launched"
-        # One continuation request, carrying the denial and the reason together.
         assert len(endpoint.requests) == 2, endpoint.requests
         continuation = history(json.loads(endpoint.requests[1])["input"])
         outputs = [item for item in continuation if item.get("type") == "function_call_output"]
@@ -1536,8 +1463,6 @@ def main(mode="all", correlation_case="all"):
         processes.remove(proposal_host)
         control_gate = state / "proposal-control-gate"
         os.mkfifo(control_gate)
-        # Keep both FIFO ends present so neither the Host reader nor fixture
-        # writer can hang during open if its peer fails between milestones.
         proposal_gate_keeper = os.open(control_gate, os.O_RDWR | os.O_NONBLOCK)
         proposal_host = start_host(
             proposal_store,
@@ -1563,11 +1488,7 @@ def main(mode="all", correlation_case="all"):
         assert len(recovered["actions"]["unresolved"]) == 1, recovered
         assert read_action(proposal_store, proposal_session, first_request["action"], "call-id") == calls[0][1].encode()
         assert read_action(proposal_store, proposal_session, first_request["action"], "arguments") == calls[0][2].encode()
-        # The Host holds its Store exclusively: canonical rows are checked
-        # after it stops; later controls never touch these resolved rows.
         expected_action_rows = {}
-        # Replay preserves canonical work; a live inspection may sample a
-        # temporary no-work admission reservation before its owner releases it.
         assert recovered["work"]["state"]["kind"] == "approval", recovered
         assert len(recovered["full"]["model_operations"]) == 1, recovered
         assert recovered["full"]["model_operations"][0]["resolution"]["code"] == "tool_proposals", recovered
@@ -1806,8 +1727,6 @@ def main(mode="all", correlation_case="all"):
         continuation_deadline = time.monotonic() + 8
 
         def continuation_successor_admitted():
-            # Observe through the Store owner. An external SQLite reader can
-            # prevent admission COMMIT in DELETE-journal/zero-busy-timeout mode.
             value = observe(continuation_store, "continuation-first", deadline=continuation_deadline)
             return (
                 value
@@ -1874,7 +1793,6 @@ def main(mode="all", correlation_case="all"):
         )
         assert stale_denial["answer"]["status"] == "rejected", stale_denial
         assert stale_denial["answer"]["code"] == "action_not_pending", stale_denial
-        # The Host holds its Store exclusively; inspect rows between Hosts.
         stop_host(continuation_host)
         processes.remove(continuation_host)
         with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
@@ -1995,9 +1913,6 @@ def main(mode="all", correlation_case="all"):
             "reasoning-1",
             "message-1",
             first_answer.decode(),
-            # Small retained/discarded fields keep the native replay witness
-            # (response-only `created_by` omission in the follow-up request).
-            # Large-field boundaries now live in the portable cursor corpus.
             encrypted_content="r" * 64,
             created_by="d" * 64,
         )
@@ -2060,11 +1975,6 @@ def main(mode="all", correlation_case="all"):
         stop_host(success_host)
         processes.remove(success_host)
 
-        # A fresh Host and client recover the original admission and answer,
-        # then the same Session completes another Turn from the historical
-        # provider view. One-byte encoding and replay progress are covered by
-        # the portable cursor corpus and real-Store preparation cases, so this
-        # restart uses production allowances and witnesses recovery/handoff.
         success_host = start_host(
             success_store,
             success_url,
@@ -2182,7 +2092,6 @@ def main(mode="all", correlation_case="all"):
             assert database.execute(
                 "SELECT attempt_ordinal,count(*) FROM model_output_item GROUP BY attempt_ordinal"
             ).fetchall() == [(1, 4)]
-            # Item-level created_by is dropped at import; the bag keeps the rest.
             reasoning_bag = database.execute(
                 "SELECT CAST(c.payload AS TEXT) FROM model_output_item item JOIN content c ON c.content_id=item.extras_content_id ORDER BY item.operation_id,item.item_ordinal LIMIT 1"
             ).fetchone()[0]
@@ -2224,9 +2133,6 @@ def main(mode="all", correlation_case="all"):
         stop_host(offline_success)
         processes.remove(offline_success)
 
-        # Temporary transport classes consume one shared per-Operation
-        # allowance. Retry-After may lengthen, never shorten, the frozen
-        # 2/4/8 policy (shortened here only to keep the fixture deterministic).
         retry_sse, retry_reasoning, retry_message_item = sse_answer(
             "retry-response", "retry-reasoning", "retry-message-item", "recovered answer"
         )
@@ -2276,8 +2182,6 @@ def main(mode="all", correlation_case="all"):
         database.close()
         stop_endpoint(retry_endpoint, endpoints)
 
-        # A date four seconds ahead expires during five seconds of progressing
-        # error-body transfer. It must not add the original delay again.
         dated_failure = ResponseSpec(
             b"123456789012345678", {}, 503,
             retry_date_seconds=4, chunk_delay=1,
@@ -2299,8 +2203,6 @@ def main(mode="all", correlation_case="all"):
         assert read_result(dated_store, "dated-message") == b"recovered answer"
         assert len(dated_endpoint.requests) == 2
         assert dated_endpoint.requests[0] == dated_endpoint.requests[1]
-        # Allows the one-second discovery tick; the old conversion adds at
-        # least three seconds after the body and cannot pass this bound.
         assert dated_failure.body_finished_at is not None
         after_body = dated_endpoint.request_times[1] - dated_failure.body_finished_at
         assert 0.04 <= after_body < 2.5, after_body
@@ -2308,9 +2210,6 @@ def main(mode="all", correlation_case="all"):
         processes.remove(dated_host)
         stop_endpoint(dated_endpoint, endpoints)
 
-        # A permanent request/authentication-class HTTP failure is terminal
-        # after one Attempt and is never blindly retried. It keeps the
-        # provider's own request correlation, or none, through restart.
         permanent_request_ids = ('permanent-"quoted"\\request', None)
         permanent_endpoint = SuccessEndpoint([
             ResponseSpec(b"authentication rejected", {"X-Request-Id": request_id} if request_id else {}, 401)
@@ -2370,8 +2269,6 @@ def main(mode="all", correlation_case="all"):
             processes.remove(reopened)
         stop_endpoint(permanent_endpoint, endpoints)
 
-        # Redirects are disabled and contradictory provider headers are
-        # deterministic response failures. Neither is a connection retry.
         invalid_header_sse = sse_answer(
             "invalid-header-response",
             "invalid-header-reasoning",
@@ -2431,9 +2328,6 @@ def main(mode="all", correlation_case="all"):
             processes.remove(disposition_host)
         stop_endpoint(disposition_endpoint, endpoints)
 
-        # A local read failure while the client owns the request is a Host fault,
-        # not provider evidence. Fence dispatch, retain uncertainty and avoid
-        # a same-process retry.
         local_read_endpoint = SuccessEndpoint(
             [sse_answer("local-read", "local-read-r", "local-read-m", "unused")[0]]
         )
@@ -2479,8 +2373,6 @@ def main(mode="all", correlation_case="all"):
         assert len(local_read_endpoint.requests) <= 1
         stop_endpoint(local_read_endpoint, endpoints)
 
-        # A replacement Attempt reuses the exact historical view, including
-        # private continuation, even after newer settings and input commit.
         continued_first, continued_reasoning, continued_message = sse_answer(
             "continued-first", "continued-r-1", "continued-m-1", "first answer"
         )
@@ -2557,7 +2449,6 @@ def main(mode="all", correlation_case="all"):
         wait_for(lambda: len(continued_endpoint.requests) >= 3, "replacement continued Attempt")
         assert continued_endpoint.requests[1] == continued_endpoint.requests[2]
         frozen_retry = json.loads(continued_endpoint.requests[2])
-        # Later settings cannot re-address or re-baseline the replacement Attempt.
         assert frozen_retry["instructions"] == model_instructions(
             ROOT, "original instructions", store=continued_store, session=continued_retry_session, model="gpt-6-sol"
         ), frozen_retry
@@ -2779,9 +2670,6 @@ def main(mode="all", correlation_case="all"):
         assert len(contradictory_endpoint.requests) == 1
         stop_endpoint(contradictory_endpoint, endpoints)
 
-        # Input committed after the first request's cutoff is selected at the
-        # next boundary. The first complete candidate is durable history but
-        # cannot become the Turn's Final Answer while applicable input waits.
         pending_first_sse, pending_reasoning, pending_message_item = sse_answer(
             "pending-response-1", "pending-reasoning-1", "pending-message-1", "intermediate"
         )
@@ -2842,9 +2730,6 @@ def main(mode="all", correlation_case="all"):
         processes.remove(pending_host)
         stop_endpoint(pending_endpoint, endpoints)
 
-        # Structured output remains an explicitly unavailable partial-build
-        # surface. Even a complete 2xx text response cannot be published under
-        # a frozen object schema without schema validation.
         schema_candidate = sse_answer(
             "schema-response", "schema-reasoning", "schema-message", "private schema answer"
         )[0]
@@ -2943,8 +2828,6 @@ def main(mode="all", correlation_case="all"):
             processes.remove(reopened)
         stop_endpoint(schema_endpoint, endpoints)
 
-        # Completed transport is not success: the whole SSE candidate must be
-        # complete, consistent and limited to the supported text subset.
         invalid_reasoning = {
             "type": "reasoning",
             "id": "invalid-reasoning",
@@ -3039,8 +2922,6 @@ def main(mode="all", correlation_case="all"):
                          "item": unsupported_message}], done=False),
             encode_sse([{"type": "response.output_item.future_event", "private": private_sentinel}], done=False),
         ]
-        # Distinct output item identities pass parsing, but the decoded call
-        # identity must remain unique when Store imports the complete envelope.
         duplicate_calls = sse_tool_calls("duplicate-calls", [
             ("bash", "same-call", json.dumps({
                 "description": f"Print duplicate marker {index}",
@@ -3121,8 +3002,6 @@ def main(mode="all", correlation_case="all"):
             assert database.execute("SELECT count(*) FROM model_tool_call").fetchone()[0] == 0
             assert database.execute("SELECT request_id FROM model_operation").fetchone()[0] == expected_request_id
             database.close()
-            # Rejection evidence must survive scratch disposal and Host restart,
-            # without turning a diagnostic into an answer or continuation.
             reopened = start_host(invalid_store, None)
             processes.append(reopened)
             report = command(
@@ -3139,8 +3018,6 @@ def main(mode="all", correlation_case="all"):
             assert detail["reason"] and detail["stage"], detail
             assert len(resolution["content"]["text"].encode()) <= 512
             assert private_sentinel not in json.dumps(report), report
-            # The same rejected bytes stay privately on disk, bound to the
-            # saved Operation, Attempt, code and typed reason/offset.
             assert_complete_failed_response(
                 invalid_store, invalid_bodies[index], operation=operation["operation"],
                 code=expected_code, http_status=200, request_id=expected_request_id,
@@ -3167,8 +3044,6 @@ def main(mode="all", correlation_case="all"):
         assert len(invalid_endpoint.requests) == 16
         stop_endpoint(invalid_endpoint, endpoints)
 
-        # Concurrent failures keep separate exact captures, a success adds
-        # none, and a retention fault leaves the saved failure unchanged.
         def unfinished_tool(label, padding):
             return encode_sse([{
                 "type": "response.output_item.added", "output_index": 0,
@@ -3178,7 +3053,6 @@ def main(mode="all", correlation_case="all"):
             }}])
 
         concurrent_release = threading.Event()
-        # One body crosses the 64 KiB copy window; lengths all differ.
         concurrent_bodies = {
             f"concurrent-{index}": unfinished_tool(f"concurrent-{index}", (70_000, 1, 977, 4_096)[index])
             for index in range(4)
@@ -3203,7 +3077,6 @@ def main(mode="all", correlation_case="all"):
         concurrent_thread.start()
         concurrent_store = state / "concurrent-failed-responses"
         concurrent_host = start_host(
-            # Many streams in flight at once over shared h2c connections.
             concurrent_store, f"http://127.0.0.1:{concurrent_endpoint.server_port}/responses", active_capacity=500,
         )
         processes.append(concurrent_host)
@@ -3242,8 +3115,6 @@ def main(mode="all", correlation_case="all"):
             assert record["status"] == "complete", record
         assert sorted(record["request_id"] for record, _ in records) == sorted(concurrent_bodies)
 
-        # A record-namespace entry that cannot be reclaimed blocks retention.
-        # The Attempt still saves the same failure, and later work recovers.
         record_root = concurrent_store / "diagnostics" / "failed-responses"
         blocker = record_root / "response-99-1-1.json.tmp"
         blocker.mkdir(mode=0o700)
@@ -3263,8 +3134,6 @@ def main(mode="all", correlation_case="all"):
         assert (recovered["request_id"], recovered_body) == ("after-fault", later_bodies["after-fault"]), recovered
         assert recovered["operation"] == saved_failures("concurrent-1")["operation"], recovered
 
-        # Local metadata acquisition can fail after a complete provider
-        # response; it must not discard that failed request's captured bytes.
         message(state, concurrent_store, "metadata-blocked-message", concurrent_sessions["concurrent-1"], "metadata-blocked")
         wait_for(lambda: len(concurrent_endpoint.requests) == 8, "metadata request awaiting response")
         metadata_operation = saved_failures("concurrent-1")["operation"]
@@ -3397,8 +3266,6 @@ def main(mode="all", correlation_case="all"):
         processes.remove(scratch_host)
         stop_endpoint(scratch_endpoint, endpoints)
 
-        # Item cardinality and answer bytes grow independently while execution
-        # capacity remains one and metadata/capture stay in shared scratch.
         count_payload = sse_many("many-items", 32, "count answer")
         large_answer = "z" * 100_000
         byte_payload = sse_many("large-answer", 1, large_answer)
@@ -3447,9 +3314,6 @@ def main(mode="all", correlation_case="all"):
             growth_diagnostics, growth_store, growth_b_session, imported, bytes_deadline,
             peers=growth_peers,
         )
-        # A failed caller destination may retain a prefix, but it cannot make
-        # the read successful or consume the saved keyed answer. A fresh read
-        # streams the complete bytes again without inventing a newline.
         read_fd, write_fd = os.pipe()
         failed_destination = None
         failed_read_deadline = time.monotonic() + 15
@@ -3510,13 +3374,10 @@ def main(mode="all", correlation_case="all"):
         assert database.execute(
             "SELECT count(*) FROM model_output_item WHERE operation_id=1"
         ).fetchone()[0] == 33
-        # The answer's text is saved once, as its public part, with no raw copy.
         assert database.execute("SELECT private,length(payload) FROM content WHERE byte_length>=?", (len(large_answer),)).fetchall() == [(0, len(large_answer))]
         database.close()
         stop_endpoint(growth_endpoint, endpoints)
 
-        # A public answer is its message's saved part text. Exercise both dedup
-        # orders: answer then caller input, and caller then answer.
         parts = ["", "x" * 4093 + "\n", "🙂\t\\", ""]
         projected_answer = "".join(parts).encode()
         projection_endpoint = SuccessEndpoint([
@@ -3555,11 +3416,6 @@ def main(mode="all", correlation_case="all"):
         processes.remove(host)
         stop_endpoint(projection_endpoint, endpoints)
 
-        # A committed permit launches exactly one complete frozen request. The
-        # endpoint holds the response so later settings and input arrive while
-        # the admitted request is demonstrably in flight. Byte/item
-        # scheduling stress lives in the portable cursor corpus; this journey
-        # keeps production allowances and witnesses the frozen composition.
         store = state / "frozen-store"
         host = start_host(
             store,
@@ -3609,8 +3465,6 @@ def main(mode="all", correlation_case="all"):
             "session", "inspect", "--store", store, "--session", main_session
         ))["execution"]
         assert int(resources["scratch_used_bytes"]) == len(endpoint.requests[0]), resources
-        # Mutable settings accepted while the request is in flight apply only
-        # to the successor, never to the frozen request.
         mutable_update = frozen_peers.call("configure", lambda: command(
             "session", "configure",
             "--store",
@@ -3656,7 +3510,6 @@ def main(mode="all", correlation_case="all"):
             expect=0,
         ))
         assert post_failure_model_change["answer"]["status"] == "accepted"
-        # The queued Message starts its own Turn once the first one fails.
         successor_deadline = time.monotonic() + 8
         wait_for(
             lambda: frozen_peers.call("observe", lambda: observe(
@@ -3683,8 +3536,6 @@ def main(mode="all", correlation_case="all"):
                 {"role": "developer", "content": [{"type": "input_text", "text": "B"}]},
                 {"role": "developer", "content": [{"type": "input_text", "text": "A"}]},
                 {"role": "developer", "content": [{"type": "input_text", "text": "A"}]},
-                # openai-responses/2 declares function tools in the history,
-                # at the Operation that first offers them.
                 {"type": "additional_tools", "role": "developer", "tools": [
                 {
                     "type": "function",
@@ -3708,7 +3559,6 @@ def main(mode="all", correlation_case="all"):
                 },
             ]},
             ],
-            # Only provider-run tools stay at the top.
             "tools": [],
             "text": {
                 "verbosity": "low",
@@ -3726,8 +3576,6 @@ def main(mode="all", correlation_case="all"):
         frozen_peers.finish(time.monotonic() + 5)
         processes.remove(host)
 
-        # Killing the execution owner cannot erase either saved result. Input
-        # accepted without execution stays queued for the restarted Host.
         offline = start_host(store, None)
         processes.append(offline)
         assert observe(store, "message-a")["result"]["code"] == "provider_http_422"
@@ -3737,9 +3585,6 @@ def main(mode="all", correlation_case="all"):
         stop_host(offline)
         processes.remove(offline)
 
-        # A successor reuses complete projected history in its original order:
-        # the prior failed Turn's messages and each distinct instruction
-        # update, including repeated equal text and reversals.
         successor = json.loads(endpoint.requests[1])
         successor["input"] = without_prose(successor["input"])
         later_input = expected["input"] + [
@@ -3751,8 +3596,6 @@ def main(mode="all", correlation_case="all"):
         assert successor["tools"] == [], successor
         assert successor["text"] == {"verbosity": "low"}, successor
 
-        # A restarted Host reconstructs the same projection from the Store
-        # alone and dispatches the queued Message after it.
         host = start_host(store, url)
         processes.append(host)
         wait_for(lambda: len(endpoint.requests) == 3, "post-restart successor request")
@@ -3770,10 +3613,6 @@ def main(mode="all", correlation_case="all"):
         stop_host(host)
         processes.remove(host)
 
-        # A known live preparation failure saves future eligibility. Killing
-        # the process before such a failure can settle leaves conservative
-        # uncertainty instead. Neither path refunds Attempt 1; both recover
-        # through a freshly admitted Attempt 2.
         preparation_sse = sse_answer(
             "preparation-recovered",
             "preparation-r",
@@ -3891,9 +3730,6 @@ def main(mode="all", correlation_case="all"):
         processes.remove(preparation_host)
         stop_endpoint(preparation_endpoint, endpoints)
 
-        # Fresh processes are terminated after committed Attempt admission,
-        # launch, sealed validation input, and final result commit. Only the
-        # committed boundary is recovered; old permits and scratch never are.
         prelaunch_sse = sse_answer(
             "prelaunch-recovered", "prelaunch-r", "prelaunch-m", "prelaunch answer"
         )[0]
@@ -4139,10 +3975,6 @@ def main(mode="all", correlation_case="all"):
         processes.remove(committed_host)
         stop_endpoint(committed_endpoint, endpoints)
 
-        # Full execution capacity leaves later work as only a durable queued
-        # admission: no Attempt, request scratch, or resident waiter appears.
-        # Releasing custody is sufficient to make progress without a new
-        # message or notification.
         capacity_release = threading.Event()
         releases.append(capacity_release.set)
         capacity_answer = sse_answer(
@@ -4192,8 +4024,6 @@ def main(mode="all", correlation_case="all"):
             "occupy capacity",
         ))
         wait_for(lambda: len(capacity_endpoint.requests) == 1, "occupied capacity")
-        # The provider gate holds model scratch, not preceding ingress/report
-        # owners. Retire each exchange before either accounting snapshot.
         scratch_before = capacity_peers.call("inspect", lambda: command(
             "session", "inspect",
             "--store",
@@ -4250,9 +4080,6 @@ def main(mode="all", correlation_case="all"):
         processes.remove(durable_wait_host)
         stop_endpoint(capacity_endpoint, endpoints)
 
-        # Retry selection is taken only when execution capacity is available.
-        # A candidate observed while full cannot survive until release and
-        # bypass an older Operation that becomes due in the meantime.
         stale_release = threading.Event()
         newer_initial_release = threading.Event()
         releases.extend((newer_initial_release.set, stale_release.set))
@@ -4337,9 +4164,6 @@ def main(mode="all", correlation_case="all"):
         processes.remove(stale_host)
         stop_endpoint(stale_endpoint, endpoints)
 
-        # The smallest age-indexed selector keeps no scan state. With one live
-        # transport and a second permitted stream it still finds a due
-        # Operation behind 100 older future retries within the light-discovery target.
         backlog_stall_release = threading.Event()
         backlog_retry_release = threading.Event()
         releases.extend((backlog_retry_release.set, backlog_stall_release.set))
@@ -4354,7 +4178,6 @@ def main(mode="all", correlation_case="all"):
         endpoints[backlog_endpoint] = backlog_thread
         backlog_thread.start()
         backlog_store = state / "retry-age-backlog-store"
-        # An offline Host queues the admission without dispatching it.
         backlog_host = start_host(backlog_store, None)
         processes.append(backlog_host)
         backlog_session = configure(state, backlog_store, "backlog-config", None, "gpt-6-sol")
@@ -4420,11 +4243,6 @@ def main(mode="all", correlation_case="all"):
         processes.remove(backlog_host)
         stop_endpoint(backlog_endpoint, endpoints)
 
-        # Exhausted recovery and admission are independent work in one Host
-        # turn. A due retry and then queued new work both receive free custody
-        # while a high-age exhausted sentinel proves the restart backlog is
-        # still unresolved; ordinary inspection progresses and recovery
-        # eventually drains.
         recovery_retry_release = threading.Event()
         recovery_new_release = threading.Event()
         releases.extend((recovery_retry_release.set, recovery_new_release.set))
@@ -4590,9 +4408,6 @@ def main(mode="all", correlation_case="all"):
             )
             assert new_admitted["binding"]["attempt"] == "1", new_admitted
             wait_for(lambda: len(recovery_endpoint.requests) >= 4, "recovery new launch")
-            # Both attempts must remain in flight while their responses are
-            # held. Global custody may also contain a transient reservation
-            # while the Host probes the Store for more work.
             for key, attempt in (("recovery-due-message", "2"), ("recovery-new-message", "1")):
                 held = observe(recovery_store, key)
                 assert held["binding"]["attempt"] == attempt, held
@@ -4663,9 +4478,6 @@ def main(mode="all", correlation_case="all"):
             database.close()
         stop_endpoint(recovery_endpoint, endpoints)
 
-        # Exhaustion settles only the selected prefix. Input admitted while
-        # those retries run remains unselected and receives the outcome of the
-        # successor Turn that eventually takes it.
         exhaustion_release = threading.Event()
         releases.append(exhaustion_release.set)
         exhaustion_answer = sse_answer(
@@ -4745,9 +4557,6 @@ def main(mode="all", correlation_case="all"):
         database.close()
         stop_endpoint(exhaustion_endpoint, endpoints)
 
-        # One reactor fills two fixed custody records without allocating a
-        # worker per Session. Complete beta first and verify that the opaque
-        # completion identity settles beta's binding while alpha remains live.
         alpha_release = threading.Event()
         beta_release = threading.Event()
         releases.extend((beta_release.set, alpha_release.set))
@@ -4799,9 +4608,6 @@ def main(mode="all", correlation_case="all"):
         processes.remove(host)
         stop_endpoint(capacity_endpoint, endpoints)
 
-        # A peer allowing one stream at a time gets one connection per
-        # stream: the second Attempt is sent on its own connection while the
-        # first is held, instead of waiting behind it.
         mcs1_release = threading.Event()
         releases.append(mcs1_release.set)
         mcs1_endpoint = SuccessEndpoint(
@@ -4839,8 +4645,6 @@ def main(mode="all", correlation_case="all"):
         processes.remove(mcs1_host)
         stop_endpoint(mcs1_endpoint, endpoints)
 
-        # Inactivity is per stream: a sibling's steady progress on the same
-        # connection does not keep a silent stream alive.
         pacing_end = threading.Event()
         releases.append(pacing_end.set)
         silent_release = threading.Event()
@@ -4897,8 +4701,6 @@ def main(mode="all", correlation_case="all"):
         assert retry[0] == 1 and retry[1] == 0 and retry[2] is not None, retry
         stop_endpoint(slow_endpoint, endpoints)
 
-        # A failed Attempt commit rolls back all provenance, fences the Store
-        # like any canonical save fault, and cannot produce an endpoint launch.
         endpoint.received.clear()
         endpoint.release.clear()
         endpoint.requests.clear()
@@ -4929,8 +4731,6 @@ def main(mode="all", correlation_case="all"):
                 "SELECT count(*) FROM conversation_entry WHERE session_ref=?", (rollback_session,)
             ).fetchone() == (0,)
 
-        # Retrying the original caller record after rollback recovers the one
-        # queued admission. Only its later successful admission may dispatch.
         endpoint.release.set()
         host = start_host(rollback_store, url)
         processes.append(host)
@@ -4966,9 +4766,6 @@ def main(mode="all", correlation_case="all"):
         endpoint.received.clear()
         endpoint.release.clear()
 
-        # The first fallible post-commit step consumes Attempt 1, saves a typed
-        # failure, releases custody, and never reaches HTTP. Original request
-        # retries stay bound to that result after the Session advances.
         first_store = state / "first-step-store"
         host = start_host(first_store, url, "--fault", "request-first-step")
         processes.append(host)
@@ -5057,8 +4854,6 @@ def main(mode="all", correlation_case="all"):
             assert_model_cleanup_census(fault_diagnostics, failed)
             processes.remove(host)
 
-        # A canonical stop committed between resumable preparation advances
-        # cancels that exact live owner before transport sees partial scratch.
         preparation_stop_endpoint = SuccessEndpoint(
             [sse_answer("preparation-stop-response", "preparation-stop-r", "preparation-stop-m", "must not launch")[0]]
         )
@@ -5129,10 +4924,6 @@ def main(mode="all", correlation_case="all"):
             assert database.execute("SELECT outcome_code FROM turn").fetchall() == [("cancelled",)]
         stop_endpoint(preparation_stop_endpoint, endpoints)
 
-        # Infrastructure shutdown owns the same cancellation path. Populate
-        # durable work while execution is unavailable, then make the listener
-        # fail after preparation has yielded. Restart admits Attempt 2 from
-        # canonical uncertainty; the discarded cursor and scratch never launch.
         preparation_shutdown_sse = sse_answer(
             "preparation-shutdown-response",
             "preparation-shutdown-r",
@@ -5190,8 +4981,6 @@ def main(mode="all", correlation_case="all"):
             capture_output=True,
             timeout=10,
         )
-        # The already-spawned client may finish while the listener owner is
-        # beginning shutdown; its reply does not determine Host lifecycle.
         assert shutdown_trigger.returncode in (0, 1, 6), shutdown_trigger
         assert preparation_shutdown_host.wait(timeout=10) != 0
         stop_process(preparation_shutdown_host)
@@ -5219,9 +5008,6 @@ def main(mode="all", correlation_case="all"):
         processes.remove(preparation_shutdown_host)
         stop_endpoint(preparation_shutdown_endpoint, endpoints)
 
-        # A canonical save fault rolls back the claimed failure, fences the
-        # live dispatch owner, and leaves the admitted Attempt uncertain for
-        # the following retry/restart slice rather than recreating its permit.
         endpoint.requests.clear()
         endpoint.release.set()
         save_store = state / "save-fault-store"
@@ -5251,12 +5037,7 @@ def main(mode="all", correlation_case="all"):
         stop_host(offline)
         processes.remove(offline)
 
-        # Exact emitted request bytes, including the framing around many empty
-        # inputs, are the complete reservation. The exact observed limit passes
-        # while one byte below it fails before HTTP.
         def empty_messages(host, store, session, prefix):
-            # Empty CLI stdin sends nothing. Seed these zero-byte framing
-            # cases through the Message protocol without changing their input.
             from control_fixture import raw_request
             for index in range(40):
                 wire = {"version": host_process.WIRE_VERSION, "kind": "message", "store": str(store),
@@ -5267,8 +5048,6 @@ def main(mode="all", correlation_case="all"):
 
         endpoint.requests.clear()
         endpoint.release.clear()
-        # Each request carries only its six-byte Session ID, so all three
-        # cases have identical address framing regardless of their Store paths.
         framing_store = state / "framing-meter-store"
         host = start_host(framing_store, None)
         processes.append(host)
@@ -5331,9 +5110,6 @@ def main(mode="all", correlation_case="all"):
             "exact-capacity result",
             deadline=exact_deadline,
         )
-        # The request itself fits exactly and reaches HTTP. Its charge retires
-        # once its body is sent and the response has started, so the fixture
-        # response reuses that scratch.
         assert exact_result["result"]["code"] == "provider_http_422", exact_result
         wait_model_cleanup(
             exact_diagnostics, framing_exact_store, framing_exact_session,
@@ -5381,8 +5157,6 @@ def main(mode="all", correlation_case="all"):
         assert_model_cleanup_census(limit_diagnostics, limited)
         processes.remove(host)
 
-        # URL authority is parsed before the client sees it. Userinfo that makes a
-        # prefix look loopback is rejected at startup and reaches no server.
         endpoint.requests.clear()
         deceptive = subprocess.run(
             [
@@ -5398,9 +5172,6 @@ def main(mode="all", correlation_case="all"):
         assert deceptive.returncode != 0
         assert endpoint.requests == []
 
-        # The production timeout is inactivity-based, not a total request
-        # deadline. A reduced one-second interval stays alive while bytes make
-        # progress for over three intervals, while a body stall fails.
         progress_store = state / "progress-store"
         host = start_host(
             progress_store,
@@ -5453,7 +5224,6 @@ def main(mode="all", correlation_case="all"):
         assert stalled["binding"]["attempt"] == "1", stalled
         stop_host(host)
         processes.remove(host)
-        # The interrupted body keeps its one received byte, never called complete.
         (stalled_record, stalled_body), = failed_response_records(stall_store)
         assert stalled_body == b"x", stalled_body
         assert (stalled_record["status"], stalled_record["transfer"], stalled_record["truncated"]) == ("partial", "interrupted", False), stalled_record
@@ -5467,8 +5237,6 @@ def main(mode="all", correlation_case="all"):
             ).fetchall()
         assert retry == [(1, 0, None, "provider_transport_failure", 1)], retry
 
-        # Discarding large bodies must preserve HTTP classification. Retryable
-        # evidence releases physical custody and saves the next eligible retry.
         for path in ("/large-422", "/large-429", "/429", "/503", "/disconnect"):
             case_state = state / (path[1:] + "-records")
             case_state.mkdir(mode=0o700)
@@ -5505,7 +5273,6 @@ def main(mode="all", correlation_case="all"):
             with sqlite3.connect(transient_store / "rui.sqlite3") as database:
                 (operation_id,), = database.execute("SELECT operation_id FROM model_operation").fetchall()
             if path == "/disconnect":
-                # No response byte arrived, so nothing is retained.
                 assert failed_response_records(transient_store) == []
             else:
                 status = int(path.rsplit("-", 1)[-1].lstrip("/"))
@@ -5539,8 +5306,6 @@ def main(mode="all", correlation_case="all"):
             stop_host(host)
             processes.remove(host)
 
-        # A canonical read fault published before launch fences the Store
-        # and prevents the synchronized dispatch handoff.
         endpoint.requests.clear()
         endpoint.release.clear()
         race_store = state / "fence-race-store"
@@ -5550,9 +5315,6 @@ def main(mode="all", correlation_case="all"):
         other_session = configure(state, race_store, "race-other-config", None, "gpt-6-sol")
         stop_host(host)
         processes.remove(host)
-        # The Host holds its Store exclusively, so damage another Session
-        # while it is stopped: admitting and preparing the race Session never read
-        # it, and the inspection below reads it inside the launch delay.
         database = sqlite3.connect(race_store / "rui.sqlite3")
         original_instructions = database.execute(
             "SELECT instructions_content_id FROM session WHERE session_ref=?", (other_session,)
@@ -5599,9 +5361,6 @@ def main(mode="all", correlation_case="all"):
         stop_host(repaired)
         processes.remove(repaired)
 
-        # The first report uses request number zero. If immediate unlink fails,
-        # the Host stops instead of accumulating ownerless names; startup owns
-        # the recognizable empty file and either removes it or refuses service.
         report_unlink_store = state / "report-unlink-store"
         report_setup_host = start_host(report_unlink_store, None)
         processes.append(report_setup_host)
@@ -5662,9 +5421,6 @@ def main(mode="all", correlation_case="all"):
         stop_host(report_cleanup_host)
         processes.remove(report_cleanup_host)
 
-        # Response and validation-metadata unlink failures retain one named
-        # file under custody and fence dispatch. A second failed cleanup leaves
-        # it owned for the next startup, which removes only recognized names.
         unlink_effect = state / "unlink-fault-must-not-launch"
         unlink_calls = classification_population("unlink", unlink_effect)
         unlink_output = sse_tool_calls(
@@ -5740,10 +5496,6 @@ def main(mode="all", correlation_case="all"):
         assert not unlink_effect.exists()
         stop_endpoint(unlink_endpoint, endpoints)
 
-        # If initial unlink fails, the live owner keeps both descriptors and
-        # named scratch while fencing later dispatch. No bytes have yet been
-        # emitted, so logical scratch charge remains zero. A fresh owner removes
-        # the identifiable leftover before serving.
         unlink_store = state / "unlink-store"
         host = start_host(unlink_store, url, "--fault", "request-unlink")
         processes.append(host)

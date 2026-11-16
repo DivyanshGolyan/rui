@@ -145,7 +145,6 @@ test("model updates serialize without changing omitted settings", async () => {
 	assert.equal(calls, 1);
 });
 
-// Compile-time API contract checks; these declarations never send requests.
 function sessionTypeContract(spec: SessionSpec): void {
 	const { effort: _effort, ...withoutEffort } = spec;
 	// @ts-expect-error creation must specify reasoning, even when explicitly null

@@ -96,8 +96,6 @@ func toolRequest(t *testing.T, client *http.Client, url, session string, input .
 	return items
 }
 
-// A coordinator gets one send per worker plus its own workload; a failed
-// call output must count as failed, never as completed work.
 func TestToolTurnCountsDispatchAndWorkloadSeparately(t *testing.T) {
 	directory := t.TempDir()
 	ids := []string{"k7m2qx", "123abc", "456def"}
@@ -151,8 +149,6 @@ func TestToolTurnCountsDispatchAndWorkloadSeparately(t *testing.T) {
 	}
 }
 
-// Only exactly one output per issued call, each with ordered markers and no
-// end marker, counts.
 func TestToolOutputsRequireExactIssuedCalls(t *testing.T) {
 	issued := []toolCall{{ID: "tool-000-dispatch-001", Kind: "dispatch"}, {ID: "tool-000-workload", Kind: "workload"}}
 	output := func(id, text string) json.RawMessage {
@@ -191,8 +187,6 @@ func TestToolOutputsRequireExactIssuedCalls(t *testing.T) {
 	}
 }
 
-// A barrier read that times out must fail the call without running the
-// workload; only a released line lets it run.
 func TestBarrierTimeoutFailsWithoutWorkload(t *testing.T) {
 	directory := t.TempDir()
 	if err := syscall.Mkfifo(directory+"/release", 0o600); err != nil {
@@ -221,9 +215,6 @@ func TestTimedCommandKeepsFailureStatus(t *testing.T) {
 	}
 }
 
-// The workload is the shell's final simple command, so `bash -c` (5.1 and
-// later) execs it in place, with and without the barrier prefix: `cat
-// /proc/self/stat` then reports this test as its parent, not a Bash shell.
 func TestWorkloadIsExecutedInPlaceByBash(t *testing.T) {
 	for _, barrier := range []bool{false, true} {
 		directory := t.TempDir()
@@ -251,7 +242,6 @@ func TestWorkloadIsExecutedInPlaceByBash(t *testing.T) {
 	}
 }
 
-// A parked workload neither runs nor exits before release, then runs once.
 func TestBarrierHoldsWorkloadUntilRelease(t *testing.T) {
 	directory := t.TempDir()
 	if err := syscall.Mkfifo(directory+"/release", 0o600); err != nil {
@@ -261,8 +251,6 @@ func TestBarrierHoldsWorkloadUntilRelease(t *testing.T) {
 	if err := os.WriteFile(config.ReadFile, []byte("payload"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// File-backed stdout: the test reads it while the shell may write, so it
-	// must not share an unsynchronized buffer with os/exec's copier.
 	stdout, err := os.Create(directory + "/stdout")
 	if err != nil {
 		t.Fatal(err)

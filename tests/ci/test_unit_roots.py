@@ -1,4 +1,3 @@
-"""Fast contracts for partitioned unit execution (no Zig compilation)."""
 import importlib.util
 import os
 from pathlib import Path
@@ -86,7 +85,6 @@ class DeadlineTest(unittest.TestCase):
         self.assertEqual(self.names(), ["native"])
 
     def test_budget_is_shared_and_active_child_is_reaped(self):
-        # Each root individually fits; together they exceed the ONE deadline.
         result = self.run_roots(1.5, [self.root("native", delay=0.9),
                                       self.root("store", delay=0.9), self.root("must not run")])
         self.assertEqual(result.returncode, 124, result.stderr)
@@ -149,7 +147,6 @@ class BuildWiringTest(unittest.TestCase):
         self.assertIn(".root_source_file = b.path(definition.source)", build)
         self.assertIn(".filters = if (definition.filtered_only) test_filters else unit_filters[@backingInt(partition)]", build)
         self.assertIn(".mode = .server } else filtered_runner", build)
-        # test, test-full and test-logic refuse a filter that leaves no named test.
         self.assertEqual(build.count(".test_runner = filtered_runner"), 2)
         self.assertIn('generate.addArg("--filtered")', build)
 

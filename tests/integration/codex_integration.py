@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Public-caller managed-route journey with only fixed, synthetic credentials."""
 
 import json
 import fcntl
@@ -101,7 +100,6 @@ def run():
     diagnostics = None
     complete = False
     try:
-        # Missing and uncertain credentials must never reach model transport.
         credentials(credential_file, state="refresh_pending")
         host = start(store, url)
         head, listed_body = raw_request(host.rui_ready_fields["socket"], "/v1/model-list", json.dumps({
@@ -127,8 +125,6 @@ def run():
         fixture.stop_host(host)
         host = None
 
-        # The fixture flag must reach credential selection: a real-looking
-        # credential is refused before any request to the fixture endpoint.
         credentials(credential_file, access="e30.eyJleHAiOjQxMDI0NDQ4MDB9.b3RoZXI")
         host = start(store, url)
         fixture.message(state, store, "other-credential", session, "reject another credential")
@@ -153,8 +149,6 @@ def run():
         assert configured["answer"]["status"] == "accepted", configured
         bash.allow(state, store, "allow", session, action["action"])
         fixture.wait_for(lambda: fixture.completed_observation(store, "message"), "managed answer")
-        # The 12-byte tool stdout is optionally retained; custody, not the
-        # retained full output, must be released before the crash cut.
         fixture.wait_for(lambda: bash.execution_custody_idle(store, session), "owned cleanup")
         assert fixture.read_result(store, "message") == b"managed answer"
         assert proof.read_text() == "once\n"
@@ -165,8 +159,6 @@ def run():
         assert ACCESS not in public_report
         assert len(endpoint.requests) == 2
         continuation = json.loads(endpoint.requests[1])
-        # openai-responses/2 keeps the starting effort on top, so the prefix
-        # stays cached, and writes the change into the input once.
         assert continuation["reasoning"] == {"effort": start_effort("gpt-6-sol")}, continuation
         assert [item for item in continuation["input"] if item.get("type") == "configuration_update"] == [
             {"type": "configuration_update", "reasoning": {"effort": "high"}}
@@ -177,7 +169,6 @@ def run():
         assert continuation["instructions"] == fixture.model_instructions(fixture.ROOT, "Use the approved tool result.", store=store, session=session, model="gpt-6-sol")
 
         fixture.stop_host(host)
-        # The Host holds its Store exclusively; inspect private rows between Hosts.
         assert bash.rows(store, "SELECT private FROM content WHERE instr(payload, ?) > 0", (b"synthetic-private-reasoning",)) == [(1,)]
         assert not bash.rows(store, "SELECT private FROM content WHERE instr(payload, ?) > 0", (ACCESS.encode(),))
         host = start(store, url)
@@ -186,8 +177,6 @@ def run():
         assert len(endpoint.requests) == 2 and proof.read_text() == "once\n"
         settings = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
         assert settings["reasoning_effort"] == settings["reasoning_effort_override"] == "high", settings
-        # Keep the atomic unsupported-effort guard on a model that does not
-        # list `none`; changing this Session's immutable model is not that guard.
         guard = fixture.command(
             "session", "configure", "--store", store, "--record", state / "effort-guard.json",
             "--key", "effort-guard", "--workspace", fixture.ROOT,
@@ -207,7 +196,6 @@ def run():
             assert rejected["answer"]["code"] == "unsupported_reasoning_effort", rejected
             unchanged = fixture.command("session", "inspect", "--store", store, "--session", guard_session)["session"]
             assert unchanged == guard_settings and len(endpoint.requests) == 2, unchanged
-        # `none` is a literal listed effort on this model, not a reset.
         configured = fixture.command(
             "session", "configure", "--store", store, "--session", session,
             "--record", state / "effort-none.json", "--key", "effort-none",
@@ -233,9 +221,6 @@ def run():
         later = json.loads(endpoint.requests[2])
         assert later["reasoning"] == {"effort": start_effort("gpt-6-sol")}, later
         assert any(item.get("type") == "function_call_output" and item["call_id"] == "managed-call" for item in later["input"])
-        # Another owner commits a newer credential generation while this
-        # Attempt is in flight: the rejected lease is not refreshed and the
-        # Operation fails as before, with no replacement request.
         rejected_release = threading.Event()
         with endpoint.lock:
             endpoint.responses.append((fixture.ResponseSpec(b"authentication rejected", {"X-Request-Id": "newer-ready"}, 401), rejected_release))
@@ -265,8 +250,6 @@ def run():
         assert not any(row["rui_test_phase"] == "codex_transfer" for row in diagnostics.records), "ordinary Host emitted test-only transfer observations"
         diagnostics = None
 
-        # Block the worker on the same stable file lock used by login while
-        # a public stop is accepted. Releasing it must not revive dispatch.
         stop_store = state / "stop-store"
         host = start(stop_store, url, "--test-phase-trace")
         diagnostics = HostDiagnostics(host)
@@ -293,8 +276,6 @@ def run():
         fixture.stop_host(host)
         host = None
 
-        # The credential is already selected and the transfer prepared. A
-        # committed stop before the final handoff must still suppress POST.
         host = start(stop_store, url, "--test-phase-trace", "--test-before-launch-delay-ms", "1500")
         diagnostics = HostDiagnostics(host)
         configured = fixture.command(
@@ -306,9 +287,6 @@ def run():
         handoff_session = configured["answer"]["session"]
         fixture.message(state, stop_store, "handoff-message", handoff_session, "do not launch")
         diagnostics.wait("prepared_before_handoff", timeout=10)
-        # Header construction borrows the worker's lease; its stable lock
-        # must remain owned through the final launch decision, even if a stop
-        # wins that handoff. A copied/early-released owner would allow this.
         with open(credential_dir / ".codex.json.lock", "r+b") as lock:
             assert not lock_available(lock), "authenticated handoff released its credential lease early"
         stopped = fixture.command(
@@ -342,9 +320,6 @@ def run():
         fixture.stop_host(host)
         host = start(stop_store, url)
         diagnostics = None
-        # Catalog defaults, exercised through real managed POSTs and public
-        # effective settings; the expected values come from the catalog and
-        # product defaults, so a catalog refresh needs no edit here.
         expected_agent = expected_user_agent()
         mismatches = []
         for index, model in enumerate(("gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-astra",
@@ -388,8 +363,6 @@ def run():
                 mismatches.append((model, "User-Agent", endpoint.user_agents[4 + index], expected_agent))
         assert len(endpoint.requests) == 13, endpoint.requests
         assert not mismatches, mismatches
-        # D229: every grammar effort reaches an unlisted model unchanged.
-        # A provider refusal stays final; Rui must not retry with another effort.
         for index, effort in enumerate(("none", "low", "medium", "high", "xhigh", "max")):
             key = f"unlisted-effort-{effort}"
             response = (fixture.ResponseSpec(b'{"error":{"message":"unsupported effort"}}', {}, 400)
@@ -442,7 +415,6 @@ def run():
 
 
 def turn_state_proposal(command, state):
-    # Private reasoning text is saved evidence; replay must omit it.
     reasoning = {"type": "reasoning", "id": "turn-reasoning", "summary": [{"type": "summary_text", "text": "visible"}],
                  "content": [{"type": "reasoning_text", "text": "private-reasoning-text"}],
                  "encrypted_content": "turn-private-continuation"}
@@ -464,8 +436,6 @@ def turn_state_answer(key, state):
 
 
 def turn_state_journey():
-    """Codex sticky routing: one captured value per Turn, replayed on its
-    retries and continuations, never sent to another Turn or a fresh Host."""
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-codex-turn.")).resolve()
     credential_dir = state / "private"
     credential_dir.mkdir(mode=0o700)
@@ -473,15 +443,11 @@ def turn_state_journey():
     os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(credential_file)
     credentials(credential_file)
     endpoint = fixture.SuccessEndpoint([
-        # Turn A: an error answer's value is not routing state; the retry
-        # starts the Turn and the first successful value is kept.
         fixture.ResponseSpec(b"temporary", {"x-codex-turn-state": "error-state"}, 503),
         turn_state_proposal("printf a-witness", "sticky-a"),
         fixture.ResponseSpec(b"temporary", {"x-codex-turn-state": "error-later"}, 503),
         turn_state_answer("turn-a-answer", "sticky-a-replaced"),
-        # Turn B in the same Session starts without Turn A's value.
         turn_state_answer("turn-b-answer", "sticky-b"),
-        # Turn C's value dies with its Host; its continuation starts fresh.
         turn_state_proposal("printf c-witness", "sticky-c"),
         turn_state_answer("turn-c-answer", None),
     ])
@@ -526,7 +492,6 @@ def turn_state_journey():
         action = fixture.wait_for(lambda: bash.action_for(store, other), "turn C proposal")
         fixture.stop_host(host)
         host = None
-        # Turn state is process memory: no Store row ever holds it.
         assert not bash.rows(store, "SELECT 1 FROM content WHERE instr(payload, ?) > 0", (b"sticky-",))
         assert bash.rows(store, "SELECT private FROM content WHERE instr(payload, ?) > 0", (b"private-reasoning-text",)), "saved reasoning text evidence lost"
         host = start(store, url, "--test-retry-waits-ms", "1,1,1")
@@ -554,9 +519,6 @@ def turn_state_journey():
 
 
 def forced_refresh_journey():
-    """A managed model 401 claims its Operation's one forced refresh at the
-    rejected lease's unchanged generation and makes one replacement Attempt.
-    A second 401 and a refresh that requires login fail without resend."""
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-codex-refresh.")).resolve()
     credential_dir = state / "private"
     credential_dir.mkdir(mode=0o700)
@@ -588,7 +550,6 @@ def forced_refresh_journey():
         assert configured["answer"]["status"] == "accepted", configured
         session = configured["answer"]["session"]
 
-        # One stale-token 401: one forced refresh, one replacement Attempt.
         fixture.message(state, store, "stale", session, "refresh a stale token")
         answered = fixture.wait_for(lambda: fixture.completed_observation(store, "stale"), "answer after forced refresh")
         assert answered["binding"]["attempt"] == "2", answered
@@ -597,8 +558,6 @@ def forced_refresh_journey():
         assert endpoint.requests[0] == endpoint.requests[1], "replacement changed the model request"
         assert credential_facts(credential_file) == ("2", "ready")
 
-        # The refreshed credential is rejected again: the Operation has spent
-        # its refresh, so it fails with the provider's answer and no resend.
         fixture.message(state, store, "rejected-twice", session, "reject twice")
         failure = fixture.wait_for(
             lambda: (value := fixture.observe(store, "rejected-twice")).get("result", {}).get("code") and value,
@@ -609,8 +568,6 @@ def forced_refresh_journey():
         assert len(endpoint.requests) == 4, "a second 401 refreshed or resent again"
         assert credential_facts(credential_file) == ("3", "ready"), "one Operation refreshed more than once"
 
-        # A refresh that requires login fails as authentication, distinct
-        # from the provider's 401, and sends no replacement.
         pending_release = threading.Event()
         with endpoint.lock:
             endpoint.responses.append((fixture.ResponseSpec(b"stale token", {}, 401), pending_release))
@@ -627,9 +584,6 @@ def forced_refresh_journey():
         assert len(endpoint.requests) == 5, "a login-required refresh resent a model request"
         assert credential_facts(credential_file) == ("3", "refresh_pending")
 
-        # A different owner advances the generation and then leaves it
-        # pending. Preserve this Attempt's answered 401 and correlation,
-        # rather than replacing them with that owner's login failure.
         with open(credential_dir / ".codex.json.lock", "r+b") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             credentials(credential_file, generation=4)
@@ -676,9 +630,6 @@ def forced_refresh_journey():
 
 
 def openai_journey():
-    """One Host serves ChatGPT by device code and an OpenAI API key side by side. The key goes
-    out as a bearer with no ChatGPT account, the body matches a Codex
-    Session's, a 401 is final, and a Host never starts openai without a key."""
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-openai.")).resolve()
     private = state / "private"
     private.mkdir(mode=0o700)
@@ -702,20 +653,17 @@ def openai_journey():
     host = None
     complete = False
     try:
-        # No key: the Host refuses to start rather than serve openai unready.
         for serve in (["--test-openai-fixture-endpoint", url], ["--set", 'providers={"openai":{}}']):
             refused = subprocess.run([fixture.RUI, "host", "serve", "--store", store, *serve],
                                      capture_output=True, text=True, timeout=15)
             assert refused.returncode != 0 and "no OpenAI API key" in refused.stderr, refused
             assert not refused.stdout.startswith("ready "), refused.stdout
-        # The real endpoint takes the key only from an owner-only file.
         key_file.write_text(OPENAI_KEY + "\n")
         key_file.chmod(0o644)
         refused = subprocess.run([fixture.RUI, "host", "serve", "--store", store, "--test-openai-fixture-endpoint", url],
                                  capture_output=True, text=True, timeout=15)
         assert refused.returncode != 0, refused
         key_file.chmod(0o600)
-        # A base URL must be https, and names the only place the key goes.
         refused = subprocess.run([fixture.RUI, "host", "serve", "--store", store, "--set", 'providers={"openai":{}}'],
                                  capture_output=True, text=True, timeout=15,
                                  env={**os.environ, "RUI_OPENAI_BASE_URL": "http://api.openai.com/v1"})
@@ -742,7 +690,6 @@ def openai_journey():
             assert fixture.read_result(store, f"same-{provider}") == b"same answer"
         assert len(endpoint.requests) == 2
         codex_body, openai_body = (json.loads(body) for body in endpoint.requests)
-        # The only difference is each Session's own reference in its context.
         codex_instructions = codex_body.pop("instructions").replace(sessions["codex"], "SESSION")
         assert codex_instructions == openai_body.pop("instructions").replace(sessions["openai"], "SESSION")
         assert codex_body == openai_body, (codex_body, openai_body)
@@ -752,17 +699,14 @@ def openai_journey():
         assert re.fullmatch(r"[0-9a-f]{32}", affinity) and affinity != codex_affinity
         assert endpoint.user_agents[1] == expected_user_agent()
 
-        # A rejected key is final: no refresh, no resend, the key untouched.
         fixture.message(state, store, "rejected", sessions["openai"], "rejected")
         failure = fixture.wait_for(
             lambda: (value := fixture.observe(store, "rejected")).get("result", {}).get("code") and value,
             "API key rejection",
         )
         assert failure["result"]["code"] == "provider_api_key_rejected", failure
-        # A resend would come before the Operation settles, so none came.
         assert len(endpoint.requests) == 3, "a rejected API key was resent"
         assert key_file.read_text() == OPENAI_KEY + "\n"
-        # The Host holds its Store exclusively; inspect rows after it stops.
         fixture.stop_host(host)
         host = None
         assert not bash.rows(store, "SELECT 1 FROM content WHERE instr(payload, ?) > 0", (OPENAI_KEY.encode(),))

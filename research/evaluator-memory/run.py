@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Bounded, serial, offline-after-dependency-download QuickJS decoding probe."""
 import argparse, ctypes, fcntl, hashlib, json, os, pathlib, platform, resource, struct, subprocess, tempfile, time, tracemalloc, urllib.request
 HERE=pathlib.Path(__file__).resolve().parent
 PIN='1ab8676f4b6d6d669baeb5f21790fb9734636a20'
@@ -19,7 +18,6 @@ def script(mode,n,results=32):
     return '(async()=>{'+body.replace('SELECTED',str(min(31,results-1)))+'return 1;})()'
 
 def prepare(path,total,count,results,width=1,corrupt=None):
-    # Full integrity check precedes read-only handoff. No payload-sized parent object.
     tracemalloc.start();before=tracemalloc.get_traced_memory()[0]
     h=hashlib.sha256();written=0
     with path.open('wb',buffering=0) as f:

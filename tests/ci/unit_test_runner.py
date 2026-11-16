@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-"""Adapt the installed Zig runner, rather than maintaining a fork of its protocol."""
 from pathlib import Path
 import sys
 
 
 def generate(source):
-    # Compiler filters reduce sema/codegen but always include anonymous discovery
-    # tests, and match substrings rather than prefixes. Give the runner the exact
-    # owned subset, including those discovery tests, in BOTH CLI and server mode.
     needle = "builtin.test_functions"
     if needle not in source:
         raise ValueError("Zig's test runner changed: review unit root ownership")
@@ -33,8 +29,6 @@ fn unitTests() []const std.builtin.TestFn {
 
 
 def generate_filtered(source):
-    # A -Dtest-filter that names no test still compiles the anonymous discovery
-    # tests, so the run passes having checked nothing. Refuse that run.
     needle = "builtin.test_functions"
     if needle not in source:
         raise ValueError("Zig's test runner changed: review filtered test runs")

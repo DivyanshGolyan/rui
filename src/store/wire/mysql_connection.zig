@@ -1,24 +1,3 @@
-//! A blocking connection to MySQL: the socket, TLS and deadlines around
-//! the sans-I/O client in `mysql.zig`. The thread that calls it does the
-//! I/O and waits on it; it starts no thread.
-//!
-//! Memory is fixed when the connection is made: a 16 KiB receive buffer, a
-//! send buffer that holds one 4 MiB batch, the client's 2 KiB handshake
-//! buffer, and two TLS record buffers. Nothing grows with a row or a
-//! statement: rows stream from the receive buffer (an event's slices stay
-//! valid until the next call), and a statement longer than a batch streams
-//! through the send buffer behind a header that states its length.
-//!
-//! Every wait on the socket ends after `deadline_ms` without progress, so a
-//! peer that stops answering cannot hold the caller longer. That, the end
-//! of the stream, a reset, a TLS failure and every client error lose the
-//! connection: each later call returns `error.ConnectionLost`, and its
-//! owner closes it.
-//!
-//! Every COM_QUERY starts with the owner's session settings
-//! (`useSettings`), whose results `next` consumes: a message never relies
-//! on what an earlier one set, so a proxy may send each on a different
-//! server connection.
 const std = @import("std");
 const tls_client = @import("tls_client");
 pub const mysql = @import("mysql.zig");
@@ -29,58 +8,38 @@ pub const tls = @import("tls.zig");
 /// error rather than a lost connection.
 pub const round_deadline_ms: u32 = 60_000;
 
-/// The statement text one COM_QUERY batch holds at most: room for a
-/// step's writes and its content chunks in one round trip. A server whose
-/// `max_allowed_packet` is smaller lowers it (`limitBatch`).
 pub const batch_bytes = 4 * 1024 * 1024;
 
 const prefix_len = 5;
 
 pub const Address = union(enum) {
-    /// A Unix socket's path.
     unix_socket: []const u8,
-    /// TCP under TLS. `host`, a DNS name or an IP literal, is checked
-    /// against the server's certificate.
     tcp_tls: struct { host: []const u8, port: u16, trust: tls.Trust },
-    /// Plaintext TCP, for tests: the client never sends a password over it,
-    /// so only a login the server's cache already holds succeeds.
     tcp: struct { host: []const u8, port: u16 },
 };
 
-/// Borrowed until `open` returns.
 pub const Options = struct {
     address: Address,
     user: []const u8,
     password: []const u8,
-    /// Launch-owned credentials, erased immediately after login (or failure).
-    /// Other callers retain ownership and leave this null.
     password_to_wipe: ?[]u8 = null,
     database: []const u8,
     deadline_ms: u32 = round_deadline_ms,
 };
 
 pub const Error = error{
-    /// The end of the stream, a reset, a failed send or receive, or TLS
-    /// failing after its handshake. Also every call after any error.
     ConnectionLost,
-    /// No byte moved within `deadline_ms`.
     DeadlineExceeded,
-    /// The server's certificate failed verification.
     UntrustedPeer,
     TlsFailed,
 } || mysql.Error;
 
 pub const OpenError = Error || mysql.OptionsError || tls.ContextError || error{
-    /// The server refused the login; its error went to `refusal`.
     LoginRefused,
-    /// The server refused the connection before login, or failed the handshake
-    /// for a reason other than credentials or access rules.
     ServerRefused,
-    /// No address of the host took the connection.
     ConnectFailed,
     HostNotFound,
     InvalidHost,
-    /// Descriptors or memory ran out.
     SystemResources,
 };
 
@@ -89,43 +48,27 @@ pub const Connection = struct {
     deadline_ms: u32,
     client: mysql.Client,
     lost: bool,
-    /// A handshake response went out: server errors can now concern login.
     login_sent: bool,
-    /// The cause of the last `error.WriteFailed` from `writer`.
     write_error: ?Error,
-    /// COM_QUERY packets sent, for tests that count round trips.
     queries: u64,
     inbox: [mysql.receive_buffer_min]u8,
     in_start: usize,
     in_end: usize,
     handshake: [mysql.send_buffer_min]u8,
-    /// The COM_QUERY prefix, then a batch's text; or the part of a
-    /// streamed statement not yet sent.
     send_buffer: [prefix_len + batch_bytes]u8,
     writer: std.Io.Writer,
-    /// Bytes of a streamed statement still due, the buffered ones included;
-    /// null while a batch fills, which never drains.
     stream_left: ?usize,
-    /// The text a batch may hold: `batch_bytes`, or less for a server
-    /// whose packets are smaller (`limitBatch`), the settings included.
     batch_limit: usize,
-    /// Statements, each ending in `;`, that begin every COM_QUERY.
     settings: []const u8,
-    /// How many statements `settings` holds.
     settings_count: u8,
-    /// Results of the last COM_QUERY's settings not yet consumed.
     settings_due: u8,
     context: ?tls.Context,
     session: ?tls.Session,
-    /// After `.start_tls`: every later byte crosses TLS.
     tls_active: bool,
     cipher_in: [tls.max_record_bytes]u8,
     cipher_len: usize,
     cipher_out: [tls.max_record_bytes]u8,
 
-    /// Connects and logs in. A server error goes to `refusal`
-    /// (`mysql.Event.format`); credential/access refusals return LoginRefused,
-    /// other server errors ServerRefused. On any error the connection is closed.
     pub fn open(self: *Connection, options: Options, refusal: *std.Io.Writer) OpenError!void {
         defer if (options.password_to_wipe) |bytes| std.crypto.secureZero(u8, bytes);
         self.context = null;
@@ -134,16 +77,12 @@ pub const Connection = struct {
         try self.login(options, refusal);
     }
 
-    /// Connects and logs in again after `disconnect`, with the TLS trust
-    /// the last `open` loaded: a reconnect never loads trust, whose
-    /// OpenSSL stack is too deep for a Store caller's thread.
     pub fn reopen(self: *Connection, options: Options, refusal: *std.Io.Writer) OpenError!void {
         std.debug.assert((options.address == .tcp_tls) == (self.context != null));
         try self.login(options, refusal);
     }
 
     fn login(self: *Connection, options: Options, refusal: *std.Io.Writer) OpenError!void {
-        // Full authentication can send the clear password over TLS/a socket.
         defer std.crypto.secureZero(u8, &self.handshake);
         self.fd = -1;
         self.deadline_ms = options.deadline_ms;
@@ -184,14 +123,10 @@ pub const Connection = struct {
         }
         const event = try self.next();
         if (event == .ready) return;
-        // Keep the server code until classification; writing a diagnostic
-        // must not change the outcome. `next` only returns ready/err at login.
         refusal.print("{f}", .{event}) catch {};
         return loginError(event.err.code, self.login_sent);
     }
 
-    /// Sends COM_QUIT when the client is ready, then closes. Nothing is
-    /// reported: the descriptor and the TLS state are released either way.
     pub fn close(self: *Connection) void {
         if (!self.lost and self.client.isReady()) self.transmit(&self.client.quit()) catch {};
         self.disconnect();
@@ -207,8 +142,6 @@ pub const Connection = struct {
         return !self.lost and self.client.isReady();
     }
 
-    /// The next event other than a send, which it performs. Slices in the
-    /// event stay valid until the next call.
     pub fn next(self: *Connection) Error!mysql.Event {
         if (self.lost) return error.ConnectionLost;
         errdefer self.lost = true;
@@ -221,8 +154,6 @@ pub const Connection = struct {
                     self.login_sent = true;
                 },
                 .start_tls => |n| try self.startTls(n),
-                // A setting the server refuses leaves the message's
-                // statements on a session unlike the one they were written for.
                 .ok => if (self.settings_due != 0) {
                     self.settings_due -= 1;
                 } else return event,
@@ -231,14 +162,10 @@ pub const Connection = struct {
         }
     }
 
-    /// Room left for text in the open batch.
     pub fn batchRoom(self: *const Connection) usize {
         return (prefix_len + self.batch_limit) -| @max(self.writer.end, self.headLen());
     }
 
-    /// Makes `settings`, `count` statements each ending in `;`, the start
-    /// of every later COM_QUERY. Borrowed for the connection's life. No
-    /// batch may be open.
     pub fn useSettings(self: *Connection, settings: []const u8, count: u8) void {
         std.debug.assert(self.writer.end == 0 and settings.len < self.batch_limit);
         self.settings = settings;
@@ -249,20 +176,15 @@ pub const Connection = struct {
         return prefix_len + self.settings.len;
     }
 
-    /// Keeps every batch within the server's `max_allowed_packet`, less
-    /// room for the packet's own framing. No batch may be open.
     pub fn limitBatch(self: *Connection, max_allowed_packet: u64) void {
         std.debug.assert(self.writer.end == 0);
         self.batch_limit = @intCast(@min(batch_bytes, max_allowed_packet -| 1024));
     }
 
-    /// Text in the open batch, the settings not included.
     pub fn batchLen(self: *const Connection) usize {
         return self.writer.end -| self.headLen();
     }
 
-    /// The writer of the open batch, opening one if none is. The caller
-    /// writes at most `batchRoom()` bytes: a batch never drains.
     pub fn batch(self: *Connection) *std.Io.Writer {
         std.debug.assert(self.isReady() and self.stream_left == null);
         if (self.writer.end == 0) {
@@ -272,25 +194,18 @@ pub const Connection = struct {
         return &self.writer;
     }
 
-    /// Sends the open batch as one COM_QUERY. Its results arrive through
-    /// `next` until the client is ready again.
     pub fn sendBatch(self: *Connection) Error!void {
         if (self.lost) return error.ConnectionLost;
         errdefer self.lost = true;
         std.debug.assert(self.isReady() and self.stream_left == null and self.batchLen() > 0);
         const end = self.writer.end;
         self.writer.end = 0;
-        // A batch is far below the single-packet limit.
         self.send_buffer[0..prefix_len].* = self.client.query(end - prefix_len) catch unreachable;
         self.queries += 1;
         self.settings_due = self.settings_count;
         try self.transmit(self.send_buffer[0..end]);
     }
 
-    /// Starts a COM_QUERY of `text_len` bytes, which the caller writes to
-    /// the returned writer and ends with `endQuery`. The text streams
-    /// through the send buffer, so it may be longer than a batch. No batch
-    /// may be open.
     pub fn beginQuery(self: *Connection, text_len: usize) (Error || mysql.QueryError)!*std.Io.Writer {
         if (self.lost) return error.ConnectionLost;
         std.debug.assert(self.isReady() and self.writer.end == 0);
@@ -304,9 +219,6 @@ pub const Connection = struct {
         return &self.writer;
     }
 
-    /// Sends what the streamed statement still buffers. When the writer
-    /// failed, returns why. Exactly the stated length must have been
-    /// written.
     pub fn endQuery(self: *Connection) Error!void {
         if (self.write_error) |err| return err;
         if (self.lost) return error.ConnectionLost;
@@ -316,10 +228,8 @@ pub const Connection = struct {
         self.stream_left = null;
     }
 
-    /// Sends `text` as one COM_QUERY.
     pub fn query(self: *Connection, text: []const u8) (Error || mysql.QueryError)!void {
         const w = try self.beginQuery(text.len);
-        // A failed write's cause comes from endQuery.
         w.writeAll(text) catch {};
         try self.endQuery();
     }
@@ -331,8 +241,6 @@ pub const Connection = struct {
             self.lost = true;
             return error.WriteFailed;
         };
-        // The buffer is empty again: take what fits of the first bytes due,
-        // the last slice only when it is repeated at least once.
         for (data, 0..) |bytes, index| {
             if (index == data.len - 1 and splat == 0) break;
             if (bytes.len == 0) continue;
@@ -346,21 +254,16 @@ pub const Connection = struct {
 
     fn flushStream(self: *Connection) Error!void {
         const bytes = self.send_buffer[0..self.writer.end];
-        // A batch never drains, and a statement is no longer than it said.
         std.debug.assert(bytes.len <= self.stream_left.?);
         try self.transmit(bytes);
         self.stream_left.? -= bytes.len;
         self.writer.end = 0;
     }
 
-    /// Releases the descriptor and the TLS session, keeping the trust a
-    /// `reopen` uses. `close` releases everything.
     pub fn disconnect(self: *Connection) void {
         self.lost = true;
         if (self.session) |*session| session.deinit();
         self.session = null;
-        // A failed close leaves nothing to retry: the descriptor is
-        // released either way.
         if (self.fd >= 0) _ = std.c.close(self.fd);
         self.fd = -1;
     }
@@ -374,8 +277,6 @@ pub const Connection = struct {
         try self.connectTo(std.c.AF.UNIX, @ptrCast(&address), @sizeOf(std.c.sockaddr.un));
     }
 
-    /// Resolves `host` with the system resolver, which blocks for its own
-    /// configured time, then tries each address in turn.
     fn connectTcp(self: *Connection, host: []const u8, port: u16) OpenError!void {
         var host_z: [256]u8 = undefined;
         if (host.len == 0 or host.len >= host_z.len or std.mem.indexOfScalar(u8, host, 0) != null) return error.InvalidHost;
@@ -402,7 +303,6 @@ pub const Connection = struct {
         return error.ConnectFailed;
     }
 
-    /// Connects a new non-blocking socket, waiting at most the deadline.
     fn connectTo(self: *Connection, family: c_uint, address: *const std.c.sockaddr, len: std.c.socklen_t) OpenError!void {
         const fd = std.c.socket(family, std.c.SOCK.STREAM, 0);
         if (fd < 0) return error.SystemResources;
@@ -428,8 +328,6 @@ pub const Connection = struct {
         if (std.c.getsockopt(fd, std.c.SOL.SOCKET, std.c.SO.ERROR, @ptrCast(&result), &result_len) != 0 or result != 0) return error.ConnectFailed;
     }
 
-    /// Waits until the socket is ready for `events`, or an error or hangup
-    /// that the following send or receive then reports.
     fn wait(self: *Connection, events: i16) Error!void {
         var fds = [_]std.c.pollfd{.{ .fd = self.fd, .events = events, .revents = 0 }};
         while (true) {
@@ -466,7 +364,6 @@ pub const Connection = struct {
         }
     }
 
-    /// Sends plaintext, through TLS once it started.
     fn transmit(self: *Connection, plain: []const u8) Error!void {
         if (!self.tls_active) return self.sendRaw(plain);
         var rest = plain;
@@ -483,14 +380,12 @@ pub const Connection = struct {
         }
     }
 
-    /// Reads more plaintext behind the unconsumed bytes, moved to the front.
     fn fill(self: *Connection) Error!void {
         if (self.in_start > 0) {
             std.mem.copyForwards(u8, &self.inbox, self.inbox[self.in_start..self.in_end]);
             self.in_end -= self.in_start;
             self.in_start = 0;
         }
-        // The client never needs more than the buffer holds.
         if (self.in_end == self.inbox.len) return error.ProtocolViolation;
         if (!self.tls_active) {
             self.in_end += try self.receiveRaw(self.inbox[self.in_end..]);
@@ -513,13 +408,10 @@ pub const Connection = struct {
     }
 
     fn receiveCipher(self: *Connection) Error!void {
-        // A record fits the buffer whole, so a full buffer is a peer that
-        // breaks TLS.
         if (self.cipher_len == self.cipher_in.len) return error.ConnectionLost;
         self.cipher_len += try self.receiveRaw(self.cipher_in[self.cipher_len..]);
     }
 
-    /// Sends what OpenSSL wrote and drops the ciphertext it read.
     fn settle(self: *Connection, wire: *const tls.Wire) Error!void {
         try self.sendRaw(wire.out[0..wire.out_used]);
         if (wire.in_used == 0) return;
@@ -527,9 +419,7 @@ pub const Connection = struct {
         self.cipher_len -= wire.in_used;
     }
 
-    /// Sends the SSLRequest in plaintext, then completes the handshake.
     fn startTls(self: *Connection, request_len: usize) Error!void {
-        // The server sends nothing between its greeting and our ClientHello.
         if (self.in_start != self.in_end) return error.ProtocolViolation;
         try self.sendRaw(self.handshake[0..request_len]);
         const session = &self.session.?;
@@ -549,8 +439,6 @@ pub const Connection = struct {
     }
 };
 
-/// Server access denials share one classification at authentication and at
-/// Store admission, including table- and column-level privilege failures.
 pub fn accessDenied(code: u16) bool {
     return switch (code) {
         1044, 1045, 1130, 1698, 1142, 1143 => true,
@@ -558,37 +446,25 @@ pub fn accessDenied(code: u16) bool {
     };
 }
 
-/// Classify once, where the connection still has both the server code and
-/// whether it sent credentials. Even an access error instead of a greeting
-/// cannot mean credentials were checked. During auth, 1130 is LoginRefused:
-/// "host is not allowed to connect" is an access rule, unlike 1129's blocked
-/// host (or 1040's capacity limit), which credentials cannot fix.
 fn loginError(code: u16, login_sent: bool) error{ LoginRefused, ServerRefused } {
     if (!login_sent) return error.ServerRefused;
     if (accessDenied(code)) return error.LoginRefused;
     return switch (code) {
-        1251, 1524 => error.LoginRefused, // Unsupported/unloaded auth plugin.
+        1251, 1524 => error.LoginRefused,
         else => error.ServerRefused,
     };
 }
-
-// Tests replay the client's captured exchanges (`mysql.Capture`) through a
-// peer thread on a real socket. The peer checks every byte the connection
-// sends against the capture and records what went wrong before it closes,
-// so joining it after the connection returns cannot change the result.
 
 const Peer = struct {
     listener: std.c.fd_t,
     steps: []const Step,
     thread: std.Thread = undefined,
-    /// What went wrong, read after `join`.
     failure: ?[]const u8 = null,
     failed_step: usize = 0,
 
     const Step = union(enum) {
         send: []const u8,
         expect: []const u8,
-        /// Closes the connection without waiting for the client.
         close,
     };
 
@@ -599,7 +475,6 @@ const Peer = struct {
         return .{ .listener = server.socket.handle, .steps = steps };
     }
 
-    /// A loopback TCP listener; `port` receives its port.
     fn tcp(port: *u16, steps: []const Step) !Peer {
         const server = try (try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0")).listen(std.testing.io, .{});
         port.* = server.socket.address.getPort();
@@ -610,7 +485,6 @@ const Peer = struct {
         self.thread = try std.Thread.spawn(.{}, run, .{self});
     }
 
-    /// Waits for the peer, then reports what it saw go wrong.
     fn join(self: *Peer) !void {
         self.thread.join();
         _ = std.c.close(self.listener);
@@ -625,7 +499,6 @@ const Peer = struct {
     }
 
     fn serve(self: *Peer) ?[]const u8 {
-        // Bounded, so a broken test fails instead of hanging.
         var fds = [_]std.c.pollfd{.{ .fd = self.listener, .events = std.c.POLL.IN, .revents = 0 }};
         if (std.c.poll(&fds, 1, 10_000) != 1) return "no connection arrived";
         const fd = std.c.accept(self.listener, null, null);
@@ -659,14 +532,12 @@ const Peer = struct {
             }
         }
         self.failed_step = self.steps.len;
-        // The client closes next; a byte before that is one the script lacks.
         var extra: [1]u8 = undefined;
         if (std.c.recv(fd, &extra, 1, 0) != 0) return "the client sent more than the capture holds";
         return null;
     }
 };
 
-/// `capture` as a peer's script: the server's chunks sent, the client's expected.
 fn scriptOf(capture: mysql.Capture, steps: []Peer.Step) []const Peer.Step {
     for (capture.chunks, steps[0..capture.chunks.len]) |chunk, *step| step.* = switch (chunk[0]) {
         .server => .{ .send = chunk[1] },
@@ -675,7 +546,6 @@ fn scriptOf(capture: mysql.Capture, steps: []Peer.Step) []const Peer.Step {
     return steps[0..capture.chunks.len];
 }
 
-/// Events as text, one per line, with a value's bytes joined to it.
 const Transcript = struct {
     text: std.Io.Writer.Allocating,
     value_open: bool = false,
@@ -700,13 +570,11 @@ const Transcript = struct {
         try w.print("{f}", .{event});
     }
 
-    /// Every event until the client is ready again.
     fn untilReady(self: *Transcript, connection: *Connection) !void {
         while (!connection.isReady()) try self.add(try connection.next());
     }
 };
 
-/// Logs in as `capture` did, runs each query it recorded, then closes.
 fn replay(capture: mysql.Capture, address: Address, transcript: *Transcript) !void {
     const connection = try std.testing.allocator.create(Connection);
     defer std.testing.allocator.destroy(connection);
@@ -716,7 +584,6 @@ fn replay(capture: mysql.Capture, address: Address, transcript: *Transcript) !vo
     defer connection.close();
     for (capture.chunks) |chunk| {
         const bytes = chunk[1];
-        // A COM_QUERY is the only client packet with sequence id 0 and command 3.
         if (chunk[0] != .client or bytes[3] != 0 or bytes[4] != 3) continue;
         try connection.query(bytes[5..]);
         try transcript.untilReady(connection);
@@ -892,12 +759,10 @@ test "an unsupported auth switch remains an auth method refusal" {
     try std.testing.expectEqual(-1, connection.fd);
 }
 
-/// An OK packet with sequence id `sequence`, `more` results following.
 fn okPacket(sequence: u8, affected: u8, more: bool) [11]u8 {
     return .{ 7, 0, 0, sequence, 0, affected, 0, if (more) 0x0a else 0x02, 0, 0, 0 };
 }
 
-/// The capture's login, as a script's first steps.
 const cached_login = [_]Peer.Step{
     .{ .send = mysql.cached_tcp.chunks[0][1] },
     .{ .expect = mysql.cached_tcp.chunks[1][1] },
@@ -971,7 +836,6 @@ test "no byte within the deadline loses the connection" {
     defer tmp.cleanup();
     var path_buffer: [128]u8 = undefined;
     const path = try tmpSocket(&tmp, &path_buffer);
-    // The peer sends no greeting; it waits for the client to close.
     var peer: Peer = try .unix(path, &.{});
     try peer.start();
     const connection = try std.testing.allocator.create(Connection);
@@ -985,7 +849,6 @@ test "the end of the stream mid-result loses the connection for every later call
     const select = [_]u8{ 9, 0, 0, 0, 3 } ++ "SELECT 1".*;
     const steps = cached_login ++ [_]Peer.Step{
         .{ .expect = &select },
-        // A result set of one column, then nothing.
         .{ .send = &.{ 1, 0, 0, 1, 1 } },
         .close,
     };

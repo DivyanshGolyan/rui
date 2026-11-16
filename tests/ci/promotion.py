@@ -24,7 +24,6 @@ import steps
 
 
 def fetch(base, head):
-    """Make the batch's history local; CI checkouts are shallow."""
     if git("rev-parse", "--is-shallow-repository") == "true":
         git("fetch", "--quiet", "--unshallow", "--no-tags", "origin", head)
     for sha in (base, head):
@@ -33,7 +32,6 @@ def fetch(base, head):
 
 
 def batch(base, head):
-    """The first-parent commits after `base` up to `head`, oldest first."""
     if subprocess.run(["git", "merge-base", "--is-ancestor", base, head]).returncode:
         raise SystemExit(f"{base} is not an ancestor of {head}; the batch has no linear history")
     listed = git("rev-list", "--first-parent", "--reverse", f"{base}..{head}")
@@ -41,11 +39,6 @@ def batch(base, head):
 
 
 def bisect(commits, base, passes):
-    """Locate the first failing commit, given `passes(sha)` for each replay.
-
-    Returns a verdict dictionary: `not-reproduced` when HEAD passes again,
-    `before-batch` when `stable` fails too, else `culprit` with its commit.
-    """
     if not commits:
         return dict(verdict="empty-batch", replays=[])
     replays = []
@@ -95,14 +88,12 @@ def main():
     fetch(args.base, args.head)
     commits = batch(args.base, args.head)
     args.logs.mkdir(parents=True, exist_ok=True)
-    # Replays report only through their log files and the verdict.
     env = {key: value for key, value in os.environ.items() if key != "GITHUB_STEP_SUMMARY"}
     results, lines = [], []
     for index, step in enumerate(failed):
         def passes(sha, step=step, index=index):
             git("checkout", "--quiet", "--force", "--detach", sha)
             name = f"{index}-{sha}"
-            # A fresh output directory per replay, as steps.py gives the original run.
             replay_env = dict(env, STEP_OUTPUT=str(args.logs / f"{name}-output"))
             with open(args.logs / f"{name}.log", "w") as log:
                 code = subprocess.run(step["argv"], stdout=log, stderr=subprocess.STDOUT, env=replay_env).returncode
@@ -118,7 +109,6 @@ def main():
         lines.append(f"Promotion bisect: {step['name']}: {describe(result, args.base, args.head)}")
     verdict = dict(base=args.base, head=args.head, batch=len(commits), steps=results)
     (args.logs / "verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
-    # report_issue.py copies these lines onto each issue it files for the job.
     print("\n".join(lines))
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary, "a") as output:

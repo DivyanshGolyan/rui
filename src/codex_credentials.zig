@@ -11,23 +11,16 @@ pub const max_file_bytes = policy.max_file_bytes;
 pub const State = policy.State;
 pub const Record = policy.Record;
 
-/// Room for one credential operation: the file it reads or encodes, and the
-/// current record an install or refresh reads under the lock. Its owner
-/// keeps it off the stack. Each operation wipes what it wrote.
 pub const Scratch = struct {
     file: [max_file_bytes + 1]u8 = undefined,
     current: Record = undefined,
 };
 
-/// Holds the stable cross-process lock through the model launch decision.
-/// The caller owns the returned record and must release this lease on every path.
 pub const Lease = struct {
     owner: Owner,
     lock: std.Io.File,
     record: Record,
 
-    /// Wipes only the secret bytes the lease read: its storage spans about
-    /// 50 KiB, and a whole-record wipe would keep every page of it resident.
     pub fn release(self: *Lease) void {
         self.record.wipe();
         self.lock.close(io);
@@ -35,8 +28,6 @@ pub const Lease = struct {
     }
 };
 
-/// Initialize the lease in its final owner storage; on failure no lock or
-/// token-bearing record remains with the caller.
 pub fn leaseInto(path: []const u8, destination: *Lease, scratch: *Scratch) !void {
     destination.owner = try Owner.open(path);
     errdefer destination.owner.close();
@@ -58,8 +49,6 @@ pub fn loadInto(path: []const u8, destination: *Record, scratch: *Scratch) !void
     try owner.syncDirectory();
 }
 
-/// Read an atomic snapshot without creating a lock or refreshing. On success
-/// the caller owns destination and must wipe it after its final consumer.
 pub fn readSnapshotInto(path: []const u8, destination: *Record, scratch: *Scratch) !bool {
     var owner = Owner.open(path) catch |err| switch (err) {
         error.FileNotFound => return false,
@@ -73,14 +62,7 @@ pub fn readSnapshotInto(path: []const u8, destination: *Record, scratch: *Scratc
     return true;
 }
 
-/// `expected_generation == null` is an explicit login. It may replace an
-/// existing login and advances its generation. A non-null value is a refresh
-/// compare-and-swap and must preserve the account binding. `record` carries
-/// the admitted generation once it is published; a failed install leaves
-/// `record` as it was.
 pub fn install(path: []const u8, record: *Record, expected_generation: ?u64, scratch: *Scratch) !void {
-    // Refuse an incomplete record before touching the owner directory;
-    // admission checks it again with the current record.
     try policy.validateReplacement(record);
     var owner = try Owner.open(path);
     defer owner.close();
@@ -95,18 +77,12 @@ pub fn install(path: []const u8, record: *Record, expected_generation: ?u64, scr
     };
     defer if (current != null) std.crypto.secureZero(u8, std.mem.asBytes(&scratch.current));
     const admitted = try policy.admitReplacement(current, record, expected_generation);
-    // The encoder reads the generation from the record it publishes.
     const previous = record.generation;
     record.generation = admitted;
     errdefer record.generation = previous;
     try owner.publish(record, &scratch.file);
 }
 
-/// Keep the stable lock from the durable intent through the exchange and save.
-/// Other Hosts wait for the live claimant; after a crash they see the pending
-/// record and require login instead of repeating a possibly consumed token.
-/// The exchange owns its network effects and fills `replacement` with a
-/// complete replacement.
 pub fn exchangeRefresh(path: []const u8, expected_generation: u64, scratch: *Scratch, replacement: *Record, context: anytype, exchange: anytype) !bool {
     var owner = try Owner.open(path);
     defer owner.close();
@@ -130,12 +106,6 @@ pub fn exchangeRefresh(path: []const u8, expected_generation: u64, scratch: *Scr
     return true;
 }
 
-/// Signs the plan record at `path` out under the exclusive lock, so no
-/// refresh rotates the tokens between their revocation and their removal:
-/// `revoke` first acts on the record as it is (it decides what to report and
-/// returns an error only to abandon the sign-out), then the record is
-/// published signed out (`policy.signOut`). Returns false, publishing
-/// nothing, when there is no sign-in to end.
 pub fn signOut(path: []const u8, scratch: *Scratch, context: anytype, revoke: anytype) !bool {
     var owner = try Owner.open(path);
     defer owner.close();
@@ -154,9 +124,6 @@ pub fn signOut(path: []const u8, scratch: *Scratch, context: anytype, revoke: an
     return true;
 }
 
-/// Writes the owner-only file at `path` only when there is none, under the
-/// exclusive lock; true when this call wrote it. A file that exists is never
-/// replaced.
 pub fn createPrivate(path: []const u8, bytes: []const u8, buffer: []u8) !bool {
     var published = false;
     return createPrivateObserved(path, bytes, buffer, &published, null);
@@ -164,7 +131,6 @@ pub fn createPrivate(path: []const u8, bytes: []const u8, buffer: []u8) !bool {
 
 pub const PrivateFault = Owner.PublishFault;
 
-/// `published` changes only after this owner renames the new immutable file.
 pub fn createPrivateObserved(path: []const u8, bytes: []const u8, buffer: []u8, published: *bool, fault: ?PrivateFault) !bool {
     var owner = try Owner.open(path);
     defer owner.close();
@@ -181,9 +147,6 @@ pub fn createPrivateObserved(path: []const u8, bytes: []const u8, buffer: []u8, 
     return true;
 }
 
-/// The owner-only file at absolute `path`, whose parent must be a private
-/// directory, read into `buffer`; null when it does not exist. The caller
-/// wipes the returned bytes.
 pub fn readPrivate(path: []const u8, buffer: []u8) !?[]u8 {
     var owner = Owner.open(path) catch |err| switch (err) {
         error.FileNotFound => return null,
@@ -196,8 +159,6 @@ pub fn readPrivate(path: []const u8, buffer: []u8) !?[]u8 {
     };
 }
 
-/// Replaces the owner-only file at `path` with `bytes`, durably and atomically.
-/// The exclusive lock keeps a concurrent publisher off the one temporary file.
 pub fn publishPrivate(path: []const u8, bytes: []const u8) !void {
     var owner = try Owner.open(path);
     defer owner.close();
@@ -206,15 +167,10 @@ pub fn publishPrivate(path: []const u8, bytes: []const u8) !void {
     return owner.publishBytes(bytes, null);
 }
 
-/// Syncs an already admitted private credential directory after removal.
 pub fn syncPrivateDirectory(directory: std.Io.Dir) !void {
     if (std.c.fsync(directory.handle) != 0) return error.DirectorySyncFailed;
 }
 
-/// Holds the same private-file lock from snapshot through publication. The
-/// callback borrows current bytes and returns replacement bytes borrowed until
-/// this call returns. Null inspects without writing. Scratch belongs to caller.
-/// DirectorySyncFailed means rename already happened; retain referenced files.
 pub const PrivatePublication = union(enum) { committed, unconfirmed: anyerror };
 
 pub fn editPrivate(path: []const u8, buffer: []u8, context: anytype, comptime edit: anytype, fault: ?PrivateFault) !PrivatePublication {
@@ -289,7 +245,6 @@ const Owner = struct {
                     .lock = kind,
                     .permissions = .fromMode(0o600),
                 }) catch |create_err| switch (create_err) {
-                    // Another process won creation; open and lock its stable inode.
                     error.PathAlreadyExists => continue,
                     else => return create_err,
                 },
@@ -307,10 +262,7 @@ const Owner = struct {
         try policy.parseInto(bytes, destination);
     }
 
-    /// The whole file, which must be shorter than `buffer`. The caller wipes
-    /// the bytes it returns; on error nothing read stays in `buffer`.
     fn readBytes(self: *Owner, buffer: []u8) ![]u8 {
-        // Reject a private FIFO after opening it without waiting for a writer.
         const file: std.Io.File = .{ .handle = try std.posix.openat(self.parent.handle, self.finalName(), .{
             .ACCMODE = .RDONLY,
             .NONBLOCK = true,
@@ -321,7 +273,6 @@ const Owner = struct {
         try validatePrivateFile(file);
         const stat = try file.stat(io);
         if (stat.size >= buffer.len) return error.CredentialFileTooLarge;
-        // The read writes at most this prefix; the rest stays untouched.
         const bytes = buffer[0..@intCast(stat.size + 1)];
         errdefer std.crypto.secureZero(u8, bytes);
         const count = try file.readPositionalAll(io, bytes, 0);
@@ -383,7 +334,6 @@ const Owner = struct {
                 .exclusive = true,
                 .permissions = .fromMode(0o600),
             });
-            // Until rename succeeds the temporary name is ours to remove.
             errdefer self.parent.deleteFile(io, temp_name) catch {};
             {
                 defer file.close(io);
@@ -399,10 +349,6 @@ const Owner = struct {
             try self.parent.rename(temp_name, self.parent, self.finalName(), io);
             renamed.* = true;
         }
-        // After rename the new value is visible and committed at file level. If
-        // this fails, callers receive DirectorySyncFailed and must inspect on
-        // restart; blindly repeating a refresh is unsafe because publication is
-        // uncertain across power loss.
         if (fault == .directory_sync) return error.InjectedCredentialDirectorySyncFailure;
         try self.syncDirectory();
     }
@@ -442,7 +388,6 @@ fn testRecord(account: []const u8, generation: u64) !Record {
     return result;
 }
 
-/// Reads the committed record into `scratch.current`, as `loadInto` fills a caller's record.
 fn testLoad(path: []const u8, scratch: *Scratch) !*const Record {
     try loadInto(path, &scratch.current, scratch);
     return &scratch.current;
@@ -498,8 +443,6 @@ test "installed local credential status completes under the exclusive mutation l
         return err;
     };
     test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(2)), &worker.done, test_poll.isSet) catch {};
-    // Record before releasing, then join even on the negative path: a shared
-    // lock regression fails at this boundary rather than hanging the runner.
     const completed_while_locked = worker.done.load(.acquire);
     lock.close(io);
     thread.join();
@@ -514,9 +457,6 @@ test "installed local credential status completes under the exclusive mutation l
 test "a rejected refresh replacement leaves the claim pending until login" {
     var built: Record = undefined;
     var scratch: Scratch = undefined;
-    // Both routing directions and the admission rules are value-tested in
-    // codex_credential_policy.zig. This proves the shell publishes the pending
-    // claim before the exchange and nothing after a rejected replacement.
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -600,19 +540,16 @@ test "a sign-out revokes the committed tokens under the lock, then leaves only t
         }
     };
     var seen: Seen = .{};
-    // No file: nothing to end, nothing revoked or written.
     try std.testing.expect(!try signOut(path, &scratch, &seen, Seen.revoke));
     try std.testing.expectEqual(@as(usize, 0), seen.calls);
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "private/chatgpt", .{}));
 
     var record = try testRecord("acct", 0);
     try record.client_id.set("oaiapp_made_up");
-    // A plan record's access token carries its expiry.
     try record.access_token.set("e30.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln");
     record.expires_at = 4_102_444_800;
     try install(path, &record, null, &scratch);
 
-    // A revoke that abandons the sign-out leaves the record as it was.
     try std.testing.expectError(error.FixtureRequiresSyntheticCredential, signOut(path, &scratch, &seen, Seen.abandon));
     try std.testing.expectEqual(State.ready, (try testLoad(path, &scratch)).state);
 
@@ -626,10 +563,8 @@ test "a sign-out revokes the committed tokens under the lock, then leaves only t
     try std.testing.expectEqual(@as(usize, 0), after.refresh_token.len);
     var lease: Lease = undefined;
     try std.testing.expectError(error.SignedOut, leaseInto(path, &lease, &scratch));
-    // Signed out already: nothing more to revoke.
     try std.testing.expect(!try signOut(path, &scratch, &seen, Seen.revoke));
     try std.testing.expectEqual(@as(usize, 1), seen.calls);
-    // A login replaces it and advances the generation.
     try install(path, &record, null, &scratch);
     try std.testing.expectEqual(@as(u64, 3), (try testLoad(path, &scratch)).generation);
 }
@@ -679,7 +614,6 @@ test "unsafe paths and credential aliases fail closed" {
     const path = try testPath(&tmp, "auth", &path_buffer);
     var record = try testRecord("acct", 0);
     try std.testing.expectError(error.PathMustBeAbsolute, install("relative", &record, null, &scratch));
-    // An incomplete record is refused before the owner path is examined.
     record.state = .refresh_pending;
     try std.testing.expectError(error.InstallMustBeReady, install("relative", &record, null, &scratch));
     record.state = .ready;
@@ -721,7 +655,6 @@ test "releasing a lease wipes its secrets and writes nothing past them" {
     const token = &lease.record.refresh_token;
     const read = token.len;
     try std.testing.expectEqualStrings("private-refresh", token.slice());
-    // Stands for pages the lease never wrote; releasing must not touch them.
     @memset(token.bytes[read..], 0x5a);
     lease.release();
     try std.testing.expect(std.mem.allEqual(u8, token.bytes[0..read], 0));
@@ -754,7 +687,6 @@ test "private file, lock, directory, and abandoned temp are validated" {
     try private.symLink(io, "auth", ".auth.tmp", .{});
     try std.testing.expectError(error.SymLinkLoop, install(path, &record, null, &scratch));
     try std.testing.expectEqual(@as(u64, 1), (try testLoad(path, &scratch)).generation);
-    // The caller's record does not claim a generation that was never published.
     try std.testing.expectEqual(@as(u64, 1), record.generation);
     try private.deleteFile(io, ".auth.tmp");
     try private.setPermissions(io, .fromMode(0o755));
@@ -782,8 +714,6 @@ test "each replacement failure leaves only a complete old or new credential" {
         try std.testing.expectError(case[1], owner.publishWithFault(&replacement, case[0], &scratch.file));
         lock.close(io);
         owner.close();
-        // The next publish would clear a leftover, so check that each cut
-        // already removed the secret-bearing temporary name.
         try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "private/.auth.tmp", .{}));
         var observed: Record = undefined;
         try loadInto(path, &observed, &scratch);

@@ -1,4 +1,3 @@
-"""Synthetic token-text/SSE fixture; body offsets are independent of framing chunks."""
 import functools
 
 def delta(index, tokens):
@@ -14,7 +13,6 @@ def dimensions(tokens, events):
 
 @functools.lru_cache(maxsize=16)
 def body(offset, length, tokens, events):
-    # At most 16 chunks of <=16 KiB; never construct a whole response.
     assert length<=16384
     record_len,terminal_len=dimensions(tokens,events)
     total_delta=record_len*events;head=terminal_head(events)

@@ -1,4 +1,3 @@
-"""The weekly true-positive rate counts labelled causes only, by the ISO week each issue closed."""
 from pathlib import Path
 import re
 import unittest
@@ -31,12 +30,11 @@ class WeeksTest(unittest.TestCase):
         self.assertEqual((row["strict"], row["broad"]), (0.25, 0.5))
 
     def test_weeks_are_iso_weeks_of_the_close_in_utc(self):
-        # Sunday 2026-11-08 23:59 UTC is still W45; Monday 00:00 starts W46.
         rows = weeks([
             issue(1, "2026-11-08T23:59:59Z", "real"),
             issue(2, "2026-11-09T00:00:00Z", "stale"),
-            issue(3, "2026-12-31T12:00:00Z", "infra"),  # ISO week 53 of 2026
-            issue(4, None, "real"),  # still open: no week
+            issue(3, "2026-12-31T12:00:00Z", "infra"),
+            issue(4, None, "real"),
         ])
         self.assertEqual([row["week"] for row in rows], ["2026-W45", "2026-W46", "2026-W53"])
         self.assertEqual([row["strict"] for row in rows], [1.0, 0.0, 0.0])

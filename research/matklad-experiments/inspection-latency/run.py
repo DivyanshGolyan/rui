@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Pinned SQLite native inspection scheduling/abort sensitivity, not the Host."""
 import argparse,os,hashlib,json,pathlib,random,re,subprocess,tempfile,tarfile,platform
 ap=argparse.ArgumentParser();ap.add_argument('--bytewise',action='store_true');opts=ap.parse_args()
 H=pathlib.Path(__file__).resolve().parent
@@ -19,7 +18,6 @@ macros=['-D'+k+'='+v for k,v in re.findall(r'addCMacro\("([^"]+)", "([^"]+)"\)',
 binary=O/'probe'
 subprocess.run(['cc','-O2','-c',str(source),*macros,'-o',str(O/'sqlite.o')],check=True)
 subprocess.run(['cc','-O2','-Wall','-Wextra','-Werror','-I'+str(source.parent),str(probe),str(O/'sqlite.o'),'-o',str(binary)],check=True)
-# Width includes escape-heavy strings. Delays emulate scratch service stalls per batch.
 cases=[
  ('small',1000,128,100,0,0,0,1),
  ('medium',10000,128,100,0,0,0,1),
@@ -54,7 +52,6 @@ with tempfile.TemporaryDirectory(prefix='rui-inspection-') as td:
    assert len(lines)==n+2
    for i,row in enumerate(lines[1:-1],1):
     assert row['seq']==i and row['binding']==''.join(['\n','"','\\','b'][j%4] for j in range(w))
-   # A truncated delivery must fail the terminal-frame oracle.
    assert lines[-2].get('end') is not True
    export.unlink()
   assert p.returncode==0,(name,p.stderr)

@@ -2932,6 +2932,13 @@ def paired_frames(out, head, base, new_states=()):
     return result
 
 
+def revision_scenario(sha, sizes):
+    """Read one pinned revision's default recipe, independent of the working tree."""
+    raw = subprocess.check_output(["git", "-C", str(HERE.parents[4]), "show",
+                                   f"{sha}:.claude/skills/verify-rui/scripts/frames.json"], text=True)
+    return validate_scenario(json.loads(raw), sizes)
+
+
 def cmd_frames(args):
     if not getattr(args, "before", None):
         return run_frames(args)
@@ -2941,11 +2948,12 @@ def cmd_frames(args):
     head, base = pinned(args.sha), pinned(args.before)
     for sha in (head, base):
         require_screen(load_build(sha))
-    # A baseline uses its own pinned recipe. Explicit --scenario intentionally
+    # Each comparison side uses its own pinned recipe. Explicit --scenario intentionally
     # supplies one recipe for both builds. Both still share the same runner.
     with tempfile.TemporaryDirectory(prefix="verify-rui-before-") as temporary:
         try:
-            head_scenario = load_scenario(getattr(args, "scenario", None) or HERE.with_name("frames.json"), args.sizes)
+            head_scenario = (load_scenario(args.scenario, args.sizes) if getattr(args, "scenario", None)
+                             else revision_scenario(head, args.sizes))
             states = {state["name"]: state for state in head_scenario["states"]}
             selected = set(args.only.split(",")) if args.only else set(states)
             unknown = selected - states.keys()
@@ -2954,17 +2962,17 @@ def cmd_frames(args):
             if getattr(args, "scenario", None):
                 before_scenario = head_scenario
             else:
-                raw = subprocess.check_output(["git", "-C", str(HERE.parents[4]), "show",
-                                               f"{base}:.claude/skills/verify-rui/scripts/frames.json"], text=True)
-                before_scenario = validate_scenario(json.loads(raw), args.sizes)
+                before_scenario = revision_scenario(base, args.sizes)
             before_names = {state["name"] for state in before_scenario["states"]}
             new_states = selected - before_names
             # Keep BASE's steps and assertions; drive the same requested viewports.
             for state in before_scenario["states"]:
                 if state["name"] in selected:
                     state["sizes"] = states[state["name"]]["sizes"]
-            before_path = pathlib.Path(temporary) / "scenario.json"
+            before_path = pathlib.Path(temporary) / "before.json"
+            after_path = pathlib.Path(temporary) / "after.json"
             before_path.write_text(json.dumps(scenario_snapshot(before_scenario)))
+            after_path.write_text(json.dumps(scenario_snapshot(head_scenario)))
         except (OSError, ValueError, TypeError, subprocess.CalledProcessError) as error:
             die(f"cannot prepare comparison recipes: {error}")
         out = pathlib.Path(args.out).resolve() if args.out else CACHE / "pairs" / f"{time.time_ns()}-{head[:7]}"
@@ -2974,8 +2982,8 @@ def cmd_frames(args):
         failed = False
         for side, sha in (("before", base), ("after", head)):
             child = argparse.Namespace(**{**vars(args), "sha": sha, "out": str(out / side), "before": None})
+            child.scenario = str(before_path if side == "before" else after_path)
             if side == "before":
-                child.scenario = str(before_path)
                 child.only = ",".join(state["name"] for state in before_scenario["states"]
                                       if state["name"] in selected)
                 if not child.only:
@@ -3079,21 +3087,19 @@ def screens_markdown(head, base, rows):
             alt = f"{row['name']} {row['size']} {side}" + (" recording" if ext == "gif" else "")
             attachments[name] = alt
             images.append(f"![{alt}]({quote(name, safe='/@')})")
-        return " ".join(images)
+        return "\n\n".join(images)
     lines = ["## Screens", "", f"Head: `{head}`", f"Base: `{base}`" if base else "Base: none (single build)",
              "Sizes: " + ", ".join(dict.fromkeys(r["size"] for r in rows)), "Surface: plain PTY, L1 synthetic input", ""]
     for name in dict.fromkeys(row["name"] for row in rows):
         lines += [f"### {name}", ""]
-        if base:
-            lines += ["| Size | Before | After |", "| --- | --- | --- |"]
         for row in (row for row in rows if row["name"] == name):
             size = row["size"] + (" (same)" if row["same"] else "")
+            lines += [f"#### {size}", ""]
             if base:
-                before = "New screen" if row.get("new") else images(row["before"], "before", row)
-                lines.append(f"| {size} | {before} | {images(row['after'], 'after', row)} |")
-            else:
-                lines += [size, "", images(row["after"], "after", row), ""]
-        lines.append("")
+                lines += ["Before", ""]
+                lines += ["New screen"] if row.get("new") else images(row["before"], "before", row).splitlines()
+                lines += ["", "After", ""]
+            lines += images(row["after"], "after", row).splitlines() + [""]
     return "\n".join(lines), attachments
 
 
@@ -3120,7 +3126,7 @@ def screens_parts(body):
 
 def verify_attachments(body, attachments, facts):
     _, screens, _ = screens_parts(body)
-    embedded = dict(re.findall(r"!\[([^\]\n]*)\]\(\s*(https://github\.com/user-attachments/[^\s)]+)\s*\)", screens))
+    embedded = dict(re.findall(r"^[ \t]*!\[([^\]\n]*)\]\(\s*(https://github\.com/user-attachments/[^\s)]+)\s*\)[ \t]*$", screens, re.M))
     if not all(alt in embedded for alt in attachments.values()) or not all(fact in screens for fact in facts):
         raise ValueError("PR readback is missing embedded Screens attachments; inspect the body before retrying")
 

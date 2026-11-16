@@ -1,5 +1,3 @@
-"""The h2 model endpoint and Host request helpers that the transport and Codex H2
-fixtures share."""
 import json
 import os_semantics
 import socketserver
@@ -40,35 +38,26 @@ class Endpoint(socketserver.ThreadingTCPServer):
         self.eager_sse = eager_sse
         self.observed_shape = observed_shape
         self.answers = {}
-        # The body a GET of a model list is answered with; None answers 404.
         self.models = None
         self.catalog = None
         self.catalog_etag = '"catalog-v1"'
         self.catalog_release = None
         self.catalog_responses = []
-        # Set: a model list GET waits unanswered until the event is set.
         self.models_release = None
-        # Set: each connection allows this many concurrent streams.
         self.max_streams = None
         self.isolation = isolation
         self.stream_ids = {}
         self.resets = []
         self.offered_bytes = 0
-        # Held: the peer sends each response's head and `held_bytes` of its
-        # body, then withholds the rest until `release` is set.
         self.release = threading.Event() if held else None
         self.held_bytes = 0
-        self.held_prefix_bytes = 0  # Body bytes sent before the hold, all streams.
-        self.held_prefixes = {}  # The same, by request text.
+        self.held_prefix_bytes = 0
+        self.held_prefixes = {}
         self.held = threading.Event()
-        # Flow probe: "quick" is answered at once; "flow" gets its head, then
-        # waits for `flow_release` before its long body and a PING follow.
         self.flow_probe = flow_probe
         self.flow_release = threading.Event()
         self.flow_ping_acked = threading.Event()
         self.flow_body_sent = threading.Event()
-        # Isolation: the sibling's answer, queued when the target resets, is
-        # withheld until `isolation_release` is set.
         self.isolation_release = threading.Event()
         self.ready = threading.Event()
         self.lock = threading.Lock()
@@ -83,8 +72,6 @@ def observed_shape_answer(text):
 
 
 def observed_shape_sse(stream, text):
-    # Mac Codex 0.154.0 HTTP SSE: small deltas, but response lifecycle data
-    # measured 37–39 KiB. Padding is synthetic; no private payload is replayed.
     answer = observed_shape_answer(text)
     response_id = f"response-{stream}"
     body, _, _ = dispatch.sse_answer(response_id, f"reasoning-{stream}", f"message-{stream}", answer)
@@ -161,8 +148,6 @@ class StreamHandler(socketserver.BaseRequestHandler):
             payload = b"" if unchanged else models if models is not None else b"{}"
             status = "304" if unchanged else "200" if models is not None else "404"
             if is_catalog:
-                # Record the selected reply before sending it, independently
-                # of teardown or the Host consuming the body.
                 with self.server.lock:
                     self.server.catalog_responses.append({"headers": headers, "status": status, "etag": etag})
             fields = [(":status", status), ("content-type", "application/json")]
@@ -186,7 +171,7 @@ class StreamHandler(socketserver.BaseRequestHandler):
             except TimeoutError:
                 if not held_bodies and not held_models and not flow_bodies and not isolation_bodies:
                     return
-                data = None  # Polling for release.
+                data = None
             except OSError:
                 return
             if data == b"":
@@ -223,16 +208,14 @@ class StreamHandler(socketserver.BaseRequestHandler):
                             self.server.streams.append((self.client_address, event.stream_id, None, b""))
                     if refuse:
                         conn.reset_stream(event.stream_id, error_code=h2.errors.ErrorCodes.REFUSED_STREAM)
-                        # Reopen upload credit so the replay can send its body.
                         conn.update_settings({h2.settings.SettingCodes.INITIAL_WINDOW_SIZE: 65535})
                         continue
                     if dict(event.headers)[b":method"] == b"GET":
-                        # A listing: it has no body and is not a model request.
                         get_headers[event.stream_id] = dict(event.headers)
                         release = listing_release(event.stream_id)
                         if release is not None and not release.is_set():
                             held_models.append(event.stream_id)
-                            sock.settimeout(0.05)  # Poll for release.
+                            sock.settimeout(0.05)
                         else:
                             answer_models(event.stream_id)
                         continue
@@ -258,10 +241,8 @@ class StreamHandler(socketserver.BaseRequestHandler):
                             if self.server.observed_shape:
                                 answer = observed_shape_answer(text)
                             elif self.server.flow_probe and text == "flow":
-                                # Many times one stream's 16-KiB receive window.
                                 answer = "F" * 256 * 1024
                             elif self.server.after_progress and text == "held-0":
-                                # The interrupt target exceeds the 10-KiB prefix the peer sends.
                                 answer = "L" * 80_000 + text
                             else:
                                 answer = f"answer-{text}" if len(self.server.streams) % 2 else "L" * 8192 + text
@@ -276,8 +257,6 @@ class StreamHandler(socketserver.BaseRequestHandler):
                         conn.reset_stream(event.stream_id, error_code=h2.errors.ErrorCodes.REFUSED_STREAM)
                         continue
                     if self.server.early_protocol_error:
-                        # DATA on stream zero is an H2 connection protocol error,
-                        # after the POST but before any response version is known.
                         sock.sendall(b"\x00\x00\x01\x00\x00\x00\x00\x00\x00x")
                         return
                     if self.server.eager_sse:
@@ -308,8 +287,6 @@ class StreamHandler(socketserver.BaseRequestHandler):
                             conn.send_headers(target, [(":status", "200"), ("content-type", "text/event-stream")])
                             conn.send_headers(sibling, [(":status", "200"), ("content-type", "text/event-stream")])
                             if self.server.isolation == "capture":
-                                # Cross the capture limit within initial H2 credit; the
-                                # target stays open so its abort has an observable reset.
                                 payload, _, _ = dispatch.sse_answer("large", "reasoning-large", "message-large", "L" * 40_000)
                                 outgoing_bodies[target] = payload
                             pending.clear()
@@ -334,7 +311,7 @@ class StreamHandler(socketserver.BaseRequestHandler):
                                 ])
                                 if self.server.flow_probe and text == "flow":
                                     flow_bodies[stream] = payload
-                                    sock.settimeout(0.05)  # Poll for release.
+                                    sock.settimeout(0.05)
                                     continue
                                 if self.server.release is not None and not self.server.release.is_set():
                                     sent = min(self.server.held_bytes, len(payload) - 1)
@@ -371,10 +348,8 @@ class StreamHandler(socketserver.BaseRequestHandler):
                             "sibling", "reasoning-sibling", "message-sibling", "unaffected sibling",
                         )
                         isolation_bodies[self.server.stream_ids["isolation-sibling"]] = payload
-                        sock.settimeout(0.05)  # Poll for release.
+                        sock.settimeout(0.05)
             for stream, body in list(outgoing_bodies.items()):
-                # A single frame per recv can deadlock: no peer event need
-                # arrive while an incomplete response waits in this queue.
                 while body:
                     credit = min(conn.local_flow_control_window(stream), conn.max_outbound_frame_size, len(body))
                     if not credit:
@@ -397,7 +372,6 @@ class StreamHandler(socketserver.BaseRequestHandler):
             if self.server.isolation and not pending and len(self.server.stream_ids) == 2:
                 self.server.ready.set()
             if held_bodies and not outgoing_bodies and not self.server.held.is_set():
-                # Every held prefix is on the wire; poll for release.
                 self.server.held.set()
                 sock.settimeout(0.05)
 
@@ -419,7 +393,6 @@ def closed_host_request(socket_path, store, kind, *, timeout=15, deadline=None, 
         connection.sendall(
             f"POST /v1/{kind.replace('_', '-')} HTTP/1.1\r\n".encode()
             + b"Content-Type: application/json\r\nX-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\n"
-            # A Message carries the sending terminal's environment; these carry none.
             + (b"X-Rui-Environment-Bytes: 0\r\n" if kind == "message" else b"")
             + f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload
         )
@@ -429,8 +402,6 @@ def closed_host_request(socket_path, store, kind, *, timeout=15, deadline=None, 
         assert len(body) == int(headers[b"content-length"]), "truncated Host response"
         expected_type = b"text/plain" if kind == "read_result" else b"application/json"
         assert headers[b"content-type"].strip().startswith(expected_type), head
-        # EOF establishes peer closure, not retirement of reports or other
-        # exchange resources. Idle sampling separately waits for native release.
         set_timeout()
         assert connection.recv(1) == b"", "Host must close after its response"
     result = body if kind == "read_result" else json.loads(body)

@@ -128,5 +128,4 @@ if (( $# >= 2 )); then
 fi
 prepare_dependencies "$repo/build.zig.zon"
 
-# Keep the complete graph authoritative, including translate-c and its parser.
 (cd -- "$repo" && zig build --fetch=all)

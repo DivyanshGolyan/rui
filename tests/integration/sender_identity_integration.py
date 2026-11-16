@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Action sender authority through the installed CLI, exit, stop and restart."""
 import json
 import os
 import pathlib
@@ -89,8 +88,6 @@ def main():
                 env["RUI_STORE"] = str(store)
             if handle is not None:
                 env["RUI_SENDER_HANDLE"] = handle
-            # Incomplete context is a CLI boundary error, never anonymous or
-            # a fallback to HOME. Complete but forged context reaches the Host.
             if not accepted and (sender is None or not handle):
                 record = state / f"{key}.json"
                 refused = subprocess.run([str(installed), "session", "send", "--to", endpoint.receiver,
@@ -137,8 +134,6 @@ def main():
             for index, (sender, supplied) in enumerate(((victim, handle), (session, None),
                                                       (session, ""), (session, "0" * 32), (None, handle))):
                 send(f"invalid-{ending}-{index}", sender, supplied, accepted=False)
-            # Every partial/invalid environment must fail before publishing a
-            # capture, even with a usable HOME Store and known receiver.
             for index, fields in enumerate((
                 {"RUI_STORE": str(store)}, {"RUI_ADDRESS": session},
                 {"RUI_SENDER_HANDLE": handle},
@@ -148,9 +143,6 @@ def main():
                 {"RUI_STORE": str(store), "RUI_ADDRESS": "ABC123", "RUI_SENDER_HANDLE": handle},
                 {"RUI_STORE": str(store), "RUI_ADDRESS": session, "RUI_SENDER_HANDLE": "h" * 33},
             )):
-                # Explicit Store selection, even of another Store, is not
-                # authority to downgrade a malformed peer into an anonymous
-                # human/script send.
                 for selection, options in (("default", ()), ("explicit", ("--store", str(store))),
                                            ("foreign", ("--store", str(state / "foreign-store")))):
                     key = f"partial-{ending}-{index}-{selection}"
@@ -174,8 +166,6 @@ def main():
             else:
                 fixture.crash_host(host, state, "sender-crash")
                 host = None
-                # Retire the disposable held child; the restarted Host must
-                # reject its old authority regardless of its process lifetime.
                 (workspace / f"{session}.release").touch()
                 host, _ = start_ready_process(host_args, env=environment, required_fields={"execution": "enabled"})
             send(f"stale-{ending}", session, handle, accepted=False)

@@ -1,9 +1,5 @@
-//! One option value as `/configure`, `/setup` and a new Session's start
-//! options read it back.
 const std = @import("std");
 
-/// Bare when it reads back as itself, else in double quotes with `"` and `\`
-/// escaped.
 pub fn write(writer: *std.Io.Writer, value: []const u8) std.Io.Writer.Error!void {
     if (value.len != 0 and std.mem.indexOfAny(u8, value, " \"\\") == null) return writer.writeAll(value);
     try writer.writeByte('"');

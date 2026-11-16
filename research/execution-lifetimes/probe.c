@@ -1,5 +1,3 @@
-/* Narrow execution lifetime fixture. No Store, provider grammar or recovery
- * engine. */
 #define _DARWIN_C_SOURCE
 #include <assert.h>
 #include <curl/curl.h>

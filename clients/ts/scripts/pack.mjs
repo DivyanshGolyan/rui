@@ -1,11 +1,3 @@
-// Builds the npm tarballs for one release: the `ruicode` package (compiled to
-// plain JavaScript, since Node does not strip types under node_modules) and
-// one package per platform holding that platform's `rui` executable (D125,
-// D127, D186). Nothing here publishes anything.
-//
-//   node scripts/pack.mjs <version> <outdir> <platform>=<executable> ...
-//
-// <platform> is a release platform: linux-x86_64, linux-arm64 or darwin-arm64.
 import { execFileSync } from "node:child_process";
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,7 +6,6 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-/** Release platform -> npm package, operating system and CPU. */
 export const PLATFORMS = {
 	"linux-x86_64": { name: "ruicode-linux-x64", os: "linux", cpu: "x64" },
 	"linux-arm64": { name: "ruicode-linux-arm64", os: "linux", cpu: "arm64" },
@@ -28,16 +19,12 @@ function writeJson(path, value) {
 	writeFileSync(path, `${JSON.stringify(value, null, "\t")}\n`);
 }
 
-// Release assets keep their rui-* file names (tests/ci/release_publication.py
-// checks every release, old and new, against one list); only the npm package
-// names inside are ruicode*, because npm refused the name `rui`.
 function pack(directory, outdir) {
 	const [{ filename }] = JSON.parse(execFileSync("npm", ["pack", "--json", "--pack-destination", outdir], { cwd: directory, encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] }));
 	if (!filename.startsWith("ruicode")) throw new Error(`unexpected npm pack output ${filename}`);
 	renameSync(join(outdir, filename), join(outdir, `rui${filename.slice("ruicode".length)}`));
 }
 
-/** Writes the directory of one platform package. */
 export function platformPackage(directory, version, platform, executable) {
 	const target = PLATFORMS[platform];
 	if (target === undefined) throw new Error(`unknown platform ${platform}`);
@@ -56,7 +43,6 @@ export function platformPackage(directory, version, platform, executable) {
 	});
 }
 
-/** Writes the directory of the main package, compiled, with every platform package as an optional dependency. */
 export function mainPackage(directory, version) {
 	const source = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 	execFileSync("npx", ["tsc", "-p", "tsconfig.build.json", "--outDir", join(directory, "dist")], { cwd: root, stdio: "inherit" });

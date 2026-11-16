@@ -1,8 +1,6 @@
 const std = @import("std");
 const preferences = @import("preferences");
 
-/// Native adapter for exercising the production preference owner independently
-/// of the separately owned CLI integration. No credential/network effects.
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 3) return error.InvalidArguments;

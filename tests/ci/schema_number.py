@@ -20,13 +20,11 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def advice(branch, base, main):
-    """(ok, message) for a branch at schema `branch` whose merge base has `base` and main has `main`."""
     if branch == base:
         return True, f"This branch keeps the Store format; main is at schema {main}."
     if branch < base:
         return False, f"schema_version {branch} goes back below its base's {base}: restore {base}."
     if main > base:
-        # CI judges the merge base, so a renumbered branch must also rebase.
         renumber = (f"keep schema {branch}" if branch == main + 1 else
                     f"renumber this branch's format from {branch} to {main + 1}: schema_version = {main + 1}, "
                     f"its bootstrap_digests row and its migration step .from = {main}")

@@ -1,9 +1,3 @@
-"""Synthetic request selector. No SQLite import or database access.
-
-Small fixture JSON objects are decoded up to 64 KiB. Large-object JSON
-transformation is deliberately NOT established by this interface experiment.
-The returned request is a test oracle value, not production request storage.
-"""
 import json
 from core import ResourceExceeded, Unavailable
 
@@ -41,8 +35,6 @@ def request(view, rules='normal'):
             output.append(value(view,ref))
             continue
         if rules == 'explicit-reset':
-            # Synthetic policy retains ALL host input, omits prior provider output.
-            # This is not claimed to be a supported Codex continuation mode.
             continue
         for payload in view.model_output(ref, from_anchor=anchored):
             item = value(view,payload)
@@ -52,8 +44,6 @@ def request(view, rules='normal'):
             if rules == 'omit-visible-summary' and item['type'] == 'reasoning':
                 item['summary'] = []
             output.append(item)
-        # Second bounded traversal supplies results in original call order,
-        # rather than completion order or interleaved between output items.
         for payload in view.model_output(ref, from_anchor=anchored):
             item = value(view,payload)
             if item['type'] == 'function_call':

@@ -1,4 +1,3 @@
-//! Integration witnesses for settings' injected, real preset grammar.
 const std = @import("std");
 const hs = @import("../host_settings.zig");
 const core_tools = @import("../core_tools.zig");
@@ -52,7 +51,6 @@ test "Host settings real preset checker accepts specs and retains independent in
     try std.testing.expectEqualStrings("bash", retained.get("tools").?.array.items[0].string);
     const answer = retained.get("outputSchema").?.object.get("properties").?.object.get("answer").?.object;
     try std.testing.expectEqualStrings("string", answer.get("type").?.string);
-    // Exercise the retained representation through its real consumer too.
     var memory: std.heap.ArenaAllocator = .init(gpa);
     defer memory.deinit();
     try std.testing.expectEqual(@as(?[]const u8, null), try checkPreset(memory.allocator(), retained));
@@ -89,7 +87,6 @@ test "Host settings presets replace sets while CLI edits preserve retained sibli
     try std.testing.expectEqual(@as(usize, 2), settings.presets.specs.len);
     try expectModel(settings, "reader", "model-a");
     try expectModel(settings, "writer", "model-b");
-    // Editing one entry serializes borrowed sibling specs before freeing the old arena.
     try hs.assign(settings, gpa, "presets.writer", spec, checkPreset, &failure);
     try expectModel(settings, "reader", "model-a");
     try expectModel(settings, "writer", "model-a");
@@ -129,7 +126,6 @@ test "Host settings real preset collection derives name and count limits" {
         if (i != 0) try output.writer.writeByte(',');
         try output.writer.print("\"entry_{d}\":{s}", .{ i, spec });
         if (i + 1 == preset_value.max_presets) {
-            // The count boundary itself accepts the complete real specs.
             const boundary = try std.fmt.allocPrint(gpa, "{s}}}}}", .{output.written()});
             defer gpa.free(boundary);
             try hs.apply(settings, gpa, boundary, .pipe, checkPreset, &failure);
@@ -154,8 +150,6 @@ fn allocationFailureCase(gpa: std.mem.Allocator) !void {
     try hs.apply(settings, gpa, input, .pipe, checkPreset, &failure);
     try std.testing.expectEqualStrings("mysql://user:PRIVATE_PASSWORD@localhost/database", settings.store.mysql.url.value());
     try std.testing.expectEqualStrings("PRIVATE_MCP_TOKEN", settings.tools.mcp.values[0].bearer_token.value());
-    // Every injected failure after apply must also clean old retained presets,
-    // parsed login storage and fixed secrets, not just the new editing arena.
     try hs.assign(settings, gpa, "presets.writer", changed_spec, checkPreset, &failure);
     try hs.assign(settings, gpa, "presets.reader", changed_spec, checkPreset, &failure);
     try std.testing.expectEqual(@as(usize, 2), settings.presets.specs.len);

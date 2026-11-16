@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 """Opt-in native public-caller qualification; never part of ordinary build gates."""
 
 import argparse
@@ -52,7 +53,6 @@ def wait_for_observation(store, key, predicate, label):
 
 
 def decode_model_evidence(value):
-    """Independent schema-27 oracle; keep absent sources absent."""
     assert isinstance(value, bytes) and 7 <= len(value) <= 775
     assert value[0] == 1, "unsupported model evidence version"
     sources = []
@@ -115,8 +115,6 @@ def run(model, external_credential=None):
     first_observations = []
     later_observations = []
     try:
-        # The device code is shown directly to the operator, never captured in
-        # an artifact or included in the payload-free qualification report.
         if not credential.exists():
             print("Rui-owned device login (requires an enabled account):", flush=True)
             subprocess.run([str(caller.RUI), "auth", "login", "codex"], check=True, timeout=1000)
@@ -150,9 +148,6 @@ def run(model, external_credential=None):
         )
         assert configured["answer"]["status"] == "accepted", "configuration rejected"
         session = configured["answer"]["session"]
-        # The simple Bash proposal may use no reasoning tokens. Establish real
-        # private reasoning first, then require the same Session to replay it
-        # through Bash continuation and a fresh Host.
         caller.message(
             state, store, "reasoning", session,
             "Count monotone lattice paths from (0,0) to (15,15) that avoid both forbidden "
@@ -195,7 +190,7 @@ def run(model, external_credential=None):
         assert [int(record["new_connections"]) for record in first_observations] == [1, 0, 0], "sequential reuse not observed"
         resources = bash.process_resources(host)
 
-        stop()  # committed result, not an interrupted Bash effect; SQLite reads only after exit
+        stop()
         reasoning_counts = [private_reasoning_count(store, record["operation"]) for record in first_observations]
         output_tokens = [output_token_count(store, record["operation"]) for record in first_observations]
         print(f"Pre-restart reasoning: private item counts={reasoning_counts}, output tokens={output_tokens}", flush=True)
@@ -219,7 +214,7 @@ def run(model, external_credential=None):
         assert (workspace / "effect-count").read_bytes() == b"once\n"
         caller.wait_for(lambda: len(later_observations) >= 1, "fresh Host transport observation", timeout=10)
         assert len(later_observations) == 1 and int(later_observations[0]["new_connections"]) == 1
-        stop()  # release the Store owner before inspecting private response shape
+        stop()
         after = evidence(store)
         assert len(after) == 4 and after[:3] == before and after[3][0]
         print(json.dumps({
@@ -248,7 +243,6 @@ def run(model, external_credential=None):
 
 
 if __name__ == "__main__":
-    # The live journey reaches the real provider through the caller's proxy and trust store.
     os.environ.update(host_process.enter())
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("rui", type=pathlib.Path, help="built Rui binary")

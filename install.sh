@@ -101,12 +101,9 @@ printf 'Checking the built command ...\n'
 test -f "$release/THIRD_PARTY_NOTICES.md"
 printf '%s\n' "$revision" >"$release/revision"
 
-# Keep each complete build: running processes may still use its files.
 published=1
 rui_publish "$prefix" "$release" "$format"
 
-# Restart through the selected command, never a PATH-shadowing older binary.
-# Activation failure does not undo a complete, successfully published install.
 if ! "$prefix/bin/rui" host restart --all; then
     printf '%s\n' 'Rui was installed, but some Hosts could not be restarted; follow the instructions above and retry rui host restart --all.' >&2
 fi

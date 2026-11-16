@@ -13,10 +13,7 @@ import quarantine
 from report_issue import fixtures
 from steps import record_failure
 
-# Marks a batch's retry in the job log; report_issue.py files the failure before it.
 RETRIED = "one automatic retry"
-# A unit test past this is stalled: Zig's runner kills it and names it,
-# where a job timeout reports only "cancelled" (#755 stalled 34 minutes).
 TEST_TIMEOUT = "5m"
 
 
@@ -57,7 +54,6 @@ def main():
             if not returncode:
                 summarize(f"{' '.join(batch)} passed on its automatic retry after failing.")
         if returncode:
-            # A replay in another commit's tree builds from its source, not this run's artifacts.
             record_failure(' '.join(batch), command(batch))
             summarize(f"Executed {' '.join(batch)}: failed (exit {returncode}). "
                       "Inspect the failed step. Retained artifacts are diagnostics, not acceptance.")
@@ -81,13 +77,11 @@ def summarize(line):
 
 def command(batch, ci_artifacts=None):
     artifacts = ["-Dci-artifacts=" + ci_artifacts] if ci_artifacts else []
-    # Fixtures copy their own retained diagnostics; this only runs the gate.
     mode = ["-Dpr-ci=true"] if pr_ci() else []
     return ["zig", "build", *batch, *mode, *artifacts, "--summary", "all", "--test-timeout", TEST_TIMEOUT]
 
 
 def execute(batch, ci_artifacts):
-    """Run one batch, streaming its output; (exit code, output) for the quarantine to read."""
     print("Executing: " + " ".join(batch), flush=True)
     start = time.monotonic()
     output = []

@@ -22,35 +22,22 @@ pub const Outcome = union(enum) {
 
 const AdmissionKey = struct { generation: u64, slot_changes: u64, paused: bool, capacity: DispatchCapacity };
 
-/// Which commit-driven scans would find work, as one Store round read it
-/// (`Store.dispatchWork`). A hint: each scan still selects for itself.
 pub const Work = struct {
-    /// An owed stop, an owed ending, a feed hop or a core tool call.
     core: bool = true,
     mcp: bool = true,
     bash: bool = true,
     message: bool = true,
     tool_continuation: bool = true,
-    /// An Attempt the retry scans read exists.
     retry: bool = true,
 };
 
 const WorkKey = struct { generation: u64, paused: bool, capacity: DispatchCapacity };
 
-/// The retry scans read Store rows, which a commit moves, and skip the
-/// Operations execution slots hold, which a slot change moves. A scheduled
-/// retry also falls due by time alone (`State.next_retry_unix_ms`).
 const RetryKey = struct { generation: u64, slot_changes: u64 };
 
-/// What the last retry admission scan learned of scheduled retries.
 pub const ScheduledRetry = union(enum) {
-    /// No scan ran, so nothing is known.
     unknown,
-    /// None is scheduled.
     none,
-    /// The Unix millisecond the earliest one falls due, as the Store dates
-    /// it: the Store admits by the wall clock, so a clock step moves when
-    /// that is.
     at_unix_ms: u64,
 };
 
@@ -58,19 +45,10 @@ pub const State = struct {
     preference: [4]Kind = .{ .bash, .retry, .message, .tool_continuation },
     retry_admission_due: bool = true,
     last_retry_poll: ?std.Io.Clock.Timestamp = null,
-    /// Retry facts before the last exhausted-retry scan that found nothing.
     idle_exhausted: ?RetryKey = null,
-    /// Retry facts before the last retry admission scan that found nothing.
-    /// While both keys stand and no scheduled retry has fallen due, the
-    /// retry scans have nothing new to read, so an idle Host sends none.
     idle_retry: ?RetryKey = null,
-    /// The Unix millisecond the earliest scheduled retry falls due, as that
-    /// scan read it.
     next_retry_unix_ms: ?u64 = null,
-    /// Control generation read before the last reconciliation.
     reconciled_controls: u64 = 0,
-    /// An Action loses custody unsettled only once dispatch is fenced or the
-    /// Host shuts down, so uncertain Actions come only from an earlier Host.
     uncertain_action_scan_exhausted: bool = false,
     idle_admission: ?AdmissionKey = null,
     idle_core: ?WorkKey = null,
@@ -84,9 +62,6 @@ pub fn serviceLifecycle(state: *State, context: anytype) bool {
     const now = context.now();
     const hint = context.consumeControlHint();
     var made_progress = false;
-    // The Store advances the control generation after each accepted
-    // control commits, so a lost hint is found at the next service, and
-    // the loop's own commits read no controls.
     const controls = context.controlGeneration();
     if (hint or state.reconciled_controls != controls) {
         context.reconcileControls();
@@ -100,7 +75,6 @@ pub fn serviceLifecycle(state: *State, context: anytype) bool {
     return made_progress;
 }
 
-/// Noinline: the stack-frame gate names the engine thread by it.
 noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timestamp) error{Fence}!bool {
     var made_progress = false;
     const capacity_released = state.capacity_was_full and context.freeSlots() != 0;
@@ -111,8 +85,6 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
     if (!state.uncertain_action_scan_exhausted) {
         if (try context.recoverUncertainAction()) made_progress = true else state.uncertain_action_scan_exhausted = true;
     }
-    // Read before every scan below, so a change after a scan read its rows
-    // moves the key the scan's empty result is kept under.
     const admission_key: AdmissionKey = .{
         .generation = context.commitGeneration(),
         .slot_changes = context.slotChanges(),
@@ -123,21 +95,14 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
     const scanned = if (state.idle_admission) |previous| std.meta.eql(previous, admission_key) else false;
     const work_key: WorkKey = .{ .generation = admission_key.generation, .paused = admission_key.paused, .capacity = admission_key.capacity.workInput() };
     const core_due = if (state.idle_core) |kept| !std.meta.eql(kept, work_key) else true;
-    // One round says which of the scans below would find work, so a commit
-    // costs that round rather than an empty scan of each kind.
     const work_stands = if (state.work) |kept| std.meta.eql(kept.key, work_key) else false;
     if (!work_stands and (core_due or !scanned)) {
         state.work = null;
         state.work = .{ .key = work_key, .found = try context.scanWork(admission_key.paused, admission_key.capacity) };
     }
     const work: Work = if (state.work) |kept| kept.found else .{};
-    // No commit since that round read no Attempt for the retry scans, so
-    // neither would find one, whatever the slots hold or the clock says.
     const retries_absent = !work.retry and std.meta.eql(state.work.?.key, work_key);
     const retries_idle = keyIs(state.idle_exhausted, retry_key) and keyIs(state.idle_retry, retry_key);
-    // The poll interval bounds how often moving facts rescan; standing
-    // facts rescan only when a scheduled retry falls due by the wall clock,
-    // or that clock cannot be read.
     const maintain_retries = context.providerConfigured() and !retries_absent and
         (capacity_released or (retry_poll_due and (!retries_idle or retryFellDue(state.next_retry_unix_ms, context))));
     if (maintain_retries) {
@@ -206,8 +171,6 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
         }
         if (kind != .retry and admission != .no_work) found_nothing = false;
         if (admission == .admitted) {
-            // Only a committed winner moves. Skipped kinds keep their place,
-            // including while their shared preparation owner is occupied.
             std.mem.copyForwards(Kind, state.preference[index .. state.preference.len - 1], state.preference[index + 1 ..]);
             state.preference[state.preference.len - 1] = kind;
             state.idle_admission = null;
@@ -218,9 +181,6 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
     return made_progress;
 }
 
-/// The Store admits a retry once the wall clock reaches its due time, so the
-/// same clock says when a scan would find it: a clock step forward makes it
-/// due at once, and one backward makes it wait.
 fn retryFellDue(due_unix_ms: ?u64, context: anytype) bool {
     const due = due_unix_ms orelse return false;
     const now = context.unixMilliseconds() orelse return true;
@@ -281,7 +241,6 @@ const Recording = struct {
     now_ns: i96 = 0,
     auto_advance: i96 = 1,
     hint: bool = false,
-    // Each read observes a new commit unless a test holds the Store still.
     generation: u64 = 0,
     generation_advance: u64 = 1,
     fenced: bool = false,
@@ -293,7 +252,6 @@ const Recording = struct {
     model_prep_open: bool = true,
     slot_changes: u64 = 0,
     paused: bool = false,
-    /// Flips the pause right after the run reads it, as a racing listener can.
     flip_pause_after_read: bool = false,
     admitted_paused: ?bool = null,
     observed_slots: ?SlotFacts = null,
@@ -418,8 +376,6 @@ const Recording = struct {
         return self.provider;
     }
 
-    /// Like the production setSlot, any change to the modelled slot facts
-    /// counts as a slot change; a test may also count one that leaves them.
     fn slotChanges(self: *Recording) u64 {
         const facts: SlotFacts = .{ .free = self.free, .bash_open = self.bash_prep_open, .model_open = self.model_prep_open };
         if (self.observed_slots) |observed| {
@@ -688,7 +644,6 @@ test "controls reconcile on a hint or a moved control generation only" {
     var state: State = .{};
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 0), context.reconcile_count);
-    // The loop's own commits and time read no controls.
     context.generation += 5;
     context.now_ns += std.time.ns_per_s;
     _ = run(&state, &context);
@@ -696,7 +651,6 @@ test "controls reconcile on a hint or a moved control generation only" {
     context.hint = true;
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 1), context.reconcile_count);
-    // A control whose hint was lost is found at the next service.
     context.controls += 1;
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 2), context.reconcile_count);
@@ -714,7 +668,6 @@ test "uncertain Action recovery scans until one scan finds none" {
     context.recover_action = false;
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 3), context.count(.recover_action));
-    // Commits and released slots cannot create another uncertain Action.
     context.free = 2;
     _ = run(&state, &context);
     _ = run(&state, &context);
@@ -841,7 +794,6 @@ test "a core tool call runs with no free slot, and its scan waits for a commit" 
     context.core_admission = .no_work;
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 2), context.count(.run_core));
-    // Nothing committed since the scan that found nothing.
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 2), context.count(.run_core));
 }
@@ -878,7 +830,6 @@ test "admission scans rerun only after a commit, a released slot or a reopened p
     context.free = 2;
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 3), context.count(.admit_new));
-    // A shared preparation owner reopening needs no commit.
     context.model_prep_open = false;
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 4), context.count(.admit_bash));
@@ -903,8 +854,6 @@ test "admission rescans after any slot change or commit and skips while both sta
     _ = run(&state, &context);
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
-    // A slot moved between states that keep the free count and both
-    // preparations open, such as a retained cleanup changing hands.
     context.slot_changes += 1;
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 2), context.count(.admit_bash));
@@ -928,7 +877,6 @@ test "a pause or resume reruns the message scan with no commit" {
     _ = run(&state, &context);
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
-    // A resume commits nothing, yet held Messages may now start Turns.
     context.paused = true;
     _ = run(&state, &context);
     _ = run(&state, &context);
@@ -943,8 +891,6 @@ test "the message scan and its cache key use one pause snapshot" {
     var context = Recording{ .provider = true, .free = 1, .generation_advance = 0, .flip_pause_after_read = true };
     var state: State = .{};
     _ = run(&state, &context);
-    // The listener paused after the key read `false`; the scan still ran as
-    // unpaused, so caching its empty result under `false` is truthful.
     try std.testing.expectEqual(@as(?bool, false), context.admitted_paused);
     try std.testing.expect(context.paused);
 }
@@ -965,7 +911,6 @@ test "an admission that must retry later keeps scanning without a commit" {
 test "retry scans wait while the work survey read no Attempt for them" {
     var context = Recording{ .provider = true, .free = 1, .generation_advance = 0, .auto_advance = 0, .work = .{ .retry = false } };
     var state: State = .{};
-    // Neither a commit, a released slot nor the poll interval runs them.
     _ = run(&state, &context);
     context.generation += 1;
     context.slot_changes += 1;
@@ -973,7 +918,6 @@ test "retry scans wait while the work survey read no Attempt for them" {
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 0), context.count(.recover_retry));
     try std.testing.expectEqual(@as(usize, 0), context.count(.admit_retry));
-    // A commit after which the survey reads one does.
     context.work.retry = true;
     context.generation += 1;
     _ = run(&state, &context);
@@ -988,19 +932,15 @@ test "retry scans that found nothing rerun only after a commit, a slot change or
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 1), context.count(.recover_retry));
     try std.testing.expectEqual(@as(usize, 1), context.count(.admit_retry));
-    // Time alone makes nothing due: an idle Host stops asking.
     context.now_ns += 10 * retry_poll_interval_ns;
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 1), context.count(.recover_retry));
     try std.testing.expectEqual(@as(usize, 1), context.count(.admit_retry));
     try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
-    // A commit may have scheduled or orphaned an Attempt.
     context.generation += 1;
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 2), context.count(.recover_retry));
     try std.testing.expectEqual(@as(usize, 2), context.count(.admit_retry));
-    // A slot change may have released one, but within the poll interval
-    // the scans wait.
     context.slot_changes += 1;
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 2), context.count(.recover_retry));
@@ -1008,22 +948,18 @@ test "retry scans that found nothing rerun only after a commit, a slot change or
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 3), context.count(.recover_retry));
     try std.testing.expectEqual(@as(usize, 3), context.count(.admit_retry));
-    // The scan read a retry scheduled ahead on the wall clock.
     context.scheduled_retry = .{ .at_unix_ms = context.unix_ms.? + 5_000 };
     context.generation += 1;
     context.now_ns += retry_poll_interval_ns;
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 4), context.count(.admit_retry));
-    // Awake time alone does not make it due.
     context.now_ns += 10 * retry_poll_interval_ns;
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 4), context.count(.admit_retry));
-    // A wall clock stepped backward keeps it waiting.
     context.unix_ms.? -= 60_000;
     context.now_ns += retry_poll_interval_ns;
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 4), context.count(.admit_retry));
-    // One stepped forward past the due time makes it due at once.
     context.unix_ms.? += 65_000;
     context.now_ns += retry_poll_interval_ns;
     context.retry_admission = .admitted;
@@ -1041,13 +977,11 @@ test "a scheduled retry rescans when the wall clock cannot be read, and a moved 
     context.now_ns += retry_poll_interval_ns;
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 1), context.count(.admit_retry));
-    // An unreadable clock cannot say the retry still waits.
     const readable = context.unix_ms;
     context.unix_ms = null;
     context.now_ns += retry_poll_interval_ns;
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 2), context.count(.admit_retry));
-    // A commit rescans with the clock stepped backward, far from due.
     context.unix_ms = readable.? - 60_000;
     context.now_ns += retry_poll_interval_ns;
     _ = run(&state, &context);
@@ -1073,20 +1007,16 @@ test "one work read per commit or pause says which scans run" {
     var state: State = .{};
     _ = run(&state, &context);
     _ = run(&state, &context);
-    // Nothing to find: the read replaces every commit-driven scan.
     try std.testing.expectEqual(@as(usize, 1), context.work_scans);
     try std.testing.expectEqual(@as(usize, 0), context.count(.run_core));
     try std.testing.expectEqual(@as(usize, 0), context.count(.admit_bash));
     try std.testing.expectEqual(@as(usize, 0), context.count(.admit_new));
     try std.testing.expectEqual(@as(usize, 0), context.count(.admit_continuation));
-    // The retry scans read what slots hold, so they keep their own rule.
     try std.testing.expectEqual(@as(usize, 1), context.count(.admit_retry));
-    // A slot change moves no Store row: the read stands.
     context.slot_changes += 1;
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 1), context.work_scans);
     try std.testing.expectEqual(@as(usize, 0), context.count(.admit_new));
-    // A commit moves it, and only the kinds it names scan.
     context.generation += 1;
     context.work.message = true;
     _ = run(&state, &context);
@@ -1095,13 +1025,11 @@ test "one work read per commit or pause says which scans run" {
     try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
     try std.testing.expectEqual(@as(usize, 0), context.count(.admit_bash));
     try std.testing.expectEqual(@as(usize, 0), context.count(.run_core));
-    // A pause picks another message selection, with no commit.
     context.paused = true;
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 3), context.work_scans);
     try std.testing.expectEqual(@as(?bool, true), context.work_paused);
     try std.testing.expectEqual(@as(usize, 2), context.count(.admit_new));
-    // Core work or an MCP call alone runs the slot-free scan.
     context.generation += 1;
     context.work = .{ .core = false, .mcp = true, .bash = false, .message = false, .tool_continuation = false };
     _ = run(&state, &context);
@@ -1115,7 +1043,6 @@ test "a kind that stays named keeps its own empty-scan rule within one work read
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 1), context.work_scans);
     try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
-    // The slot change rescans the named kinds without reading work again.
     context.slot_changes += 1;
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 1), context.work_scans);
@@ -1161,7 +1088,6 @@ test "an empty MCP core work scan waits for a commit before admission resumes" {
     context.generation += 1;
     try std.testing.expect(run(&state, &context) == .continue_immediately);
     try std.testing.expectEqual(@as(usize, 1), context.mcp_runs);
-    // Success does not retain the empty-scan gate, even at this generation.
     context.mcp_available = true;
     try std.testing.expect(run(&state, &context) == .continue_immediately);
     try std.testing.expectEqual(@as(usize, 2), context.mcp_runs);

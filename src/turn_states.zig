@@ -1,32 +1,10 @@
-//! Per-Turn sticky routing for the Turns this Host runs, for any provider.
-//! A codec names the response header that carries a Turn's routing value
-//! (`codec_abi.ObservedHeaders.turn_state`). The first value in a Turn's
-//! successful answer is sent back unchanged on every later request of that
-//! Turn (retries, replacement Attempts, tool continuations and in-Turn
-//! compaction), and no other Turn ever sends it. A provider that never sends
-//! the header never stores or receives one, so nothing here asks which
-//! provider it is.
-//!
-//! Process memory only: a fresh Host starts each Turn without it, and the
-//! Store never holds it. Each value belongs to the owner that received it,
-//! an opaque digest of the credential's identity (`providers.routingOwner`).
-//! Another owner drops every value of that provider and retires outstanding
-//! captures from the previous epoch. Each table is bounded by execution
-//! capacity and replaces the least recently used Turn; a dropped value only
-//! loses stickiness, since every request carries full input.
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const provider = @import("provider.zig");
 
-/// One table per provider, so Turns of two served providers never retire
-/// each other's values by alternating owners. Reached only through `sink`,
-/// under the provider Reactor's lock: the transport thread captures and the
-/// execution thread replays.
 pub const PerProvider = struct {
     tables: std.EnumArray(protocol.Provider, TurnStates) = .initFill(.{}),
 
-    /// Each table takes `per_table` of `entries`, which the caller maps
-    /// zeroed and unmaps after `deinit`.
     pub fn init(entries: []TurnStates.Entry) PerProvider {
         const providers = std.enums.values(protocol.Provider).len;
         std.debug.assert(entries.len % providers == 0);
@@ -40,8 +18,6 @@ pub const PerProvider = struct {
         return self.tables.getPtr(served);
     }
 
-    /// Every transfer's header callback delivers its value straight here,
-    /// keyed by its provider, Turn and the epoch its launch selected.
     pub fn sink(self: *PerProvider) provider.TurnStateSink {
         return .{ .context = self, .capture = observe, .replay = replayFor };
     }
@@ -63,7 +39,6 @@ pub const PerProvider = struct {
     }
 };
 
-/// One provider's table: at most one value per Turn, for one owner at a time.
 pub const TurnStates = struct {
     entries: []Entry = &.{},
     owner: ?Owner = null,
@@ -73,12 +48,8 @@ pub const TurnStates = struct {
     pub const Owner = provider.RoutingOwner;
     pub const Replay = struct {
         epoch: u64,
-        /// Borrowed until the next mutation of this table.
         value: []const u8,
     };
-    /// Zero bytes are an empty entry. A held value is malloc'd at its real
-    /// length, so the table costs a few words per unit of capacity and a
-    /// Turn's value costs its own bytes.
     pub const Entry = struct {
         held: ?Held = null,
         used: u64 = 0,
@@ -88,11 +59,8 @@ pub const TurnStates = struct {
         value: []const u8,
     };
 
-    /// Select the launch owner and return this Turn's value and capture
-    /// epoch. An observed owner change invalidates every cached Turn.
     pub fn replay(self: *TurnStates, turn_id: u64, owner: Owner) Replay {
         if (self.owner == null or !std.mem.eql(u8, &self.owner.?, &owner)) {
-            // Only occupied entries are reset, so an unused entry stays untouched.
             for (self.entries) |*entry| if (entry.held != null) release(entry);
             self.owner = owner;
             self.epoch += 1;
@@ -104,9 +72,6 @@ pub const TurnStates = struct {
         return .{ .epoch = self.epoch, .value = entry.held.?.value };
     }
 
-    /// Record a transport-validated value from the selected launch epoch;
-    /// the Turn's first one wins. A late completion cannot revive old state,
-    /// including after the same owner has returned in a new epoch.
     pub fn capture(self: *TurnStates, turn_id: u64, epoch: u64, value: []const u8) void {
         if (epoch != self.epoch or self.owner == null or value.len == 0 or self.entries.len == 0) return;
         const target = self.find(turn_id) orelse lru: {
@@ -118,7 +83,6 @@ pub const TurnStates = struct {
         };
         if (target.held != null and target.held.?.turn_id == turn_id) return;
         std.debug.assert(value.len <= provider.max_turn_state_bytes);
-        // Without memory the value is dropped, which only loses stickiness.
         const owned = std.heap.c_allocator.dupe(u8, value) catch return;
         if (target.held != null) release(target);
         self.uses += 1;
@@ -131,8 +95,6 @@ pub const TurnStates = struct {
         self.* = undefined;
     }
 
-    /// An emptied entry also forgets its recency, so capture fills it
-    /// before evicting any held Turn.
     fn release(entry: *Entry) void {
         std.heap.c_allocator.free(entry.held.?.value);
         entry.* = .{};
@@ -149,8 +111,6 @@ test "a routing value replays one Turn's first value and never another Turn's" {
     var states: TurnStates = .{ .entries = &storage };
     defer states.deinit();
     const account: TurnStates.Owner = @splat(1);
-    // The same owner's next launch, as after a credential refresh (a refresh
-    // keeps the owner: see providers.zig), keeps the epoch and the first value.
     const refreshed = account;
     const launch = states.replay(7, account);
     try std.testing.expectEqualStrings("", launch.value);
@@ -167,14 +127,11 @@ test "a routing value replays one Turn's first value and never another Turn's" {
     try std.testing.expectEqualStrings("eight", states.replay(8, account).value);
     try std.testing.expectEqualStrings("first", states.replay(7, account).value);
 
-    // Turn 8 is least recently used, so Turn 9 replaces it, not Turn 7.
     states.capture(9, launch.epoch, "nine");
     try std.testing.expectEqualStrings("", states.replay(8, account).value);
     try std.testing.expectEqualStrings("first", states.replay(7, account).value);
     try std.testing.expectEqualStrings("nine", states.replay(9, account).value);
 
-    // After a binding change the emptied entries take new Turns before any
-    // held Turn is evicted, whatever their recency before the change.
     const other: TurnStates.Owner = @splat(2);
     const rebound = states.replay(10, other);
     states.capture(10, rebound.epoch, "ten");
@@ -182,8 +139,6 @@ test "a routing value replays one Turn's first value and never another Turn's" {
     try std.testing.expectEqualStrings("ten", states.replay(10, other).value);
     try std.testing.expectEqualStrings("eleven", states.replay(11, other).value);
 
-    // Another owner never receives the value, and the original owner does
-    // not regain it after the change.
     for ([_]TurnStates.Owner{ @splat(2), @splat(3) }) |changed| {
         var owned: [1]TurnStates.Entry = @splat(.{});
         var isolated: TurnStates = .{ .entries = &owned };
@@ -222,12 +177,8 @@ test "owner changes invalidate paused Turns and stale completions" {
             try std.testing.expectEqualStrings("", replacement.value);
             states.capture(2, replacement.epoch, "active-b");
             if (late_completion) states.capture(1, original.epoch, "late-a");
-            // A Turn untouched during A -> B must not resurrect A's hint
-            // when A returns, including an A completion delivered under B.
             const returned = states.replay(1, account);
             try std.testing.expectEqualStrings("", returned.value);
-            // A completion from the original A epoch is stale even after
-            // another request has observed B -> A.
             states.capture(1, original.epoch, "late-original-a");
             states.capture(2, replacement.epoch, "late-b");
             try std.testing.expectEqualStrings("", states.replay(1, account).value);
@@ -247,12 +198,10 @@ test "two providers' Turns keep their values while their different owners launch
     const sink = states.sink();
     const first = states.get(.codex).replay(1, chatgpt);
     sink.capture(sink.context, .{ .provider = .codex, .turn_id = 1, .epoch = first.epoch }, "sticky");
-    // A key's launch is another owner, but of another provider's table.
     const keyed = states.get(.openai).replay(2, key);
     try std.testing.expectEqualStrings("", keyed.value);
     sink.capture(sink.context, .{ .provider = .openai, .turn_id = 2, .epoch = keyed.epoch }, "proxy-sticky");
     try std.testing.expectEqualStrings("sticky", states.get(.codex).replay(1, chatgpt).value);
     try std.testing.expectEqualStrings("proxy-sticky", states.get(.openai).replay(2, key).value);
-    // Each table holds only its own Turns.
     try std.testing.expectEqualStrings("", states.get(.openai).replay(1, key).value);
 }

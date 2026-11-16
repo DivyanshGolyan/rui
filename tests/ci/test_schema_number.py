@@ -1,4 +1,3 @@
-"""The schema number comes from main as it is now, not from a guess or a stale base."""
 import unittest
 
 from schema_number import advice
@@ -11,12 +10,10 @@ class SchemaNumberTest(unittest.TestCase):
         self.assertTrue(advice(59, 59, 61)[0], "a branch that keeps the format need not follow main")
 
     def test_main_moving_past_the_base_asks_to_rebase_and_renumber(self):
-        # #887/#897: two PRs took the same next number; the second must move.
         ok, message = advice(60, 59, 60)
         self.assertFalse(ok)
         self.assertIn("Rebase onto origin/main and renumber this branch's format from 60 to 61", message)
         self.assertIn("migration step .from = 60", message)
-        # Renumbered without rebasing still fails CI, which judges the merge base.
         ok, message = advice(61, 59, 60)
         self.assertFalse(ok)
         self.assertIsNotNone(schema_bump_error(61, 59))
@@ -32,7 +29,6 @@ class SchemaNumberTest(unittest.TestCase):
                 for branch in range(base - 1, main + 3):
                     ok, _ = advice(branch, base, main)
                     with self.subTest(branch=branch, base=base, main=main):
-                        # An accepted branch already sits on main, so CI's base is main.
                         self.assertEqual(ok, (main == base or branch == base) and schema_bump_error(branch, base) is None
                                          and (branch == base or branch == main + 1))
 

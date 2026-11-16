@@ -19,7 +19,6 @@ static void sample(const char *stage){
 int main(int argc,char**argv){
  if(argc!=6)return 1;
  int n=atoi(argv[2])*1024*1024;int returning=atoi(argv[3]);int hard=atoi(argv[4]);int spill_mode=atoi(argv[5]);
- // Apple disables memory accounting by default; explicitly enable before init.
  die(sqlite3_config(SQLITE_CONFIG_MEMSTATUS,1),"memstatus");
 
  printf("{\"version\":\"%s\",\"bytes\":%d,\"returning\":%d,\"hard_heap_mib\":%d}\n",sqlite3_libversion(),n,returning,hard);

@@ -12,20 +12,16 @@ pub fn narrowed(self: ScratchBudget, limit: u64) ScratchBudget {
     return result;
 }
 
-/// Acquire a full charge, reclaiming eligible retained output if necessary.
 pub fn allocate(self: ScratchBudget, amount: u64) bool {
     return self.charge(amount) or self.reclaim(amount);
 }
 
-/// Ask the owner of retained output to make room for `amount`; false
-/// when no reclaimer is installed.
 fn reclaim(self: ScratchBudget, amount: u64) bool {
     const reclaim_fn = self.reclaim_fn orelse return false;
     const context = self.reclaim_context orelse return false;
     return reclaim_fn(context, amount, self.limit);
 }
 
-/// Accounting only: failure changes no charge and never invokes reclamation.
 pub fn charge(self: ScratchBudget, amount: u64) bool {
     if (amount > self.limit) return false;
     var current = self.used.load(.acquire);
@@ -36,14 +32,12 @@ pub fn charge(self: ScratchBudget, amount: u64) bool {
     }
 }
 
-/// Acquire available capacity; when full, reclaim for one byte of progress.
 pub fn allocateUpTo(self: ScratchBudget, maximum: u64) u64 {
     const reserved = self.chargeUpTo(maximum);
     if (reserved != 0 or maximum == 0) return reserved;
     return if (self.reclaim(1)) 1 else 0;
 }
 
-/// Accounting-only partial reservation, with no cleanup or filesystem effects.
 pub fn chargeUpTo(self: ScratchBudget, maximum: u64) u64 {
     var current = self.used.load(.acquire);
     while (current < self.limit and maximum != 0) {
@@ -98,9 +92,6 @@ test "narrowing a scratch budget cannot widen its authority" {
     const budget = ScratchBudget{ .used = &used, .limit = 10 };
     try std.testing.expectEqual(@as(u64, 10), budget.narrowed(11).limit);
     try std.testing.expectEqual(@as(u64, 9), budget.narrowed(9).limit);
-    // A narrowed view limits only its own admission: unrelated usage may
-    // already exceed the narrowed limit, so no invariant requires
-    // used <= narrowed.limit.
     used.store(10, .release);
     try std.testing.expectEqual(@as(u64, 10), used.load(.acquire));
     try std.testing.expect(!budget.narrowed(9).charge(1));
@@ -108,14 +99,6 @@ test "narrowing a scratch budget cannot widen its authority" {
 }
 
 test "shared usage is baseline-relative and failed growth reserves nothing" {
-    // Budget arithmetic only: charge/release totals on an unrelated
-    // baseline. The reserve-before-failed-write obligation is established
-    // beside the real RequestWriter (see "request writer failure retains
-    // the full reservation until the owner releases").
-    // Unrelated reservation B = 41 stays unchanged through the lifecycle.
-    // A writer reserves 5 bytes successfully, then reserves 7 more bytes
-    // for a write that fails after charging: the outstanding contribution
-    // is 12 reserved bytes, not 5 written bytes.
     var used = std.atomic.Value(u64).init(41);
     const budget = ScratchBudget{ .used = &used, .limit = 100 };
     try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
@@ -123,7 +106,6 @@ test "shared usage is baseline-relative and failed growth reserves nothing" {
     try std.testing.expectEqual(@as(u64, 46), used.load(.acquire));
     try std.testing.expect(budget.charge(7));
     try std.testing.expectEqual(@as(u64, 53), used.load(.acquire));
-    // Rejected growth changes neither usage nor ownership.
     try std.testing.expect(!budget.charge(48));
     try std.testing.expectEqual(@as(u64, 53), used.load(.acquire));
     budget.release(12);

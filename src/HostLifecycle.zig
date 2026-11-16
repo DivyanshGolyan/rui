@@ -34,7 +34,6 @@ pub const Limitation = enum {
 pub const LaunchOption = struct { name: []const u8, value: ?[]const u8 };
 pub const LaunchSpecification = struct {
     options: []LaunchOption,
-    /// The option values: a translated retired flag's are not argv bytes.
     values: []u8 = &.{},
 
     fn deinit(self: *const LaunchSpecification, allocator: std.mem.Allocator) void {
@@ -48,8 +47,6 @@ pub const Plan = struct {
     snapshot: identity.Snapshot,
     launch: LaunchSpecification,
     version: candidate.Version,
-    /// Its build's `host serve` takes no --set: a release from before the
-    /// retired flags, whose unset `providers` meant something else.
     previous_release: bool,
 };
 
@@ -71,8 +68,6 @@ pub const ActivationOutcome = union(enum) {
     superseded,
     already_ready: struct { instance: protocol.InstanceId, pid: c_int },
     ready: struct { instance: protocol.InstanceId, pid: c_int },
-    /// The exact launched build answered, but only a new client can read its
-    /// protocol. No activation failure or uncertain process identity is hidden.
     client_incompatible: c_int,
     unsupported: Limitation,
     replacement_observed,
@@ -178,8 +173,6 @@ fn nowNanos(io: std.Io) i96 {
     return std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
 }
 
-/// Sleeps toward `until` on the awake clock, at most 50 ms at a time, and
-/// answers false without sleeping once `until` has passed.
 fn sleepToward(io: std.Io, until: i96) !bool {
     const remaining = until - nowNanos(io);
     if (remaining <= 0) return false;
@@ -201,18 +194,13 @@ fn deriveLaunch(allocator: std.mem.Allocator, argv: []const []const u8) !LaunchS
     defer scratch.deinit();
     const grammar = comptime cli_args.Command.host_serve.definition();
     var problem: cli_args.Refusal = undefined;
-    // A Host a previous release started names retired flags; serve_grammar
-    // reads them as the assignments that replace them.
     const arguments = serve_grammar.currentArguments(scratch.allocator(), argv[3..]) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.InvalidArguments => return error.UnsupportedHostConfiguration,
     };
     const parsed = try grammar.parseSyntax(arguments, scratch.allocator(), &problem);
     try parsed.validateValues(&problem);
-    // Whether the settings reproduce in `/` is host_start.replayable's, at activation.
     if (parsed.help or parsed.missing() != null) return error.UnsupportedHostConfiguration;
-    // Relaunch appends one authoritative capacity assignment. Refuse before
-    // disruption when the target parser would have no repeat slot for it.
     if (parsed.repeat_count == parsed.repeats.len) return error.UnsupportedHostConfiguration;
     var options: std.ArrayList(LaunchOption) = .empty;
     errdefer options.deinit(allocator);
@@ -238,8 +226,6 @@ fn deriveLaunch(allocator: std.mem.Allocator, argv: []const []const u8) !LaunchS
     return .{ .options = try options.toOwnedSlice(allocator), .values = values };
 }
 
-// host_launch starts the replacement in `/` with stdin closed; host_start
-// decides before any retirement whether this launch reproduces there.
 fn admitReplay(init: std.process.Init, options: []const LaunchOption, store: []const u8) !void {
     var assignments: std.ArrayList([]const u8) = .empty;
     defer assignments.deinit(init.gpa);
@@ -253,11 +239,6 @@ fn admitReplay(init: std.process.Init, options: []const LaunchOption, store: []c
     if (!try host_start.replayable(init, request)) return error.UnsupportedHostConfiguration;
 }
 
-/// The replacement's options, owned by `allocator`. A Host a previous release
-/// started first gets the provider set that release served when none of its
-/// layers named one (serve_grammar.previousProviders), so an upgrade never
-/// changes what it serves. Call after admitReplay, which refuses a relative
-/// --settings before its document is read here.
 fn replayOptions(init: std.process.Init, allocator: std.mem.Allocator, plan: *const Plan) ![]LaunchOption {
     const base: ?[]const u8 = if (plan.previous_release) base: {
         var document: ?[]const u8 = null;
@@ -414,7 +395,6 @@ const PrivateLaunch = struct {
     fn init(allocator: std.mem.Allocator, executable: []const u8, options: []const LaunchOption, store: []const u8, active_capacity: usize, environment: []const []const u8) !PrivateLaunch {
         var capacity_buffer: [128]u8 = undefined;
         const capacity = try host_start.capacityAssignment(active_capacity, &capacity_buffer);
-        // Replay overrides first; the observed capacity is authoritative last.
         const arguments = [_][]const u8{ executable, "host", "serve", "--store", store, "--set", capacity };
         var argc: usize = arguments.len;
         var byte_count: usize = 0;
@@ -500,7 +480,6 @@ fn startPinned(init: std.process.Init, allocator: std.mem.Allocator, plan: *cons
     };
     if (launched != 0 or launched_pid <= 0 or launched_started == 0) return .{ .failed = .starting };
     Progress.send(progress, .verifying);
-    // A Host of a newer release may first back up and migrate the Store.
     var wait = HostStartupWait.init(nowNanos(io));
     var startup: [8192]u8 = undefined;
     var used: usize = 0;
@@ -530,8 +509,6 @@ fn startPinned(init: std.process.Init, allocator: std.mem.Allocator, plan: *cons
     return .{ .unconfirmed = .verifying };
 }
 
-/// Both wire-compatible and wire-incompatible replies require the same pinned
-/// launch identity. A mismatch never grants ordinary Host request readiness.
 fn activationReading(reading: client.HostProcessReading, launched_pid: c_int, launched_started: u64, snapshot: *const identity.Snapshot, executable: []const u8, capacity: usize) ActivationOutcome {
     if (reading.pid() != launched_pid) return .replacement_observed;
     if (!identity.matchesLaunch(launched_pid, launched_started, snapshot, executable)) return .{ .unconfirmed = .verifying };
@@ -711,7 +688,6 @@ test "upgrade lifecycle derives launch semantics before disruption" {
         try std.testing.expect(supportedByHelp(&launch, "rui host serve [--store PATH] [--set PATH=VALUE]\n"));
         try std.testing.expect(!supportedByHelp(&launch, "rui host serve [--store PATH]\n"));
     }
-    // A Host a previous release's starter launched replays as assignments.
     {
         var launch = try deriveLaunch(allocator, &.{ "rui", "host", "serve", "--store", "/some/store", "--provider", "codex", "--provider", "openai", "--active-capacity", "4" });
         defer launch.deinit(allocator);
@@ -734,8 +710,6 @@ test "upgrade lifecycle derives launch semantics before disruption" {
     var almost_full = try deriveLaunch(allocator, full[0 .. full.len - 2]);
     defer almost_full.deinit(allocator);
     try std.testing.expectEqual(repeat_limit - 1, almost_full.options.len);
-    // File-backed documents retain the same argv replay and help-admission
-    // behavior as ordinary flags; host_start.replayable decides the rest.
     for ([_][]const u8{"/private/host.json"}) |file| {
         var launch = try deriveLaunch(allocator, &.{ "rui", "host", "serve", "--settings", file });
         defer launch.deinit(allocator);
@@ -793,8 +767,6 @@ test "upgrade activation refuses cwd-dependent or stdin-bound settings before an
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const directory = root[0..try private.realPath(init.io, &root)];
     const path = try std.fmt.allocPrint(arena.allocator(), "{s}/host.json", .{directory});
-    // No release is installed under target: an admitted plan proceeds past
-    // admission and stops only at resolving the target executable.
     const target = try std.fmt.allocPrint(arena.allocator(), "{s}/no-release", .{directory});
     var host = try tmp.dir.createDirPathOpen(init.io, "host", .{ .permissions = .fromMode(0o700) });
     defer host.close(init.io);
@@ -802,26 +774,18 @@ test "upgrade activation refuses cwd-dependent or stdin-bound settings before an
     const host_dir = host_root[0..try host.realPath(init.io, &host_root)];
     const Case = struct { argv: []const []const u8, document: []const u8, admitted: bool, saved: []const u8 = "{}" };
     for ([_]Case{
-        // A relative document path names another file once the launch is in `/`,
-        // and the replacement has no stdin to read a document from.
         .{ .argv = &.{ "rui", "host", "serve", "--settings", "relative/host.json" }, .document = "{}", .admitted = false },
         .{ .argv = &.{ "rui", "host", "serve", "--settings", "-" }, .document = "{}", .admitted = false },
         .{ .argv = &.{ "rui", "host", "serve", "--set", "missing-equals" }, .document = "{}", .admitted = false },
-        // An absolute document must not hide a cwd-relative trust root.
         .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"network\":{\"caFile\":\"relative.pem\"}}", .admitted = false },
         .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"tools\":{\"bash\":{\"path\":\"relative/bash\"}}}", .admitted = false },
         .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"interface\":{\"lifetime\":\"stdin\"}}", .admitted = false },
-        // Unreadable or refused documents cannot be replayed either.
         .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"unknown\":true}", .admitted = false },
-        // Fully absolute configurations replay. A relative Store directory would
-        // override the pinned --store with a path under `/`.
         .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"network\":{\"caFile\":\"/private/ca.pem\"},\"tools\":{\"bash\":{\"path\":\"/bin/bash\"}}}", .admitted = true },
         .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"store\":{\"sqlite\":{\"dir\":\"relative/store\"}}}", .admitted = false },
         .{ .argv = &.{ "rui", "host", "serve", "--settings", path, "--set", "network.caFile=/private/ca.pem" }, .document = "{}", .admitted = true },
-        // --set layers replay from `/` too.
         .{ .argv = &.{ "rui", "host", "serve", "--set", "network.caFile=relative.pem" }, .document = "{}", .admitted = false },
         .{ .argv = &.{ "rui", "host", "serve", "--set", "presets.review=@relative.json" }, .document = "{}", .admitted = false },
-        // So does the Host directory's saved host.json, which a later layer can override.
         .{ .argv = &.{ "rui", "host", "serve" }, .document = "{}", .saved = "{\"tools\":{\"bash\":{\"path\":\"relative/bash\"}}}", .admitted = false },
         .{ .argv = &.{ "rui", "host", "serve", "--set", "tools.bash.path=/bin/bash" }, .document = "{}", .saved = "{\"tools\":{\"bash\":{\"path\":\"relative/bash\"}}}", .admitted = true },
     }) |case| {
@@ -830,7 +794,6 @@ test "upgrade activation refuses cwd-dependent or stdin-bound settings before an
         try host.writeFile(init.io, .{ .sub_path = "host.json", .data = case.saved });
         try host.setFilePermissions(init.io, "host.json", .fromMode(0o600), .{});
         const launch = deriveLaunch(gpa, case.argv) catch |err| {
-            // Argument admission is the first half of the same decision.
             try std.testing.expect(!case.admitted);
             try std.testing.expectEqual(error.UnsupportedHostConfiguration, err);
             continue;
@@ -855,7 +818,6 @@ test "upgrade replay keeps the provider set a previous release's Host served" {
     const gpa = std.testing.allocator;
     var environment: std.process.Environ.Map = .init(gpa);
     defer environment.deinit();
-    // Signed out with no key: the current automatic set is codex alone.
     try environment.put("HOME", "/nonexistent-upgrade-provider-test-home");
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -872,9 +834,6 @@ test "upgrade replay keeps the provider set a previous release's Host served" {
     try host.writeFile(init.io, .{ .sub_path = "with.json", .data = "{\"providers\":{\"openai\":{}}}" });
     for ([_][]const u8{ "without.json", "with.json" }) |name| try host.setFilePermissions(init.io, name, .fromMode(0o600), .{});
     const Served = struct { codex: bool = false, openai: bool = false, chatgpt: bool = false };
-    // Each `served` is what the old Host served: a flag-only fill started
-    // from no providers, and a document without `providers` served every
-    // built-in entry; named providers added to either.
     const Case = struct { argv: []const []const u8, previous: bool, served: Served };
     for ([_]Case{
         .{ .argv = &.{ "rui", "host", "serve", "--store", dir }, .previous = true, .served = .{} },
@@ -885,7 +844,6 @@ test "upgrade replay keeps the provider set a previous release's Host served" {
         .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", without, "--provider", "codex" }, .previous = true, .served = .{ .codex = true, .openai = true, .chatgpt = true } },
         .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", with }, .previous = true, .served = .{ .openai = true } },
         .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", with, "--provider", "chatgpt" }, .previous = true, .served = .{ .openai = true, .chatgpt = true } },
-        // This release's Host with unset providers keeps the current default.
         .{ .argv = &.{ "rui", "host", "serve", "--store", dir }, .previous = false, .served = .{ .codex = true } },
         .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", without }, .previous = false, .served = .{ .codex = true } },
         .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--set", "providers.chatgpt={}" }, .previous = false, .served = .{ .chatgpt = true } },
@@ -897,7 +855,6 @@ test "upgrade replay keeps the provider set a previous release's Host served" {
         try admitReplay(init, plan.launch.options, dir);
         const options = try replayOptions(init, gpa, &plan);
         defer gpa.free(options);
-        // The replacement's argv, as PrivateLaunch orders it.
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(gpa);
         try args.appendSlice(gpa, &.{ "--store", dir });

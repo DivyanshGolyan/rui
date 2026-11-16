@@ -1,4 +1,3 @@
-"""Paced SSE with an all-request barrier and encrypted-output byte accounting."""
 import asyncio,json,ssl,sys,time,hashlib
 from h2.connection import H2Connection
 from h2.config import H2Configuration
@@ -28,8 +27,6 @@ async def accept(reader,writer):
  global connections,resumed,arrivals,streams_max,wire_bytes,sent_body
  connections+=1;obj=writer.get_extra_info('ssl_object');reused=obj.session_reused;resumed+=int(reused)
  emit(connection=connections,resumed=reused,tls_version=obj.version())
- # Pinned asyncio instrumentation: counts ciphertext handed to TCP after handshake,
- # including H2 framing/TLS records; not IP/TCP headers or actual retransmissions.
  transport=writer.transport._ssl_protocol._transport
  underlying_write=transport.write
  def counted_write(data):

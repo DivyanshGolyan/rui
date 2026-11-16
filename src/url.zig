@@ -1,8 +1,6 @@
-//! URL values and transport admission, without sockets or TLS.
 const std = @import("std");
 
 pub const max_url_bytes = 2048;
-/// The longest DNS name; IP literals are shorter.
 pub const max_host_bytes = 253;
 
 pub const UrlError = error{ InvalidUrl, CleartextNotLoopback };
@@ -11,22 +9,13 @@ pub const Scheme = enum(u8) { https, http };
 
 pub const Url = struct {
     scheme: Scheme,
-    /// Without brackets for an IPv6 literal. Name lookup uses it as written.
     host: []const u8,
-    /// What SNI carries and the certificate must match: `host` without a
-    /// fully qualified name's trailing dot (RFC 6066 section 3).
     server_name: []const u8,
     port: u16,
-    /// `host[:port]` as written, for `:authority`.
     authority: []const u8,
-    /// Path and query; "/" when the URL has none.
     path: []const u8,
 };
 
-/// The transport's safety rule: `https://` to any host, `http://` (h2c by
-/// prior knowledge) only to the loopback literals 127.0.0.1 and [::1]. No
-/// userinfo, no fragment, valid UTF-8, at most `max_url_bytes`. The parts
-/// are slices of `url`.
 pub fn parseUrl(url: []const u8) UrlError!Url {
     if (url.len > max_url_bytes or !std.unicode.utf8ValidateSlice(url)) return error.InvalidUrl;
     if (std.mem.indexOfAny(u8, url, "#\\ \t\r\n") != null) return error.InvalidUrl;
@@ -52,8 +41,6 @@ pub fn parseUrl(url: []const u8) UrlError!Url {
     return .{ .scheme = scheme, .host = host, .server_name = server_name, .port = port, .authority = authority, .path = path };
 }
 
-/// `host[:port]`, or `[ipv6][:port]`, with `default_port` when it names
-/// none. The host is a slice of `authority`, without brackets.
 pub fn parseHostPort(authority: []const u8, default_port: u16) UrlError!struct { []const u8, u16 } {
     if (authority.len == 0) return error.InvalidUrl;
     var host: []const u8 = authority;
@@ -87,13 +74,8 @@ pub fn parseHostPort(authority: []const u8, default_port: u16) UrlError!struct {
     return .{ host, port };
 }
 
-/// How a percent-decoded text reads `+`: as itself, or as a space (a form
-/// or query value).
 pub const Plus = enum { literal, space };
 
-/// `%XX` escapes in `text` decoded into `out`; null when an escape is
-/// malformed or the result does not fit. What the decoded bytes may hold is
-/// the caller's policy.
 pub fn percentDecode(text: []const u8, out: []u8, plus: Plus) ?[]u8 {
     var len: usize = 0;
     var index: usize = 0;

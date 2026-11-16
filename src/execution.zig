@@ -6,10 +6,8 @@ const transport_policy = @import("transport_policy.zig");
 const CaptureFailure = transport_policy.CaptureFailure;
 const TransferOutcome = transport_policy.TransferOutcome;
 
-/// How a failed model Attempt settles: the Store owns the retry allowance.
 pub const FailureKind = enum { permanent, temporary, context_overflow, effort_change_refused };
 
-/// A sealed HTTP error answer, interpreted before settlement.
 pub const ErrorResponse = union(enum) { ordinary, context_overflow, effort_change_refused, quota: transport_policy.Quota, refusal: transport_policy.Refusal, unreadable: anyerror };
 
 pub const TransferFailure = struct {
@@ -35,8 +33,6 @@ pub const TransferDecision = union(enum) {
     fail: TransferFailure,
 };
 
-/// Failure facts only: Store owns retry allowance, eligibility and Turn
-/// scheduling. No decision here delivers a result or releases resources.
 pub fn transferDecision(
     outcome: TransferOutcome,
     error_response: ErrorResponse,
@@ -64,7 +60,6 @@ pub fn transferDecision(
             .answered = true,
             .quota = quota,
         } },
-        // The code decides, whatever the status: resending cannot fix it.
         .refusal => |refusal| return .{ .fail = .{
             .code = .{ .named = transport_policy.refusalCode(refusal) },
             .answered = true,
@@ -94,8 +89,6 @@ pub fn transferDecision(
     } };
 }
 
-/// Only the model endpoint's own HTTP 401 answer may spend an Operation's
-/// one forced credential refresh. Every other status settles as it is.
 pub fn rejectsCredential(failure: TransferFailure) bool {
     return failure.answered and failure.code == .http and failure.code.http == 401;
 }
@@ -138,7 +131,6 @@ test "HTTP quota refusal overrides rate limit retry evidence and retains reset d
         try std.testing.expect(decision.fail.retry_after_ms == null);
         try std.testing.expect(decision.fail.retry_after_deadline_ms == null);
         try std.testing.expectEqualStrings(detail, decision.fail.quota.?.format(&diagnostic));
-        // A body cannot override a failed transport or a successful status.
         try std.testing.expect(transferDecision(.{ .transport_finished = .{ .disposition = .success } }, refusal) == .interpret_output);
         const connection = transferDecision(.{ .transport_finished = .{ .disposition = .temporary_connection } }, refusal).fail;
         try std.testing.expectEqual(.temporary, connection.kind);
@@ -212,9 +204,6 @@ test "transfer decisions never correlate capture failure or settle request sourc
     }
 }
 
-/// One model owner's next work, derived from native owner facts, never stored
-/// as a second lifecycle. Decisions grant neither Store settlement authority
-/// nor permission to reuse custody before the indicated disposal succeeds.
 pub const ModelObservation = union(enum) {
     preparing: struct { launch_allowed: bool },
     prepared: struct { authentication_required: bool },
@@ -256,12 +245,8 @@ pub fn modelDecision(observation: ModelObservation) ModelDecision {
         else
             .settle_preparation_failure,
         .authenticating => |value| switch (value.result) {
-            // Cancellation cannot dispose a request still owned by this stage
-            // until the authentication worker has returned its result.
             .pending => .wait,
             .ready => if (!value.cancelled and value.launch_allowed) .launch else .abandon,
-            // Preserve known failure delivery even if local launch is fenced;
-            // Store still rechecks applicability. A control suppresses both.
             .failed => if (value.cancelled) .abandon else .settle_authentication_failure,
         },
         .handoff_failed => |value| switch (value) {
@@ -278,7 +263,6 @@ pub const CustodyToken = struct {
 
 const State = enum(u8) { free, reserved, attached, detached };
 
-/// The Attempt a custody record holds: a model Attempt or an Action's.
 pub const CustodyBinding = union(enum) {
     model: attempt.AttemptBinding,
     action: attempt.ActionAttemptBinding,
@@ -330,8 +314,6 @@ pub const DispatchCapacity = packed struct(u3) {
 pub const CustodyPool = struct {
     records: []CustodyRecord,
 
-    /// Records start empty, as `.{}` or all zero bytes, so fresh pages
-    /// need no initializing pass and an unused record never becomes resident.
     pub fn initialize(records: []CustodyRecord) CustodyPool {
         for (records) |*record| std.debug.assert(record.state.load(.monotonic) == .free);
         return .{ .records = records };
@@ -360,8 +342,6 @@ pub const CustodyPool = struct {
         return null;
     }
 
-    /// Consumes a model or Action dispatch permit into the reserved record
-    /// and returns the permit's binding.
     pub fn attach(
         self: *CustodyPool,
         token: CustodyToken,
@@ -377,7 +357,6 @@ pub const CustodyPool = struct {
         return attempt_binding;
     }
 
-    /// Borrow until this custody retires; the Transfer is deinitialized first.
     pub fn modelTiming(self: *CustodyPool, token: CustodyToken) !*model_timing.Attempt {
         const record = try self.current(token);
         if (record.state.load(.acquire) != .attached or record.binding != .model) return error.CustodyDetached;
@@ -426,8 +405,6 @@ pub const CustodyPool = struct {
         return record.delivered.cmpxchgStrong(false, true, .acq_rel, .acquire) == null;
     }
 
-    /// An attached Action whose terminal delivery nobody claimed: detaching
-    /// it leaves the Action unsettled.
     pub fn holdsUndeliveredAction(self: *CustodyPool, token: CustodyToken) bool {
         const record = self.current(token) catch return false;
         return record.state.load(.acquire) == .attached and record.binding == .action and
@@ -446,8 +423,6 @@ pub const CustodyPool = struct {
         return self.transition(token, .detached, .free);
     }
 
-    /// Moves the token's current record from `from` to `to` in one atomic
-    /// step, or refuses when it is in any other state.
     fn transition(self: *CustodyPool, token: CustodyToken, from: State, to: State) !void {
         const record = try self.current(token);
         if (record.state.cmpxchgStrong(from, to, .acq_rel, .acquire) != null) {
@@ -455,19 +430,12 @@ pub const CustodyPool = struct {
         }
     }
 
-    /// The token's current record, when it is in `state`.
     fn expectState(self: *CustodyPool, token: CustodyToken, state: State) !*CustodyRecord {
         const record = try self.current(token);
         if (record.state.load(.acquire) != state) return error.InvalidCustodyTransition;
         return record;
     }
 
-    /// Custody-local structural checks. Each inspects the current
-    /// production record without mutating it. Legal checkpoints are
-    /// immediately after a complete custody operation, under the
-    /// existing ownership discipline. Free and reserved records may
-    /// retain historical binding fields; only the checked state,
-    /// generation, kind, and identity must agree.
     pub fn checkReserved(self: *CustodyPool, token: CustodyToken) !void {
         _ = try self.expectState(token, .reserved);
     }
@@ -476,8 +444,6 @@ pub const CustodyPool = struct {
         try checkBinding(try self.expectState(token, .attached), expected);
     }
 
-    /// A null `expected` checks only that the token's record is detached,
-    /// for retained owners that keep no Attempt identity.
     pub fn checkDetached(self: *CustodyPool, token: CustodyToken, expected: ?CustodyBinding) !void {
         const record = try self.expectState(token, .detached);
         if (expected) |value| try checkBinding(record, value);
@@ -498,11 +464,6 @@ pub const CustodyPool = struct {
         return !record.delivered.load(.acquire);
     }
 
-    /// Custody an Attempt holds: attached for execution or detached for
-    /// cleanup. Unlike `occupied`, excludes the execution owner's in-flight
-    /// admission reservation, so concurrent observers see no phantom custody
-    /// while it probes capacity. A just-committed Attempt is therefore not
-    /// counted until the owner attaches it, without blocking in between.
     pub fn held(self: *const CustodyPool) usize {
         var count: usize = 0;
         for (self.records) |*record| {
@@ -553,7 +514,6 @@ test "custody remains occupied through detachment and rejects late delivery afte
         error.ForeignLaunchAuthority,
         pool.consumeLaunchAuthority(first, .{ .model = .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 1 } }),
     );
-    // Rejected launch leaves valid authority unconsumed.
     try pool.checkAttached(first, .{ .model = first_binding });
     try pool.consumeLaunchAuthority(first, .{ .model = first_binding });
     try std.testing.expectError(
@@ -563,8 +523,6 @@ test "custody remains occupied through detachment and rejects late delivery afte
     try std.testing.expect(pool.claimTerminalDelivery(first));
     try std.testing.expect(pool.canClaimTerminalDelivery(first) == false);
     try std.testing.expect(!pool.claimTerminalDelivery(first));
-    // Delivery is independent of launch: consuming launch twice still fails
-    // after delivery, and delivery state does not restore launch authority.
     try std.testing.expectError(
         error.DispatchPermitConsumed,
         pool.consumeLaunchAuthority(first, .{ .model = first_binding }),
@@ -601,7 +559,6 @@ test "custody attach consumes one permit only after validating its reservation" 
     const second = pool.reserve().?;
     try pool.checkReserved(first);
     try pool.checkReserved(second);
-    // Capacity is exhausted.
     try std.testing.expect(pool.reserve() == null);
     try std.testing.expectEqual(@as(usize, 2), pool.occupied());
     var permit = attempt.DispatchPermit{ .binding = .{
@@ -612,10 +569,8 @@ test "custody attach consumes one permit only after validating its reservation" 
     const attached = try pool.attach(first, &permit);
     try pool.checkAttached(first, .{ .model = attached });
     try std.testing.expectError(error.DispatchPermitConsumed, pool.attach(second, &permit));
-    // Rejected attachment leaves the reservation and its generation intact.
     try pool.checkReserved(second);
     try std.testing.expect(!permit.available);
-    // A fresh permit still cannot attach to an already-attached record.
     var fresh = attempt.DispatchPermit{ .binding = .{
         .turn_id = 9,
         .operation_id = 9,
@@ -644,7 +599,6 @@ test "custody attach consumes one permit only after validating its reservation" 
     const reused = pool.reserve().?;
     try std.testing.expectError(error.StaleCustody, pool.attach(first, &next_permit));
     try std.testing.expect(next_permit.available);
-    // Stale attach leaves the new reservation untouched.
     try pool.checkReserved(reused);
     const reused_binding = try pool.attach(reused, &next_permit);
     try pool.checkAttached(reused, .{ .model = reused_binding });
@@ -668,7 +622,6 @@ test "unused reservation returns without an Attempt binding" {
     try pool.releaseUnused(token);
     try pool.checkFree(token);
     try std.testing.expectEqual(@as(usize, 0), pool.occupied());
-    // Releasing twice is rejected and leaves the slot free.
     try std.testing.expectError(error.InvalidCustodyTransition, pool.releaseUnused(token));
     try pool.checkFree(token);
 }
@@ -715,7 +668,6 @@ test "model and Action Attempt bindings cannot cross custody paths" {
         error.ForeignLaunchAuthority,
         pool.consumeLaunchAuthority(model_token, .{ .action = action_binding }),
     );
-    // Valid bindings remain unchanged after cross-path rejection.
     try pool.checkAttached(model_token, .{ .model = model_binding });
     try pool.checkAttached(action_token, .{ .action = action_binding });
 
@@ -755,7 +707,6 @@ test "model launch authority requires every identity field" {
         try std.testing.expectError(error.ForeignLaunchAuthority, pool.consumeLaunchAuthority(token, .{ .model = mismatch }));
         try std.testing.expectError(error.ForeignLaunchAuthority, pool.checkAttached(token, .{ .model = mismatch }));
     }
-    // Each rejection leaves valid authority and the attached binding intact.
     try pool.checkAttached(token, .{ .model = binding });
     try pool.consumeLaunchAuthority(token, .{ .model = binding });
     try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(token, .{ .model = binding }));
@@ -820,7 +771,6 @@ test "detached custody rejects reuse until cleanup completes" {
     try pool.detach(token);
     try pool.checkDetached(token, null);
     try std.testing.expectEqual(@as(usize, 1), pool.occupied());
-    // Detached records cannot be reserved, re-attached, released, or delivered.
     try std.testing.expect(pool.reserve() == null);
     var late_permit = attempt.DispatchPermit{ .binding = .{
         .turn_id = 2,
@@ -840,7 +790,6 @@ test "detached custody rejects reuse until cleanup completes" {
 }
 
 test "bounded custody sequences preserve invariants after every operation" {
-    // Success on one record: every completed operation re-checks.
     {
         var records: [1]CustodyRecord = @splat(.{});
         var pool = CustodyPool.initialize(&records);
@@ -861,8 +810,6 @@ test "bounded custody sequences preserve invariants after every operation" {
         try pool.checkFree(token);
         try std.testing.expectEqual(@as(usize, 0), pool.occupied());
     }
-    // Cancellation before attachment: the freed record rejects attachment
-    // without consuming the fresh permit.
     {
         var records: [1]CustodyRecord = @splat(.{});
         var pool = CustodyPool.initialize(&records);
@@ -875,8 +822,6 @@ test "bounded custody sequences preserve invariants after every operation" {
         try std.testing.expect(permit.available);
         try pool.checkFree(token);
     }
-    // Double claims then reuse: one-shot authority and delivery hold, and a
-    // stale attach after reuse leaves the new reservation untouched.
     {
         var records: [1]CustodyRecord = @splat(.{});
         var pool = CustodyPool.initialize(&records);
@@ -900,8 +845,6 @@ test "bounded custody sequences preserve invariants after every operation" {
         try pool.detach(second);
         try pool.cleanupComplete(second);
     }
-    // Two-record interference: a consumed permit cannot attach the sibling,
-    // and detaching one record leaves the other attached.
     {
         var records: [2]CustodyRecord = @splat(.{});
         var pool = CustodyPool.initialize(&records);
@@ -953,7 +896,6 @@ test "stale tokens after reuse leave the new owner unchanged" {
     } };
     const second_binding = try pool.attach(second, &second_permit);
 
-    // Every old-token operation fails without touching the new owner.
     try std.testing.expectError(error.StaleCustody, pool.consumeLaunchAuthority(first, .{ .model = first_binding }));
     try std.testing.expectError(error.StaleCustody, pool.binding(first));
     try std.testing.expect(!pool.claimTerminalDelivery(first));
@@ -1024,8 +966,6 @@ test "failed reclamation keeps custody occupied until the same owner succeeds" {
 test "model decisions preserve cancellation and known authentication failure precedence" {
     try std.testing.expectEqual(ModelDecision.advance_preparation, modelDecision(.{ .preparing = .{ .launch_allowed = true } }));
     try std.testing.expectEqual(ModelDecision.abandon, modelDecision(.{ .preparing = .{ .launch_allowed = false } }));
-    // Independent expected table: rows are no control/open, no control/fenced,
-    // control/open, control/fenced; columns are pending, ready, failed.
     const expected = [4][3]ModelDecision{
         .{ .wait, .launch, .settle_authentication_failure },
         .{ .wait, .abandon, .settle_authentication_failure },
@@ -1075,7 +1015,6 @@ test "model prepared routes preserve one shot handoff across rejection and reuse
                     .result = .ready,
                 } }));
             }
-            // Canonical handoff can reject after local authority is consumed.
             try pool.consumeLaunchAuthority(token, .{ .model = binding });
             try std.testing.expectEqual(if (failure == .unexpected) ModelDecision.fence else .abandon, modelDecision(.{ .handoff_failed = failure }));
             try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(token, .{ .model = binding }));

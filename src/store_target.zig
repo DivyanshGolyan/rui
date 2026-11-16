@@ -1,12 +1,8 @@
-//! Resolved Store kind, shared by routing and the Store without importing I/O.
 const std = @import("std");
 const store_id = @import("store_id.zig");
 
 pub const Kind = enum { sqlite, mysql };
 
-/// Only the CLI selection boundary interprets strings and the optional hint.
-/// Invalid hints still select MySQL: path validation must refuse them rather
-/// than silently treating an opaque Store id as a new SQLite directory.
 pub fn resolveKind(selector: []const u8, runtime_hint: ?[]const u8) Kind {
     return if (store_id.valid(selector) and runtime_hint != null) .mysql else .sqlite;
 }

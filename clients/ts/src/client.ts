@@ -1,10 +1,3 @@
-// Rui.connect starts the Host as a child of this process, hands it the settings
-// document on stdin and waits until it answers host-info on the socket in its
-// private interface (D107, D112, D130, D131). By default the child lives as
-// long as stdin stays open (D5, D118); settings may select detached lifetime.
-// A child that exits on its own is restarted with
-// capped backoff, and calls in flight are retried once the new Host is ready;
-// every write carries a request key, so a retry is safe (D118, D129).
 import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdtemp, rm, stat, symlink } from "node:fs/promises";
@@ -47,13 +40,10 @@ const DEFAULT_LOCK_WAIT_MS = 120_000;
 const LOCK_RETRY_MS = 500;
 const FIRST_RESTART_MS = 500;
 const MAX_RESTART_MS = 30_000;
-/** The Host bounds its own shutdown at 10 s (D118); this leaves room for the exit to arrive. */
 const CLOSE_GRACE_MS = 15_000;
 const READY_POLL_MS = 25;
 const READINESS_RECEIPT_BYTES = Buffer.byteLength("ready instance=") + 32 + 1;
-/** How long a refused connection waits for the child's exit before it counts as unanswered. */
 const EXIT_NOTICE_MS = 2_000;
-/** Transient refusals during automatic restart, not initial connect. */
 const RETRYABLE_START_CODES = new Set<RuiStartError["code"]>(["store_locked", "mysql_unreachable"]);
 
 interface Exit {
@@ -61,7 +51,6 @@ interface Exit {
 	signal: NodeJS.Signals | null;
 }
 
-/** A child that answered host-info. */
 interface Host {
 	child: ChildProcess;
 	instance: string;
@@ -84,7 +73,6 @@ interface Launch {
 	env: NodeJS.ProcessEnv;
 }
 
-/** A failed start, with the child's exit when there was a child. */
 class AttemptFailed extends Error {
 	readonly error: Error;
 	readonly exit: Exit | undefined;
@@ -100,14 +88,12 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	readonly #launch: Launch;
 	readonly #runtimeDir: string;
 	#host: Host | undefined;
-	/** The child of the latest start, ready or not. */
 	#child: ChildProcess | undefined;
 	#waiters: Waiter[] = [];
 	#backoff = FIRST_RESTART_MS;
 	#restart: NodeJS.Timeout | undefined;
 	#closing: Promise<void> | undefined;
 	#dead: Error | undefined;
-	/** Local Session write notifications, shared by every handle. Internal. */
 	readonly activity = new SessionNotifications();
 	/** Create and list Sessions. */
 	readonly sessions: Sessions = new Sessions(this);
@@ -192,11 +178,6 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 		}
 	}
 
-	/**
-	 * Sends one request to the ready Host. A call that finds the child gone
-	 * waits for the restarted Host and is sent once more. Internal: the
-	 * package's calls are built on it.
-	 */
 	async call(path: string, body: string, environment?: Buffer, limits?: ReplyLimits): Promise<Buffer> {
 		let retried = false;
 		for (;;) {
@@ -219,22 +200,15 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 		}
 	}
 
-	/**
-	 * Sends one request built for the Host's Store. `build` receives the
-	 * canonical Store name the Host reported at readiness. Internal: the
-	 * package's calls are built on it.
-	 */
 	async exchange(path: string, build: (store: string) => string, environment?: Buffer, limits?: ReplyLimits): Promise<Buffer> {
 		const host = await this.#ready();
 		return this.call(path, build(host.info.store), environment, limits);
 	}
 
-	/** The running child's process id. Internal. */
 	get pid(): number | undefined {
 		return this.#host?.child.pid;
 	}
 
-	/** The latest host-info reply. Internal. */
 	get hostInfo(): HostInfo | undefined {
 		return this.#host?.info;
 	}
@@ -266,12 +240,10 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	}
 
 	#scheduleRestart(): void {
-		// Once close has begun nothing may start again, whoever asked (an exit listener may close).
 		if (this.#closing) return;
 		const delay = this.#backoff;
 		this.#backoff = Math.min(this.#backoff * 2, MAX_RESTART_MS);
 		this.#restart = setTimeout(() => void this.#restartNow(), delay);
-		// An idle client does not keep the process alive; a call waiting for the restart does (see #ready).
 		if (this.#waiters.length === 0) this.#restart.unref();
 	}
 
@@ -301,7 +273,6 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 }
 
 export function launchFor(settings: HostSettings, runtimeDir: string, options: ClientOptions = {}): Launch {
-	// Inherit program/home lookup plus only the secret sources this document names.
 	const env: NodeJS.ProcessEnv = Object.create(null);
 	for (const name of ["PATH", "HOME", "TMPDIR"]) {
 		const value = process.env[name];
@@ -314,13 +285,11 @@ export function launchFor(settings: HostSettings, runtimeDir: string, options: C
 	};
 }
 
-/** Release all restart-owned secret bytes/references on every terminal transition. */
 function disposeLaunch(launch: Launch): void {
 	launch.document.fill(0);
 	for (const name of Object.keys(launch.env)) delete launch.env[name];
 }
 
-/** Starts one child and resolves once it answers host-info, or throws AttemptFailed. */
 async function start(launch: Launch, spawned: (child: ChildProcess) => void): Promise<Host> {
 	let child: ChildProcess;
 	try {
@@ -333,7 +302,6 @@ async function start(launch: Launch, spawned: (child: ChildProcess) => void): Pr
 	}
 	spawned(child);
 	const stdout: Buffer[] = [];
-	// This fixed prefix precedes every caller-controlled path in the child's record.
 	const receipt = Buffer.alloc(READINESS_RECEIPT_BYTES);
 	let receiptBytes = 0;
 	let readyInstance: string | undefined;
@@ -352,12 +320,10 @@ async function start(launch: Launch, spawned: (child: ChildProcess) => void): Pr
 	const outputEnded = new Promise<void>((done) => child.stdout?.once("close", done));
 	const launchError = new Promise<Error>((done) => child.once("error", done));
 	const exited = exitOf(child);
-	// The child must not keep this process alive; its stdin closing is how it learns this process ended.
 	child.unref();
 	(child.stdout as Socket | null)?.unref();
 	(child.stdin as unknown as Socket | null)?.unref();
 	child.stdin?.on("error", () => {});
-	// write owns this copy until its callback; retain the restart document separately.
 	const bytes = Buffer.from(launch.document);
 	const wipeWrite = () => bytes.fill(0);
 	child.stdin?.once("close", wipeWrite);
@@ -382,7 +348,6 @@ async function start(launch: Launch, spawned: (child: ChildProcess) => void): Pr
 		if (ended instanceof Error) {
 			throw new AttemptFailed(new RuiUnavailableError(`could not start ${launch.binary}: ${ended.message}`, { cause: ended }), undefined);
 		}
-		// The refusal line is written before the exit; give the pipe a moment to deliver it.
 		await Promise.race([outputEnded, sleep(1_000)]);
 		const output = Buffer.concat(stdout);
 		let refusal: RuiStartError | undefined;
@@ -404,7 +369,6 @@ async function start(launch: Launch, spawned: (child: ChildProcess) => void): Pr
 	}
 }
 
-/** Readiness proves the Host admitted the path; decoding and alias effects belong after it. */
 async function createInterfaceAlias(launch: Launch): Promise<void> {
 	const dir = launch.interfaceDir;
 	const target = typeof dir === "string" ? dir : Buffer.from(dir.hex, "hex");
@@ -430,7 +394,6 @@ async function probe(launch: Launch, instance: string): Promise<HostInfo | undef
 	return info;
 }
 
-/** One length-prefixed JSON frame: a 4-byte big-endian length, then UTF-8 JSON (D130). */
 export function encodeSettings(document: Schemas["HostSettings"]): Buffer {
 	const json = Buffer.from(JSON.stringify(document));
 	try {
@@ -443,13 +406,11 @@ export function encodeSettings(document: Schemas["HostSettings"]): Buffer {
 	}
 }
 
-/** Only the fixed leading child receipt is authoritative; later path bytes are not records. */
 export function readinessInstance(prefix: Buffer): string | undefined {
 	if (prefix.length !== READINESS_RECEIPT_BYTES) return undefined;
 	return /^ready instance=([0-9a-f]{32}) $/.exec(prefix.toString("latin1"))?.[1];
 }
 
-/** The refusal a child wrote as its one stdout line, `{"rui_start_error":{code,message}}` (D211). */
 export function startError(output: string): RuiStartError | undefined {
 	for (const line of output.split("\n").reverse()) {
 		if (!line.trim()) continue;
@@ -460,7 +421,6 @@ export function startError(output: string): RuiStartError | undefined {
 				return new RuiStartError(refusal.code, typeof refusal.message === "string" ? refusal.message : refusal.code);
 			}
 		} catch {
-			// Not the refusal line.
 		}
 	}
 	return undefined;

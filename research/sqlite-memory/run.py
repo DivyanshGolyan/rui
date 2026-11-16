@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Bounded native storage experiment. All heavy work holds the sibling lock."""
 import fcntl, hashlib, json, pathlib, platform, re, subprocess, tarfile, tempfile, time
 HERE=pathlib.Path(__file__).resolve().parent
 ROOT=HERE.parents[1]
@@ -22,7 +21,6 @@ macros=['-D'+k+'='+v for k,v in re.findall(r'addCMacro\("([^"]+)", "([^"]+)"\)',
 source=(ROOT/'src/host_store.zig').read_text()
 block=source.split('const content_schema =',1)[1].split('\n;',1)[0]
 schema='\n'.join(line.strip()[2:] for line in block.splitlines() if line.strip().startswith('\\\\'))
-# Only relax the earlier value-size guard for the large-value prototype.
 large_schema=schema.replace('byte_length BETWEEN 1 AND 1048576','byte_length >= 1')
 (OUT/'schema.h').write_text('#define CONTENT_SCHEMA '+json.dumps(large_schema)+'\n')
 metadata={'revision':command(['git','rev-parse','HEAD'],cwd=ROOT).strip(),'machine':platform.platform(),'hardware':command(['sysctl','-n','hw.model','hw.memsize','hw.ncpu']).splitlines(),'compiler':command(['cc','--version']),'zig':env,'sqlite_sha256':hashlib.sha256(sqlite.read_bytes()).hexdigest(),'sqlite_package_hash':pkg,'macros':macros,'schema':large_schema,'source_sha256':{p:hashlib.sha256((ROOT/p).read_bytes()).hexdigest() for p in ['src/host_store.zig','build.zig','ARCHITECTURE.md','VERIFICATION.md','research/sqlite-memory/probe.c','research/sqlite-memory/run.py']},'measurement_note':'fresh process per case; Mac physical footprint stage samples, SQLite high-water continuous; malloc zone includes SQLite and libc, do not sum; source and database scratch removed per case'}
@@ -60,7 +58,6 @@ with open('/tmp/rui-memory-experiments.lock','a') as lock:
                 elif p.returncode: raise RuntimeError(record)
     metadata['vm_stat_after']=command(['vm_stat'])
 (HERE/'provenance.json').write_text(json.dumps(metadata,indent=2)+'\n')
-# Assert outcomes independently of native checks, so expected failures are not mistaken for success.
 for r in results:
     failures=[s['failure_rc'] for s in r['samples'] if 'failure_rc' in s]
     expected=7 if not r['spill'] else {'full':13,'short':1001,'digest':1002}.get(r['mode'])

@@ -1,7 +1,3 @@
-//! The app settings Version row's joined worker: check, then install.
-//! The owner keeps this value at a stable address from begin through
-//! completion, polls `advance` and tells the overview's core its `status`. The
-//! full check and receipts print on exit.
 const std = @import("std");
 const upgrade = @import("upgrade.zig");
 const installation_path = @import("installation_path.zig");
@@ -18,8 +14,6 @@ store: []const u8 = "",
 allocator: std.mem.Allocator = undefined,
 task: ClientTask = .{},
 phase: std.atomic.Value(upgrade.Phase) = .init(.checking),
-/// Who decided the run first: Esc cancelling it, or the worker committing
-/// to publication. The one owner of whether Esc may still cancel.
 gate: std.atomic.Value(enum(u8) { open, cancelled, committed }) = .init(.open),
 operation: Operation = .check,
 checked: ?upgrade.Check = null,
@@ -28,22 +22,16 @@ cleanup: upgrade.CleanupReceipts = .{},
 download: upgrade.Download = .{},
 failure: ?anyerror = null,
 outcome: Outcome = .unchanged,
-/// A stop was asked for: an Esc that `gate` let through, or leaving the
-/// overview, which requests a stop whatever `gate` says. Activation already
-/// handed to the independent coordinator still finishes before the join.
 cancelling: bool = false,
 started: bool = false,
 finished: bool = false,
 
-/// The owner and its init/store must outlive the worker. Never move the job
-/// between begin and join. Call deinit even when begin fails.
 pub fn begin(self: *Self, init: std.process.Init, store: []const u8) !void {
     std.debug.assert(!self.started and self.task.thread == null);
     self.init = init;
     self.store = store;
     self.allocator = init.gpa;
     self.started = true;
-    // Esc came while the overview settled its Host work: nothing checks.
     if (self.cancelling) return self.finish();
     self.task.start(init.io, self, work) catch |err| {
         self.failure = err;
@@ -63,8 +51,6 @@ fn work(raw: *anyopaque, task: *ClientTask) !void {
 fn progress(raw: *anyopaque, phase: upgrade.Phase) void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (phase == .publishing) {
-        // Publication commits the run unless Esc closed the gate first;
-        // then the worker stops itself before it publishes.
         if (self.gate.cmpxchgStrong(.open, .committed, .acq_rel, .acquire) != null) {
             self.task.cancellation.requestStop();
             return;
@@ -73,9 +59,6 @@ fn progress(raw: *anyopaque, phase: upgrade.Phase) void {
     self.phase.store(phase, .release);
 }
 
-/// Poll, join completed work, and automatically install an eligible check.
-/// Worker failures are retained for status/writeReport rather than replacing
-/// a caller's primary input, output or terminal-restoration failure.
 pub fn advance(self: *Self) !bool {
     return self.advanceWith(work);
 }
@@ -114,26 +97,18 @@ fn finish(self: *Self) void {
     self.finished = true;
 }
 
-/// Esc: cancels only while nothing is published. The worker and Esc race
-/// on `gate`, so whichever comes first holds; once publication committed,
-/// Esc is refused and the status row hears the publication. One made
-/// before `begin` holds: the run then ends without checking.
 pub fn cancel(self: *Self) void {
     if (self.finished) return;
     if (self.gate.cmpxchgStrong(.open, .cancelled, .acq_rel, .acquire)) |gate| if (gate == .committed) return;
     self.abandon();
 }
 
-/// Leaving the overview requests a stop, publication or not. The independent
-/// coordinator retains accepted activation custody; joining waits for its result.
 fn abandon(self: *Self) void {
     if (self.finished) return;
     self.cancelling = true;
     if (self.started) self.task.cancel();
 }
 
-/// On a fatal UI exit, preserve the joined outcome for writeReport before
-/// deinit. The caller retains its own primary error independently.
 pub fn settle(self: *Self) void {
     if (!self.started or self.finished) return;
     self.abandon();
@@ -149,10 +124,6 @@ pub fn deinit(self: *Self) void {
     self.* = .{};
 }
 
-/// Where the run stands now, whole: what the core shows and decides by.
-/// The census counts same-user Hosts, not just this Store's working Sessions.
-/// A release already selected with no discovered Hosts installs quietly: the
-/// check goes on until it ends up to date.
 pub fn status(self: *const Self) upgrade_status.Run {
     if (self.finished) return .{ .ended = .{ .how = self.ending(), .outcome = self.outcome } };
     if (self.cancelling) return .cancelling;
@@ -167,9 +138,6 @@ pub fn status(self: *const Self) upgrade_status.Run {
     return .checking;
 }
 
-/// The selected build already is the release, or newer, and no running
-/// Host would restart onto it, so the run has nothing to show until it
-/// ends. A newer selected build is never restarted onto the older release.
 fn current(checked: *const upgrade.Check) bool {
     return upgrade.holdsRelease(checked) and checked.hosts.entries.len == 0;
 }
@@ -204,24 +172,18 @@ fn ending(self: *const Self) upgrade_status.Ended {
             .source => .source_build,
             .unknown_managed => .unknown_build,
             .ineligible => .package_managed,
-            // An eligible check installs, so it ends with a result or a failure.
             .released => unreachable,
         },
     };
 }
 
-/// The concise but durable installation and activation receipt for an ordinary
-/// exit or a subsequent command. The full check remains in writeReport.
 pub fn writeReceipt(self: *const Self, writer: *std.Io.Writer) !void {
     std.debug.assert(!self.started or self.finished);
     if (self.result) |*result| try upgrade.writeResult(writer, result);
-    // A shell that finds another rui first still needs telling.
     if (self.checked) |*checked| try installation_path.write(writer, &checked.path, checked.home);
     try self.cleanup.write(writer);
 }
 
-/// The publication's pinned selection, never PATH or this running image.
-/// An activation-only run has installed nothing and must not replace the TUI.
 pub fn relaunchBuild(self: *const Self) ?[]const u8 {
     std.debug.assert(!self.started or self.finished);
     const result = &(self.result orelse return null);
@@ -235,8 +197,6 @@ pub fn hasGuidance(self: *const Self) bool {
         (if (self.checked) |checked| checked.path.state != .selected else false);
 }
 
-/// Read only after finished/settle; always render the actual publication and
-/// activation receipt and copied cleanup facts, including on cancellation.
 pub fn writeReport(self: *const Self, writer: *std.Io.Writer) !void {
     std.debug.assert(!self.started or self.finished);
     if (self.checked) |*checked| try upgrade.writeCheck(writer, checked);
@@ -255,9 +215,6 @@ pub fn writeReport(self: *const Self, writer: *std.Io.Writer) !void {
     if (self.outcome == .incompatible) try writer.writeAll("\nThis client cannot safely resume Host requests. Keep the draft and recovery handles; use the selected Rui in a new terminal. Do not resend indeterminate work.\n");
 }
 
-/// Why a run failed, in words: the caller code's own for the release and
-/// preparation failures it names; anything else, such as a network or
-/// file fault, only that it did not finish.
 fn failureWords(err: anyerror) []const u8 {
     return switch (caller_error.of(err)) {
         .upgrade_download_failed, .upgrade_release_invalid, .upgrade_preparation_failed, .upgrade_ineligible => |code| caller_error.facts(code).says,
@@ -285,7 +242,6 @@ test "joined installation cancellation retains the actual publication receipt" {
     try job.writeReceipt(&receipt);
     try std.testing.expect(std.mem.indexOf(u8, receipt.buffered(), "Installed Rui. Complete build: /synthetic/installed") != null);
     try std.testing.expect(std.mem.indexOf(u8, receipt.buffered(), "Installation was not rolled back") != null);
-    // Fixture strings are static, not owned allocations.
     job.result = null;
 }
 
@@ -362,7 +318,6 @@ test "settle requests cancellation and joins before returning the failure" {
 }
 
 test "Esc and publication race on one gate: whichever comes first holds" {
-    // Esc after the worker reached publication: refused, nothing stops.
     {
         var job: Self = .{ .started = true, .operation = .install };
         progress(&job, .preparing);
@@ -372,7 +327,6 @@ test "Esc and publication race on one gate: whichever comes first holds" {
         try std.testing.expect(!job.task.cancellation.stopped.load(.acquire));
         try std.testing.expectEqual(upgrade.Phase.publishing, job.phase.load(.acquire));
     }
-    // Esc first: the worker's next step to publication stops itself.
     {
         var job: Self = .{ .started = true, .operation = .install };
         progress(&job, .preparing);
@@ -382,7 +336,6 @@ test "Esc and publication race on one gate: whichever comes first holds" {
         try std.testing.expect(job.task.cancellation.stopped.load(.acquire));
         try std.testing.expectEqual(upgrade.Phase.preparing, job.phase.load(.acquire));
     }
-    // Leaving the overview still cancels after publication.
     {
         var job: Self = .{ .started = true, .operation = .install };
         progress(&job, .publishing);
@@ -396,7 +349,6 @@ test "a cancel before the worker starts ends the run cancelled without checking"
     init.io = std.testing.io;
     init.gpa = std.testing.allocator;
     var job: Self = .{};
-    // Esc while the overview still settles its own Host work.
     job.cancel();
     try std.testing.expect(job.cancelling);
     try job.begin(init, "/store");
@@ -469,7 +421,6 @@ test "completed check starts install automatically only when eligible and not ca
             try std.testing.expect(finished and job.operation == .check);
             try std.testing.expect(job.result == null);
         }
-        // These checks and receipts use static fixture strings.
         job.checked = null;
         job.result = null;
         job.deinit();
@@ -487,13 +438,11 @@ const news_check: upgrade.Check = .{
 
 test "the run's status: checking, the release found, each restart step, then how it ended" {
     var job: Self = .{ .started = true, .checked = news_check };
-    // Still checking, whatever the check has read.
     try std.testing.expectEqual(upgrade_status.Run.checking, job.status());
     job.operation = .install;
     job.phase.store(.preparing, .release);
     const found: upgrade_status.Found = .{ .host = .none };
     try std.testing.expectEqualDeep(upgrade_status.Run{ .installing = .{ .found = found } }, job.status());
-    // A Host it would restart counts the Sessions at work.
     job.checked.?.hosts = .{ .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "/s", .state = .{ .outcome = .{ .unsupported = .incompatible } } }}) };
     try std.testing.expectEqual(upgrade_status.Host{ .running = 1 }, job.status().installing.found.host);
     job.checked.?.hosts = .{};
@@ -511,18 +460,15 @@ test "the run's status: checking, the release found, each restart step, then how
 }
 
 test "a stop asked for shows until the run ends, before the worker starts and while it prepares, and not once it published" {
-    // Esc while the overview still settles its own Host work.
     var waiting: Self = .{};
     try std.testing.expectEqual(upgrade_status.Run.checking, waiting.status());
     waiting.cancel();
     try std.testing.expectEqual(upgrade_status.Run.cancelling, waiting.status());
-    // Esc while preparing.
     var preparing: Self = .{ .started = true, .operation = .install, .checked = news_check };
     progress(&preparing, .preparing);
     preparing.cancel();
     try std.testing.expectEqual(upgrade_status.Run.cancelling, preparing.status());
     preparing.checked = null;
-    // Esc after publication committed: refused, and the status says what happens.
     var published: Self = .{ .started = true, .operation = .install, .checked = news_check };
     progress(&published, .publishing);
     published.cancel();
@@ -547,26 +493,16 @@ test "how a run ends, as the status bar names it" {
     const already_ready: @import("HostLifecycle.zig").ActivationOutcome = .{ .already_ready = .{ .instance = @splat(0), .pid = 1 } };
     const Case = struct { job: Self, ended: upgrade_status.Ended, outcome: Outcome };
     for ([_]Case{
-        // Installed: restarted only when the new Host came up.
         .{ .job = .{ .operation = .install, .result = .{ .installation = installed, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = ready } }}) }, .store = "" } }, .ended = .{ .upgraded = .{ .version = v, .restarted = true } }, .outcome = .compatible },
         .{ .job = .{ .operation = .install, .result = .{ .installation = installed, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .not_needed } }}) }, .store = "" } }, .ended = .{ .upgraded = .{ .version = v, .restarted = false } }, .outcome = .compatible },
-        // Installed and published, though the run was cancelled after.
         .{ .job = .{ .operation = .install, .cancelling = true, .result = .{ .installation = installed, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .cancelled } }}) }, .store = "" } }, .ended = .{ .upgraded = .{ .version = v, .restarted = false } }, .outcome = .compatible },
-        // Already the selected build: up to date, unless the Host restarted
-        // onto it.
-        // Up to date still admits the Host it left: a retry after an
-        // Upgrade blocked requests lifts the block.
         .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .not_needed } }}) }, .store = "" } }, .ended = .{ .up_to_date = v }, .outcome = .compatible },
         .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = already_ready } }}) }, .store = "" } }, .ended = .{ .up_to_date = v }, .outcome = .compatible },
         .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = ready } }}) }, .store = "" } }, .ended = .{ .upgraded = .{ .version = v, .restarted = true } }, .outcome = .compatible },
-        // Another install selected a newer build: not up to date with the
-        // older candidate, and nothing restarted.
         .{ .job = .{ .operation = .install, .result = .{ .installation = .{ .unchanged = .{ .operation_build = "/b", .selected_after = "/b", .selected_version = .{ .schema = 60, .patch = 2 } } }, .hosts = .{ .version = .{ .schema = 60, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .superseded } }}) }, .store = "" } }, .ended = .superseded, .outcome = .compatible },
-        // The Host left cannot serve this client.
         .{ .job = .{ .operation = .install, .result = .{ .installation = installed, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .{ .client_incompatible = 123 } } }}) }, .store = "" } }, .ended = .{ .incompatible = v }, .outcome = .incompatible },
         .{ .job = .{ .operation = .install, .result = .{ .installation = installed, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .{ .unconfirmed = .verifying } } }}) }, .store = "" } }, .ended = .{ .incompatible = v }, .outcome = .incompatible },
         .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .replacement_observed } }}) }, .store = "" } }, .ended = .{ .incompatible = v }, .outcome = .incompatible },
-        // No receipt: a cancel says so before a failure does.
         .{ .job = .{ .operation = .install, .cancelling = true, .failure = error.Cancelled }, .ended = .cancelled, .outcome = .unchanged },
         .{ .job = .{ .operation = .install, .failure = error.ReleaseChecksumMismatch }, .ended = .{ .failed = .release }, .outcome = .unchanged },
         .{ .job = .{ .failure = error.ReleaseDownloadFailed }, .ended = .{ .failed = .download }, .outcome = .unchanged },
@@ -581,8 +517,6 @@ test "how a run ends, as the status bar names it" {
         try std.testing.expectEqualDeep(upgrade_status.Run{ .ended = .{ .how = case.ended, .outcome = case.outcome } }, job.status());
         job.result = null;
         job.checked = null;
-        // Discovery can fail before any Check exists; the same owner still
-        // decides why, without collapsing it into a generic failed ending.
         if (job.failure != null) try std.testing.expectEqualDeep(case.ended, job.ending());
     }
 }
@@ -714,8 +648,6 @@ test "Upgrade status derives every version from the publication target across ca
                 var entries = [_]restart_all.Entry{.{ .socket = "/socket", .store = "/store", .state = .{ .outcome = activation } }};
                 var job: Self = .{ .started = true, .operation = .install, .checked = news_check };
                 job.checked.?.candidate.version = candidate;
-                // Cover both an already-newer selection and a publication
-                // replacing the check's older selection with a concurrent winner.
                 job.checked.?.selected.released.version = if (installed) .{ .schema = 1, .patch = 0 } else target;
                 job.checked.?.hosts.entries = &entries;
                 const preparing = job.status();
@@ -726,8 +658,6 @@ test "Upgrade status derives every version from the publication target across ca
 
                 job.result = .{
                     .installation = if (installed) .{ .installed = receipt } else .{ .unchanged = receipt },
-                    // The batch may fail before learning a target. It is not
-                    // another authority for the publication's version.
                     .hosts = .{ .entries = &entries },
                     .store = "/store",
                 };

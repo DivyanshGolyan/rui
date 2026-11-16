@@ -1,4 +1,3 @@
-"""One fixture-owned Unix exchange; callers own the response, including malformations."""
 
 import contextlib
 import pathlib
@@ -10,8 +9,6 @@ import time
 
 from host_process import dispose_all
 
-# These read-only typed requests contain identities/cursors, never input payloads.
-# Keep generous finite fixture limits without retaining their request bodies.
 HEADER_LIMIT = 16 * 1024
 BODY_LIMIT = 64 * 1024
 
@@ -22,13 +19,6 @@ class _Cancelled(Exception):
 
 @contextlib.contextmanager
 def one_reply(path, response, *, timeout=10):
-    """Yield the original deadline for the caller's subprocess timeout.
-
-    All I/O and normal retirement use that deadline. Failure wakes every wait
-    and reaps the worker before releasing its resources; reaping is mandatory,
-    not a timed join that abandons a live thread. OS scheduling is not bounded.
-    The supplied response is borrowed and sent unchanged without a full copy.
-    """
     deadline = time.monotonic() + timeout
     path = pathlib.Path(path)
     sockets = []
@@ -40,7 +30,7 @@ def one_reply(path, response, *, timeout=10):
         sockets.append(listener)
         cancel, wake = socket.socketpair()
         sockets.extend((cancel, wake))
-        path.unlink(missing_ok=True)  # Only the stopped fixture Host's endpoint.
+        path.unlink(missing_ok=True)
         listener.bind(str(path))
         bound = True
         listener.listen(1)
@@ -129,8 +119,6 @@ def one_reply(path, response, *, timeout=10):
     finally:
         def retire():
             if worker is not None and worker.ident is not None:
-                # EOF on the private cancellation socket wakes accept/read/write.
-                # Only the worker ever touches the accepted socket.
                 dispose_all(lambda: wake.shutdown(socket.SHUT_WR), worker.join)
             if errors:
                 raise errors[0]

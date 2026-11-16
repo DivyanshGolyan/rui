@@ -65,11 +65,8 @@ def screen_evidence(body):
     visible = "\n".join(lines)
     if re.search(r"^No screen change:[ \t]*\S[^\n]*$", visible, re.M):
         return True
-    if re.search(r"!\[[^\]\n]*\]\(\s*[^\s)]+[^\n]*\)|!\[[^\]\n]*\]\[[^\]\n]*\]"
-                          r"|<img\b|<video\b|https://github\.com/user-attachments/[^\s<>)]+",
-                          visible, re.I):
-        return True
-    return False
+    return any(line.lstrip().startswith(("![", "<img", "<video"))
+               and "https://github.com/user-attachments/" in line for line in lines)
 
 
 def refusal(changed_paths, body, *, base=None) -> str | None:
@@ -85,7 +82,7 @@ def refusal(changed_paths, body, *, base=None) -> str | None:
     if base is not None and any(path.startswith("src/") for path in paths):
         ui |= revision_ui_paths(base)
     if paths & (ui | {".claude/skills/verify-rui/scripts/frames.json"}) and not screen_evidence(body):
-        return ("UI PRs need embedded media or a line 'No screen change: <reason>'. "
+        return ("UI PRs need a visible user-attachments image/video line or a line 'No screen change: <reason>'. "
                 "Run verify-rui frames HEAD --before BASE, then verify-rui publish DIR --pr PR (gh 2.104.0+ and a classic PAT or gh OAuth token with push access); attach before the next push or re-run failed jobs after updating the body.")
     return None
 
