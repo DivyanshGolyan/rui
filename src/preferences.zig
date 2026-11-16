@@ -174,18 +174,21 @@ pub fn saveProviderAfterLogin(home: []const u8, provider: protocol.Provider) !vo
     _ = try save(home, .{ .provider = .{ .set = @tagName(provider) } }, &readiness, null);
 }
 
-noinline fn resolveStore(value: []const u8) !platform.Paths {
-    return platform.resolveClientPaths(io, value) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir, error.AccessDenied, error.PermissionDenied, error.InsecureDirectoryPermissions, error.SymLinkLoop, error.StorePathTooLong, error.NameTooLong, error.InvalidStorePath => error.InvalidPreferenceStore,
-        else => err,
+noinline fn resolveStore(value: []const u8) !@import("host_settings.zig").OsBytes(protocol.max_store_bytes) {
+    const paths = platform.resolveClientPaths(io, value) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir, error.AccessDenied, error.PermissionDenied, error.InsecureDirectoryPermissions, error.SymLinkLoop, error.StorePathTooLong, error.NameTooLong, error.InvalidStorePath => return error.InvalidPreferenceStore,
+        else => return err,
     };
+    var selector: @import("host_settings.zig").OsBytes(protocol.max_store_bytes) = .{};
+    try selector.set(paths.selector());
+    return selector;
 }
 
 fn apply(saved: Values, edit: Edit, readiness: *const Readinesses) !Values {
     var values = saved;
     if (edit.store == .set) {
-        const paths = try resolveStore(edit.store.set);
-        values.store.set(paths.selector()) catch return error.InvalidPreferenceStore;
+        const selector = try resolveStore(edit.store.set);
+        values.store.set(selector.slice()) catch return error.InvalidPreferenceStore;
     }
     if (edit.provider == .set) {
         const chosen = std.meta.stringToEnum(protocol.Provider, edit.provider.set).?;

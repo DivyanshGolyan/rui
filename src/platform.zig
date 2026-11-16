@@ -32,7 +32,7 @@ pub const Paths = struct {
         return if (self.host_directory.len != 0) self.host_directory.slice() else self.store_identity.slice();
     }
 
-    pub fn retainReachableDirectory(self: *Paths, io: std.Io, dir: []const u8) void {
+    pub noinline fn retainReachableDirectory(self: *Paths, io: std.Io, dir: []const u8) void {
         // A foreground unsaved placement need not be reachable through DIR.
         // Keep its legacy route rather than inventing a discoverable selector.
         const saved = resolveClientPaths(io, dir) catch return;
@@ -339,23 +339,26 @@ pub noinline fn mysqlClientPaths(io: std.Io, store: []const u8, runtime: []const
 /// Every explicit-interface lookup admits an existing directory before any
 /// connection. Saved placement may name a directory the starter has yet to
 /// create; the legacy opaque-id lookup still requires an existing runtime.
-fn privateInterfacePaths(io: std.Io, kind: Kind, store: []const u8, runtime: []const u8, missing: enum { allow, refuse }) !Paths {
+fn validateInterfaceDirectory(io: std.Io, runtime: []const u8, missing: enum { allow, refuse }) !void {
     var dir = std.Io.Dir.cwd().openDir(io, runtime, .{}) catch |err| {
-        if (err == error.FileNotFound and missing == .allow) return interfacePaths(kind, store, runtime);
+        if (err == error.FileNotFound and missing == .allow) return;
         return err;
     };
     defer dir.close(io);
     try validatePrivateDirectory(dir, io);
-    return interfacePaths(kind, store, runtime);
 }
 
-/// The single Paths construction for both saved placement and legacy MySQL hints.
-fn interfacePaths(kind: Kind, store: []const u8, runtime: []const u8) !Paths {
+fn privateInterfacePaths(io: std.Io, kind: Kind, store: []const u8, runtime: []const u8, missing: enum { allow, refuse }) !Paths {
+    try validateInterfaceDirectory(io, runtime, missing);
     var paths: Paths = .{ .kind = kind };
     try paths.store_identity.set(store);
+    try setInterfacePaths(&paths, runtime);
+    return paths;
+}
+
+fn setInterfacePaths(paths: *Paths, runtime: []const u8) !void {
     paths.socket.len = (try std.fmt.bufPrint(&paths.socket.bytes, "{s}/rui.sock", .{runtime})).len;
     paths.scratch.len = (try std.fmt.bufPrint(&paths.scratch.bytes, "{s}/scratch", .{runtime})).len;
-    return paths;
 }
 
 pub fn anchorPlacement(io: std.Io, settings: *hs.Settings, dir: []const u8, failure: *start_report.Failure) !void {
@@ -401,9 +404,8 @@ pub noinline fn placementPaths(io: std.Io, settings: *const @import("host_settin
     var canonical: [protocol.max_store_bytes]u8 = undefined;
     var paths = try pathsForCanonicalStore(try canonicalStoreDestination(io, settings.store.sqlite.dir.slice(), &canonical));
     if (!settings.interface.dir.anchored) {
-        const interface = try privateInterfacePaths(io, .sqlite, paths.store_identity.slice(), settings.interface.dir.slice(), .allow);
-        paths.socket = interface.socket;
-        paths.scratch = interface.scratch;
+        try validateInterfaceDirectory(io, settings.interface.dir.slice(), .allow);
+        try setInterfacePaths(&paths, settings.interface.dir.slice());
     }
     return paths;
 }

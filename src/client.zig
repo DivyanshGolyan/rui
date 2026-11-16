@@ -1110,6 +1110,7 @@ pub fn hostLockState(io: std.Io, store_path: []const u8) HostLockState {
     const selected = platform.resolveClientSelection(store_path);
     if (selected == .mysql) return .failure;
     const paths = selected.paths(io) catch |err| return if (err == error.FileNotFound) .free else .failure;
+    if (paths.kind == .mysql) return .failure;
     return lockState(io, &paths);
 }
 
