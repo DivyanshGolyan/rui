@@ -1270,7 +1270,7 @@ fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) proto
         var memory: [protocol.max_host_info_response_bytes * 2]u8 = undefined;
         var fixed: std.heap.FixedBufferAllocator = .init(&memory);
         const hint = std.json.parseFromSliceLeaky(struct { store: []const u8 }, fixed.allocator(), reply.body, .{ .ignore_unknown_fields = true }) catch return .incompatible;
-        if (!platform.validStoreId(hint.store)) return .incompatible;
+        if (!@import("store_id.zig").valid(hint.store)) return .incompatible;
         return protocol_reply.parseHostInfo(reply.body, hint.store) catch .incompatible;
     }
     return protocol_reply.parseHostInfo(reply.body, paths.store.slice()) catch .incompatible;
@@ -2002,7 +2002,7 @@ pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, tar
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     try protocol_reply.validateIdentityInputs(location.key, input.session);
     if (input.action_id == 0) return error.InvalidTarget;
-    return runCapture(io, paths, &location, input.session, .permission_decision, null, Capture.writePermissionDecision, .{ paths.store.slice(), location.key, input });
+    return runCapture(io, &paths, &location, input.session, .permission_decision, null, Capture.writePermissionDecision, .{ paths.store.slice(), location.key, input });
 }
 
 fn finishCapture(io: std.Io, capture: *Capture, location: *const CaptureTarget.Location, store: []const u8, session: []const u8, kind: protocol.CommandKind) !CapturedRecord {
@@ -2330,7 +2330,7 @@ fn openRead(requests: Requests, paths: *const platform.Paths, comptime route: []
 }
 
 pub const SendError = ErrorOf(std.Io.net.UnixAddress.init) || ErrorOf(connectRequest) || ErrorOf(uploadRequest) || ErrorOf(readCommandResponse);
-pub const MutationSendError = SendError || ErrorOf(platform.resolveClientPaths) || error{ Cancelled, EnvironmentTooLarge };
+pub const MutationSendError = SendError || ErrorOf(platform.resolveClientPaths) || error{ Cancelled, EnvironmentTooLarge, RequestBindingMismatch };
 
 /// The client environment a Message carries for its Session's Bash: the
 /// process's variables in order as `NAME=VALUE\0` entries. Names starting

@@ -2095,8 +2095,6 @@ test "Host start detached launches rebase typed paths and refuse paths with no b
     for ([_]Spawn{
         .{ .dir = dir, .settings_file = "plain.json" },
         .{ .dir = dir, .assignments = &.{"tools.bash=@bash.json"} },
-        // The reviewer's witness: a relative Store directory typed beside --store.
-        .{ .dir = dir, .assignments = &.{"store.sqlite.dir=host-references"} },
     }) |request| {
         var failure: start_report.Failure = undefined;
         var cwd: Cwd = .{ .io = init.io, .path = here };
@@ -2109,52 +2107,98 @@ test "Host start detached launches rebase typed paths and refuse paths with no b
     try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), "rui host serve --settings -") != null);
 }
 
-test "Host start starter refuses settings that move the Host away from its directory without resolving secrets" {
+test "Host start placement agrees across Store interface and every door without resolving secrets" {
     const gpa = std.testing.allocator;
     var environment: std.process.Environ.Map = .init(gpa);
     defer environment.deinit();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const init = initForTest(&arena, &environment);
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = try @import("socket_fixture.zig").Directory.init();
     defer tmp.cleanup();
-    const Case = struct { path: []const u8, value: []const u8, refused: ?[]const u8 };
-    var other_root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var other = try tmp.dir.createDirPathOpen(init.io, "other", .{ .permissions = .fromMode(0o700) });
-    defer other.close(init.io);
-    const elsewhere = other_root[0..try other.realPath(init.io, &other_root)];
-    for ([_]Case{
-        .{ .path = "tools.bash.timeoutMs", .value = "1000", .refused = null },
-        .{ .path = "execution.paused", .value = "true", .refused = null },
-        .{ .path = "interface.dir", .value = elsewhere, .refused = "interface.dir:" },
-        .{ .path = "store.mysql.url", .value = "env:HOST_START_NEVER_RESOLVED", .refused = "store.mysql:" },
-        .{ .path = "store.sqlite.dir", .value = elsewhere, .refused = "store.sqlite.dir:" },
-        .{ .path = "store.sqlite.dir", .value = "SELF", .refused = null },
-    }, 0..) |case, index| {
-        var name: [16]u8 = undefined;
-        var host = try tmp.dir.createDirPathOpen(init.io, try std.fmt.bufPrint(&name, "host{d}", .{index}), .{ .permissions = .fromMode(0o700) });
-        defer host.close(init.io);
-        var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const dir = root[0..try host.realPath(init.io, &root)];
+    const Store = enum { here, elsewhere, mysql };
+    const Door = enum { serve, starter, client };
+    for (std.enums.values(Store)) |store| for ([_]bool{ false, true }) |explicit| {
+        const name = try std.fmt.allocPrint(arena.allocator(), "{s}-{s}", .{ @tagName(store), if (explicit) "explicit" else "default" });
+        const dir = try std.fs.path.join(arena.allocator(), &.{ tmp.root[0..tmp.root_len], name });
+        const elsewhere = try std.fs.path.join(arena.allocator(), &.{ dir, "data" });
+        const interface = try std.fs.path.join(arena.allocator(), &.{ tmp.root[0..tmp.root_len], "interface" });
         var failure: start_report.Failure = undefined;
-        try checkStart(init, .{ .dir = dir }, &failure);
-        const value = if (std.mem.eql(u8, case.value, "SELF")) dir else case.value;
-        // Saved and one-off assignments reach the same verdict.
-        const assignment = try std.fmt.allocPrint(arena.allocator(), "{s}={s}", .{ case.path, value });
-        const once = checkStart(init, .{ .dir = dir, .assignments = &.{assignment} }, &failure);
-        try savedEdit(init, dir, case.path, value, &failure);
-        const saved_result = checkStart(init, .{ .dir = dir }, &failure);
-        if (case.refused) |prefix| {
-            try std.testing.expectError(error.SettingsInvalid, once);
-            try std.testing.expectError(error.SettingsInvalid, saved_result);
-            try std.testing.expectEqual(start_report.StartError.settings_invalid, failure.code);
-            try std.testing.expect(std.mem.startsWith(u8, failure.message.slice(), prefix));
-            try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), "rui host serve --store DIR") != null);
-        } else {
-            try once;
-            try saved_result;
+        try savedEdit(init, dir, "providers", "{}", &failure);
+        switch (store) {
+            .here => {},
+            .elsewhere => try savedEdit(init, dir, "store.sqlite.dir", elsewhere, &failure),
+            .mysql => try savedEdit(init, dir, "store.mysql.url", "env:HOST_START_NEVER_RESOLVED", &failure),
         }
+        if (explicit) try savedEdit(init, dir, "interface.dir", interface, &failure);
+        var expected: ?platform.Paths = null;
+        for (std.enums.values(Door)) |door| {
+            const settings = try gpa.create(hs.Settings);
+            defer gpa.destroy(settings);
+            settings.* = .{};
+            defer settings.deinit();
+            const paths = switch (door) {
+                .client => try savedPlacement(init.io, dir),
+                .serve => result: {
+                    const parsed = try parseForTest(arena.allocator(), &.{});
+                    var fixtures: providers.Fixtures = .{};
+                    try fillAt(init, &parsed, dir, settings, &fixtures, &failure);
+                    try anchorPlacement(init, settings, dir, &failure);
+                    break :result try platform.placementPaths(init.io, settings);
+                },
+                .starter => result: {
+                    try checkStart(init, .{ .dir = dir }, &failure);
+                    try readDetached(init, .{ .dir = dir }, settings, &failure);
+                    try anchorPlacement(init, settings, dir, &failure);
+                    break :result try platform.placementPaths(init.io, settings);
+                },
+            };
+            if (expected) |first| {
+                try std.testing.expectEqual(first.kind, paths.kind);
+                try std.testing.expectEqualStrings(first.store.slice(), paths.store.slice());
+                try std.testing.expectEqualStrings(first.socket.slice(), paths.socket.slice());
+            } else expected = paths;
+            if (explicit) try std.testing.expectEqualStrings(try std.fs.path.join(arena.allocator(), &.{ interface, "rui.sock" }), paths.socket.slice());
+            if (store == .mysql) {
+                try std.testing.expectEqual(platform.Kind.mysql, paths.kind);
+                try std.testing.expectEqual(@as(usize, 0), paths.store.len);
+            } else try std.testing.expectEqualStrings(if (store == .here) dir else elsewhere, paths.store.slice());
+        }
+    };
+    // Long default placement remains short, unlike an explicit interface.
+    const long = try std.fs.path.join(arena.allocator(), &.{ tmp.root[0..tmp.root_len], "d" ** 150 });
+    var failure: start_report.Failure = undefined;
+    try savedEdit(init, long, "providers", "{}", &failure);
+    const sqlite = try savedPlacement(init.io, long);
+    try savedEdit(init, long, "store.mysql.url", "env:HOST_START_NEVER_RESOLVED", &failure);
+    const mysql = try savedPlacement(init.io, long);
+    try std.testing.expect(sqlite.socket.len < hs.max_launch_socket_path_bytes);
+    try std.testing.expect(mysql.socket.len < hs.max_launch_socket_path_bytes);
+    try checkStart(init, .{ .dir = long }, &failure);
+}
+
+test "Host start unsaved placement is refused but saved placement and other overrides are admitted" {
+    const gpa = std.testing.allocator;
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init = initForTest(&arena, &env);
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const dir = tmp.root[0..tmp.root_len];
+    var failure: start_report.Failure = undefined;
+    const interface = try std.fs.path.join(arena.allocator(), &.{ dir, "runtime" });
+    for ([_][]const u8{ "store.mysql.url=env:NEVER_RESOLVED", try std.fmt.allocPrint(arena.allocator(), "interface.dir={s}", .{interface}), try std.fmt.allocPrint(arena.allocator(), "store.sqlite.dir={s}/data", .{dir}) }) |assignment| {
+        try std.testing.expectError(error.SettingsInvalid, checkStart(init, .{ .dir = dir, .assignments = &.{assignment} }, &failure));
+        try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), "rui host set") != null);
     }
+    const file = try std.fs.path.join(arena.allocator(), &.{ dir, "placement.json" });
+    try tmp.dir.writeFile(init.io, .{ .sub_path = "placement.json", .data = "{\"store\":{\"mysql\":{\"url\":{\"env\":\"NEVER_RESOLVED\"}}}}" });
+    try tmp.dir.setFilePermissions(init.io, "placement.json", .fromMode(0o600), .{});
+    try std.testing.expectError(error.SettingsInvalid, checkStart(init, .{ .dir = dir, .settings_file = file }, &failure));
+    try savedEdit(init, dir, "interface.dir", interface, &failure);
+    try checkStart(init, .{ .dir = dir, .assignments = &.{"execution.activeCapacity=3"} }, &failure);
 }
 
 test "Host start guided connection isolates two Stores preserves providers and freezes the pair" {
