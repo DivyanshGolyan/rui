@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Real list producer: semantic output and exact scope/cursor validation."""
 import json
 import os
 import pathlib
@@ -179,7 +178,6 @@ def main():
                 elif mode == "cursor":
                     page["next"]["after"] = "0" + page["next"]["after"]
                 elif mode == "delta":
-                    # Changed rows answer a token; this listing sent none.
                     assert page["delta"] == "full", page
                     page["delta"] = "changed"
                 elif mode == "exhausted" and page["next"] is not None:
@@ -221,7 +219,6 @@ def main():
                 b"X-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\nConnection: close\r\nContent-Length: "
                 + str(len(ERROR_BYTES)).encode() + b"\r\n\r\n" + ERROR_BYTES)
             def paged(*args, replies=()):
-                """Lists through the real producer, answering page N with replies[N] when given."""
                 def replace(response):
                     index = len(proxy.exchanges) - 1
                     return replies[index] if index < len(replies) and replies[index] is not None else response
@@ -232,8 +229,6 @@ def main():
                     proxy.close()
                 return result, [json.loads(response.split(b"\r\n\r\n", 1)[1]) for _, response in proxy.exchanges], \
                     [response for _, response in proxy.exchanges]
-            # Rows print only once the last page is read: a later page that
-            # fails prints nothing.
             result, pages, _ = paged(replies=(None, failure))
             assert len(pages) == 2 and pages[0]["next"] is not None, pages
             assert result.returncode == 1 and "[internal_unexpected]" in result.stderr and result.stdout == "", result
@@ -243,8 +238,6 @@ def main():
                 assert relabelled.returncode == 0, relabelled
             _, full_pages, full_replies = paged()
             full_first = full_pages[0]
-            # A changed listing whose continuation restarts as full prints
-            # the full listing alone, so each Session appears once.
             for replies in ((None, full_replies[0]), (None, full_replies[0], failure), (None, failure)):
                 result, pages, _ = paged("--since", token, replies=replies)
                 assert len(pages) == len(replies) + (replies[-1] is not failure), (replies, pages)

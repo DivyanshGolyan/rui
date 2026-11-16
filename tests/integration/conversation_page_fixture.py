@@ -1,6 +1,3 @@
-"""Conversation page helpers shared with the activity fixture and
-host_process_test.py: Host resource census, page disposal and the whole-stream
-shape case."""
 import http.server
 import json
 import os
@@ -20,7 +17,6 @@ def dispose_page(process, endpoint, thread, timeout):
             try:
                 endpoint.shutdown()
             except BaseException:
-                # Closing the listener does not signal serve_forever to retire.
                 dispose_all(endpoint.shutdown)
                 raise
 
@@ -39,15 +35,13 @@ def dispose_page(process, endpoint, thread, timeout):
 
 def host_resources(pid):
     if not pathlib.Path(f"/proc/{pid}/status").exists():
-        return None  # Linux process diagnostics; not a macOS footprint verdict.
+        return None
     status = pathlib.Path(f"/proc/{pid}/status").read_text()
     rss = int(next(line.split()[1] for line in status.splitlines() if line.startswith("VmRSS:"))) * 1024
     return rss, len(os.listdir(f"/proc/{pid}/fd"))
 
 
 def provider_connections(pid, port):
-    """The Host's open TCP sockets to the provider fixture on `port`. HTTP/2
-    keeps an idle connection for reuse, so it is not a reader's descriptor."""
     inodes = {line.split()[9] for table in ("/proc/net/tcp", "/proc/net/tcp6") if pathlib.Path(table).exists()
               for line in pathlib.Path(table).read_text().splitlines()[1:]
               if int(line.split()[2].rsplit(":", 1)[1], 16) == port}
@@ -56,13 +50,12 @@ def provider_connections(pid, port):
         try:
             target = os.readlink(fd)
         except FileNotFoundError:
-            continue  # Closed while listed.
+            continue
         count += target.startswith("socket:[") and target[8:-1] in inodes
     return count
 
 
 def idle_resources(pid, path):
-    # Response completion is not connection cleanup; wait for owned peer FDs.
     directory = pathlib.Path(f"/proc/{pid}/fd")
     try:
         descriptors = {fd.name: os.readlink(fd) for fd in directory.iterdir()}
@@ -70,8 +63,7 @@ def idle_resources(pid, path):
             if len(r := line.split()) == 8 and r[7] == path and int(r[3], 16) == 0}
         if any(target in peers for target in descriptors.values()): return None
         if descriptors != {fd.name: os.readlink(fd) for fd in directory.iterdir()}: return None
-    except FileNotFoundError: return None  # An observed descriptor just closed.
-    # Count the validated identities, not a later, unrelated FD enumeration.
+    except FileNotFoundError: return None
     return host_resources(pid)[0], len(descriptors)
 
 
@@ -84,8 +76,6 @@ def request(socket_path, store, route, kind, session, **fields):
 
 
 def whole_stream_shape(length):
-    # Escaping changes source length, not public byte framing. Pad only with
-    # ASCII so each shape is valid UTF-8 and has the independently chosen size.
     unit = "\x00\n\\\"é中🙂/"
     text = "" if length == 0 else "x" + unit * ((length - 1) // len(unit.encode()))
     text += "z" * (length - len(text.encode()))
@@ -115,8 +105,6 @@ def whole_stream_shape(length):
         store = state / "store"
         store.mkdir(mode=0o700)
         endpoint = TestHTTPServer(("127.0.0.1", 0), Handler)
-        # Persistent shutdown refusal must fail the checked join, not hang the
-        # interpreter at exit. Daemon mode is not evidence of retirement.
         worker = threading.Thread(target=endpoint.serve_forever, daemon=True)
         process = None
         try:
@@ -125,15 +113,11 @@ def whole_stream_shape(length):
             process, fields = start_host(store, provider)
             session = configure(state, store, "stream-config")
             if length == 0:
-                # Empty CLI stdin intentionally sends nothing. The protocol
-                # still admits empty content for this stream-range contract.
                 wire = {"version": host_process.WIRE_VERSION, "kind": "message", "store": str(store),
                     "key": "stream-message", "session": session, "sender": None, "sender_handle": None,
                     "text": {"state": "value", "value": ""}}
                 head, body = raw_request(fields["socket"], "/v1/message", json.dumps(wire, separators=(",", ":")).encode())
                 assert head.startswith(b"HTTP/1.1 200 ") and json.loads(body)["answer"]["status"] == "accepted", (head, body)
-                # Exercise the settled ordering too: a successful empty answer
-                # appends an assistant entry after the empty User entry.
                 settled = wait_for(lambda: observe(store, "stream-message").get("result"), "empty answer settlement")
                 assert settled["status"] == "completed" and settled["text"]["bytes"] == "0", settled
             else:
@@ -153,16 +137,12 @@ def whole_stream_shape(length):
             assert head.startswith(b"HTTP/1.1 200 ") and body == expected, (head, len(body), length)
             for name in ("Content-Length", "X-Rui-Content-Bytes", "X-Rui-Next-Offset"):
                 assert f"{name}: {length}\r\n".encode() in head + b"\r\n", head
-            # Public identity/provenance/range checks remain the same in stream
-            # mode. Invalid caller requests must not fence healthy content.
             for changes, status in (({"start": "1"}, 400), ({"ordinal": "1"}, 409), ({"position": str(2**64 - 1)}, 400)):
                 head, _ = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", session, **(identity | changes))
                 assert head.startswith(f"HTTP/1.1 {status} ".encode()), head
             wait_for(lambda: inspect_execution(store, session)["custody_occupied"] == "0", "stream producer cleanup")
             stop_process(process)
             process = None
-            # Alter only a stopped Store: a whole-value read checks the digest
-            # before its final window, so damage cannot read as success.
             with sqlite3.connect(store / "rui.sqlite3") as database:
                 if length:
                     answer, payload = database.execute(
@@ -171,8 +151,6 @@ def whole_stream_shape(length):
                     assert payload[:1] == b"x"
                     database.execute("UPDATE content SET payload=? WHERE content_id=?", (b"y" + payload[1:], answer))
                 else:
-                    # Authenticate the admitted empty User entry independently
-                    # of the later assistant entry.
                     answer = database.execute("SELECT content_id FROM conversation_entry WHERE entry_kind=1").fetchone()[0]
                     database.execute("UPDATE content SET digest=? WHERE content_id=?", (b"\xff" * 32, answer))
             process, fields = start_host(store, provider)
@@ -183,8 +161,6 @@ def whole_stream_shape(length):
             else:
                 assert head.startswith(b"HTTP/1.1 200 "), head
                 assert f"Content-Length: {length}\r\n".encode() in head, head
-                # No byte of the failed final window may escape, even at an
-                # exact window multiple. Earlier bytes are not authenticated.
                 sent = ((length - 1) // 4096) * 4096
                 assert body == (b"y" + expected[1:])[:sent] and len(body) < length, (length, len(body))
                 assert b"HTTP/1.1" not in body and b"canonical_store_failure" not in body

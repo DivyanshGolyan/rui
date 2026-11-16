@@ -1,4 +1,3 @@
-//! Values retained for a Message command observation.
 const Bounded = @import("bounded.zig").Bounded;
 const tool_presentation = @import("tool_presentation.zig");
 

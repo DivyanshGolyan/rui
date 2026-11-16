@@ -27,9 +27,6 @@ extern int csops(pid_t, unsigned int, void *, size_t);
 enum { rui_cs_ops_status = 0, rui_cs_restrict = 0x00000800 };
 #endif
 
-/* Observation only: neither a PID nor these bytes authorize process mutation.
- * argv/environ are process memory, not immutable kernel launch records. Two
- * matching observations reject ordinary races, not a hostile same-user process. */
 static void wipe(void *bytes, size_t length) {
     volatile unsigned char *p = bytes;
     while (length--) *p++ = 0;
@@ -156,7 +153,6 @@ static int observe(int pid, int directory, struct identity *result) {
     path[count] = 0;
     error = canonical(path, result);
     if (error) return error;
-    /* Reject deleted/replaced executable paths and namespace ambiguity. */
     struct stat actual;
     if (fstatat(directory, "exe", &actual, 0) != 0) return errno;
     if (actual.st_dev != result->device || actual.st_ino != result->inode) return ESTALE;
@@ -281,10 +277,8 @@ int rui_process_generation(int pid, unsigned long long *started) {
 #endif
 }
 
-/* Live memory for the overview's counts line. Observation only. */
 
 #if defined(__linux__)
-/* Adds one "Name:   N kB" line's value to *total when it names `field`. */
 static void status_field(const char *line, const char *field, unsigned long long *total) {
     size_t length = strlen(field);
     if (strncmp(line, field, length) != 0 || line[length] != ':') return;
@@ -327,7 +321,6 @@ int rui_process_footprint(int pid, unsigned long long *bytes) {
 #endif
 }
 
-/* The direct children of `pid`, up to `cap` of them in `pids`. */
 int rui_process_children(int pid, int *pids, size_t cap, size_t *count) {
     if (!pids || !count) return EINVAL;
     *count = 0;
@@ -355,7 +348,7 @@ int rui_process_children(int pid, int *pids, size_t cap, size_t *count) {
         int written = snprintf(children, sizeof(children), "%s/children", entry->d_name);
         if (written <= 0 || (size_t)written >= sizeof(children)) continue;
         int fd = openat(tasks, children, O_RDONLY | O_CLOEXEC);
-        if (fd < 0) continue; /* The thread ended. */
+        if (fd < 0) continue;
         FILE *file = fdopen(fd, "re");
         if (!file) { close(fd); continue; }
         int child;

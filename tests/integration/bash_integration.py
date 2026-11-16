@@ -52,7 +52,6 @@ def execution_idle(store, session):
 
 
 def prove_stdin(state):
-    """Canonical descriptors, real bidirectional pressure and restart identity."""
     store = state / "stdin-store"
     workspace = state / "stdin-workspace"
     workspace.mkdir()
@@ -70,7 +69,6 @@ def prove_stdin(state):
     )
     probe = "import os,stat; print('null' if stat.S_ISCHR(os.fstat(0).st_mode) else 'file'); print(len(os.read(0,1)))"
     failed_send = "Bash failed. Exit code: 2.\nstderr:\n"
-    # The empty-send cases retain the refusal line itself, measured below.
     retained_output_bytes = {"large": 524288, "over": 0, "null": 7, "missing": 7, "empty": 7,
                              "closed": 6, "timeout": 0}
     cases = [
@@ -91,7 +89,6 @@ def prove_stdin(state):
         host = fixture.start_host(store, url, active_capacity=2)
         recipient = configure(state, store, "stdin-recipient-config", workspace=workspace)
         for name, input_text in (("empty-send", ""), ("null-send", None)):
-            # Trusted Bash peers select the launching Action's Store.
             command = shlex.join([str(fixture.RUI), "session", "send", "--to", recipient,
                                   "--record", str(state / f"{name}.json"), "--key", name])
             cases.append((name, {"cmd": command, "stdin": input_text}, "failed"))
@@ -112,8 +109,6 @@ def prove_stdin(state):
 
             assert saved_arguments() == descriptors[name].encode(), name
             if name == "large":
-                # No Attempt yet: restart must execute this same admitted input,
-                # not a fresh proposal or a reconstructed command string.
                 fixture.stop_host(host)
                 host = None
                 host = fixture.start_host(store, url, active_capacity=2)
@@ -401,8 +396,6 @@ def prove_reused_session(state):
             "session", "inspect", "--store", store, "--session", session
         )["execution"]
         assert int(delayed["custody_occupied"]) >= len(actions_by_ordinal), delayed
-        # Both commands write only files: delayed cleanup holds custody over
-        # empty captures, and the command itself never reaches scratch.
         assert delayed["scratch_used_bytes"] == "0", delayed
 
         fixture.message(
@@ -424,8 +417,6 @@ def prove_reused_session(state):
         second_processing = fixture.observe(store, "reuse-second")["binding"]
         assert second_processing["turn"] != first_processing["turn"], second_processing
         retry_failure_release.set()
-        # The failed Attempt releases its own custody at settlement, while
-        # delayed Bash cleanup still holds the earlier Actions' custody.
         milestones.wait(
             "cleanup_completed",
             operation=str(second_processing["operation"]),
@@ -831,8 +822,6 @@ def main():
     )
     rollback_marker = state / "rollback-marker"
     add_exchange(responses, "rollback", f"printf x >> {rollback_marker}")
-    # The limit counts decoded UTF-8 bytes: each "é" is two command bytes,
-    # six JSON bytes and one character.
     command_limit = 120 * 1024
     over_limit_marker = state / "over-limit-marker"
     limit_prefix = f"printf at-limit; printf x >> {over_limit_marker} #"
@@ -952,8 +941,6 @@ def main():
         "same-group-timeout",
         f"(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & child=$!; "
         f"{publish_pid(same_group_pid, '$child')}; wait \"$child\"",
-        # The budget only has to outlast launch and PID publication: under CPU
-        # load the shell can wait tens of ms for a CPU before it starts.
         timeout_ms=1000,
     )
     add_exchange(
@@ -1182,7 +1169,6 @@ def main():
         output = outputs[0]["output"]
         assert "Bash succeeded." in output and "stderr-mark" in output, output
         assert "�" in output and " bytes left out]" in output, output
-        # Only the truncated stream names its full file.
         assert "Full stdout:" in output and "Full stderr:" not in output, output
         first_read = fixture.command(
             "action", "read", "--store", store, "--session", session,
@@ -1264,8 +1250,6 @@ def main():
                                   models=2, inspection_limit=321 + 2)
         success_milestones = None
         host = fixture.start_host(store, endpoint_url, "--test-phase-trace", active_capacity=0)
-        # A zero-capacity Host with a provider endpoint runs no transport: its
-        # execution loop serves and the Host stays up.
         HostDiagnostics(host).wait("lifecycle_service_observation", timeout=5)
         assert host.poll() is None, host.returncode
         session = configure(state, store, "rollback-config")
@@ -1278,7 +1262,6 @@ def main():
         fixture.stop_host(host)
         host = fixture.start_host(store, endpoint_url, "--fault", "attempt-before-commit")
         allow(state, store, "rollback-allow", session, rollback_action["action"])
-        # The failed Attempt commit rolls back and fences; the Host exits.
         host.wait(timeout=10)
         assert host.returncode != 0, host.returncode
         assert not rollback_marker.exists()
@@ -1339,8 +1322,6 @@ def main():
         assert resolution(store, session) == "cancelled"
         assert not unattempted_marker.exists()
 
-        # stop --all stops each Session whose work is under way, each under
-        # its own generated request, and leaves idle and settled ones alone.
         waiting = []
         for name in ("stop-all-a", "stop-all-b"):
             waiter = configure(state, store, f"{name}-config")
@@ -1348,7 +1329,6 @@ def main():
             fixture.wait_for(lambda: action_for(store, waiter), f"{name} stoppable Action")
             waiting.append(waiter)
         idle = configure(state, store, "stop-all-idle-config")
-        # Generated captures go under this HOME, not the runner's.
         stop_all_env = {**os.environ, "HOME": str(state / "stop-all-home")}
         (state / "stop-all-home").mkdir()
         stopped_all = subprocess.run([str(fixture.RUI), "session", "stop", "--all", "--store", str(store)],
@@ -1365,8 +1345,6 @@ def main():
                                  env=stop_all_env, text=True, capture_output=True, timeout=15)
         assert (nothing.returncode, nothing.stdout) == (0, ""), nothing
         assert nothing.stderr == "\nrui: no Session in this Store has work to stop.\n", nothing
-        # A lost reply leaves each stop saved. Every Session is named before
-        # its own request line, which is what recovers its answer.
         lost = []
         for name in ("stop-all-lost", "stop-all-lost-2"):
             waiter = configure(state, store, f"{name}-config")
@@ -1375,7 +1353,6 @@ def main():
             lost.append(waiter)
         dropped = subprocess.run([str(fixture.RUI), "session", "stop", "--all", "--store", str(store), "--test-drop-reply", "after-commit"],
                                  env=stop_all_env, text=True, capture_output=True, timeout=15)
-        # The second Session is still stopped after the first reply was lost.
         assert dropped.returncode == 4 and dropped.stdout == "", dropped
         unconfirmed = re.findall(r"^rui: stopping (\S+)\n+request: (\S+) ", dropped.stderr, re.M)
         assert {waiter for waiter, _ in unconfirmed} == set(lost) and len(unconfirmed) == 2, dropped
@@ -1461,8 +1438,6 @@ def main():
         )
         milestones = HostDiagnostics(host)
         milestones.wait("prepared_before_handoff", action=str(pending["action"]))
-        # The exact native receipt plus an unreleased, empty FIFO holds the
-        # handoff; marker absence alone cannot establish that launch is barred.
         assert host.poll() is None
         before_launch_gate.assert_held()
         named_first_acquisition = sorted((store / "scratch").glob("bash-*-*.tmp"))
@@ -1922,7 +1897,6 @@ def main():
             allow(state, store, f"{name}-allow", session, action["action"])
             fixture.wait_for(lambda: resolution(store, session) == expected, f"{name} result")
             if name == "arguments":
-                # The OS refused the padded environment; the result names its sizes.
                 text = result_text(store, session)
                 assert "Bash was not started: the system refused its arguments as too large." in text, text
                 assert re.search(r"the environment is \d{7,} bytes in \d+ variables", text), text
@@ -2026,8 +2000,6 @@ def main():
             lambda: fixture.completed_observation(store, "service-message"),
             "service failure continuation",
         )
-        # The shell creates the file for >> before printf writes, so the failure
-        # shutdown can leave it empty. The single attempt row rules out a rerun.
         if service_marker.exists():
             assert service_marker.read_text() in ("", "x")
 
@@ -2116,8 +2088,6 @@ def main():
         host = fixture.start_host(store, endpoint_url, active_capacity=2)
         session = configure(state, store, "sibling-config", "bypass")
         fixture.message(state, store, "sibling-message", session, "execute")
-        # Observe the second sibling's durable result before releasing the first;
-        # command duration alone cannot establish canonical acceptance order.
         def second_sibling_settled():
             actions = list(action_rows_by_id(store, session).values())
             return len(actions) == 2 and {
@@ -2213,14 +2183,14 @@ def main():
             try:
                 cleanup()
             except BaseException as error:
-                cleanup_errors.append(error)  # Attempt every owned resource.
+                cleanup_errors.append(error)
         if completed and incoming_error is None and not cleanup_errors:
             shutil.rmtree(state)
         else:
             try:
                 retain_failure_state("Bash integration failure state", state)
             except Exception:
-                pass  # Reporting cannot replace the original failure.
+                pass
         if cleanup_errors:
             for error in cleanup_errors:
                 try:

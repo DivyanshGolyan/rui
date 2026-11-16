@@ -1,6 +1,3 @@
-//! A scripted loopback HTTP server for tests. It takes one connection for
-//! `reply` and one more for each of `more`, reads a whole request on each
-//! and sends that reply. `seen` holds the latest request.
 const std = @import("std");
 
 const Script = @This();
@@ -10,7 +7,6 @@ port: u16 = 0,
 thread: ?std.Thread = null,
 reply: []const u8,
 more: []const []const u8 = &.{},
-/// Wait for client cancellation instead of replying; observations publish before exit.
 hold_reply: bool = false,
 request_received: std.atomic.Value(bool) = .init(false),
 connection_closed: std.atomic.Value(bool) = .init(false),
@@ -81,7 +77,6 @@ pub fn stop(self: *Script) void {
     _ = std.c.close(self.listener);
 }
 
-/// An `application/json` reply carrying `body`.
 pub fn jsonReply(comptime body: []const u8) []const u8 {
     return std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\n\r\n", .{body.len}) ++ body;
 }

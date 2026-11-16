@@ -1,33 +1,15 @@
-//! TLS for a Store connection, Postgres or MySQL, over the vendored
-//! OpenSSL, between caller buffers: OpenSSL reads ciphertext from
-//! `Wire.in` and writes it to `Wire.out`, and the connection's owner moves
-//! both to and from the socket. Nothing here touches a descriptor.
-//!
-//! Verification is never off: the chain against the trust and the host
-//! name or IP literal against the leaf. The context settings, host naming
-//! and trust loading are `tls_client`'s, shared with h2, so `SSL_CERT_FILE`
-//! and the host bundles behave the same for the Store as for providers. On
-//! macOS, `.system` is the bundle OpenSSL reads (`/etc/ssl/cert.pem`), not
-//! SecTrust, which only h2 uses.
 const std = @import("std");
 const shared = @import("tls_client");
 const c = shared.c;
 
 pub const Trust = shared.Trust;
-/// Why `Context.init` failed: memory, or trust that would not load.
 pub const ContextError = shared.TrustError || error{OutOfMemory};
 pub const HostKind = shared.HostKind;
 
-/// Room for one TLS record of a full plaintext fragment (2^14 bytes plus
-/// TLS 1.2's largest expansion and the record header), so encrypting one
-/// `send_buffer_bytes` outbox never stops halfway for want of room.
 pub const max_record_bytes = 16 * 1024 + 2048 + 5;
 
-/// The certificate hash SCRAM-SHA-256-PLUS binds (RFC 5929 section 4.1).
 pub const ChannelBinding = @import("scram.zig").ChannelBinding;
 
-/// The ciphertext OpenSSL may read (`in[in_used..]`) and the room it may
-/// write (`out[out_used..]`) during one call.
 pub const Wire = struct {
     in: []const u8,
     in_used: usize = 0,
@@ -66,12 +48,8 @@ pub const Progress = enum { done, want_read, want_write, untrusted_peer, failed 
 
 pub const Transfer = union(enum) {
     bytes: usize,
-    /// More ciphertext must arrive in `Wire.in`.
     want_read,
-    /// `Wire.out` is full: send it and call again.
     want_write,
-    /// The peer's close_notify, or a fatal TLS error. Either ends the
-    /// connection; the Store fences on both alike.
     closed,
 };
 
@@ -79,8 +57,6 @@ pub const Session = struct {
     ssl: *c.SSL,
     bio: *c.BIO,
 
-    /// A client session verifying `host`: SNI and the name check for a DNS
-    /// name, the IP check (and no SNI) for a literal.
     pub fn init(context: *const Context, host: []const u8, kind: HostKind) error{ OutOfMemory, InvalidHost }!Session {
         var host_z: [shared.max_host_bytes + 1]u8 = undefined;
         if (host.len > shared.max_host_bytes or std.mem.indexOfScalar(u8, host, 0) != null) return error.InvalidHost;
@@ -113,7 +89,6 @@ pub const Session = struct {
         };
     }
 
-    /// Encrypts a prefix of `plain` into `wire.out`.
     pub fn write(self: *Session, wire: *Wire, plain: []const u8) Transfer {
         self.attach(wire);
         defer self.detach();
@@ -122,7 +97,6 @@ pub const Session = struct {
         return self.status();
     }
 
-    /// Decrypts from `wire.in` into `plain`.
     pub fn read(self: *Session, wire: *Wire, plain: []u8) Transfer {
         self.attach(wire);
         defer self.detach();
@@ -131,10 +105,6 @@ pub const Session = struct {
         return self.status();
     }
 
-    /// The tls-server-end-point hash of the verified leaf: its signature's
-    /// digest, SHA-256 in place of MD5 or SHA-1. Null for a signature with
-    /// no separate digest (Ed25519, RSA-PSS), which SCRAM cannot bind; a
-    /// server offering only PLUS is then refused.
     pub fn channelBinding(self: *const Session) ?ChannelBinding {
         const cert = c.SSL_get0_peer_certificate(self.ssl) orelse return null;
         var digest_nid: c_int = c.NID_undef;
@@ -158,7 +128,6 @@ pub const Session = struct {
         c.BIO_set_data(self.bio, null);
     }
 
-    /// After a failed SSL_read_ex or SSL_write_ex, which return 0.
     fn status(self: *Session) Transfer {
         return switch (c.SSL_get_error(self.ssl, 0)) {
             c.SSL_ERROR_WANT_READ => .want_read,

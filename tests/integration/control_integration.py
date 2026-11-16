@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Deterministic Session-stop and exact model-interruption integration proof."""
 
 import http.server
 import concurrent.futures
@@ -28,7 +27,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 
-# Independent fixture populations, not Host connection limits.
 ORDINARY_CLIENTS = 10
 CONTROL_HEADROOM = 2
 MAX_STORE_BYTES = 492
@@ -280,8 +278,6 @@ def wait_execution_release(diagnostics, store, session, deadline, *, peers=None)
     try:
         return wait_for_execution_release(inspect, deadline)
     except BaseException:
-        # Retain this boundary's existing facts before destructive teardown;
-        # optional capture failure cannot replace the original refusal.
         preserve_failure_metadata(store.parent / "probe.log", lambda: {
             "execution": execution,
             "deadline": deadline,
@@ -441,7 +437,6 @@ def check_schema(database_path):
 
 
 def open_held_population(socket_path, peers):
-    """Open each fixture member once and witness its native borrower."""
     held = []
     try:
         for _ in range(ORDINARY_CLIENTS):
@@ -500,7 +495,7 @@ def stop_control_case(process, diagnostics, endpoint, thread, *releases, connect
             try:
                 print(f"Control cleanup failed: {type(error).__name__}: {error}", file=sys.stderr)
             except Exception:
-                pass  # Reporting cannot replace the original assertion or cleanup failure.
+                pass
         if incoming_error is None:
             raise errors[0]
 
@@ -554,8 +549,6 @@ def prove_pre_handoff_stop(state):
             timeout=release_deadline - time.monotonic(),
         )[0]
         assert isinstance(superseded["trace_lost"], bool), superseded
-        # The marker precedes finishCustodyNow. Only the same execution owner's
-        # next lifecycle boundary proves that the superseded branch returned.
         with milestones.condition:
             while True:
                 boundaries = [
@@ -585,8 +578,6 @@ def prove_pre_handoff_stop(state):
             assert execution["dispatch_fenced"] is False, execution
             assert execution["scratch_used_bytes"] == "0", execution
             return execution
-        # Inspection can sample a temporary no-work admission reservation;
-        # require an actual zero, never an allowance or a stable idle census.
         execution = wait_for(inspection, f"superseded custody release within 8s after boundary {boundary}",
                              interval=0.01, deadline=release_deadline,
                              ready=lambda execution: execution["custody_occupied"] == "0")
@@ -646,7 +637,6 @@ def prove_sealed_interruption_and_cleanup(state):
         milestones.claim_inspection()
         execution = inspect_execution(store, session)
         assert execution["custody_occupied"] == "1", execution
-        # Host information counts the same held record, read from memory.
         host = command("host", "status", "--store", store)
         assert host["status"] == "ready" and host["custody_occupied"] == "1", host
 
@@ -683,8 +673,6 @@ def prove_sealed_interruption_and_cleanup(state):
             timeout=15,
         )
         assert unavailable.returncode != 0, unavailable
-        # A reader may resolve the FIFO name just before its sole writer
-        # closes. Reproduce that no-writer state without a scheduler race.
         os.mkfifo(settlement_gate.path, mode=0o600)
         message(state, store, "released-gate-message", session, "after release")
         successor_deadline = time.monotonic() + 8
@@ -724,8 +712,6 @@ def prove_delivery_and_settlement_contention(state, *, sample_host=None):
             "--test-model-result-gate-path",
             settlement_gate.path,
         ]
-        # Keep two independently held fixture responses while exercising the
-        # two client control places.
         process, fields = start_host(store, url, *extra, active_capacity=101, observations="control_peers")
         milestones = HostDiagnostics(process)
         peers = PeerCensus(milestones)
@@ -802,14 +788,11 @@ def prove_delivery_and_settlement_contention(state, *, sample_host=None):
                 ]
                 barrier.wait()
             except BaseException:
-                # Wake submitted workers before the executor waits for them.
                 barrier.abort()
                 raise
             results = [future.result(timeout=10) for future in futures]
         for reply, _ in results:
             assert reply["answer"]["status"] == "accepted", reply
-        # Accepted controls establish the race. Evidence collection must not
-        # extend the workload's deliberate settlement gate.
         settlement_gate.release()
         for request in control_requests:
             peers.release(request, control_deadline)
@@ -1206,8 +1189,6 @@ def prove_idle_stop_wire_recovery(state):
     store = state / "queued-stop-reuse-store"
     process = None
     try:
-        # Store tests own replay after newer work. This native witness owns the
-        # lost-reply record and nullable idle selection across a Host restart.
         process, _ = start_host(store)
         target_session = configure(state, store, "queued-stop-target-config")
         message(
@@ -1457,8 +1438,6 @@ def prove_partial_setup_cleanup():
                     connection.settimeout.assert_called_once_with(3)
                     connection.close.assert_not_called()
 
-    # The native population cases require each exact classification and release;
-    # silence and repeated saturation attempts no longer establish membership.
     print("Partial callers: both write failures and setup cleanup passed; native census owns membership")
 
 
@@ -1626,8 +1605,6 @@ def main():
         assert recovered_stop["answer"]["status"] == "accepted", recovered_stop
         assert recovered_stop["answer"]["replayed"] is True, recovered_stop
         assert recovered_stop["answer"]["selection"]["turn"] is None, recovered_stop
-        # The intake witness owns a separate bounded native census. Earlier
-        # cancellation/replay traffic is not an uncounted admission baseline.
         stop_process(process)
         process, fields = start_host(store, observations="control_peers")
         milestones = HostDiagnostics(process)

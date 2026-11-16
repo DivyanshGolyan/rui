@@ -1,4 +1,3 @@
-//! Host/Store boundary regressions for native MCP calls (no provider or Bash).
 const std = @import("std");
 const store = @import("store.zig");
 const protocol = @import("protocol.zig");
@@ -10,8 +9,6 @@ const mcp = @import("server_mcp.zig");
 const Script = @import("mcp/test_server.zig");
 const poll = @import("test_poll");
 
-// Compose the fixture with the canonical built-ins so a new core tool cannot
-// make every MCP Host test fail before it reaches the runner.
 const records = blk: {
     var out = tools.built_in_tool_set.records[0..tools.built_in_tool_set.records.len].* ++ [_]tools.Record{
         .{ .name = "fetch_other", .owner = .mcp, .server = "other", .description = "Fetch elsewhere.", .input_schema = "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}" },
@@ -111,9 +108,6 @@ fn run(case: Case) !void {
     defer if (case == .concurrent) other_script.stop();
     var other_url_buffer: [128]u8 = undefined;
     const other_url = try std.fmt.bufPrint(&other_url_buffer, "http://127.0.0.1:{d}/mcp", .{if (case == .concurrent) other_script.port else @as(u16, 1)});
-    // Both an unanswered connect and an unanswered sent request must expire
-    // inside the five-second test watchdog. In particular, do not race the
-    // unavailable call's deadline against Context.done's identical deadline.
     const timeout_ms: u64 = switch (case) {
         .timeout, .down => 50,
         .success => @import("mcp/servers.zig").default_timeout_ms,
@@ -156,7 +150,6 @@ fn run(case: Case) !void {
         const context: Context = .{ .active = &active, .host = host, .script = script };
         if (case == .concurrent) {
             try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(5)), context, Context.sent);
-            // A new Session is independent of the first Session's sent call.
             try command.key.set("other-config");
             command.configuration.tools = try .of(&.{"fetch_other"});
             const other_configured = try storage.configure(command, .{});
@@ -284,8 +277,6 @@ fn run(case: Case) !void {
     try expectNextRequest(storage, &tmp, continuation, expected, count);
 }
 
-// Assert the sealed provider request, not merely a report projection: the
-// model's next input must include each MCP Tool Result and its original id.
 fn expectNextRequest(storage: *store.Store, tmp: *std.testing.TmpDir, binding: store.AttemptBinding, expected: []const u8, count: usize) !void {
     const allocator = std.testing.allocator;
     const adapter = @import("model_adapter.zig");
@@ -303,13 +294,11 @@ fn expectNextRequest(storage: *store.Store, tmp: *std.testing.TmpDir, binding: s
     preparation.page.open(binding);
     try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
-    // A runaway guard on bounded nonblocking work, not a scheduler wait.
     var advances: usize = 0;
     while (true) {
         advances += 1;
         try expectHere(@src(), advances < 16384);
         var progress = preparation.advance(16384, 64);
-        // As the shell does: the Store reads what the request's page asks.
         while (progress == .read) {
             try storage.readRequestPage(&preparation.page);
             progress = preparation.proceed();

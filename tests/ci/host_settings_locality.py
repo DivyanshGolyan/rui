@@ -1,16 +1,3 @@
-"""Keep Host leaf knowledge in its owner, including undotted JSON keys.
-
-Vocabulary comes from generated HostSettings, emitted from Settings by the same
-visitor as leaves, not a second setting inventory. We reject literal paths,
-Host-specific keys/names, schema path member chains, and typed HostSettings
-accesses (including overlapping wire names). Other wire schemas derive the
-shared vocabulary; their unrooted fields are not Host-setting knowledge.
-
-Generic byte/path words are not setting knowledge on their own. They still
-fail in a setting path or on a typed HostSettings value. Like caller_errors,
-this is a source gate, not a whole-program type checker: reflective/dynamically
-constructed keys or aliases passed through unknown functions require review.
-"""
 import json
 import re
 import sys
@@ -19,8 +6,6 @@ from pathlib import Path
 from caller_errors import Token, close_brace, lex, production
 
 ROOT = Path(__file__).resolve().parents[2]
-# Language/OS/transport primitives, not a setting inventory. These words do
-# not identify a Host setting without a settings-rooted reference.
 GENERIC = frozenset("path dir file env url endpoint hex value key owner interface".split())
 
 
@@ -29,7 +14,6 @@ def snake(name):
 
 
 def vocabulary(schema, prefix=()):
-    """All properties and group/leaf paths, including alternatives and maps."""
     keys, paths = set(), set()
     if not isinstance(schema, dict):
         return keys, paths
@@ -88,9 +72,6 @@ def facts(root=ROOT):
         wk, wp = vocabulary(schema)
         shared.update(wk)
         wire_paths.update(wp)
-    # These independent domains overlap Host spelling but are not Host
-    # configuration: routing engine tags and frozen tool-call fields/owners.
-    # Derive their declarations, never maintain the overlapping names by hand.
     for file, declaration in (("store_target.zig", "Kind"),
                               ("tool_record.zig", "Owner"),
                               ("call_classification.zig", "BashArguments")):
@@ -105,7 +86,6 @@ def surfaces(root):
     paths = {root / name for name in (
         "src/cli.zig", "src/serve_grammar.zig", "src/cli_grammar.zig",
         "clients/ts/src/client.ts")}
-    # TUI components are top-level PascalCase modules, not h2/Engine or Store.
     for path in (root / "src").rglob("*.zig"):
         relative = path.relative_to(root / "src")
         top_component = len(relative.parts) == 1 and path.name[0].isupper()
@@ -120,7 +100,6 @@ def surfaces(root):
 
 def tokens_for(source, typescript=False):
     if not typescript:
-        # Preserve Zig multiline payloads as literal tokens and line numbers.
         source = re.sub(r"(?m)^([ \t]*)\\\\(.*)$",
                         lambda m: m[1] + json.dumps(m[2]), source)
         return production(lex(source))
@@ -152,7 +131,6 @@ def unquote(text):
 
 
 def transition(tokens, relative):
-    """Only one named declaration in one file owns migration spellings."""
     if relative != "src/serve_grammar.zig":
         return tokens
     names = [t.text for t in tokens]
@@ -179,7 +157,6 @@ def transition(tokens, relative):
         cursor += 1
 
     while cursor < end:
-        # grammar.retired("flag", &.{ "PATH=VALUE", ... }, "note")
         if names[cursor:cursor + 4] != ["grammar", ".", "retired", "("]:
             raise ValueError("retired_options accepts only grammar.retired literal rows")
         cursor += 4
@@ -217,7 +194,6 @@ def scan(source, relative="src/cli.zig", derived=None):
     def hit(index, reason):
         found.add(f"{relative}:{tokens[index].line}: {reason}")
 
-    # Expand both source spellings mechanically, with dynamic named map slots.
     host_paths = {tuple(snake(k) for k in path) for path in paths} | paths
     wire_paths = {tuple(snake(k) for k in path) for path in wire_paths} | wire_paths
     host_paths = {p for p in host_paths if len(p) > 1 and p not in wire_paths}
@@ -231,7 +207,6 @@ def scan(source, relative="src/cli.zig", derived=None):
             for pattern in patterns:
                 if match := pattern.search(literal):
                     hit(i, "names setting path " + match[0])
-            # Decoded JSON literals must not hide undotted keys via escaping.
             try:
                 value = json.loads(literal)
             except (ValueError, TypeError):
@@ -256,8 +231,6 @@ def scan(source, relative="src/cli.zig", derived=None):
         if semantic_name and spelling in keys - shared - GENERIC:
             hit(i, "names setting key/name " + spelling)
 
-        # Member chains identify group semantics even when every individual
-        # field is a generic/shared word (store.sqlite.dir, tools.bash.path).
         chain = []
         j = i
         while j < len(names) and re.fullmatch(r"[A-Za-z_]\w*", names[j]):
@@ -269,9 +242,6 @@ def scan(source, relative="src/cli.zig", derived=None):
             if len(chain) >= len(path) and all(p == "*" or p == c for p, c in zip(path, chain)):
                 hit(i, "accesses setting path " + ".".join(chain[:len(path)]))
 
-    # Track directly typed Host documents and straightforward local aliases.
-    # Scope each binding to its function/block: Session settings named
-    # "settings" elsewhere in cli.zig must not become Host settings by spelling.
     braces, parens = [], []
     stack = []
     for index, name in enumerate(names):
@@ -299,7 +269,6 @@ def scan(source, relative="src/cli.zig", derived=None):
                 scope = enclosing[-1] if enclosing else (0, len(names))
             if scope:
                 roots.append((binding, *scope))
-        # A typed literal constructor also names fields without reading them.
         declaration = next((j for j in range(i - 1, -1, -1)
                             if names[j] in ("const", "let", "var", ";", "{", "(")), None)
         if declaration is not None and names[declaration] in ("const", "let", "var"):
@@ -310,14 +279,11 @@ def scan(source, relative="src/cli.zig", derived=None):
                     key = unquote(names[j]) or names[j]
                     if key in keys and names[j + 1] in (":", "="):
                         hit(j, "constructs HostSettings key " + key)
-        # Allocator.create(host_settings.Settings), or a typed initializer.
         begin = max((j for j in range(i) if names[j] in (";", "{")), default=-1) + 1
         if begin + 2 < i and names[begin] in ("const", "let", "var") and "=" in names[begin:i]:
             enclosing = sorted((a, b) for a, b in braces if a < begin < b)
             scope = enclosing[-1] if enclosing else (0, len(names))
             roots.append((names[begin + 1], *scope))
-    # A direct alias (including &root and canonical normalization) retains its
-    # meaning; no hand-maintained names like settings/document are required.
     changed = True
     while changed:
         changed = False
@@ -332,8 +298,6 @@ def scan(source, relative="src/cli.zig", derived=None):
             for binding, start, stop in tuple(roots):
                 if not start < i < stop or binding not in rhs:
                     continue
-                # Do not taint arbitrary function results (a writer/boolean
-                # may consume a document without returning one).
                 direct = rhs[:1] == [binding] or rhs[:2] == ["&", binding]
                 normalized = rhs[:2] == ["pipeSettings", "("]
                 if not (direct or normalized):
@@ -366,8 +330,6 @@ def scan(source, relative="src/cli.zig", derived=None):
                 if key in keys:
                     hit(i + 2, "looks up HostSettings key " + key)
 
-    # HostSettings indexed types are semantic references, including otherwise
-    # shared keys. Bare opaque document types/transport are deliberately legal.
     for i, name in enumerate(names):
         if name == "HostSettings" or name == "host_settings":
             j = i + 1

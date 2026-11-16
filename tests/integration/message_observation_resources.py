@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""Linux CLI-only observation diagnostic, not Host or release qualification.
-
-Usage: python3 tests/integration/message_observation_resources.py BASELINE CANDIDATE
-Use uninstrumented ReleaseSafe binaries. One baseline Host supplies the same
-failed Message and held in-flight Message to both clients. No live provider.
-"""
 import hashlib
 import json
 import os
@@ -28,7 +22,6 @@ def retained(state, binary, label, repetition, failed_key):
     home = state / f"{label}-{repetition}"
     home.mkdir()
     master, slave = open_pty()
-    # Keep the historical baseline's original entry; migrate only the candidate.
     entry = (["session", "--store", str(state / "store"), "--session", "resources/message"]
         if label == "baseline" else ["session", "resume", "--store", str(state / "store"), "--", "resources/message"])
     process = spawn([str(binary), *entry], env={**os.environ, "HOME": str(home)},
@@ -44,14 +37,10 @@ def retained(state, binary, label, repetition, failed_key):
                     prompt if label == "baseline" else "result: failed", composer=label != "baseline")
                 assert ("This saved Message failed" in result or "result: failed" in result) and "provider_http_422" in result, result
                 if label != "baseline":
-                    # The page stays shown: leave it, so the next read's wait
-                    # sees its own reply and not this one.
                     cli.command_frame(master, "\x1b", lambda frame: "result: failed" not in frame, end="")
             samples.append(sample(process.pid))
         cli.terminal_step(master, "\x03", "Detached.")
         assert process.wait(timeout=5) == 0
-        # Stdio plus the frontend's descriptor-owned render scratch; polling
-        # owns at most one transient socket, never another retained reader.
         assert samples[0]["retained_fds"] in (3, 4), samples
         assert all(value["retained_fds"] == samples[0]["retained_fds"] and value["sockets"] <= 1 for value in samples), samples
         return {"binary": label, "repetition": repetition, "result_reads": 100, "samples": samples}
@@ -64,7 +53,6 @@ def retained(state, binary, label, repetition, failed_key):
 
 def held(state, binary, label, handle):
     if label == "baseline":
-        # The historical baseline holds its decoded follow snapshot at a gate.
         gate = state / f"{label}-gate"
         process = subprocess.Popen([str(binary), "follow", handle, "--json"],
             env={**os.environ, "HOME": str(state / "capture-home"), "RUI_TEST_FOLLOW_GATE": str(gate)},
@@ -77,8 +65,6 @@ def held(state, binary, label, handle):
         finally:
             process.kill()
             process.communicate(timeout=5)
-    # The candidate observes once. Hold it after its decoded observation is
-    # written: it may own only stdio plus the two hold descriptors.
     release_read, release_write = os.pipe()
     ready_read, ready_write = os.pipe()
     process = subprocess.Popen([str(binary), "request", "inspect", handle],
@@ -109,7 +95,6 @@ def held(state, binary, label, handle):
 
 
 def baseline_admit(home, *args):
-    # Setup drives the baseline with its own historical two-line receipt.
     captured, admission = map(json.loads, cli.run(home, *args, "--json").splitlines())
     assert captured == {"event": "captured", "request": admission["request"]}, (captured, admission)
     assert admission["event"] == "admission", admission

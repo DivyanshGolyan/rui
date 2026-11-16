@@ -1,5 +1,3 @@
-//! Model capability derived only from supplied sorted facts, independent of
-//! transport, credentials, client defaults and account entitlement.
 const std = @import("std");
 const catalog = @import("model_catalog.zig");
 const product_defaults = @import("product_defaults.zig");
@@ -15,12 +13,10 @@ pub const CompactionPolicy = struct {
     output_reservation: u64,
 };
 
-/// Exact catalog membership, without aliases, prefixes or family inference.
 pub fn supportsModel(facts: []const catalog.Entry, model: []const u8) bool {
     return catalog.find(facts, model) != null;
 }
 
-/// The OpenAI-listed IDs in the supplied facts, in catalog order.
 pub fn writeModelHelp(out: *std.Io.Writer, facts: []const catalog.Entry) !void {
     try out.writeAll("Supported model IDs: ");
     var first = true;
@@ -32,7 +28,6 @@ pub fn writeModelHelp(out: *std.Io.Writer, facts: []const catalog.Entry) !void {
     try out.writeByte('\n');
 }
 
-/// The OpenAI-listed IDs without `max`, comma separated.
 pub fn writeEffortExceptions(out: *std.Io.Writer, facts: []const catalog.Entry) !void {
     var first = true;
     for (facts) |row| if (row.openai_listed and !row.efforts.contains(.max)) {
@@ -42,7 +37,6 @@ pub fn writeEffortExceptions(out: *std.Io.Writer, facts: []const catalog.Entry) 
     };
 }
 
-/// Offline help renders through the same writers as operation-scoped facts.
 pub const model_help: []const u8 = &rendered_model_help;
 pub const ids_without_max_effort: []const u8 = &rendered_effort_exceptions;
 
@@ -69,34 +63,22 @@ const rendered_effort_exceptions = blk: {
     break :blk bytes[0..out.buffered().len].*;
 };
 
-/// Listed models accept exactly their advertised efforts. D229: unlisted
-/// models pass Rui's closed grammar through; the provider decides support.
-/// Null is unspecified: listed models allow it only without effort levels.
-/// Frozen Operations do not consult this again.
 pub fn supportsReasoningEffort(facts: []const catalog.Entry, model: []const u8, effort: ?ReasoningEffort) bool {
     const row = catalog.find(facts, model) orelse return true;
     return if (effort) |value| row.efforts.contains(value) else row.efforts.count() == 0;
 }
 
-/// The effort a new Session on `model` starts at from the saved one: the
-/// saved one when the catalog allows it or the model is unlisted, else none.
-/// Client product defaults apply separately.
 pub fn startEffort(facts: []const catalog.Entry, saved: ?ReasoningEffort, model: []const u8) ?ReasoningEffort {
     const effort = saved orelse return null;
     return if (supportsReasoningEffort(facts, model, effort)) effort else null;
 }
 
-/// A model's context window: its row's, else the product's unlisted default.
 pub fn contextWindow(facts: []const catalog.Entry, model: []const u8) u64 {
     const row = catalog.find(facts, model) orelse return product_defaults.unlisted_context_window;
     return row.context_window orelse product_defaults.unlisted_context_window;
 }
 
-/// No alias inference, account entitlement or live qualification is implied.
-/// Reservation is extra heuristic headroom, never a provider output limit.
 pub fn compactionPolicy(model: []const u8, trigger_override: ?u64, reservation_override: ?u64) CompactionPolicy {
-    // D111: a stored null setting has fixed headroom, not a catalog default.
-    // New specs always save their explicit token count.
     _ = model;
     return .{
         .compaction_trigger = trigger_override orelse product_defaults.unlisted_context_window * product_defaults.compaction_trigger_percent / 100,
@@ -106,10 +88,6 @@ pub fn compactionPolicy(model: []const u8, trigger_override: ?u64, reservation_o
 
 const provider_count = @typeInfo(provider_name.Provider).@"enum".field_names.len;
 
-/// Every built-in provider, in declaration order. They share one catalog.
-/// Selection of a Session binding or saved pin admits any exact ID with valid
-/// syntax, including IDs this release does not list, which run with default
-/// limits.
 pub fn capabilities(readiness: *const provider_selection.Readinesses) [provider_count]provider_selection.Capability {
     var out: [provider_count]provider_selection.Capability = undefined;
     for (&out, std.enums.values(provider_name.Provider)) |*entry, provider|
@@ -128,7 +106,6 @@ test "compaction policy never infers a spec from the model catalog" {
         try std.testing.expectEqual(@as(u64, 3), overridden.output_reservation);
     }
     for ([_][]const u8{ "model-a", "gpt-6-luna-alias", "GPT-6-LUNA", "gpt-6-lun" }) |other| {
-        // D111: stored null values use the same fixed threshold on every model.
         try std.testing.expectEqual(@as(u64, 115200), compactionPolicy(other, null, null).compaction_trigger);
         try std.testing.expect(!supportsModel(catalog.shipped, other));
     }
@@ -226,7 +203,6 @@ test "selected facts alone own capability effort context and help" {
         }
     }
     for ([_][]const catalog.Entry{ facts, &.{} }) |selected| {
-        // A shipped row absent from the selected facts is unlisted, not merged.
         try std.testing.expect(!supportsModel(selected, "gpt-5.5"));
         try std.testing.expect(supportsReasoningEffort(selected, "gpt-5.5", null));
         try std.testing.expectEqual(product_defaults.unlisted_context_window, contextWindow(selected, "gpt-5.5"));

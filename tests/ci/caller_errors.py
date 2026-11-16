@@ -66,7 +66,6 @@ def close_brace(tokens, start):
 
 
 def production(tokens):
-    """Remove balanced test blocks; braces in strings cannot end a block."""
     kept = []
     i = 0
     while i < len(tokens):
@@ -109,7 +108,6 @@ def error_identifier(token):
 
 
 def error_sites(tokens):
-    """Both literal error.Name uses and names declared in error{...} sets."""
     for i in range(len(tokens) - 1):
         if tokens[i].text != "error":
             continue
@@ -171,8 +169,6 @@ def mapped_names(source):
         raise ValueError("caller_error.zig: mapped must return switch (err)")
     arms = body[6:-2]
     names = set()
-    # Only literal error.Name => .code arms count as classification. Merely
-    # mentioning an error elsewhere in this function must not admit it.
     while arms:
         if arms[:3] == ["else", "=>", "null"]:
             arms = arms[3:]
@@ -207,7 +203,6 @@ def check(sources):
     failures = []
     for path, source in sorted(sources.items()):
         tokens = lex(source)
-        # Ban raw rendering even in tests: strings and comments are inert.
         if caller_path(path):
             for i in range(len(tokens) - 1):
                 if [token.text for token in tokens[i:i + 2]] == ["@errorName", "("]:
@@ -234,7 +229,6 @@ def needs_bootstrap(root=ROOT):
 
 
 def zig_setting(source, name):
-    """A string field in Zig's pinned manifest or `zig env` ZON output."""
     tokens = [token.text for token in lex(source)]
     values = [tokens[i + 2] for i in range(len(tokens) - 2)
               if tokens[i:i + 2] == [name, "="]]
@@ -244,7 +238,6 @@ def zig_setting(source, name):
 
 
 def toolchain_version(setup_source):
-    """Use the existing install owner's exact archive pin, not a minimum."""
     versions = set(re.findall(r"(?m)^\s*archive=zig-\S+?-(\d+\.\d+\.\d+[^\s]*)\s*$", setup_source))
     if len(versions) != 1:
         raise ValueError("expected one exact Zig release in the trusted setup action")
@@ -252,7 +245,6 @@ def toolchain_version(setup_source):
 
 
 def standard_names(expected_version, environment=None):
-    """Bootstrap only: inherit errors from the exact trusted Zig std sources."""
     if environment is None:
         environment = subprocess.check_output(["zig", "env"], text=True, stderr=subprocess.PIPE)
     version = zig_setting(environment, "version")
@@ -266,12 +258,6 @@ def standard_names(expected_version, environment=None):
 
 
 def allowance_growth(root=ROOT, bootstrap_names=None):
-    """The candidate cannot bless new pending names, even on first rollout.
-
-    Tests may inject trusted external names without requiring a compiler. The
-    production path reads the installed compiler only during the first rollout;
-    once main owns pending, not even a std name can enlarge that exact tuple.
-    """
     base = git(root, "merge-base", "HEAD", "origin/main")
     paths = git(root, "ls-tree", "-r", "--name-only", base, "--", "src").splitlines()
     trusted = (git(root, "show", f"{base}:{path}") for path in paths if inventory_path(path))
@@ -284,8 +270,6 @@ def allowance_growth(root=ROOT, bootstrap_names=None):
             bootstrap_names = standard_names(version)
         before |= set(bootstrap_names)
     else:
-        # A formerly broader pending tuple cannot bless new CLI references to
-        # errors that only appeared in Host-internal owners on trusted main.
         before &= inventory
     current = pending_names((root / CATALOG).read_text())
     if current is None:

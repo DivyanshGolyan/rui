@@ -1,16 +1,3 @@
-//! One MCP request on the wire: an HTTP/1.1 exchange, and its reply read
-//! into the one JSON-RPC message that answers it. The owner polls `fd()`
-//! for `events()` and calls `advance()`, as with `http1.Exchange`; nothing
-//! here blocks or runs on its own.
-//!
-//! The answer is read into the caller's buffer, which bounds it. In an SSE
-//! reply each event is read there in turn, and notifications such as
-//! progress are dropped before the next (D65). The connection closes once
-//! the answer is in, or on `deinit`, which is how a call is cancelled.
-//!
-//! Lifetime: a Request holds an Exchange, so it has one address; its owner
-//! initializes it in place. The request bytes and the answer buffer are
-//! borrowed until `deinit`; an outcome's slices point into the buffer.
 const std = @import("std");
 const Exchange = @import("../http1/Exchange.zig");
 const http1 = @import("../http1/request.zig");
@@ -20,18 +7,13 @@ const reply = @import("reply.zig");
 const Request = @This();
 
 pub const Error = Exchange.Error || reply.Invalid || @import("document.zig").Error || error{
-    /// The answer outgrew the caller's buffer.
     AnswerTooLarge,
-    /// The reply ended without a message answering the request.
     NoAnswer,
 };
 
 pub const Outcome = union(enum) {
     waiting,
-    /// The server's JSON-RPC answer.
     answered: reply.Message,
-    /// An HTTP status that carries no JSON-RPC answer, with the start of
-    /// its body as the server wrote it, for the error the model sees.
     failed: struct { status: u16, body: []const u8 },
 };
 
@@ -48,8 +30,6 @@ stream: EventStream,
 answer: std.Io.Writer,
 overflowed: bool,
 
-/// Opens the connection and starts sending `bytes`, a request that
-/// `post.writeList` or `post.writeCall` wrote with id `id`.
 pub fn init(self: *Request, target: http1.Target, bytes: []const u8, id: u64, buffer: []u8) error{ LocalFailure, ConnectFailed }!void {
     self.id = id;
     self.reading = .head;
@@ -71,13 +51,10 @@ pub fn events(self: *const Request) i16 {
     return self.exchange.events();
 }
 
-/// Whether any request byte left this process: the line between "failed,
-/// not run" and "outcome unknown" (D146).
 pub fn requestSent(self: *const Request) bool {
     return self.exchange.requestSent();
 }
 
-/// Borrow all response evidence, including status when its body was cut.
 pub fn answerEvidence(self: *const Request, extent: reply.Extent) reply.Answer {
     return switch (self.reading) {
         .head => unreachable,
@@ -88,11 +65,8 @@ pub fn answerEvidence(self: *const Request, extent: reply.Extent) reply.Answer {
 
 pub fn advance(self: *Request) Error!Outcome {
     return self.advanceInner() catch |err| {
-        // The classifier must inspect the retained JSON prefix even when it
-        // came with an HTTP error: it may already establish a JSON-RPC error.
         if (err == error.AnswerTooLarge) return err;
         return switch (self.reading) {
-            // Even a malformed/truncated error body cannot undo the HTTP answer.
             .failed => |status| .{ .failed = .{ .status = status, .body = self.answer.buffered() } },
             .body => |body| if (body.status >= 400)
                 .{ .failed = .{ .status = body.status, .body = self.answer.buffered() } }
@@ -120,12 +94,10 @@ fn advanceInner(self: *Request) Error!Outcome {
     }
 }
 
-/// Reads body bytes; returns the outcome once they complete it.
 fn take(self: *Request, bytes: []const u8) Error!?Outcome {
     switch (self.reading) {
         .head => unreachable,
         .failed => {
-            // Keep what fits: it is only the start of the server's words.
             const room = self.answer.unusedCapacityLen();
             self.answer.writeAll(bytes[0..@min(room, bytes.len)]) catch unreachable;
             if (bytes.len > room) return error.AnswerTooLarge;
@@ -161,24 +133,18 @@ fn ended(self: *Request) Error!Outcome {
         .body => |body| switch (body.kind) {
             .json => json: {
                 const message = try reply.readMessage(self.answer.buffered(), self.id);
-                // A body of only a notification answers nothing.
                 if (message == .notification) return error.NoAnswer;
                 break :json .{ .answered = message };
             },
-            // The stream closed before the answer: a lost request.
             .event_stream => error.NoAnswer,
         },
     };
 }
 
-// Tests run a scripted loopback server on a thread, as the HTTP/1.1
-// client's own tests do.
-
 const Script = @import("test_server.zig");
 
 const post = @import("post.zig");
 
-/// Sends a tools/list to `script` and drives the reply to its outcome.
 fn run(script: *Script, buffer: []u8) !Outcome {
     try script.start();
     defer script.stop();
@@ -219,8 +185,6 @@ test "a JSON body of only a notification is not an answer" {
 test "an SSE reply skips progress and answers with the response event" {
     const progress = ": keep-alive\n\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n";
     const answer = "data: " ++ tools_result ++ "\n\n";
-    // Chunks split the events where they please; the server would keep
-    // the stream open, and the answer is enough.
     var script: Script = .{ .reply = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n" ++
         std.fmt.comptimePrint("{x}\r\n", .{progress.len + 10}) ++ progress ++ answer[0..10] ++ "\r\n" ++
         std.fmt.comptimePrint("{x}\r\n", .{answer.len - 10}) ++ answer[10..] ++ "\r\n" };

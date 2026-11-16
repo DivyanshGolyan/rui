@@ -1,7 +1,3 @@
-"""Native owner/ALPN/stream witness cases; requires h2==4.3.0 and OpenSSL CLI.
-
-transport_h2_integration.py runs them, and transport_h2_integration_test.py
-checks their oracles against fabricated transcripts."""
 import http.server
 import json
 import os
@@ -24,10 +20,8 @@ from h2_fixture import Endpoint, closed_host_request
 
 
 class HeldEndpoint(TestHTTPServer):
-    """Cleartext h2 peer that withholds the first response until released."""
     allow_reuse_address = True
     daemon_threads = True
-    # Share DNS-free binding without changing this witness's polling cadence.
     serve_forever = http.server.ThreadingHTTPServer.serve_forever
 
     def __init__(self):
@@ -37,8 +31,6 @@ class HeldEndpoint(TestHTTPServer):
         self.release_first = threading.Event()
         self.requests = []
         self.connections = set()
-        # Responses whose complete Content-Length body has not been sent,
-        # not Python handler lifetimes or server-side socket retirement.
         self.active = 0
         self.maximum_active = 0
 
@@ -72,9 +64,6 @@ class HeldHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(payload[:-1])
-            # The client can complete the stream as soon as the final byte
-            # arrives. Retire response accounting before another handler can
-            # enter it, independently of this handler's remaining cleanup.
             with self.server.lock:
                 self.wfile.write(payload[-1:])
                 self.wfile.flush()
@@ -100,10 +89,6 @@ def host_physical_peak(pid):
     return int(re.search(r"^\s*phys_footprint_peak: (\d+) B$", report, re.M).group(1))
 
 
-# SQLite names its temp files etilqs_*. A Store write's statement journal
-# that spilled to one stays open for the life of the EXCLUSIVE connection,
-# and descriptor_capacity budgets it among SQLite's four, so counts that
-# compare rounds leave it out.
 def open_descriptors(pid):
     if os.path.isdir(f"/proc/{pid}/fd"):
         names = []
@@ -133,16 +118,14 @@ def assert_round_trip_history(streams, capacity, rounds, answers):
             stream, body = requests[text]
             expected.append({"role": "user", "content": [{"type": "input_text", "text": text}]})
             assert [item for item in json.loads(body)["input"] if item.get("type") != "additional_tools"] == expected, f"complete request history for {text}"
-            # Reconstruct fixture emissions, never expectations from Host input.
             _, reasoning, message = dispatch.sse_answer(
                 f"response-{stream}", f"reasoning-{stream}", f"message-{stream}", answers[text].decode(),
             )
-            del reasoning["created_by"]  # Response-only provenance is not replayed.
+            del reasoning["created_by"]
             expected.extend((reasoning, message))
 
 
 class HostRequests:
-    """Issue a bounded population; sample only after every native owner retires."""
 
     def __init__(self, host, socket_path, store):
         self.host, self.socket_path, self.store = host, socket_path, store
@@ -230,7 +213,6 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
             idle_fds.append(requests.idle_descriptors(drain_deadline))
             if endpoint.observed_shape:
                 physical_peaks.append(host_physical_peak(host.pid))
-                # Flush completed-wave evidence before starting work that can fail.
                 print(json.dumps({"case": "observed_shape_wave", "round": round_number + 1,
                                   "capacity": capacity, "host_physical_peak_bytes": physical_peaks[-1],
                                   "native_connection_observations": True,
@@ -298,13 +280,12 @@ def stop_held_case(host, endpoint, thread):
             try:
                 print(f"Held endpoint cleanup failed: {type(error).__name__}: {error}", file=sys.stderr)
             except BaseException:
-                pass  # Optional reporting cannot replace the primary failure.
+                pass
         if incoming_error is None:
             raise errors[0]
 
 
 def held_population(root):
-    """One withheld response cannot hold back its siblings or spin the Host."""
     capacity = 8
     endpoint = HeldEndpoint()
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
@@ -358,7 +339,6 @@ def held_population(root):
                 dispatch.wait_for(lambda: len(endpoint.requests) == capacity,
                                   "every stream beside the held one", deadline=result_deadline)
                 held_key = "held-message-" + endpoint.requests[0][0].removeprefix("held-")
-                # Siblings share the connection and complete while one is held.
                 for key in keys:
                     if key != held_key:
                         wait_result(key, result_deadline)
@@ -413,8 +393,6 @@ def held_population(root):
 
 
 def held_streams(root, endpoint, after_progress=False):
-    """100 peer-held streams: controls keep working and an interrupt cancels
-    its stream at once, before the peer releases anything."""
     phase = ("observed-" if endpoint.observed_shape else "") + (
         "after-progress" if after_progress else "before-first-byte"
     )
@@ -436,7 +414,6 @@ def held_streams(root, endpoint, after_progress=False):
             dispatch.message(records, store, f"held-message-{index}", session, f"held-{index}")
         dispatch.wait_for(lambda: len(endpoint.streams) == 100, "100 live H2 streams", timeout=45)
         assert endpoint.held.wait(30), "peer did not hold every stream"
-        # Rui holds every stream and has written exactly the withheld prefixes.
         held = dispatch.wait_for(
             lambda: (value := dispatch.command("session", "inspect", "--store", store,
                                                "--session", sessions[0])["execution"])
@@ -444,7 +421,6 @@ def held_streams(root, endpoint, after_progress=False):
             "every held prefix captured", timeout=30,
         )
         assert int(held["custody_occupied"]) == 100, held
-        # After progress, the interrupt target is mid-body: 10,000 bytes in.
         assert endpoint.held_prefixes["held-0"] == (10_000 if after_progress else 0), endpoint.held_prefixes
         processing = dispatch.observe(store, "held-message-0")["binding"]
         result_deadline = time.monotonic() + 45
@@ -503,8 +479,6 @@ def held_streams(root, endpoint, after_progress=False):
 
 
 def write_failure_isolated(root, endpoint):
-    """One stream's local write failure leaves its 19 siblings and the shared
-    connection untouched."""
     store = root / "write-failure-store"
     host = dispatch.start_host(
         store, f"https://localhost:{endpoint.server_address[1]}/responses",
@@ -577,7 +551,6 @@ def refused_stream(root, endpoint, phase):
         assert [text for _, _, text, _ in endpoint.streams] == (
             [None, "refused-request"] if phase == "headers" else ["refused-request"] * 2
         )
-        # REFUSED_STREAM means unprocessed: replayed on the same connection.
         assert len(endpoint.connections) == 1, endpoint.connections
         dispatch.stop_host(host)
         with sqlite3.connect(store / "rui.sqlite3") as database:
@@ -594,9 +567,6 @@ def refused_stream(root, endpoint, phase):
 
 
 def flow_while_execution_held(root, endpoint):
-    """While the execution owner is held between one sealed answer and its
-    settlement, as a slow Store round holds it, a sibling stream on the same
-    connection still receives far more than its window and answers PING."""
     store = root / "flow-store"
     gate = ReleaseGate(root / "flow-settlement-gate")
     host = dispatch.start_host(
@@ -616,7 +586,6 @@ def flow_while_execution_held(root, endpoint):
         endpoint.flow_release.set()
         assert endpoint.flow_ping_acked.wait(10), "no PING answer while execution was held"
         assert endpoint.flow_body_sent.wait(10), "the sibling stream stalled while execution was held"
-        # Execution was held the whole time: the quick answer is still unsettled.
         gate.assert_held()
         assert dispatch.observe(store, "flow-quick-message").get("result") is None
         gate.release()
@@ -735,10 +704,6 @@ def isolated_terminal_stream(root, endpoint, mode):
             ("cancelled", "cancelled") if mode == "cancel" else ("failed", "response_scratch_exhausted")
         ), target
         result_deadline = target_deadline
-        # The transport thread reads on while execution settles the target, so
-        # the sibling's answer waits until the target's custody, and with it
-        # its scratch charge, is released; until then the shared limit may
-        # refuse it too.
         dispatch.wait_for(
             lambda: dispatch.command("session", "inspect", "--store", store, "--session", sessions["target"],
                                      timeout=max(result_deadline - time.monotonic(), 0.1),
@@ -827,13 +792,6 @@ def connection_failure(root, endpoint):
 
 
 def retain_connection_failure(store, host, diagnostics, endpoint, observed, sessions):
-    """Keep where each Attempt went: peer streams per connection, live Host
-    execution facts, durable retry state and Attempt milestones. Fixture
-    texts, codes, counts and clocks only; never bodies or the Store itself.
-
-    Decide from Store rows, peer streams and execution facts. Trace and
-    optional stderr are try-only and lossy, so milestones only corroborate.
-    Retention is optional: no step of it may replace the original failure."""
     try:
         _retain_connection_failure(store, host, diagnostics, endpoint, observed, sessions)
     except Exception as error:
@@ -846,14 +804,14 @@ def retain_connection_failure(store, host, diagnostics, endpoint, observed, sess
 def _retain_connection_failure(store, host, diagnostics, endpoint, observed, sessions):
     execution = {}
     if host.poll() is None:
-        for index, session in enumerate(sessions):  # Live facts first; a fence is visible only here.
+        for index, session in enumerate(sessions):
             try:
                 execution[index] = dispatch.command(
                     "session", "inspect", "--store", store, "--session", session, timeout=2,
                 )["execution"]
             except Exception as error:
                 execution[index] = type(error).__name__
-    dispatch.stop_host(host)  # Reap: the Store and stderr are then final.
+    dispatch.stop_host(host)
 
     def collect():
         with endpoint.lock:

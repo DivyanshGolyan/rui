@@ -1,25 +1,13 @@
-//! The `http://` proxy `https://` origins tunnel through with CONNECT (RFC
-//! 9110 section 9.3.6): the parts of its URL, which hosts bypass it, and
-//! the tunnel's request and answer. A functional core: `Engine` reads the
-//! settings and `Connection` does the I/O. Internal.
 const std = @import("std");
 const url = @import("url");
 
 pub const UrlError = error{ HttpsProxyInvalid, HttpsProxySchemeUnsupported };
 
-/// A proxy URL's parts, slices of it.
 pub const UrlParts = struct {
-    /// `host[:port]`, for `h2.parseHostPort` with port 80 by default.
     authority: []const u8,
-    /// Percent-encoded `user[:password]`; null when the URL carries none or
-    /// an empty one.
     user_info: ?[]const u8,
 };
 
-/// `[http://][user[:password]@]host[:port][/]`. Without a scheme the URL
-/// is an `http://` one, as proxy settings are commonly written. Any other
-/// scheme, `https://` included, is refused: Rui does not speak TLS to a
-/// proxy.
 pub fn splitUrl(text: []const u8) UrlError!UrlParts {
     var rest = text;
     if (std.mem.indexOf(u8, rest, "://")) |end| {
@@ -37,11 +25,8 @@ pub fn splitUrl(text: []const u8) UrlError!UrlParts {
     return .{ .authority = rest, .user_info = user_info };
 }
 
-/// Longest user info, decoded, that credentials take.
 pub const max_user_info_bytes = 512;
 
-/// `Proxy-Authorization`'s value, `Basic` (RFC 7617), from a URL's
-/// percent-encoded `user[:password]`.
 pub fn basicCredentials(allocator: std.mem.Allocator, user_info: []const u8) (UrlError || error{OutOfMemory})![]u8 {
     const colon = std.mem.indexOfScalar(u8, user_info, ':');
     var decoded: [max_user_info_bytes]u8 = undefined;
@@ -49,7 +34,6 @@ pub fn basicCredentials(allocator: std.mem.Allocator, user_info: []const u8) (Ur
     const user = percentDecode(user_info[0 .. colon orelse user_info.len], &decoded) orelse return error.HttpsProxyInvalid;
     // RFC 7617: the user-id cannot carry the separator.
     if (std.mem.indexOfScalar(u8, user, ':') != null) return error.HttpsProxyInvalid;
-    // The separator comes even when the URL has no password.
     var len = user.len;
     if (len == decoded.len) return error.HttpsProxyInvalid;
     decoded[len] = ':';
@@ -63,16 +47,12 @@ pub fn basicCredentials(allocator: std.mem.Allocator, user_info: []const u8) (Ur
     return value;
 }
 
-/// `%XX` escapes decoded into `out`; null when malformed, when it does not
-/// fit, or when it decodes to a control byte, which no header may carry.
 fn percentDecode(text: []const u8, out: []u8) ?[]u8 {
     const decoded = url.percentDecode(text, out, .literal) orelse return null;
     for (decoded) |byte| if (std.ascii.isControl(byte)) return null;
     return decoded;
 }
 
-/// Whether `host` (a URL host without brackets or trailing dot) is a
-/// loopback name or address, which never goes through a proxy.
 pub fn isLoopback(host: []const u8) bool {
     if (std.ascii.eqlIgnoreCase(host, "localhost") or endsWithLabel(host, "localhost")) return true;
     const address = Address.parse(host) orelse return false;
@@ -82,17 +62,6 @@ pub fn isLoopback(host: []const u8) bool {
     };
 }
 
-/// Whether `no_proxy` exempts `host` (a URL host without brackets or
-/// trailing dot) from the proxy. Entries are comma-separated, with spaces
-/// around them ignored:
-/// - `*` exempts every host;
-/// - an IP address, or a CIDR range such as `10.0.0.0/8` or `fd00::/8`,
-///   exempts the addresses it covers, when the host is an address;
-/// - a name exempts itself and every name below it, with or without a
-///   leading dot (`example.com` and `.example.com` both exempt
-///   `api.example.com`). Names compare without case.
-///
-/// An entry that is none of these exempts nothing.
 pub fn bypasses(no_proxy: []const u8, host: []const u8) bool {
     const address = Address.parse(host);
     var entries = std.mem.tokenizeScalar(u8, no_proxy, ',');
@@ -112,21 +81,15 @@ pub fn bypasses(no_proxy: []const u8, host: []const u8) bool {
     return false;
 }
 
-/// Whether `host` ends with `.suffix`, without case.
 fn endsWithLabel(host: []const u8, suffix: []const u8) bool {
     return host.len > suffix.len and host[host.len - suffix.len - 1] == '.' and
         std.ascii.eqlIgnoreCase(host[host.len - suffix.len ..], suffix);
 }
 
-/// An IPv4 or IPv6 address, parsed here so this core needs no network
-/// API.
 pub const Address = struct {
     bytes: [16]u8,
-    /// 4 or 16.
     len: u8,
 
-    /// Dotted-quad IPv4 or RFC 4291 text IPv6 (`::` compression and a
-    /// trailing dotted quad), without brackets or zone; null otherwise.
     pub fn parse(text: []const u8) ?Address {
         if (parse4(text)) |bytes| {
             var address: Address = .{ .bytes = @splat(0), .len = 4 };
@@ -141,7 +104,6 @@ pub const Address = struct {
         var parts = std.mem.splitScalar(u8, text, '.');
         for (&bytes) |*byte| {
             const part = parts.next() orelse return null;
-            // Decimal only: no empty part, sign or leading zero.
             if (part.len == 0 or part.len > 3 or (part.len > 1 and part[0] == '0')) return null;
             for (part) |digit| if (!std.ascii.isDigit(digit)) return null;
             byte.* = std.fmt.parseInt(u8, part, 10) catch return null;
@@ -157,7 +119,6 @@ pub const Address = struct {
         const gap = std.mem.indexOf(u8, text, "::");
         if (gap) |at| if (std.mem.indexOfPos(u8, text, at + 1, "::") != null) return null;
         const before = if (gap) |at| text[0..at] else text;
-        // A dotted quad is only ever the last 32 bits.
         if (!groups(before, &head, &head_len, gap == null)) return null;
         if (gap) |at| if (!groups(text[at + 2 ..], &tail, &tail_len, true)) return null;
         if (gap == null and head_len != 16) return null;
@@ -168,8 +129,6 @@ pub const Address = struct {
         return bytes;
     }
 
-    /// Colon-separated hex groups, the last of which may be a dotted quad
-    /// when `quad` allows it.
     fn groups(text: []const u8, out: *[16]u8, len: *usize, quad: bool) bool {
         if (text.len == 0) return true;
         var parts = std.mem.splitScalar(u8, text, ':');
@@ -222,16 +181,11 @@ const Range = struct {
     }
 };
 
-/// A URL host's longest form, as `h2.max_host_bytes`.
 pub const max_host_bytes = 253;
 
-/// Room for the longest CONNECT request: two `host:port` targets and the
-/// largest credentials.
 pub const max_request_bytes = 2 * (max_host_bytes + "[]:65535".len) + 64 +
     "Proxy-Authorization: Basic \r\n".len + std.base64.standard.Encoder.calcSize(max_user_info_bytes);
 
-/// The tunnel request for `host:port`, with `Host` as HTTP/1.1 requires,
-/// and the proxy credentials when there are any.
 pub fn connectRequest(buffer: *[max_request_bytes]u8, host: []const u8, port: u16, credentials: ?[]const u8) []const u8 {
     const open, const close = if (std.mem.indexOfScalar(u8, host, ':') != null) .{ "[", "]" } else .{ "", "" };
     var writer: std.Io.Writer = .fixed(buffer);
@@ -249,17 +203,13 @@ pub const Answer = struct {
     consumed: u16 = 0,
     status: u16 = 0,
     phase: enum(u8) { version, status, reason, fields } = .version,
-    /// Bytes of the status line's version, or of the status, read so far.
     part: u8 = 0,
-    /// Of the CR LF CR LF that ends the fields, the bytes just matched.
     ending: u8 = 0,
 
     pub const max_bytes = 8192;
 
     pub const Step = union(enum) {
-        /// The answer goes on past these bytes.
         more,
-        /// The answer ended `used` bytes into these.
         done: struct { status: u16, used: usize },
         malformed,
     };
@@ -269,7 +219,6 @@ pub const Answer = struct {
             if (self.consumed == max_bytes) return .malformed;
             self.consumed += 1;
             switch (self.phase) {
-                // "HTTP/1." and one digit, then a space.
                 .version => {
                     const prefix = "HTTP/1.";
                     if (self.part < prefix.len) {
@@ -284,7 +233,6 @@ pub const Answer = struct {
                     }
                     self.part += 1;
                 },
-                // Three digits, then a space or the line's end.
                 .status => if (self.part < 3) {
                     if (!std.ascii.isDigit(byte)) return .malformed;
                     self.status = self.status * 10 + (byte - '0');
@@ -303,7 +251,6 @@ pub const Answer = struct {
                         '\n' => switch (self.ending) {
                             1 => 2,
                             3 => {
-                                // 101 switches protocols, which a tunnel cannot.
                                 if (self.status >= 200 or self.status == 101)
                                     return .{ .done = .{ .status = self.status, .used = index + 1 } };
                                 self.* = .{ .consumed = self.consumed };
@@ -311,10 +258,8 @@ pub const Answer = struct {
                             },
                             else => return .malformed,
                         },
-                        // A CR stands only before LF.
                         else => if (self.ending == 1 or self.ending == 3) return .malformed else 0,
                     };
-                    // A line ended: what follows is a field, or the end.
                     if (self.ending == 2) self.phase = .fields;
                 },
             }
@@ -333,7 +278,6 @@ test "proxy URLs: http or no scheme, credentials, and no other scheme" {
     const credentials = try splitUrl("http://us%40er:p@ss@[::1]:8080/");
     try std.testing.expectEqualStrings("[::1]:8080", credentials.authority);
     try std.testing.expectEqualStrings("us%40er:p@ss", credentials.user_info.?);
-    // An empty user info carries no credentials.
     try std.testing.expect((try splitUrl("http://@proxy.example")).user_info == null);
 
     try std.testing.expectError(error.HttpsProxySchemeUnsupported, splitUrl("https://proxy.example:443"));
@@ -371,11 +315,9 @@ test "credentials are Basic over the decoded user and password" {
     const allocator = std.testing.allocator;
     const value = try basicCredentials(allocator, "us%40er:p%3Ass");
     defer allocator.free(value);
-    // base64("us@er:p:ss")
     try std.testing.expectEqualStrings("Basic dXNAZXI6cDpzcw==", value);
     const user_only = try basicCredentials(allocator, "user");
     defer allocator.free(user_only);
-    // base64("user:"): RFC 7617 keeps the separator with no password.
     try std.testing.expectEqualStrings("Basic dXNlcjo=", user_only);
     try std.testing.expectError(error.HttpsProxyInvalid, basicCredentials(allocator, "a%3Ab:c"));
     try std.testing.expectError(error.HttpsProxyInvalid, basicCredentials(allocator, "user:%0d%0a"));
@@ -415,10 +357,8 @@ test "NO_PROXY: everything, names and the names below them, addresses and ranges
         .{ .no_proxy = "[2001:db8::1]", .host = "2001:db8::1", .bypass = true },
         .{ .no_proxy = "10.0.0.0/8", .host = "fd12::1", .bypass = false },
         .{ .no_proxy = "10.0.0.0/33", .host = "10.0.0.1", .bypass = false },
-        // A prefix length is decimal digits, without a sign or separator.
         .{ .no_proxy = "10.0.0.0/+8", .host = "10.200.0.1", .bypass = false },
         .{ .no_proxy = "10.0.0.0/0_8", .host = "10.200.0.1", .bypass = false },
-        // A name entry does not cover an address, nor an address a name.
         .{ .no_proxy = "10.1.2.3", .host = "host.10.1.2.3", .bypass = false },
     };
     for (cases) |case| {
@@ -456,7 +396,6 @@ test "the proxy's answer: its status once the fields end, in any split" {
     }
     var bare: Answer = .{};
     try std.testing.expectEqual(@as(u16, 407), bare.feed("HTTP/1.0 407\r\n\r\nafter").done.status);
-    // Interim answers come first and are read past; 101 is final.
     const interim = "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\nLink: </>\r\n\r\nHTTP/1.1 200 OK\r\n\r\n";
     var past: Answer = .{};
     const step = past.feed(interim);

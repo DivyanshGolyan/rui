@@ -86,8 +86,6 @@ func TestNativeLinuxProcessSnapshot(t *testing.T) {
 			t.Fatal(fmt.Errorf("raw evidence: %w", err))
 		}
 	}
-	// An initial sample can abort its caller before any workload row exists.
-	// Its independent counters and failure must still survive in the sidecar.
 	failedPath := filepath.Join(t.TempDir(), "initial-failed")
 	if err := os.Mkdir(failedPath+".smaps_rollup", 0o700); err != nil {
 		t.Fatal(err)

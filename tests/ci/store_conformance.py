@@ -1,3 +1,4 @@
+
 """The Store's tests split by engine: a codemod and the rule it leaves behind.
 
 `rewrite` reads src/store/tests.zig as it stood before the split and writes
@@ -49,22 +50,17 @@ ROOT = Path(__file__).resolve().parents[2]
 TESTS = "src/store/tests.zig"
 SQLITE_TESTS = "src/store/sqlite_tests.zig"
 
-# What SQLite-only code names: the SQLite module and C API, the Store's
-# connection and statement cache, blob and VM-step counters, engine passes,
-# and a Store opened by its database path.
 SQLITE_CODE = re.compile(
     r"\bsqlite\.|\bc\.(?:sqlite3|SQLITE)|\.database\b|\bStatementCache\b|\bsqlite_heap_bytes\b|"
     r"\.passes\b|\.statements\b|\btesting_content_work\.(?:read|blob|closes)\b|\.read_blob\b|"
     r"\.open\(\s*(?:std\.testing\.)?io\s*,|\bopenWithOptions\b|\bsqlite_only\b")
 SQLITE_IMPORT = '@import("sqlite.zig")'
-# Store helpers of tests.zig that conformance code reaches through the fixtures.
 NEUTRAL_HELPERS = {"testingStore"}
 
 TOKEN = re.compile(r'//[^\n]*|\\\\[^\n]*|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'')
 
 
 def code_only(text):
-    """`text` with comments and string literals blanked, lines kept."""
     def blank(match):
         token = match.group()
         if token.startswith("//"):
@@ -91,8 +87,6 @@ def depth_change(line):
 
 
 def parse(source):
-    """The header (lines before the first test or function), then the
-    top-level items, each with the comments and blank lines before it."""
     lines = source.split("\n")
     header, items, pending = [], [], []
     index = 0
@@ -136,7 +130,6 @@ def parse(source):
 
 STRING = r'"(?:\\.|[^"\\\n])*"'
 STRINGS = re.compile(r'\s*' + STRING + r'(?:\s*\+\+\s*' + STRING + r')*\s*$')
-# The raw-SQL helpers of tests.zig, and how many arguments follow the text.
 RAW = {"sqlite.exec": ("exec", 0), "queryU64": ("queryU64", 0),
        "execSessionSql": ("exec", 1), "querySessionU64": ("queryU64", 1)}
 CALL = re.compile(r'(?<![\w.])(sqlite\.exec|queryU64|execSessionSql|querySessionU64|failAtStepForTesting)\(')
@@ -146,22 +139,18 @@ FK = re.compile(r'^(\s*)try sqlite\.exec\((\w+)\.database, "PRAGMA foreign_keys=
 
 
 def zig_strings(path, name):
-    """The string literals of the Zig array `name` in `path`."""
     source = (ROOT / path).read_text()
     table = source[source.index(f"const {name} = "):]
     return re.findall(r'"((?:\\.|[^"\\])*)"', table[:table.index("};")])
 
 
 def rsql_words():
-    """The words `rsql.portabilityError` refuses, read from rsql.zig."""
     source = (ROOT / "src/store/rsql.zig").read_text()
     table = source[source.index("const forbidden_words"):]
     table = table[:table.index("};")]
     return re.findall(r'\.word = "(\w+)"', table)
 
 
-# What `store_testing.fixtureTextError` refuses by word, from its own
-# lists: rsql's forbidden words, the SQLite words, and the SQLite prefixes.
 REFUSED_WORD = re.compile(
     r"\b(?:" + "|".join(rsql_words() + zig_strings("src/store/testing.zig", "fixture_sqlite_words")) + r")\b|"
     r"\b(?:" + "|".join(zig_strings("src/store/testing.zig", "fixture_sqlite_prefixes")) + r")\w*|"
@@ -169,23 +158,15 @@ REFUSED_WORD = re.compile(
 
 
 def fixture_verdict(sql):
-    """Whether `store_testing.fixtureTextError` refuses `sql` by what this
-    scan sees: a refused word outside string literals, `||`, `INSERT OR`,
-    a comment or a double quote. It does not apply rsql's reserved-name
-    and `IS` rules; the compile does, so a text this scan takes but Zig
-    refuses fails the build rather than staying raw."""
     sql = re.sub(r"'(?:[^']|'')*'", "''", sql)
     return bool(REFUSED_WORD.search(sql) or re.search(r'\|\||--|/\*|"|\bINSERT\s+OR\b', sql, re.I))
 
 
 def not_portable(literal):
-    """`fixture_verdict` of `literal`, Zig string literals joined by `++`."""
     return fixture_verdict("".join(text[1:-1].replace('\\"', '"') for text in re.findall(STRING, literal)))
 
 
 def call_end(text, open_index):
-    """The index of the `)` closing the call whose `(` is at `open_index`,
-    and its top-level arguments."""
     depth = 0
     args, start = [], open_index + 1
     index = open_index
@@ -217,8 +198,6 @@ def call_end(text, open_index):
 
 
 def fixture_text(item_text, expression):
-    """`expression` as comptime fixture text: (text, values it binds, the
-    format buffer it frees or None), or None when it is not one."""
     expression = expression.strip()
     if STRINGS.match(expression):
         text, values, buffer = expression, [], None
@@ -234,7 +213,6 @@ def fixture_text(item_text, expression):
         values = [value.strip() for value in formatted.group(3).split(",") if value.strip()]
         slots = iter(range(1, len(values) + 2))
         text = PLACEHOLDER.sub(lambda _: f"?{next(slots)}", formatted.group(2).strip())
-        # Every value binds a whole slot: none left over, none inside a SQL string.
         if next(slots) != len(values) + 1 or re.search(r"\{[^}]*\}", text) or re.search(r"'[^']*\?\d[^']*'", text):
             return None
         buffer = formatted.group(1)
@@ -272,8 +250,6 @@ def rewrite_calls(item):
         position = close + 1
     out.append(text[position:])
     text = "".join(out)
-    # A format buffer the rewrite no longer uses goes with it.
-    # A declaration with no use before the next one of its name goes too.
     for buffer in set(freed):
         declaration = re.compile(r"\n[ \t]*var " + buffer + r": \[[^\]]+\]u8 = undefined;")
         found = list(declaration.finditer(text))
@@ -285,8 +261,6 @@ def rewrite_calls(item):
 
 
 def rewrite_foreign_keys(item):
-    """A run between `PRAGMA foreign_keys=OFF` and `=ON` whose code does
-    nothing but fixture writes becomes those writes, each without keys."""
     lines = item.lines
     out, index = [], 0
     while index < len(lines):
@@ -310,9 +284,6 @@ def rewrite_foreign_keys(item):
 
 
 def pointer_of(text, name, position):
-    """How `name`, the Store its nearest declaration before `position` in
-    `text` names, is passed by pointer: a `var name: Store` or a function
-    parameter `name: *Store` (a struct field of that type is neither)."""
     declared = [(m.start(), "&" + name) for m in re.finditer(r"\bvar " + name + r": Store\b", text[:position])]
     for signature in re.finditer(r"\bfn \w+\(", text[:position]):
         close, params = call_end(text, signature.end() - 1)
@@ -334,7 +305,6 @@ def references(item, names):
 
 
 def classify(items):
-    """The SQLite-only items, and the items that open a Store."""
     named = {item.name: item for item in items if item.kind != "test" and item.name}
     names = set(named)
     refs = {id(item): references(item, names) for item in items}
@@ -362,12 +332,10 @@ def indent(lines, spaces):
 
 
 def case_name(item):
-    """`case`, or `store_case` when the test already names a `case`."""
     return "store_case" if re.search(r"\bcase\b", code_only(item.text)) else "case"
 
 
 def wrap_test(item, case):
-    """`test "x" { body }` as a test that runs body once per engine."""
     lines = item.lines
     start = next(i for i, line in enumerate(lines) if DECL.match(line))
     assert lines[-1] == "}", item.name
@@ -383,8 +351,6 @@ def wrap_test(item, case):
 
 
 def thread_case(item, helpers, case):
-    """Passes `case` to every helper in `helpers` that `item` calls, and
-    makes the conformance `testingStore` the fixture's."""
     text = item.text
     text = re.sub(r"(?<![\w.])testingStore\(", f"store_testing.testingStore({case}, ", text)
     for name in helpers:
@@ -395,7 +361,6 @@ def thread_case(item, helpers, case):
 
 
 def make_pub(item):
-    """Marks `item` pub, and each declaration directly inside a struct."""
     for index, line in enumerate(item.lines):
         if DECL.match(line) and not line.startswith("pub "):
             item.lines[index] = "pub " + line
@@ -414,10 +379,8 @@ def rewrite(pre_split):
     for item in items:
         rewrite_sql(item)
     sqlite_only, opens, refs, named = classify(items)
-    # A shared helper stays in tests.zig, so it may not be SQLite-only.
     kept = [item for item in items if id(item) not in sqlite_only]
     moved_tests = [item for item in items if item.kind == "test" and id(item) in sqlite_only]
-    # Helpers the moved tests reach and no kept item names move with them.
     used_by_kept = set()
     for item in kept:
         used_by_kept |= refs[id(item)]
@@ -437,7 +400,6 @@ def rewrite(pre_split):
             moving.add(id(target))
         else:
             shared.add(name)
-    # A SQLite-only helper no item names lost its last caller to the fixtures.
     named_anywhere = set().union(*refs.values())
     dropped = {id(item) for item in items if item.kind != "test" and id(item) in sqlite_only
                and id(item) not in moving and item.name not in named_anywhere}
@@ -469,7 +431,6 @@ def rewrite(pre_split):
     return tests, moved, stats
 
 
-# Why a moved test is SQLite-only, strongest first.
 REASONS = (
     ("VM steps, statements or passes", re.compile(
         r"progress_handler|stmt_status|STMTSTATUS|trace_v2|\.passes\b|\.statements\b|StatementCache|next_stmt|"
@@ -484,7 +445,6 @@ REASONS = (
 
 
 def table(pre_split):
-    """Each test of `pre_split`: where the split puts it, and why."""
     _, items, _ = parse(pre_split)
     for item in items:
         rewrite_sql(item)
@@ -510,11 +470,6 @@ def table(pre_split):
 
 
 def conformance_sources(root=ROOT):
-    """tests.zig and every tests/**/*.zig file under `root`, as (name, text).
-
-    SQLite helpers and tests live in sqlite_tests.zig and sqlite_tests/;
-    neither is part of this engine-neutral source set.
-    """
     directory = root / Path(TESTS).with_suffix("")
     return [(TESTS, (root / TESTS).read_text())] + [
         (path.relative_to(root).as_posix(), path.read_text()) for path in sorted(directory.rglob("*.zig"))]
@@ -524,7 +479,6 @@ SQLITE_MODULE_IMPORT = re.compile(r'@import\("(?:\.\./)*(?:sqlite(?:_tests)?\.zi
 
 
 def check(sources):
-    """Why one of `sources`, (name, text) pairs, is not engine-neutral, or None."""
     destination = "the SQLite test files under src/store/sqlite_tests/"
     for name, source in sources:
         if SQLITE_MODULE_IMPORT.search(source):
@@ -538,8 +492,6 @@ def check(sources):
 
 def main(argv):
     if argv[1:2] == ["rewrite"]:
-        # Only a pre-split file: rewriting split tests.zig moves nothing,
-        # and writing that would empty sqlite_tests.zig.
         if len(argv) < 3:
             print("rewrite needs the pre-split tests.zig", file=sys.stderr)
             return 2

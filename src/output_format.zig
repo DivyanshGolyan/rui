@@ -1,4 +1,3 @@
-//! Shared output projections and scratch metadata codec. No Store or provider parser.
 const std = @import("std");
 const named_scratch = @import("named_scratch.zig");
 const conversation_read = @import("conversation_read.zig");
@@ -8,55 +7,31 @@ pub const ModelOperationKind = @import("turn_policy.zig").Purpose;
 pub const OutputItemKind = @import("output_item.zig").Kind;
 pub const OutputRecordTag = enum(u8) {
     item = 1,
-    /// A message's text: its text parts' decoded text back to back, as one
-    /// decoded length and digest. Follows the message's parts and bag.
     text = 2,
     usage = 3,
-    // 4 was a call's provider item id; the id is in the item bag.
     name = 5,
     call_id = 6,
     arguments = 7,
-    /// One part of an item in Rui's own form, in item order: the encoded
-    /// range of its text in the source, with the decoded length and digest
-    /// (empty for an opaque block).
     part = 8,
-    /// Closes one provider bag: its total length and digest. The bag is the
-    /// `member` records of its scope since the previous trailer of that
-    /// scope, joined by commas.
     extras = 9,
-    /// One raw `"key":value` member of a provider bag, as received.
     member = 10,
-    /// A hosted tool call's action and outcome, and the encoded range of
-    /// its target string's contents (empty when it has none). Precedes its
-    /// item's record, like a call's fields.
     action = 11,
-    /// The encoded range of a find_in_page action's pattern, after its
-    /// call's action record.
     pattern = 12,
 };
 
-/// What a hosted tool call did; see `codec_abi.HostedAction`.
 pub const HostedAction = enum(u8) { none = 0, search = 1, open_page = 2, find_in_page = 3 };
 
-/// What a part holds. `opaque_block` is a block Rui does not read: its
-/// whole object lives in its part bag.
 pub const PartKind = enum(u8) { opaque_block = 0, output_text = 1, refusal = 2, summary_text = 3, reasoning_text = 4 };
-/// A message's phase in Rui's form; any other literal stays in the item bag.
 pub const NeutralPhase = enum(u8) { unphased = 0, commentary = 1, final_answer = 2 };
-/// The item array a part belongs to.
 pub const PartArray = enum(u8) { none = 0, content = 1, summary = 2 };
-/// Whether a bag record belongs to the item or to the latest part.
 pub const BagScope = enum(u8) { item = 0, part = 1 };
 
-/// Token usage in Rui's form. Each provider maps its own report onto these
-/// four counts; a count the provider does not bill is zero.
 pub const Usage = struct {
     uncached: u64,
     cache_read: u64,
     cache_write: u64,
     output: u64,
 
-    /// Context pressure: every token the next request starts from.
     pub fn pressure(self: Usage) u64 {
         return self.uncached +| self.cache_read +| self.cache_write +| self.output;
     }
@@ -71,24 +46,15 @@ pub const OutputMetadataRecord = struct {
     decoded_length: u64 = 0,
     id_digest: [32]u8 = @splat(0),
     content_digest: [32]u8 = @splat(0),
-    /// A usage record's counts, when the provider's report was usable.
     usage: ?Usage = null,
-    /// An item record's replay rule, judged once at acceptance: a reasoning
-    /// item whose nonempty `content` holds only reasoning_text blocks, which
-    /// replay leaves out.
     omit_reasoning_text: bool = false,
-    /// A part record's kind and array.
     part_kind: PartKind = .opaque_block,
     part_array: PartArray = .none,
-    /// A bag record's owner.
     scope: BagScope = .item,
-    /// A message item record's phase in Rui's form.
     phase: NeutralPhase = .unphased,
-    /// An action record's action and outcome.
     action: HostedAction = .none,
     call_failed: bool = false,
 
-    /// One past the record's last encoded byte.
     pub fn end(self: *const OutputMetadataRecord) !u64 {
         return std.math.add(u64, self.start, self.length);
     }
@@ -147,8 +113,6 @@ pub const OutputMetadataWriter = struct {
         if (!self.budget.allocate(output_metadata_record_bytes)) {
             return error.MetadataScratchExhausted;
         }
-        // A failed write ends validation; retain the complete fixed-record
-        // reservation until deinit so a partial OS write is never uncharged.
         self.charged += output_metadata_record_bytes;
         var bytes: [output_metadata_record_bytes]u8 = @splat(0);
         bytes[0] = @backingInt(record.tag);
@@ -159,8 +123,6 @@ pub const OutputMetadataWriter = struct {
         std.debug.assert(!record.omit_reasoning_text or (record.tag == .item and record.kind == .reasoning));
         std.debug.assert((record.action == .none and !record.call_failed) or record.tag == .action);
         std.debug.assert((record.tag != .action and record.tag != .pattern) or record.kind == .web_search_call);
-        // An action record holds its outcome and action where other
-        // records hold the replay rule and part kind.
         bytes[3] = @intFromBool(record.omit_reasoning_text or record.call_failed);
         std.debug.assert(record.tag == .part or (record.part_kind == .opaque_block and record.part_array == .none));
         std.debug.assert(record.tag != .part or record.part_array != .none);
@@ -176,8 +138,6 @@ pub const OutputMetadataWriter = struct {
         std.mem.writeInt(u64, bytes[32..40], record.decoded_length, .little);
         @memcpy(bytes[40..72], &record.id_digest);
         if (record.usage) |usage| {
-            // A usage record has no ordinal, decoded length or id; its
-            // counts take those slots.
             std.debug.assert(record.ordinal == 0 and record.decoded_length == 0 and std.mem.allEqual(u8, &record.id_digest, 0));
             std.mem.writeInt(u64, bytes[8..16], usage.uncached, .little);
             std.mem.writeInt(u64, bytes[32..40], usage.cache_read, .little);
@@ -192,8 +152,6 @@ pub const OutputMetadataWriter = struct {
         }
     }
 
-    /// Forgets every record written so far: the file is emptied and its
-    /// charge released, and the next record is the first.
     pub fn discard(self: *OutputMetadataWriter) !void {
         std.debug.assert(!self.sealed);
         try self.file.setLength(self.io, 0);
@@ -243,7 +201,6 @@ pub const OutputMetadataReader = struct {
     }
 };
 
-/// Records already in memory, such as a metadata file mapped read-only.
 pub const OutputMetadataRecords = struct {
     bytes: []const u8,
     offset: usize = 0,
@@ -280,8 +237,6 @@ fn decodeRecord(bytes: *const [output_metadata_record_bytes]u8) !OutputMetadataR
         .cache_write = std.mem.readInt(u64, bytes[40..48], .little),
         .output = std.mem.readInt(u64, bytes[48..56], .little),
     } else null;
-    // The counts' slots end at 56; the rest of the id slot is unused, and
-    // the record has no ordinal, decoded length or id.
     if (usage != null and !std.mem.allEqual(u8, bytes[56..72], 0)) return error.CorruptOutputMetadata;
     return .{
         .tag = switch (bytes[0]) {
@@ -323,8 +278,6 @@ fn decodeRecord(bytes: *const [output_metadata_record_bytes]u8) !OutputMetadataR
     };
 }
 
-/// Decode one scalar from an already-delimited JSON string. The byte source
-/// owns bounds and storage; this function retains at most one UTF-8 scalar.
 pub fn decodeScalar(source: anytype, encoded: *[4]u8) !usize {
     const byte = try source.take();
     if (byte != '\\') {
@@ -364,17 +317,10 @@ pub fn readHexScalar(source: anytype) !u21 {
     return value;
 }
 
-/// Streams a value's decoded bytes through a whole content window.
 pub const EncodedStringReader = EncodedStringWindow(conversation_read.content_window_bytes);
 
-/// Reads a call name, which the Host only compares with a tool set name or
-/// quotes as a 32-byte prefix, so a short window serves it.
 pub const NameReader = EncodedStringWindow(64);
 
-/// Bounded decoded view of a certified JSON string range, excluding quotes,
-/// read through a `window_bytes` window. Declared with a literal of its
-/// range (`.position = record.start, .end = try record.end()`), so the
-/// window stays unwritten until a read fills it.
 pub fn EncodedStringWindow(comptime window_bytes: usize) type {
     return struct {
         const Self = @This();

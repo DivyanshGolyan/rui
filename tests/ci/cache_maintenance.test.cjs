@@ -22,7 +22,6 @@ async function run(caches, faults = {}) {
     await prune({
       context: {repo: {owner: 'test', repo: 'rui'}}, core: {info() {}},
       github: {
-        // Model the SDK's paginated inventory, including candidates after page 1.
         paginate: async () => {
           if (faults.inventory) throw new Error('Inventory unavailable');
           return [caches.slice(0, 100), caches.slice(100)].flat();
@@ -56,12 +55,10 @@ test('prune every PR snapshot and old main snapshots without crossing platform o
     {...cache(16, closed), key: 'other-cache'},
     {...cache(17, open), key: 'rui-actionlint-1.7.7-linux-amd64'},
     cache(18, 'refs/heads/main-other'),
-    // Main keeps only its newest compiler per platform, so a Zig repin retires the old one.
     {...cache(19, main), key: 'rui-compiler-macOS-ARM64-0.17.0'},
     {...cache(20, main), key: 'rui-build-v2-lookalike'},
     {...cache(21, main), key: 'rui-compiler-macOS-ARM64-0.17.1'},
   ];
-  // Equal timestamps use IDs. Recently accessed old caches still retire.
   caches[0].created_at = caches[1].created_at;
   caches[0].last_accessed_at = '2099-01-01T00:00:00Z';
   const result = await run(caches);
@@ -81,7 +78,6 @@ test('build layouts share partition groups across repins without crossing parts'
     reordered(4, 'baseline'), cache(5, main, 'Linux-X64', 'baseline'),
     reordered(6, 'compiled', 'macOS-ARM64'),
     {...reordered(7, 'compiled'), key: reordered(7, 'compiled').key + '-extra'},
-    // A part whose name starts with another part's name is its own group.
     cache(8, main, 'Linux-X64', 'compiled-unit'), reordered(9, 'compiled-unit'),
   ];
   const result = await run(entries);
@@ -98,7 +94,6 @@ test('build restores keep each part apart and seed parts without snapshots from 
   assert.equal(restore.length, 1);
   const order = [...restore[0].matchAll(/build-keys\.outputs\.([a-z-]+)/g)].map(m => m[1]);
   assert.deepEqual(order, ['prefix-deps', 'prefix-part', 'prefix-seed']);
-  // Every part the workflows name, plus setup's default.
   const workflows = `${root}/.github/workflows`;
   const parts = new Set(['all']);
   for (const file of readdirSync(workflows).filter(file => file.endsWith('.yml'))) {
@@ -112,7 +107,6 @@ test('build restores keep each part apart and seed parts without snapshots from 
         }
         continue;
       }
-      // The key's '.' terminator is unambiguous only while no part can contain it.
       assert.match(part, /^[a-z][a-z0-9-]*$/, `${file} names check part ${part}`);
       parts.add(part);
     }
@@ -120,7 +114,6 @@ test('build restores keep each part apart and seed parts without snapshots from 
   for (const part of ['compiled', 'compiled-unit', 'codegen', 'baseline']) assert.ok(parts.has(part), part);
   const prefix = `rui-build-v2-Linux-X64-0.17.1-${'a'.repeat(64)}-`;
   const [d1, d2, s1, s2] = ['d', 'e', 'b', 'c'].map(c => c.repeat(64));
-  // Run the step's own script, as the runner does.
   const keys = (part, deps, sources = s2) => {
     const dir = mkdtempSync(join(tmpdir(), 'rui-keys-'));
     try {
@@ -145,12 +138,8 @@ test('build restores keep each part apart and seed parts without snapshots from 
     return null;
   };
   const key = (part, deps, sources = s1) => keys(part, deps, sources).key;
-  // Existing snapshots, oldest first.
   const existing = [key('compiled', d1), key('codegen', d1), key('baseline', d1), key('baseline', d2), key('compiled-unit', d2), key('all', d2)];
-  // A part main never saves starts from baseline at the current dependencies.
   assert.equal(restored('codegen', d2, existing.filter(k => !k.includes('codegen.'))), key('baseline', d2));
-  // After a repin a part prefers its own older snapshot to the newer baseline,
-  // and never another part whose name it starts (compiled-unit).
   assert.equal(restored('compiled', d2, existing), key('compiled', d1));
   assert.equal(restored('compiled-unit', d1, existing), key('compiled-unit', d2));
   assert.equal(restored('baseline', d2, existing), key('baseline', d2));
@@ -224,8 +213,6 @@ test('only already-absent deletion is recoverable', async () => {
 test('cleanup follows every cache producer, including failed workflows with successful jobs', () => {
   const directory = `${__dirname}/../../.github/workflows`;
   const workflow = readFileSync(`${directory}/cache-maintenance.yml`, 'utf8');
-  // Inspect the owning dependency and event declarations. Actionlint validates
-  // complete YAML/Actions syntax; these assertions guard lifecycle ordering.
   const jobs = Object.fromEntries([...workflow.matchAll(/^  (\w+):\n((?: {4}[^\n]*\n|\n)+)/gm)]
     .map(([, name, body]) => [name, body]));
   assert.match(jobs.prune, /^    needs: \[baseline, compiled, runner, previous_release\]\s*$/m,
@@ -252,8 +239,6 @@ test('cleanup follows every cache producer, including failed workflows with succ
 });
 
 test('post-publication cleanup retains partial saves and reconciles later concurrent saves', async () => {
-  // Exact hits publish nothing; fallback hits and cold builds publish new keys.
-  // Failed and step-timed-out peers now publish partial compilation too.
   for (const [ref, platform, part, limit] of [
     ['refs/heads/main', 'Linux-X64', 'baseline', 1],
     ['refs/heads/main', 'macOS-ARM64', 'baseline', 1],
@@ -265,8 +250,6 @@ test('post-publication cleanup retains partial saves and reconciles later concur
       const result = await run(published);
       assert.ifError(result.error);
       assert.deepEqual(result.ids, saved ? [10] : original.map(c => c.id));
-      // Publication after this inventory temporarily exceeds the target. Its
-      // own completion requests another cleanup; this is not an atomic quota.
       const later = [...published.filter(c => result.ids.includes(c.id)), cache(20, ref, platform, part)];
       const reconciled = await run(later);
       assert.ifError(reconciled.error);
@@ -299,11 +282,9 @@ test('maintenance warms both producer parts on both platforms using the consumer
     assert.match(consumers[`${platform}_build_unit`], /build_artifact.py build "\$TARGETS" --part unit/);
     assert.match(consumers[`${platform}_build`], /check-part: compiled\s/);
     assert.match(consumers[`${platform}_build_unit`], /check-part: compiled-unit\s/);
-    // Keep the existing cold-build safety nets, without increasing Linux unit.
     assert.match(consumers[`${platform}_build`], /^    timeout-minutes: 60$/m);
     assert.match(consumers[`${platform}_build_unit`], new RegExp(`^    timeout-minutes: ${platform === 'linux' ? 15 : 60}$`, 'm'));
   }
-  // These are compilation-only targets, not zig build check/test acceptance.
   assert.match(jobs.compiled, /\["check-full","test-logic","admission-debug-integration","stack-frames"\]/);
   assert.match(jobs.compiled, /\["check-full","test-logic","admission-debug-integration"\]/);
   assert.match(jobs.compiled, /^    timeout-minutes: 120$/m);
@@ -338,8 +319,6 @@ test('publishers save after work without capping setup or shard recovery', () =>
         assert.doesNotMatch(restore, /timeout-minutes:/, `${label} must retain fallback rebuild recovery`);
         assert.doesNotMatch(steps[compile], /timeout-minutes:/, `${label} configuration follows an uncapped rebuild`);
       }
-      // Only pre-existing acceptance/bisect deadlines may exist outside the
-      // measured compile step. Setup/fetch/linter/upload caps are not save windows.
       for (const [index, step] of steps.entries()) {
         if (index === compile || !step.includes('timeout-minutes:')) continue;
         if (/name: Run (?:selected targets|required native targets)/.test(step)) {
@@ -360,7 +339,6 @@ test('capture only missing exact keys, preserving fallback and cold misses even 
   const script = capture.match(/^      run: \|\n((?: {8}.*\n)+)/m)[1].replace(/^ {8}/gm, '');
   const caches = ['COMPILER', 'BUILD', 'PACKAGES', 'RUNNER'];
   for (const publish of ['true', 'false']) {
-    // All combinations of exact hit, fallback/miss, and skipped restore.
     for (let state = 0; state < 3 ** caches.length; state++) {
       const env = {PATH: process.env.PATH, PUBLISH: publish};
       let rest = state;
@@ -372,7 +350,6 @@ test('capture only missing exact keys, preserving fallback and cold misses even 
       const directory = mkdtempSync(join(tmpdir(), 'rui-cache-save-'));
       try {
         const output = join(directory, 'env');
-        // A failed preceding command must not change the capture's decisions.
         execFileSync('bash', ['-c', `false\n${script}`], {env: {...env, GITHUB_ENV: output}});
         const actual = Object.fromEntries(readFileSync(output, 'utf8').trimEnd().split('\n').map(line => line.split('=')));
         for (const cache of caches) {
@@ -398,8 +375,6 @@ test('capture only missing exact keys, preserving fallback and cold misses even 
   assert.match(setup, /test "\$\("\$RUNNER_TEMP\/rui-zig\/zig" version\)" = 0\.17\.1\n        echo "RUI_CACHE_COMPILER_READY=true"/);
 });
 
-// Evaluate only the conjunction/equality subset used by the actual save guards.
-// Unsupported syntax fails the test instead of silently inventing Actions behavior.
 function saveGuard(step, values, successful) {
   const expression = step.match(/^ {6,8}if: \$\{\{ (.*) \}\}$/m)[1];
   return expression.split(' && ').every(term => {
@@ -429,7 +404,6 @@ test('every saved cache x work outcome x restore state chooses exact, partial, o
     assert.match(step, /key: \$\{\{ steps\.(?:restore|actionlint-cache).outputs.cache-primary-key \}\}/);
   }
   const kinds = ['compiler', 'build', 'packages', 'runner', 'previous-release', 'actionlint'];
-  // Expected decisions come from the approved rule, not the policy under test.
   const outcomes = [
     {name: 'setup/install failed', setupOutcome: 'failure', workOutcome: 'skipped', compilerReady: false, successful: false,
       expected: ['none', 'none', 'none', 'none', 'none', 'none']},
@@ -454,7 +428,6 @@ test('every saved cache x work outcome x restore state chooses exact, partial, o
       const directory = mkdtempSync(join(tmpdir(), 'rui-publication-domain-'));
       try {
         const output = join(directory, 'output');
-        // Exercise the production CLI handoff as well as its pure policy.
         const keys = Object.fromEntries(kinds.map(kind => [kind, `key-${kind}`]));
         const env = {
           PATH: process.env.PATH, GITHUB_OUTPUT: output, GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '2',
@@ -558,33 +531,30 @@ function deadlineValues(text) {
 }
 
 test('new work deadlines derive a save window and cover recorded green durations plus margin', () => {
-  // Read with gh api .../actions/runs/<id>/jobs, retaining only successful
-  // steps in successful jobs. These independent observations must not be
-  // weakened merely because a smaller deadline fits inside the job budget.
   const green = {
     'check.yml': {
-      linux_build: [851, '43732653500'], // Promote: compile selected gates.
-      linux_build_unit: [480, '43819213128'], // Promote: unit compilation.
-      macos_typecheck: [449, '43819213128'], // Promote: native Mac typecheck on Linux.
-      macos_build: [1117, '43720387127'], // Selected: compile selected gates (899 s in Promote 43701103697).
-      macos_build_unit: [760, '43720387127'], // Selected: unit compilation.
-      cache_execution: [351, '42755585733'], // Selected: warm-cache acceptance proof.
-      linux_codegen: [593, '43762678033'], // Selected: LLVM frame oracle.
+      linux_build: [851, '43732653500'],
+      linux_build_unit: [480, '43819213128'],
+      macos_typecheck: [449, '43819213128'],
+      macos_build: [1117, '43720387127'],
+      macos_build_unit: [760, '43720387127'],
+      cache_execution: [351, '42755585733'],
+      linux_codegen: [593, '43762678033'],
     },
     'cache-maintenance.yml': {
-      baseline: [568, '43433947643'], // Main push: ReleaseSafe baseline, both platforms sampled.
-      compiled: [1117, '43720387127'], // Conservative proxy: equivalent consumer command; new matrix not yet run on main.
-      runner: [99, '43381025988'], // Upper bound from combined fetch/configure; no new standalone configure measurement.
-      previous_release: [354, '43381025988'], // Main push: non-skipped pinned-release build, including fetch.
+      baseline: [568, '43433947643'],
+      compiled: [1117, '43720387127'],
+      runner: [99, '43381025988'],
+      previous_release: [354, '43381025988'],
     },
     'renderer-contracts.yml': {
-      contracts: [725, '43732653500'], // Promote: Renderer contracts.
-      mutations: [464, '42754650502'], // Latest green dispatched mutation campaign, test member.
+      contracts: [725, '43732653500'],
+      mutations: [464, '42754650502'],
     },
   };
-  const marginSeconds = 120; // Require two full minutes beyond each sampled maximum.
-  const observedSetupSeconds = 213; // Selected 43832831879, linux_build setup (unit setup: 194 s in 43739148635).
-  const retryWindows = 4; // Cold-fetch accounting, not a claim that unmeasured network tails are bounded.
+  const marginSeconds = 120;
+  const observedSetupSeconds = 213;
+  const retryWindows = 4;
   const fetch = readFileSync(`${__dirname}/../../src/fetch_dependencies.sh`, 'utf8');
   const retrySeconds = Math.max(...[...fetch.matchAll(/--retry-max-time (\d+)/g)].map(m => Number(m[1])));
   const requestSeconds = Math.max(...[...fetch.matchAll(/--max-time (\d+)/g)].map(m => Number(m[1])));

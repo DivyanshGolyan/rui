@@ -1,4 +1,3 @@
-//! Host-only generator; the parser itself has no I/O.
 const std = @import("std");
 const models_dev = @import("models_dev.zig");
 const catalog = @import("model_catalog.zig");
@@ -7,7 +6,6 @@ const model_capability = @import("model_capability.zig");
 pub fn main(init: std.process.Init) !void {
     const scratch = init.arena.allocator();
     const args = try init.minimal.args.toSlice(scratch);
-    // The build supplies the output path; the user supplies the input path.
     if (args.len != 3) {
         try std.Io.File.stderr().writeStreamingAll(init.io, "usage: zig build model-catalog -- <path to api.json>\n");
         std.process.exit(1);
@@ -18,8 +16,6 @@ pub fn main(init: std.process.Init) !void {
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = args[1], .data = output.written() });
 }
 
-/// Pure generation, including chat facts, from one coherent parsed catalog.
-/// Only the writer's output survives; temporary metadata is released here.
 fn writeSnapshot(scratch: std.mem.Allocator, out: *std.Io.Writer, source_name: []const u8, body: []const u8) !void {
     const records = try models_dev.parseForGeneration(scratch, body);
     defer scratch.free(records);
@@ -29,7 +25,6 @@ fn writeSnapshot(scratch: std.mem.Allocator, out: *std.Io.Writer, source_name: [
             "// The entry type is supplied by model_catalog.zig to keep imports one-way.\n" ++
             "pub fn entries(comptime Entry: type) []const Entry {\n",
     );
-    // EnumSet.init evaluates each field of each generated row at comptime.
     try out.print("    @setEvalBranchQuota({d});\n", .{32 * records.len + 1000});
     try out.writeAll("    return &.{\n");
     for (records) |record| {
@@ -100,8 +95,6 @@ fn writeChatProjection(scratch: std.mem.Allocator, out: *std.Io.Writer, source_n
     try out.writeAll("};\n");
 }
 
-/// Candidate slices borrow IDs from records, which outlive the family map.
-/// A chat sibling disqualifies a whole-family inference, not its exact IDs.
 fn addFamily(families: *std.StringHashMap(void), records: []const models_dev.Generated, prefix: []const u8) !void {
     for (records) |record| {
         if (record.canChat() and catalog.inFamily(record.model.id, prefix)) return;

@@ -150,9 +150,6 @@ static void restat_dir(const char *dir) {
     closedir(d);
 }
 
-// Usage: zig_cache_restat <manifest dir>... -- <base dir>...
-// Base dirs are tried in order for relative manifest paths: the working
-// directory, the Zig lib directory, and the local and global caches.
 int main(int argc, char **argv) {
     int split = 1;
     while (split < argc && strcmp(argv[split], "--") != 0) split++;

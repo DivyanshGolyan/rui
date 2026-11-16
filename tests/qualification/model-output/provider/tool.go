@@ -22,11 +22,6 @@ import (
 	"rui.local/qualification/measurement"
 )
 
-// ToolConfig drives one coordinated tool turn. Session 0 is the coordinator:
-// its measured turn returns one `rui session send` Bash call per worker plus
-// its own workload call. Every worker's measured turn returns one workload
-// call. Each Session's first request is its history seed and is answered
-// without tools; continuations must carry every call's output.
 type ToolConfig struct {
 	Sessions    int
 	SessionIDs  []string
@@ -36,11 +31,7 @@ type ToolConfig struct {
 	Workspace   string
 	Store       string
 	ArtifactDir string
-	// Barrier, when set, is a directory holding the FIFO `release`. Each
-	// workload shell marks itself parked and waits for one released line,
-	// using only bash builtins, so parking adds no process.
 	Barrier string
-	// BarrierWait is the shell's `read -t` bound in seconds; empty means 120.
 	BarrierWait string
 }
 
@@ -111,9 +102,6 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
-// timed marks the start and leaves command as the shell's final simple
-// command, so `bash -c` may exec it in place. Nothing runs after it: an end
-// marker, trap or redirection there would keep Bash resident.
 func timed(command string) string {
 	return `printf 'rui-measure-start %s\n' "$EPOCHREALTIME" >&2; ` + command
 }
@@ -155,7 +143,6 @@ func writeSSE(output *strings.Builder, value any) {
 	output.WriteString("\n\n")
 }
 
-// Same function_call event shapes as call-classification and bash_integration.
 func toolCallsSSE(responseID string, calls []toolCall) string {
 	var output strings.Builder
 	items := make([]any, len(calls))
@@ -202,11 +189,6 @@ func parseMarker(seconds, micros string) int64 {
 	return whole*1e9 + fraction*1e3
 }
 
-// validateOutputs requires exactly one output per issued call, in any order,
-// and no other output. A call counts as succeeded only when Bash reported
-// exit 0 and its markers are complete and ordered: park (barrier workload
-// only) <= start, and no end marker. Unissued, duplicate and missing outputs
-// are failures.
 func validateOutputs(issued []toolCall, input []json.RawMessage, barrier bool) ([]ToolOutput, []string) {
 	var failures []string
 	kinds := map[string]string{}

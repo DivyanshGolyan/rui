@@ -1,5 +1,3 @@
-"""Host status helpers that the Host status and stop fixtures and
-host_process_test.py share."""
 import hashlib
 import os
 import pathlib
@@ -13,9 +11,6 @@ RUI, ACTOR = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:3])
 
 
 def status(store, *, timed=False):
-    # Untimed, the actor classifies whatever the peer sends, however late a
-    # loaded runner schedules the peer (#967). Only probes of the Host-info
-    # deadline itself run timed.
     result = subprocess.run([ACTOR, store] if timed else [ACTOR, "untimed", store],
         capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
@@ -35,8 +30,6 @@ def complete_response(stream):
         except OSError as error:
             if not is_peer_disconnect(error):
                 raise
-            # Early route/kind rejection leaves hostile bytes unread. Reset
-            # can terminate a complete reply, but never certify a prefix.
             break
         if not chunk:
             break
@@ -60,5 +53,4 @@ def finish(stream, body):
         except OSError as error:
             if not is_peer_disconnect(error):
                 raise
-            # A late reset must not erase a captured acceptance prefix.
     return bytes(response)

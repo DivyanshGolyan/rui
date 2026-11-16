@@ -1,5 +1,3 @@
-//! Bounded streaming byte search. Only ASCII case is folded. Snippets replace
-//! malformed bytes with '?' (one byte each), preserving stored byte offsets.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 
@@ -7,10 +5,7 @@ pub fn fold(byte: u8) u8 {
     return if (byte >= 'A' and byte <= 'Z') byte + 32 else byte;
 }
 
-/// Bytes a hit's snippet holds.
 const snippet_bytes = 160;
-/// Bytes of recent input kept to cut snippets from: more than a snippet with
-/// its lookbehind and lookahead.
 const raw_bytes = 512;
 
 pub const Hit = struct {
@@ -32,7 +27,6 @@ pub const Matcher = struct {
     starts: [3]usize = undefined,
     done: [3]bool = .{ false, false, false },
 
-    /// The shell validates query UTF-8; byte queries are useful to test the engine.
     pub fn init(self: *Matcher, query: []const u8) void {
         std.debug.assert(query.len > 0 and query.len <= 256);
         self.* = .{};
@@ -50,8 +44,6 @@ pub const Matcher = struct {
                 if (self.count < 3 and std.mem.eql(u8, self.carry[0..self.carry_len], self.query[0..self.query_len])) {
                     const pos = self.total - self.query_len;
                     self.hits[self.count].raw_offset = pos;
-                    // Long queries are matched in full but only their visible
-                    // prefix is highlighted inside the snippet.
                     self.starts[self.count] = pos - @min(pos, if (self.query_len <= 120) @as(usize, 40) else 0);
                     self.count += 1;
                 }
@@ -68,15 +60,8 @@ pub const Matcher = struct {
         for (0..self.count) |i| if (!self.done[i]) self.cut(i);
     }
 
-    /// Bytes read past a snippet's end before it is cut, so a character
-    /// crossing the end is told apart from a truncated, malformed one.
     const lookahead = 3;
 
-    /// One rule decodes a snippet's bytes: a valid character is kept whole,
-    /// and every other byte shows as '?', so snippet bytes map one to one
-    /// onto stored bytes. Decoding starts up to three bytes before the
-    /// snippet, where a character crossing its start can begin, so only a
-    /// valid character crossing either end is left out.
     fn cut(self: *Matcher, index: usize) void {
         var bytes: [snippet_bytes]u8 = undefined;
         const start = self.starts[index];
@@ -198,7 +183,6 @@ test "word search UTF8 windows snippet boundaries and long queries" {
     m.init("x");
     m.feed("\xffx\xc3");
     m.finish();
-    // The value ends inside a sequence: that byte is malformed too.
     try std.testing.expectEqualStrings("?x?", m.hits[0].snippet.slice());
 }
 
@@ -220,8 +204,6 @@ test "word search shows malformed continuation bytes at either snippet start" {
     m.finish();
     try std.testing.expectEqualStrings("?x", m.hits[0].snippet.slice());
     try std.testing.expectEqual(@as(usize, 1), m.hits[0].offset);
-    // A snippet starting 40 bytes before the match: a stray continuation
-    // there shows as '?', while a whole character crossing the start is left out.
     var data: [60]u8 = @splat('a');
     data[10] = 0x80;
     data[50] = 'x';

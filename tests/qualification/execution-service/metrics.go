@@ -84,8 +84,6 @@ func uintField(s, name string) (uint64, error) {
 	return n, nil
 }
 
-// parseObservations reads the Host's lossless observation records, already
-// in sequence order with run and process from the frame header.
 func parseObservations(records []map[string]any) ([]traceEvent, error) {
 	events := []traceEvent{}
 	var run, process string

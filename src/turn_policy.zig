@@ -1,17 +1,13 @@
-//! Turn decisions over facts read under the Store transaction.
 const std = @import("std");
 
 pub const Purpose = enum { assistant_response, compaction };
 
-/// What the provider produced, independent of queued input or Turn completion.
 pub const OutputFact = enum {
     answer,
     tool_proposals,
     compacted,
 };
 
-/// Model operation resolutions that Turn policy decides on. A failure records
-/// its own code, which never names one of these.
 pub const Resolution = enum {
     answer,
     compacted,
@@ -32,15 +28,9 @@ pub const Resolution = enum {
     }
 };
 
-/// Accepted provider output; context history and later Turn steps build on it.
 pub const accepted = [_]Resolution{ .answer, .compacted, .tool_proposals };
-/// The active Turn admits queued input without waiting for tool results.
 pub const continues_with_input = [_]Resolution{ .answer, .compacted, .interrupted, .context_overflow };
-/// The active Turn continues with tool results and no queued input. An
-/// interrupted operation waits for new input.
 pub const continues_without_input = [_]Resolution{ .answer, .compacted, .context_overflow };
-// A Turn ready without input also takes queued input, so any queued Message
-// in its Session is message selection's work, with no per-Turn eligibility read.
 comptime {
     for (continues_without_input) |resolution| {
         if (!contains(&continues_with_input, resolution))
@@ -60,8 +50,6 @@ pub fn completesTurn(output: OutputFact, pending_messages: u64) bool {
     return output == .answer and pending_messages == 0;
 }
 
-/// Whether an overflowing call's Turn goes on to compact. A compaction's
-/// own overflow goes on only to a deeper floor (store/domain/history_floor.zig).
 pub fn recoversOverflow(purpose: Purpose, context_changed: bool) bool {
     return purpose == .assistant_response and context_changed;
 }
@@ -83,13 +71,9 @@ pub const CompactionFacts = struct {
     output_reservation: u64,
 };
 
-/// A selected purpose needs no pressure queries. Null requests the bounded
-/// pressure facts from the transaction owner, not another policy decision.
 pub fn forcedPurpose(prior: ?Previous, trigger: ?u64) ?Purpose {
     const previous = prior orelse return .assistant_response;
     if (previous.turn_active and previous.context_overflow) return .compaction;
-    // The input prefix must run after compaction, even when its Turn failed
-    // before projection. A stop excludes that prefix rather than future input.
     if (previous.purpose == .compaction and (previous.turn_active or previous.same_input_prefix)) return .assistant_response;
     if (trigger == null) return .assistant_response;
     return null;
@@ -100,11 +84,6 @@ pub fn nextPurpose(facts: CompactionFacts) Purpose {
     return if (pressure >= facts.trigger.?) .compaction else .assistant_response;
 }
 
-/// The estimated tokens the next model call starts from, when automatic
-/// compaction decides that call by comparing them with its trigger: the last
-/// accepted usage, four bytes per token of uncovered content, and the
-/// headroom. Without eligible usage, the bytes include built-in instructions.
-/// Null when the call's purpose does not depend on them.
 pub fn comparedPressure(facts: CompactionFacts) ?u64 {
     if (forcedPurpose(facts.previous, facts.trigger) != null or !facts.context_changed) return null;
     return (facts.usage_tokens orelse 0) +| @as(u64, @intCast(estimatedBytes(facts) / 4)) +| facts.output_reservation;
@@ -114,10 +93,6 @@ fn estimatedBytes(facts: CompactionFacts) u128 {
     return @as(u128, facts.uncovered_bytes) + if (facts.usage_tokens == null) facts.builtin_instruction_bytes else @as(u64, 0);
 }
 
-/// The fewest uncovered bytes whose pressure reaches the trigger, so a
-/// caller that knows the other facts can decide the purpose without the
-/// count: `nextPurpose` compacts from this many on. Null when no count
-/// changes the purpose it gives for none.
 pub fn compactingBytes(facts: CompactionFacts) ?u64 {
     var none = facts;
     none.uncovered_bytes = 0;
@@ -183,8 +158,6 @@ test "compaction purpose respects recovery prefix and both sides of pressure" {
 
 test "a compared pressure decides compaction exactly when it reaches the trigger" {
     const previous = [_]?Previous{ null, .{ .purpose = .assistant_response, .context_overflow = false, .turn_active = true, .same_input_prefix = false }, .{ .purpose = .assistant_response, .context_overflow = true, .turn_active = true, .same_input_prefix = false }, .{ .purpose = .compaction, .context_overflow = false, .turn_active = true, .same_input_prefix = false }, .{ .purpose = .compaction, .context_overflow = false, .turn_active = false, .same_input_prefix = true }, .{ .purpose = .compaction, .context_overflow = false, .turn_active = false, .same_input_prefix = false } };
-    // Whether each previous Operation leaves the purpose to pressure, as the
-    // base commit's nextPurpose decided before it compared.
     const compares = [_]bool{ false, true, false, false, false, true };
     for (previous, compares) |prior, open| for ([_]?u64{ null, 1, 100 }) |trigger| for ([_]bool{ false, true }) |changed| for ([_]u64{ 0, 99, 100, 400 }) |bytes| {
         const facts: CompactionFacts = .{ .previous = prior, .trigger = trigger, .context_changed = changed, .usage_tokens = 0, .uncovered_bytes = bytes, .output_reservation = 0 };
@@ -194,7 +167,6 @@ test "a compared pressure decides compaction exactly when it reaches the trigger
             try std.testing.expectEqual(bytes / 4, value);
             try std.testing.expectEqual(value >= trigger.?, nextPurpose(facts) == .compaction);
         }
-        // The byte count alone moves the purpose only at `compactingBytes`.
         var none = facts;
         none.uncovered_bytes = 0;
         const compacts = nextPurpose(none) == .compaction or if (compactingBytes(facts)) |limit| bytes >= limit else false;

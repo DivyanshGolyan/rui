@@ -1,5 +1,3 @@
-// Real Drift transport: stateless MCP behind Node HTTP/1.1.
-// POST /release (authenticated) releases all pending slow calls.
 import http from 'node:http';
 import { McpServer, createMcpHandler } from '@modelcontextprotocol/server';
 import * as z from 'zod';

@@ -31,18 +31,14 @@ ROOT = Path(__file__).resolve().parents[2]
 POLICY = Path(__file__).with_name("stack_frames.json")
 MAIN_ROOT = "server.serve"
 PAGE = 4096
-# The probe helper walks its caller's frame; its own loop is not a frame.
 PROBE = "__zig_probe_stack"
-# The prologue sets the frame within this many instructions.
 PROLOGUE_LINES = 40
 HEADER = re.compile(r"^[0-9a-f]+ <(.+)>:$")
 PROBE_SIZE = re.compile(r"\bmov\s+\$0x([0-9a-f]+),%[er]ax$")
 SUB_SIZE = re.compile(r"\bsub\s+\$0x([0-9a-f]+),%rsp$")
 CALL = re.compile(r"\b(?:call|jmp)\s+[0-9a-f]+ <([^>+]+)>$")
-# std.Thread.spawn's entry, referenced by address where a thread starts.
 SPAWN = re.compile(r"# [0-9a-f]+ <([^>+]+\.entryFn)>$")
 GENERATED = re.compile(r"__(?:func|struct|union)_\d+")
-# std.debug's panic entry points and the handlers they dispatch to.
 PANIC = re.compile(r"^debug\.(?:FullPanic|defaultPanic|panic|panicExtra)\b")
 
 
@@ -59,7 +55,6 @@ def skipped(name):
 
 
 def parse(disassembly):
-    """{raw name: {"frame": bytes, "calls": set, "spawns": set}} from objdump -d."""
     functions = {}
     current = None
     for line in disassembly.splitlines():
@@ -88,7 +83,6 @@ def parse(disassembly):
 
 
 def walk(functions, *roots):
-    """Each function reachable from roots by direct calls, with a call path to it."""
     paths = {root: (root,) for root in roots}
     pending = list(roots)
     while pending:
@@ -101,12 +95,6 @@ def walk(functions, *roots):
 
 
 def host_roots(functions, threads):
-    """{entry: label}: server.serve, then each thread a Host stack spawns.
-
-    threads maps a label to its anchor, a function only that thread reaches; the
-    main thread's anchor is server.serve itself. A spawned thread that no anchor
-    names is a new Host stack the policy must name.
-    """
     if MAIN_ROOT not in functions:
         raise ValueError(f"Host root {MAIN_ROOT} is not in the binary")
     main = [label for label, spec in threads.items() if spec["anchor"] == MAIN_ROOT]
@@ -132,12 +120,10 @@ def host_roots(functions, threads):
 
 
 def key(name, roots):
-    # Every thread entry normalizes to one std name; its label tells them apart.
     return f"{normalize(name)} ({roots[name]})" if name in roots and name != MAIN_ROOT else normalize(name)
 
 
 def module_functions(functions, modules):
-    """Every function defined in one of modules, named by its Zig namespace."""
     found = {module: [name for name in functions if normalize(name).startswith(module + ".")] for module in modules}
     missing = sorted(module for module, names in found.items() if not names)
     if missing:
@@ -146,7 +132,6 @@ def module_functions(functions, modules):
 
 
 def cycles(callees):
-    """{name: members of its recursive cycle} for each function on a call cycle."""
     index, low, stack, on_stack, members = {}, {}, [], set(), {}
     for start in callees:
         if start in index:
@@ -181,13 +166,6 @@ def cycles(callees):
 
 
 def deepest(functions, roots):
-    """{root: (total bytes, chain)}: each root's heaviest chain of distinct functions.
-
-    A function on a recursive cycle can call back into the cycle members already
-    on the chain, so its heaviest chain depends on which of them are; it is
-    memoized under that set. Any other function's heaviest chain is the same
-    wherever the walk reaches it.
-    """
     sys.setrecursionlimit(max(sys.getrecursionlimit(), 20000))
     callees = {name: sorted(callee for callee in function["calls"] if callee in functions and not skipped(callee))
                for name, function in functions.items()}
@@ -209,12 +187,6 @@ def deepest(functions, roots):
 
 
 def dispatch(functions, dispatches):
-    """Make each dispatcher call the functions it runs through a pointer.
-
-    A dispatch names a caller and a name prefix: the caller runs every
-    function of that prefix through a function pointer, which leaves no
-    direct call, so each chain through the caller counts them as callees.
-    """
     for entry in dispatches:
         callers = [name for name in functions if normalize(name) == entry["caller"]]
         callees = {name for name in functions if normalize(name).startswith(entry["callees"])}
@@ -226,14 +198,12 @@ def dispatch(functions, dispatches):
 
 
 def check(functions, policy):
-    """(report lines, failures) for the Host stacks in functions under policy."""
     budget = policy["budget_bytes"]
     exceptions = {entry["function"]: entry["frame_bytes"] for entry in policy["exceptions"]}
     threads = policy["threads"]
     dispatch(functions, policy.get("dispatches", []))
     roots = host_roots(functions, threads)
     report, failures = [], []
-    # Name -> (largest reachable frame of that name, call path to it).
     frames = {}
     chains = deepest(functions, roots)
     for entry, label in roots.items():
@@ -281,11 +251,9 @@ def git(root, *args):
 
 
 def allowance_growth(root=ROOT, policy_path=POLICY):
-    """Allowances that grew since the trusted review base; empty when none did."""
     review_base = git(root, "merge-base", "HEAD", "origin/main")
     name = policy_path.resolve().relative_to(root.resolve()).as_posix()
     if not git(root, "ls-tree", "--name-only", review_base, "--", name):
-        # First introduction: the reviewed seed is the allowance.
         return []
     trusted = json.loads(git(root, "show", f"{review_base}:{name}"))
     policy = json.loads(policy_path.read_text())
@@ -301,7 +269,6 @@ def allowance_growth(root=ROOT, policy_path=POLICY):
     anchors = {spec["anchor"] for spec in trusted["threads"].values()}
     for label, spec in policy["threads"].items():
         if label not in ceilings and spec["anchor"] not in anchors:
-            # A thread new to the Host: its reviewed ceiling seeds the allowance.
             continue
         if spec["chain_ceiling"] > ceilings.get(label, 0):
             grown.append(f"{label}: chain_ceiling {spec['chain_ceiling']} exceeds the trusted "

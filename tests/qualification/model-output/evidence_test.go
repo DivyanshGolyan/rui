@@ -6,7 +6,6 @@ import (
 )
 
 func TestSQLiteRequiredEvidenceMutations(t *testing.T) {
-	// Independent fixture of every required configuration and usage field.
 	const fixture = `{"page_size_bytes":4096,"cache_size_setting":-1024,"hard_heap_limit_bytes":16777216,"cache_spill_threshold":247,"synchronous":2,"journal_mode":"wal","mmap_size_bytes":0,"temp_store":1,"busy_timeout_ms":0,"process_memory_current_bytes":0,"process_memory_highwater_bytes":0,"cache_used_bytes":0,"cache_spills":0,"subject":"k7m2qx","cache_size_setting_scope":"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages"}`
 	wrongSettings := map[string]any{
 		"page_size_bytes": 8192, "cache_size_setting": -4096,

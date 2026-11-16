@@ -1,10 +1,3 @@
-//! Every way the host OS changes what Rui does, outside the C sources.
-//!
-//! Linux CI predicts Mac CI because platform differences live in src/os/ and
-//! nowhere else in Zig: tests/ci/platform_boundary.py rejects a platform name
-//! or divergent syscall elsewhere, and a PR that changes src/os/ runs Mac
-//! Selected.
-
 const builtin = @import("builtin");
 const std = @import("std");
 
@@ -18,8 +11,6 @@ pub const Semantics = struct {
     proc_memory: bool,
     full_backlog_blocks_connect: bool,
     stack_guard_bus_error: bool,
-    /// The command that opens a link in the user's browser, and whether it
-    /// works only inside a graphical session.
     link_opener: ?struct { command: []const u8, needs_display: bool },
 };
 
@@ -46,8 +37,6 @@ pub fn semantics(comptime os: std.Target.Os.Tag) Semantics {
 
 pub const current = semantics(tag);
 
-/// Rui's descriptor census, owner checks and process control are written for
-/// these two kernels.
 pub const supported = current.supported;
 
 /// Darwin's fsync leaves data in the drive cache; SQLite's fullfsync issues

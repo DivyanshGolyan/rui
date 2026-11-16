@@ -1,4 +1,3 @@
-//! Contracts between Store replies and the client reply decoder.
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const protocol_reply = @import("protocol_reply.zig");
@@ -67,9 +66,6 @@ test "a Session with message_agent keeps it through its list row and report, as 
 }
 
 test "Session settings Current report and typed Settings round trip every setting" {
-    // This is a codec contract, not an engine conformance test. Use the same
-    // SQLite fixture as the other native decoder contracts so presentation
-    // imports do not become dependencies of live-engine acceptance.
     const settings = @import("session_settings.zig");
     const reply = protocol_reply;
     const io = std.testing.io;

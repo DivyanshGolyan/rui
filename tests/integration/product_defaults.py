@@ -1,12 +1,3 @@
-"""Read the values Rui's source owns, so fixtures follow the owner, not a copy.
-
-DEFAULTS mirrors src/product_defaults.zig and CATALOG the generated
-src/model_catalog_snapshot.zig. compaction_trigger and start_effort apply the
-client's documented rules (src/client_defaults.zig, D111) to those values, so
-a change to a default or a catalog row needs no fixture edit. The owners' own
-tests pin the approved values; tests/ci/test_fixture_literals.py keeps
-fixtures from restating them.
-"""
 import pathlib
 import re
 from types import SimpleNamespace
@@ -17,7 +8,6 @@ _DECLARATION = re.compile(r'^pub const (\w+)(?:: \w+)? = (?:"([^"\\]*)"|(\d+));$
 _TRIGGER = re.compile(r'\.provider = "(\w+)", \.tokens = (\d+)')
 _ROW = re.compile(r'\.id = "((?:[^"\\]|\\.)*)", \.context_window = (null|\d+), '
                   r'\.efforts = \.init\(\.\{([^}]*)\}\), \.openai_listed = (true|false)')
-# Rui's closed effort grammar, lowest first (src/model_catalog.zig).
 EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 
 
@@ -49,21 +39,16 @@ CATALOG = _catalog()
 
 
 def context_window(model):
-    """The model's window from its row, else the unlisted default."""
     row = CATALOG.get(model)
     return row.context_window if row and row.context_window else DEFAULTS.unlisted_context_window
 
 
 def compaction_trigger(provider, model):
-    """The client's default trigger: the usual share of the model's window,
-    capped by the provider's own default when it has one."""
     model_trigger = context_window(model) * DEFAULTS.compaction_trigger_percent // 100
     return min(DEFAULTS.provider_compaction_triggers.get(provider, model_trigger), model_trigger)
 
 
 def start_effort(model, saved=None):
-    """The effort a fresh Session on `model` starts at: the saved one, else the
-    product default, when the model allows it; else its lowest listed effort."""
     row = CATALOG.get(model)
     for effort in (saved, DEFAULTS.reasoning_effort):
         if effort is not None and (row is None or effort in row.efforts):

@@ -1,4 +1,3 @@
-//! Value decisions for the request-wait shell; no clocks or transport.
 const std = @import("std");
 
 pub const Disposition = enum { done, later, absent };
@@ -13,8 +12,6 @@ pub fn nextPoll(milliseconds: u32) u32 {
     return @min(milliseconds *| 2, max_poll_ms);
 }
 
-/// Reads only supported observation facts. Non-Message commands have no
-/// Message lifecycle to follow, including rejected commands without a kind.
 pub fn disposition(observation: anytype) ?Disposition {
     if (observation.status == .absent) return .absent;
     if (observation.status == .rejected or observation.kind != .message) return .done;

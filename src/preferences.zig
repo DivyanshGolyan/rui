@@ -16,32 +16,24 @@ pub const defaultStore = @import("preference_values.zig").defaultStore;
 
 pub const Change = union(enum) { keep, set: []const u8 };
 
-/// Borrows set strings through update. Keep preserves a choice, not a resolved
-/// recommendation; an absent model inherits only when creating a new Session.
 pub const Edit = struct {
     store: Change = .keep,
     provider: Change = .keep,
     model: union(enum) { keep, set: []const u8, clear } = .keep,
-    /// Null keeps the saved choice.
     notifications: ?bool = null,
     reasoning_effort: union(enum) { keep, set: model_capability.ReasoningEffort, clear } = .keep,
     permission_mode: union(enum) { keep, set: PermissionMode, clear } = .keep,
 };
 
-/// Safe fields only: resource availability belongs to the selecting caller.
 pub fn validate(values: *const Values) !void {
     if (values.store.len != 0 and !validAbsoluteText(values.store.slice())) return error.InvalidPreferenceStore;
     for (values.provider.slice()) |byte| {
         if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return error.InvalidPreferenceProvider;
     }
-    // Empty means no pin; any pin follows Codex's one identifier rule.
     if (values.model.len != 0 and !model_capability.validModelSyntax(values.model.slice())) return error.InvalidPreferenceModel;
     if (values.model.len != 0 and values.provider.len == 0) return error.PreferenceProviderRequired;
 }
 
-// Preserve the precise saved-data cause, independently of the same invalid
-// fresh edit. CLI reads need environment repair; legacy login stdout still
-// carries its original reason spelling.
 fn validateSaved(values: *const Values) !void {
     validate(values) catch |err| return switch (err) {
         error.InvalidPreferenceStore => error.SavedPreferenceStoreInvalid,
@@ -68,9 +60,6 @@ fn read(dir: std.Io.Dir) !Values {
     const count = try file.readPositionalAll(io, bytes[0..@intCast(stat.size + 1)], 0);
     if (count != stat.size) return error.InvalidPreferences;
     var lines = std.mem.splitScalar(u8, bytes[0..count], '\n');
-    // Version 1 predates notifications: they keep their default, on.
-    // Version 3 adds the new-Session effort; version 4 adds permissions
-    // and allows an empty effort when no effort is saved.
     const version = lines.next() orelse "";
     const known = [_][]const u8{ "version=1", "version=2", "version=3", "version=4" };
     const number = for (known, 1..) |name, at| {
@@ -118,11 +107,8 @@ pub fn load(home: []const u8) !Values {
 
 pub const Readinesses = provider_selection.Readinesses;
 
-/// What a failed `update` means for every caller that shows it.
 pub const Failure = struct {
-    /// The file holds the new values, but a crash may yet lose them.
     saved: bool = false,
-    /// Why, as a clause; null when only the error's name says more.
     reason: ?[]const u8 = null,
 };
 
@@ -153,65 +139,41 @@ test "a failed save says whether the file holds it, and why, without an error na
     try std.testing.expectEqual(@as(?[]const u8, null), failure(error.AccessDenied).reason);
 }
 
-/// Serializes read/modify/write for competing setup callers. A failed write or
-/// rename leaves the previous complete file; post-rename sync failure is uncertain.
 pub fn update(home: []const u8, edit: Edit, readiness: *const Readinesses) !Values {
     return (try save(home, edit, readiness, null)).values;
 }
 
-/// What `rui auth login` did to the default provider for new Sessions.
 pub const LoginDefault = enum {
-    /// None was saved; the signed-in provider is now the default.
     filled,
-    /// The saved default was the other sign-in to the same account, and is
-    /// now this provider, keeping the model saved with it.
     replaced,
-    /// The signed-in provider already was the default.
     already,
-    /// Another saved choice stays, even an unsupported one.
     kept,
 };
 
-/// After `rui auth login`, under the same preference lock as setup: fill an
-/// unset provider default, or replace the other sign-in to the same
-/// account, and keep any other choice. Credentials are owned separately.
 pub fn fillProviderAfterLogin(home: []const u8, provider: protocol.Provider) !LoginDefault {
     const readiness: Readinesses = .initFill(.configured);
     return (try save(home, .{ .provider = .{ .set = @tagName(provider) } }, &readiness, provider)).login.?;
 }
 
-/// What a sign-in to `provider` did, from the locked snapshot `before` and
-/// whether it published new values.
 fn loginOutcome(before: *const Values, published: bool, provider: protocol.Provider) LoginDefault {
     if (!published) return if (before.provider.eql(@tagName(provider))) .already else .kept;
     return if (before.provider.len == 0) .filled else .replaced;
 }
 
-/// Whether a sign-in to `provider` may make it the default in place of the
-/// saved provider `saved`: when none is saved, or when `saved` is the other
-/// sign-in to the same account.
 fn loginMayReplace(saved: []const u8, provider: protocol.Provider) bool {
     return saved.len == 0 or otherWayIn(saved, provider);
 }
 
-/// Whether the saved provider `saved` is the other sign-in to `provider`'s
-/// account, as `Provider.sameAccount` says.
 fn otherWayIn(saved: []const u8, provider: protocol.Provider) bool {
     const other = provider.sameAccount() orelse return false;
     return std.mem.eql(u8, saved, @tagName(other));
 }
 
-/// Saves `provider` as the default after the sign-in screen signed it in:
-/// the person chose it there, so it replaces any saved provider, and like
-/// any provider change keeps the saved model only within the same account.
 pub fn saveProviderAfterLogin(home: []const u8, provider: protocol.Provider) !void {
     const readiness: Readinesses = .initFill(.configured);
     _ = try save(home, .{ .provider = .{ .set = @tagName(provider) } }, &readiness, null);
 }
 
-// Both preflight and locked application keep Store-selection failures
-// distinct from failures reading or publishing the preferences themselves.
-// Keep the Paths return temporaries out of apply's frame.
 noinline fn resolveStore(value: []const u8) !platform.Paths {
     return platform.resolveClientPaths(io, value) catch |err| switch (err) {
         error.FileNotFound, error.NotDir, error.AccessDenied, error.PermissionDenied, error.InsecureDirectoryPermissions, error.SymLinkLoop, error.StorePathTooLong, error.NameTooLong, error.InvalidStorePath => error.InvalidPreferenceStore,
@@ -219,7 +181,6 @@ noinline fn resolveStore(value: []const u8) !platform.Paths {
     };
 }
 
-/// Apply explicit choices to the locked snapshot, never resolved recommendations.
 fn apply(saved: Values, edit: Edit, readiness: *const Readinesses) !Values {
     var values = saved;
     if (edit.store == .set) {
@@ -227,9 +188,6 @@ fn apply(saved: Values, edit: Edit, readiness: *const Readinesses) !Values {
         values.store.set(paths.store.slice()) catch return error.InvalidPreferenceStore;
     }
     if (edit.provider == .set) {
-        // A model saved for another account's provider is dropped; within
-        // one account it carries over, as both ways in name OpenAI's model
-        // IDs. `save` admitted only a known provider name.
         const chosen = std.meta.stringToEnum(protocol.Provider, edit.provider.set).?;
         if (!saved.provider.eql(edit.provider.set) and !otherWayIn(saved.provider.slice(), chosen)) values.model = .{};
         values.provider.set(edit.provider.set) catch unreachable;
@@ -261,12 +219,8 @@ fn apply(saved: Values, edit: Edit, readiness: *const Readinesses) !Values {
     return values;
 }
 
-/// The values saved once a save returns, and for a sign-in's save, what it
-/// did to the default provider.
 const Saved = struct { values: Values, login: ?LoginDefault };
 
-/// `login` names the provider just signed in, whose edit applies only where
-/// `loginMayReplace` allows; null applies the edit as an explicit choice.
 fn save(home: []const u8, edit: Edit, readiness: *const Readinesses, login: ?protocol.Provider) !Saved {
     return saveWithSync(home, edit, readiness, login, NativeDirectorySync{});
 }
@@ -298,8 +252,6 @@ fn saveWithSync(home: []const u8, edit: Edit, readiness: *const Readinesses, log
             error.PathAlreadyExists => false,
             else => return err,
         };
-        // Only newly created entries belong to this owner. Existing parents
-        // retain their modes; existing private entries still fail validation.
         if (created_config and std.c.fchmodat(home_dir.handle, ".config", 0o700, std.c.AT.SYMLINK_NOFOLLOW) != 0)
             return error.PreferencePermissionsFailed;
         var config_dir = try home_dir.openDir(io, ".config", .{ .iterate = true });
@@ -313,8 +265,6 @@ fn saveWithSync(home: []const u8, edit: Edit, readiness: *const Readinesses, log
         const opened = try config_dir.openDir(io, "rui", .{ .iterate = true, .follow_symlinks = false });
         errdefer opened.close(io);
         try privateDirectory(opened);
-        // Sync both parent entries even if another caller created them but
-        // has not synced yet; close parent handles before lock/publication.
         if (directory_sync.sync(home_dir.handle) != 0 or directory_sync.sync(config_dir.handle) != 0)
             return error.PreferenceDirectorySyncFailed;
         break :blk opened;
@@ -356,16 +306,11 @@ fn saveWithSync(home: []const u8, edit: Edit, readiness: *const Readinesses, log
     }
     {
         const file = try dir.createFile(io, "preferences.tmp", .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
-        // Until rename succeeds the temporary name is ours to remove.
         errdefer dir.deleteFile(io, "preferences.tmp") catch {};
         {
             defer file.close(io);
             if (std.c.fchmod(file.handle, 0o600) != 0) return error.PreferencePermissionsFailed;
             var bytes: [max_file_bytes]u8 = undefined;
-            // Each file is the lowest version that holds its values, so an older
-            // Rui still reads it unless a choice it cannot hold was made: version 1
-            // says notifications are on, version 2 turns them off, version 3 adds
-            // the new-Session effort, and version 4 adds permissions.
             const fields = .{ values.store.slice(), values.provider.slice(), values.model.slice() };
             const encoded = (if (values.permission_mode) |mode|
                 std.fmt.bufPrint(&bytes, "version=4\nstore={s}\nprovider={s}\nmodel={s}\nnotifications={s}\n" ++ effort_key ++ "{s}\n" ++ permission_key ++ "{s}\n", fields ++ .{ if (values.notifications) "on" else "off", if (values.reasoning_effort) |effort| @tagName(effort) else "", @tagName(mode) })
@@ -420,7 +365,6 @@ fn validateOwner(handle: anytype) !void {
     if (stat.st_uid != c.geteuid()) return error.UnownedPreferences;
 }
 
-/// Codex in `state` and every other provider missing.
 fn codexOnly(state: provider_selection.Readiness) Readinesses {
     var readiness: Readinesses = .initFill(.missing);
     readiness.set(.codex, state);
@@ -429,9 +373,6 @@ fn codexOnly(state: provider_selection.Readiness) Readinesses {
 
 test "native directory sync forwards descriptor failures" {
     const native: NativeDirectorySync = .{};
-    // A pipe is a live descriptor that cannot be synced on either supported
-    // platform. Unlike publication readback, this rejects a successful no-op
-    // or replacement with an unrelated successful descriptor operation.
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
     defer _ = std.c.close(fds[0]);
@@ -461,7 +402,6 @@ test "directory sync failures preserve complete preference publication" {
                 actual.st_ino == self.expected[self.calls].st_ino;
             self.correct_directories = self.correct_directories and matches;
             self.calls += 1;
-            // Only the selected returned error is synthetic; all other I/O is real.
             return if (self.calls == self.at) -1 else NativeDirectorySync.sync(.{}, fd);
         }
     };
@@ -508,8 +448,6 @@ test "login fills only a missing provider under the preference lock" {
     try std.testing.expectEqualStrings("codex", first.provider.slice());
     try std.testing.expectEqualStrings("", first.model.slice());
 
-    // A saved, currently unsupported choice is still the user's choice. An
-    // unconditional login update would overwrite this exact counterexample.
     var config = try tmp.dir.openDir(io, ".config/rui", .{});
     defer config.close(io);
     var file = try config.createFile(io, "preferences.tmp", .{ .permissions = .fromMode(0o600) });
@@ -530,24 +468,16 @@ test "a login fills an unset default, replaces the other sign-in to its account 
     var config = try tmp.dir.openDir(io, ".config/rui", .{});
     defer config.close(io);
     const pin = "gpt-6-luna";
-    // What the file holds afterwards: the same bytes, or a published
-    // provider and model with every other choice kept.
     const Expected = union(enum) {
         unchanged: LoginDefault,
         saved: struct { outcome: LoginDefault, provider: []const u8, model: []const u8 },
         refused: anyerror,
     };
-    // Written out by hand from the owner's decision of 2026-11-13, not
-    // derived from the code under test: the two ChatGPT sign-ins (codex by
-    // device code, chatgpt in a browser) replace each other in both
-    // directions and keep the saved model; openai and an unsupported name
-    // stay; nothing saved is filled.
     const Case = struct { saved: []const u8, pinned: bool, login: protocol.Provider, expected: Expected };
     const cases = [_]Case{
         .{ .saved = "", .pinned = false, .login = .codex, .expected = .{ .saved = .{ .outcome = .filled, .provider = "codex", .model = "" } } },
         .{ .saved = "", .pinned = false, .login = .chatgpt, .expected = .{ .saved = .{ .outcome = .filled, .provider = "chatgpt", .model = "" } } },
         .{ .saved = "", .pinned = false, .login = .openai, .expected = .{ .saved = .{ .outcome = .filled, .provider = "openai", .model = "" } } },
-        // A pin with no provider is a broken file, left for the person.
         .{ .saved = "", .pinned = true, .login = .codex, .expected = .{ .refused = error.SavedPreferenceProviderRequired } },
         .{ .saved = "", .pinned = true, .login = .chatgpt, .expected = .{ .refused = error.SavedPreferenceProviderRequired } },
         .{ .saved = "", .pinned = true, .login = .openai, .expected = .{ .refused = error.SavedPreferenceProviderRequired } },
@@ -576,7 +506,6 @@ test "a login fills an unset default, replaces the other sign-in to its account 
         .{ .saved = "retired", .pinned = true, .login = .chatgpt, .expected = .{ .unchanged = .kept } },
         .{ .saved = "retired", .pinned = true, .login = .openai, .expected = .{ .unchanged = .kept } },
     };
-    // Every saved value, login and pin, once each.
     try std.testing.expectEqual(5 * std.enums.values(protocol.Provider).len * 2, cases.len);
     for (cases) |case| {
         var text_buffer: [256]u8 = undefined;
@@ -604,7 +533,6 @@ test "a login fills an unset default, replaces the other sign-in to its account 
             },
         }
     }
-    // A file this Rui cannot read is never overwritten, whoever signs in.
     for (std.enums.values(protocol.Provider)) |login| {
         const text = "version=9\nstore=\nprovider=codex\nmodel=\n";
         const file = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
@@ -622,7 +550,6 @@ test "the sign-in screen's save keeps the model only within one account" {
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
     const all: Readinesses = .initFill(.configured);
-    // From, to, the model kept: written out by hand.
     for ([_]struct { []const u8, protocol.Provider, []const u8 }{
         .{ "codex", .chatgpt, "gpt-6-luna" },
         .{ "chatgpt", .codex, "gpt-6-luna" },
@@ -656,8 +583,6 @@ test "preference edits distinguish model keep set and clear without publishing r
     try std.testing.expect((try load(home)).model.len == 0);
     const reset = try update(home, .{ .model = .{ .set = "gpt-6-luna" } }, &codexOnly(.refresh_required));
     try std.testing.expect(reset.model.eql("gpt-6-luna"));
-    // Syntax accepts unlisted exact IDs; catalog membership is a separate
-    // concern. Invalid edits must leave the complete previous pin unchanged.
     for ([_][]const u8{ "family=variant", &@as([256]u8, @splat('x')) }) |valid| {
         const result = try update(home, .{ .model = .{ .set = valid } }, &codexOnly(.missing));
         try std.testing.expectEqualStrings(valid, result.model.slice());
@@ -683,14 +608,12 @@ test "notifications stay on until turned off, and a version 1 file reads as on" 
     try file.writeStreamingAll(io, "version=1\nstore=\nprovider=codex\nmodel=pin\n");
     file.close(io);
     try std.testing.expect((try load(home)).notifications);
-    // Turning them off keeps every other choice, and a later edit keeps it off.
     const off = try update(home, .{ .notifications = false }, &codexOnly(.configured));
     try std.testing.expect(!off.notifications and off.provider.eql("codex") and off.model.eql("pin"));
     const kept = try update(home, .{ .model = .clear }, &codexOnly(.configured));
     try std.testing.expect(!kept.notifications and !(try load(home)).notifications);
     var bytes: [256]u8 = undefined;
     try std.testing.expectEqualStrings("version=2\nstore=\nprovider=codex\nmodel=\nnotifications=off\n", try savedFile(config, &bytes));
-    // Turned back on, the file is version 1 again, which an older Rui reads.
     try std.testing.expect((try update(home, .{ .notifications = true }, &codexOnly(.configured))).notifications);
     try std.testing.expectEqualStrings("version=1\nstore=\nprovider=codex\nmodel=\n", try savedFile(config, &bytes));
     for ([_][]const u8{ "version=2\nstore=\nprovider=codex\nmodel=\n", "version=2\nstore=\nprovider=codex\nmodel=\nnotifications=yes\n" }) |invalid| {
@@ -716,7 +639,6 @@ test "a saved effort is kept across other edits, read back, and written as versi
     try std.testing.expect(kept.reasoning_effort == .high and !kept.notifications);
     try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), (try load(home)).reasoning_effort);
     try std.testing.expectEqualStrings("version=3\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\n", try savedFile(config, &bytes));
-    // Cleared, the file goes back to the version an older Rui reads.
     _ = try update(home, .{ .reasoning_effort = .clear, .notifications = true }, &codexOnly(.configured));
     try std.testing.expectEqualStrings("version=1\nstore=\nprovider=codex\nmodel=gpt-6-luna\n", try savedFile(config, &bytes));
     for ([_][]const u8{ "version=3\nstore=\nprovider=codex\nmodel=\nnotifications=on\n", "version=3\nstore=\nprovider=codex\nmodel=\nnotifications=on\nreasoning_effort=\n", "version=3\nstore=\nprovider=codex\nmodel=\nnotifications=on\nreasoning_effort=fast\n" }) |invalid| {
@@ -837,8 +759,6 @@ test "preference edits persist explicit choices rather than recommendations" {
         .{ "legacy", "retired-model", Edit{ .provider = .{ .set = "codex" }, .model = .{ .set = "new-pin" } }, "codex", "new-pin" },
         .{ "", "", Edit{ .model = .{ .set = "gpt-6-luna" } }, "codex", "gpt-6-luna" },
         .{ "legacy", "retired-model", Edit{}, "legacy", "retired-model" },
-        // Changing how one signs in to the same account keeps the model;
-        // moving to another account drops it.
         .{ "codex", "gpt-6-luna", Edit{ .provider = .{ .set = "chatgpt" } }, "chatgpt", "gpt-6-luna" },
         .{ "chatgpt", "gpt-6-luna", Edit{ .provider = .{ .set = "codex" } }, "codex", "gpt-6-luna" },
         .{ "codex", "gpt-6-luna", Edit{ .provider = .{ .set = "openai" } }, "openai", "" },
@@ -903,7 +823,6 @@ test "preference publication creates owner usable private modes despite umask" {
         defer file.close(io);
         try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), (try file.stat(io)).permissions.toMode() & 0o777);
     }
-    // Do not silently repair an existing parent's mode or an unsafe private owner.
     try std.testing.expectEqual(@as(c_int, 0), std.c.fchmod(config.handle, 0o750));
     _ = try update(home, .{ .model = .{ .set = "explicit-pin" } }, &codexOnly(.missing));
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o750), (try config.stat(io)).permissions.toMode() & 0o777);
@@ -982,8 +901,6 @@ test "any built-in provider can be saved, and a model alone needs one ready prov
     try std.testing.expect((try load(home)).provider.eql("openai"));
 }
 
-/// Legacy stdout login receipts are outside the CLI stderr migration. Derive
-/// their unchanged reason vocabulary from this owner's closed error set.
 pub fn loginDefaultFailureReason(err: @import("error_set.zig").Of(fillProviderAfterLogin)) []const u8 {
     switch (err) {
         error.SavedPreferenceStoreInvalid => return "InvalidPreferenceStore",

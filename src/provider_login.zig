@@ -1,5 +1,3 @@
-//! Shared credential installation for the explicit CLI and sign-in screen.
-//! Presentation and the independent provider-default outcome stay with callers.
 const std = @import("std");
 const api_key = @import("api_key.zig");
 const auth = @import("codex_auth.zig");
@@ -16,8 +14,6 @@ pub fn createConfigDirectory(io: std.Io, home: []const u8) !void {
     dir.close(io);
 }
 
-/// The variable naming a sign-in provider's credential file, as
-/// RUI_CODEX_CREDENTIAL_FILE for Codex.
 pub fn credentialVariable(comptime provider: Provider) []const u8 {
     comptime var upper: [@tagName(provider).len]u8 = undefined;
     inline for (@tagName(provider), &upper) |byte, *to| to.* = comptime std.ascii.toUpper(byte);
@@ -25,8 +21,6 @@ pub fn credentialVariable(comptime provider: Provider) []const u8 {
     return "RUI_" ++ &final ++ "_CREDENTIAL_FILE";
 }
 
-/// A sign-in provider's credential file: HOME/.config/rui/LABEL.json unless
-/// its variable (`credentialVariable`) names an absolute path.
 pub fn credentialPath(init: std.process.Init, comptime provider: Provider, buffer: []u8, create: bool) ![]const u8 {
     if (init.environ_map.get(comptime credentialVariable(provider))) |path| {
         if (!std.fs.path.isAbsolute(path)) return error.InvalidCredentialPath;
@@ -51,7 +45,6 @@ pub fn codex(init: std.process.Init, comptime exchange: anytype, display: anytyp
         _ = try credentials.readSnapshotInto(path, snapshot, &room.work.credentials);
     }
     if (cancelled()) return error.LoginInterrupted;
-    // Exchange may fail after writing part of a token, so wipe on every exit.
     defer std.crypto.secureZero(u8, std.mem.asBytes(&room.tokens));
     try exchange(init.io, display, cancelled, &room.tokens);
     defer std.crypto.secureZero(u8, std.mem.asBytes(&room.record));
@@ -60,11 +53,6 @@ pub fn codex(init: std.process.Init, comptime exchange: anytype, display: anytyp
     try credentials.install(path, &room.record, null, &room.work.credentials);
 }
 
-/// The ChatGPT plan sign-in: a browser or pasted answer from `issuer`,
-/// installed through the same custody as a Codex login once `publish` wins
-/// the caller's cancellation gate. The caller renders each `plan_login.Shown`
-/// through `display` and supplies the pasted address through `paste`. The
-/// host id lives beside the credential directory at HOME/.config/rui/host-id.
 pub fn chatgpt(init: std.process.Init, issuer: plan_login.Issuer, display: anytype, paste: plan_login.Paste, cancelled: *const fn () bool, publish: *const fn () bool) !void {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try credentialPath(init, .chatgpt, &path_buffer, true);
@@ -92,7 +80,6 @@ pub fn chatgpt(init: std.process.Init, issuer: plan_login.Issuer, display: anyty
         .credential_path = path,
         .host_id_path = host_id_path,
         .issuer = issuer,
-        // A test's issuer is a loopback; no browser goes there.
         .opener = if (issuer == .fixture) null else os.linkOpener(init.environ_map),
     }, display, paste, cancelled, &room.record, Publish{ .path = path, .scratch = &room.work.credentials, .gate = publish }, Publish.install);
 }

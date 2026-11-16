@@ -1,4 +1,3 @@
-"""Previous-red planning uses fake REST responses and logs, never GitHub."""
 from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
@@ -383,8 +382,6 @@ AssertionError
         self.assertIn("MySQL rounds", results[1]["name"])
 
     def test_every_registered_root_matches_independent_membership_standalone_and_packed(self):
-        # Independent expected membership: deriving the expected side from the
-        # registry would miss a composition that stopped matching execution.
         units = {
             "unit-native-tests": ("test-native", {"test-native", "test", "check", "check-full", "full-execution"}),
             "unit-store-tests": ("test-store", {"test-store", "test", "check", "check-full", "full-execution"}),
@@ -421,7 +418,6 @@ AssertionError
                                    zig_test="store.tests.activity.test.queued input")
         for owners in (["check"], ["test-native", "test-store"], ["test-store"]):
             self.assertEqual(prepush.unit_target([(owner, "all") for owner in owners], cause, graph), "test-store")
-        # A matrix target alone carries no authority about a failed root.
         cause = report_issue.Cause("unknown", zig_test="unregistered.test.named test")
         self.assertIsNone(prepush.unit_target([("test-logic", "all")], cause, graph))
 

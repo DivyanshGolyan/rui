@@ -1,4 +1,3 @@
-//! Native adapter actor: no Host, frontend or syscall interposition.
 const std = @import("std");
 pub const panic = @import("vaxis").Panic;
 
@@ -27,8 +26,6 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("decision=none\n", .{});
         return;
     }
-    // `app-late-hangup` takes the hangup a shell forwards only after App
-    // released the terminal, as when App saw the end of input first.
     const late_hangup = args.len == 2 and std.mem.eql(u8, args[1], "app-late-hangup");
     if (late_hangup or (args.len == 2 and std.mem.eql(u8, args[1], "app-signal"))) {
         var runtime: @import("TerminalApp.zig") = .{};
@@ -109,8 +106,6 @@ const ConsentProbe = struct {
         }
     }
 
-    /// Root hands the probe its keys, as it does the Session's core: the
-    /// first key goes to the card, which takes only an exact Enter.
     fn key(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery: @import("app_input.zig").Effects.Delivery) anyerror!void {
         const self: *ConsentProbe = @ptrCast(@alignCast(raw));
         const choice: @import("ActionConsent.zig").Input = switch (input) {

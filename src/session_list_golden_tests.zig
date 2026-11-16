@@ -81,8 +81,6 @@ fn compare(bytes: []const u8, storage: *store.Store, workspace: []const u8, ids:
         var placeholder: [16]u8 = undefined;
         try replace(&normalized, id.slice(), try std.fmt.bufPrint(&placeholder, "<id{d}>", .{i}));
     }
-    // Engine setup may commit before the first Session. Compare the complete
-    // token the Store owns instead of assuming its generation starts at zero.
     var token_buffer: [protocol.SinceToken.max_bytes]u8 = undefined;
     const token = (protocol.SinceToken{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) }).format(&token_buffer);
     try replace(&normalized, token, "<since>");
@@ -90,8 +88,6 @@ fn compare(bytes: []const u8, storage: *store.Store, workspace: []const u8, ids:
         try replace(&normalized, row.object.get("created_at").?.string, "<time>");
         try replace(&normalized, row.object.get("work").?.object.get("state").?.object.get("since").?.string, "<time>");
     }
-    // The captured template records the old wire version; its owner supplies
-    // the expected version, so unrelated version bumps do not invalidate it.
     const prefix = "{\"version\":\"";
     try std.testing.expect(std.mem.startsWith(u8, expected, prefix));
     const end = std.mem.indexOfScalarPos(u8, expected, prefix.len, '"') orelse return error.InvalidGolden;
