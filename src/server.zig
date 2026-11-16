@@ -24,6 +24,7 @@ const platform = @import("platform.zig");
 const provider = @import("provider.zig");
 const providers = @import("providers.zig");
 const protocol = @import("protocol.zig");
+const command_spec = @import("command_spec.zig");
 const host_reply = @import("host_reply.zig");
 const ScratchBudget = @import("ScratchBudget.zig");
 const wire_request = @import("wire_request.zig");
@@ -394,13 +395,10 @@ const Intake = struct {
                         .host_info => protocol.max_host_info_request_bytes,
                         .host_stop => protocol.max_host_stop_request_bytes,
                         .host_pause => protocol.max_host_pause_request_bytes,
-                        .session_stop => protocol.max_session_stop_request_bytes,
-                        .session_archive => protocol.max_session_archive_request_bytes,
-                        .session_pin => protocol.max_session_pin_request_bytes,
-                        .model_interruption => protocol.max_model_interruption_request_bytes,
-                        .permission_decision => protocol.max_permission_decision_request_bytes,
-                        .action_background => protocol.max_action_background_request_bytes,
-                        else => std.math.maxInt(u64),
+                        inline else => |route| if (comptime route.commandKind()) |kind|
+                            if (command_spec.spec(kind).is_control) command_spec.spec(kind).Request.maxBytes(protocol).? else std.math.maxInt(u64)
+                        else
+                            std.math.maxInt(u64),
                     };
                     if (self.header.content_length > limit) return error.RequestTooLarge;
                     const request_length = try self.reserveEnvironment();
@@ -1490,8 +1488,21 @@ const Route = enum {
     model_list,
     unsupported_control,
 
+    fn commandKind(comptime self: Route) ?protocol.CommandKind {
+        inline for (comptime std.enums.values(protocol.CommandKind)) |command_kind| {
+            if (self == @field(Route, @tagName(command_kind))) return command_kind;
+        }
+        return null;
+    }
+
     fn isControl(self: Route) bool {
-        return self == .host_stop or self == .host_pause or self == .session_stop or self == .session_archive or self == .session_pin or self == .model_interruption or self == .permission_decision or self == .action_background or self == .unsupported_control;
+        return switch (self) {
+            .host_stop, .host_pause, .unsupported_control => true,
+            inline else => |route| if (comptime route.commandKind()) |command_kind|
+                command_spec.spec(command_kind).is_control
+            else
+                false,
+        };
     }
 
     fn atomicOnly(self: Route) bool {
@@ -1507,6 +1518,28 @@ const Route = enum {
         };
     }
 };
+test "command route projection preserves control classification" {
+    inline for (comptime std.enums.values(Route)) |route| {
+        const expected: ?protocol.CommandKind = switch (route) {
+            .configure => .configure,
+            .message => .message,
+            .session_stop => .session_stop,
+            .session_archive => .session_archive,
+            .session_pin => .session_pin,
+            .model_interruption => .model_interruption,
+            .permission_decision => .permission_decision,
+            .action_background => .action_background,
+            else => null,
+        };
+        try std.testing.expectEqual(expected, comptime route.commandKind());
+        const expected_control = switch (route) {
+            .host_stop, .host_pause, .unsupported_control, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background => true,
+            else => false,
+        };
+        try std.testing.expectEqual(expected_control, route.isControl());
+    }
+}
+
 const DropMode = enum { none, before_admission, during_admission, after_commit };
 
 const Header = struct {
