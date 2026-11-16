@@ -174,6 +174,7 @@ pub const Listed = struct {
     operation: ?u64 = null,
     archive_state: ArchiveState = .active,
     pin_order: ?@import("session_pin.zig").PinOrder = null,
+    created_at: u64 = 0,
     workspace: []const u8,
     provider: Provider,
     label: ?[]const u8 = null,
@@ -194,6 +195,7 @@ pub const Listed = struct {
             .operation = row.work.operation,
             .archive_state = row.archive_state,
             .pin_order = row.pin_order,
+            .created_at = row.created_at,
             .workspace = row.workspace.slice(),
             .provider = row.provider,
             .label = if (row.label) |*text| text.slice() else null,
@@ -606,6 +608,7 @@ pub const Row = struct {
     operation: ?u64 = null,
     archive_state: ArchiveState = .active,
     pin_order: ?@import("session_pin.zig").PinOrder = null,
+    created_at: u64 = 0,
 
     workspace: u32,
     provider: ?Provider = null,
@@ -1439,6 +1442,7 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
             .operation = listed.operation,
             .archive_state = listed.archive_state,
             .pin_order = listed.pin_order,
+            .created_at = listed.created_at,
             .workspace = try state.intern(listed.workspace),
             .provider = listed.provider,
             .label = if (listed.label) |text| labelOf(text) else null,
@@ -1501,6 +1505,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         const same = if (incoming.first) |first| if (row.first) |known| first.admission == known.admission else false else false;
         row.archive_state = incoming.archive_state;
         row.pin_order = incoming.pin_order;
+        row.created_at = incoming.created_at;
         row.workspace = incoming.workspace;
         row.provider = incoming.provider;
         row.label = incoming.label;
@@ -2610,6 +2615,16 @@ pub fn listSegments(arena: Allocator, state: *const State, item: Item, width: u1
     };
     result.segments = try segmentsOf(arena, spans, width, .{});
     return result;
+}
+
+pub fn newestEmpty(state: *const State) ?Reference {
+    var newest: ?*const Row = null;
+    for (state.rows.items) |*row| {
+        if (!row.listed or row.archive_state == .archived or row.first != null) continue;
+        if (newest == null or row.created_at > newest.?.created_at or
+            (row.created_at == newest.?.created_at and std.mem.order(u8, &row.reference, &newest.?.reference) == .gt)) newest = row;
+    }
+    return if (newest) |row| row.reference else null;
 }
 
 pub fn footerRight(state: *const State) []const u8 {

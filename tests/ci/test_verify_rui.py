@@ -1027,6 +1027,10 @@ while True:
         self.assertEqual(state["open"], "overview")
         self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
         self.assertEqual(state["steps"], [
+            {"wait": "+ New Session"},
+            {"wait": "Type a task", "min_columns": 100},
+            {"keys": ["Esc"]},
+            {"wait": "enter open"},
             {"keys": ["End", "Enter"]},
             {"wait": "Rui"}, {"wait": "Notifications"},
         ])

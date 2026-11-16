@@ -5,10 +5,35 @@
   ],
   "states": [
     {
+      "name": "wide-launch",
+      "note": "Bare launch opens an empty chat beside the list at wide widths",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "+ New Session"
+        },
+        {
+          "wait": "Type a task",
+          "min_columns": 100
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Settings"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
       "name": "archived-row-none",
       "note": "Archived stays available with nothing archived",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "+ New Session"
         }
@@ -113,6 +138,10 @@
       "theme": "night",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "Input tint chat"
         },
@@ -246,6 +275,10 @@
       "theme": "day",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "Input tint chat"
         },
@@ -314,6 +347,10 @@
         }
       ],
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "You wrote"
         }
@@ -364,6 +401,10 @@
         }
       ],
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "Agent working"
         },
@@ -856,6 +897,10 @@
       "note": "Sessions and Archived tabs stay below the separate New Session action",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "Archived"
         }
@@ -877,6 +922,10 @@
       "note": "Down from New Session selects Sessions; Right selects Archived, Left returns to Sessions",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "Archived"
         },
@@ -906,6 +955,10 @@
       "note": "Enter on Archived opens the existing archived view: plain names, no archived marker",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "Archived"
         },
@@ -939,6 +992,10 @@
       "note": "A click on Archived opens the archived view",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "Archived"
         },
@@ -969,6 +1026,10 @@
       "note": "Esc in the archived view returns to the usual list",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "Archived"
         },
@@ -1192,7 +1253,12 @@
       "name": "start-empty",
       "note": "01-overview-empty: pinned actions without an editor or copied chat facts",
       "open": "overview",
-      "steps": [],
+      "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"}
+      ],
       "expect": [
         "+ New Session",
         "Settings",
@@ -1212,6 +1278,10 @@
       "note": "01a-new-empty-chat: New Session opens the only input and its Session footer facts",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "keys": [
             "Home",
@@ -1288,6 +1358,10 @@
       "note": "App settings by selecting the list's Settings row (End) and pressing Enter",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "keys": [
             "End",
@@ -1320,6 +1394,10 @@
       "note": "Open Settings from the overview, move to Model, and open the shared choice",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "keys": [
             "End",
@@ -1364,6 +1442,10 @@
       "note": "Filter the shared settings Model choice by typing sol",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "keys": [
             "End",
@@ -1414,6 +1496,10 @@
       "note": "Pointer over Notifications; L2 SGR motion, selection unchanged",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "keys": [
             "End",
@@ -1451,6 +1537,10 @@
       "note": "Empty-chat model word opens the shared Model choice alone above the input",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "keys": [
             "Home",
@@ -1497,6 +1587,10 @@
       "note": "Tab Tab Enter opens the shared Effort choice alone above the input",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "keys": [
             "Home",
@@ -1547,6 +1641,10 @@
       "note": "Picking xhigh in the empty-chat Effort choice saves this Session\u2019s effort and closes the choice",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "keys": [
             "Home",
@@ -1610,6 +1708,10 @@
         }
       ],
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "Existing conversation"
         },
@@ -1655,6 +1757,10 @@
       "note": "Picking a different model without sending a Message still leaves no empty overview row",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "Existing conversation"
         },
@@ -1740,6 +1846,10 @@
         }
       ],
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "Existing second conversation"
         },
@@ -1803,6 +1913,10 @@
       "note": "Click the pinned Settings row using terminal mouse modes",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "Settings"
         },
@@ -1840,6 +1954,10 @@
       "note": "02-overview",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "Schema migration"
         },
@@ -1932,6 +2050,10 @@
       "note": "Pointer over Release notes for 0.60; L2 SGR motion, selection unchanged",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "Schema migration"
         },
@@ -1963,6 +2085,10 @@
       "note": "Pointer over Settings; L2 SGR motion, selection unchanged",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "Schema migration"
         },
@@ -1993,6 +2119,10 @@
       "note": "03-overview-busy: one-line working Sessions",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "send": {
             "to": "Benchmark idle memory",
@@ -3075,6 +3205,10 @@
       "note": "Shared key reference, aligned pairs at 140 and one column at 46",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "keys": [
             "End",
@@ -3213,6 +3347,10 @@
       "note": "The list ignores printable input and has no command path",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "text": "/nope"
         },
@@ -3777,6 +3915,10 @@
       "note": "App settings inline Model value editor with compact matches",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "keys": [
             "End",
@@ -3819,6 +3961,10 @@
       "note": "App settings Model inline value filtered by ter; no separate Filter row",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "keys": [
             "End",
@@ -3867,6 +4013,10 @@
       "note": "48-new-chat-draft: task typing happens only after New Session opens",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "keys": [
             "Home",
@@ -3899,6 +4049,10 @@
       "note": "50c-long-label",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "Migrate the billing"
         }
@@ -3930,6 +4084,10 @@
       "note": "51-many-sessions",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "Batch job"
         }
@@ -3966,6 +4124,10 @@
       "note": "51a-many-sessions-middle",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "Batch job"
         },
@@ -4022,6 +4184,10 @@
       "note": "51b-many-sessions-end",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "Batch job"
         },
@@ -4060,6 +4226,10 @@
       "note": "51c-many-sessions-pinned-end",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "wait": "Batch job"
         },
@@ -4164,7 +4334,12 @@
       "name": "day-start",
       "note": "70-light-overview",
       "open": "overview",
-      "steps": [],
+      "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"}
+      ],
       "theme": "day",
       "expect": [
         "+ New Session",
@@ -4251,6 +4426,10 @@
       "note": "60-host-down-overview",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "host": "pause"
         },
@@ -4297,6 +4476,10 @@
       "note": "61-host-back",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"wait": "enter open"},
         {
           "host": "start"
         },
