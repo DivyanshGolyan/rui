@@ -390,6 +390,7 @@ screen_ready: bool = false,
 pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !?Relaunch {
     const self = try create(init, options, hooks, client_operations, &Signals.cancellation);
     defer self.destroy();
+    _ = try view.step(&self.state, .{ .launch_start = .{ .explicit_session = options.open != null, .restoring = options.restoration != null } });
     try self.restoreRelaunch();
     const screen = try init.gpa.create(SessionScreen);
     defer init.gpa.destroy(screen);
@@ -1009,7 +1010,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     self.app_new_session = .{ .state = &self.state, .caps = self.caps, .userdata = self, .on_click = appClick };
     self.app_settings_line = .{ .selected = false, .caps = self.caps, .userdata = self, .on_click = appClick };
     self.app_sessions.on_press = .{ .userdata = self, .pressed = appClick };
-    try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model), .launch = options.open == null and options.restoration == null });
+    try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
     return self;
 }
@@ -7685,6 +7686,7 @@ test "wide launch waits for listing and opens the newest empty Session without c
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
     defer rig.close();
+    _ = try view.step(&rig.overview.state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
     var shown = try rig.shown(140, 40);
     defer shown.deinit();
     try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, try shown.text(), "+ New Session"));
@@ -7710,6 +7712,7 @@ test "narrow launch and later widening do not open a chat" {
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
     defer rig.close();
+    _ = try view.step(&rig.overview.state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
     var narrow = try rig.shown(46, 30);
     defer narrow.deinit();
     _ = try rig.overview.event(.{ .tick = test_now_s * 1000 });
@@ -7748,6 +7751,7 @@ test "wide launch creates a focused empty chat and Escape returns to overview" {
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-6-luna" }, ops, &cancellation);
     defer rig.close();
+    _ = try view.step(&rig.overview.state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
     const overview = rig.overview;
     overview.hooks.scratch = Scratch.scratch;
     defer {
@@ -7800,6 +7804,7 @@ test "launch threshold follows split width and explicit resume never starts a ne
         var cancellation: client.Cancellation = .{};
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .open = if (is_resume) "k7m2qx".* else null }, fake_operations, &cancellation);
         defer rig.close();
+        _ = try view.step(&rig.overview.state, .{ .launch_start = .{ .explicit_session = is_resume, .restoring = false } });
         var shown = try rig.shown(width, 30);
         defer shown.deinit();
         try std.testing.expectEqual(!is_resume and width >= Root.split_at, rig.overview.state.launch == .waiting);
@@ -7820,6 +7825,7 @@ test "wide launch refused and unconfirmed creation restore the overview" {
         var cancellation: client.Cancellation = .{};
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
         defer rig.close();
+        _ = try view.step(&rig.overview.state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
         var shown = try rig.shown(140, 40);
         defer shown.deinit();
         _ = try rig.overview.event(.{ .tick = test_now_s * 1000 });
@@ -7852,6 +7858,7 @@ test "wide launch shows stopped Host recovery and failed listing" {
         var cancellation: client.Cancellation = .{};
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
         defer rig.close();
+        _ = try view.step(&rig.overview.state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
         var shown = try rig.shown(140, 40);
         defer shown.deinit();
         try std.testing.expect(rig.overview.state.hidesOverview());

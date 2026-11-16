@@ -304,6 +304,7 @@ pub const Event = union(enum) {
     list_settled: struct { wide: bool, focused: bool },
 
     resized: Size,
+    launch_start: struct { explicit_session: bool, restoring: bool },
     launch_size: struct { size: Size, wide: bool },
     launch_poll,
 
@@ -723,11 +724,10 @@ pub const State = struct {
         home: []const u8,
         login_at: ?u64 = null,
         default: ?Default = null,
-        launch: bool = false,
     };
 
     pub fn init(self: *State, gpa: Allocator, options: Options) error{OutOfMemory}!void {
-        self.* = .{ .gpa = gpa, .home = options.home, .cwd = 0, .login_at = options.login_at, .default = options.default, .launch = if (options.launch) .sizing else .done };
+        self.* = .{ .gpa = gpa, .home = options.home, .cwd = 0, .login_at = options.login_at, .default = options.default };
         errdefer self.deinit();
         self.cwd = try self.intern(options.cwd);
     }
@@ -1300,6 +1300,9 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             state.releaseModels();
         },
         .resized => |size| state.size = size,
+        .launch_start => |startup| {
+            if (!startup.explicit_session and !startup.restoring and !state.left and state.conversing == null) state.launch = .sizing;
+        },
         .launch_size => |frame| {
             state.size = frame.size;
             if (state.launch == .sizing and frame.size.width != 0) state.launch = if (frame.wide) .waiting else .done;
@@ -6287,4 +6290,20 @@ test "launch core leaves narrow overview alone after widening" {
     _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 30 }, .wide = true } });
     try expectEffects(&.{}, try step(&state, .launch_poll));
     try std.testing.expectEqual(@as(usize, 0), state.request_count);
+}
+
+test "launch admission belongs to bare app startup" {
+    var state = try testState();
+    defer state.deinit();
+    _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+    try std.testing.expectEqual(.done, state.launch);
+    _ = try step(&state, .{ .launch_start = .{ .explicit_session = true, .restoring = false } });
+    _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+    try std.testing.expectEqual(.done, state.launch);
+    _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = true } });
+    _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+    try std.testing.expectEqual(.done, state.launch);
+    _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+    _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+    try std.testing.expectEqual(.waiting, state.launch);
 }
