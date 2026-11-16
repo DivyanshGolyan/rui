@@ -1,56 +1,14 @@
-//! MySQL classic client protocol for MySQL 8.4 LTS and later: handshake v10,
-//! caching_sha2_password, COM_QUERY with multiple statements, text result
-//! sets. MariaDB and MySQL before 8.4 are refused.
-//!
-//! The client owns no socket, thread or buffer. Its driver reads bytes into a
-//! buffer of its own and hands them to `read`, which consumes what it can and
-//! returns at most one `Event`; bytes the client wants sent go into the
-//! driver's `out` buffer. Who drives the connection, and whether TLS wraps it,
-//! is the driver's business, so one client serves a blocking test driver and
-//! an event loop alike.
-//!
-//! Packets other than result rows are decoded whole, so the receive buffer
-//! must hold `receive_buffer_min` bytes. A row streams: each value arrives as
-//! `.value` (its length) followed by `.bytes` slices, so a row of up to the
-//! single-packet limit (16 MiB) passes through a fixed buffer. Slices in
-//! events borrow the driver's input and stay valid until the driver discards
-//! the bytes they cover.
-//!
-//! Session settings are the driver's: the handshake can only name
-//! utf8mb4_0900_ai_ci (a collation id fits one byte there), so the driver sets
-//! utf8mb4_0900_bin and the strict sql_mode with NO_BACKSLASH_ESCAPES by
-//! query, and can confirm the latter through `Status.no_backslash_escapes`.
-//! Which transports to offer is also the driver's policy; the client only
-//! refuses to send the password where it could be read.
-//!
-//! A command payload of 0xFFFFFF bytes or more would need a continuation
-//! packet. Rui's statements stay far below that (16 KiB batches, 128 KiB
-//! content chunks rendered as hex), so `query` refuses one rather than split it,
-//! and a received packet of that size is refused as a protocol violation.
 const std = @import("std");
 
-/// The smallest receive buffer the driver may use: it holds any packet
-/// other than a result row.
 pub const receive_buffer_min = 16 * 1024;
-/// The smallest `out` buffer `read` may be given: it holds any handshake
-/// packet for options within the limits below.
 pub const send_buffer_min = 2048;
 
-/// MySQL caps user names at 32 characters and schema names at 64; four bytes
-/// per character bounds both. No MySQL limit applies to the password; this
-/// one keeps every handshake packet within `send_buffer_min`.
 pub const max_user_bytes = 32 * 4;
 pub const max_database_bytes = 64 * 4;
 pub const max_password_bytes = 1024;
 
-/// How the driver reaches the server. The full caching_sha2_password
-/// exchange sends the password itself, so only a Unix socket or TLS may
-/// carry it.
 pub const Transport = enum {
-    /// The driver starts TLS on `.start_tls`, before the client sends any
-    /// credential.
     tcp_tls,
-    /// TCP without TLS: only a cached-scramble login can succeed.
     tcp,
     unix_socket,
 
@@ -59,8 +17,6 @@ pub const Transport = enum {
     }
 };
 
-/// Borrowed until `read` returns `.ready` or the client closes; the client
-/// keeps no copy.
 pub const Options = struct {
     user: []const u8,
     password: []const u8,
@@ -69,35 +25,18 @@ pub const Options = struct {
 };
 
 pub const Event = union(enum) {
-    /// Send `out[0..n]` before calling `read` again.
     send: usize,
-    /// Send `out[0..n]` (the SSLRequest) in plaintext, complete the TLS
-    /// handshake, and carry every later byte over TLS. The next `read` emits
-    /// the handshake response.
     start_tls: usize,
-    /// Logged in; `query` may be called.
     ready,
-    /// One statement completed without a result set. With CLIENT_FOUND_ROWS,
-    /// `affected_rows` counts matched rows.
     ok: Ok,
-    /// The server refused the statement or the login. No further result of
-    /// the same query follows: MySQL stops a multi-statement query at its
-    /// first error. A login error closes the client.
     err: ServerError,
-    /// A result set begins with this many columns; that many `.column`
-    /// events follow, then its rows.
     columns: u16,
     column: Column,
-    /// A row begins; one `.value` per column follows.
     row,
-    /// The next value of the row: null for SQL NULL, else its length in
-    /// bytes, delivered by `.bytes` events that add up to it.
     value: ?u32,
     bytes: []const u8,
-    /// The result set ended.
     rows_end: Status,
 
-    /// One line for logs and test transcripts; `.bytes` shows only its length.
     pub fn format(event: Event, w: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (event) {
             .send => |n| try w.print("send {d}", .{n}),
@@ -135,12 +74,10 @@ pub const Ok = struct {
     status: Status,
 };
 
-/// SERVER_STATUS flags of an OK packet.
 pub const Status = packed struct(u16) {
     in_transaction: bool,
     autocommit: bool,
     _unused: bool,
-    /// Another statement's result of the same query follows.
     more_results: bool,
     _index_and_cursor: u5,
     no_backslash_escapes: bool,
@@ -210,23 +147,16 @@ pub const Step = struct {
     consumed: usize,
     event: ?Event,
 
-    /// More input is needed.
     const more: Step = .{ .consumed = 0, .event = null };
 };
 
 pub const VersionError = error{ MysqlTooOld, MysqlIsMariadb };
 
 pub const Error = error{
-    /// Bytes the protocol does not allow at this point.
     ProtocolViolation,
-    /// A packet other than a row larger than `receive_buffer_min` allows.
     PacketTooLarge,
-    /// A server lacking the required protocol or capability.
     UnsupportedServer,
-    /// `.tcp_tls` was asked for and the server does not offer TLS.
     TlsRefused,
-    /// The server asked for an authentication method other than
-    /// caching_sha2_password, or for the password over plaintext TCP.
     AuthMethodRefused,
 } || VersionError;
 
@@ -255,23 +185,16 @@ const Capability = struct {
     const plugin_auth_lenenc_client_data: u32 = 1 << 21;
     const deprecate_eof: u32 = 1 << 24;
 
-    /// Everything the client asks for apart from SSL; the server must offer
-    /// all of it. Never asked: LOCAL_FILES (lets a server read client files),
-    /// INTERACTIVE (selects interactive_timeout), COMPRESS, SESSION_TRACK and
-    /// OPTIONAL_RESULTSET_METADATA (column definitions are how a caller
-    /// checks result types).
     const required = found_rows | connect_with_db | protocol_41 | transactions | secure_connection |
         multi_statements | multi_results | plugin_auth | plugin_auth_lenenc_client_data | deprecate_eof;
 };
 
 const State = union(enum) {
     greeting,
-    /// The SSLRequest went out; the next `read` sends the handshake response.
     tls,
     auth: Auth,
 
     ready,
-    /// A query went out; its next statement's first packet is due.
     result,
     columns: u16,
     rows,
@@ -279,9 +202,7 @@ const State = union(enum) {
     closed,
 
     const Auth = enum {
-        /// The handshake response's scramble went out.
         scramble_sent,
-        /// An AuthSwitchRequest's scramble went out; no second switch follows.
         switched,
         password_sent,
     };
@@ -289,7 +210,6 @@ const State = union(enum) {
     const Row = struct {
         columns_left: u16,
         packet_left: u32,
-        /// Bytes still due of the value being delivered; 0 between values.
         value_left: u32,
     };
 };
@@ -297,19 +217,15 @@ const State = union(enum) {
 pub const Client = struct {
     options: Options,
     state: State = .greeting,
-    /// The sequence id of the next packet either side sends.
     sequence: u8 = 0,
     nonce: [nonce_len]u8 = undefined,
     column_count: u16 = 0,
-    /// The server's id for this connection, for KILL QUERY from another
-    /// connection. Set by the greeting.
     connection_id: u32 = 0,
 
     pub fn init(options: Options) OptionsError!Client {
         if (options.user.len == 0 or options.user.len > max_user_bytes or
             options.database.len == 0 or options.database.len > max_database_bytes or
             options.password.len > max_password_bytes) return error.InvalidOptions;
-        // Each is NUL-terminated on the wire.
         for ([_][]const u8{ options.user, options.database, options.password }) |text|
             if (std.mem.indexOfScalar(u8, text, 0) != null) return error.InvalidOptions;
         return .{ .options = options };
@@ -319,9 +235,6 @@ pub const Client = struct {
         return self.state == .ready;
     }
 
-    /// Consumes a prefix of `in` and returns at most one event. A step with
-    /// no event and nothing consumed needs more input than `in` holds. After
-    /// an error the client is unusable and the driver closes the connection.
     pub fn read(self: *Client, in: []const u8, out: []u8) Error!Step {
         std.debug.assert(out.len >= send_buffer_min);
         return switch (self.state) {
@@ -336,8 +249,6 @@ pub const Client = struct {
         };
     }
 
-    /// The 5-byte prefix of a COM_QUERY whose statement text is `text_len`
-    /// bytes. The driver sends the prefix, then exactly that text.
     pub fn query(self: *Client, text_len: usize) QueryError![5]u8 {
         std.debug.assert(self.state == .ready);
         if (text_len + 1 > max_payload) return error.StatementTooLarge;
@@ -349,7 +260,6 @@ pub const Client = struct {
         return prefix;
     }
 
-    /// COM_QUIT, after which the driver closes the connection.
     pub fn quit(self: *Client) [5]u8 {
         std.debug.assert(self.state == .ready);
         self.state = .closed;
@@ -370,13 +280,12 @@ pub const Client = struct {
         const nonce_head = try cursor.take(8);
         _ = try cursor.int(u8);
         var capabilities: u32 = try cursor.int(u16);
-        _ = try cursor.int(u8); // charset
-        _ = try cursor.int(u16); // status
+        _ = try cursor.int(u8);
+        _ = try cursor.int(u16);
         capabilities |= @as(u32, try cursor.int(u16)) << 16;
         const auth_data_len = try cursor.int(u8);
         _ = try cursor.take(10);
         if (capabilities & Capability.required != Capability.required) return error.UnsupportedServer;
-        // Part two holds the nonce's last 12 bytes and a NUL.
         if (auth_data_len != nonce_len + 1) return error.ProtocolViolation;
         const nonce_tail = try cursor.take(nonce_len - 8 + 1);
         if (nonce_tail[nonce_len - 8] != 0) return error.ProtocolViolation;
@@ -397,8 +306,6 @@ pub const Client = struct {
         return .{ .consumed = consumed, .event = .{ .start_tls = writer.finish() } };
     }
 
-    /// The 32 bytes an SSLRequest consists of and a HandshakeResponse41
-    /// starts with.
     fn writeLoginPrefix(self: *const Client, writer: *PacketWriter) void {
         writer.int(u32, Capability.required | if (self.options.transport == .tcp_tls) Capability.ssl else 0);
         writer.int(u32, max_packet_size);
@@ -406,7 +313,6 @@ pub const Client = struct {
         writer.zeros(23);
     }
 
-    /// HandshakeResponse41.
     fn writeResponse(self: *Client, out: []u8) usize {
         var writer: PacketWriter = .start(out, self.nextSequence());
         self.writeLoginPrefix(&writer);
@@ -506,15 +412,15 @@ pub const Client = struct {
     fn readColumn(self: *Client, in: []const u8) Error!Step {
         const payload = try self.packet(in) orelse return .more;
         var cursor: Cursor = .{ .bytes = payload };
-        for (0..4) |_| _ = try cursor.lenencString(); // catalog, schema, table, org_table
+        for (0..4) |_| _ = try cursor.lenencString();
         const name = try cursor.lenencString();
-        _ = try cursor.lenencString(); // org_name
+        _ = try cursor.lenencString();
         if (try cursor.lenenc() != 0x0c) return error.ProtocolViolation;
         const charset = try cursor.int(u16);
-        _ = try cursor.int(u32); // display length
+        _ = try cursor.int(u32);
         const column_type: ColumnType = @fromBackingInt(@intCast(try cursor.int(u8)));
         const flags: ColumnFlags = @bitCast(try cursor.int(u16));
-        _ = try cursor.take(3); // decimals, filler
+        _ = try cursor.take(3);
         if (cursor.rest().len != 0) return error.ProtocolViolation;
         const left = self.state.columns - 1;
         self.state = if (left == 0) .rows else .{ .columns = left };
@@ -587,9 +493,6 @@ pub const Client = struct {
         return .{ .consumed = prefix_len, .event = .{ .value = len } };
     }
 
-    /// Stores the row's progress. The last value must end its packet; that is
-    /// checked once its length is known, before its bytes, so the refusal
-    /// does not depend on how those bytes arrive.
     fn advanceRow(self: *Client, row: State.Row) Error!void {
         if (row.columns_left == 0 and row.packet_left != row.value_left) return error.ProtocolViolation;
         if (row.columns_left == 0 and row.value_left == 0) {
@@ -599,8 +502,6 @@ pub const Client = struct {
         }
     }
 
-    /// The payload of the whole packet at the start of `in`, or null if
-    /// `in` does not hold all of it yet.
     fn packet(self: *Client, in: []const u8) Error!?[]const u8 {
         if (in.len < header_len) return null;
         const len = try payloadLen(in);
@@ -610,7 +511,6 @@ pub const Client = struct {
         return in[header_len..][0..len];
     }
 
-    /// Checks the packet header at the start of `in` and returns its length.
     fn header(self: *Client, in: []const u8) Error!u32 {
         const len = try payloadLen(in);
         if (in[3] != self.sequence) return error.ProtocolViolation;
@@ -624,8 +524,6 @@ pub const Client = struct {
     }
 };
 
-/// Shared by greeting admission and the Store's version/version_comment check.
-/// MariaDB takes precedence even when its compatibility version is too old.
 pub fn versionRefusal(version: []const u8, comment: []const u8) ?VersionError {
     if (containsMaria(version) or containsMaria(comment)) return error.MysqlIsMariadb;
     var parts = std.mem.splitScalar(u8, version, '.');
@@ -636,7 +534,6 @@ pub fn versionRefusal(version: []const u8, comment: []const u8) ?VersionError {
 }
 
 fn decimal(text: []const u8) ?u32 {
-    // parseInt alone also accepts signs and underscores.
     if (text.len == 0 or std.mem.indexOfNone(u8, text, "0123456789") != null) return null;
     return std.fmt.parseInt(u32, text, 10) catch null;
 }
@@ -648,13 +545,10 @@ fn containsMaria(text: []const u8) bool {
     return false;
 }
 
-/// MySQL 8.4 or later. MariaDB reports a 5.5.5- prefixed version and names
-/// itself; either way it is refused.
 fn checkVersion(version: []const u8) Error!void {
     if (versionRefusal(version, "")) |err| return err;
 }
 
-/// caching_sha2_password: SHA256(p) XOR SHA256(SHA256(SHA256(p)) || nonce).
 fn scramble(password: []const u8, nonce: *const [nonce_len]u8) [32]u8 {
     const Sha256 = std.crypto.hash.sha2.Sha256;
     var digest: [32]u8 = undefined;
@@ -674,9 +568,9 @@ fn scramble(password: []const u8, nonce: *const [nonce_len]u8) [32]u8 {
 fn parseOk(payload: []const u8) Error!Ok {
     var cursor: Cursor = .{ .bytes = payload[1..] };
     const affected_rows = try cursor.lenenc();
-    _ = try cursor.lenenc(); // last insert id
+    _ = try cursor.lenenc();
     const status: Status = @bitCast(try cursor.int(u16));
-    _ = try cursor.int(u16); // warnings
+    _ = try cursor.int(u16);
     return .{ .affected_rows = affected_rows, .status = status };
 }
 
@@ -689,8 +583,6 @@ fn parseErr(payload: []const u8) Error!ServerError {
     return .{ .code = code, .sql_state = sql_state, .message = cursor.rest() };
 }
 
-/// The length in the packet header at the start of `in`. No packet the
-/// server sends on these paths is empty, and none needs a continuation.
 fn payloadLen(in: []const u8) Error!u32 {
     const len = std.mem.readInt(u24, in[0..3], .little);
     if (len == 0 or len > max_payload) return error.ProtocolViolation;
@@ -702,8 +594,6 @@ fn writeHeader(out: *[4]u8, len: u24, sequence: u8) void {
     out[3] = sequence;
 }
 
-/// Reads a whole packet's payload; reading past its end is a protocol
-/// violation.
 const Cursor = struct {
     bytes: []const u8,
     pos: usize = 0,
@@ -748,8 +638,6 @@ const Cursor = struct {
     }
 };
 
-/// Writes one packet into the driver's `out`, whose size `read` checked
-/// against every packet the options allow.
 const PacketWriter = struct {
     out: []u8,
     len: usize = header_len,
@@ -785,9 +673,6 @@ const PacketWriter = struct {
     }
 };
 
-/// One connection's bytes as a real MySQL 8.4.13 exchanged them with this
-/// client, recorded by a proxy between the two, in order. The connection's
-/// tests (`mysql_connection.zig`) replay them over a socket.
 pub const Capture = struct {
     transport: Transport,
     user: []const u8 = "rui",
@@ -805,7 +690,6 @@ fn hex(comptime text: []const u8) *const [text.len / 2]u8 {
     }
 }
 
-/// Events as text, one per line, with a value's bytes joined to it.
 const Transcript = struct {
     text: std.Io.Writer.Allocating,
     value_open: bool = false,
@@ -836,10 +720,6 @@ const Transcript = struct {
     }
 };
 
-/// Replays `capture`, handing the client the server's bytes `split` at a
-/// time. Each byte the client sends must equal the recorded one; the client
-/// runs each recorded query or quit when it is next. Returns the events, and
-/// the error that ended the replay as its last line.
 fn replay(capture: Capture, split: usize) !Transcript {
     var transcript: Transcript = .init();
     errdefer transcript.deinit();
@@ -854,7 +734,6 @@ fn replay(capture: Capture, split: usize) !Transcript {
         chunk += 1;
         switch (direction) {
             .client => {
-                // Only a query or a quit is the driver's to start.
                 try std.testing.expect(client.isReady());
                 if (std.mem.eql(u8, bytes, &.{ 1, 0, 0, 0, 1 })) {
                     try std.testing.expectEqualSlices(u8, bytes, &client.quit());
@@ -892,13 +771,10 @@ fn replay(capture: Capture, split: usize) !Transcript {
             }
         }
     }
-    // Every byte the server sent was read.
     try std.testing.expectEqual(in.len, start);
     return transcript;
 }
 
-/// Replays `capture` at every split, from one byte at a time to whole
-/// chunks, and expects the same transcript from each.
 fn expectReplay(capture: Capture, expected: []const u8) !void {
     var largest: usize = 0;
     for (capture.chunks) |chunk| largest = @max(largest, chunk[1].len);
@@ -986,7 +862,6 @@ test "OK packets carry the open transaction" {
 }
 
 test "the scramble matches an independent caching_sha2_password computation" {
-    // Python: m1 = sha256(p); m3 = sha256(sha256(m1) + nonce); m1 XOR m3.
     var nonce: [nonce_len]u8 = undefined;
     for (&nonce, 1..) |*byte, i| byte.* = @intCast(i);
     try std.testing.expectEqualSlices(u8, comptime hex("746ebe205d56a0707acb3e796e834e0dd7b1d61743b26bd5202c7a623230c7c9"), &scramble("secret", &nonce));
@@ -1016,24 +891,20 @@ test "TLS: the SSLRequest goes first, and the handshake response follows it afte
     try std.testing.expectEqual(0, second.consumed);
     const response = out[0..second.event.?.send];
     try std.testing.expectEqual(2, response[3]);
-    // The response repeats the request's capabilities, packet size and charset.
     try std.testing.expectEqualSlices(u8, request[4..], response[4..36]);
 }
 
 test "TLS is refused by a server that does not offer it" {
     var edited = greeting[0..greeting.len].*;
-    // The capability's low half follows the version, connection id and nonce head.
     const at = 4 + 1 + std.mem.indexOfScalar(u8, edited[5..], 0).? + 1 + 4 + 8 + 1;
     edited[at + 1] &= ~@as(u8, Capability.ssl >> 8);
     var client: Client = try .init(tls_options);
     try std.testing.expectError(error.TlsRefused, readOne(&client, &edited));
-    // The same greeting without TLS asked for is accepted.
     var plain: Client = try .init(plain_options);
     _ = try readOne(&plain, &edited);
 }
 
 test "MariaDB and MySQL before 8.4 are refused" {
-    // MariaDB 11.4.13's greeting.
     const mariadb = comptime hex("5b0000000a31312e342e31332d4d6172696144422d75627532343034000300000050683a2859677c5800feff2d0200ff81150000000000001d000000244821696e6b4f297d5d3a47006d7973716c5f6e61746976655f70617373776f726400");
     var client: Client = try .init(plain_options);
     try std.testing.expectError(error.MysqlIsMariadb, readOne(&client, mariadb));
@@ -1075,7 +946,6 @@ test "a packet out of sequence is a protocol violation" {
     try std.testing.expectError(error.ProtocolViolation, readOne(&client, &edited));
 }
 
-/// A client that has sent a query; the next packet's sequence id is 1.
 fn querying() !Client {
     var client: Client = try .init(plain_options);
     client.state = .ready;
@@ -1089,7 +959,6 @@ test "an authentication exchange takes each step at most once" {
     var client: Client = try .init(plain_options);
     _ = try readOne(&client, greeting);
     _ = try readOne(&client, to_sha2);
-    // A second switch, with the sequence id it would carry.
     var again = to_sha2.*;
     again[3] = 4;
     try std.testing.expectError(error.ProtocolViolation, readOne(&client, &again));
@@ -1097,27 +966,20 @@ test "an authentication exchange takes each step at most once" {
     var unix: Client = try .init(.{ .user = "rui", .password = "pw", .database = "rui", .transport = .unix_socket });
     _ = try readOne(&unix, greeting);
     _ = try readOne(&unix, "\x02\x00\x00\x02\x01\x04");
-    // After the password, only OK or ERR may follow.
     try std.testing.expectError(error.ProtocolViolation, readOne(&unix, "\x02\x00\x00\x04\x01\x03"));
 }
 
 test "malformed results are refused" {
-    // An empty packet where a row may start, followed by bytes that would
-    // read as an ERR's first byte.
     var empty_row = try querying();
     empty_row.column_count = 1;
     empty_row.state = .rows;
     try std.testing.expectError(error.ProtocolViolation, readOne(&empty_row, "\x00\x00\x00\x01\xff\x00\x00\x02"));
-    // An empty packet where a statement's result is due.
     var empty_result = try querying();
     try std.testing.expectError(error.ProtocolViolation, readOne(&empty_result, "\x00\x00\x00\x01"));
-    // A LOCAL INFILE request, which the client never enables.
     var client = try querying();
     try std.testing.expectError(error.ProtocolViolation, readOne(&client, "\x05\x00\x00\x01\xfbfile"));
-    // A non-row packet larger than the receive buffer.
     client = try querying();
     try std.testing.expectError(error.PacketTooLarge, readOne(&client, &std.mem.toBytes(@as(u32, max_control_payload + 1) | 1 << 24)));
-    // A row whose value runs past its packet.
     client = try querying();
     client.column_count = 1;
     client.state = .rows;
@@ -1126,8 +988,6 @@ test "malformed results are refused" {
 }
 
 test "the last value of a row ends its packet, or the row is refused before that value" {
-    // Two columns, the first "x". `refused_at` is the offset of the last
-    // value's first byte, where a packet it does not end is refused.
     const cases = [_]struct { payload: []const u8, refused_at: ?usize }{
         .{ .payload = "\x01x\xfb", .refused_at = null },
         .{ .payload = "\x01x\xfbz", .refused_at = 6 },
@@ -1144,8 +1004,6 @@ test "the last value of a row ends its packet, or the row is refused before that
         var client = try querying();
         client.column_count = 2;
         client.state = .rows;
-        // Whole: everything left at once. Split: one more byte whenever the
-        // client needs more.
         var at: usize = 0;
         var end: usize = if (split) 1 else in.len;
         const refused_at: ?usize = while (at < in.len) {
@@ -1154,7 +1012,6 @@ test "the last value of a row ends its packet, or the row is refused before that
                 break at;
             };
             if (step.consumed == 0) {
-                // Waiting for bytes the row does not have.
                 if (end == in.len) return error.TestUnexpectedResult;
                 end += 1;
             } else at += step.consumed;

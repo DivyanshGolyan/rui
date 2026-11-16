@@ -1,4 +1,3 @@
-//! Search activity SQLite mechanism tests.
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
 const store_core = @import("../Store.zig");
@@ -27,8 +26,6 @@ test "searchActivity streams window edges filters kinds and pages newest first" 
     @memcpy(text[65534..][0..6], "NeEdLe");
     try submitTestMessage(&storage, &tmp, "search-edge", "search-edge", session.slice(), text);
     try submitTestMessage(&storage, &tmp, "search-new", "search-new", session.slice(), "needle new");
-    // More than one candidate batch of nonmatching entries must not end
-    // the search before its first match.
     for (0..18) |i| {
         const key = try std.fmt.allocPrint(arena, "search-miss-{d}", .{i});
         try submitTestMessage(&storage, &tmp, key, key, session.slice(), "unrelated");

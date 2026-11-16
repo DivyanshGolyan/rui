@@ -1,5 +1,3 @@
-//! Activity SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
@@ -155,9 +153,6 @@ test "the queued Messages cost the queue, not the history after a page's end" {
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
-    // Messages 1..n wait at positions 2, 4, ...; a stop at 2n+1 excludes all
-    // but the newest. A page ending at the first Message has one waiting,
-    // as one ending after the stop does.
     var steps: [2][2]i32 = undefined;
     for ([_]usize{ 10, 10_000 }, &steps) |history, *cost| {
         try store_testing.sqlite_only.exec(&storage, "DELETE FROM message_admission; DELETE FROM session_stop", .{});
@@ -194,8 +189,6 @@ test "persisted tool label corruption fences every publication route" {
         .{ .sql = "'Read' || char(10) || 'files'" },
         .{ .sql = "char(160)" },
         .{ .sql = "'Read' || char(8232) || 'files'" },
-        // The typed row's Bounded text rejects malformed UTF-8 before
-        // semantic validation; a typed decode failure is CorruptStore.
         .{ .sql = "CAST(X'80' AS TEXT)" },
     };
     for (invalid) |description| {
@@ -241,12 +234,6 @@ test "persisted tool label corruption fences every publication route" {
 }
 
 test "an Activity page costs the same steps after 32 or 10,000 earlier rows" {
-    // Each Store holds `history` earlier units, a Message, its call item, the
-    // call's rejection and its Turn's outcome, then the same Session tail: a
-    // Message, twenty rejected calls and a stop. The opening's page and a
-    // forward page from the tail's first row read only the tail. At least
-    // 17 history units saturate every source's bounded lookahead, including
-    // model_call rows at admissions, before comparing exact VM steps.
     var steps: [2][2]i64 = undefined;
     for ([_]usize{ 32, 10_000 }, &steps) |history, *cost| {
         var tmp = std.testing.tmpDir(.{});
@@ -255,8 +242,6 @@ test "an Activity page costs the same steps after 32 or 10,000 earlier rows" {
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "cost-config");
-        // Foreign keys are off: each history Message names its Turn before
-        // the Turn row exists, which an immediate key would refuse.
         try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
         const insert = try std.testing.allocator.printSentinel(
             "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
@@ -278,7 +263,6 @@ test "an Activity page costs the same steps after 32 or 10,000 earlier rows" {
         defer std.testing.allocator.free(insert);
         try sqlite.exec(storage.sqliteDatabase(), insert);
         try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
-        // The history rows bypass the Host's ids.
         try store_core.reloadIdentitiesForTesting(&storage);
         const tail = (try store_core.readSessionForTesting(&storage, session.slice())).?.next_position;
         try submitTestMessage(&storage, &tmp, "cost-input", "input", session.slice(), "propose");
@@ -309,8 +293,6 @@ test "an Activity page costs the same steps after 32 or 10,000 earlier rows" {
 }
 
 test "a one-row page of a person's Messages costs the same steps after 10 or 10,000 received ones" {
-    // Ctrl-P from the end passes over every Message another Session sent
-    // to reach the person's first one, through their own index.
     var steps: [2]i64 = undefined;
     for ([_]usize{ 10, 10_000 }, &steps) |history, *cost| {
         var tmp = std.testing.tmpDir(.{});
@@ -345,9 +327,6 @@ test "a one-row page of a person's Messages costs the same steps after 10 or 10,
 }
 
 test "a forward one-row page of a person's Messages costs the same steps past 10 or 10,000 tool groups" {
-    // Ctrl-N from the first Message steps to the second, with every tool
-    // group completed between it and the third. The page lists no calls, so it reads no
-    // call activity.
     var steps: [2]i64 = undefined;
     for ([_]usize{ 10, 10_000 }, &steps) |history, *cost| {
         var tmp = std.testing.tmpDir(.{});
@@ -359,8 +338,6 @@ test "a forward one-row page of a person's Messages costs the same steps past 10
         try submitTestMessage(&storage, &tmp, "forward-first", "first", session.slice(), "first");
         try submitTestMessage(&storage, &tmp, "forward-second", "second", session.slice(), "second");
         const first = try store_testing.sqlite_only.queryU64(&storage, "SELECT min(admission_position) FROM message_admission", .{});
-        // Foreign keys are off: each tool group names its Turn before the
-        // Turn row exists. A cancelled Turn needs no answer content.
         try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
         const insert = try std.testing.allocator.printSentinel(
             "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
@@ -393,9 +370,6 @@ test "a forward one-row page of a person's Messages costs the same steps past 10
 }
 
 test "a one-row page of a person's Messages costs the same steps past 100 or 10,000 waiting ones" {
-    // Ctrl-P from the end reads the newest Message, with every other one
-    // still waiting. The page is filtered, so it reads no queue footer.
-    // Each Store holds more waiting Messages than a page source reads.
     var steps: [2]i64 = undefined;
     for ([_]usize{ 100, 10_000 }, &steps) |history, *cost| {
         var tmp = std.testing.tmpDir(.{});
@@ -414,7 +388,6 @@ test "a one-row page of a person's Messages costs the same steps past 100 or 10,
             0,
         );
         defer std.testing.allocator.free(insert);
-        // Foreign keys are off: the waiting Messages have no commands.
         try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
         try sqlite.exec(storage.sqliteDatabase(), insert);
         try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
@@ -430,8 +403,6 @@ test "a one-row page of a person's Messages costs the same steps past 100 or 10,
     try std.testing.expectEqual(steps[0], steps[1]);
 }
 
-/// The VM steps every statement of the Store's connection takes to read one
-/// Activity page.
 fn activityPageSteps(storage: *Store, request: protocol.ActivityPage) !i64 {
     var statement = c.sqlite3_next_stmt(storage.sqliteDatabase(), null);
     while (statement) |each| : (statement = c.sqlite3_next_stmt(storage.sqliteDatabase(), each))
@@ -445,9 +416,6 @@ fn activityPageSteps(storage: *Store, request: protocol.ActivityPage) !i64 {
 }
 
 test "activity judges every candidate Operation's tool outcomes, not only its kept calls" {
-    // The page keeps three calls' presentations; the rule must still reach
-    // the fourth call, by one read per Operation while there are at most
-    // `max_operations`, 32, and by one read over them all past that.
     for ([_]enum { one_operation, many_operations }{ .one_operation, .many_operations }) |shape| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -488,10 +456,7 @@ test "activity judges every candidate Operation's tool outcomes, not only its ke
         const page = try store_core.activityPageForTesting(&storage, request);
         try std.testing.expectEqual(@as(usize, 3), page.call_activity.count);
         try std.testing.expect(page.call_activity.total >= 4);
-        // One call each, so as many candidate Operations as calls.
         if (shape == .many_operations) try std.testing.expect(page.call_activity.total > 32);
-        // The last candidate call's item stops being a call item; no kept
-        // presentation reads that call.
         try store_testing.sqlite_only.exec(&storage, "UPDATE model_output_item SET item_kind=1 WHERE (operation_id,item_ordinal)=" ++
             "(SELECT operation_id,item_ordinal FROM model_tool_call ORDER BY operation_id DESC,call_ordinal DESC LIMIT 1)", .{});
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
@@ -501,8 +466,6 @@ test "activity judges every candidate Operation's tool outcomes, not only its ke
 }
 
 test "the tool outcome rule counts an Operation's calls against its call items" {
-    // One call's item stops being a call item: every call left is valid
-    // and as many as the call items, so only the count of calls differs.
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -533,7 +496,6 @@ test "the Current report fences an unauthorized Action proposed under bypass" {
     try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
     try submitTestMessage(&storage, &tmp, "unauthorized-input", "input", session.slice(), "propose");
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "unauthorized-calls");
-    // The CHECK pairs a grant with its decision, so the damage clears both.
     try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET authorized=0,decided_at=NULL WHERE call_ordinal=1", .{});
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
     try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
@@ -554,7 +516,6 @@ test "a page of approval requests costs the same however many calls ran without 
     try request.session.set(session.slice());
     const Page = struct {
         fn steps(store: *Store, page_request: protocol.ActivityPage) !u64 {
-            // The first read prepares the page's statements.
             _ = try store_core.activityPageForTesting(store, page_request);
             var counter: TestingSteps = .{};
             counter.begin(store.sqliteDatabase());
@@ -563,8 +524,6 @@ test "a page of approval requests costs the same however many calls ran without 
             try std.testing.expectEqual(@as(usize, 2), page.count);
             return counter.steps;
         }
-        /// `copies` more of the Session's calls and Actions that never
-        /// asked: copies of its own, without an approval position.
         fn addBypassed(store: *Store, ref: []const u8, comptime first: u64) !void {
             const sequence = std.fmt.comptimePrint("WITH RECURSIVE sequence(value) AS (VALUES({d}) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) ", .{ first, first + 999 });
             try store_testing.sqlite_only.withoutForeignKeys(store, sequence ++
@@ -581,8 +540,6 @@ test "a page of approval requests costs the same however many calls ran without 
     const thousand = try Page.steps(&storage, request);
     try Page.addBypassed(&storage, session.slice(), 1001);
     try std.testing.expectEqual(@as(u64, 4002), try store_testing.sqliteQueryU64(storage.sqliteDatabase(), "SELECT count(*) FROM action_operation", .{}));
-    // A fixed cost: the seek past the bypassed rows is one step, whatever
-    // their number.
     const many = try Page.steps(&storage, request);
     if (thousand < few or thousand - few > 1 or many != thousand)
         std.debug.print("Approval page VM steps: few={d}, thousand={d}, two thousand={d}\n", .{ few, thousand, many });

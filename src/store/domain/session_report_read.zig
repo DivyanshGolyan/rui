@@ -1,9 +1,3 @@
-//! A Session report as the Store reads it: the saved Session and its
-//! Current facts as plain values (`session_report.Current`), then each
-//! Current list row by row (`session_report.Row`), handed to a visitor.
-//! The Host writes the reply. The Full profile's history follows, as
-//! plain values too (`report.readFull`).
-
 const std = @import("std");
 const tool_fulfillment = @import("tool_fulfillment.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -36,8 +30,6 @@ const WorkRead = report_domain.WorkRead;
 const archive_state = report_domain.archive_state;
 const Code = Bounded(outcome_code.max_bytes);
 
-/// Remembers whether `visitor` failed. Its failure is its own, such as
-/// exhausted scratch, which is ordinary and does not fence the Store.
 pub fn Watched(comptime Visitor: type) type {
     return struct {
         visitor: Visitor,
@@ -58,30 +50,12 @@ pub fn Watched(comptime Visitor: type) type {
     };
 }
 
-/// Reads the report of `session_ref` on `a` and hands it to `watched`'s
-/// visitor, whose methods each return an error union:
-///
-/// - `missing(profile)` once, for a Session that is not saved, and nothing
-///   more;
-/// - else `current(profile, *const session_report.Current)`, then, for
-///   each `session_report.List` in order, `open(list)` and its rows,
-///   `row(*const session_report.Row)`, as they step; then `end()`;
-/// - for the Full profile, its history (`report.readFull`): `fullOpen`,
-///   `fullRow` and `fullEnd`;
-/// - then `tail()`.
-///
-/// All under one Entry, so one snapshot. A visitor's error stops the read
-/// and is its answer.
 pub fn readSessionReport(a: *ReadAccess, session_ref: []const u8, profile: cli_value.ReportProfile, watched: anytype) !void {
     if (!try readHead(a, session_ref, profile, watched)) return;
     if (profile == .full) try report_domain.readFull(a, session_ref, watched);
     try watched.call("tail", .{});
 }
 
-/// A report's head, whose rounds tests count: round 1 reads the saved
-/// Session, and a missing one ends the report there; the Current facts
-/// and lists follow (`readCurrent`). Not inlined: the saved Session lives
-/// in its frame, which returns before any history content is read.
 pub noinline fn readHead(a: *ReadAccess, session_ref: []const u8, profile: cli_value.ReportProfile, watched: anytype) !bool {
     var current: CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
     var found: store_access.Found = undefined;
@@ -96,8 +70,6 @@ pub noinline fn readHead(a: *ReadAccess, session_ref: []const u8, profile: cli_v
     return true;
 }
 
-/// The Message the active Turn started from: an active Turn owns the
-/// selection even if a successor is queued.
 const selected_active = rsql.Read(.{
     .sql = "SELECT m.command_key FROM turn t @index(turn_one_active_per_session) JOIN message_admission m ON m.admission_id=t.first_admission_id " ++
         "WHERE t.session_ref=?1 AND t.outcome_code IS NULL",
@@ -108,8 +80,6 @@ const selected_active = rsql.Read(.{
 
 const SelectedRow = struct { command_key: Bounded(idempotency_key.max_bytes) };
 
-/// Without an active Turn, the oldest Message queued after the latest
-/// stop's cutoff ?2.
 const selected_queued = rsql.Read(.{
     .sql = "SELECT command_key FROM message_admission @index(message_admission_session_pending) " ++
         "WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2 ORDER BY admission_id LIMIT 1",
@@ -118,10 +88,6 @@ const selected_queued = rsql.Read(.{
     .cardinality = .each,
 });
 
-/// The ten newest Messages of terminal Turns. CROSS JOIN fixes the
-/// indexed order, Turns newest first and then their admissions, so LIMIT
-/// stops after ten Messages, even when older history or other Sessions
-/// grow.
 const recent_messages = rsql.Read(.{
     .sql = "SELECT t.turn_id,m.command_key,t.outcome_code FROM turn t @index(turn_session_latest) " ++
         "CROSS JOIN message_admission m @index(message_admission_session_order) " ++
@@ -132,7 +98,6 @@ const recent_messages = rsql.Read(.{
     .cardinality = .each,
 });
 
-/// Every unresolved Action in the Session, with its call's presentation.
 const unresolved_actions = rsql.Read(.{
     .sql = "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.permission_revision,a.authorized,revision.permission_mode,@payload(call_name) AS tool_name," ++
         "call_id.byte_length AS call_id_length,call_id.digest AS call_id_digest,arguments.byte_length AS arguments_length,arguments.digest AS arguments_digest," ++
@@ -167,17 +132,6 @@ const unresolved_actions = rsql.Read(.{
 
 const Description = Bounded(tool_presentation.max_description_bytes);
 
-/// The CTE `publications`: each active Operation's tool group
-/// publication, as main's outcome facts gave it, its largest acceptance
-/// when every call has one and none otherwise. Grouped once per
-/// Operation, so a list joins it per row without rescanning the
-/// Operation's calls. The rule over `active_tool_calls` proved every
-/// call of each listed Operation valid in an earlier round of this
-/// Access, under the Entry that excludes every writer, so its Operation
-/// has as many calls as call items. By the schema's CHECKs a call has an
-/// acceptance exactly when it is rejected (`model_tool_call`'s) or its
-/// Action resolved (`action_operation`'s), main's terminal calls, so this
-/// counts what main counted.
 const publications_sql = "WITH publications AS (SELECT operation.operation_id," ++
     "CASE WHEN count(*)=count(" ++ tool_fulfillment.positionSql("sibling", "sibling_action") ++ ") " ++
     "THEN max(" ++ tool_fulfillment.positionSql("sibling", "sibling_action") ++ ") END AS publication " ++
@@ -187,9 +141,6 @@ const publications_sql = "WITH publications AS (SELECT operation.operation_id," 
     "LEFT JOIN action_operation sibling_action ON sibling_action.parent_operation_id=sibling.operation_id AND sibling_action.call_ordinal=sibling.call_ordinal " ++
     "WHERE active.session_ref=?1 AND active.outcome_code IS NULL GROUP BY operation.operation_id) ";
 
-/// The active Turn's resolved Actions, with each call's line and its
-/// group's publication for its presentation. An Action's call is its
-/// foreign key.
 const resolved_actions = rsql.Read(.{
     .sql = publications_sql ++ "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.resolution_code,a.acceptance_position," ++
         "result.byte_length AS result_length,result.digest AS result_digest,tool_call.description," ++ tool_fulfillment.resolutionPublicationSql("a", "publications.publication") ++ " AS publication " ++
@@ -215,8 +166,6 @@ const resolved_actions = rsql.Read(.{
     .cardinality = .each,
 });
 
-/// The active Turn's rejected calls, with each one's line and its group's
-/// publication for its presentation.
 const rejected_calls = rsql.Read(.{
     .sql = publications_sql ++ "SELECT tool_call.operation_id,tool_call.call_ordinal,tool_call.rejection_code,tool_call.acceptance_position," ++
         "rejection.byte_length AS rejection_length,rejection.digest AS rejection_digest,name.byte_length AS name_length,name.digest AS name_digest," ++
@@ -261,10 +210,6 @@ const actionable_permissions = rsql.Read(.{
     .cardinality = .each,
 });
 
-/// The names main gave the Current report's failed steps; any other is
-/// `CorruptStore`, main's answer for content metadata. A presentation's
-/// reads, which main named apart, are its list's own columns now, so
-/// they take its list's name.
 pub const current_failures = .{
     .{ archive_state, error.SessionReadFailed },
     .{ selected_active, error.TurnReadFailed },
@@ -276,13 +221,10 @@ pub const current_failures = .{
     .{ actionable_permissions, error.ActionReadFailed },
 } ++ report_domain.session_count_failures ++ model_admission_domain.compaction_failures ++ report_domain.report_failures;
 
-/// Ends a round of the Current report, naming a failed step by
-/// `current_failures`.
 fn runCurrent(a: *ReadAccess) !void {
     return store_access.runNamed(a, current_failures, error.CorruptStore);
 }
 
-/// What the Current report reads before its lists.
 const CurrentFacts = struct {
     archive: archive_state.Result = null,
     instructions: content_domain.content_metadata.Row = undefined,
@@ -296,20 +238,16 @@ const CurrentFacts = struct {
     active: reads_domain.First(SelectedRow) = .{},
     queued: reads_domain.First(SelectedRow) = .{},
     outcome: content_domain.content_metadata.Row = undefined,
-    /// In the Store's scratch (`Store.reportScratch`): over 4 KiB.
     tools: *ToolNames,
     tools_found: store_access.Found = undefined,
 };
 
-/// The saved and loaded tool sets' names (`set_names`) and each sorted
-/// (`report.sortedToolNames`), which the Current values borrow.
 const ToolNames = struct {
     row: set_names.Row,
     tools: [tool_defs.max_tools][]const u8,
     loaded: [tool_defs.max_tools][]const u8,
 };
 
-/// The names of the tool set ?1, joined (`tool_set.namesSql`).
 const set_names = rsql.Read(.{
     .sql = "SELECT " ++ tool_set.namesSql("s.tool_set_id") ++ " AS names," ++ tool_set.namesSql("?2") ++ " AS loaded_names FROM tool_set s WHERE s.tool_set_id=?1",
     .Args = struct { set: u64, loaded: u64 },
@@ -317,19 +255,6 @@ const set_names = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// The Current report after its saved Session, in the rounds its reads'
-/// dependencies take. Round 2: the instructions' and output schema's
-/// metadata, the counts' first round (`SessionCounts`), the latest Turn
-/// for `context_estimate` (`CompactionRead`), the work's latest Turn, the
-/// latest Message from no Session, both first-Message seeks and the
-/// active Turn's Message. Round 3: the counts' second round, the queued Message
-/// when no Turn is active, the work's second stage, the first Message's
-/// row, the latest outcome's content metadata and the compaction facts'
-/// next stage. The work's and compaction facts' later stages share the
-/// rounds after it. The facts are checked, then visited; then each list,
-/// in a round of its own; the active Turn's lists only when it counts an
-/// Action or rejected call to list. Not inlined, so its reads take no slot
-/// in the Full profile's frames.
 noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_value.ReportProfile, current: *const CurrentConfiguration, watched: anytype) !void {
     const policy = model_capability.compactionPolicy(current.model.slice(), current.compaction_trigger, current.output_reservation);
     var facts: CurrentFacts = .{
@@ -338,9 +263,6 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
         .work = .{ .session = session_ref },
         .tools = a.store.reportScratch(ToolNames),
     };
-    // `checkSaved` refused a missing or zero instructions id and a zero
-    // output schema id. A negative id is `CorruptStore` without a read,
-    // where main read it and found no row unless one had that id.
     const instructions_id = current.instructions_id.?;
     if (instructions_id < 0 or (current.output_schema_id orelse 1) < 0) return error.CorruptStore;
     const metadata = content_domain.content_metadata;
@@ -362,7 +284,6 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
     if (facts.active.row == null) a.readEach(selected_queued, .{ .session = session_ref, .cutoff = facts.counts.stopCutoff() }, 1, &facts.queued);
     const admission = facts.first.admission();
     if (admission != 0) a.read(report_domain.first_message, .{ .session = session_ref, .first = admission }, &facts.first_row);
-    // The work's latest Turn is read, so its outcome is known.
     const outcome = facts.work.outcome();
     if (outcome) |found| if (found.content_id) |content_id| a.read(metadata, .{ .content_id = content_id }, &facts.outcome);
     var work_more = facts.work.queue(a);
@@ -431,11 +352,6 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
     try watched.call("end", .{});
 }
 
-/// One list of the Current report: opened, then, when `read`, its rows in
-/// a round of their own, each checked (`values`) and visited as it steps,
-/// so it keeps no row: `limit` bounds only a list whose text does. A row
-/// that failed did before any later row's step failed, so its error is
-/// main's first.
 fn readList(
     a: *ReadAccess,
     comptime list: session_report.List,
@@ -455,12 +371,8 @@ fn readList(
     try ran;
 }
 
-/// What a list row's values fail with: a stored fact main would not have
-/// written.
 const ValuesError = error{CorruptStore};
 
-/// Checks each row and visits its values, in step order; after a failure
-/// it visits nothing more.
 fn ListRead(comptime Row: type, comptime values: anytype, comptime Watcher: type) type {
     const VisitError = @typeInfo(@typeInfo(Watcher).pointer.child.Result("row")).error_union.error_set;
     return struct {
@@ -487,20 +399,16 @@ fn recentRow(row: *const recent_messages.Row) ValuesError!session_report.Row {
 }
 
 fn unresolvedRow(row: *const unresolved_actions.Row) ValuesError!session_report.Row {
-    // The insert authorizes every Action proposed under `bypass`.
     if (row.permission_mode == 1 and !row.authorized) return error.CorruptStore;
     const built_in = actionTool(&row.name_digest);
     const server: ?[]const u8 = if (row.server) |*server| server.slice() else null;
     if (server) |name| {
         if (!tool_name.valid(name) or built_in != null) return error.CorruptStore;
     }
-    // A non-built-in Action must name an MCP member of its frozen offer.
-    // Built-in checks remain strict; provider tools never create Actions.
     const mcp = server != null;
     const name = if (mcp) row.tool_name.slice() else @tagName(built_in orelse return error.CorruptStore);
     if (mcp and !tool_name.valid(name)) return error.CorruptStore;
     const core = !mcp and tool_defs.Runner.of(tool_defs.record(built_in.?)) == .core;
-    // Settlement authorizes a core call at once, with no decision.
     if (core and !row.authorized) return error.CorruptStore;
     return .{
         .unresolved_actions = .{
@@ -513,14 +421,11 @@ fn unresolvedRow(row: *const unresolved_actions.Row) ValuesError!session_report.
             .call_id = .{ .length = row.call_id_length, .digest = row.call_id_digest },
             .server = server,
             .arguments = .{ .length = row.arguments_length, .digest = row.arguments_digest },
-            // Unresolved, and not rejected: the rule proved a call with an
-            // Action has no rejection, so main's code, either one's, is none.
             .presentation = try reads_domain.presentationOf(row.description, null, row.authorized, null),
         },
     };
 }
 
-/// The built-in tool whose name has `digest`, among those an Action runs.
 fn actionTool(digest: *const [32]u8) ?built_in_tool.BuiltInTool {
     for (std.enums.values(built_in_tool.BuiltInTool)) |tool| {
         const owned = tool_defs.record(tool);
@@ -538,9 +443,6 @@ fn resolvedRow(row: *const resolved_actions.Row) ValuesError!session_report.Row 
             .code = row.resolution_code.slice(),
             .acceptance_position = row.acceptance_position.get(),
             .result = .{ .length = row.result_length, .digest = row.result_digest },
-            // Main's code was the rejection's, else the resolution's; the rule
-            // proved a call with an Action has no rejection. A code decides the
-            // outcome, so whether the Action was authorized is not weighed.
             .presentation = try reads_domain.presentationOf(row.description, try presentedCode(row.resolution_code.slice()), null, optional(row.publication)),
         },
     };
@@ -557,7 +459,6 @@ fn rejectedRow(row: *const rejected_calls.Row) ValuesError!session_report.Row {
             .name = .{ .length = row.name_length, .digest = row.name_digest },
             .call_id = .{ .length = row.call_id_length, .digest = row.call_id_digest },
             .arguments = .{ .length = row.arguments_length, .digest = row.arguments_digest },
-            // A code decides the outcome, so no authorization is weighed.
             .presentation = try reads_domain.presentationOf(row.description, try presentedCode(row.rejection_code.slice()), null, optional(row.publication)),
         },
     };
@@ -567,8 +468,6 @@ fn actionableRow(row: *const actionable_permissions.Row) ValuesError!session_rep
     return .{ .actionable_permissions = .{ .action = row.action_id.get(), .permission_revision = row.permission_revision.get() } };
 }
 
-/// A stored outcome code as a presentation's: one it does not name is
-/// `CorruptStore`, as main's decode answered.
 fn presentedCode(code: []const u8) error{CorruptStore}!tool_presentation.ToolPresentation.Code {
     return std.meta.stringToEnum(tool_presentation.ToolPresentation.Code, code) orelse error.CorruptStore;
 }

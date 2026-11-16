@@ -1,62 +1,30 @@
-//! Session work: what one Session is doing now, derived from its own rows.
-//!
-//! The Store reads a fixed set of facts under one lock, none of which grows
-//! with history, and `derive` turns them into one `WorkState`. Session list
-//! rows, activity pages, Current and Message progress all report this one
-//! value, so no two readers can disagree. Nothing here is stored: there is no
-//! phase column, and every `since` is a commit time the owning row already
-//! saved.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const turn_policy = @import("turn_policy.zig");
 const transport_policy = @import("transport_policy.zig");
 const retry_policy = @import("retry_policy.zig");
 
-/// The saved code bound (`turn.outcome_code`, `model_operation.last_failure_code`).
 pub const max_code_bytes = 96;
-/// The saved call line bound, shared by Bash and MCP running Actions.
 pub const max_description_bytes = @import("tool_presentation.zig").max_description_bytes;
 
-/// The greatest ordinal a retrying state's failed Attempt has: the last
-/// Attempt is never retried.
 pub const max_retried_attempt = retry_policy.maximum_attempts - 1;
 
-/// The closed set that frontends, scripts and agents switch on.
 pub const Kind = enum { idle, pending, working, retrying, bash, approval, stopping, finished, failed, stopped };
 
-/// Why a Session's latest work stopped.
 pub const StopCause = enum {
-    /// A Session stop selected the Turn or excluded queued input.
     stop,
-    /// A Model Interruption cancelled the Turn.
     interruption,
 };
 
-/// One value per Session. Every variant carries `since`: the Host Unix second
-/// the Session entered this state, read from the row whose commit made it so.
 pub const WorkState = union(Kind) {
-    /// No Turn, nothing queued and no stop excluded input.
     idle: Since,
-    /// Eligible but not admitted: queued input, a continuation, approved Bash
-    /// awaiting a slot, or a retry whose due time has passed.
     pending: Since,
-    /// A model Attempt is admitted and unresolved.
     working: Since,
-    /// The model Operation waits for a future retry time. `attempt` is the
-    /// ordinal of the Attempt that failed; `cause` its failure code.
     retrying: Retrying,
-    /// At least one Action (Bash or MCP) is running. `call` is the oldest running
-    /// call's ordinal among the calls of the Work's Operation, null only as
-    /// read from a Host that predates it, and `description` its saved
-    /// description; `approvals` counts sibling Actions awaiting a
-    /// Permission Decision.
     bash: Bash,
-    /// Every unresolved Action awaits a Permission Decision.
     approval: Since,
-    /// A stop selected the active Turn and a running Bash Attempt is settling.
     stopping: Since,
     finished: Since,
-    /// `resets_at` is the saved quota reset time, for quota codes only.
     failed: Failed,
     stopped: Stopped,
 
@@ -66,13 +34,8 @@ pub const WorkState = union(Kind) {
     pub const Failed = struct { since: u64, code: Bounded(max_code_bytes), resets_at: ?u64 };
     pub const Stopped = struct { since: u64, cause: StopCause };
 
-    /// Work under way, as a pending Message's progress reports it
-    /// (docs/contracts/inspection.md, "Work state and wait conditions"): a retry due in
-    /// the future is `in_flight`, a past-due one and approved Bash awaiting
-    /// a slot are `runnable`.
     pub const Progress = enum { runnable, in_flight, waiting_for_permission };
 
-    /// Null when no work is under way: idle, or the latest Turn ended.
     pub fn progress(self: WorkState) ?Progress {
         return switch (self) {
             .pending => .runnable,
@@ -82,9 +45,6 @@ pub const WorkState = union(Kind) {
         };
     }
 
-    /// Whether queued input waits behind work under way: any progress but
-    /// `runnable`. A pending Session acts at once, and idle or ended work
-    /// holds nothing back.
     pub fn holdsQueue(self: WorkState) bool {
         const progress_ = self.progress() orelse return false;
         return progress_ != .runnable;
@@ -96,9 +56,6 @@ pub const WorkState = union(Kind) {
         };
     }
 
-    /// The one time rule. A retry falling due commits nothing, so a reader
-    /// holding an older value applies this to see it as `pending` from its
-    /// due second, never before the retry was scheduled.
     pub fn asOf(self: WorkState, now_ms: u64) WorkState {
         return switch (self) {
             .retrying => |retry| if (retry.due_at_ms <= now_ms) .{ .pending = .{ .since = @max(retry.since, retry.due_at_ms / 1000) } } else self,
@@ -107,87 +64,57 @@ pub const WorkState = union(Kind) {
     }
 };
 
-/// What the Store read for one Session, as plain values. Slices borrow the
-/// reader's statements for the duration of `derive`.
 pub const Inputs = struct {
     now_ms: u64,
-    /// `session.created_at`.
     created_at: u64,
-    /// The Session's latest Turn and its current Operation, if any.
     latest: ?Turn = null,
-    /// The Session-wide oldest eligible approval, independent of the latest Operation.
     first_action: ?u64 = null,
-    /// Without an active Turn: the oldest eligible queued Message. Ignored
-    /// beside an active Turn.
     oldest_pending: ?Pending = null,
-    /// Without an active Turn: the newest admission a stop excluded, with the
-    /// earliest stop that excluded it. Ignored beside an active Turn.
     excluded: ?Excluded = null,
 
-    /// The transactional Store frontier, including unpublished child facts.
     owed_since: ?u64 = null,
 
-    /// A queued Message's `admitted_at` and its admission position.
     pub const Pending = struct { at: u64, position: u64 };
     pub const Excluded = struct { admission: u64, stop_position: u64, stop_at: u64 };
 
     pub const Turn = struct {
         turn_id: u64,
-        /// The current Operation's ID; `op` is its state.
         operation_id: u64,
-        /// The newest admission this Turn bound as input.
         input_cutoff: u64,
-        /// `stopped_at` of the earliest stop that selected this Turn.
         stopped_at: ?u64 = null,
         terminal: ?Terminal = null,
         op: Op,
-        /// Every Action the current Operation proposed, aggregated. Read for
-        /// an active Turn only.
         actions: Actions = .{},
     };
 
     pub const Terminal = struct {
         outcome: enum { completed, cancelled, failed },
-        /// The saved outcome code.
         code: []const u8,
         at: u64,
         position: u64,
-        /// A quota failure's saved reset time (`quotaResetsAt`), which the
-        /// read parses from the failed Operation's saved diagnostic.
         resets_at: ?u64 = null,
     };
 
-    /// The current Operation, in the three states its CHECK allows.
     pub const Op = union(enum) {
         in_flight: struct { attempt_at: u64 },
         waiting: struct { scheduled_at: u64, due_at_ms: u64, cause: []const u8, attempt: u64 },
-        /// `resolution` is null for a failure code.
         resolved: struct { resolution: ?turn_policy.Resolution, at: u64 },
     };
 
     pub const Actions = struct {
         total: u64 = 0,
         unresolved: u64 = 0,
-        /// Unresolved and not authorized: awaiting a Permission Decision.
         awaiting: u64 = 0,
         first_awaiting: ?u64 = null,
-        /// Unresolved with a launched Attempt.
         running: u64 = 0,
         oldest_running: ?Running = null,
-        /// `resolved_at` of the group's last resolution, the one at the
-        /// greatest acceptance position. Null while none resolved.
         latest_resolution_at: ?u64 = null,
-        /// `decided_at` of the latest `allow_once` decision on an Action
-        /// still unresolved. Authorization under `bypass` came with the
-        /// proposal and is not a decision.
         latest_decision_at: ?u64 = null,
 
         pub const Running = struct { at: u64, call: u64, description: ?[]const u8 };
     };
 };
 
-/// The derived state and the identities that locate it: the latest Turn and
-/// its Operation, and the earliest Action awaiting permission.
 pub const Work = struct {
     state: WorkState,
     turn: ?u64 = null,
@@ -195,11 +122,6 @@ pub const Work = struct {
     first_action: ?u64 = null,
 };
 
-/// Applies the Session work table in docs/contracts/inspection.md ("Work state and wait
-/// conditions"), checked in order.
-///
-/// Inputs no writer produces return `error.CorruptStore`, and the reader
-/// fences as it does for other contradictions.
 pub fn derive(inputs: Inputs) error{CorruptStore}!Work {
     var work = try deriveOwn(inputs);
     if (work.state.progress() == null) {
@@ -218,7 +140,6 @@ fn deriveOwn(inputs: Inputs) error{CorruptStore}!Work {
         (actions.awaiting == 0) != (actions.first_awaiting == null) or
         (actions.running == 0) != (actions.oldest_running == null) or
         (actions.unresolved == actions.total) != (actions.latest_resolution_at == null)) return error.CorruptStore;
-    // Only an active Turn's tool proposals own Actions.
     const proposed = latest.op == .resolved and latest.op.resolved.resolution == .tool_proposals;
     if (actions.total != 0 and (latest.terminal != null or !proposed)) return error.CorruptStore;
     var work: Work = .{ .state = undefined, .turn = latest.turn_id, .operation = latest.operation_id, .first_action = inputs.first_action };
@@ -244,7 +165,6 @@ fn deriveOwn(inputs: Inputs) error{CorruptStore}!Work {
             .attempt = retry.attempt,
         } }).asOf(inputs.now_ms),
         .resolved => |resolved| state: {
-            // A failure code closes its Turn in the same transaction.
             const resolution = resolved.resolution orelse return error.CorruptStore;
             if (resolution != .tool_proposals) break :state .{ .pending = .{ .since = resolved.at } };
             if (actions.oldest_running) |running| break :state .{ .bash = .{
@@ -254,10 +174,6 @@ fn deriveOwn(inputs: Inputs) error{CorruptStore}!Work {
                 .running = actions.running,
                 .approvals = actions.awaiting,
             } };
-            // Every change in the group follows its proposal, and
-            // resolutions follow one another by position. A decision claims
-            // no position, so only its time orders it against a resolution:
-            // the one clock comparison in this table.
             const since = if (actions.latest_resolution_at) |resolved_at|
                 if (actions.latest_decision_at) |decided_at| @max(resolved_at, decided_at) else resolved_at
             else
@@ -271,26 +187,19 @@ fn deriveOwn(inputs: Inputs) error{CorruptStore}!Work {
     return work;
 }
 
-/// Queued or stop-excluded input decides a Session with no active Turn
-/// before its latest outcome does. Positions say which fact is newer.
 fn settled(inputs: Inputs, terminal: ?Inputs.Terminal) ?WorkState {
     if (inputs.oldest_pending) |pending| {
-        // Queued behind the Turn, the input became eligible at its outcome.
         const behind = if (terminal) |t| pending.position < t.position else false;
         return .{ .pending = .{ .since = if (behind) terminal.?.at else pending.at } };
     }
     const excluded = inputs.excluded orelse return null;
     if (inputs.latest) |latest| {
-        // A Turn binds every eligible queued Message at its start, and an
-        // outcome after the stop is the newer fact.
         if (excluded.admission <= latest.input_cutoff) return null;
         if (terminal) |t| if (excluded.stop_position < t.position) return null;
     }
     return .{ .stopped = .{ .since = excluded.stop_at, .cause = .stop } };
 }
 
-/// A quota failure's saved reset time; null for any other code or an
-/// unreadable record.
 pub fn quotaResetsAt(code: []const u8, diagnostic: ?[]const u8) ?u64 {
     const bytes = diagnostic orelse return null;
     const quota = transport_policy.Quota.parse(bytes) orelse return null;
@@ -358,7 +267,6 @@ test "a Session with no Turn is idle, pending or stopped by its queue" {
         .created_at = 100,
         .excluded = .{ .admission = 1, .stop_position = 2, .stop_at = 130 },
     });
-    // Eligible input outranks an earlier stop's exclusion.
     try expectState(.{ .pending = .{ .since = 140 } }, .{
         .now_ms = 0,
         .created_at = 100,
@@ -377,9 +285,7 @@ test "an active Turn reports its Operation's state from the row that set it" {
         .created_at = 1,
         .latest = activeTurn(waiting, .{}),
     });
-    // A past-due retry waits for a slot, from its due second.
     try expectState(.{ .pending = .{ .since = 320 } }, .{ .now_ms = 320_500, .created_at = 1, .latest = activeTurn(waiting, .{}) });
-    // A due time set before the scheduling second cannot predate the state.
     const early: Inputs.Op = .{ .waiting = .{ .scheduled_at = 310, .due_at_ms = 1, .cause = "provider_temporary_http_429", .attempt = 2 } };
     try expectState(.{ .pending = .{ .since = 310 } }, .{ .now_ms = 2, .created_at = 1, .latest = activeTurn(early, .{}) });
     for ([_]turn_policy.Resolution{ .answer, .compacted, .interrupted, .context_overflow }) |resolution| {
@@ -418,7 +324,6 @@ test "a proposal group is Bash, approval or pending by its Actions" {
         .latest = activeTurn(proposals(340), undescribed),
     });
 
-    // Every unresolved Action awaits permission: since the group last changed.
     const awaiting: Inputs.Actions = .{ .total = 2, .unresolved = 2, .awaiting = 2, .first_awaiting = 41 };
     try expectState(.{ .approval = .{ .since = 340 } }, .{ .now_ms = 0, .created_at = 1, .latest = activeTurn(proposals(340), awaiting) });
     var after_sibling = awaiting;
@@ -426,14 +331,11 @@ test "a proposal group is Bash, approval or pending by its Actions" {
     after_sibling.latest_resolution_at = 380;
     try expectState(.{ .approval = .{ .since = 380 } }, .{ .now_ms = 0, .created_at = 1, .latest = activeTurn(proposals(340), after_sibling) });
 
-    // Approved Bash awaiting a slot, a settled group awaiting continuation,
-    // or proposals that were all rejected and own no Action.
     const approved: Inputs.Actions = .{ .total = 2, .unresolved = 2, .awaiting = 1, .first_awaiting = 42, .latest_decision_at = 390 };
     try expectState(.{ .pending = .{ .since = 390 } }, .{ .now_ms = 0, .created_at = 1, .latest = activeTurn(proposals(340), approved) });
     const settled_group: Inputs.Actions = .{ .total = 2, .latest_resolution_at = 395 };
     try expectState(.{ .pending = .{ .since = 395 } }, .{ .now_ms = 0, .created_at = 1, .latest = activeTurn(proposals(340), settled_group) });
     try expectState(.{ .pending = .{ .since = 340 } }, .{ .now_ms = 0, .created_at = 1, .latest = activeTurn(proposals(340), .{}) });
-    // A decision and a resolution share no position: the later time wins.
     var allowed_after_sibling = approved;
     allowed_after_sibling.total = 3;
     allowed_after_sibling.latest_resolution_at = 380;
@@ -441,13 +343,10 @@ test "a proposal group is Bash, approval or pending by its Actions" {
 }
 
 test "the newer fact dates work, even when the clock stepped back" {
-    // A resolution or a decision always follows its group's proposal.
     const after_sibling: Inputs.Actions = .{ .total = 2, .unresolved = 1, .awaiting = 1, .first_awaiting = 41, .latest_resolution_at = 300 };
     try expectState(.{ .approval = .{ .since = 300 } }, .{ .now_ms = 0, .created_at = 1, .latest = activeTurn(proposals(340), after_sibling) });
     const allowed: Inputs.Actions = .{ .total = 2, .unresolved = 2, .awaiting = 1, .first_awaiting = 42, .latest_decision_at = 330 };
     try expectState(.{ .pending = .{ .since = 330 } }, .{ .now_ms = 0, .created_at = 1, .latest = activeTurn(proposals(340), allowed) });
-    // Queued behind the Turn (position 39, before its outcome at 40), the
-    // input became eligible at the outcome; admitted after it, at admission.
     try expectState(.{ .pending = .{ .since = 500 } }, .{ .now_ms = 0, .created_at = 1, .latest = endedTurn(.completed, "completed"), .oldest_pending = .{ .at = 600, .position = 39 } });
     try expectState(.{ .pending = .{ .since = 450 } }, .{ .now_ms = 0, .created_at = 1, .latest = endedTurn(.completed, "completed"), .oldest_pending = .{ .at = 450, .position = 41 } });
 }
@@ -476,18 +375,15 @@ test "a settled Session reports its latest outcome unless input came after it" {
         .latest = endedTurn(.failed, "retry_exhausted"),
     });
 
-    // Queued input after the outcome makes the Session pending again.
     try expectState(.{ .pending = .{ .since = 510 } }, .{ .now_ms = 0, .created_at = 1, .latest = endedTurn(.completed, "completed"), .oldest_pending = .{ .at = 510, .position = 41 } });
     try expectState(.{ .pending = .{ .since = 500 } }, .{ .now_ms = 0, .created_at = 1, .latest = endedTurn(.completed, "completed"), .oldest_pending = .{ .at = 490, .position = 39 } });
 
-    // A stop after the outcome that excluded newer input stops the Session.
     try expectState(.{ .stopped = .{ .since = 520, .cause = .stop } }, .{
         .now_ms = 0,
         .created_at = 1,
         .latest = endedTurn(.completed, "completed"),
         .excluded = .{ .admission = 6, .stop_position = 41, .stop_at = 520 },
     });
-    // Input the Turn already bound, or a stop older than the outcome, does not.
     try expectState(.{ .finished = .{ .since = 500 } }, .{
         .now_ms = 0,
         .created_at = 1,
@@ -525,27 +421,19 @@ test "inputs no writer produces are corrupt" {
     var ended_with_group = endedTurn(.cancelled, "cancelled");
     ended_with_group.actions = .{ .total = 1, .latest_resolution_at = 1 };
     for ([_]Inputs.Turn{
-        // Actions beside an unresolved or non-proposal Operation, or a Turn
-        // that already ended.
         activeTurn(unresolved, group),
         activeTurn(.{ .resolved = .{ .resolution = .answer, .at = 330 } }, group),
         ended_with_group,
-        // A failure code on an active Turn.
         activeTurn(.{ .resolved = .{ .resolution = null, .at = 330 } }, .{}),
-        // Counts that disagree with themselves.
         activeTurn(proposals(340), .{ .total = 1, .unresolved = 2 }),
         activeTurn(proposals(340), .{ .total = 1, .unresolved = 1, .awaiting = 1 }),
         activeTurn(proposals(340), .{ .total = 1, .unresolved = 1, .awaiting = 1, .first_awaiting = 41, .running = 1, .oldest_running = .{ .at = 1, .call = 0, .description = null } }),
         activeTurn(proposals(340), .{ .total = 1, .unresolved = 1, .running = 1 }),
-        // A resolved Action without its time, or a time with none resolved.
         activeTurn(proposals(340), .{ .total = 1 }),
         activeTurn(proposals(340), .{ .total = 1, .unresolved = 1, .awaiting = 1, .first_awaiting = 41, .latest_resolution_at = 1 }),
-        // A terminal Turn whose Operation never resolved.
         .{ .turn_id = 7, .operation_id = 19, .input_cutoff = 5, .terminal = .{ .outcome = .completed, .code = "completed", .at = 500, .position = 40 }, .op = unresolved },
-        // A retry after an Attempt that is never retried.
         activeTurn(.{ .waiting = .{ .scheduled_at = 1, .due_at_ms = 2, .cause = "c", .attempt = max_retried_attempt + 1 } }, .{}),
         activeTurn(.{ .waiting = .{ .scheduled_at = 1, .due_at_ms = 2, .cause = "c", .attempt = 0 } }, .{}),
-        // A saved code beyond its bound.
         activeTurn(.{ .waiting = .{ .scheduled_at = 1, .due_at_ms = 2, .cause = &@as([max_code_bytes + 1]u8, @splat('x')), .attempt = 1 } }, .{}),
     }) |turn| {
         try std.testing.expectError(error.CorruptStore, derive(.{ .now_ms = 0, .created_at = 1, .latest = turn }));
@@ -574,21 +462,17 @@ test "progress follows the work table" {
             else => .{ .since = 1 },
         });
         try std.testing.expectEqual(expected.get(kind), state.progress());
-        // Only work under way holds queued input back; pending reads it next.
         try std.testing.expectEqual(switch (kind) {
             .working, .retrying, .bash, .approval, .stopping => true,
             .idle, .pending, .finished, .failed, .stopped => false,
         }, state.holdsQueue());
         try std.testing.expectEqual(@as(u64, 1), state.since());
-        // Only a due retry changes with time.
         try std.testing.expectEqual(kind == .retrying, std.meta.activeTag(state.asOf(5_000)) != kind);
         try std.testing.expectEqual(kind, std.meta.activeTag(state.asOf(4_999)));
     }
 }
 
 test "saved MCP call lines survive pending, running and completed Actions at every boundary" {
-    // Action ownership does not change the work-state projection. Exercise
-    // both single-byte and multi-byte saved lines at the old and new bounds.
     for ([_]usize{ 100, 101, 200 }) |length| {
         for ([_]bool{ false, true }) |multibyte| {
             var description: [@import("tool_presentation.zig").max_description_bytes]u8 = @splat('x');

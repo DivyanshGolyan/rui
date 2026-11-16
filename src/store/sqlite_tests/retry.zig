@@ -1,5 +1,3 @@
-//! Retry SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
@@ -150,8 +148,6 @@ test "HTTP status failures keep the settling Attempt's provider correlation" {
             try sqlite.readText(statement, 1, &recorded);
         }
         if (ordinal < request_ids.len) {
-            // A scheduled retry has not settled the Operation; the next
-            // Attempt's answer will.
             try std.testing.expectEqualStrings("", resolution.slice());
             try std.testing.expectEqualStrings("", recorded.slice());
             try store_testing.sqlite_only.exec(&storage, "UPDATE model_operation SET retry_due_at_ms=1 WHERE retry_due_at_ms IS NOT NULL", .{});
@@ -162,8 +158,6 @@ test "HTTP status failures keep the settling Attempt's provider correlation" {
         }
     }
 
-    // An ordinary HTTP failure retains the source bytes too, not a slice of
-    // a copied union payload which expires before the SQLite step.
     try submitTestMessage(&storage, &tmp, "correlated-input", "correlated-message", session.slice(), "fail with correlation");
     const correlated = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     var ordinary: ModelFailure = .{ .correlated = .{ .code = "provider_http_403", .request_id = .{}, .report = "" } };
@@ -179,7 +173,6 @@ test "HTTP status failures keep the settling Attempt's provider correlation" {
         try std.testing.expectEqualStrings("terminal-\"request\"-é", recorded.slice());
     }
 
-    // A provider answer without correlation records none.
     try submitTestMessage(&storage, &tmp, "uncorrelated-input", "uncorrelated-message", session.slice(), "fail");
     const terminal = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try storage.settleModelAttemptFailure(terminal, .{ .correlated = .{ .code = "provider_http_401", .request_id = .{}, .report = "" } }, .ordinary, .{});
@@ -195,7 +188,6 @@ test "a refresh claim whose UPDATE changes no row answers false and does not fen
     const session = try configureTestSession(&storage, "claim-race-config");
     try submitTestMessage(&storage, &tmp, "claim-race-input", "claim-race-message", session.slice(), "work");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    // Claims between the read round and the write, so the guarded UPDATE finds no row.
     const Interposed = struct {
         const Inner = model_settlement_domain.ClaimAuthRefresh;
         pub const rounds = Inner.rounds;
@@ -256,9 +248,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const policy = retry_policy.Input{
         .waits_ms = .{ 50, 1, 1 },
-        // This valid integer cannot name a deadline at the settlement clock.
         .retry_after_ms = 9_223_372_036_854_775_000,
-        // Future eligibility must not assume a commit returns within 50 ms.
         .retry_after_deadline_ms = std.math.maxInt(i64),
     };
     try storage.settleModelAttemptFailure(
@@ -286,8 +276,6 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
         try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(statement, 3));
     }
 
-    // Make this fixture's operation eligible explicitly; admission still uses
-    // the real Store transition and checks the allowance and stale binding.
     {
         const due = try sqlite.prepare(storage.sqliteDatabase(), "UPDATE model_operation SET retry_due_at_ms=1 WHERE operation_id=?1");
         defer _ = c.sqlite3_finalize(due);
@@ -402,8 +390,6 @@ test "retry admission and exhausted recovery use their selection indexes" {
     }
 }
 
-/// Gives each Session an Operation names a row, for a fixture that inserts
-/// Operations with foreign keys off: a writer reads every Session it touches.
 fn insertTestingSessionsForOperations(database: *c.sqlite3) !void {
     try sqlite.exec(
         database,
@@ -527,41 +513,30 @@ test "a 401 forced refresh is claimed at most once per Operation across failures
     defer if (storage_open) storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "refresh-config");
 
-    // Claimed once: the claim commits before any refresh, the Attempt stays
-    // uncertain, and a second claim for the same Operation is refused.
     try submitTestMessage(&storage, &tmp, "refresh-a", "refresh-a", session.slice(), "a");
     const a1 = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try std.testing.expect(try storage.claimModelAuthRefresh(a1));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE resolution_code IS NULL AND retry_due_at_ms=0 AND auth_refresh_claimed=1", .{}));
     try std.testing.expect(!try storage.claimModelAuthRefresh(a1));
-    // A completed refresh makes the one replacement immediately eligible,
-    // without generic backoff, and records the 401.
     try storage.settleModelAttemptFailure(a1, testing_401, .refreshed, .{});
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(storage.sqliteDatabase(), "SELECT count(*) FROM model_operation WHERE resolution_code IS NULL AND retry_due_at_ms!=0 AND last_failure_code='provider_http_401' AND retry_due_at_ms<=CAST(unixepoch('subsec')*1000 AS INTEGER)", .{}));
     const a2 = (try admitRetryForTesting(&storage)).?.permit.binding;
     try std.testing.expectEqual(@as(u64, 2), a2.attempt_ordinal);
-    // Counterexample A: a transient failure intervenes; the next 401 must
-    // not claim again.
     const a3 = try settleTransientForTesting(&storage, a2);
     try std.testing.expect(!try storage.claimModelAuthRefresh(a3));
     try storage.settleModelAttemptFailure(a3, testing_401, .ordinary, .{});
 
-    // Counterexample B: same saved shape at Attempt 3, but no earlier claim.
     try submitTestMessage(&storage, &tmp, "refresh-b", "refresh-b", session.slice(), "b");
     const b1 = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const b3 = try settleTransientForTesting(&storage, try settleTransientForTesting(&storage, b1));
     try std.testing.expectEqual(@as(u64, 3), b3.attempt_ordinal);
     try std.testing.expect(try storage.claimModelAuthRefresh(b3));
     try storage.settleModelAttemptFailure(b3, testing_401, .refreshed, .{});
-    // The replacement consumes the ordinary allowance: Attempt 4 has none
-    // left, so a 401 there cannot claim.
     const b4 = (try admitRetryForTesting(&storage)).?.permit.binding;
     try std.testing.expectEqual(@as(u64, 4), b4.attempt_ordinal);
     try std.testing.expect(!try storage.claimModelAuthRefresh(b4));
     try storage.settleModelAttemptFailure(b4, testing_401, .ordinary, .{});
 
-    // A stale binding cannot claim, and a refreshed settlement requires the
-    // claim.
     try submitTestMessage(&storage, &tmp, "refresh-c", "refresh-c", session.slice(), "c");
     const c1 = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     var stale = c1;
@@ -569,8 +544,6 @@ test "a 401 forced refresh is claimed at most once per Operation across failures
     try std.testing.expectError(error.StaleAttemptBinding, storage.claimModelAuthRefresh(stale));
     try std.testing.expectError(error.StaleAttemptBinding, storage.settleModelAttemptFailure(c1, testing_401, .refreshed, .{}));
 
-    // Crash after the claim and before settlement: restart replaces the
-    // uncertain Attempt under ordinary policy and the claim survives.
     try std.testing.expect(try storage.claimModelAuthRefresh(c1));
     try storage.close();
     storage_open = false;
@@ -736,7 +709,6 @@ test "a failed Turn whose diagnostic is not UTF-8 gives no reset time, as on mai
     try submitTestMessage(&storage, &tmp, "diagnostic-bytes-input", "diagnostic-bytes-message", session.slice(), "q");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try storage.settleModelAttemptFailure(binding, .{ .rejected = .{ .code = "provider_quota", .diagnostic = "{\"refusal\":\"quota\",\"resets_at\":5}", .request_id = .{}, .report = "" } }, .ordinary, .{});
-    // The saved record's first byte made one no UTF-8 decoder accepts.
     try sqlite.exec(storage.sqliteDatabase(), "UPDATE content SET payload=CAST(X'FF'||substr(payload,2) AS BLOB) WHERE payload=CAST('{\"refusal\":\"quota\",\"resets_at\":5}' AS BLOB)");
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT changes()", .{}));
     var request: protocol.ActivityPage = .{};

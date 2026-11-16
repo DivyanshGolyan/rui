@@ -1,23 +1,3 @@
-//! The floor of a compaction that makes room (D217): when a compaction
-//! request overflows, the next compaction leaves out the oldest drop units
-//! until the rest fits a smaller target.
-//!
-//! A drop unit is a host Message after the Session's first, or a model
-//! Operation with its tool results; it begins at the Message's position or
-//! the Operation's admission position, and a floor drops every unit that
-//! begins at or below it (`historical.RequestPage.Floor`). A floor once
-//! reached stays: every later compaction keeps its base's floor or goes
-//! deeper (`InheritedFloor`). Each level
-//! aims at a quarter of the room the level before it did: level 1 at the
-//! context window less the output reservation, at four bytes per token as
-//! `turn_policy.comparedPressure` counts, so a catalog window larger than
-//! the one served (D207) still recovers by level 3. A unit counts the bytes
-//! the request sends for it: a Message its text and the skills it bound
-//! (their entries follow it, so they drop with it), an Operation its output
-//! items (`item_bytes_sql`) and its tool results. An Operation the base
-//! covers sends neither, so it is no unit; what is always kept is not
-//! counted. The newest unit is always kept: it is the work in hand.
-
 const std = @import("std");
 const output_item = @import("../../output_item.zig");
 const model_capability = @import("../../model_capability.zig");
@@ -29,30 +9,21 @@ const store_schema = @import("../schema.zig");
 pub const levels = 3;
 const bytes_per_token = 4;
 
-/// The bytes level `level` (1 to `levels`) aims a compaction request at.
 pub fn target(window: u64, reservation: u64, level: u8) u64 {
     std.debug.assert(level >= 1 and level <= levels);
     const room = (window -| reservation) *| bytes_per_token;
     return room >> @intCast(2 * (level - 1));
 }
 
-/// The deeper floor a compaction goes to next, and its level.
 pub const Choice = struct { floor: u64, level: u8 };
 
-/// A deeper floor, with what `DroppedEntries` counts from.
 pub const Room = struct { choice: Choice, previous: u64, first_message: u64 };
 
-/// The units walked newest first, and the floor each level reaches: just
-/// below the oldest unit it keeps, the newer neighbour of the first unit
-/// past the newest whose bytes, with every newer unit's, exceed that
-/// level's target. No unit begins between them, so every entry at or below
-/// the floor belongs to a dropped unit or is kept by kind.
 pub const Walk = struct {
     targets: [levels]u64,
     floors: [levels]u64 = @splat(0),
     total: u64 = 0,
     units: u64 = 0,
-    /// The begin the next page reads below.
     cursor: u64,
     page_rows: u64 = 0,
 
@@ -62,8 +33,6 @@ pub const Walk = struct {
         return .{ .targets = targets, .cursor = boundary };
     }
 
-    /// Takes the next older unit; false once level 1's floor is found,
-    /// which every deeper level's precedes.
     pub fn take(walk: *Walk, begin: u64, size: u64) bool {
         std.debug.assert(begin < walk.cursor);
         const newer = walk.cursor;
@@ -81,7 +50,6 @@ pub const Walk = struct {
         return walk.floors[0] != 0;
     }
 
-    /// The first level past `from` whose floor drops more than `previous`.
     pub fn deeper(walk: *const Walk, from: u8, previous: u64) ?Choice {
         var level = from + 1;
         while (level <= levels) : (level += 1) {
@@ -97,9 +65,6 @@ pub const Walk = struct {
     }
 };
 
-/// What the walk from compaction Operation ?1 starts from: its own floor
-/// and level, its selected base's position and floor, the Session's first
-/// user Message, and the model and reservation it was admitted with.
 const floor_facts = rsql.Read(.{
     .sql = "SELECT current.admission_position,current.history_floor,current.history_level,base.history_floor AS base_floor,coalesce(base.admission_position,0) AS frontier," ++
         "coalesce((SELECT min(first.session_position) FROM conversation_entry first @index(conversation_entry_history) " ++
@@ -130,16 +95,11 @@ const floor_facts = rsql.Read(.{
 
 const page_rows = 16;
 
-/// Whether the skill entry `e` belongs to the Message at `first_message`,
-/// which every floor keeps with its skills.
 pub fn firstMessageSkillSql(comptime e: []const u8, comptime first_message: []const u8) []const u8 {
     return "(" ++ e ++ ".entry_kind=4 AND EXISTS(SELECT 1 FROM conversation_entry owner WHERE owner.source_admission_id=" ++ e ++
         ".source_skill_admission_id AND owner.session_position=" ++ first_message ++ "))";
 }
 
-/// The bytes output item `i` takes in a request: its bag, its parts' text
-/// and bags, and a call's three fields. A message part's text is a length
-/// of its message text. Admission's uncovered bytes count the same.
 pub const item_bytes_sql = "coalesce((SELECT bag.byte_length FROM content bag WHERE bag.content_id=i.extras_content_id),0) + " ++
     "(SELECT coalesce(sum(coalesce(p.text_length,text.byte_length,0)+coalesce(bag.byte_length,0)),0) FROM model_output_part p " ++
     "LEFT JOIN content text ON text.content_id=p.text_content_id LEFT JOIN content bag ON bag.content_id=p.extras_content_id " ++
@@ -149,10 +109,6 @@ pub const item_bytes_sql = "coalesce((SELECT bag.byte_length FROM content bag WH
     "JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
     "WHERE tool_call.operation_id=i.operation_id AND tool_call.item_ordinal=i.item_ordinal AND tool_call.session_ref=i.session_ref),0)";
 
-/// The drop units of Operation ?1's Session that begin below ?2 and above
-/// ?3, newest first: Messages but the first (?4), and the calls after the
-/// base (?5) whose output later requests send. A failed call holds nothing,
-/// and a compaction's output is sent only while it is the base, which is kept.
 const units = rsql.Read(.{
     .sql = "SELECT e.session_position AS start,content.byte_length+coalesce((SELECT sum(body.byte_length) FROM message_skill skill " ++
         "JOIN content body ON body.content_id=skill.content_id WHERE skill.admission_id=e.source_admission_id),0) AS size FROM model_operation current " ++
@@ -172,7 +128,6 @@ const units = rsql.Read(.{
     .compound = true,
 });
 
-/// The floor of the Session ?1's newest compaction base below position ?2.
 const base_floor_read = rsql.Read(.{
     .sql = "SELECT base.history_floor,r.model FROM model_operation base @index(model_operation_compaction_bases) " ++
         "JOIN session_revision r ON r.session_ref=base.session_ref AND r.revision=base.settings_revision " ++
@@ -183,12 +138,6 @@ const base_floor_read = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// The floor a compaction that makes no room keeps: its base's, so a
-/// later base drops what the one it replaces dropped, read in one round
-/// its caller runs: `queue` queues it, and `floor`, after that round,
-/// answers. Its caller names the round's failed step `CorruptStore`. A
-/// transition keeps it, as the round's destination, in storage that
-/// outlives the round, as it does the `session` it reads by.
 pub const InheritedFloor = struct {
     found: base_floor_read.Result = undefined,
 
@@ -196,8 +145,6 @@ pub const InheritedFloor = struct {
         a.read(base_floor_read, .{ .session = session, .boundary = boundary }, &read.found);
     }
 
-    /// After `queue`'s round: the base's floor where a request for `model`
-    /// replays the base, or null.
     pub fn floor(read: *const InheritedFloor, model: []const u8) ?u64 {
         const row = read.found orelse return null;
         if (!output_item.Kind.compaction.replayableTo(row.model.slice(), model, .selected_base)) return null;
@@ -205,27 +152,11 @@ pub const InheritedFloor = struct {
     }
 };
 
-/// The floor and level the compaction after compaction Operation
-/// `operation` overflowed goes to, as rounds its caller runs: `start`
-/// queues the facts read for the first; after each round, `next` queues a
-/// page and answers true, or answers false once the walk is over, when
-/// `room` is the answer, null when no level drops more: only kept items
-/// remain, or level `levels` overflowed. Settlement walks it to decide
-/// whether the Turn goes on, and admission again for the floor it writes;
-/// nothing they read changes in between, so both get one answer. Each
-/// page is a round; the walk stops at level 1's floor, so it reads about
-/// as many units as fit that target, however long the history. Its
-/// callers name a failed step `CorruptStore`.
 pub const FloorSearch = struct {
     operation: u64,
-    /// The facts round's row, then the walk `next` starts from it: the
-    /// pages need none of the row's model names.
     read: union { facts: floor_facts.Row, walk: Walk } = undefined,
-    /// The level the walk deepens from, or `levels` while none is deeper.
     from: u8 = levels,
-    /// Whether a page round ran.
     paged: bool = false,
-    /// What `next` keeps from the facts for the pages and the answer.
     base_floor: u64 = 0,
     previous: u64 = 0,
     first_message: u64 = 0,
@@ -247,8 +178,6 @@ pub const FloorSearch = struct {
             search.previous = if (facts.history_floor) |floor| floor.get() else search.base_floor;
             search.first_message = facts.first_message;
             search.frontier = if (compatible) facts.frontier else 0;
-            // Both callers walk the failed Operation's admission-time window, never
-            // today's catalog or its successor's window. A refresh cannot move this floor.
             const walk: Walk = .init(facts.context_window, facts.output_reservation, facts.admission_position.get());
             search.read = .{ .walk = walk };
         } else if (search.read.walk.page_rows < page_rows) return false;
@@ -273,9 +202,6 @@ pub const FloorSearch = struct {
     }
 };
 
-/// The conversation entries of Operation ?1's Session above ?2 and at or
-/// below ?3, but instructions and the first Message (?4) with its skills: what a floor
-/// drops beyond the one before it.
 const dropped_entries = rsql.Read(.{
     .sql = "SELECT count(*) AS dropped FROM model_operation current " ++
         "JOIN conversation_entry e @index(conversation_entry_history) ON e.session_ref=current.session_ref " ++
@@ -286,11 +212,6 @@ const dropped_entries = rsql.Read(.{
     .cardinality = .one,
 });
 
-/// How many conversation entries `room`'s floor drops beyond the one
-/// before it (D217's `dropped`): a range of the entry index as long as
-/// what it drops, read once per compaction that makes room, in one round
-/// its caller runs: `queue` queues it, and `dropped`, after that round,
-/// answers. Its caller names the round's failed step `CorruptStore`.
 pub const DroppedEntries = struct {
     row: dropped_entries.Row = undefined,
 
@@ -298,7 +219,6 @@ pub const DroppedEntries = struct {
         a.read(dropped_entries, .{ .operation = operation, .above = room.previous, .floor = room.choice.floor, .first_message = room.first_message }, &read.row);
     }
 
-    /// After `queue`'s round.
     pub fn dropped(read: *const DroppedEntries) u64 {
         return read.row.dropped;
     }
@@ -312,30 +232,22 @@ test "each level aims at a quarter of the room the one before it did" {
 }
 
 test "the walk keeps the newest unit and finds each level's floor below it" {
-    // Targets 400, 100 and 25 bytes.
     var walk: Walk = .init(100, 0, 100);
-    // The newest unit alone is past every target, and is kept.
     try std.testing.expect(walk.take(90, 500));
     try std.testing.expect(!walk.take(80, 0));
     try std.testing.expectEqual([levels]u64{ 89, 89, 89 }, walk.floors);
-    // Running totals 10 (kept), 20, 30, 120 and 420.
     var spread: Walk = .init(100, 0, 100);
     for ([_]u64{ 10, 10, 10, 90, 300 }, 0..) |size, index| _ = spread.take(90 - 10 * index, size);
     try std.testing.expect(spread.done());
     try std.testing.expectEqual([levels]u64{ 59, 69, 79 }, spread.floors);
     try std.testing.expectEqual(Choice{ .floor = 59, .level = 1 }, spread.deeper(0, 0).?);
     try std.testing.expectEqual(Choice{ .floor = 69, .level = 2 }, spread.deeper(1, 59).?);
-    // A level whose floor drops no more than the last is passed over.
     try std.testing.expectEqual(Choice{ .floor = 79, .level = 3 }, spread.deeper(0, 69).?);
     try std.testing.expectEqual(@as(?Choice, null), spread.deeper(3, 0));
     try std.testing.expectEqual(@as(?Choice, null), spread.deeper(0, 79));
 }
 
 test "a catalog window four times the served one recovers within the levels" {
-    // ChatGPT sign-in (D207): the catalog says 1.05M tokens, the provider
-    // serves 272k and code runs nearer three bytes per token than four, so
-    // the provider refuses a request above 272k * 3 bytes. A long history
-    // of 2 KiB units, newest first.
     const catalog: u64 = 1_050_000;
     const reservation: u64 = 8000;
     const served_bytes: u64 = 272_000 * 3;
@@ -344,14 +256,11 @@ test "a catalog window four times the served one recovers within the levels" {
     var walk: Walk = .init(catalog, reservation, count + 1);
     var begin: u64 = count;
     while (begin > 0 and walk.take(begin, unit)) : (begin -= 1) {}
-    // What a request at a floor sends: every unit that begins above it.
     const Kept = struct {
         fn bytes(floor: u64) u64 {
             return (count - floor) * unit;
         }
     };
-    // The full request overflows, and so do levels 1 and 2, which aim at
-    // the catalog's room and a quarter of it.
     try std.testing.expect(count * unit > served_bytes);
     var previous: u64 = 0;
     var from: u8 = 0;

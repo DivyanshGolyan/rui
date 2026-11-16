@@ -1,4 +1,3 @@
-//! Retry Store conformance tests.
 const std = @import("std");
 const retry_policy = @import("../../retry_policy.zig");
 const store_core = @import("../Store.zig");
@@ -17,7 +16,6 @@ test "retry settlement adds actual entropy after the provider deadline" {
             var storage: Store = undefined;
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            // With no retry scheduled, the admission scan says so.
             var scheduled: ?u64 = 1;
             try std.testing.expect((try storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{}, &scheduled)) == null);
             try std.testing.expectEqual(@as(?u64, null), scheduled);
@@ -44,8 +42,6 @@ test "retry settlement adds actual entropy after the provider deadline" {
                 .retry_after_deadline_ms = 40_000,
             } }, .{});
             try std.testing.expectEqual(@as(u64, 40_500), try store_testing.queryU64(&storage, "SELECT retry_due_at_ms FROM model_operation", .{}));
-            // Not due yet: the scan admits nothing and reads when the
-            // earliest scheduled retry falls due, in its own round.
             const rounds = storage.testing_content_work.rounds;
             try std.testing.expect((try storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{}, &scheduled)) == null);
             try std.testing.expectEqual(@as(?u64, 40_500), scheduled);

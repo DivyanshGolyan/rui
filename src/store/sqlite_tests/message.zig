@@ -1,5 +1,3 @@
-//! Message SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
@@ -66,15 +64,12 @@ test "message admissions remain queued in order and retain bounded canonical con
     const second_reply = storage.submitMessageWithModel(&second, null, .{});
     try std.testing.expect(second_reply == .accepted);
     try std.testing.expect(first_reply.accepted.admission_id < second_reply.accepted.admission_id);
-    // The Host stamps each admission with its wall clock, to the second.
     const after = try sqlite.pragmaInt(storage.sqliteDatabase(), "SELECT unixepoch()");
     const stamped = try sqlite.pragmaInt(storage.sqliteDatabase(), "SELECT admitted_at FROM message_admission WHERE admission_id=1");
     try std.testing.expect(before <= stamped and stamped <= after);
-    // A replayed or restarted admission keeps the time it was admitted at.
     try store_testing.sqlite_only.exec(&storage, "UPDATE message_admission SET admitted_at=1000 WHERE admission_id=1", .{});
 
     const replay = storage.submitMessageWithModel(&first, commits.callback(), .{});
-    // A replayed admission installs nothing.
     try std.testing.expectEqual(@as(usize, 1), commits.count);
     try std.testing.expect(replay == .accepted);
     try std.testing.expect(replay.accepted.replayed);
@@ -126,7 +121,6 @@ test "a message's text is stored once and its parts replay as lengths of it" {
     try std.testing.expectEqual(@as(u64, 3), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_output_part WHERE text_content_id IS NULL", .{}));
     try std.testing.expectEqual(@as(u64, 4 + 0 + 4), try store_testing.sqlite_only.queryU64(&storage, "SELECT sum(text_length) FROM model_output_part", .{}));
     try std.testing.expectEqual(try store_testing.sqlite_only.queryU64(&storage, "SELECT content_id FROM conversation_entry WHERE entry_kind=3", .{}), try store_testing.sqlite_only.queryU64(&storage, "SELECT message_content_id FROM model_output_item WHERE item_kind=2", .{}));
-    // Each part kind holds exactly its text shape, and a message names its text.
     for ([_]struct { ConstraintProbe, [:0]const u8 }{
         .{ .check_violation, "UPDATE model_output_part SET text_length=NULL WHERE part_ordinal=0" },
         .{ .check_violation, "UPDATE model_output_part SET text_content_id=extras_content_id WHERE part_ordinal=0" },
@@ -161,8 +155,6 @@ test "a large message's parts read only their own ranges" {
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "large-parts-config");
-    // Many small parts before one large one: each small part's reader must
-    // not read ahead into the rest of the text.
     const large = try std.testing.allocator.alloc(u8, 1024 * 1024 + 4096);
     defer std.testing.allocator.free(large);
     @memset(large, 'a');
