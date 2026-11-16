@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Public Conversation wire reads against a real Host and canonical Store."""
 
 import hashlib
 import http.server
@@ -35,8 +34,6 @@ def main():
         socket_path = fields["socket"]
         page_session = configure(state, store, "page-config")
         foreign_session = configure(state, store, "foreign-config")
-        # Raw wire identities are exact, even when an alias selects this Store
-        # through the production Client. Keep this deliberate alias unnormalized.
         alias = state / "store-alias"
         alias.symlink_to(store, target_is_directory=True)
         head, body = request(socket_path, alias, "/v1/conversation-page", "conversation_page", page_session,
@@ -61,10 +58,7 @@ def main():
         assert len(page["items"]) == 1, page
         item = page["items"][0]
         assert item["kind"] == "user" and item["ordinal"] == "0", item
-        # The Host stamps its own wall-clock second when it admits the row.
         assert admitted_after <= int(item["admitted_at"]) <= int(time.time()), item
-        # Invalid public identities must not turn a SQL bind error into a
-        # canonical Store fence. A subsequent ordinary read still succeeds.
         for field in ("end", "before_position", "before_ordinal"):
             cursor = {"end": page["end"], "before_position": item["position"], "before_ordinal": "0"}
             cursor[field] = str(2**64 - 1)
@@ -86,8 +80,6 @@ def main():
             "bytes": "10005", "sha256": hashlib.sha256(len(domain).to_bytes(8, "big") + domain + payload.encode()).hexdigest(),
             "display": "omitted",
         }, item
-        # Range offsets are bytes, not UTF-8 character indices. The first
-        # transfer can end inside a scalar; joining transfers is lossless.
         chunks = []
         start = 0
         while start < len(payload.encode()):
@@ -120,8 +112,6 @@ def main():
             head, _ = request(socket_path, store, "/v1/conversation-content", "conversation_content", session,
                 position=position, ordinal=ordinal, start=start)
             assert head.startswith(b"HTTP/1.1 409 "), head
-        # Keep the provider held. These large admissions remain unapplied and
-        # cannot inflate the public page or add per-message resident buffers.
         for index in range(8):
             message(state, store, f"queued-{index}", page_session, "q" * (256 * 1024))
         after = host_resources(process.pid)
@@ -205,7 +195,6 @@ def projected_ranges():
 
 
 def missing_assistant_entries():
-    """Stopped synthetic Store damage must not look like absent public text."""
     import model_fixture as f
     from host_process import HostDiagnostics
 
@@ -239,7 +228,6 @@ def missing_assistant_entries():
                         "--session", session, timeout=remaining)["execution"], time.monotonic() + 10)
                     f.stop_host(process)
                     process = None
-                    # No concurrent SQLite owner, FK bypass or live Store writes.
                     with sqlite3.connect(store / "rui.sqlite3") as database:
                         rows = database.execute("SELECT session_position,source_operation_id,source_item_ordinal,turn_id,content_id "
                             "FROM conversation_entry WHERE entry_kind=3 ORDER BY session_position").fetchall()
@@ -254,8 +242,6 @@ def missing_assistant_entries():
                         assert database.execute("PRAGMA integrity_check").fetchone() == ("ok",)
                     process = f.start_host(store, None)
                     HostDiagnostics(process)
-                    # A damaged Conversation projection does not replace the
-                    # original admitted Request result, even after reopen.
                     assert f.read_result(store, "first") == b"Selected answer"
                     paths = {
                         "page": ("conversation-page", "conversation_page", dict(end="0", before_position="0", before_ordinal="0")),

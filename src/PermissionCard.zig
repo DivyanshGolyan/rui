@@ -1,5 +1,3 @@
-//! A request on its own ground above the ruled input row. The Action
-//! document owns the title; the screen applies the exact decision.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -16,8 +14,6 @@ on_decision: *const fn (*anyopaque, *vxfw.EventContext, Policy.Decision) anyerro
 method: vaxis.gwidth.Method = .unicode,
 style: vaxis.Style = .{},
 quiet: vaxis.Style = .{ .dim = true },
-/// The pointer's choice: only its background, reverse and underline apply, and the
-/// highlighted choice keeps its reverse under the pointer.
 hover_style: vaxis.Style = .{ .ul_style = .single },
 choice_row: ?u16 = null,
 choice_column: u16 = 0,
@@ -29,8 +25,6 @@ pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
 }
 
-/// The card's own events: the pointer and the tick. Its keys come from
-/// the Session's core through `take`.
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     try self.hover.handleEvent(ctx, input);
@@ -58,12 +52,9 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         else => return,
     };
     ctx.consumeEvent();
-    // Root hands no click inside a paste to anything (`app_input`).
     try self.take(ctx, action, false);
 }
 
-/// One input at the choice: a key the Session's core handed it, with
-/// whether it arrived inside a paste, or the pointer's.
 pub fn take(self: *Self, ctx: *vxfw.EventContext, input: Consent.Input, pasted: bool) !void {
     const before = self.consent.highlight;
     if (self.consent.handle(input, pasted)) |decision| {
@@ -77,8 +68,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     return self.drawInput(ctx, null);
 }
 
-/// InputArea supplies the composer only when the consent owner selects it.
-/// This is placement, not row/key policy: the request always stays above it.
 fn choiceLook(self: *const Self, highlighted: bool, target: Hover.Rect) input_choice.Look {
     return if (highlighted) .selected else if (self.hover.contains(target)) .hovered else .plain;
 }
@@ -89,11 +78,9 @@ pub fn drawInput(self: *Self, ctx: vxfw.DrawContext, composer: ?vxfw.Widget) std
     self.hover.targets = &.{};
     if (size.width == 0 or size.height == 0) return .empty(self.widget());
     const draft = if (composer) |widget_| try widget_.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = @min(size.height, @import("draft_layout.zig").cap(size.height) + 2) })) else null;
-    // Reserve the input before the request: a choice survives even at 1×1.
     const input_height: u16 = if (draft) |drawn| drawn.size.height else @min(3, size.height);
     const rule: u16 = if (input_height >= 3) 1 else 0;
     const body_height = size.height - input_height;
-    // With room for the prompt, the body aligns with the labels after it.
     self.choice_column = if (size.width >= 6 and size.height >= 4) input_choice.prompt_cells else 0;
     self.choice_width = size.width - 2 * self.choice_column;
     var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
@@ -161,12 +148,10 @@ test "PermissionCard decides the drawn request at tiny sizes and ignores pasted 
         try std.testing.expect(surface.size.width <= size.width and surface.size.height <= size.height);
         try std.testing.expectEqual(@as(?u64, 52), consent.request);
     }
-    // Keys go to the Session's core first; the card takes none from vxfw.
     _ = try card.widget().draw(ctx);
     events.consume_event = false;
     try card.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
     try std.testing.expect(!events.consume_event);
-    // A key handed inside a paste never authorizes.
     for ([_]Consent.Input{ .enter, .left, .right, .other, .cancel }) |input| {
         try card.take(&events, input, true);
         try std.testing.expectEqual(null, owner.decision);
@@ -182,7 +167,6 @@ test "PermissionCard decides the drawn request at tiny sizes and ignores pasted 
     try std.testing.expectEqualStrings("─", shown.readCell(39, 4).char.grapheme);
     try std.testing.expect(shown.readCell(3, 3).style.reverse);
     try std.testing.expect(!shown.readCell(17, 3).style.reverse);
-    // A prompt/margin click is not an approval; the exact Deny cells are.
     const click: vaxis.Mouse = .{ .col = 0, .row = 3, .button = .left, .type = .press, .mods = .{} };
     try card.widget().handleEvent(&events, .{ .mouse = click });
     try std.testing.expectEqual(null, owner.decision);
@@ -234,7 +218,6 @@ test "PermissionCard takes no choice from a key handed inside a paste, across re
     _ = try card.widget().draw(ctx);
     try card.take(&events, .enter, true);
     try std.testing.expectEqual(null, owner.decision);
-    // Once the paste ends, Enter takes the highlighted choice.
     try card.take(&events, .enter, false);
     try std.testing.expectEqual(@as(?Policy.Decision, .{ .action = 29, .choice = .allow_once }), owner.decision);
 }
@@ -257,7 +240,6 @@ test "PermissionCard hover is quieter than the choice selection and changes neit
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} };
     consent.adopt(41);
     _ = try card.widget().draw(ctx);
-    // Both choices take the hover look, retaining foreground, while the other keeps its reverse.
     for ([_]Policy.Choice{ .deny, .allow_once }) |choice| {
         card.hover_style = .{ .ul_style = .single };
         consent.highlight = if (choice == .deny) .allow_once else .deny;
@@ -273,7 +255,6 @@ test "PermissionCard hover is quieter than the choice selection and changes neit
         card.hover_style = .{ .bg = .{ .index = 5 } };
         const coloured = try card.widget().draw(ctx);
         try std.testing.expectEqual(vaxis.Color{ .index = 5 }, coloured.readCell(col, 3).style.bg);
-        // The highlighted choice keeps its reverse under the pointer.
         consent.highlight = if (choice == .deny) .deny else .allow_once;
         const both = try card.widget().draw(ctx);
         try std.testing.expect(both.readCell(col, 3).style.reverse);
@@ -289,7 +270,6 @@ test "PermissionCard hover is quieter than the choice selection and changes neit
         try std.testing.expectEqual(card.style.bg, left.readCell(col, 3).style.bg);
         try std.testing.expect(!card.hover.pointing);
     }
-    // Padding and a clipped-away choice have neither hover nor click authority.
     try card.widget().handleEvent(&events, .{ .mouse = .{ .col = 14, .row = 3, .button = .none, .type = .motion, .mods = .{} } });
     try std.testing.expect(!card.hover.pointing);
     _ = try card.widget().draw(ctx.withConstraints(.{}, .{ .width = 1, .height = 1 }));

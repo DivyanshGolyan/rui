@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-"""A Host started with a settings document on stdin: readiness in interface.dir,
-refusals on stdout and stderr, and a clean exit when
-stdin closes (D5, D112, D118, D130, D136)."""
 
 import json
 import pathlib
@@ -38,11 +35,6 @@ def mcp_entry(name, server):
 
 
 def sdk_tool_set(root, good, network, ci):
-    """Prove every real SDK tool entered the Host tool set, with its owner.
-
-    There is no public tool-set listing route yet. A collision refusal is the
-    existing public boundary that reports a tool name and both sources.
-    """
     if not shutil.which("node") or not shutil.which("npm"):
         assert not ci, "CI requires Node and npm for the real MCP SDK fixture"
         print("SKIP real MCP SDK: node/npm not installed locally")
@@ -109,7 +101,6 @@ def sdk_tool_set(root, good, network, ci):
 
 
 def source_modes(root, good):
-    """All source modes reach the same reporting door; only lifetime ends input."""
     store = good["store"]["sqlite"]["dir"]
     settings_file = root / "settings.json"
 
@@ -119,8 +110,6 @@ def source_modes(root, good):
         return subprocess.Popen([RUI, "host", "serve", "--settings", str(settings_file), *flags],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    # The original pipe Host holds this Store. File and flag Hosts must emit
-    # the same structured refusal and stderr sentence as the pipe Host.
     private = dict(good, providers={})
     for process in (file_host(private),
                     subprocess.Popen([RUI, "host", "serve", "--store", store],
@@ -133,8 +122,6 @@ def source_modes(root, good):
     assert refused["code"] == "settings_invalid", refused
     assert "providers.openai.key" in refused["message"], refused
 
-    # A document's default lifetime is detached, even when read from stdin.
-    # A file may explicitly choose stdin lifetime. Flags override its leaves.
     for source in ("pipe", "file"):
         runtime = root / (source + "-lifetime")
         runtime.mkdir(mode=0o700)
@@ -155,8 +142,6 @@ def source_modes(root, good):
             host_process.close_stdin(process)
         else:
             host_stop(path, target, info["instance"])
-        # Explicit stdin lifetime settles cleanly. Detached shutdown retains
-        # the ordinary flag Host's EffectAwareShutdown exit classification.
         expected_exit = 0 if source == "file" else 1
         assert process.wait(timeout=30) == expected_exit, output(process)
         assert not path.exists()
@@ -167,11 +152,6 @@ PROXY = "\nrui: https_proxy/HTTPS_PROXY names a scheme other than http://; Rui t
 
 
 def flag_start_failures(root):
-    """Start failures that flags and the environment reach without a document
-    keep main's exit, caller code, own diagnostic and empty stdout;
-    settings_invalid is only for a leaf refusal, the change pr4 lists.
-    Expectations were recorded from the merge-base build, not derived from
-    this one. The caller line's prose belongs to src/caller_error.zig."""
     home = root / "flag-home"
     home.mkdir(mode=0o700)
     key = root / "flag-key"
@@ -184,17 +164,11 @@ def flag_start_failures(root):
     credential = {"RUI_CODEX_CREDENTIAL_FILE": str(root / "c.json"), "RUI_CHATGPT_CREDENTIAL_FILE": str(root / "c.json")}
     absent = {"RUI_OPENAI_KEY_FILE": str(root / "absent")}
     openai = ["--set", 'providers={"openai":{}}']
-    # (flags, environment changes, exit, caller code, diagnostic before it)
-    # Rows that used a retired flag spell it with --set, the replacement its
-    # refusal names, and keep the outcome main pinned for the flag.
     unchanged = [
         (["--test-openai-fixture-endpoint", endpoint], {}, 1, "internal_unexpected", ""),
         (["--test-openai-fixture-endpoint", endpoint], absent, 6, "sign_in_required", NO_KEY),
         (["--test-openai-fixture-endpoint", endpoint], {"RUI_OPENAI_KEY_FILE": str(key)}, 1, "internal_unexpected", ""),
         (["--test-openai-fixture-endpoint", endpoint], {"RUI_OPENAI_KEY_FILE": str(bad_key)}, 1, "internal_unexpected", ""),
-        # main reported internal_unexpected for --provider openai here; the
-        # document spelling reaches the same missing-key refusal as the row
-        # without it.
         (["--test-openai-fixture-endpoint", endpoint, *openai], absent, 6, "sign_in_required", NO_KEY),
         (openai, {}, 6, "sign_in_required", NO_KEY),
         (openai, {"HOME": None}, 6, "home_unavailable", ""),
@@ -203,12 +177,9 @@ def flag_start_failures(root):
         (["--test-codex-fixture-endpoint", endpoint], {}, 1, "internal_unexpected", ""),
         (["--test-chatgpt-fixture-endpoint", endpoint], {}, 1, "internal_unexpected", ""),
         (["--test-chatgpt-fixture-endpoint", "http://127.0.0.1:9/other"], credential, 2, "invocation_invalid", ""),
-        # The proxy has no caller code: its own sentence is the whole report.
         (["--set", f"providers.openai.endpoint={endpoint}", "--set", "providers.openai.unauthenticated=true"],
          {"HTTPS_PROXY": "https://proxy.example:1"}, 6, None, PROXY),
     ]
-    # Each retired flag is refused before any start, naming its --set
-    # replacement; pr7 removes the migration table and these rows.
     retired = [
         ["--active-capacity", "2"],
         ["--provider", "codex"],
@@ -221,9 +192,6 @@ def flag_start_failures(root):
     ]
     for flags in retired:
         unchanged.append((flags, {}, 2, "host_option_retired", ""))
-    # Listed change: a value refused as its settings leaf. main reported
-    # these as internal_unexpected with exit 1 and no stdout, or, for the
-    # retired flags, a flag-level choice or count refusal.
     leaf = [
         (["--set", "providers.codex.endpoint=ftp://127.0.0.1/responses"], {}, "providers.codex.endpoint: must be a valid HTTPS or loopback HTTP endpoint"),
         (["--test-codex-fixture-endpoint", "ftp://x/responses"], credential, "providers.codex.endpoint: must be a valid HTTPS or loopback HTTP endpoint"),
@@ -275,7 +243,6 @@ def main(network, ci):
     info = host_info(sock, str(store))
     assert info["active_capacity"] == "2", info
     assert info["capabilities"]["providers"]["openai"] == "key_file", info
-    # The key never reaches argv or the environment.
     if os_semantics.PROC_FS:
         for name in ("cmdline", "environ"):
             assert b"sk-launch-test" not in pathlib.Path(f"/proc/{host.pid}/{name}").read_bytes(), name
@@ -283,20 +250,16 @@ def main(network, ci):
     source_modes(root, good)
     flag_start_failures(root)
 
-    # A second Host on the same Store is refused while the first holds it.
     other = root / "other"
     other.mkdir(mode=0o700)
     second = launch(frame(dict(good, interface=dict(good["interface"], dir=str(other)))))
     assert refusal(second, expected_exit=6)["code"] == "store_locked"
 
-    # Another Store may not share the runtime directory: the first Host keeps
-    # its socket.
     shared = launch(frame(dict(good, store={"sqlite": {"dir": str(root / "store2")}})))
     refused = refusal(shared)
     assert refused["code"] == "runtime_dir_unusable", refused
     assert info == host_info(sock, str(store))
 
-    # A runtime directory others can write to is refused before any bind.
     open_dir = root / "open"
     open_dir.mkdir()
     open_dir.chmod(0o777)
@@ -305,13 +268,11 @@ def main(network, ci):
     assert refused["code"] == "runtime_dir_unusable", refused
     assert not (open_dir / "rui.sock").exists()
 
-    # An interface.dir that is a file is a structured refusal too.
     not_a_dir = root / "file"
     not_a_dir.write_text("x")
     refused = refusal(launch(frame(dict(good, store={"sqlite": {"dir": str(root / "store4")}}, interface=dict(good["interface"], dir=str(not_a_dir))))))
     assert refused["code"] == "runtime_dir_unusable", refused
 
-    # Closing stdin stops the Host; its socket goes with it.
     started = time.monotonic()
     host_process.close_stdin(host)
     assert host.wait(timeout=30) == 0, output(host)
@@ -319,14 +280,12 @@ def main(network, ci):
     assert elapsed < 10, elapsed
     assert not sock.exists()
 
-    # host-stop before stdin closes stops a launched Host too.
     host = launch(frame(good))
     wait_for_host(sock, store, host)
     host_stop(sock, str(store), host_info(sock, str(store))["instance"])
     assert host.wait(timeout=30) == 0, output(host)
     assert not sock.exists()
 
-    # A Host launched paused reports it, and host_pause can lift it.
     host = launch(frame(dict(good, execution=dict(good["execution"], paused=True))))
     wait_for_host(sock, store, host)
     info = host_info(sock, str(store))
@@ -338,7 +297,6 @@ def main(network, ci):
     host_process.close_stdin(host)
     assert host.wait(timeout=30) == 0, output(host)
 
-    # Presets are launch-only seeds; the saved Session contains resolved fields.
     preset = {"model": "gpt-6.1-sol", "effort": "low", "compactAt": 100000,
               "tools": [], "permissionMode": "ask", "label": "Review"}
     host = launch(frame(dict(good, presets={"review": preset})))
@@ -383,9 +341,6 @@ def main(network, ci):
         assert refused["code"] == "settings_invalid", refused
         assert message in refused["message"], refused
 
-    # MCP servers: the Host lists their tools before it serves; a name a
-    # server shares with a built-in refuses the start naming both; a server
-    # that is down does not stop it.
     docs = mcp_server(["search"])
     clash = mcp_server(["bash"])
     mcp_root = root / "mcp"
@@ -395,8 +350,6 @@ def main(network, ci):
     wait_for_host(mcp_root / "rui.sock", base["store"]["sqlite"]["dir"], host)
     host_process.close_stdin(host)
     assert host.wait(timeout=30) == 0, output(host)
-    # The launcher stays connected until the refusal arrives: a closed stdin
-    # while listing is a launcher that went away, and stops the Host quietly.
     colliding = launch(frame(dict(base, tools={"mcp": dict([mcp_entry("docs", docs), mcp_entry("clash", clash)])})))
     line = colliding.stdout.readline()
     refused = json.loads(line)["rui_start_error"]
@@ -411,8 +364,6 @@ def main(network, ci):
     host_process.close_stdin(host)
     assert host.wait(timeout=30) == 0, output(host)
 
-    # A launcher that goes away while a server withholds its answer stops the
-    # Host at once, not after the listing's own deadline.
     silent = socket.socket()
     silent.bind(("127.0.0.1", 0))
     silent.listen(8)
@@ -420,7 +371,6 @@ def main(network, ci):
     hang_root.mkdir(mode=0o700)
     entry = ("slow", {"url": f"http://127.0.0.1:{silent.getsockname()[1]}/mcp", "bearerToken": {"value": "t"}, "callTimeoutMs": 1000})
     host = launch(frame(dict(good, store={"sqlite": {"dir": str(root / "store6")}}, interface=dict(good["interface"], dir=str(hang_root)), tools={"mcp": dict([entry])})))
-    # The Host has asked the server for its tools and now waits for an answer.
     silent.settimeout(20)
     held, _ = silent.accept()
     started = time.monotonic()

@@ -23,8 +23,6 @@ pub fn addCheck(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget
     queue_audit_test.addFileArg(ci.path(sqlite_shell));
     measurement_test_step.dependOn(&queue_audit_test.step);
 
-    // The runners' configure call against the current CLI and Host, so a change
-    // to either fails here rather than in the next measurement campaign.
     const configure_contract = b.addSystemCommand(&.{"python3"});
     configure_contract.addFileArg(b.path("tests/integration/host_process.py"));
     configure_contract.addArgs(&.{ "exec", "env", "GOTOOLCHAIN=local", "go", "test", "-count=1", "-mod=readonly", "-run", "^TestConfigureContract$", "./measurement", "-args", "-rui" });
@@ -125,8 +123,6 @@ pub fn add(b: *std.Build, ci: CiArtifacts, release_safe: *std.Build.Step.Compile
     measure_execution_service_step.dependOn(&measure_execution_service.step);
 }
 
-// A Go measurement launches Rui, so it enters the fixture boundary like every
-// fixture: root is refused and the environment is built there.
 fn addMeasurement(b: *std.Build, arguments: []const []const u8) *std.Build.Step.Run {
     const run = b.addSystemCommand(&.{"python3"});
     run.addFileArg(b.path("tests/integration/host_process.py"));

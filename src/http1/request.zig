@@ -1,20 +1,10 @@
-//! What an HTTP/1.1 request is before it reaches a socket, as values: the
-//! loopback target a URL names, and the head that asks it for one response.
-//!
-//! Plain HTTP reaches loopback only (D120), so a target is an IP literal on
-//! the machine itself and never needs a name lookup. Every request carries
-//! `Connection: close`: one connection per request, so closing it is the
-//! cancel and the response may end with the connection.
 const std = @import("std");
 const Parser = @import("Parser.zig");
 
 pub const max_url_bytes = 2048;
 
 pub const Error = error{
-    /// Not `http://`: TLS and other schemes are refused.
     UnsupportedScheme,
-    /// The host is not 127.0.0.0/8 or [::1]. `localhost` is refused too:
-    /// which address it names depends on the machine.
     NotLoopback,
     InvalidUrl,
     UrlTooLong,
@@ -24,20 +14,12 @@ pub const Family = enum { ipv4, ipv6 };
 
 pub const Target = struct {
     family: Family,
-    /// The address in network order; an IPv4 one uses the first 4 bytes.
     address: [16]u8,
     port: u16,
-    /// `host[:port]` as the URL wrote it, for the Host field. Borrowed from
-    /// the URL.
     authority: []const u8,
-    /// The path and query, `/` when the URL has none. Borrowed from the URL.
     path: []const u8,
 };
 
-/// Reads `http://host[:port][/path[?query]]`, where host is an IPv4
-/// loopback literal or `[::1]`. A URL with userinfo or a fragment is
-/// refused, since neither belongs on the wire, and so is a query with no
-/// path before it.
 pub fn parseTarget(url: []const u8) Error!Target {
     if (url.len > max_url_bytes) return error.UrlTooLong;
     const scheme = "http://";
@@ -112,19 +94,12 @@ fn port(text: []const u8) ?u16 {
 
 pub const Field = struct { name: []const u8, value: []const u8 };
 
-/// Fields the head writes itself or that would change the framing; a
-/// caller's field may not use one.
 pub const owned_fields = [_][]const u8{ "host", "content-length", "connection", "transfer-encoding", "te", "upgrade", "keep-alive", "trailer", "expect" };
 
 pub const FieldError = error{
-    /// A name that is not a token or that the head owns, or a value with a
-    /// control byte, a byte outside ASCII, or whitespace at either end.
     InvalidField,
 };
 
-/// A POST head is written in three parts: `beginPost`, any number of
-/// `writeField`, then `endPost` with the body's length. A failed
-/// `writeField` has written nothing.
 pub fn beginPost(writer: *std.Io.Writer, target: Target) std.Io.Writer.Error!void {
     try writer.print("POST {s} HTTP/1.1\r\nHost: {s}\r\n", .{ target.path, target.authority });
 }
@@ -138,7 +113,6 @@ pub fn endPost(writer: *std.Io.Writer, body_len: usize) std.Io.Writer.Error!void
     try writer.print("Content-Length: {d}\r\nConnection: close\r\n\r\n", .{body_len});
 }
 
-/// A whole POST head with `fields` in order.
 pub fn writePost(writer: *std.Io.Writer, target: Target, fields: []const Field, body_len: usize) (FieldError || std.Io.Writer.Error)!void {
     for (fields) |field| try checkField(field);
     try beginPost(writer, target);
@@ -152,8 +126,6 @@ pub fn checkField(field: Field) FieldError!void {
     if (!isFieldValue(field.value)) return error.InvalidField;
 }
 
-/// RFC 9110 field-value restricted to ASCII: visible bytes, with spaces and
-/// tabs only between them.
 pub fn isFieldValue(value: []const u8) bool {
     for (value) |byte| {
         if (byte != ' ' and byte != '\t' and (byte < 0x21 or byte > 0x7e)) return false;

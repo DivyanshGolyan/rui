@@ -28,7 +28,6 @@ pub const default_bash_timeout_ms = @import("host_settings.zig").default_bash_ti
 pub const default_bash_path = @import("host_settings.zig").default_bash_path;
 pub const scratch_limit_bytes: u64 = 8 * 1024 * 1024 * 1024;
 pub const default_retention_entry_capacity = @import("retention_capacity.zig").entries;
-/// Real operating limits. Tests may narrow them; production uses the defaults.
 pub const Limits = struct {
     request_scratch_limit_bytes: u64 = scratch_limit_bytes,
     request_preparation_byte_allowance: usize = model_adapter.preparation_byte_allowance,
@@ -42,22 +41,14 @@ pub const Limits = struct {
     sqlite_cache_kib: u32 = (store_module.OpenOptions{}).cache_kib,
 };
 
-/// Test hooks: injected failures, holds and observation, set only by the
-/// hidden `host serve` options and fixture catalog environment, and empty
-/// in production. Work consults
-/// them at named points, and the owner views below say which failures reach
-/// which owner, so no work site copies them field by field.
 pub const Hooks = struct {
-    /// Null uses production discovery; an empty fixture URL disables it.
     models_dev_url: ?[]const u8 = null,
     failures: std.EnumSet(Failure) = .empty,
     bash_lifecycle: bash.LifecycleFault = .none,
     pauses: std.EnumArray(std.meta.Tag(Pause), Hold) = .initFill(.{}),
     transition: ?TransitionGate = null,
-    /// Presence gates: the owner waits while the path exists.
     bash_reclaim_gate_path: ?[]const u8 = null,
     retry_recovery_gate_path: ?[]const u8 = null,
-    /// Fails the Output Retention queue's removals.
     retention_removal: bool = false,
     inspection_reply: Hold = .{},
     control_gate: ?ControlGate = null,
@@ -68,7 +59,6 @@ pub const Hooks = struct {
     observation_plan: ?TestObservation.Plan = null,
     sqlite_diagnostics: bool = false,
 
-    /// Spelled with hyphens by `--fault`.
     pub const Failure = enum {
         content_acquire,
         content_write,
@@ -90,7 +80,6 @@ pub const Hooks = struct {
         response_acquire,
         response_unlink,
         response_write,
-        /// Fails the next launched Transfer's response writes, then disarms.
         response_write_once,
         response_seal,
         response_metadata,
@@ -107,13 +96,10 @@ pub const Hooks = struct {
         bash_capture_write,
         bash_seal,
         bash_cleanup,
-        /// Bash faults strike only while the scratch fault gate exists.
         bash_fault_gated,
         report_unlink,
     };
 
-    /// Where a test may hold an owner for a delay, at a gate, or both. A
-    /// held launch or result is traced for the Attempt it holds.
     pub const Pause = union(enum) {
         action_launch: store_module.ActionAttemptBinding,
         model_launch: store_module.AttemptBinding,
@@ -121,7 +107,6 @@ pub const Hooks = struct {
         model_result: store_module.AttemptBinding,
         preparation_advanced,
         bash_exit_observed,
-        /// Shutdown signalled every effect; Bash grace has not been serviced.
         shutdown_signalled,
     };
 
@@ -137,13 +122,10 @@ pub const Hooks = struct {
         action_result_committed,
     };
 
-    /// Traces one Action transition and holds it at the gate.
     pub const TransitionGate = struct { transition: Transition, path: []const u8 };
 
-    /// Holds the listed control command keys once they hold the Store.
     pub const ControlGate = struct { keys: []const u8, path: []const u8 };
 
-    /// The Store commits a Host makes, each reached by its own failures.
     pub const StoreCommit = union(enum) {
         command,
         control: ?store_module.ControlTrace,
@@ -157,7 +139,6 @@ pub const Hooks = struct {
         return self.failures.contains(failure);
     }
 
-    /// The tag of `E` that test options spell with hyphens for underscores.
     pub fn fromOptionName(comptime E: type, name: []const u8) ?E {
         var buffer: [64]u8 = undefined;
         if (name.len > buffer.len or std.mem.indexOfScalar(u8, name, '_') != null) return null;
@@ -165,7 +146,6 @@ pub const Hooks = struct {
         return std.meta.stringToEnum(E, buffer[0..name.len]);
     }
 
-    /// Adds one `--fault` name: a Failure or a Bash lifecycle fault.
     pub fn inject(self: *Hooks, name: []const u8) error{UnknownFault}!void {
         if (std.mem.startsWith(u8, name, "bash-")) {
             if (fromOptionName(bash.LifecycleFault, name["bash-".len..])) |lifecycle| if (lifecycle != .none) {
@@ -216,8 +196,6 @@ pub const Hooks = struct {
         };
     }
 
-    /// `write_once_spent`: an earlier Transfer started with the one-shot
-    /// response write failure, which the execution owner records.
     pub fn transferFaults(self: *const Hooks, write_once_spent: bool) provider.Faults {
         return .{
             .request_read = self.fails(.request_read),
@@ -244,18 +222,12 @@ pub const Hooks = struct {
     }
 };
 
-/// What the hidden `host serve` test options narrow a Host to. Production
-/// spells none of them, so it runs on the defaults.
 pub const Tuning = struct {
-    /// Process facts read by the startup shell, not document settings.
     home: ?[]const u8 = null,
     fixtures: providers_module.Fixtures = .{},
     limits: Limits = .{},
     hooks: Hooks = .{},
 
-    /// `models_dev_env` is RUI_TEST_MODELS_DEV_URL, read when no option
-    /// names the catalog fixture. The `host serve` grammar bounds every
-    /// number, so `parsed` holds only values a Host accepts.
     pub fn fromOptions(parsed: *const cli_grammar.Parsed, models_dev_env: ?[]const u8) !Tuning {
         var tuning: Tuning = .{};
         const limits = &tuning.limits;
@@ -275,8 +247,6 @@ pub const Tuning = struct {
             hooks.pauses.getPtr(.model_result).delay_ms = delay;
         }
         hooks.pauses.getPtr(.model_result).gate_path = parsed.get("test-model-result-gate-path");
-        // The shared integration boundary sets an empty URL for every child,
-        // including detached Hosts. Only catalog cases explicitly opt in.
         hooks.models_dev_url = parsed.get("test-models-dev-url") orelse models_dev_env;
         hooks.retry_recovery_gate_path = parsed.get("test-retry-recovery-gate-path");
         hooks.inspection_reply.gate_path = parsed.get("test-inspection-reply-gate-path");
@@ -324,7 +294,6 @@ fn parseRetryWaits(value: []const u8) !retry_policy.Waits {
         wait.* = std.fmt.parseInt(u64, part, 10) catch return error.InvalidRetryWaits;
     }
     if (parts.next() != null) return error.InvalidRetryWaits;
-    // The Store rechecks the deadlines against its clock at startup.
     retry_policy.validateWaits(waits, 0) catch return error.InvalidRetryWaits;
     return waits;
 }
@@ -343,7 +312,6 @@ test "the hidden serve options narrow a Host" {
     try std.testing.expectEqual(@as(?usize, null), plain.limits.retention_entry_capacity);
     try std.testing.expect(!plain.hooks.phase_trace and plain.hooks.models_dev_url == null and plain.hooks.control_gate == null);
 
-    // The grammar bounds each number; these are its edges.
     try std.testing.expectEqual(@as(?usize, 2), (try tuningFor(&.{ "--test-retention-entry-capacity", "2" }, null)).limits.retention_entry_capacity);
     try std.testing.expectError(error.InvalidOptionValue, tuningFor(&.{ "--test-retention-entry-capacity", "1" }, null));
     try std.testing.expectError(error.InvalidOptionValue, tuningFor(&.{ "--test-before-launch-delay-ms", "10001" }, null));
@@ -357,7 +325,6 @@ test "the hidden serve options narrow a Host" {
     try std.testing.expectEqual(@as(i64, 0), held.hooks.pauses.get(.preparation_advanced).delay_ms);
     try std.testing.expectError(error.InvalidRetryWaits, tuningFor(&.{ "--test-retry-waits-ms", "1,2" }, null));
 
-    // A gate needs both its subject and its path.
     try std.testing.expectError(error.IncompleteControlGate, tuningFor(&.{ "--test-control-gate-keys", "k" }, null));
     try std.testing.expectError(error.IncompleteControlGate, tuningFor(&.{ "--test-control-gate-path", "/g" }, null));
     try std.testing.expectError(error.IncompleteTestTransitionGate, tuningFor(&.{ "--test-transition", "action-result-ready" }, null));
@@ -366,27 +333,16 @@ test "the hidden serve options narrow a Host" {
     try std.testing.expectEqual(Hooks.Transition.action_result_ready, gated.hooks.transition.?.transition);
     try std.testing.expectError(error.UnknownTestTransition, tuningFor(&.{ "--test-transition", "action_result_ready", "--test-transition-gate-path", "/t" }, null));
 
-    // An observation descriptor traces phases; the catalog option outranks
-    // its environment fallback.
     try std.testing.expect((try tuningFor(&.{ "--test-observation-fd", "3" }, null)).hooks.phase_trace);
     try std.testing.expectEqualStrings("env", (try tuningFor(&.{}, "env")).hooks.models_dev_url.?);
     try std.testing.expectEqualStrings("flag", (try tuningFor(&.{ "--test-models-dev-url", "flag" }, "env")).hooks.models_dev_url.?);
 }
 
-/// The execution owner's progress through the fixed Hooks, so Hooks stay
-/// read-only for every thread once the Host starts.
 pub const HookProgress = struct {
-    /// A Transfer started with the one-shot response write failure.
     response_write_once_spent: bool = false,
     retry_recovery: enum { initial, held, released } = .initial,
 };
 
-/// How far a Host has shut down. It only moves forward, under the launch
-/// gate, through `Host.advance`. `fenced` blocks new effect launches while
-/// owned work, retained cleanup and intake continue. `draining` is Host
-/// teardown after intake has returned: execution winds down, and a failure
-/// found while it does is still reported. `stopping` stops effects: it
-/// retires unhanded requests, closes the listener and winds execution down.
 pub const Phase = enum(u8) { open, fenced, draining, stopping };
 
 pub const Host = struct {
@@ -397,52 +353,29 @@ pub const Host = struct {
     instance: protocol.InstanceId = undefined,
     hooks: Hooks = .{},
     limits: Limits = .{},
-    /// What this Host serves, owned by its caller for the Host's life.
     providers: *const providers_module.Providers = &providers_module.none,
-    /// Named creation specs, borrowed from Host settings for the Host's life.
-    /// Never part of the Store or any Session after resolution (D22).
     presets: []const core_tools.Preset = &.{},
-    /// Each served provider's model list; the execution owner refreshes
-    /// the live ones.
     model_lists: ModelLists = .{},
     listings_requested: std.atomic.Value(bool) = .init(false),
     auth_worker: ?*AuthWorker = null,
-    /// The scratch account every request and response of this Host
-    /// charges; set by the execution owner when a provider is configured.
     scratch_budget: ?provider.ScratchBudget = null,
-    /// Execution-thread-owned per-Turn sticky routing; in memory only.
     turn_states: turn_states_module.PerProvider = .{},
-    /// Execution-thread-owned history memos: an index preallocated at
-    /// start, with span bytes in scratch files deleted at stop.
     history_memos: model_adapter.HistoryMemos = .{},
-    /// Execution-thread-owned progress through the fixed hooks.
     hook_progress: HookProgress = .{},
-    /// Execution-thread-owned, one per custody record and zero-mapped.
     bash_work: []BashWork = &.{},
-    /// Execution-thread-owned count of execution slot writes; it moves on
-    /// every slot change and nothing else.
     slot_changes: u64 = 0,
     bash_path: []const u8 = default_bash_path,
     bash_facts: environment.HostFacts = bash.default_facts,
-    /// Each Session's client environment; null in owner tests, whose Bash
-    /// then starts from the Host facts alone.
     environments: ?*SessionEnvironments = null,
     bash_timeout_ms: u64 = default_bash_timeout_ms,
-    /// MCP settings projection, owned and wiped after execution joins.
     mcp_servers: @import("mcp/servers.zig").Servers = .{},
     retention: *output_retention.Queue = undefined,
-    /// The Store directory for optional failed-response records; null in
-    /// owner tests that have no lease.
     failed_response_store: ?std.Io.Dir = null,
     custody: execution.CustodyPool = .{ .records = &.{} },
     phase: std.atomic.Value(Phase) = .init(.open),
     controls_changed: std.atomic.Value(bool) = .init(false),
-    /// Whether execution holds every new Turn (D193): Messages still queue
-    /// and running Turns go on. Host memory only; `host_pause` sets it.
     turns_paused: std.atomic.Value(bool) = .init(false),
     control_hint_suppressed: std.atomic.Value(bool) = .init(false),
-    /// Ends the dispatch loop's wait: a Store commit and a finished stream
-    /// set it from their own threads, and only the loop resets it.
     dispatch_wake: std.Io.Event = .unset,
     request_counter: std.atomic.Value(u64) = .init(0),
     intake_wake: ?std.posix.fd_t = null,
@@ -451,17 +384,21 @@ pub const Host = struct {
     scratch_used: std.atomic.Value(u64) = .init(0),
     launch_mutex: std.Io.Mutex = .init,
     trace_run_ns: u64 = 0,
-    /// Host Unix seconds, set once before the execution thread starts. An
-    /// Attempt admitted earlier cannot be held by this Host.
     started_at: u64 = 0,
     trace_sequence: u64 = 0,
     trace_lost: std.atomic.Value(bool) = .init(false),
     test_observation: ?*TestObservation = null,
     last_unprocessed_completions: ?u64 = null,
 
-    // Canonical permission belongs to Store; process-local permission belongs
-    // to Host. The Store handoff must enter this gate, in that lock order, for
-    // every effect. A preflight observation alone cannot authorize a launch.
+    pub fn dispatchCapacity(host: *const Host) store_module.ActionCapacityView {
+        return .{ .total = host.custody.records.len, .context = &host.custody, .freeFn = struct {
+            fn free(context: *const anyopaque) usize {
+                const pool: *const execution.CustodyPool = @ptrCast(@alignCast(context));
+                return pool.records.len - pool.occupied();
+            }
+        }.free };
+    }
+
     pub fn launchAllowed(self: *const Host) bool {
         return self.phase.load(.acquire) == .open;
     }
@@ -474,8 +411,6 @@ pub const Host = struct {
         return @backingInt(self.phase.load(.acquire)) >= @backingInt(Phase.draining);
     }
 
-    /// Moves the Host forward to `target`, never back, and returns the
-    /// phase it was in.
     pub fn advance(self: *Host, target: Phase) Phase {
         self.launch_mutex.lockUncancelable(self.io);
         defer self.launch_mutex.unlock(self.io);
@@ -484,16 +419,8 @@ pub const Host = struct {
         return previous;
     }
 
-    /// Stops the Host because someone asked: a `host-stop` control (pause,
-    /// stop, an Upgrade's swap) or a launcher closing stdin. When this ask is
-    /// what stops the Host, it leaves the stop record, so a client that later
-    /// finds the lease free does not take the stop for a crash. A stop the
-    /// Host began itself, after a fault, leaves none. Returns whether this
-    /// ask stopped the Host.
     pub fn stopAsked(self: *Host) bool {
         if (self.advance(.stopping) == .stopping) return false;
-        // The stop goes on without the record; a client then reads it as a
-        // crash and may start one Host the person meant to stop.
         self.lease.recordStopAsked() catch |err| stderr.print("rui: stop record not written: {s}\n", .{@errorName(err)});
         return true;
     }
@@ -506,21 +433,13 @@ pub const Host = struct {
     }
 };
 
-/// Each served provider's model list. A provider whose list is live
-/// (`Providers.liveList`) has its own, which execution fetches at Host start
-/// and on each model-list request; intake only signals refresh and renders
-/// known IDs. Every other provider shows the shipped catalog.
 pub const ModelLists = struct {
     io: std.Io = undefined,
     allocator: std.mem.Allocator = undefined,
     providers: *const providers_module.Providers = &providers_module.none,
     mutex: std.Io.Mutex = .init,
-    /// Each provider's list, under `mutex`. A live list's IDs are exact
-    /// length, from `allocator`.
     live: std.EnumArray(protocol.Provider, model_list.List) = .initFill(.catalog),
 
-    /// Pending for each provider whose live list execution will fetch, or
-    /// settle as unavailable; the catalog for every other.
     pub fn init(io: std.Io, allocator: std.mem.Allocator, providers: *const providers_module.Providers) ModelLists {
         var lists: ModelLists = .{ .io = io, .allocator = allocator, .providers = providers };
         for (std.enums.values(protocol.Provider)) |name| {
@@ -537,7 +456,6 @@ pub const ModelLists = struct {
         self.* = .{};
     }
 
-    /// Under the lock: intake renders while execution sets.
     pub fn set(self: *ModelLists, name: protocol.Provider, list: model_list.List) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -548,8 +466,6 @@ pub const ModelLists = struct {
         self.live.set(name, list);
     }
 
-    /// Publishes `name`'s fetched answer: its IDs, kept, or why there are
-    /// none. Only a provider with a live list has an answer to publish.
     pub fn publish(self: *ModelLists, name: protocol.Provider, body: anyerror![]const u8) void {
         const listing = self.providers.liveList(name).?.credential.listing().?;
         const list: model_list.List = if (keep(self.allocator, listing, body)) |bytes| .{ .live = .{ .bytes = bytes } } else |err| failed: {
@@ -559,8 +475,6 @@ pub const ModelLists = struct {
         self.set(name, list);
     }
 
-    /// The IDs of `body` as `listing` reads them, exact length from
-    /// `allocator`. Its scratch is mapped for the call, off the caller's stack.
     noinline fn keep(allocator: std.mem.Allocator, listing: providers_module.Listing, body: anyerror![]const u8) ![]const u8 {
         var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
         defer arena.deinit();
@@ -569,7 +483,6 @@ pub const ModelLists = struct {
         return allocator.dupe(u8, parsed.bytes);
     }
 
-    /// Each served provider's list, borrowed under the lock for `write`.
     pub fn render(self: *ModelLists, out: *std.Io.Writer, facts: []const @import("model_catalog.zig").Entry) !void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -584,34 +497,19 @@ pub const ModelLists = struct {
     }
 };
 
-// One Host-wide authentication I/O job: a launch lease, or one forced
-// refresh after a model 401. Canonical custody remains in the execution slot
-// while file locks, refresh TLS and persistence run here.
-/// The Host's one sign-in worker. It serves every served sign-in, one job
-/// at a time; each job names the sign-in it is for.
 pub const AuthWorker = struct {
     io: std.Io,
     mutex: std.Io.Mutex = .init,
     condition: std.Io.Condition = .init,
     state: State = .idle,
-    // Only .ready/.in_use own this final storage. The execution thread borrows
-    // it through launch; the worker never publishes a value copy of the lease.
     credential: providers_module.Lease = undefined,
-    /// The file and claims each acquisition reads through. The worker lives
-    /// in the execution Workspace, so only the pages an acquisition writes
-    /// become resident; a refresh maps its own storage for the call.
     work: providers_module.Work = undefined,
     stopping: bool = false,
 
-    /// A launch lease from a sign-in, or a forced refresh of one at the
-    /// rejected generation.
     const Job = union(enum) { acquire: providers_module.Authentication, refresh: providers_module.Credential.Refresh };
-    /// .requested stays set while the worker runs its job outside the lock.
     const State = union(enum) { idle, requested: Job, ready, in_use, refreshed: bool, failed: anyerror };
     const Result = union(enum) { ready: *const providers_module.Lease, refreshed: bool, failed: anyerror };
 
-    /// Only the execution thread requests and takes, so an idle worker stays
-    /// idle until that thread's next request.
     pub fn idle(self: *AuthWorker) bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -688,10 +586,6 @@ pub const AuthWorker = struct {
     }
 };
 
-/// The Bash state too large for an execution slot, kept in its custody
-/// record's entry of `Host.bash_work`: only records that ever held Bash make
-/// theirs resident, and a slot stays sized for model work. The slot's arm
-/// says which field is live.
 pub const BashWork = union {
     execution: bash.Execution,
     prepared_cleanup: bash.PreparedCleanup,
@@ -704,7 +598,6 @@ pub fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
 }
 
 pub fn wakeListener(host: *Host) void {
-    // Coalesced hints: a full nonblocking socket is already readable.
     if (host.intake_wake) |fd| _ = std.c.write(fd, "x", 1);
 }
 
@@ -722,9 +615,6 @@ pub fn beginTestObservation(host: *Host, phase: []const u8, subject: ?[]const u8
     return writer.begin(phase, subject);
 }
 
-/// Each trace below is an inline guard and a noinline body. A trace line
-/// needs a 3.3 KB ResponseBuffer; it lives only in the body's frame, which
-/// runs only while `phase_trace` is set, so no caller's frame holds it.
 pub fn writeTestTrace(host: *Host, trace: *protocol.ResponseBuffer, publication: *?TestObservation.Publication) void {
     if (!host.hooks.phase_trace) return;
     if (publication.*) |*value| value.record(trace.slice());
@@ -772,7 +662,6 @@ noinline fn writeSubjectTrace(host: *Host, phase: []const u8, subject_kind: []co
     writeTestTrace(host, &trace, &publication);
 }
 
-/// Tier 1 returns the input token unchanged; tier 2 advances only its generation.
 pub inline fn traceCommandObservation(host: *Host, key: []const u8, phase: []const u8) void {
     if (host.hooks.phase_trace) writeCommandObservationTrace(host, key, phase);
 }
@@ -809,8 +698,6 @@ noinline fn writeRequestTrace(host: *Host, phase: []const u8, request_number: u6
     writeTestTrace(host, &trace, &publication);
 }
 
-/// Local execution facts for inspection, read from another thread than the
-/// execution owner's.
 pub fn executionFacts(host: *Host) session_report.Execution {
     return .{
         .dispatch_fenced = !host.launchAllowed(),
@@ -1096,7 +983,6 @@ pub fn testTransition(host: *Host, transition: Hooks.Transition, binding: store_
     waitAtTestGate(host, gate.path);
 }
 
-/// Holds the calling owner at `point` for the test's delay and gate, if any.
 pub fn pause(host: *Host, point: Hooks.Pause) void {
     const hold = host.hooks.pauses.get(point);
     if (hold.delay_ms == 0 and hold.gate_path == null) return;
@@ -1111,9 +997,6 @@ pub fn pause(host: *Host, point: Hooks.Pause) void {
     if (hold.delay_ms != 0) host.io.sleep(.fromMilliseconds(hold.delay_ms), .awake) catch {};
 }
 
-/// The retry recovery gate lets one exhausted-retry recovery run, then holds
-/// later recoveries while the gate exists, never admission or the execution
-/// turn. One real call first preserves the full-drain counterexample.
 pub fn retryRecoveryHeld(host: *Host) bool {
     if (host.hook_progress.retry_recovery != .held) return false;
     if (testGateActive(host, host.hooks.retry_recovery_gate_path.?)) return true;
@@ -1129,9 +1012,6 @@ pub fn retryRecovered(host: *Host) void {
     traceSubject(host, "exhausted_retry_recovery_held", "path", path);
 }
 
-/// The Bash reclaim gate holds closed Bash custody while the path exists.
-/// Its release is one owner transition, traced once, not reclamation retry
-/// history: `attempted` says whether this owner already tried to reclaim.
 pub fn bashReclaimHeld(host: *Host, binding: store_module.ActionAttemptBinding, attempted: bool) bool {
     const path = host.hooks.bash_reclaim_gate_path orelse return false;
     if (testGateActive(host, path)) return true;
@@ -1218,8 +1098,6 @@ fn appendOptionalSigned(
     } else try trace.append("null");
 }
 
-/// A Transfer's connection reuse and request correlation, for tests. Only a
-/// Host serving a sign-in traces it: the managed-route journeys read it.
 pub inline fn traceTransfer(host: *Host, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {
     if (host.providers.anySignIn() and host.hooks.phase_trace) writeTransferTrace(host, transfer, binding);
 }
@@ -1346,9 +1224,6 @@ test "every --fault name reaches its own hook and nothing else" {
 }
 
 test "inspection counts held custody, not an in-flight admission reservation" {
-    // The execution owner reserves before each admission probe and releases
-    // when nothing is runnable. Inspection reads from another thread, so it
-    // must not report that probe as a second custody beside gated cleanup.
     var records: [2]execution.CustodyRecord = @splat(.{});
     var host = Host{
         .io = std.testing.io,
@@ -1363,7 +1238,6 @@ test "inspection counts held custody, not an in-flight admission reservation" {
     try host.custody.detach(cleanup);
     const probe = host.custody.reserve().?;
     try std.testing.expectEqual(@as(usize, 1), executionFacts(&host).custody_occupied);
-    // The reservation still blocks reuse and stays visible to reconciliation.
     try std.testing.expectEqual(@as(usize, 2), host.custody.occupied());
     try std.testing.expect(host.custody.reserve() == null);
     try host.custody.releaseUnused(probe);
@@ -1439,7 +1313,6 @@ test "effect launch gate rechecks every Host phase" {
             .lease = undefined,
             .store = undefined,
         };
-        // The preflight result is deliberately stale before the real gate.
         try std.testing.expect(host.launchAllowed());
         _ = host.advance(phase);
         var calls: usize = 0;
@@ -1511,17 +1384,14 @@ test "an asked stop leaves the stop record only when it is what stops the Host, 
         try lease.prepareForServing(false);
         try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
         var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined };
-        // A stop the Host began itself, after a fault, is not an ask.
         _ = host.advance(before);
         try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
         const stopped = before != .stopping;
         try std.testing.expectEqual(stopped, host.stopAsked());
         try std.testing.expect(host.stopping());
         try std.testing.expectEqual(if (stopped) platform.StoreLease.LastStop.asked else .unasked, platform.StoreLease.lastStop(io, path));
-        // A repeated ask, as a retried host-stop, changes nothing.
         try std.testing.expect(!host.stopAsked());
         try std.testing.expectEqual(if (stopped) platform.StoreLease.LastStop.asked else .unasked, platform.StoreLease.lastStop(io, path));
-        // The next Host start removes it before serving.
         try lease.prepareForServing(false);
         try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
     }
@@ -1538,8 +1408,6 @@ test "each provider's model list is published and rendered on its own" {
     const facts: []const catalog.Entry = &.{.{ .id = "gpt-6-sol", .context_window = null, .efforts = .{}, .openai_listed = true }};
     var bytes: [4096]u8 = undefined;
     var out = std.Io.Writer.fixed(&bytes);
-    // Until each fetch answers, each live list is pending; the device
-    // sign-in shows the catalog.
     try lists.render(&out, facts);
     try std.testing.expectEqualStrings(
         "[{\"provider\":\"codex\",\"source\":\"catalog\",\"models\":[{\"id\":\"gpt-6-sol\",\"known\":true}]}," ++
@@ -1547,8 +1415,6 @@ test "each provider's model list is published and rendered on its own" {
             "{\"provider\":\"chatgpt\",\"source\":\"pending\",\"models\":[{\"id\":\"gpt-6-sol\",\"known\":true}]}]",
         out.buffered(),
     );
-    // Each answer is read in its own route's shape, in the server's order,
-    // and settles only its own provider; a failure falls back alone.
     lists.publish(.chatgpt, "{\"models\":[{\"slug\":\"gpt-6-terra\",\"visibility\":\"list\"},{\"slug\":\"secret\",\"visibility\":\"hide\"},{\"slug\":\"gpt-6-sol\",\"visibility\":\"list\"}]}");
     lists.publish(.openai, error.ListingRefused);
     out = std.Io.Writer.fixed(&bytes);
@@ -1559,8 +1425,6 @@ test "each provider's model list is published and rendered on its own" {
             "{\"provider\":\"chatgpt\",\"source\":\"live\",\"models\":[{\"id\":\"gpt-6-terra\",\"known\":false},{\"id\":\"gpt-6-sol\",\"known\":true}]}]",
         out.buffered(),
     );
-    // An OpenAI-shaped answer is not a plan's list; a later answer replaces
-    // the kept one, freeing it.
     lists.publish(.chatgpt, "{\"data\":[{\"id\":\"gpt-6-luna\"}]}");
     try std.testing.expect(lists.live.get(.chatgpt) == .catalog_fallback);
     lists.publish(.openai, "{\"data\":[{\"id\":\"gpt-6-luna\"}]}");

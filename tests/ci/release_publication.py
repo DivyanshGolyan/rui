@@ -1,4 +1,3 @@
-"""Publish complete immutable releases, then repair the stable compatibility pointer."""
 import hashlib
 import json
 import os
@@ -58,7 +57,6 @@ def expected_assets(version):
 
 
 def inventory():
-    """Read every release, including drafts; API errors must not become absence."""
     try:
         pages = json.loads(gh("api", "--paginate", "--slurp",
                               f"repos/{_repository()}/releases"))
@@ -129,7 +127,6 @@ def _verify_directory(version, directory):
 
 
 def verify_release(version, record):
-    """Check the full remote asset set and its bytes, whether public or draft."""
     _check_names(version, _asset_names(version, record))
     with tempfile.TemporaryDirectory(prefix="rui-release-") as scratch:
         for asset in record["assets"]:
@@ -193,7 +190,6 @@ def _upload_url(record, name):
 
 
 def publish(version, sha, directory, notes):
-    """Use the acknowledged release ID, never a collection index, during publication."""
     _verify_directory(version, directory)
     sha = _commit(sha)
     record = _record(version)
@@ -247,7 +243,6 @@ def _ancestor(ancestor, commit):
 
 
 def repair_stable(sha):
-    """Fast-forward stable after a verified publication, never rewind or force it."""
     remote = git("ls-remote", "--heads", "origin", "refs/heads/main", "refs/heads/stable")
     refs = dict(reversed(line.split()) for line in remote.splitlines())
     if "refs/heads/main" not in refs:

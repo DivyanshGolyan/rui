@@ -1,4 +1,3 @@
-"""Catalog fixture oracles separate optional stderr from canonical outcomes."""
 import contextlib
 import io
 from pathlib import Path
@@ -10,7 +9,6 @@ import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
-# The fixture libraries bind their executable from argv even when only imported.
 with patch.object(sys, "argv", ["codex_h2_integration.py", "unused-rui"]):
     import codex_h2_integration as catalog
 
@@ -136,8 +134,6 @@ class CatalogDiagnosticsTest(unittest.TestCase):
                     self.run_fixture(case, **mutation)
 
     def test_required_provider_setup_failure_keeps_its_classification(self):
-        # A provider Host refuses the proxy before readiness (#1093): a ready
-        # line means the cause was left to race the startup stderr custody.
         mutations = ({"required_code": 0}, {"required_stderr": "wrong failure"},
                      {"required_stdout": "ready socket=fixture.sock\n"},
                      {"required_stderr": REQUIRED_FAILURE + "\nmodels.dev catalog unavailable"})

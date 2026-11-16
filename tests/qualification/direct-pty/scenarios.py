@@ -1,4 +1,3 @@
-"""Real frontend scenarios; each interpreter owns one HOME/Store/Host/provider."""
 import json
 import os
 import pathlib
@@ -36,7 +35,6 @@ class Fixture:
             self.home, self.store = self.root / "h", self.root / "s"
             self.home.mkdir(mode=0o700)
             self.env.update(HOME=str(self.home), TERM="xterm-256color")
-            # Host fixture uses inherited HOME; one interpreter per row.
             os.environ.update(HOME=str(self.home))
         with defer_signals():
             self.endpoint = model.SuccessEndpoint([])
@@ -56,8 +54,6 @@ class Fixture:
         assert len(self.session) == 6 and all(c in "0123456789abcdefghjkmnpqrstvwxyz" for c in self.session), configuration
         assert configuration["answer"]["created"] is True, configuration
         codex.credentials(self.home / ".config/rui/codex.json")
-        # Public Configure itself captures one request; input refusal must not
-        # create another, rather than pretending fixture setup created none.
         self.capture_baseline = set((self.home / ".config/rui/requests").glob("*.json"))
 
     def answer(self, marker, gate=None, *, text=None):
@@ -74,7 +70,6 @@ class Fixture:
         return self.tty
 
     def save(self):
-        # Synthetic provider requests only; never copy HOME, Store or credentials.
         if self.endpoint is not None:
             (self.output / "requests.json").write_text(json.dumps(
                 [json.loads(body) for body in self.endpoint.requests], ensure_ascii=False, indent=2))
@@ -86,8 +81,6 @@ class Fixture:
             (self.output / "screen.txt").write_text(self.tty.screen.completed)
 
     def close(self):
-        # Release all deliberate holds first, then reap caller before restoring
-        # ReplyProxy's socket path. No caller can observe its old rename gap.
         dispose_all(*(gate.set for gate in self.gates),
             lambda: self.tty.close() if self.tty is not None else None,
             self.save,
@@ -129,13 +122,11 @@ def chunks(tty, vector):
 
 
 def leave(tty):
-    """Detach via the raw Ctrl-C key and retain all terminal-restoration checks."""
     tty.send(b"\x03")
     tty.finish()
 
 
 def escaped_overview(tty, conversation):
-    """A standalone Esc returns to the list, never to another editor."""
     tty.wait(lambda: all(marker in tty.screen.completed for marker in
                          ("+ New Session", conversation, "Settings", "enter open")),
              label="overview after expired standalone Esc")
@@ -151,9 +142,6 @@ def editor(fixture, row):
     fixture.answer("TD4 exact answer")
     tty = fixture.terminal()
     if "reopen_draft" in row:
-        # Configure-only chats intentionally disappear from the overview on
-        # departure. Admit a real Message through this same chat so its sole
-        # row remains available for the draft save/restore vector below.
         tty.send(b"TD4 saved conversation\r")
         tty.marker("TD4 saved conversation answer")
         tty.draft("", 2)
@@ -161,18 +149,10 @@ def editor(fixture, row):
         assert_submitted(fixture.endpoint.requests, list(expected))
     chunks(tty, row["chunks"])
     if "reopen_draft" in row:
-        # The expired standalone Esc leaves the chat, saving its draft. Enter
-        # reopens the sole, now-populated Session. Its initial empty entry may
-        # have left overview navigation on pinned New Session, so select the
-        # first conversation explicitly instead of relying on chat selection.
-        # If Esc merged with a later byte, this overview observation must fail.
         escaped_overview(tty, "TD4 saved conversation")
         tty.send(b"\x1b[H\x1b[B\x1b[B\r")
-        # The reopened chat retains its own draft and caret.
         tty.draft(row["reopen_draft"], 2 + len(row["reopen_draft"]))
         chunks(tty, row["submit_chunks"])
-    # Each vector supplies its own submit byte(s). This makes wrong Enter,
-    # swallowed suffix and accidental multi-Message behavior observable.
     tty.marker("TD4 exact answer")
     tty.draft("", 2)
     expected.append(row["expected"])
@@ -198,7 +178,6 @@ def recovery(fixture, row):
     release = threading.Event()
     fixture.answer("TD4 original answer", release)
     fixture.answer("TD4 next answer")
-    # Install before any caller starts; no concurrent frontend socket borrower.
     with defer_signals():
         fixture.proxy = ReplyProxy(fixture.host, "/v1/message",
             lambda response: b"" if len(fixture.proxy.exchanges) == 1 else response)
@@ -231,13 +210,11 @@ HISTORY_LINES = 100
 
 
 def navigation_rows(screen):
-    """Feed capacity from the composer boundary, not from visible history."""
     lines = screen.splitlines()
     prompts = [at for at, line in enumerate(lines) if re.match(r"\s*[›>]($|\s)", line)]
     assert len(prompts) == 1, ("navigation composer", prompts)
     top_rule = prompts[0] - 1
     assert top_rule > 1 and set(lines[top_rule].strip()) in ({"─"}, {"-"}), ("navigation composer rule", lines)
-    # One permanently reserved marker row directly precedes the input.
     return top_rule - 1
 
 
@@ -247,16 +224,11 @@ def navigation_first(live_first, feed_rows, back):
 
 def assert_navigation_history(screen, first, browsing, feed_rows):
     assert navigation_rows(screen) == feed_rows, ("navigation feed capacity changed", screen)
-    # The answer's last line takes one feed row at end. Away from end all
-    # feed rows hold numbered lines, followed by the separately reserved chip.
     count = feed_rows if browsing else feed_rows - 1
     expected = [f"History line {number:03d}" for number in range(first, min(first + count, HISTORY_LINES))]
     lines = screen.splitlines()
     actual = [found.group(0) for found in (re.match(r"History line \d{3}", line.strip()) for line in lines) if found]
     assert actual == expected, ("navigation history anchor/distance", actual, expected)
-    # Scrolled back, the `↓` marker sits alone at the right of the row
-    # under the last history line, and nothing new arrived below; at the
-    # latest it is gone.
     marked = [number for number, line in enumerate(lines) if re.search(r"↓( \d+ new)?\s*$", line)]
     assert len(marked) == (1 if browsing else 0), ("navigation marker", marked)
     assert not browsing or (lines[marked[0]].strip() == "↓" and expected[-1] in lines[marked[0] - 1]), \
@@ -264,7 +236,6 @@ def assert_navigation_history(screen, first, browsing, feed_rows):
 
 
 def chat_info_ready(tty, folder):
-    """Observe actual settings, not a notice or the retired inspection page."""
     fields = ("Effort", "Permissions", "Tools", "Folder", "Model")
     actions = ("Rename", "Archive", "Copy last answer")
     def ready():
@@ -284,8 +255,6 @@ def chat_info_ready(tty, folder):
 
 
 def navigation(fixture, row):
-    # A real completed answer supplies enough history for page and wheel input
-    # to move the viewport; an empty Session cannot distinguish ignored keys.
     fixture.answer("TD4 history end", text="\n".join(
         [f"History line {number:03d}" for number in range(HISTORY_LINES)] + ["TD4 history end"]))
     tty = fixture.terminal()
@@ -297,14 +266,9 @@ def navigation(fixture, row):
     live_first = HISTORY_LINES + 1 - feed_rows
 
     def scrolled_back():
-        # The answer's last line leaves the screen once the view is above the
-        # latest.
         return "TD4 history end" not in tty.screen.completed
 
     def history(first, browsing):
-        # A later printable byte witnesses consumption of all preceding input,
-        # not just an intermediate frame from a repeated-key batch. This is an
-        # ordered editor observation, not a kernel-arrival timestamp.
         tty.send(b"~")
         tty.draft("~", 3)
         assert scrolled_back() == browsing, "navigation view changed before ordered marker"

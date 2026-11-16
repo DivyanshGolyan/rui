@@ -1,4 +1,3 @@
-"""Wire-release invalidation reruns only the current PR's policy job checked before publication."""
 from contextlib import redirect_stderr, redirect_stdout
 import io
 import os
@@ -15,12 +14,10 @@ import recheck_wire_prs as owner
 
 REPO = "owner/repo"
 FORK = "contributor/repo"
-# Fixture runs and policy jobs start before publication unless a test says otherwise.
 PUBLISHED_AT = "2026-11-13T12:00:00Z"
 PUBLISHED = owner.timestamp(PUBLISHED_AT)
 BEFORE, AT, AFTER = "2026-11-13T11:00:00Z", PUBLISHED_AT, "2026-11-13T12:00:01Z"
 NOW = owner.timestamp("2026-11-13T12:05:00Z")
-# GitHub's rerun limit counts from the run's creation: exactly 30 days is still rerunnable.
 WINDOW_EDGE, EXPIRED = "2026-10-14T12:05:00Z", "2026-10-14T12:04:59Z"
 
 
@@ -115,7 +112,6 @@ class SelectionTest(unittest.TestCase):
                 self.assertIsNone(self.select(runs=[unrelated], jobs=[job(200, run_id=20)]).job_id)
 
     def test_fork_head_run_without_pull_requests_is_the_prs_run(self):
-        # GitHub lists no pull_requests on a run whose head is in a fork.
         fork_pr = pull(head=head(repo=FORK))
         fork_run = run(head_repository={"full_name": FORK}, pull_requests=[])
         self.assertEqual(self.select(pr=fork_pr, runs=[fork_run]).job_id, 100)
@@ -150,7 +146,6 @@ class SelectionTest(unittest.TestCase):
                 self.assertIn("checks after publication", after.reason)
 
     def test_restarted_attempt_uses_its_own_policy_start(self):
-        # A rerun of the run after publication is a new attempt that reads the tag itself.
         attempt = run(run_attempt=2, run_started_at=AFTER)
         self.assertIsNone(self.select(runs=[attempt], jobs=[job(run_attempt=2, started_at=AFTER)]).job_id)
         self.assertEqual(self.select(runs=[attempt], jobs=[job(run_attempt=2)]).job_id, 100)
@@ -162,7 +157,6 @@ class SelectionTest(unittest.TestCase):
         self.assertFalse(expired.waiting)
         self.assertIn("older than GitHub's 30-day rerun limit; push to the PR to start a fresh run", expired.reason)
         self.assertEqual(self.select(runs=[run(created_at=WINDOW_EDGE)]).job_id, 100)
-        # A run that checked after publication needs no rerun, whatever its age.
         self.assertFalse(self.select(runs=[run(created_at=EXPIRED)], jobs=[job(started_at=AFTER)]).failed)
 
     def test_publication_time_must_be_a_zoned_github_timestamp(self):
@@ -185,7 +179,6 @@ class SelectionTest(unittest.TestCase):
 
 
 class GitHub:
-    """Independent paginated REST snapshots, never an actual rerun request."""
     def __init__(self):
         self.pulls = [pull()]
         self.files = {1: files("openapi.json")}
@@ -198,7 +191,7 @@ class GitHub:
         self.calls = []
         self.posts = []
         self.fail = None
-        self.fail_count = None  # None: every call to the failing path fails
+        self.fail_count = None
         self.next_runs = None
         self.run_reads = 0
 
@@ -207,7 +200,6 @@ class GitHub:
         parsed = urlsplit(endpoint)
         path = parsed.path.removeprefix(f"repos/{REPO}/")
         query = parse_qs(parsed.query)
-        # A failing run listing fails only PR #1's head, so other PRs can be served.
         if self.fail == path and query.get("head_sha", ["current-head"]) == ["current-head"] \
                 and self.fail_count != 0:
             if self.fail_count is not None:
@@ -261,7 +253,6 @@ class Clock:
 
 class AdapterTest(unittest.TestCase):
     def setUp(self):
-        # main() reads the wall clock; pin it so fixture runs stay inside the rerun limit.
         patcher = mock.patch.object(owner, "utc_now", lambda: NOW)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -384,8 +375,6 @@ class AdapterTest(unittest.TestCase):
         api, output = GitHub(), io.StringIO()
         def hung_api(method, endpoint):
             if "/files?" in endpoint:
-                # No timing assertion: the alarm must terminate this blocked
-                # subprocess through subprocess.run's exception cleanup.
                 subprocess.run([sys.executable, "-c", "import signal; signal.pause()"],
                                check=True, capture_output=True, text=True)
                 self.fail("watchdog did not interrupt API subprocess")
@@ -552,7 +541,6 @@ class AdapterTest(unittest.TestCase):
                 self.assertEqual(status, 1)
                 self.assertEqual(api.posts, ["actions/jobs/200/rerun"])
                 self.assertIn("Retry PR #1 next poll: API error: HTTP 403: denied", output)
-                # Discovery and the first poll each try the file list before any sleep.
                 retries_without_sleep = 2 if endpoint == "pulls/1/files" else 1
                 self.assertEqual(clock.sleeps, [60] * (owner.MAX_API_FAILURES - retries_without_sleep))
                 message = output.split("::error::")[-1]

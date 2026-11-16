@@ -1,5 +1,3 @@
-//! Message Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -14,7 +12,7 @@ const store_testing = @import("../testing.zig");
 const AcceptedMessage = command_domain.AcceptedMessage;
 const ActionExecutionInput = action_domain.ActionExecutionInput;
 const ContentReader = content_domain.ContentReader;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
 const completeMessage = store_testing.completeMessage;
@@ -45,8 +43,6 @@ test "a creating Message with require_model creates nothing without a model" {
             const refused = storage.submitMessageWithModel(&message, null, .{});
             try std.testing.expectEqual(protocol.MessageRejection.model_capability_unavailable, refused.rejected.code);
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
-            // The saved refusal replays even once a model is available, and the
-            // same key without the condition is a different request.
             storage.served = protocol.routesAll(.endpoint);
             try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}).rejected.replayed);
             var unconditional = message;
@@ -130,8 +126,6 @@ test "initial Message atomically allocates its Session and replays its original 
 test "message rejections replay before current Session checks without retained input" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            // Fix entropy so a real allocation makes the formerly unknown target live.
-            // Replay must still return the original rejection, not re-run admission.
             const Entropy = struct {
                 fn random(_: ?*anyopaque, bytes: []u8) std.Io.RandomSecureError!void {
                     @memset(bytes, 0);
@@ -187,7 +181,6 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             defer storage.close() catch unreachable;
             const sender_id = try configureTestSession(&storage, "configure-sender");
             const sender = sender_id.slice();
-            // Pages retain the complete allocated identity, not a display alias.
             _ = try configureTestSession(&storage, "configure-neighbour");
             const allocated_session_1 = try configureTestSession(&storage, "configure-receiver");
             var tools: wire_request.ConfigureCommand = .{};
@@ -200,7 +193,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             try submitTestMessage(&storage, &tmp, "sender-seed", "sender-seed", sender, "send a report");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, model, "sender-calls");
-            const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+            const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
             var input: ActionExecutionInput = undefined;
             try storage.readActionExecutionInput(.bash, action, &input);
             const handle = input.sender_handle;
@@ -232,7 +225,6 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             try std.testing.expectEqual(@as(usize, 1), commits.count);
             try std.testing.expect(commits.calls[0].from_peer);
             try std.testing.expectEqual(accepted.accepted.admission_id, commits.calls[0].admission_id);
-            // The sender is part of the request: the same key without it conflicts.
             var anonymous = try Send.make(tmp.dir, storage.storeId(), "peer-send-anonymous", allocated_session_1.slice(), null, "look at this\nsecond line");
             defer anonymous.removeTemporaryContent(std.testing.io) catch unreachable;
             try anonymous.key.set("peer-send");
@@ -242,7 +234,6 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             refused.sender_handle = handle;
             defer refused.removeTemporaryContent(std.testing.io) catch unreachable;
             try std.testing.expectEqual(protocol.MessageRejection.unknown_session, storage.submitMessageWithModel(&refused, commits.callback(), .{}).rejected.code);
-            // A rejected Message installs nothing.
             try std.testing.expectEqual(@as(usize, 1), commits.count);
 
             var forged = try Send.make(tmp.dir, storage.storeId(), "peer-forged", allocated_session_1.slice(), "f0rged", "forged");
@@ -250,8 +241,6 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             try std.testing.expectEqual(protocol.MessageRejection.invalid_sender_handle, storage.submitMessageWithModel(&forged, null, .{}).rejected.code);
             const forged_replay = storage.submitMessageWithModel(&forged, null, .{});
             try std.testing.expect(forged_replay.rejected.replayed and forged_replay.rejected.code == .invalid_sender_handle);
-            // Every invalid binding must leave both receiver admission and the
-            // falsely claimed sender's Activity untouched.
             for (0..5) |variant| {
                 var invalid = sent;
                 var key_buffer: [32]u8 = undefined;
@@ -269,8 +258,6 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             var changed_handle = sent;
             changed_handle.sender_handle = null;
             try std.testing.expect(storage.submitMessageWithModel(&changed_handle, null, .{}) == .conflict);
-            // An invalid target is refused first, whichever sender: an unknown one
-            // claims no sequence position, and the Store stays open.
             for ([_]struct { key: []const u8, from: []const u8 }{
                 .{ .key = "peer-empty-forged", .from = "f0rged" },
                 .{ .key = "peer-empty-known", .from = sender },
@@ -280,7 +267,6 @@ test "a peer sender is resolved from its Action handle and exact replays survive
                 defer empty.removeTemporaryContent(std.testing.io) catch unreachable;
                 try std.testing.expectEqual(protocol.MessageRejection.invalid_session_reference, storage.submitMessageWithModel(&empty, null, .{}).rejected.code);
             }
-            // An unknown sender has no sequence: only the known sender's refusals are kept.
             try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM sent_rejection", .{}));
             try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSessionForTesting(allocated_session_1.slice())).pending_messages);
 
@@ -291,8 +277,6 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             const peer = received.items[0].value.received.sender.?;
             try std.testing.expectEqualStrings(sender, peer.session.slice());
             {
-                // The receiver's row names that peer as its starter; no person has
-                // messaged it.
                 var listed = try testingListRow(&storage, &tmp, allocated_session_1.slice());
                 defer listed.deinit();
                 try std.testing.expectEqualStrings(sender, listed.get(&.{ "first_message", "sender", "session" }).string);
@@ -307,8 +291,6 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             try std.testing.expect(own.items[2].value.send_failed.target == null);
             const out = own.items[0].value.sent;
             try std.testing.expectEqual(accepted.accepted.admission_id, out.admission);
-            // One Message's two rows share its admission time; a refused send is
-            // dated by its refusal.
             try std.testing.expectEqual(out.admitted_at, own.items[0].at);
             try std.testing.expectEqual(received.items[0].at, own.items[0].at);
             for (own.items[1..3]) |failure| try std.testing.expectEqual(200 + failure.position, failure.at);
@@ -318,8 +300,6 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             try std.testing.expectEqualStrings("unknown_session", failed.code.slice());
             try std.testing.expect(own.items[0].position < own.items[1].position);
             {
-                // Each peer row names the peer by its label as it is now; a peer
-                // without one, or one the Store never held, has none.
                 try std.testing.expectEqual(@as(usize, 0), out.target.label.len);
                 try std.testing.expectEqual(@as(usize, 0), failed.target.?.label.len);
                 try store_testing.exec(&storage, "UPDATE session SET label='Review the WAL' WHERE session_ref=?1", .{allocated_session_1.slice()});
@@ -337,15 +317,13 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             var stale = sent;
             try stale.key.set("stale-handle");
             try std.testing.expectEqual(protocol.MessageRejection.invalid_sender_handle, storage.submitMessageWithModel(&stale, null, .{}).rejected.code);
-            // The sent row's bytes are the Message's, read through the sender.
             var reader: ContentReader = undefined;
             reader.open(try storage.openActivityContent(&.{ .session = session, .position = own.items[0].position }));
             reader.close();
 
-            // The model's historical view carries the recorded sender, not text.
             var admitted = (try storage.admitNextModelAttempt(.{})).?;
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(try admitted.permit.consume(), &view);
+            var view: TestingPage = undefined;
+            view.open(&storage, try admitted.permit.consume());
             defer view.close();
             const entry = (try view.nextEntry(0)).?;
             try std.testing.expect(entry.kind == .user);
@@ -373,7 +351,7 @@ test "refused peer creation activity keeps invalid targets absent" {
             try submitTestMessage(&storage, &tmp, "creation-refusal-seed", "creation-refusal-seed", sender.slice(), "start another Session");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, model, "creation-refusal-calls");
-            const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+            const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
             var input: ActionExecutionInput = undefined;
             try storage.readActionExecutionInput(.bash, action, &input);
             const before = try store_core.activityPageForTesting(&storage, .{ .session = sender });
@@ -404,8 +382,6 @@ test "refused peer creation activity keeps invalid targets absent" {
             try std.testing.expectEqualSlices(u8, &refused.rejected.content.digest, &replay.rejected.content.digest);
             try std.testing.expectEqual(@as(usize, 0), commits.count);
 
-            // A refusal records its answer and one sender position, not a child,
-            // configuration revision or first-Message admission.
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{}));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission", .{}));
@@ -449,16 +425,12 @@ test "refused peer creation activity keeps invalid targets absent" {
                     return .{ .facts = try store_core.activityPageForTesting(store, request), .request = request };
                 }
             };
-            // These spellings are independent invalid examples, including
-            // six-byte strings that fail grammar rather than merely width.
             const malformed = [_][]const u8{ "", "short", "k7m2qi", "K7m2qx", "k7\x00mqx", "雪雪", "1234567" };
             const invalid_count = malformed.len + protocol.max_session_bytes + 1;
             var times: [invalid_count + 3]u64 = undefined;
             times[0] = item.at;
             const wide: [protocol.max_session_bytes]u8 = @splat('X');
             for (0..invalid_count) |index| {
-                // Every supported width 0..128 is covered; uppercase X is
-                // independently invalid even at the otherwise valid width 6.
                 const attempted = if (index < malformed.len) malformed[index] else wide[0 .. index - malformed.len];
                 var invalid = message;
                 invalid.configuration = null;
@@ -554,8 +526,6 @@ test "refused peer creation activity keeps invalid targets absent" {
             try std.testing.expectEqualStrings("absent", filtered_last.facts.items[0].value.send_failed.target.?.session.slice());
             try std.testing.expect(!filtered_last.facts.more);
 
-            // Fixed-end pagination must retain every refusal between the
-            // sender's older work and the accepted creation, in both directions.
             for ([_]@FieldType(protocol.ActivityPage, "direction"){ .forward, .backward }) |direction| {
                 var cursor: protocol.ActivityPage = .{ .end = end, .position = if (direction == .forward) before.end else 0, .direction = direction };
                 var seen: usize = 0;
@@ -735,7 +705,6 @@ test "message conflicts and failed commits cannot create another admission" {
             defer message.removeTemporaryContent(std.testing.io) catch unreachable;
             var commits: TestingCommits = .{};
             try std.testing.expect(storage.submitMessageWithModel(&message, commits.callback(), .{ .before_commit = true }) == .infrastructure_failure);
-            // A Message that did not commit installs nothing.
             try std.testing.expectEqual(@as(usize, 0), commits.count);
             try storage.close();
 

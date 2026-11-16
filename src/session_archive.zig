@@ -1,5 +1,3 @@
-//! Organization is independent of a Session's work state. A pending archive
-//! remains unarchived until the Host has fully settled its work.
 const std = @import("std");
 
 pub const State = enum { active, archiving, archived };

@@ -9,7 +9,6 @@ pub const Observation = struct {
 
 extern "c" fn rui_raise_descriptor_limit(required: usize) c_int;
 
-/// Best effort: an OS refusal selects reduced intake, not a startup failure.
 pub fn raise(required: usize) void {
     _ = rui_raise_descriptor_limit(required);
 }
@@ -21,8 +20,6 @@ pub fn convertQuery(result: c_int, current: u128, infinity: u128) !?usize {
     return @intCast(current);
 }
 
-/// Observe the inherited population and RLIMIT_NOFILE before Rui creates any
-/// Host descriptor owner. The temporary enumeration directory is excluded.
 pub fn observe(io: std.Io) !Observation {
     const directory_path = switch (builtin.os.tag) {
         .linux => "/proc/self/fd",

@@ -1,19 +1,6 @@
-//! Blocking work for one connection setup, on a short-lived thread of its
-//! own: a name lookup, or a SecTrust evaluation on macOS. Internal.
-//!
-//! A job owns nothing but its work: no socket, no session, no stream. The
-//! thread exists only while the work runs, so an idle Client holds no
-//! thread. The job is shared by two references, the owner's and the
-//! thread's; whichever lets go last frees it. Finished work wakes the
-//! owner's `wait`, unless the owner abandoned it first (the connection or
-//! Client closed), in which case the thread only frees the job. A thread
-//! may outlive `Client.deinit` until its work returns, which nothing can
-//! interrupt.
 const std = @import("std");
 const Waker = @import("Waker.zig");
 
-/// `Work` has `fn run(*Work) void`, called once on the job's thread, and
-/// may have `fn deinit(*Work) void`, called when the job is freed.
 pub fn Job(comptime Work: type) type {
     return struct {
         const Self = @This();
@@ -24,10 +11,7 @@ pub fn Job(comptime Work: type) type {
         waker: *Waker,
         work: Work,
 
-        /// Starts `work` and returns the owner's reference, or null when no
-        /// thread could be started (and `work` was deinitialized).
         pub fn start(waker: *Waker, work: Work) ?*Self {
-            // Freed by whichever thread lets go last, so not the Client's allocator.
             const self = std.heap.c_allocator.create(Self) catch {
                 var unused = work;
                 deinitWork(&unused);
@@ -45,22 +29,18 @@ pub fn Job(comptime Work: type) type {
             return self;
         }
 
-        /// A job whose `work` is already done, with no thread: the owner's
-        /// reference alone. A test's stand-in for work it controls.
         pub fn finished(waker: *Waker, work: Work) ?*Self {
             const self = std.heap.c_allocator.create(Self) catch return null;
             self.* = .{ .mutex = .{}, .references = 1, .state = .done, .waker = waker, .work = work };
             return self;
         }
 
-        /// Owner thread: the finished work, null while it runs.
         pub fn result(self: *Self) ?*const Work {
             self.lock();
             defer self.unlock();
             return if (self.state == .done) &self.work else null;
         }
 
-        /// Owner thread: lets go of the owner's reference. No wake follows.
         pub fn release(self: *Self) void {
             self.lock();
             if (self.state == .running) self.state = .abandoned;
@@ -76,7 +56,6 @@ pub fn Job(comptime Work: type) type {
             self.lock();
             if (self.state == .running) {
                 self.state = .done;
-                // Under the lock: the owner cannot have released, so its waker lives.
                 self.waker.wake();
             }
             self.references -= 1;

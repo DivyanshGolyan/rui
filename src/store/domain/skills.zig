@@ -1,5 +1,3 @@
-//! Catalog snapshots are metadata. Bodies live only in ordinary message/tool
-//! content. Catalog instructions append at the Session's next position.
 const std = @import("std");
 const catalog = @import("../../skills.zig");
 const workspace_path = @import("../../workspace_path.zig");
@@ -14,17 +12,11 @@ const store_core = @import("../Store.zig");
 const transition = @import("../transition.zig");
 const action_domain = @import("action.zig");
 
-/// Captured outside the Store writer. Borrowed until the synchronous mutation
-/// finishes. A failed scan is explicit rather than an empty catalog.
-/// ready.encoded may alias ready.instruction's suffix; neither is freed here.
 pub const Initial = union(enum) {
     ready: struct { encoded: []const u8, instruction: ?[]const u8 },
     unavailable,
 };
 
-/// A catalog instruction certifies the immutable snapshot at its own position.
-/// Reused by model history and reports; a detached/private source is corruption,
-/// not a reason to silently rebuild or repair conversation history.
 pub fn instructionConsistentSql(comptime e: []const u8) []const u8 {
     return "(" ++ e ++ ".entry_kind=2 AND " ++ e ++ ".turn_id IS NULL AND " ++
         e ++ ".source_revision IS NULL AND " ++ e ++ ".source_admission_id IS NULL AND " ++
@@ -35,9 +27,6 @@ pub fn instructionConsistentSql(comptime e: []const u8) []const u8 {
         "AND catalog_source.position=" ++ e ++ ".source_catalog_position AND catalog_metadata.private=0 AND catalog_text.private=0))";
 }
 
-/// A source-side proof catches required instructions which were deleted, so
-/// entry-driven consumers cannot silently omit an advertised snapshot.
-/// `scope` limits history to the frozen Operation boundary, never live state.
 pub fn sourcesConsistentSql(comptime session: []const u8, comptime scope: []const u8) []const u8 {
     return "NOT EXISTS(SELECT 1 FROM session_skill_catalog catalog_required WHERE catalog_required.session_ref=" ++ session ++
         " AND catalog_required.position>0 AND (" ++ scope ++ ") AND NOT EXISTS(SELECT 1 FROM conversation_entry catalog_entry " ++
@@ -85,15 +74,8 @@ const insert_instruction = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// Appends both immutable metadata and ordinary instruction bytes in the
-/// caller's transaction, which settles its command or tool result, in one
-/// round its caller runs: `queue` queues the lookup of both values' rows
-/// and, with an instruction, the Session's last entry ordinal; `finish`,
-/// after that round, queues the snapshot and the instruction. A transition keeps it in its value, so the round's rows
-/// land there and its reads bind the Session's reference in place.
 pub const Appending = struct {
     session: rsql.SessionHead,
-    /// The caller's, which outlive the transaction.
     encoded: []const u8,
     instruction: ?[]const u8,
     metadata: content.Import = undefined,
@@ -101,10 +83,6 @@ pub const Appending = struct {
     rows: content.Pair = undefined,
     last: ordinal.Row = undefined,
 
-    /// The catalog a created Session starts with, or null when it starts
-    /// with none. Initializes even an empty catalog: an empty one has no
-    /// instruction and consumes no conversation position. Existing
-    /// authored instructions stay intact.
     pub fn initial(session: rsql.SessionHead, captured: ?*const Initial) error{SkillCatalogUnavailable}!?Appending {
         const value = captured orelse return null;
         const ready = switch (value.*) {
@@ -122,7 +100,6 @@ pub const Appending = struct {
         if (appending.instruction != null) a.read(ordinal, .{ .session = &appending.session.ref }, &appending.last);
     }
 
-    /// After `queue`'s round.
     pub fn finish(appending: *Appending, a: anytype, faults: store_core.Faults) !void {
         const session = appending.session;
         content.foundPair(&appending.rows, &appending.metadata, &appending.text);
@@ -137,14 +114,11 @@ pub const Appending = struct {
     }
 };
 
-/// `Reading` in rounds its caller runs. noinline: its value stays off
-/// its caller's frame, which sits on the main thread's deepest chain.
 pub noinline fn read(a: anytype, allocator: std.mem.Allocator, session: []const u8) !catalog.Catalog {
     var reading: Reading = .{ .session = session, .allocator = allocator };
     defer reading.deinit();
     var ran: ?ReadRound = null;
     while (true) switch (try reading.step(a, ran)) {
-        // `readRaw` read its window when the step asked for it.
         .round => |at| {
             if (at != .window) try a.run();
             ran = at;
@@ -153,25 +127,14 @@ pub noinline fn read(a: anytype, allocator: std.mem.Allocator, session: []const 
     };
 }
 
-/// The rounds reading a Session's latest catalog asks for, in order: its
-/// snapshot's row, then its bytes, one `readRaw` window a round.
 pub const ReadRound = enum { latest, window };
 
-/// Reads a Session's latest catalog one round at a time: `ran` is the
-/// round that just ran, null for the first step. A transition keeps it in
-/// its value, so the row lands there; `deinit` frees its scratch on any
-/// path.
 pub const Reading = struct {
-    /// The caller's, which outlives the rounds: the read binds it in place.
     session: []const u8,
-    /// The catalog's, and the row's Workspace's.
     allocator: std.mem.Allocator,
     row: latest.Row = undefined,
     found: @import("../access.zig").Found = .missing,
-    /// The snapshot's encoded JSON: parse scratch, not another
-    /// request-arena catalog.
     bytes: []u8 = &.{},
-    /// How much of `bytes` the windows so far asked for.
     offset: usize = 0,
 
     pub const Step = union(enum) { round: ReadRound, read: catalog.Catalog };
@@ -197,7 +160,6 @@ pub const Reading = struct {
         return reading.nextWindow(a);
     }
 
-    /// The next window, or the catalog once every byte is read.
     fn nextWindow(reading: *Reading, a: anytype) !Step {
         const bytes = reading.bytes;
         const row = &reading.row;
@@ -223,20 +185,10 @@ pub const Reading = struct {
     }
 };
 
-/// The rounds reloading a catalog asks for, in order: reading the saved
-/// one (`ReadRound`), then, when it changed, appending the candidate.
 pub const ReloadRound = enum { latest, window, append };
 
-/// Reloads a Session's catalog one round at a time: reads the saved one,
-/// and appends the candidate and its delta's instruction when they
-/// differ. A writer reads its actual current catalog, not the shell's
-/// earlier guess, so concurrent same-candidate reloads append at most one
-/// delta. A transition keeps it in its value; `deinit` frees its scratch
-/// on any path. Built in place (`init`), as its read binds its Session.
 pub const Reloading = struct {
     session: rsql.SessionHead,
-    /// The caller's, which outlive the transaction, as `allocator`'s
-    /// encoded catalog and instruction do.
     candidate: catalog.Catalog,
     allocator: std.mem.Allocator,
     phase: union(enum) { reading: Reading, appending: Appending },
@@ -287,9 +239,6 @@ pub const Failure = struct {
     code: enum { unknown_session, unknown_skill, skill_file_unavailable, skill_file_too_large, skill_text_invalid, skills_unavailable },
     bytes: []const u8,
 
-    /// The command refusal a configure's skills reload saves. A reload
-    /// fails only for an unknown Session or an unreadable catalog; the
-    /// other codes are the model `skill` tool's, which reads skill files.
     pub fn configurationRejection(self: Failure) configuration_admission.Rejection {
         return switch (self.code) {
             .unknown_session => .unknown_session,
@@ -299,12 +248,7 @@ pub const Failure = struct {
     }
 };
 
-/// Ordinary immutable rejected-command outcome, in one round its caller
-/// runs: `lookup` queues the lookup of the outcome's row, and `import`,
-/// after that round, its id. Its typed code, not wording, controls the
-/// native caller's repair guidance and survives keyed replay.
 pub const ImportingFailure = struct {
-    /// The caller's, which outlive the transaction.
     bytes: []const u8,
     outcome: content.Import = undefined,
 
@@ -313,27 +257,20 @@ pub const ImportingFailure = struct {
         content.lookup(a, &importing.outcome);
     }
 
-    /// After `lookup`'s round.
     pub fn import(importing: *ImportingFailure, a: anytype, faults: store_core.Faults) !u64 {
         if (faults.content_import) return error.InjectedContentImportFailure;
         return content.importBytes(a, &importing.outcome, importing.bytes);
     }
 };
 
-/// A model skill tool call's or a catalog reload's capture.
 pub const Capture = union(enum) {
     invocation: []const u8,
     reload: catalog.Catalog,
     failed: Failure,
 };
 
-/// A skill a Message's `/name` word bound: its name and the invocation
-/// the Host read for it (`catalog.invocation`), borrowed until settlement.
 pub const BoundSkill = struct { name: []const u8, bytes: []const u8 };
 
-/// What the Host's binding of a Message's text found: the skills its
-/// `/name` words bound, in order, or why a bound skill could not be read.
-/// A word that names no skill is prose; text that binds none has no capture.
 pub const MessageCapture = union(enum) {
     bound: []const BoundSkill,
     failed: MessageFailure,
@@ -345,29 +282,12 @@ const insert_message_skill = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// The one write every Message door makes for what its text bound: each
-/// skill's body as content (shared with equal bytes), and its row after
-/// `admission_id`, in order, one skill a round: `lookupNext` queues the
-/// lookup of the next skill's body, and `save`, after that round, saves the
-/// skill. A Turn that takes the Message projects each one as its own entry
-/// right after the Message's (`model_admission`). A transition keeps it in
-/// its value, so the lookup's row lands there.
-///
-/// One lookup round per skill keeps no per-skill state beyond one body;
-/// the bytes of a Message's skills are bounded together (1 MiB). A Message
-/// may bind more skills than the Access's table of imported rows holds, so
-/// new rows go in as model settlement's batches do (`content.insertRow`).
-/// Distinct skills never share bytes: each invocation starts with its own
-/// path.
 pub const SavingBound = struct {
     admission_id: u64 = 0,
     bound: []const BoundSkill = &.{},
-    /// The skills saved so far.
     saved: usize = 0,
     body: content.Import = undefined,
 
-    /// Queues the lookup of the next skill's body; false when every skill
-    /// is saved.
     pub fn lookupNext(saving: *SavingBound, a: anytype) bool {
         if (saving.saved == saving.bound.len) return false;
         saving.body = .ofBytes(saving.bound[saving.saved].bytes, false);
@@ -375,8 +295,6 @@ pub const SavingBound = struct {
         return true;
     }
 
-    /// After `lookupNext`'s round: queues the skill's body, when new, and
-    /// its row.
     pub fn save(saving: *SavingBound, a: anytype, faults: store_core.Faults) !void {
         if (faults.content_import) return error.InjectedContentImportFailure;
         const skill = saving.bound[saving.saved];
@@ -404,15 +322,6 @@ pub const MessageFailure = struct {
 
 pub const Result = struct { bytes: []const u8, succeeded: bool, reload_status: ?mutation_answer.SkillsReloadStatus = null };
 
-/// Settles a model `skill` tool call with what the Host captured for it,
-/// in one transaction: an invocation's text, a failure's diagnostic, or
-/// a catalog reload's result. A call whose Turn a stop selected ends with
-/// false.
-///
-/// Round `.facts` reads the call's Action. A reload reads the Session's
-/// catalog in `.skills`, then its bytes one `.skills_window` each, and
-/// appends a changed one in `.skills_append` (`Reloading`). `.outcome`
-/// looks the result's row up, and the commit round resolves the call.
 pub const SettleTool = struct {
     pub const rounds = transition.rounds(.{
         .facts = .{.always},
@@ -424,11 +333,8 @@ pub const SettleTool = struct {
     pub const round_budget = 3;
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = .facts;
-    /// `captured` is the caller's, which outlives the transition.
     pub const Input = struct {
         binding: action_domain.ActionAttemptBinding,
-        /// What a reload allocates from inside the write; running out of
-        /// it rolls back cleanly and is the caller's to retry.
         allocator: std.mem.Allocator,
         captured: *const Capture,
     };
@@ -439,10 +345,7 @@ pub const SettleTool = struct {
 
     input: Input,
     facts: action_domain.core_facts.Result = undefined,
-    /// A reload's step state, once it starts; `deinit` frees its scratch.
     reloading: ?Reloading = null,
-    /// The call's result text, the caller's or the reload's, and whether
-    /// it succeeded.
     bytes: []const u8 = &.{},
     succeeded: bool = false,
     outcome: content.Import = undefined,
@@ -480,8 +383,6 @@ pub const SettleTool = struct {
         }
     }
 
-    /// The reload's next round; once reloaded, its result's lookup.
-    /// noinline: the reload's frame stays off the step's.
     noinline fn reload(t: *SettleTool, r: *transition.Round(SettleTool), ran: ?ReloadRound) !transition.Next(SettleTool) {
         const result = switch (try t.reloading.?.step(r, r.faults(), ran)) {
             .round => |round| return .{ .round = switch (round) {

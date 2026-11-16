@@ -1,18 +1,3 @@
-//! Text-protocol result rows into typed Rows, the MySQL twin of
-//! `sqlite.decodeRow`. Each value streams from the receive buffer straight
-//! into its field, so no row is copied whole and nothing grows with a value.
-//!
-//! A value is held to its field's type as SQLite's decoding holds it:
-//! integers are decimal digits of an integer column, at most the largest
-//! BIGINT and never negative; a `bool` is only 0 or 1; an `rsql.Positive`
-//! is above 0; `[n]u8` and `rsql.Blob` come only from a binary string
-//! column, `[n]u8` of exactly n bytes; text (`Bounded`, an enum tag, a
-//! SessionHead's reference) is UTF-8 within its bound, from any column, as
-//! SQLite reads any value as text. Anything else is `CorruptStore`.
-//!
-//! The decoder reads its events from a `source`: anything with
-//! `fn next() !mysql.Event`, such as `mysql_connection.Connection`. After a
-//! failure the rest of the result is still due; its owner drains it.
 const std = @import("std");
 const Bounded = @import("../bounded.zig").Bounded;
 const isBounded = @import("../bounded.zig").isBounded;
@@ -24,10 +9,8 @@ const isBlob = rsql.isBlob;
 /// carry it too, so a column of bytes is a string type with it.
 const binary_charset = 63;
 
-/// What a value of a column may decode to.
 pub const Kind = enum(u8) {
     integer,
-    /// A string or blob of bytes.
     bytes,
     other,
 };
@@ -42,20 +25,16 @@ pub fn kindOf(column: mysql.Column) Kind {
     };
 }
 
-/// The columns `Row` decodes: one per field, three for a SessionHead.
 pub fn columnCount(comptime Row: type) usize {
     var count: usize = 0;
     inline for (@typeInfo(Row).@"struct".field_types) |Field| count += if (Field == rsql.SessionHead) 3 else 1;
     return count;
 }
 
-/// A result set's column kinds, which every row of it is checked against.
 pub fn Columns(comptime Row: type) type {
     return struct { kinds: [columnCount(Row)]Kind };
 }
 
-/// After a `.columns` event of `count`: reads the `.column` events that
-/// follow. A count other than `Row`'s is `CorruptStore`.
 pub fn readColumns(comptime Row: type, source: anytype, count: u16) !Columns(Row) {
     if (count != comptime columnCount(Row)) return error.CorruptStore;
     var columns: Columns(Row) = undefined;
@@ -66,8 +45,6 @@ pub fn readColumns(comptime Row: type, source: anytype, count: u16) !Columns(Row
     return columns;
 }
 
-/// After a `.row` event: reads its values into `row`, field by field in
-/// place. A pointer field fills what it points to (`rsql.fillsInPlace`).
 pub fn decodeRow(comptime Row: type, columns: *const Columns(Row), source: anytype, row: *Row) !void {
     comptime var column: usize = 0;
     const info = @typeInfo(Row).@"struct";
@@ -89,7 +66,6 @@ fn nextValue(source: anytype) !?u32 {
     };
 }
 
-/// Reads a value's `destination.len` bytes into `destination`.
 fn readBytes(source: anytype, destination: []u8) !void {
     var filled: usize = 0;
     while (filled < destination.len) switch (try source.next()) {
@@ -102,7 +78,6 @@ fn readBytes(source: anytype, destination: []u8) !void {
     };
 }
 
-/// A present integer value: decimal digits of at most the largest BIGINT.
 fn readCount(kind: Kind, len: ?u32, source: anytype) !u64 {
     const n = len orelse return error.CorruptStore;
     const max_digits = comptime std.fmt.count("{d}", .{std.math.maxInt(i64)});
@@ -124,7 +99,6 @@ fn readPositive(kind: Kind, len: ?u32, source: anytype) !rsql.Positive {
     return .of(value);
 }
 
-/// Text of at most `destination.len` bytes, into its front.
 fn readText(len: ?u32, source: anytype, destination: []u8) ![]const u8 {
     const n = len orelse return error.CorruptStore;
     if (n > destination.len) return error.CorruptStore;
@@ -147,7 +121,6 @@ fn maxTagBytes(comptime Enum: type) usize {
     return maximum;
 }
 
-/// Decodes the value whose `.value` event said `len` into `out`.
 fn decodeValue(comptime T: type, kind: Kind, len: ?u32, source: anytype, out: *T) !void {
     if (T == rsql.SessionHead) @compileError("rsql: a SessionHead is a Row field of its own, never optional or behind a pointer");
     if (T == rsql.Positive) {
@@ -174,7 +147,6 @@ fn decodeValue(comptime T: type, kind: Kind, len: ?u32, source: anytype, out: *T
             if (len == null) {
                 out.* = null;
             } else if (comptime isBounded(optional.child) or isBlob(optional.child)) {
-                // Naming only `len` leaves the bytes unwritten until they arrive.
                 out.* = optional.child{ .len = 0 };
                 try decodeValue(optional.child, kind, len, source, &out.*.?);
             } else {
@@ -193,7 +165,6 @@ fn decodeValue(comptime T: type, kind: Kind, len: ?u32, source: anytype, out: *T
             var tag: [maxTagBytes(T)]u8 = undefined;
             out.* = std.meta.stringToEnum(T, try readText(len, source, &tag)) orelse return error.CorruptStore;
         },
-        // Bytes of exactly the array's length, such as a digest.
         .array => |array| {
             comptime std.debug.assert(array.child == u8);
             if (kind != .bytes or len != array.len) return error.CorruptStore;
@@ -203,13 +174,10 @@ fn decodeValue(comptime T: type, kind: Kind, len: ?u32, source: anytype, out: *T
     }
 }
 
-/// Events as a test hands them out, each value's bytes split `split` at a
-/// time, as a receive buffer would cut them.
 const Script = struct {
     events: []const mysql.Event,
     split: usize,
     at: usize = 0,
-    /// Of the `.bytes` event at `at`, the part already handed out.
     offset: usize = 0,
 
     pub fn next(self: *Script) error{EndOfScript}!mysql.Event {
@@ -239,13 +207,10 @@ const integer_column = testColumn(.longlong, binary_charset);
 const bytes_column = testColumn(.blob, binary_charset);
 const text_column = testColumn(.var_string, utf8mb4_0900_bin);
 
-/// A value's events as the client emits them: no `.bytes` for an empty one.
 fn testValue(comptime text: []const u8) [if (text.len == 0) 1 else 2]mysql.Event {
     return if (text.len == 0) .{.{ .value = 0 }} else .{ .{ .value = text.len }, .{ .bytes = text } };
 }
 
-/// Decodes one row of `events` (a result's column events, then the row's
-/// values) at every split.
 fn decodeAll(comptime Row: type, events: []const mysql.Event, row: *Row) !void {
     var largest: usize = 1;
     for (events) |event| {
@@ -311,7 +276,6 @@ fn expectCorrupt(comptime Field: type, kind: mysql.Event, events: []const mysql.
 }
 
 test "a value that breaks its field's type is CorruptStore" {
-    // Integers: digits only, within BIGINT, never negative, from an integer column.
     try expectCorrupt(u64, integer_column, &testValue("-1"));
     try expectCorrupt(u64, integer_column, &testValue("9223372036854775808"));
     try expectCorrupt(u64, integer_column, &testValue("12345678901234567890"));
@@ -322,13 +286,11 @@ test "a value that breaks its field's type is CorruptStore" {
     try expectCorrupt(rsql.Positive, integer_column, &testValue("0"));
     try expectCorrupt(bool, integer_column, &testValue("2"));
     try expectCorrupt(u64, integer_column, &.{.{ .value = null }});
-    // Bytes: from a binary column only, a digest of its exact length.
     try expectCorrupt([2]u8, text_column, &testValue("ab"));
     try expectCorrupt([2]u8, testColumn(.long, binary_charset), &testValue("12"));
     try expectCorrupt([2]u8, bytes_column, &testValue("abc"));
     try expectCorrupt(rsql.Blob(2), bytes_column, &testValue("abc"));
     try expectCorrupt(rsql.Blob(2), text_column, &testValue("ab"));
-    // Text: within its bound, UTF-8, a known tag.
     try expectCorrupt(Bounded(2), text_column, &testValue("abc"));
     try expectCorrupt(Bounded(2), text_column, &testValue("\xff"));
     try expectCorrupt(Tag, text_column, &testValue("shut"));

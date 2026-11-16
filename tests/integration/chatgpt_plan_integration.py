@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""A Session on --provider chatgpt, against a loopback that answers as
-OpenAI's API and as the plan's token issuer, with made-up tokens only."""
 
 import base64
 import json
@@ -21,13 +19,10 @@ from control_fixture import raw_request
 from codex_fixture import expected_user_agent
 
 
-# The client a plan fixture's record must name (codex_credential_policy.fixture_client_id).
 CLIENT = "rui-test-plan-client"
 SUBJECT = "plan-subject"
 PLAN_SCOPE = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
 FAR = 4102444800
-# The plan's list as OpenAI's API answers it: a hidden entry is not offered,
-# and the rest keep the server's order.
 PLAN_MODELS = json.dumps({"models": [
     {"slug": "gpt-6-terra", "display_name": "Terra", "visibility": "list", "context_window": 1,
      "supported_reasoning_levels": [{"effort": "minimal"}]},
@@ -64,9 +59,6 @@ def credential_facts(path):
 
 
 class PlanHandler(fixture.SuccessHandler):
-    """Responses at BASE/responses, as the fixture endpoint; the model list
-    beside it at BASE/models; the token endpoint at BASE/oauth/token, which
-    the Host derives from it."""
 
     def do_GET(self):
         with self.server.lock:
@@ -120,8 +112,6 @@ def start(store, endpoint):
 
 
 def plan_list(host, store):
-    """The chatgpt entry of a model-list reply; each request also asks the
-    Host to fetch the list again."""
     head, body = raw_request(host.rui_ready_fields["socket"], "/v1/model-list", json.dumps({
         "version": host_process.WIRE_VERSION, "kind": "model_list", "store": str(store),
     }).encode())
@@ -141,7 +131,6 @@ def run():
     credential_dir.mkdir(mode=0o700)
     credential_file = credential_dir / "chatgpt.json"
     os.environ["RUI_CHATGPT_CREDENTIAL_FILE"] = str(credential_file)
-    # Due at launch: inside the 300-second margin of its own exp.
     soon = int(time.time()) + 60
     first, second, third = access(soon, "Zmlyc3Q"), access(FAR, "c2Vjb25k"), access(FAR, "dGhpcmQ")
     credentials(credential_file, token=first, expires_at=soon)
@@ -179,8 +168,6 @@ def run():
         assert configured["answer"]["status"] == "accepted", configured
         session = configured["answer"]["session"]
 
-        # The token is inside the launch margin of its exp: the lease
-        # refreshes it over the plan wire before the first request.
         fixture.message(state, store, "first", session, "first plan message")
         fixture.wait_for(lambda: fixture.completed_observation(store, "first"), "first plan answer")
         assert fixture.read_result(store, "first") == b"first plan answer"
@@ -191,15 +178,11 @@ def run():
         }, endpoint.token_requests[0]
         facts = credential_facts(credential_file)
         assert (facts["generation"], facts["state"], facts["access_token"], facts["client_id"]) == ("2", "ready", second, CLIENT), facts
-        # The bearer alone, to the Responses path: no account or FedRAMP header.
         assert endpoint.observed[0] == {
             "path": "/v1/responses", "authorization": "Bearer " + second, "account": None, "fedramp": None,
             "user_agent": expected_user_agent(),
         }, endpoint.observed[0]
 
-        # The plan's live list, fetched beside the Responses path with the
-        # same bearer: listed entries only, in the server's order. Whichever
-        # of the list and the first message leased first refreshed the token.
         listed = settled_list(host, store, "live", "the plan's live model list")
         assert [model["id"] for model in listed["models"]] == ["gpt-6-terra", "gpt-6-sol"], listed
         assert endpoint.model_gets and all(get == {
@@ -207,8 +190,6 @@ def run():
         } for get in endpoint.model_gets), endpoint.model_gets
         assert len(endpoint.token_requests) == 1, endpoint.token_requests
 
-        # openai-responses/3: an effort change goes on top of the next
-        # request, never as a configuration_update item.
         changed = fixture.command(
             "session", "configure", "--store", store, "--session", session,
             "--record", state / "effort-high.json", "--key", "effort-high", "--reasoning-effort", "high",
@@ -221,8 +202,6 @@ def run():
         assert not [item for item in later["input"] if item.get("type") == "configuration_update"], later["input"]
         assert len(endpoint.token_requests) == 1, "a token far from expiry was refreshed"
 
-        # A 401 spends the Operation's one forced refresh, over the plan
-        # wire, and its one replacement Attempt carries the new token.
         fixture.message(state, store, "stale", session, "refresh a rejected token")
         answered = fixture.wait_for(lambda: fixture.completed_observation(store, "stale"), "answer after forced refresh")
         assert answered["binding"]["attempt"] == "2", answered
@@ -233,14 +212,11 @@ def run():
         assert endpoint.requests[2] == endpoint.requests[3], "the replacement changed the model request"
         assert credential_facts(credential_file)["generation"] == "3"
 
-        # A plan limit is a quota refusal, answered once and never retried.
         fixture.message(state, store, "quota", session, "past the plan's limit")
         limited = fixture.wait_for(lambda: fixture.observe(store, "quota").get("result") and fixture.observe(store, "quota"), "plan quota refusal")
         assert limited["result"] == {"status": "failed", "code": "provider_quota"}, limited
         assert limited["binding"]["attempt"] == "1" and len(endpoint.requests) == 5, (limited, len(endpoint.requests))
 
-        # A failed or refused list falls back to the catalog; a 401 on it
-        # forces no refresh.
         for status, body in ((500, b'{"error":"unavailable"}'), (401, b"stale token")):
             endpoint.models = (200, PLAN_MODELS)
             settled_list(host, store, "live", "the plan's live list again")
@@ -249,7 +225,6 @@ def run():
             assert fallback["models"] and all(model["known"] for model in fallback["models"]), fallback
         assert len(endpoint.token_requests) == 2, endpoint.token_requests
 
-        # A record from another client never reaches the fixture.
         fixture.stop_host(host)
         host = None
         assert bash.rows(store, "SELECT provider, codec FROM session WHERE session_ref=?", (session,)) == [("chatgpt", "openai-responses/3")]
@@ -264,7 +239,6 @@ def run():
         fixture.stop_host(host)
         host = None
 
-        # With no sign-in, the list falls back without asking for one.
         credential_file.unlink()
         host = start(store, url)
         settled_list(host, store, "catalog_fallback", "catalog fallback without a sign-in")

@@ -1,8 +1,6 @@
-//! Session pin organization, independent of work and configuration.
 const std = @import("std");
 const session_archive = @import("session_archive.zig");
 
-/// The globally ordered command that first changed an unpinned Session to pinned.
 pub const PinOrder = u64;
 pub const Change = enum { keep, pin, unpin };
 

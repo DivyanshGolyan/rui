@@ -1,6 +1,3 @@
-//! Shared input stack. The composer's lower rule and identity/keys line form
-//! the chat footer; persistent state takes space only while present.
-//! The floating palette belongs to the content above this area.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -8,14 +5,12 @@ const Composer = @import("Composer.zig");
 const PermissionCard = @import("PermissionCard.zig");
 const Self = @This();
 const empty: vxfw.Text = .{ .text = "" };
-/// The status's most lines: a command's short result.
 const status_lines = @import("slash_commands.zig").short_result_lines;
 
 composer: Composer,
 permission: ?*PermissionCard = null,
 facts: vxfw.Widget = empty.widget(),
 status: ?vxfw.Widget = empty.widget(),
-/// Where the facts row sits: under the composer, or last, under the status.
 facts_at: enum { top, bottom } = .top,
 
 pub fn widget(self: *Self) vxfw.Widget {
@@ -26,8 +21,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const self: *Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
     if (size.width == 0 or size.height == 0) return vxfw.Surface.init(ctx.cell_arena, self.widget(), .{});
-    // The facts row, then the status: a line, or as many as a command's
-    // short result has, while the content keeps a row.
     const facts_rows: u16 = @min(1, size.height - 1);
     const status_room: u16 = @min(status_lines, size.height -| 1 -| facts_rows);
     const status = if (status_room == 0) null else if (self.status) |shown| status: {
@@ -36,7 +29,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     } else null;
     const footer_rows = facts_rows + if (status) |drawn| @min(drawn.size.height, status_room) else 0;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 1 + facts_rows + @intFromBool(status != null));
-    // A draft grows to a third of the screen at most, between its two rules.
     const room = size.height - footer_rows;
     const content = if (self.permission) |card|
         try card.drawInput(ctx.withConstraints(.{}, .{ .width = size.width, .height = room }), if (card.consent.row == .draft) self.composer.widget() else null)
@@ -72,7 +64,6 @@ test "InputArea keeps facts below the composer when a notice replaces the status
         try std.testing.expectEqual(@as(i17, 3), idle.children[1].origin.row);
         try std.testing.expectEqualStrings("n", idle.children[1].surface.readCell(0, 0).char.grapheme);
         try std.testing.expectEqualStrings("e", idle.children[2].surface.readCell(0, 0).char.grapheme);
-        // A command's two-line result takes two rows; the composer moves up.
         status.text = &.{.{ .text = "Configured.\n! label saved locally only" }};
         const two = try input.widget().draw(ctx);
         try std.testing.expectEqual(@as(u16, 6), two.size.height);
@@ -169,7 +160,6 @@ test "a draft grows to a third of the screen at most, and the content keeps the 
         errdefer std.debug.print("height={d}\n", .{height});
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = height }, .cell_size = .{} };
         const drawn = try input.widget().draw(ctx);
-        // The draft's rows sit between the composer's two rules.
         const draft_rows = drawn.children[0].surface.size.height - 2;
         try std.testing.expectEqual(@min(@as(u16, 9), @import("draft_layout.zig").cap(height)), draft_rows);
     }
@@ -217,7 +207,7 @@ test "InputArea approval has one document title above a choice between composer 
         const composed = drafting.children[0].surface.children[1];
         try std.testing.expect(composed.surface.widget.eql(input.composer.widget()));
         try std.testing.expectEqual(@as(u16, 7), composed.surface.cursor.?.col);
-        try std.testing.expect(composed.origin.row > 0); // The request stays above the draft.
+        try std.testing.expect(composed.origin.row > 0);
         try std.testing.expectEqualStrings("kept draft", editor.text());
         _ = consent.route(.escape);
         _ = try input.widget().draw(ctx);

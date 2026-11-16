@@ -1,4 +1,3 @@
-// The package's public surface. Transport types stay internal (D19).
 export { Rui, type HostSettings, type ClientOptions, type ExitEvent } from "./client.ts";
 export { RuiRequestError, RuiStartError, RuiUnavailableError } from "./errors.ts";
 export {
@@ -6,6 +5,7 @@ export {
 	Sessions,
 	type AgentSpec,
 	type ActionStatus,
+	type ActionSelection,
 	type ListSessionsOptions,
 	type SessionArchiveState,
 	type SessionArchiveResult,

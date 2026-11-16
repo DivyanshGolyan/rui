@@ -56,7 +56,6 @@ test "no Store" {
 
 class StoreConformanceTest(unittest.TestCase):
     def test_fixture_verdicts_agree_with_the_zig_check(self):
-        # testing.zig's test checks fixtureTextError on these same cases.
         source = (ROOT / "src/store/testing.zig").read_text()
         cases = source[source.index("pub const fixture_text_cases"):]
         cases = re.findall(r'\.text = "((?:\\.|[^"\\])*)", \.refused = (true|false)', cases[:cases.index("};")])

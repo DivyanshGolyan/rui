@@ -1,9 +1,3 @@
-//! What a Session's work is doing now, in the words both screens use: the
-//! conversation's last line ("⠹ Thinking · 12s"), the clock on a running
-//! call's own row (" · 42s"), and the word on the Session's overview row
-//! ("Run the tests", beside the row's own age). Only work under way has a
-//! line; an ended or idle Session has none. This core takes the work its
-//! shell read and the shell's clock; it holds neither.
 const std = @import("std");
 const marks = @import("marks.zig");
 const session_work = @import("session_work.zig");
@@ -14,10 +8,8 @@ const TerminalText = @import("TerminalText.zig");
 pub const WorkState = session_work.WorkState;
 pub const Method = session_line.Method;
 
-/// How a line's words read. Its clock is always quiet.
 pub const Tone = enum { normal, quiet, attention };
 
-/// The two glyph sets a screen draws with.
 pub const Script = enum { unicode, ascii };
 pub const Glyphs = struct { dot: []const u8, ellipsis: []const u8 };
 pub const glyphs = std.enums.EnumArray(Script, Glyphs).init(.{
@@ -25,37 +17,24 @@ pub const glyphs = std.enums.EnumArray(Script, Glyphs).init(.{
     .ascii = .{ .dot = "-", .ellipsis = "." },
 });
 
-/// A Tool Call: its model Operation and its ordinal among that Operation's
-/// calls, as call activity names it.
 pub const Call = struct { operation: u64, ordinal: u64 };
 
 pub const Line = struct {
-    /// The conversation's glyph before the words; empty for none.
     mark: []const u8,
     tone: Tone,
-    /// Display text: a call's description escaped as its call row shows
-    /// it, borrowing the caller's buffer, or the table's own words.
     words: []const u8,
     clock: Clock,
-    /// The running Bash call the line is about, when the caller named the
-    /// Work's Operation.
     call: ?Call = null,
 };
 
 pub const Clock = union(enum) {
-    /// Under way with no time to show: the words end in an ellipsis.
     ellipsis,
-    /// Seconds in this state.
     elapsed: u64,
-    /// The failed Attempt's ordinal, and whole seconds until the retry is
-    /// due, rounded up.
     retry: struct { attempt: u64, seconds: u64 },
 };
 
 const Look = struct { mark: []const u8, tone: Tone = .normal, words: []const u8, clock: std.meta.Tag(Clock) };
 
-/// The one wording table. `bash` says its call's description in place of
-/// `words` when it has one, and `retrying` says a rate limit by its cause.
 const looks = std.enums.EnumArray(session_work.Kind, ?Look).init(.{
     .idle = null,
     .pending = .{ .mark = marks.marks.get(.queued).unicode, .words = "Queued", .clock = .elapsed },
@@ -69,8 +48,6 @@ const looks = std.enums.EnumArray(session_work.Kind, ?Look).init(.{
     .stopped = null,
 });
 const rate_limited = "Rate limited";
-/// Bytes a line's words take at most: a call's escaped description, or the
-/// table's own words.
 pub const max_words_bytes = max: {
     var bytes = @max(TerminalText.max_bytes_per_byte * session_work.max_description_bytes, rate_limited.len);
     for (looks.values) |look| if (look) |shown| {
@@ -79,19 +56,11 @@ pub const max_words_bytes = max: {
     break :max bytes;
 };
 
-/// The line of work being stopped: the Host's `stopping` state, and a stop
-/// the person asked for before the Host reports it.
 pub const stopping: Line = line: {
     const look = looks.get(.stopping).?;
     break :line .{ .mark = look.mark, .tone = look.tone, .words = look.words, .clock = .ellipsis };
 };
 
-/// The line for `state` at `now_ms`, or null when no work is under way.
-/// `operation` is the Work's Operation, which names a running Bash call;
-/// pass null when the screen places no calls. A retry that has fallen due
-/// reads as the work it became (`asOf`). A call's description is escaped
-/// into `words` as its call row escapes it, so no screen draws its
-/// controls.
 pub fn of(words: *[max_words_bytes]u8, state: *const WorkState, operation: ?u64, now_ms: u64) ?Line {
     if (state.* == .retrying and state.retrying.due_at_ms <= now_ms) return of(words, &state.asOf(now_ms), null, now_ms);
     if (state.* == .stopping) return stopping;
@@ -130,24 +99,14 @@ pub const max_dot_bytes = max: {
     for (glyphs.values) |set| bytes = @max(bytes, set.dot.len);
     break :max bytes;
 };
-/// Hours a running span shows at most; a longer one shows this many hours
-/// and 59 minutes.
 const max_span_hours = 99_999;
 const max_span_seconds = max_span_hours * s_per_hour + s_per_hour - 1;
 const max_span_bytes = std.fmt.count("{d}h {d}m", .{ max_span_hours, 59 });
-/// The furthest a retry can be due: the whole range of Unix milliseconds.
 const max_retry_seconds = std.math.divCeil(u64, std.math.maxInt(u64), ms_per_s) catch unreachable;
-/// Bytes the longest clock text takes: an elapsed span's, or a retry's with
-/// both numbers at their widest.
 pub const max_clock_bytes = " ".len + max_dot_bytes + @max(" ".len + max_span_bytes, std.fmt.count(" retry {d} in {d}s", .{ session_work.max_retried_attempt, max_retry_seconds }));
 
-/// Which screen the words are for. The conversation adds the elapsed time;
-/// an overview row has its own age column, so it adds only a retry's
-/// countdown.
 pub const Form = enum { conversation, row };
 
-/// The text after the words: " · 42s", " · retry 2 in 18s", "…", or
-/// nothing.
 pub fn clockText(buffer: *[max_clock_bytes]u8, clock: Clock, form: Form, script: Script) []const u8 {
     const set = glyphs.get(script);
     return switch (clock) {
@@ -156,7 +115,6 @@ pub fn clockText(buffer: *[max_clock_bytes]u8, clock: Clock, form: Form, script:
             var span: [max_span_bytes]u8 = undefined;
             break :elapsed std.fmt.bufPrint(buffer, " {s} {s}", .{ set.dot, spanText(&span, seconds) }) catch unreachable;
         },
-        // The overview leaves the attempt to the tool row: it adds nothing to a scan.
         .retry => |retry| if (form == .row)
             std.fmt.bufPrint(buffer, " {s} retry in {d}s", .{ set.dot, retry.seconds }) catch unreachable
         else
@@ -164,7 +122,6 @@ pub fn clockText(buffer: *[max_clock_bytes]u8, clock: Clock, form: Form, script:
     };
 }
 
-/// A running span: "42s", "1m 12s", "1h 5m".
 fn spanText(buffer: *[max_span_bytes]u8, total: u64) []const u8 {
     const seconds = @min(total, max_span_seconds);
     if (seconds < s_per_min) return std.fmt.bufPrint(buffer, "{d}s", .{seconds}) catch unreachable;
@@ -172,18 +129,13 @@ fn spanText(buffer: *[max_span_bytes]u8, total: u64) []const u8 {
     return std.fmt.bufPrint(buffer, "{d}h {d}m", .{ seconds / s_per_hour, seconds % s_per_hour / s_per_min }) catch unreachable;
 }
 
-/// The conversation's line within `width` cells, in the pieces its shell
-/// styles apart. Words too long for the line are cut and end in an
-/// ellipsis, keeping the clock; a line too narrow for the clock drops it.
 pub const Fitted = struct {
     mark: []const u8,
     words: []const u8,
-    /// An ellipsis follows the cut words.
     cut: bool,
     clock: []const u8,
 };
 
-/// The cells of words the clock leaves at least, or it is dropped.
 const min_words_cells = 4;
 
 pub fn fit(buffer: *[max_clock_bytes]u8, line: Line, width: usize, method: Method) Fitted {
@@ -253,21 +205,16 @@ test "every work state has the approved words on both screens, and ended work ha
         try std.testing.expectEqualStrings(case.conversation, try conversation(case.state, test_now_ms));
         try std.testing.expectEqualStrings(case.row, try row(case.state, test_now_ms, .unicode));
         try std.testing.expectEqualStrings(case.ascii, try row(case.state, test_now_ms, .ascii));
-        // A line exactly while work is under way.
         try std.testing.expectEqual(case.state.progress() != null, of(&test_words, &case.state, null, test_now_ms) != null);
         if (of(&test_words, &case.state, null, test_now_ms)) |line| try std.testing.expectEqual(case.tone, line.tone);
     }
     try std.testing.expect(seen.eql(.full));
-    // A stop the person asked for reads as the Host's stopping state does.
     const host_stopping = of(&test_words, &.{ .stopping = .{ .since = 1 } }, 7, test_now_ms).?;
     try std.testing.expectEqualStrings(stopping.words, host_stopping.words);
     try std.testing.expectEqual(stopping.tone, host_stopping.tone);
     try std.testing.expectEqual(Clock.ellipsis, host_stopping.clock);
-    // A due retry says what it became: eligible work queued again.
     try std.testing.expectEqualStrings("◌ Queued · 0s", try conversation(retry, retry.retrying.due_at_ms));
-    // Its time is from the due second: due 17.2 s ahead, read 23.199 s ahead.
     try std.testing.expectEqualStrings("◌ Queued · 6s", try conversation(retry, retry.retrying.due_at_ms + 5_999));
-    // A clock behind the state's own second shows none elapsed.
     try std.testing.expectEqualStrings("⠹ Thinking · 0s", try conversation(.{ .working = .{ .since = test_now_s + 3 } }, test_now_ms));
 }
 
@@ -275,7 +222,6 @@ test "a description's controls read escaped on both screens, as its call row sho
     const state: WorkState = .{ .bash = .{ .since = test_now_s - 42, .call = 0, .description = bounded(session_work.max_description_bytes, "Run\t\x1b[2J\u{202e}tests"), .running = 1, .approvals = 0 } };
     try std.testing.expectEqualStrings("⠹ Run\\t\\x1b[2J\\u202etests · 42s", try conversation(state, test_now_ms));
     try std.testing.expectEqualStrings("Run\\t\\x1b[2J\\u202etests", try row(state, test_now_ms, .unicode));
-    // The widest description escapes within the words' bound.
     const widest: WorkState = .{ .bash = .{ .since = test_now_s, .call = 0, .description = bounded(session_work.max_description_bytes, &@as([session_work.max_description_bytes]u8, @splat(0x1b))), .running = 1, .approvals = 0 } };
     try std.testing.expectEqual(max_words_bytes, of(&test_words, &widest, null, test_now_ms).?.words.len);
 }
@@ -284,7 +230,6 @@ test "a running Bash line names its call only beside the Work's Operation and th
     const bash: WorkState = .{ .bash = .{ .since = test_now_s, .call = 3, .description = null, .running = 2, .approvals = 0 } };
     try std.testing.expectEqual(@as(?Call, .{ .operation = 19, .ordinal = 3 }), of(&test_words, &bash, 19, test_now_ms).?.call);
     try std.testing.expectEqual(@as(?Call, null), of(&test_words, &bash, null, test_now_ms).?.call);
-    // A Host that predates `call` names no ordinal, so the line names no row.
     const older: WorkState = .{ .bash = .{ .since = test_now_s, .call = null, .description = null, .running = 2, .approvals = 0 } };
     try std.testing.expectEqual(@as(?Call, null), of(&test_words, &older, 19, test_now_ms).?.call);
     try std.testing.expectEqual(@as(?Call, null), of(&test_words, &.{ .working = .{ .since = test_now_s } }, 19, test_now_ms).?.call);
@@ -302,8 +247,6 @@ test "a running span is seconds, then minutes and seconds, then hours and minute
     for ([_]struct { u64, []const u8 }{ .{ 0, "0s" }, .{ 59, "59s" }, .{ 60, "1m 0s" }, .{ 3599, "59m 59s" }, .{ 3600, "1h 0m" }, .{ 86_400 * 3 + 61, "72h 1m" }, .{ 99_999 * 3600 + 59 * 60, "99999h 59m" }, .{ 100_000 * 3600, "99999h 59m" }, .{ std.math.maxInt(u64), "99999h 59m" } }) |case| {
         try std.testing.expectEqualStrings(case[1], spanText(&buffer, case[0]));
     }
-    // The widest clocks fill their buffer exactly: Unicode's dot is the
-    // wider.
     var clock: [max_clock_bytes]u8 = undefined;
     const widest_retry = clockText(&clock, .{ .retry = .{ .attempt = session_work.max_retried_attempt, .seconds = max_retry_seconds } }, .conversation, .unicode).len;
     const widest_span = clockText(&clock, .{ .elapsed = std.math.maxInt(u64) }, .conversation, .unicode).len;
@@ -326,7 +269,6 @@ test "a fitted line never takes more than its width and keeps the clock while wo
         try std.testing.expect(cells <= width);
         try std.testing.expect(std.unicode.utf8ValidateSlice(fitted.words));
         try std.testing.expect(std.mem.startsWith(u8, description, fitted.words));
-        // Whole when it fits; cut words end in an ellipsis.
         if (mark_cells + session_line.cells(description, method) + clock_cells <= width) {
             try std.testing.expectEqualStrings(description, fitted.words);
             try std.testing.expectEqualStrings(clock, fitted.clock);
@@ -336,7 +278,6 @@ test "a fitted line never takes more than its width and keeps the clock while wo
             if (width >= mark_cells + min_words_cells + ellipsis_cells + clock_cells) try std.testing.expectEqualStrings(clock, fitted.clock);
         }
     };
-    // A stopping line keeps its ellipsis as its clock.
     var buffer: [max_clock_bytes]u8 = undefined;
     const stopped = fit(&buffer, stopping, 80, .unicode);
     try std.testing.expectEqualStrings("Stopping", stopped.words);

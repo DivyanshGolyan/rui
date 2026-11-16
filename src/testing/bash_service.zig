@@ -1,7 +1,3 @@
-//! A `test_poll.waitUntil` condition that services a test's Bash execution
-//! one pass per check until it retires. `service` holds the `execution`, its
-//! `scratch` and a copy `window`.
-
 const std = @import("std");
 
 pub fn retired(service: anytype) !bool {

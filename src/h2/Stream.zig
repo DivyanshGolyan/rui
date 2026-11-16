@@ -1,18 +1,3 @@
-//! The record behind the opaque `h2.Stream`, stored in caller memory that
-//! does not move from `Client.prepare` until `Stream.deinit`. Its size is
-//! the client's per-held-request cost, so it holds only what a held stream
-//! needs; anything transient lives per connection or per Client.
-//!
-//!   idle --prepare--> prepared --launch--> pending --submit--> open --settle--> finished --nextFinished--> collected
-//!                         |                   ^                  |
-//!                         |                   +-----requeue------+   (HEADERS never left, or the server
-//!                         |                                          proved it did not process them)
-//!                         +--(pending, open, finished)--cancel--> cancelled
-//!   (prepared, collected, cancelled) --deinit--> idle
-//!
-//! A launched record is in the Client's timer list, ordered by
-//! `last_activity_ns`; a pending one is also in its origin's queue through
-//! `route.queued_next`; a finished one is in the finished list instead.
 const std = @import("std");
 const h2 = @import("h2.zig");
 const policy = @import("policy.zig");
@@ -23,8 +8,6 @@ pub const State = enum(u8) { idle = 0, prepared, pending, open, finished, collec
 
 prev: ?*Record,
 next: ?*Record,
-/// Provider time of launch or of the latest response bytes. The deadline is
-/// this plus the Client's inactivity interval.
 last_activity_ns: u64,
 /// The owned request field block (see `FieldBlock`), exact length. nghttp2
 /// references it without copying, so outside the caller it holds the only
@@ -37,32 +20,23 @@ state: State,
 status: u16,
 body_offset: u64,
 body_length: u64,
-/// A file descriptor, or a pointer to borrowed bytes when `flags.body_is_bytes`.
 body_source: usize,
 sink_written: u64,
-/// A file descriptor, or a buffer pointer when `flags.sink_is_buffer`.
 sink_target: usize,
 sink_capacity: u32,
-/// Set once by `finish`; before that, a local cause recorded during decode
-/// that waits for nghttp2 to close the stream.
 cause: ?policy.Cause,
 flags: Flags,
 route: Route,
 
 pub const Route = extern union {
-    /// Pending: the next record in its origin's queue.
     queued_next: ?*Record,
-    /// Open: where nghttp2 carries it. `connection` is the table index + 1.
     open: extern struct { stream_id: i32, connection: u32 },
 };
 
 pub const Flags = packed struct(u16) {
     body_is_bytes: bool = false,
     sink_is_buffer: bool = false,
-    /// HEADERS were packed for sending on some connection. Sticky across
-    /// replays, so "nothing was sent" is claimed only when it is certain.
     request_sent: bool = false,
-    /// A response frame arrived: the server processed the request.
     response_started: bool = false,
     final_seen: bool = false,
     end_stream_seen: bool = false,
@@ -70,13 +44,11 @@ pub const Flags = packed struct(u16) {
     body_retired: bool = false,
     opened_connection: bool = false,
     replays: u3 = 0,
-    /// The request is a GET: no body and no content-length.
     get: bool = false,
     _: u3 = 0,
 };
 
 comptime {
-    // The per-held-request budget (issue #556): keep the record within it.
     std.debug.assert(@sizeOf(Record) <= 96);
 }
 
@@ -106,9 +78,6 @@ pub fn facts(self: *const Record) policy.StreamFacts {
     };
 }
 
-/// The owned request field block: for each field a flags byte, a u16 name
-/// length and a u32 value length (little endian), then the name and value,
-/// or for a borrowed field their two addresses.
 pub const FieldBlock = struct {
     pub const header_bytes = 7;
     pub const sensitive: u8 = 1;
@@ -167,7 +136,6 @@ pub fn fieldEntries(self: *const Record) FieldBlock.Iterator {
     return .{ .bytes = (self.fields orelse return .{ .bytes = &.{} })[0..self.fields_len] };
 }
 
-/// Zeroes and frees the field block if it is still held.
 pub fn releaseFields(self: *Record, allocator: std.mem.Allocator) void {
     const block = self.fields orelse return;
     const bytes = block[0..self.fields_len];
@@ -177,7 +145,6 @@ pub fn releaseFields(self: *Record, allocator: std.mem.Allocator) void {
     self.fields_len = 0;
 }
 
-/// Intrusive doubly linked list over `prev`/`next`.
 pub const List = struct {
     head: ?*Record = null,
     tail: ?*Record = null,
@@ -208,8 +175,6 @@ pub const List = struct {
         return head;
     }
 
-    /// Renewal is a move to the tail. Every record of a Client shares one
-    /// interval, so activity order is deadline order and the head is due first.
     pub fn moveToTail(self: *List, record: *Record) void {
         if (self.tail == record) return;
         self.remove(record);
@@ -217,13 +182,10 @@ pub const List = struct {
     }
 };
 
-/// A FIFO of pending records through `route.queued_next`.
 pub const Queue = struct {
     head: ?*Record = null,
     tail: ?*Record = null,
     len: u32 = 0,
-    /// The last record put back: put-back records wait at the front, in
-    /// the order they were put back, ahead of every fresh launch.
     put_back: ?*Record = null,
 
     pub fn pushTail(self: *Queue, record: *Record) void {
@@ -233,8 +195,6 @@ pub const Queue = struct {
         self.len += 1;
     }
 
-    /// A requeued record was launched before everything still waiting, so
-    /// it goes first, after any put back before it.
     pub fn putBack(self: *Queue, record: *Record) void {
         if (self.put_back) |previous| {
             record.route = .{ .queued_next = previous.route.queued_next };
@@ -258,7 +218,6 @@ pub const Queue = struct {
         return head;
     }
 
-    /// O(n); only a cancel or an expiry of a waiting record removes from the middle.
     pub fn remove(self: *Queue, record: *Record) void {
         var previous: ?*Record = null;
         var current = self.head;
@@ -267,7 +226,6 @@ pub const Queue = struct {
             current = node.route.queued_next;
         }) {
             if (node != record) continue;
-            // Put-back records are the front run, so the one before is too.
             if (self.put_back == node) self.put_back = previous;
             if (previous) |p| p.route.queued_next = node.route.queued_next else self.head = node.route.queued_next;
             if (self.tail == node) self.tail = previous;
@@ -302,14 +260,12 @@ test "the queue serves put-back records first, in the order put back" {
     queue.remove(&records[0]);
     try std.testing.expectEqual(@as(u32, 3), queue.len);
     try std.testing.expectEqual(&records[2], queue.popHead().?);
-    // A put back after the front moved still goes ahead of fresh launches.
     queue.putBack(&records[4]);
     try std.testing.expectEqual(&records[3], queue.popHead().?);
     try std.testing.expectEqual(&records[4], queue.popHead().?);
     try std.testing.expectEqual(&records[1], queue.popHead().?);
     try std.testing.expectEqual(@as(?*Record, null), queue.popHead());
 
-    // Removing the last put-back record moves the mark back one.
     queue.putBack(&records[0]);
     queue.putBack(&records[1]);
     queue.remove(&records[1]);

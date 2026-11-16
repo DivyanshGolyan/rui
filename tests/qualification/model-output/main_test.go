@@ -160,7 +160,6 @@ func TestMissingPhysicalFootprintCannotQualifyPortableSample(t *testing.T) {
 }
 
 func TestExpectedCapacityRequestDigest(t *testing.T) {
-	// Prompt prose has no pinned bytes; only the oracle's inputs are checked.
 	for _, test := range []struct {
 		workspace string
 		store     string
@@ -441,7 +440,7 @@ func TestSpillDiagnosticCacheSizeSettingPreservesRawPragmaMeaning(t *testing.T) 
 	decode := func(value string) sqliteDiagnostic {
 		t.Helper()
 		record := map[string]any{"rui_test_phase": "sqlite_diagnostic", "subject": "k7m2qx", "hard_heap_limit_bytes": "16777216", "cache_spills": "0", "cache_spill_threshold": "991", "synchronous": "2", "journal_mode": "wal", "process": "42", "run": "100", "sequence": "5"}
-		if value != "" { // An absent observation field is a null diagnostic value.
+		if value != "" {
 			record["cache_size_setting"] = value
 		}
 		records, err := sqliteDiagnosticRecords([]map[string]any{{"rui_test_phase": "control_timing"}, record})

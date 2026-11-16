@@ -1,4 +1,3 @@
-"""CI routing's value domain; Git and workflow handoffs live in test_admission."""
 
 from copy import deepcopy
 from itertools import product
@@ -11,7 +10,6 @@ from qualification import shards, split_build
 
 
 def selection(documentation=False):
-    """Representative selector values, independent of Git and selector rules."""
     return dict(
         base='base', head='head',
         targets=[] if documentation else ['check', 'stack-frames', 'test-native', 'transport-h2-integration'],
@@ -27,7 +25,6 @@ def selection(documentation=False):
 
 class PlanTest(unittest.TestCase):
     def test_event_and_change_kind_domain(self):
-        # Each event's expected policy, not a replay of the owner's branches.
         cases = (
             ('draft', 'pull_request', True, False),
             ('ready', 'pull_request', False, False),
@@ -51,7 +48,6 @@ class PlanTest(unittest.TestCase):
                 original = selection(documentation)
                 before = deepcopy(original)
                 kind = ChangeKind.DOCUMENTATION if documentation else ChangeKind.NORMAL
-                # Matrix generation must use the supplied MySQL facts, never read a source tree.
                 with patch('select_tests.tree_graph', side_effect=AssertionError('plan performed I/O')):
                     result = plan(original, event_name=event, draft=draft,
                                   promotion=promotion, change_kind=kind)
@@ -83,7 +79,7 @@ class PlanTest(unittest.TestCase):
                     self.assertEqual(result.selection['server_targets'], [])
                     self.assertFalse(result.outputs['native'])
                     self.assertFalse(result.outputs['upgrade'])
-                    self.assertTrue(result.outputs['draft_run'])  # policy's plan-owned skip
+                    self.assertTrue(result.outputs['draft_run'])
 
     def test_every_selector_obligation_vetoes_documentation_even_on_a_draft(self):
         obligations = dict(targets=['test-logic'], native_targets=['test-logic'],
@@ -152,7 +148,6 @@ class PlanTest(unittest.TestCase):
                 self.assertFalse(output['linux_split'])
 
     def test_compile_only_builds_every_gate_and_unit_root_and_runs_nothing(self):
-        # main-build.yml after a push: whatever the push selected, or did not.
         for documentation, retry in product((False, True), (False, True)):
             with self.subTest(documentation=documentation, retry=retry):
                 original = dict(selection(documentation), retry=retry)

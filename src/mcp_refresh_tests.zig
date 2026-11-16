@@ -1,4 +1,3 @@
-//! Current MCP offers are derived from intent and frozen only at admission.
 const std = @import("std");
 const store = @import("store.zig");
 const testing = store.testing;
@@ -30,7 +29,7 @@ fn narrowedChild(storage: *store.Store, tmp: *std.testing.TmpDir, parent: protoc
     try testing.submitTestMessage(storage, tmp, "refresh-child-input", "refresh-child-input", parent.slice(), "start child");
     const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try store.settleCallsForTesting(storage, tmp, model, "refresh-child-call", &.{.{ .item_id = "child", .name = "start_agent", .encoded_call_id = "child", .decoded_call_id = "child", .encoded_arguments = "{}", .decoded_arguments = "{}" }});
-    const action = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
+    const action = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     var cwd: [protocol.max_workspace_bytes]u8 = undefined;
     var spec = try testing.completeConfiguration("unused", "", try testing.canonicalCwd(std.testing.io, &cwd), "model-a");
     spec.configuration.workspace = .{};
@@ -104,8 +103,6 @@ test "MCP offer projection covers identity changes removals additions and name n
                     .builtins, .narrowed, .key_namespace => after_rows[b].description = "new b",
                     .unchanged, .added => {},
                 }
-                // A removal and return exercise additions inside the saved name
-                // ceiling; a brand-new renamed tool must not widen that ceiling.
                 if (scenario == .added) {
                     var missing = records();
                     missing[a] = missing[missing.len - 1];
@@ -129,10 +126,8 @@ test "MCP offer projection covers identity changes removals additions and name n
                 try storage.saveHostToolSet(&after);
                 const old_count = try revisions(&storage, session.slice());
                 try testing.submitTestMessage(&storage, &tmp, "refresh-next", "refresh-next", session.slice(), "next");
-                // Projection interning and the admitted Operation roll back together.
                 if (scenario == .mixed and !engine.rerun) {
                     try std.testing.expectError(error.InjectedAttemptCommitFailure, storage.admitNextModelAttempt(.{ .attempt_before_commit = true }));
-                    // A fault fences; reopen with the same startup tool set.
                     try storage.close();
                     try testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .host_tool_set = &after });
                     try std.testing.expectEqual(old_count, try revisions(&storage, session.slice()));
@@ -141,8 +136,6 @@ test "MCP offer projection covers identity changes removals additions and name n
                 const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 rounds.set(scenario, storage.testing_content_work.rounds - rounds_before);
                 try std.testing.expectEqual(old_count, try revisions(&storage, session.slice()));
-                // Loaded intent whose MCP records the Host still holds is the
-                // offer itself; only a changed loaded record saves another set.
                 const changed = switch (scenario) {
                     .description, .schema, .server, .read_only, .owner, .name, .removed, .mixed => true,
                     .unchanged, .added, .builtins, .narrowed, .unloaded, .key_namespace => false,
@@ -151,22 +144,15 @@ test "MCP offer projection covers identity changes removals additions and name n
                 try std.testing.expectEqual(scenario != .builtins and scenario != .removed and scenario != .name and scenario != .unloaded, try member(&storage, session.slice(), "fetch_a"));
                 try std.testing.expect(!try member(&storage, session.slice(), "fetch_new"));
                 if (scenario != .builtins and scenario != .removed and scenario != .name and scenario != .unloaded) {
-                    // Identity equality, not just a revision increment: every
-                    // field must resolve to today's saved record for this name.
                     try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation o JOIN tool_set_member m ON m.tool_set_id=o.tool_set_id JOIN tool_record t ON t.tool_record_id=m.tool_record_id JOIN host_tool_set h ON h.slot=1 JOIN tool_set_member hm ON hm.tool_set_id=h.tool_set_id AND hm.tool_record_id=m.tool_record_id WHERE o.operation_id=?1 AND t.name='fetch_a'", .{next.operation_id}));
                 }
-                // Old frozen requests and their records are never rewritten.
                 try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND settings_revision=1", .{first.operation_id}));
-                // Only synthetic tool sets can change MCP ownership to an
-                // unsupported Rui tool. Refresh still preserves that identity;
-                // normal settlement correctly refuses such a tool set.
                 if (scenario == .owner or scenario == .narrowed) continue;
                 if (scenario == .removed) {
                     try store.settleCallsForTesting(&storage, &tmp, next, "refresh-removed-call", &.{.{ .item_id = "removed", .name = "fetch_a", .encoded_call_id = "removed", .decoded_call_id = "removed", .encoded_arguments = "{}", .decoded_arguments = "{}" }});
                     try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE operation_id=?1 AND rejection_code='unknown_tool'", .{next.operation_id}));
                     const removed_text = protocol.contentDigest(tools.removed_tool_result);
                     try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call mc JOIN content c ON c.content_id=mc.rejection_content_id WHERE mc.operation_id=?1 AND c.digest=?2", .{ next.operation_id, testing.Blob{ .bytes = &removed_text } }));
-                    // Finish the tool-result continuation too.
                     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                     try done(&storage, &tmp, continuation);
                 } else try done(&storage, &tmp, next);
@@ -177,8 +163,6 @@ test "MCP offer projection covers identity changes removals additions and name n
                 try done(&storage, &tmp, again);
                 try std.testing.expect(!storage.isFenced());
             }
-            // An unchanged MCP Session admits in as many rounds as a built-in
-            // one; only a changed loaded record pays for a projection.
             try std.testing.expectEqual(rounds.get(.builtins), rounds.get(.unchanged));
             try std.testing.expectEqual(rounds.get(.builtins), rounds.get(.unloaded));
             try std.testing.expect(rounds.get(.description) > rounds.get(.unchanged));
@@ -230,7 +214,6 @@ test "MCP intent removal return crosses explicit equal and changed tools and loa
                 try std.testing.expectEqual(@as(u64, 1), try revisions(&storage, session.slice()));
                 try done(&storage, &tmp, absent);
                 var patch: @import("wire_request.zig").ConfigureCommand = .{ .session = session };
-                // Caller keys cannot change provenance or bypass explicit intent.
                 var key: [96]u8 = undefined;
                 try patch.key.set(try std.fmt.bufPrint(&key, "rui.core/mcp_tools/{s}/2", .{session.slice()}));
                 switch (field) {
@@ -247,8 +230,6 @@ test "MCP intent removal return crosses explicit equal and changed tools and loa
                 try std.testing.expectEqual(field != .loaded_tools or !changed, try member(&storage, session.slice(), "fetch_b"));
                 try std.testing.expectEqual(field != .tools or !changed, try member(&storage, session.slice(), "find_tools"));
                 try done(&storage, &tmp, patched);
-                // A new identity returning after reopen must obey name intent,
-                // not an earlier change row or the latest reduced offer.
                 rows[a].description = "returned a";
                 const returned = hostToolSet(&rows, &digests);
                 try storage.close();
@@ -299,9 +280,6 @@ test "MCP parent creation narrows configured intent and saves no derived offer a
                 const parent = (try storage.configure(&create, .{})).accepted.session;
                 const parent_intent = try Intent.read(&storage, parent.slice());
 
-                // The parent retains a now unavailable name and an unloaded
-                // name. Neither is in its current offer. Change b's identity
-                // too: creation selects today's records, not a parent's offer.
                 var missing_rows = records();
                 missing_rows[full.find("fetch_b").?].description = "creation b";
                 const a = full.find("fetch_a").?;
@@ -326,8 +304,6 @@ test "MCP parent creation narrows configured intent and saves no derived offer a
                     .configure => child: {
                         child_spec.configuration.parent.state = .value;
                         try child_spec.configuration.parent.value.set(parent.slice());
-                        // The intent ceiling permits a, but the independent
-                        // Host tool set validation still refuses an unavailable name.
                         var unavailable = child_spec;
                         try unavailable.key.set("parent-intent-unavailable");
                         unavailable.configuration.tools = try .of(&.{"fetch_a"});
@@ -342,7 +318,7 @@ test "MCP parent creation narrows configured intent and saves no derived offer a
                     },
                     .start_agent => child: {
                         try store.settleCallsForTesting(&storage, &tmp, model, "parent-intent-call", &.{.{ .item_id = "child", .name = "start_agent", .encoded_call_id = "child", .decoded_call_id = "child", .encoded_arguments = "{}", .decoded_arguments = "{}" }});
-                        const action = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
+                        const action = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
                         const Capture = struct {
                             child: protocol.Bounded(protocol.max_session_bytes) = .{},
                             fn call(context: *anyopaque, admission: store.Store.MessageAdmission) void {
@@ -382,8 +358,6 @@ test "MCP parent creation narrows configured intent and saves no derived offer a
                 try std.testing.expectEqual(!subset, try member(&storage, child.slice(), "fetch_b"));
                 try std.testing.expect(!try member(&storage, child.slice(), "fetch_a"));
                 try done(&storage, &tmp, next);
-                // Availability changes only Operation offers, never either
-                // Session's intent, its loaded intent, or revision snapshots.
                 for ([_]struct { session: []const u8, saved: @TypeOf(child_intent) }{
                     .{ .session = parent.slice(), .saved = parent_intent },
                     .{ .session = child.slice(), .saved = child_intent },
@@ -393,8 +367,6 @@ test "MCP parent creation narrows configured intent and saves no derived offer a
                     try std.testing.expectEqual(@as(u64, 1), try revisions(&storage, expected.session));
                     try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1 AND tool_set_id=?2 AND coalesce(loaded_tool_set_id,0)=?3", .{ expected.session, saved.tools, saved.loaded }));
                 }
-                // The admitted request retains b's creation identity even
-                // after b returns with a new identity; loaded intent is a ceiling.
                 try std.testing.expectEqual(@as(u64, if (subset) 0 else 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation o JOIN tool_set_member m ON m.tool_set_id=o.tool_set_id JOIN tool_record t ON t.tool_record_id=m.tool_record_id JOIN content c ON c.content_id=t.description_content_id WHERE o.operation_id=?1 AND t.name='fetch_b' AND c.digest=?2", .{ first.operation_id, testing.Blob{ .bytes = &protocol.contentDigest("creation b") } }));
                 try std.testing.expectEqual(@as(u64, if (subset) 0 else 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation o JOIN tool_set_member m ON m.tool_set_id=o.tool_set_id JOIN tool_record t ON t.tool_record_id=m.tool_record_id JOIN content c ON c.content_id=t.description_content_id WHERE o.operation_id=?1 AND t.name='fetch_b' AND c.digest=?2", .{ next.operation_id, testing.Blob{ .bytes = &protocol.contentDigest("returned b") } }));
                 try std.testing.expect(!storage.isFenced());
@@ -431,7 +403,7 @@ test "MCP find_tools expands loaded intent without losing or inventing unavailab
                 try testing.submitTestMessage(&storage, &tmp, "load-intent-start", "load-intent-start", session.slice(), "find");
                 const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try store.settleCallsForTesting(&storage, &tmp, model, "load-intent-call", &.{.{ .item_id = "find", .name = "find_tools", .encoded_call_id = "find", .decoded_call_id = "find", .encoded_arguments = "{\\\"words\\\":\\\"fetch_b\\\"}", .decoded_arguments = "{\"words\":\"fetch_b\"}" }});
-                const input = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
+                const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
                 try @import("find_tools.zig").run(&storage, arena.allocator(), &input, .{});
                 try std.testing.expectEqual(a_loaded, try intended(&storage, session.slice(), "fetch_a", true));
                 try std.testing.expect(try intended(&storage, session.slice(), "fetch_b", true));

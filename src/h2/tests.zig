@@ -1,7 +1,3 @@
-//! The client against the in-process peer over loopback h2c and TLS. Each
-//! Client test pumps the client and the peer on one thread, so every
-//! exchange is deterministic. `exchange` blocks its caller, so its tests
-//! pump the peer on a thread of its own.
 const builtin = @import("builtin");
 const std = @import("std");
 const h2 = @import("h2.zig");
@@ -51,8 +47,6 @@ const Harness = struct {
     peer: *Peer,
     receiver: Receiver,
     endpoint: h2.Endpoint,
-    /// How long `runUntil` steps: past the client's own setup deadline, so
-    /// a slow setup ends by its own cause rather than the harness's.
     limit_ns: u64,
 
     const Config = struct {
@@ -61,11 +55,8 @@ const Harness = struct {
         inactivity_ns: u64 = 10 * std.time.ns_per_s,
         liveness: h2.Liveness = .{},
         connect_timeout_ns: u64 = 5 * std.time.ns_per_s,
-        /// Overrides the peer's URL.
         url: ?[]const u8 = null,
-        /// Overrides trusting only the peer's CA file.
         trust: ?h2.Trust = null,
-        /// Overrides the client's clock, as `TestClock.start` does.
         io: std.Io = std.testing.io,
     };
 
@@ -107,7 +98,6 @@ const Harness = struct {
         try self.client.wait(1);
     }
 
-    /// Steps until `done` holds, failing after `limit_ns`.
     fn runUntil(self: *Harness, context: anytype, comptime done: fn (*Harness, @TypeOf(context)) bool) !void {
         const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
         while (!done(self, context)) {
@@ -233,7 +223,6 @@ test "a response in any content coding but identity is refused at its head" {
         try harness.launch(&stream, bytesRequest(harness.endpoint, "x", &sink));
         try harness.runUntilFinished(1);
         try std.testing.expectEqual(h2.End{ .cause = case.cause, .request_sent = true }, try harness.collect(&stream));
-        // A refused head reaches neither the receiver nor the sink.
         try std.testing.expectEqual(@as(u32, if (case.cause == .complete) 1 else 0), harness.receiver.heads);
         try std.testing.expectEqual(@as(u64, if (case.cause == .complete) 2 else 0), stream.responseLength());
         stream.deinit();
@@ -260,8 +249,6 @@ test "a borrowed field is sent from the caller's bytes and a copied one from pre
         .body = .{ .bytes = "x" },
         .sink = .{ .buffer = &sinks[1] },
     });
-    // Nothing is sent before a drive, so the peer sees the bytes as they
-    // are now: the borrowed value's, and the copy prepare made of the other.
     shared = "Bearer later".*;
     own = "Bearer later".*;
     try harness.runUntilFinished(2);
@@ -309,8 +296,6 @@ test "request bodies come from a file and responses go to one" {
     var written: [256 * 1024]u8 = undefined;
     try std.testing.expectEqual(written.len, try sink_file.readPositionalAll(io, &written, 0));
     try std.testing.expectEqualSlices(u8, &response, &written);
-    // Credit reopens only for written bytes: never more than one stream
-    // window outstanding.
     try std.testing.expect(harness.peer.seen.max_stream_window <= h2.stream_window_bytes);
     stream.deinit();
 }
@@ -379,7 +364,6 @@ test "REFUSED_STREAM is sent again at most four times" {
     defer harness.destroy();
     var stream: h2.Stream = .idle;
     var sink: [8]u8 = undefined;
-    // Each resend carries the borrowed field again, from the caller's bytes.
     try harness.launch(&stream, .{
         .endpoint = harness.endpoint,
         .fields = &.{.{ .name = "authorization", .value = "Bearer shared", .sensitive = true, .borrowed = true }},
@@ -411,8 +395,6 @@ test "a reset after a response began is not sent again" {
             return h.receiver.heads == 1;
         }
     }.done);
-    // The response began, so REFUSED_STREAM no longer proves the server
-    // left the request unprocessed.
     harness.peer.reset(harness.peer.streams.items[0], 0x7);
     try harness.runUntilFinished(1);
     try std.testing.expectEqual(h2.End{ .cause = .reset_by_peer, .request_sent = true }, try harness.collect(&stream));
@@ -456,7 +438,6 @@ test "a connection outlives its last stream's cancel, which only drive sends" {
     try harness.launch(&stream, bytesRequest(harness.endpoint, "1", &sink));
     try harness.runUntilPeerStreams(1);
     harness.client.cancel(&stream);
-    // No stream is left, but the reset is still unsent.
     try std.testing.expect(harness.client.hasConnections());
     try std.testing.expectEqual(@as(u32, 0), harness.peer.seen.rst_received);
     try harness.runUntil({}, struct {
@@ -491,7 +472,6 @@ test "retireConnections closes abandoned setup before the peer answers" {
     var stream: h2.Stream = .idle;
     var sink: [128]u8 = undefined;
     try harness.launch(&stream, bytesRequest(harness.endpoint, "1", &sink));
-    // Do not pump the peer: the setup cannot have completed.
     try harness.client.drive(&harness.receiver);
     try std.testing.expect(harness.client.hasConnections());
     harness.client.cancel(&stream);
@@ -557,8 +537,6 @@ test "a stream that closes mid-read leaves its siblings one write each" {
         const short: [20]u8 = @splat('s');
         fn handle(peer: *Peer, stream: *Peer.Stream) void {
             if (stream.index != 1) return;
-            // Both bodies go out in one flush, their DATA frames interleaved,
-            // so the short stream ends inside the read that carries the long.
             peer.respond(peer.streams.items[0], 200, &long);
             peer.respond(stream, 200, &short);
         }
@@ -697,13 +675,10 @@ test "an inactive stream ends and is reset" {
     stream.deinit();
 }
 
-/// The client's awake clock, moved only by `advance`: a stream is overdue
-/// when the test says so, never because the runner stalled mid-step.
 const TestClock = struct {
     var awake_ns: i96 = 0;
     var vtable: std.Io.VTable = undefined;
 
-    /// Restarts the clock at the real awake time; one harness at a time.
     fn start() std.Io {
         awake_ns = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
         vtable = std.testing.io.vtable.*;
@@ -746,7 +721,6 @@ test "a read cap defers expiry only for streams on that connection" {
     defer quiet.stop();
     const quiet_endpoint = try harness.client.addEndpoint(quiet.url());
 
-    // Five streams' windows hold more than one drive's read allowance.
     var busy: [5]h2.Stream = @splat(.idle);
     var sinks: [5][32 * 1024]u8 = undefined;
     for (&busy, &sinks) |*stream, *sink| try harness.launch(stream, bytesRequest(harness.endpoint, "x", sink));
@@ -765,13 +739,9 @@ test "a read cap defers expiry only for streams on that connection" {
     @memset(&response, 'r');
     for (harness.peer.streams.items) |stream| harness.peer.respond(stream, 200, &response);
     try harness.peer.pump();
-    // More than one drive's read allowance waits in the busy connection's
-    // socket. Not every byte: the peer has more in flight than a small
-    // receive buffer holds while the client reads nothing.
     const Busy = struct {
         fn queued(socket: std.posix.fd_t) !bool {
             var bytes: c_int = 0;
-            // FIONREAD: bytes waiting to be read.
             const fionread = if (builtin.os.tag.isDarwin()) 0x4004667f else std.os.linux.T.FIONREAD;
             if (std.c.ioctl(socket, fionread, &bytes) != 0) return error.Unexpected;
             return bytes >= h2.read_allowance_bytes;
@@ -782,8 +752,6 @@ test "a read cap defers expiry only for streams on that connection" {
     } else return error.TestUnexpectedResult;
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(3)), busy_socket, Busy.queued);
     try harness.client.drive(&harness.receiver);
-    // The silent stream's connection was drained, so it expires; the busy
-    // connection stopped at its allowance, so none of its streams do.
     try std.testing.expectEqual(@as(usize, 1), harness.client.finishedCount());
     try std.testing.expectEqual(h2.End{ .cause = .inactive, .request_sent = true }, try harness.collect(&silent));
 
@@ -907,7 +875,6 @@ test "requests the client cannot send are refused before anything opens" {
             .sink = .{ .buffer = &sink },
         }));
     }
-    // Never dereferenced: prepare refuses a sink its record cannot describe.
     const huge = @as([*]u8, &sink)[0 .. @as(usize, std.math.maxInt(u32)) + 1];
     try std.testing.expectError(error.InvalidRequest, harness.client.prepare(&stream, bytesRequest(harness.endpoint, "", huge)));
     try std.testing.expectError(error.CleartextNotLoopback, harness.client.addEndpoint("http://example.com/"));
@@ -919,8 +886,6 @@ test "a wait with the largest timeout still returns on wake" {
     harness.client.wake();
     try harness.client.wait(std.math.maxInt(u32));
 }
-
-// ---------------------------------------------------------------------- TLS
 
 test "https: a request completes over TLS with ALPN h2" {
     const harness = try Harness.create(.{ .peer = .{ .tls = .h2 } });
@@ -965,7 +930,6 @@ test "https: large bodies both ways stay within the stream window" {
 }
 
 test "https by name: the lookup runs, every address is tried, and the name is verified" {
-    // localhost may resolve to ::1 first; the peer listens on 127.0.0.1 only.
     const harness = try Harness.create(.{ .peer = .{ .tls = .h2, .url_host = "localhost" } });
     defer harness.destroy();
     var stream: h2.Stream = .idle;
@@ -991,7 +955,6 @@ const BlackHole = struct {
         if (std.c.listen(self.listener, 1) != 0) return error.ListenFailed;
         var length = self.address.length;
         if (std.c.getsockname(self.listener, @ptrCast(&self.address.storage), &length) != 0) return error.SocketFailed;
-        // Connect until one is not answered: the queue is full.
         for (&self.fillers) |*filler| {
             filler.* = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0);
             if (filler.* < 0) return error.SocketFailed;
@@ -1012,8 +975,6 @@ const BlackHole = struct {
     }
 };
 
-/// A request to a peer by name, whose lookup finds `before_peer` and then
-/// the peer's own address. Replaces the lookup the first drive started.
 fn launchRacing(harness: *Harness, stream: *h2.Stream, sink: []u8, before_peer: []const Resolver.Address) !void {
     try harness.launch(stream, bytesRequest(harness.endpoint, "x", sink));
     try harness.client.drive(&harness.receiver);
@@ -1030,7 +991,6 @@ fn launchRacing(harness: *Harness, stream: *h2.Stream, sink: []u8, before_peer: 
 test "https by name: an address that never answers does not keep the next from connecting" {
     var hole = try BlackHole.open();
     defer hole.close();
-    // Trying one address at a time would spend the whole timeout on the hole.
     const harness = try Harness.create(.{ .peer = .{ .tls = .h2, .url_host = "localhost" }, .connect_timeout_ns = 3 * std.time.ns_per_s });
     defer harness.destroy();
     var stream: h2.Stream = .idle;
@@ -1045,7 +1005,6 @@ test "https by name: two addresses that never answer do not keep the third from 
     defer holes[0].close();
     holes[1] = try BlackHole.open();
     defer holes[1].close();
-    // Two stuck attempts must give way, within two sockets, before the timeout.
     const harness = try Harness.create(.{ .peer = .{ .tls = .h2, .url_host = "localhost" }, .connect_timeout_ns = 3 * std.time.ns_per_s });
     defer harness.destroy();
     var stream: h2.Stream = .idle;
@@ -1064,8 +1023,6 @@ test "https: a partial TLS record waits for the socket instead of spinning" {
     try harness.runUntilPeerStreams(1);
     try harness.runFor(20 * ns_per_ms);
 
-    // The peer's next record goes to memory, and only its first bytes reach
-    // the socket: the client reads them and needs the rest.
     const connection = harness.peer.connections.items[0];
     const ssl = connection.ssl.?;
     const memory = openssl.BIO_new(openssl.BIO_s_mem()) orelse return error.OutOfMemory;
@@ -1110,18 +1067,10 @@ test "https: the system roots do not trust a private CA" {
     try expectSetupFailure(.{ .peer = .{ .tls = .h2 }, .trust = .system }, .untrusted_peer);
 }
 
-// On macOS SecTrust answers after the handshake, where ALPN is known
-// first; an untrusted peer must still be untrusted, as on Linux.
 test "https: an untrusted peer that does not choose h2 is untrusted" {
     try expectSetupFailure(.{ .peer = .{ .tls = .no_alpn }, .trust = .system }, .untrusted_peer);
 }
 
-// Manual checks of system trust against real servers, which CI cannot
-// make (its egress re-signs every certificate). Run on each platform:
-// `RUI_H2_LIVE_URL=https://api.openai.com/v1/models zig build test-h2`
-// `RUI_H2_LIVE_NEGATIVE=1 zig build test-h2`
-
-/// One request to `url` under system trust, until its stream ends.
 fn liveEnd(url: []const u8) !h2.End {
     var client: h2.Client = undefined;
     try client.init(std.testing.allocator, std.testing.io, .{
@@ -1146,7 +1095,6 @@ fn liveEnd(url: []const u8) !h2.End {
     return end;
 }
 
-// Any HTTP status passes; it proves the peer was verified and spoke h2.
 test "https live: system trust verifies a public server" {
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
@@ -1223,10 +1171,6 @@ test "https: trust is loaded by the first https endpoint, and a missing CA file 
     try std.testing.expectError(error.InvalidCaFile, client.addEndpoint("https://127.0.0.1:9/v1"));
 }
 
-// ----------------------------------------------------------------- exchange
-
-/// A peer pumped on its own thread, since `exchange` blocks the test's.
-/// Only that thread touches the peer until `join` returns.
 const PeerThread = struct {
     peer: *Peer,
     thread: ?std.Thread,
@@ -1249,7 +1193,6 @@ const PeerThread = struct {
         }
     }
 
-    /// Stops and joins the thread; the peer stays readable until `stop`.
     fn join(self: *PeerThread) !void {
         if (self.thread) |thread| {
             self.stopping.store(true, .release);
@@ -1259,7 +1202,6 @@ const PeerThread = struct {
         if (self.failure) |err| return err;
     }
 
-    /// Joins first, so the peer is never freed under its thread.
     fn stop(self: *PeerThread) void {
         self.join() catch {};
         self.peer.stop();
@@ -1313,13 +1255,10 @@ test "exchange: https against a CA file" {
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
-/// The OpenSSL trust variables as a test found them, restored by `restore`
-/// so other tests in this process keep their ambient trust.
 const TrustVariables = struct {
     const names = [_][*:0]const u8{ "SSL_CERT_FILE", "SSL_CERT_DIR" };
     saved: [names.len]?[std.posix.PATH_MAX:0]u8 = .{ null, null },
 
-    /// Saves both variables and clears them.
     fn isolate() !TrustVariables {
         var self: TrustVariables = .{};
         for (names, &self.saved) |name, *slot| {
@@ -1334,8 +1273,6 @@ const TrustVariables = struct {
 
     fn restore(self: *TrustVariables) void {
         for (names, &self.saved) |name, *slot| {
-            // A failed restore surfaces as later test failures. Unset only
-            // what the process started without; see `clear`.
             if (slot.*) |*value| _ = setenv(name, value, 1) else _ = unsetenv(name);
         }
     }
@@ -1353,8 +1290,6 @@ const TrustVariables = struct {
     }
 };
 
-/// One exchange under system trust to a TLS peer whose CA the variables
-/// name, or to nowhere when `peer` is null.
 fn systemTrustExchange(peer: ?*PeerThread) !h2.ExchangeOutcome {
     var response: [64]u8 = undefined;
     const request = exchangeRequest(if (peer) |running| running.peer.url() else "https://127.0.0.1:9/v1", &response);
@@ -1363,8 +1298,6 @@ fn systemTrustExchange(peer: ?*PeerThread) !h2.ExchangeOutcome {
     return outcome;
 }
 
-/// One exchange to `url` through a proxy at `proxy_url`, trusting the
-/// peer's CA when there is a peer.
 fn proxiedExchange(peer: ?*PeerThread, url: []const u8, proxy_url: []const u8, no_proxy: []const u8) !h2.ExchangeOutcome {
     var response: [64]u8 = undefined;
     var request = exchangeRequest(url, &response);
@@ -1397,8 +1330,6 @@ test "exchange: on Linux, SSL_CERT_FILE and SSL_CERT_DIR replace the bundle prob
         try TrustVariables.clear("SSL_CERT_DIR");
     }
     {
-        // Empty is unset: the host's certificate directory or bundle, which
-        // does not know this CA, or no trust at all on a host without one.
         var peer: PeerThread = undefined;
         try peer.start(.{ .tls = .h2 });
         defer peer.stop();
@@ -1412,7 +1343,6 @@ test "exchange: on Linux, SSL_CERT_FILE and SSL_CERT_DIR replace the bundle prob
         try TrustVariables.clear("SSL_CERT_FILE");
         try TrustVariables.clear("SSL_CERT_DIR");
     }
-    // A path that cannot be loaded fails trust; there is no fallback.
     try TrustVariables.set("SSL_CERT_FILE", "/nonexistent/h2-ca.pem");
     try std.testing.expectError(error.InvalidSslCertFile, systemTrustExchange(null));
     try TrustVariables.set("SSL_CERT_FILE", "/dev/null");
@@ -1426,10 +1356,8 @@ test "exchange: on Linux, SSL_CERT_FILE and SSL_CERT_DIR replace the bundle prob
         const directory = try peer.peer.caDirectory(&directory_z);
         try TrustVariables.set("SSL_CERT_DIR", try std.fmt.bufPrint(&list, "{s}:/nonexistent/h2-certs", .{directory}));
         try std.testing.expectError(error.InvalidSslCertDir, systemTrustExchange(null));
-        // A file is not a directory.
         try TrustVariables.set("SSL_CERT_DIR", peer.peer.caPath());
         try std.testing.expectError(error.InvalidSslCertDir, systemTrustExchange(null));
-        // A list of only separators names no directory.
         try TrustVariables.set("SSL_CERT_DIR", "::");
         try std.testing.expectError(error.InvalidSslCertDir, systemTrustExchange(null));
     }
@@ -1446,7 +1374,6 @@ test "system trust takes a certificate directory only when it holds a readable s
     defer peer.stop();
     var directory_z: [std.posix.PATH_MAX]u8 = undefined;
     try std.testing.expect(tls_client.hashedDirectory(try peer.peer.caDirectory(&directory_z)));
-    // A directory holding only a bundle file gives OpenSSL no roots.
     var bundle_z: [std.posix.PATH_MAX]u8 = undefined;
     const bundle_directory = try std.fmt.bufPrintSentinel(&bundle_z, "{s}", .{std.fs.path.dirname(peer.peer.caPath()).?}, 0);
     try std.testing.expect(!tls_client.hashedDirectory(bundle_directory));
@@ -1459,7 +1386,6 @@ test "system trust takes a certificate directory only when it holds a readable s
     var dangling_z: [std.posix.PATH_MAX]u8 = undefined;
     const dangling = try std.fmt.bufPrintSentinel(&dangling_z, "{s}/00000000.0", .{tmp_directory}, 0);
     try std.testing.expectEqual(@as(c_int, 0), std.c.symlink("/nonexistent/h2-ca.pem", dangling));
-    // Every hash entry dangles: the store is missing, so the probe moves on.
     try std.testing.expect(!tls_client.hashedDirectory(tmp_directory));
 }
 
@@ -1484,11 +1410,9 @@ test "exchange: https through a proxy's CONNECT tunnel, with its credentials" {
     const proxy = try Proxy.start(std.testing.allocator, .{ .target_port = peer.peer.port });
     defer proxy.stop();
     var proxy_url: [96]u8 = undefined;
-    // The tunnel reaches the peer though nothing resolves proxied.test.
     const outcome = try proxiedExchange(&peer, peer.peer.url(), try proxy.url(&proxy_url, "us%40er:p%3Ass"), "");
     try std.testing.expectEqual(@as(u16, 200), outcome.answered.status);
     var expected: [256]u8 = undefined;
-    // base64("us@er:p:ss")
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "CONNECT proxied.test:{d} HTTP/1.1\r\nHost: proxied.test:{d}\r\nProxy-Authorization: Basic dXNAZXI6cDpzcw==\r\n\r\n", .{ peer.peer.port, peer.peer.port }), proxy.firstRequest().?);
 }
 
@@ -1509,8 +1433,6 @@ test "exchange: a proxy's 407, 403 or other refusal ends the setup before any re
 }
 
 test "exchange: bytes after the proxy's answer fail the tunnel" {
-    // The origin speaks only after the client's ClientHello, so these are
-    // the proxy's own, and TLS must not read them as the server's.
     const proxy = try Proxy.start(std.testing.allocator, .{ .after_answer = "\x16\x03\x03" });
     defer proxy.stop();
     var proxy_url: [96]u8 = undefined;
@@ -1535,7 +1457,6 @@ test "exchange: loopback and NO_PROXY hosts connect directly" {
         defer peer.stop();
         try std.testing.expectEqual(@as(u16, 200), (try proxiedExchange(&peer, peer.peer.url(), url, "")).answered.status);
     }
-    // Bypassed, proxied.test is looked up directly, and .test names no host.
     const outcome = try proxiedExchange(null, "https://proxied.test/v1", url, "example.com, .test");
     try std.testing.expectEqual(h2.Cause.resolve_failed, outcome.failed.cause);
     try std.testing.expectEqual(@as(?[]const u8, null), proxy.firstRequest());
@@ -1608,7 +1529,6 @@ test "exchange: cancellation stops a request in flight" {
 }
 
 test "exchange: a refused connection is positive evidence nothing was sent" {
-    // As in the Client test: a port whose listener just closed.
     const peer = try Peer.start(std.testing.allocator, .{});
     var url_buffer: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buffer, "{s}", .{peer.url()});

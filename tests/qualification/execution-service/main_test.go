@@ -13,7 +13,6 @@ import (
 )
 
 func TestWireRequestIncludesAllocatedIdentityAndNoSyntheticSystemMessage(t *testing.T) {
-	// Prompt prose has no pinned bytes; only the oracle's inputs are checked.
 	body := wireRequest("/workspace", "k7m2qx", [][]byte{userItem("capacity-1-0")})
 	if bytes.Equal(body, wireRequest("/workspace", "k7m2qy", [][]byte{userItem("capacity-1-0")})) {
 		t.Fatal("request oracle ignored the configuration's allocated identity")
@@ -146,7 +145,6 @@ func TestParseRejectsIncompleteMeasurementIdentity(t *testing.T) {
 				return
 			}
 		}
-		// Exercise *_failed endpoints by retargeting their completed counterpart.
 		completed := phase
 		switch phase {
 		case "preparation_advance_failed":

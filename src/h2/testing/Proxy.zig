@@ -1,8 +1,3 @@
-//! A CONNECT proxy for tests, on a thread of its own. It answers each
-//! tunnel request with `Options.status` and, for a 2xx, relays bytes
-//! between the client and `Options.target_port` on 127.0.0.1, whatever
-//! host the request named. It records a request before it answers it, so
-//! a test that reads the record after the client returned sees it whole.
 const std = @import("std");
 const builtin = @import("builtin");
 const tls = @import("../tls.zig");
@@ -11,7 +6,6 @@ const Proxy = @This();
 pub const Options = struct {
     status: u16 = 200,
     target_port: u16 = 0,
-    /// Bytes sent right after the answer, before any relaying.
     after_answer: []const u8 = "",
 };
 
@@ -21,7 +15,6 @@ listener: std.posix.fd_t,
 port: u16,
 thread: std.Thread,
 stopping: std.atomic.Value(bool) = .init(false),
-/// Requests answered so far; `first_request` holds the first one's bytes.
 requests: std.atomic.Value(u32) = .init(0),
 first_request: [1024]u8 = undefined,
 first_request_len: usize = 0,
@@ -55,12 +48,10 @@ pub fn stop(self: *Proxy) void {
     self.allocator.destroy(self);
 }
 
-/// `http://127.0.0.1:port`, with `user_info@` when it is not empty.
 pub fn url(self: *const Proxy, buffer: []u8, user_info: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buffer, "http://{s}{s}127.0.0.1:{d}", .{ user_info, if (user_info.len > 0) "@" else "", self.port });
 }
 
-/// The first request's bytes, once `requests` counts one.
 pub fn firstRequest(self: *const Proxy) ?[]const u8 {
     if (self.requests.load(.acquire) == 0) return null;
     return self.first_request[0..self.first_request_len];
@@ -86,7 +77,6 @@ fn run(self: *Proxy) void {
     }
 }
 
-/// Waits briefly for `fd`, so `stop` is never blocked for long.
 fn ready(fd: std.posix.fd_t, events: i16) bool {
     var poll = [_]std.c.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
     return std.c.poll(&poll, 1, 20) > 0;
@@ -108,7 +98,6 @@ fn serve(self: *Proxy, client: std.posix.fd_t) void {
     }
     _ = self.requests.fetchAdd(1, .release);
 
-    // One send, so the answer and any bytes after it arrive together.
     var answer: [256]u8 = undefined;
     const challenge = if (self.options.status == 407) "Proxy-Authenticate: Basic realm=\"test\"\r\n" else "";
     const head = std.fmt.bufPrint(&answer, "HTTP/1.1 {d} Test\r\n{s}\r\n{s}", .{ self.options.status, challenge, self.options.after_answer }) catch unreachable;
@@ -124,7 +113,6 @@ fn serve(self: *Proxy, client: std.posix.fd_t) void {
     self.relay(client, target);
 }
 
-/// Copies bytes both ways until either side closes or the proxy stops.
 fn relay(self: *Proxy, a: std.posix.fd_t, b: std.posix.fd_t) void {
     var buffer: [16 * 1024]u8 = undefined;
     while (!self.stopping.load(.acquire)) {
@@ -141,7 +129,6 @@ fn relay(self: *Proxy, a: std.posix.fd_t, b: std.posix.fd_t) void {
     }
 }
 
-/// A side that went away must not SIGPIPE the test process.
 fn quiet(fd: std.posix.fd_t) void {
     if (!builtin.os.tag.isDarwin()) return;
     const one: c_int = 1;

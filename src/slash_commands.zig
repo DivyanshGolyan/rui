@@ -1,5 +1,3 @@
-//! Conversation slash commands: one table of names and argument shapes.
-//! The parser, the list typing "/" shows, and Tab all read it.
 const std = @import("std");
 const model_catalog = @import("model_catalog.zig");
 const cli_args = @import("cli_args.zig");
@@ -8,24 +6,15 @@ const model_capability = @import("model_capability.zig");
 const TerminalText = @import("TerminalText.zig");
 const ReasoningEffort = model_capability.ReasoningEffort;
 
-/// What may follow the name, after one space.
 pub const Argument = union(enum) {
     none,
-    /// Anything, or nothing; the word names it in the list.
     optional: []const u8,
-    /// Some text; the word names it in the list.
     required: []const u8,
-    /// Nothing, or exactly one of these words.
     choice: []const Choice,
-    /// One of the efforts the screen's model offers.
     effort,
-    /// Options of `grammar`, as a shell spells them; the list offers the
-    /// `names` and each one's fixed values.
     options: Options,
 };
 
-/// Whether a command needs a word after its name before Enter on it in
-/// the list runs it.
 fn requires(argument: Argument) bool {
     return switch (argument) {
         .required, .effort => true,
@@ -34,22 +23,16 @@ fn requires(argument: Argument) bool {
     };
 }
 
-/// A word an argument may be.
 pub const Choice = struct { word: []const u8 };
 
 pub const Options = struct {
     grammar: cli_args.Definition,
-    /// The options the list offers, in its order: each spelled with a space
-    /// after it, since another word follows.
     entries: []const Entry,
-    /// Whether the command alone does something; else alone it only says
-    /// its usage, so Enter on it in the list waits for an option.
     alone: bool,
     fn of(comptime grammar: cli_args.Definition, comptime names: []const []const u8, comptime alone: bool) Options {
         var entries: [names.len]Entry = undefined;
         for (&entries, names) |*entry, option| {
             const argument = grammar.argumentOf(option) orelse @compileError("no option --" ++ option);
-            // A flag is whole; an option waits for its value.
             entry.* = .{ .word = "--" ++ option ++ " ", .shown = "--" ++ option, .runs = argument == null };
         }
         const final = entries;
@@ -57,24 +40,19 @@ pub const Options = struct {
     }
 };
 
-/// What the screen in front knows that the list offers: the model whose
-/// efforts /effort and --reasoning-effort list, and the effort in force.
 pub const Context = struct {
     model: ?[]const u8 = null,
     effort: ?ReasoningEffort = null,
 };
 
-/// What /copy copies: the last answer, or what its one word names.
 pub const Copy = enum { answer, code, file };
 
 pub const Command = struct {
     description: []const u8 = "",
     argument: Argument = .none,
-    /// Whether typing `/` lists the command.
     listed: bool = true,
 };
 
-/// /copy's words: every `Copy` but the answer, which /copy alone copies.
 const copy_words = &[_]Choice{
     .{ .word = "code" },
     .{ .word = "file" },
@@ -84,10 +62,8 @@ comptime {
     for (@typeInfo(Copy).@"enum".field_names[1..], copy_words) |field, choice| std.debug.assert(std.mem.eql(u8, field, choice.word));
 }
 
-/// Future defaults, as /setup saves them; /setup alone shows them.
 const setup_options: Options = .of(cli_args.live_setup, &.{ "model", "provider", "reasoning-effort", "notifications", "clear-model", "store" }, true);
 
-/// The conversation's commands, declared in list order.
 const ConversationName = enum {
     archive,
     clear,
@@ -107,7 +83,6 @@ const ConversationName = enum {
     unpin,
 };
 
-/// A conversation's commands.
 pub const conversation = Commands(ConversationName, .{
     .archive = .{ .description = "archive this chat" },
     .clear = .{ .description = "start a new chat" },
@@ -127,14 +102,10 @@ pub const conversation = Commands(ConversationName, .{
     .unpin = .{ .description = "unpin this chat" },
 });
 
-/// Whether a draft starts with the one `/` a command or a leading skill
-/// takes; `//` starts literal text.
 fn slashed(text: []const u8) bool {
     return text.len != 0 and text[0] == '/' and !std.mem.startsWith(u8, text, "//");
 }
 
-/// What a conversation says for a line that names no command: the name typed,
-/// when it is short printable ASCII, and where the commands are.
 pub fn unknown(buffer: *[unknown_bytes]u8, text: []const u8) []const u8 {
     const name = text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
     var shown = name.len <= max_unknown_name;
@@ -145,25 +116,15 @@ pub fn unknown(buffer: *[unknown_bytes]u8, text: []const u8) []const u8 {
 const max_unknown_name = 32;
 pub const unknown_bytes = "! Unknown command ".len + max_unknown_name;
 
-/// The most a command's output may hold and still show as a notice, in a
-/// conversation; more opens a page.
 pub const short_result_bytes = 256;
-/// The most lines a command's output may hold and still show as a notice.
 pub const short_result_lines = 2;
-/// Room for a short result as a notice says it, a mark on each line.
 pub const result_notice_bytes = short_result_bytes + short_result_lines * "! ".len;
 
-/// What a conversation says for `output`, a command's complete output, when it
-/// is short: each line with the CLI's `Rui: ` dropped and its `rui: `
-/// diagnostics marked `!`, or `no_output` for none. Null when the output
-/// takes a page.
 pub fn resultNotice(buffer: *[result_notice_bytes]u8, output: []const u8) ?[]const u8 {
     if (output.len > short_result_bytes) return null;
     const text = std.mem.trimEnd(u8, output, "\n");
     if (text.len == 0) return no_output;
     if (std.mem.count(u8, text, "\n") >= short_result_lines) return null;
-    // A mark replaces a longer prefix, and the buffer has room for one on
-    // every line besides, so the writes always fit.
     var writer = std.Io.Writer.fixed(buffer);
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
@@ -177,27 +138,19 @@ pub fn resultNotice(buffer: *[result_notice_bytes]u8, output: []const u8) ?[]con
     return writer.buffered();
 }
 
-/// What a command that printed nothing says.
 pub const no_output = "Command finished with no output.";
 
-/// How many commands a list of `rows` rows names when `total` match: all
-/// that fit; when more match, the last row counts the rest instead, unless
-/// it is the only row.
 pub fn named(total: usize, rows: usize) usize {
     return if (total <= rows) total else if (rows >= 2) rows - 1 else rows;
 }
 
-/// The row that counts the commands a list leaves out.
 pub const more = "+{d} more · type to narrow";
 
-/// One screen's commands, `Name` in list order, and what the screen reads
-/// from them.
 pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N, Command, null)) type {
     return struct {
         pub const Name = N;
         pub const table = std.enums.EnumArray(Name, Command).init(commands);
 
-        /// The command as typed with its argument's shape, as in `/copy [code|file]`.
         pub const usage = blk: {
             var texts: std.enums.EnumArray(Name, []const u8) = undefined;
             for (std.enums.values(Name)) |name| {
@@ -226,7 +179,6 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
             break :blk count;
         };
 
-        /// Align fixed choice words after the widest listed command name.
         pub const description_column = blk: {
             var widest = 0;
             for (std.enums.values(Name)) |name| if (table.get(name).listed) {
@@ -248,32 +200,18 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
         };
 
         pub const Parsed = union(enum) {
-            /// Not a command's name.
             unknown,
-            /// A command's name with an argument its shape does not admit.
             misused: Name,
-            /// Spaces trimmed; empty when none was given.
             command: struct { name: Name, argument: []const u8 },
         };
 
-        /// A command name in the complete grammar, including unlisted actions.
-        /// Takes the bare name, without `/` or arguments; visibility is irrelevant.
         pub fn nameOf(word: []const u8) ?Name {
             return std.meta.stringToEnum(Name, word);
         }
 
-        /// What a draft is, read from its bytes and this grammar alone.
-        /// Enter, Esc, completion and the list each ask here, so they agree.
         pub const Draft = enum {
-            /// Text for the agent: Enter sends it and Esc never takes it.
-            /// A `/name` no command owns is text; the Host binds its skills.
             message,
-            /// One unfinished `/word` and nothing else: the person is still
-            /// choosing a row. Enter with no list sends it; Esc on its list
-            /// takes it.
             word,
-            /// The first word names a command, listed or not: `parse` reads
-            /// the line, Enter runs it and Esc on its list takes it.
             command,
         };
 
@@ -284,8 +222,6 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
             return if (std.mem.indexOfAny(u8, text, " \t\n") == null) .word else .message;
         }
 
-        /// Every listed command's row, in list order. Which of them a typed
-        /// first word shows, and in what order, is `skill_completion`'s.
         pub fn listed() List {
             var list: List = .{ .typed = "", .column = description_column };
             for (names) |name| {
@@ -296,7 +232,6 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
             return list;
         }
 
-        /// Reads a command line: a draft `draftOf` calls a command.
         pub fn parse(text: []const u8) Parsed {
             std.debug.assert(text.len != 0 and text[0] == '/');
             const end = std.mem.indexOfScalar(u8, text, ' ') orelse text.len;
@@ -314,8 +249,6 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
             return if (admitted) .{ .command = .{ .name = name, .argument = argument } } else .{ .misused = name };
         }
 
-        /// Drops the spaces around an argument, but keeps a final space a
-        /// backslash escapes: the argument's decoder reads it as part of a word.
         fn trimmed(raw: []const u8) []const u8 {
             const argument = std.mem.trimStart(u8, raw, " ");
             var len = std.mem.trimEnd(u8, argument, " ").len;
@@ -325,19 +258,12 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
             return argument[0..len];
         }
 
-        /// What the list shows for `draft`, read against `context`: the
-        /// choices the word being typed after a command's name starts. For
-        /// the draft's first word, an empty list: its rows are the caret
-        /// word's, which `skill_completion` matches against commands and
-        /// skills alike. Null for any other draft, which shows no list and
-        /// takes Tab as a tab.
         pub fn suggest(draft: []const u8, context: Context) ?List {
             if (!slashed(draft) or std.mem.indexOfAny(u8, draft, "\t\n") != null) return null;
             const end = std.mem.indexOfScalar(u8, draft, ' ') orelse return .{ .typed = draft[1..] };
             var list: List = .{ .typed = undefined };
             const name = nameOf(draft[1..end]) orelse return null;
             const words = draft[end + 1 ..];
-            // A quote or an escape starts text the list cannot follow.
             if (std.mem.indexOfAny(u8, words, "\"'\\") != null) return null;
             const start = if (std.mem.lastIndexOfScalar(u8, words, ' ')) |space| space + 1 else 0;
             list.typed = words[start..];
@@ -354,7 +280,6 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
                 },
                 .options => |options| {
                     const previous = before[if (std.mem.lastIndexOfScalar(u8, before, ' ')) |space| space + 1 else 0..];
-                    // A word after an option that takes a value is that value.
                     if (std.mem.startsWith(u8, previous, "--")) if (options.grammar.argumentOf(previous[2..])) |argument| if (argument) |shape| {
                         list.offerValues(shape);
                         return list;
@@ -367,7 +292,6 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
 
         const names = std.enums.values(Name);
 
-        /// `/name ` for each command, so a completion borrows static bytes.
         const spaced = blk: {
             var texts: std.enums.EnumArray(Name, []const u8) = undefined;
             for (names) |name| texts.set(name, "/" ++ @tagName(name) ++ " ");
@@ -376,43 +300,28 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
     };
 }
 
-/// One row of the list: the whole word the person is typing, as Tab puts
-/// it in the draft (with a space when another word may follow), what the
-/// row shows, and optional quiet metadata for choices, skills or requests.
 pub const Entry = struct {
     word: []const u8,
     shown: []const u8,
     description: []const u8 = "",
-    /// Whether Enter on the entry runs the command it completes; else
-    /// Enter only puts the word in, for the next one.
     runs: bool = true,
     /// The part of the row the typed word matched, which the list draws
     /// bold; `skill_completion` sets it.
     matches: MatchSpans = .{},
 };
 
-/// Matched bytes of a row's shown name (including `/`) and description.
 pub const Span = struct { start: usize, len: usize };
 pub const MatchSpans = struct { name: ?Span = null, description: ?Span = null };
 
-/// What the list shows for a draft: the words that start what is typed.
 pub const List = struct {
-    /// The word being typed. A command's argument list holds the words
-    /// that start it; a `/word`'s list, `skill_completion`'s, the rows whose
-    /// name or description holds it, and a row there replaces the whole name.
     typed: []const u8,
     entries: [capacity]Entry = undefined,
     count: usize = 0,
-    /// The exact-name entry selected by the ranking owner, if one exists.
     exact: ?usize = null,
-    /// The source `/word` in the draft, supplied by the word/list owner.
     source_word: ?Span = null,
 
-    /// Where descriptions start, when the list names one: the screen's
-    /// commands keep theirs while typing narrows them.
     column: ?usize = null,
 
-    /// All conversation commands and one complete skill preview.
     pub const capacity = conversation.listed_count + skill_suggestions.capacity;
 
     /// A typed name is known only when this list contains its exact row.
@@ -431,8 +340,6 @@ pub const List = struct {
         if (std.mem.startsWith(u8, word, self.typed)) self.add(.{ .word = word, .shown = text });
     }
 
-    /// The efforts the context's model offers, and
-    /// `default`, which clears the choice.
     fn offerEfforts(self: *List, context: Context) void {
         const model = context.model orelse return;
         for (std.enums.values(ReasoningEffort)) |effort| if (model_capability.supportsReasoningEffort(model_catalog.shipped, model, effort)) {
@@ -441,8 +348,6 @@ pub const List = struct {
         self.offer("default", "default");
     }
 
-    /// The fixed words an option's value may be: the lowercase
-    /// alternatives its shape names, so `TOKENS|default` offers `default`.
     fn offerValues(self: *List, shape: []const u8) void {
         var values = std.mem.splitScalar(u8, shape, '|');
         while (values.next()) |value| {
@@ -457,30 +362,22 @@ pub const List = struct {
         return self.entries[0..self.count];
     }
 
-    /// What Tab or Enter adds to the draft for the highlighted entry: the
-    /// rest of its word, in a list whose words start the typed one.
     pub fn completion(self: *const List, highlight: usize) []const u8 {
         std.debug.assert(std.mem.startsWith(u8, self.entries[highlight].word, self.typed));
         return self.entries[highlight].word[self.typed.len..];
     }
 
-    /// What Enter does with the highlighted entry: adds the rest of its
-    /// word to the draft, and then, when `runs`, runs the line that makes,
-    /// without the space `rest` ends with when another word may follow.
     pub fn enter(self: *const List, highlight: usize) struct { rest: []const u8, runs: bool } {
         const entry = self.entries[highlight];
         if (!entry.runs) return .{ .rest = self.completion(highlight), .runs = false };
         return .{ .rest = std.mem.trimEnd(u8, entry.word, " ")[self.typed.len..], .runs = true };
     }
 
-    /// The first of `rows` rows that keep the highlighted entry in view.
     pub fn firstShown(self: *const List, highlight: usize, rows: usize) usize {
         const fit = named(self.count, rows);
         return @min((highlight + 1) -| fit, self.count - fit);
     }
 
-    /// Cells from a row's start to its description: the widest shown text
-    /// and two spaces.
     pub fn descriptionColumn(self: *const List) usize {
         if (self.column) |column| return column;
         var widest: usize = 0;
@@ -489,37 +386,17 @@ pub const List = struct {
     }
 };
 
-/// The list built for one draft revision, and what the latest frame did
-/// with a list: the one value Enter, Esc, the arrows and Tab act on. A key
-/// on a draft changed since the frame first brings it to that draft through
-/// `next`, as the next frame would, so its rows are always the draft's.
-/// Enter, Esc and the arrows act on it only when the latest frame drew a
-/// list; Tab completes from it also after Esc closed it or when the screen
-/// had no rows for it.
 pub const Shown = struct {
     list: List,
-    /// The draft revision the list was built for.
     revision: u64,
-    /// The highlighted entry: the first until Up or Down moves it, and the
-    /// last when the list narrowed under it (the model changed, say).
     highlight: usize = 0,
     seen: enum { drawn, hidden, closed } = .hidden,
-    /// What the rows came from, when not the draft alone (see `nextOf`).
     source: u64 = 0,
 
-    /// The list, `list`, for the draft at `revision`, after `previous`:
-    /// while the draft is the one `previous` was built for, it keeps its
-    /// highlight and stays closed once Esc closed it; any edit starts a list
-    /// at its first row. It counts as drawn while the latest frame drew a
-    /// list, until a frame records its own. Null when nothing matches.
     pub fn next(previous: ?Shown, revision: u64, list: ?List) ?Shown {
         return nextOf(previous, revision, 0, list);
     }
 
-    /// As `next`, for a list whose rows come from elsewhere than the
-    /// draft, named by `source`: rows from another source are a new list, at its first row
-    /// and not drawn until a frame draws it, so no key acts on a row the
-    /// person did not see.
     pub fn nextOf(previous: ?Shown, revision: u64, source: u64, list: ?List) ?Shown {
         const built = list orelse return null;
         if (built.count == 0) return null;
@@ -530,29 +407,18 @@ pub const Shown = struct {
         return .{ .list = built, .revision = revision, .source = source, .highlight = @min(kept.highlight, built.count - 1), .seen = kept.seen };
     }
 
-    /// The list Enter, Esc and the arrows act on: `stored`, the latest
-    /// frame's, becomes `current`, its `next` for the draft as it is now,
-    /// when the latest frame drew a list.
     pub fn drawnNow(stored: *?Shown, current: ?Shown) ?*Shown {
         stored.* = current orelse return null;
         const kept = &stored.*.?;
         return if (kept.seen == .drawn) kept else null;
     }
 
-    /// A pointer press on a row a frame drew: the row's index and the
-    /// identity of the list that frame drew it in, captured at draw time.
     pub const Pick = struct { index: usize, revision: u64, source: u64 };
 
-    /// The pick of the row at `index` in this list, as a frame draws it.
     pub fn pick(self: *const Shown, index: usize) Pick {
         return .{ .index = index, .revision = self.revision, .source = self.source };
     }
 
-    /// The list a pointer press acts on: `drawnNow`'s, with the pressed row
-    /// highlighted as the arrows would leave it, only while it is still the
-    /// list `pressed` names (the same draft revision and row source the
-    /// frame drew). Null, changing nothing, for an edited draft, replaced
-    /// rows, a closed or undrawn list, or a row the list no longer has.
     pub fn pickedNow(stored: *?Shown, current: ?Shown, pressed: Pick) ?*Shown {
         const now = current orelse return null;
         if (now.revision != pressed.revision or now.source != pressed.source) return null;
@@ -562,54 +428,41 @@ pub const Shown = struct {
         return shown;
     }
 
-    /// The rows the list asks of the frame: none once Esc closed it.
     pub fn rows(self: *const Shown) usize {
         return if (self.seen == .closed) 0 else self.list.count;
     }
 
-    /// Records whether the frame had rows for the list.
     pub fn drew(self: *Shown, drawn: bool) void {
         if (self.seen != .closed) self.seen = if (drawn) .drawn else .hidden;
     }
 
-    /// Esc: the list stays closed until the draft changes.
     pub fn close(self: *Shown) void {
         self.seen = .closed;
     }
 
-    /// What Tab adds to the draft: the rest of the highlighted entry's word.
     pub fn completion(self: *const Shown) []const u8 {
         return self.list.completion(self.highlight);
     }
 
-    /// Up or Down: the highlight moves, stopping at the list's ends.
     pub fn move(self: *Shown, down: bool) void {
         self.highlight = if (down) @min(self.highlight + 1, self.list.count - 1) else self.highlight -| 1;
     }
 };
 
 const recover_command = "/" ++ @tagName(ConversationName.recover);
-/// The /recover line's room: the conversation's own key is a UUID.
 pub const recover_line_bytes = recover_command.len + " ".len + 36;
 
-/// The row a conversation's /requests page shows for its own unconfirmed
-/// original: the `/recover KEY` line that retries it, as Ctrl-R does. The
-/// caller decides that the original can be retried now, and owns `buffer`.
 pub fn recoverEntry(buffer: *[recover_line_bytes]u8, key: *const [36]u8) Entry {
     const line = std.fmt.bufPrint(buffer, recover_command ++ " {s}", .{key}) catch unreachable;
     return .{ .word = line, .shown = line, .description = "retry this unconfirmed original, as Ctrl-R does" };
 }
 
-/// A conversation's /requests rows for its saved Messages, newest saved
-/// first: each the `/result KEY` line that reads its answer, so a pick does
-/// what typing it does. `max_key_bytes` is the Store's bound on a key.
 pub fn Requests(comptime max_key_bytes: usize) type {
     return struct {
         rows: [capacity]Row = undefined,
         count: usize = 0,
 
         const Self = @This();
-        /// The list's rows, less one for the original's /recover row.
         pub const capacity = List.capacity - 1;
         const result_command = "/" ++ @tagName(ConversationName.result);
         const line_bytes = result_command.len + " ".len + max_key_bytes;
@@ -621,7 +474,6 @@ pub fn Requests(comptime max_key_bytes: usize) type {
             line_length: usize,
             description: [description_bytes]u8,
             description_length: usize,
-            /// When the request was saved; newer rows come first.
             saved: std.Io.Timestamp,
 
             fn key(self: *const Row) []const u8 {
@@ -629,9 +481,6 @@ pub fn Requests(comptime max_key_bytes: usize) type {
             }
         };
 
-        /// A saved Message, saved at `saved` and shown at `clock`, its local
-        /// `HH:MM`; the shell passes null when the C library cannot give
-        /// one, and the row then says no time. Only the newest fit.
         pub fn offer(self: *Self, saved: std.Io.Timestamp, clock: ?[]const u8, key: []const u8) void {
             if (key.len > max_key_bytes) return;
             var row: Row = .{ .line = undefined, .line_length = 0, .description = undefined, .description_length = 0, .saved = saved };
@@ -648,8 +497,6 @@ pub fn Requests(comptime max_key_bytes: usize) type {
             self.count = kept + 1;
         }
 
-        /// A key the parser reads back from `line` as its one word, and
-        /// one the list can draw: no control or direction character.
         fn admits(line: []const u8, key: []const u8) bool {
             const parsed = conversation.parse(line);
             if (parsed != .command or !std.mem.eql(u8, parsed.command.argument, key)) return false;
@@ -665,16 +512,11 @@ pub fn Requests(comptime max_key_bytes: usize) type {
             return true;
         }
 
-        /// Newest first; the key orders saves of the same moment.
         fn newer(row: *const Row, than: *const Row) bool {
             if (row.saved.nanoseconds != than.saved.nanoseconds) return row.saved.nanoseconds > than.saved.nanoseconds;
             return std.mem.order(u8, row.key(), than.key()) == .lt;
         }
 
-        /// The rows as the list an empty draft shows, after `lead`, the
-        /// original's /recover row when it can be retried now; a saved
-        /// Message that is that original has only that row. Null when
-        /// there is no row.
         pub fn list(self: *const Self, lead: ?Entry) ?List {
             var shown: List = .{ .typed = "" };
             const original = if (lead) |entry| entry.word[recover_command.len + 1 ..] else "";
@@ -692,7 +534,6 @@ test "a /requests list keeps the newest saved Messages, after the original's /re
     const Saved = Requests(128);
     const key = "01234567-89ab-4cde-8012-0123456789ab";
     var requests: Saved = .{};
-    // More Messages than fit, offered out of order, and the original among them.
     const total = Saved.capacity + 5;
     comptime std.debug.assert(std.math.gcd(11, total) == 1);
     var keys: [total][36]u8 = undefined;
@@ -705,7 +546,6 @@ test "a /requests list keeps the newest saved Messages, after the original's /re
     try std.testing.expectEqual(Saved.capacity, requests.count);
     var recover_line: [recover_line_bytes]u8 = undefined;
     const shown = requests.list(recoverEntry(&recover_line, key)).?;
-    // The original, the newest saved, shows only as its /recover row.
     try std.testing.expectEqual(Saved.capacity, shown.count);
     try std.testing.expectEqualStrings("/recover " ++ key, shown.entries[0].word);
     try std.testing.expectEqualStrings("retry this unconfirmed original, as Ctrl-R does", shown.entries[0].description);
@@ -716,13 +556,10 @@ test "a /requests list keeps the newest saved Messages, after the original's /re
         try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "/result {s}", .{newest}), entry.word);
         try std.testing.expectEqualStrings(entry.word, entry.shown);
         try std.testing.expectEqualStrings("12:34 · read this Message's saved answer", entry.description);
-        // Enter runs the whole line, which parses back to the key.
         try std.testing.expectEqualStrings(entry.word, shown.enter(index).rest);
         try std.testing.expect(shown.enter(index).runs);
         try std.testing.expectEqualStrings(newest, conversation.parse(entry.word).command.argument);
     }
-    // Without the /recover row, the original is a saved Message like any
-    // other, and the newest.
     const without = requests.list(null).?;
     try std.testing.expectEqual(Saved.capacity, without.count);
     try std.testing.expectEqualStrings("/result " ++ key, without.entries[0].word);
@@ -737,8 +574,6 @@ test "rows from elsewhere than the draft that change are a new list, which no ke
     stored.?.drew(true);
     Shown.drawnNow(&stored, Shown.nextOf(stored, 1, 7, requests.list(null))).?.move(true);
     try std.testing.expectEqualStrings("/result older", Shown.drawnNow(&stored, Shown.nextOf(stored, 1, 7, requests.list(null))).?.completion());
-    // The same draft over other rows: nothing to act on, and the first row
-    // once a frame draws them.
     try std.testing.expect(Shown.drawnNow(&stored, Shown.nextOf(stored, 1, 8, requests.list(null))) == null);
     try std.testing.expectEqual(@as(usize, 0), stored.?.highlight);
     stored.?.drew(true);
@@ -758,22 +593,16 @@ test "a /requests list takes only keys the parser reads back as one word the lis
 }
 
 test "a draft is a command line, one unfinished slash word, or a Message, by the whole grammar" {
-    // Written out, not read from the table: the two recovery actions are
-    // grammar although the list leaves them out.
     const names = [_][]const u8{ "archive", "clear", "copy", "discard", "effort", "model", "new", "pin", "recover", "reload-skills", "rename", "requests", "result", "setup", "unarchive", "unpin" };
     try std.testing.expectEqual(std.enums.values(conversation.Name).len, names.len);
     const Draft = conversation.Draft;
     for (names) |name| {
         var buffer: [80]u8 = undefined;
-        // The name alone, with a space, and with an argument its shape may
-        // refuse: misuse is still that command's line.
         for ([_][]const u8{ "", " ", " argument", " two words", " a\nline" }) |rest| {
             const draft = try std.fmt.bufPrint(&buffer, "/{s}{s}", .{ name, rest });
             try std.testing.expectEqual(Draft.command, conversation.draftOf(draft));
             try std.testing.expect(conversation.parse(draft) != .unknown);
         }
-        // Every shorter or longer spelling is a word still being chosen;
-        // with anything after it, text for the agent.
         for (0..name.len) |length| {
             if (conversation.nameOf(name[0..length]) != null) continue;
             const word = try std.fmt.bufPrint(&buffer, "/{s}", .{name[0..length]});
@@ -783,7 +612,6 @@ test "a draft is a command line, one unfinished slash word, or a Message, by the
         }
         const longer = try std.fmt.bufPrint(&buffer, "/{s}x", .{name});
         try std.testing.expectEqual(Draft.word, conversation.draftOf(longer));
-        // The same name anywhere but first, or behind `//`, is text.
         for ([_][]const u8{ "use /{s}", " /{s}", "//{s}", "//{s} now" }) |shape| {
             var text: [80]u8 = undefined;
             var writer = std.Io.Writer.fixed(&text);
@@ -858,7 +686,6 @@ test "a command admits exactly the arguments its shape names" {
 test "a command's list names the choices its word starts, and Tab puts the highlighted one in" {
     const Case = struct { draft: []const u8, shown: ?[]const []const u8, first: ?[]const u8 = null };
     const cases = [_]Case{
-        // A first word's rows are the caret word's (`skill_completion`).
         .{ .draft = "/", .shown = &.{} },
         .{ .draft = "/c", .shown = &.{} },
         .{ .draft = "/login", .shown = &.{} },
@@ -921,7 +748,6 @@ test "/effort lists only the names of efforts the screen's model offers" {
     try std.testing.expectEqual(expected + 1, list.count);
     try std.testing.expectEqualStrings("default", list.shown()[expected].word);
     try std.testing.expectEqualStrings("gh", conversation.suggest("/effort hi", .{ .model = model }).?.completion(0));
-    // Before the Session is read, no model: no levels to offer.
     try std.testing.expectEqual(@as(usize, 0), conversation.suggest("/effort ", .{}).?.count);
     try std.testing.expect(conversation.suggest("/effort high ", .{ .model = model }) == null);
 }
@@ -949,27 +775,21 @@ test "a key's list is the draft's own, and counts as drawn when the latest frame
     stored.?.drew(true);
     Shown.drawnNow(&stored, Shown.next(stored, 1, c)).?.move(true);
     try std.testing.expectEqualStrings(c.completion(1), Shown.next(stored, 1, c).?.completion());
-    // A key on a draft changed since the frame takes that draft's list,
-    // from its first row, still drawn.
     const changed = Shown.drawnNow(&stored, Shown.next(stored, 2, co)).?;
     try std.testing.expectEqual(@as(usize, 0), changed.highlight);
     try std.testing.expectEqualStrings(co.completion(0), changed.completion());
-    // Esc closes it for this draft: Tab still completes, nothing else acts.
     changed.close();
     stored = Shown.next(stored, 2, co);
     stored.?.drew(true);
     try std.testing.expectEqual(@as(usize, 0), stored.?.rows());
     try std.testing.expect(Shown.drawnNow(&stored, Shown.next(stored, 2, co)) == null);
     try std.testing.expectEqualStrings(co.completion(0), Shown.next(stored, 2, co).?.completion());
-    // The frame drew no list, so a key on the next draft finds none drawn
-    // until a frame draws it.
     try std.testing.expect(Shown.drawnNow(&stored, Shown.next(stored, 3, c)) == null);
     stored = Shown.next(stored, 3, c);
     stored.?.drew(false);
     try std.testing.expect(Shown.drawnNow(&stored, Shown.next(stored, 4, c)) == null);
     stored.?.drew(true);
     try std.testing.expect(Shown.drawnNow(&stored, Shown.next(stored, 4, c)) != null);
-    // A draft no list is for leaves the frame's value as it was.
     try std.testing.expect(Shown.drawnNow(&stored, Shown.next(stored, 5, null)) == null);
     try std.testing.expectEqual(@as(u64, 4), stored.?.revision);
 }

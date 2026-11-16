@@ -1,4 +1,3 @@
-// Owned by one Rui instance. Only active followers occupy the per-Session map.
 export class SessionNotifications {
 	readonly #sessions = new Map<string, Set<WriteWatch>>();
 
@@ -12,7 +11,6 @@ export class SessionNotifications {
 		return watch;
 	}
 
-	/** Rejects and releases every active follower, including one still reading its page. */
 	fail(error: Error): void {
 		for (const watches of this.#sessions.values()) {
 			for (const watch of watches) watch.fail(error);

@@ -1,10 +1,6 @@
-//! JSON field values the Host's reply decoders read: bounded strings and
-//! arrays, closed enums, omittable fields and decimal IDs. Values only; the decoders in
-//! protocol_reply.zig and client.zig own the reply shapes.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 
-/// A JSON string of at most `limit` UTF-8 bytes, held inline.
 pub fn JsonString(comptime limit: usize) type {
     return struct {
         value: Bounded(limit) = .{},
@@ -35,8 +31,6 @@ pub fn JsonString(comptime limit: usize) type {
     };
 }
 
-/// A JSON array of at most `capacity` `T`s, held inline. A longer array is
-/// refused, never cut.
 pub fn JsonArray(comptime T: type, comptime capacity: usize) type {
     return struct {
         values: [capacity]T = undefined,
@@ -60,7 +54,6 @@ pub fn JsonArray(comptime T: type, comptime capacity: usize) type {
     };
 }
 
-/// A JSON string naming one of `T`'s tags.
 pub fn JsonEnum(comptime T: type) type {
     const limit = comptime blk: {
         var longest: usize = 0;
@@ -81,8 +74,6 @@ pub fn JsonEnum(comptime T: type) type {
     };
 }
 
-// The containing field's default represents omission. A present field must
-// parse as T, not ?T: JSON null cannot stand in for an absent outcome/diagnostic.
 pub fn OmittableJson(comptime T: type) type {
     return struct {
         value: ?T = null,
@@ -100,8 +91,6 @@ pub fn OmittableJson(comptime T: type) type {
     };
 }
 
-/// A canonical decimal u64 sent as a string: digits only, no leading zero,
-/// and zero only when `allow_zero`.
 pub fn decimalId(value: JsonString(20), allow_zero: bool) !u64 {
     const bytes = value.slice();
     if (bytes.len == 0 or (bytes.len > 1 and bytes[0] == '0')) return error.InvalidResponse;
@@ -122,7 +111,6 @@ test "a decimal ID is canonical digits within u64, and zero only where allowed" 
     try std.testing.expectEqual(@as(u64, 0), try decimal("0", true));
     try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), try decimal("18446744073709551615", false));
     try std.testing.expectError(error.InvalidResponse, decimal("0", false));
-    // parseInt alone would accept each of these.
     for ([_][]const u8{ "", "00", "07", "+7", "1_0", "-0", " 7", "7 ", "0x7", "18446744073709551616", "99999999999999999999" }) |text|
         try std.testing.expectError(error.InvalidResponse, decimal(text, true));
 }
@@ -135,7 +123,6 @@ fn parse(comptime T: type, source: []const u8) !T {
 
 test "a JSON string field holds at most its limit, decoded, and only from a string" {
     const Field = struct { name: JsonString(4) };
-    // The limit counts decoded bytes: six escaped source bytes are two.
     try std.testing.expectEqualStrings("a\"µ", (try parse(Field, "{\"name\":\"a\\\"\\u00b5\"}")).name.slice());
     try std.testing.expectEqualStrings("abcd", (try parse(Field, "{\"name\":\"abcd\"}")).name.slice());
     try std.testing.expect((try parse(Field, "{\"name\":\"ab\"}")).name.eql("ab"));

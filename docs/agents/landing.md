@@ -75,6 +75,7 @@ Arm auto-merge only on a PR whose base is `main`; on a stacked PR it would merge
 ## CI failures
 
 Diagnose failures through [rui-ci-triage](../../.claude/skills/rui-ci-triage/SKILL.md) and follow [Evidence](../../CODING_STANDARDS.md#evidence) for reruns, strict-path holds and failure retention.
+The pre-push hook re-runs the last CI red as described in [local feedback evidence](../../CODING_STANDARDS.md#evidence).
 A red whose failing file or fixture is outside the PR's diff is first reproduced on `main`; when `main` itself is red, it gets one fix owner, and the PR's owner is not asked to fix it.
 The fastest fix for a red `main` is often a revert of the one merged PR that broke it.
 The [main build](../../.github/workflows/main-build.yml) names the PRs merged since `main` last compiled in its `ci-red` issue, and when two of them crossed, a revert of the later one is the fast fix.

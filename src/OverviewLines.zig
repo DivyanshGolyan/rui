@@ -1,4 +1,3 @@
-//! The overview provider header and pinned New Session and Settings rows.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -26,7 +25,6 @@ pub const Header = struct {
     }
 };
 
-/// Separate New Session action and view tabs, using the existing list press owner.
 pub const SessionControls = struct {
     state: *const overview_view.State,
     caps: overview_view.Caps = .{},
@@ -98,7 +96,6 @@ test "overview header draws no counts view name or Host-stopped band" {
     try std.testing.expectEqual(@as(u16, 0), stopped.size.height);
 }
 
-/// Pinned list tail, with a click target only on the Settings row.
 pub const Settings = struct {
     selected: bool,
     memory: ?overview_view.Memory = null,
@@ -138,7 +135,6 @@ pub const Settings = struct {
         const style = widget_style.of(self.caps, .{ .colour = .quiet, .background = ground });
         const version = @import("transport_options").version ++ " ";
         const label_text = "  Settings";
-        // Settings and the version keep their space, each two columns from memory.
         const memory = try @import("memory_text.zig").fit(ctx.arena, self.memory, self.caps.unicode, size.width -| @as(u16, label_text.len + 2 + 2 + version.len));
         const right = if (memory.len == 0) version else try std.fmt.allocPrint(ctx.arena, "{s}  {s}", .{ memory, version });
         const footer: @import("widgets/Footer.zig") = .{ .left = "", .right = right, .style = style };
@@ -163,7 +159,6 @@ test "session tabs press only separate drawn destinations and clear clipped targ
         var controls: SessionControls = .{ .state = &state, .userdata = &clicks, .on_click = Clicks.take };
         const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 2 }, .cell_size = .{} };
         _ = try controls.widget().draw(draw);
-        // A smaller draw invalidates the old tab hit spans, including height zero.
         const shown = try controls.widget().draw(draw.withConstraints(.{}, .{ .width = width, .height = height }));
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         if (width >= 20 and height >= 1) {
@@ -232,7 +227,6 @@ test "overview Settings hover follows only its drawn row without selecting or fo
     try settings.widget().handleEvent(&events, .mouse_leave);
     const left = try settings.widget().draw(draw_ctx);
     try std.testing.expectEqual(plain.readCell(3, 1).style, left.readCell(3, 1).style);
-    // A row clipped out of the frame is neither hoverable nor clickable.
     _ = try settings.widget().draw(draw_ctx.withConstraints(.{}, .{ .width = 40, .height = 1 }));
     try settings.widget().handleEvent(&events, .{ .mouse = .{ .col = 3, .row = 1, .button = .left, .type = .press, .mods = .{} } });
     try std.testing.expectEqual(null, clicks.got);
@@ -240,7 +234,6 @@ test "overview Settings hover follows only its drawn row without selecting or fo
     try settings.widget().handleEvent(&events, .{ .mouse = .{ .col = 3, .row = 1, .button = .left, .type = .press, .mods = .{} } });
     try std.testing.expectEqual(overview_view.Click.settings, clicks.got.?);
     try std.testing.expect(!settings.selected);
-    // Selection wins under the pointer.
     settings.selected = true;
     try settings.widget().handleEvent(&events, .{ .mouse = .{ .col = 3, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
     const both = try settings.widget().draw(draw_ctx);
@@ -253,7 +246,6 @@ test "overview Settings memory gets the columns between the label and the versio
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const version = @import("transport_options").version ++ " ";
-    // memory_text owns which form fits; this row owns only the columns it gives memory.
     const full_width = "  Settings".len + 2 + 24 + 2 + version.len;
     const rui_width = "  Settings".len + 2 + 9 + 2 + version.len;
     for ([_]struct { width: usize, expected: []const u8 }{

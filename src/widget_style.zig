@@ -1,16 +1,13 @@
-//! Bind screen colour roles to the shared theme and vaxis cells.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const view = @import("overview_view.zig");
 const theme = @import("theme.zig");
 
-/// The sole terminal-capability normalization boundary for semantic styles.
 pub fn of(caps: view.Caps, role: view.Style) vaxis.Style {
     var style: vaxis.Style = .{ .bold = role.bold, .reverse = role.reverse, .dim = role.dim };
     if (caps.depth == .none) {
         style.bold = role.bold or role.background == .band;
         style.reverse = role.reverse or role.background == .band or role.background == .selection;
-        // Reverse marks the keyboard's row; the pointer's row only underlines.
         if (role.background == .hover) style.ul_style = .single;
         return style;
     }

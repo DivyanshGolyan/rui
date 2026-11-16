@@ -1,10 +1,7 @@
-//! Hex bytes, shared by argv identities and byte-valued settings. Policy such
-//! as UTF-8 identities or non-NUL paths belongs to the caller, not this codec.
 const std = @import("std");
 
 pub const Case = enum { either, lower };
 
-/// Whether `byte` is a hex digit as the lowercase form writes it.
 pub fn isLowerDigit(byte: u8) bool {
     return std.ascii.isDigit(byte) or (byte >= 'a' and byte <= 'f');
 }
@@ -17,7 +14,6 @@ pub fn decodeInto(buffer: []u8, encoded: []const u8, letter_case: Case) error{In
     return std.fmt.hexToBytes(buffer[0 .. encoded.len / 2], encoded) catch error.InvalidHexIdentity;
 }
 
-/// Compatibility API for the existing argv identity grammar.
 pub fn decodeIdentity(allocator: std.mem.Allocator, encoded: []const u8, limit: usize) error{ InvalidHexIdentity, OutOfMemory }![]u8 {
     if (encoded.len == 0 or encoded.len % 2 != 0 or encoded.len / 2 > limit) return error.InvalidHexIdentity;
     const bytes = try allocator.alloc(u8, encoded.len / 2);

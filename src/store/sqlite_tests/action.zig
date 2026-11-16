@@ -1,5 +1,3 @@
-//! Action SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
@@ -64,7 +62,7 @@ test "Action settlement atomically yields to an earlier Session stop" {
     try allow.key.set("settlement-stop-allow");
     try allow.session.set(allocated_session_0.slice());
     try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-    const action_binding = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    const action_binding = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
 
     var stop = try completeSessionStop("settlement-stop", allocated_session_0.slice());
     const pending_stop = storage.stopSession(&stop, .{});
@@ -112,8 +110,8 @@ test "a stale Action settlement leaves the Store byte-identical" {
         try allow.session.set(session.slice());
         try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
     }
-    const settled = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
-    const open = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    const settled = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+    const open = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
     try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(settled, .succeeded, "Bash succeeded.", .{}));
 
     const Snapshot = struct {
@@ -138,7 +136,6 @@ test "a stale Action settlement leaves the Store byte-identical" {
     };
     const before = try Snapshot.take(&storage, tmp.dir);
     defer before.deinit();
-    // Already settled, and a binding whose Turn is not the Action's.
     const wrong_turn: ActionAttemptBinding = .{ .turn_id = open.turn_id + 1, .parent_operation_id = open.parent_operation_id, .action_id = open.action_id };
     for ([_]ActionAttemptBinding{ settled, wrong_turn }) |stale| {
         try std.testing.expectError(error.StaleActionAttemptBinding, storage.settleActionAttempt(stale, .failed, "A stale result is never stored.", .{}));
@@ -151,9 +148,6 @@ test "a stale Action settlement leaves the Store byte-identical" {
     try std.testing.expectEqual(before.ids, after.ids);
     try std.testing.expectEqual(before.generation, after.generation);
 
-    // Round 1 finds `open` current; before the commit round runs, the
-    // Action stops being attempted, so the resolve guard fails after the
-    // result's content row and position were queued.
     const Interposed = struct {
         const Inner = action_domain.SettleAttempt;
         pub const rounds = Inner.rounds;
@@ -199,7 +193,6 @@ test "a stale Action settlement leaves the Store byte-identical" {
     try std.testing.expectEqual(unclaimed, try store_testing.sqlite_only.queryU64(&storage, "SELECT next_position FROM session", .{}));
     try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM content WHERE CAST(payload AS TEXT)='A result the guard refuses.'", .{}));
 
-    // The open Action still settles at the position and content id the stale ones left.
     const position = try store_testing.sqlite_only.queryU64(&storage, "SELECT next_position FROM session", .{});
     const content_id = storage.identities().next.get(.content_id);
     try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(open, .failed, "A later result is stored.", .{}));
@@ -214,7 +207,6 @@ test "Action admission never visits an Action waiting for permission" {
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
-    // Each round adds a Turn with two Actions waiting for permission.
     var sessions: [2]protocol.Bounded(protocol.max_session_bytes) = undefined;
     var steps: [2]i32 = undefined;
     var allowed: [2]u64 = undefined;
@@ -227,7 +219,7 @@ test "Action admission never visits an Action waiting for permission" {
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         var metadata_buffer: [32]u8 = undefined;
         try settleTwoActionsForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&metadata_buffer, "waiting-metadata-{d}", .{round}));
-        try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
+        try std.testing.expect((try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})) == null);
         allowed_id.* = try store_testing.sqlite_only.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
 
         const select = try sqlite.prepare(storage.sqliteDatabase(), next_action_attempt_sql);
@@ -235,11 +227,9 @@ test "Action admission never visits an Action waiting for permission" {
         try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(select));
         cost.* = c.sqlite3_stmt_status(select, c.SQLITE_STMTSTATUS_VM_STEP, 0);
     }
-    // Four waiting Actions cost the scan what two did: none is in its index.
     try std.testing.expectEqual(@as(u64, 4), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=0 AND resolution_code IS NULL", .{}));
     try std.testing.expectEqual(steps[0], steps[1]);
 
-    // One allowed Action per Turn enters the index; its sibling stays out.
     for (sessions, allowed, 0..) |session, action_id, round| {
         var key_buffer: [32]u8 = undefined;
         var allow: protocol.PermissionDecisionCommand = .{ .action_id = action_id, .decision = .allow_once };
@@ -250,10 +240,10 @@ test "Action admission never visits an Action waiting for permission" {
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqliteQueryU64(storage.sqliteDatabase(), "SELECT count(*) FROM action_operation INDEXED BY action_operation_executable " ++
         "WHERE authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0", .{}));
     for (allowed) |action_id| {
-        const admitted = (try storage.admitNextActionAttempt(300_000, .{})).?;
+        const admitted = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?;
         try std.testing.expectEqual(action_id, admitted.permit.binding.action_id);
     }
-    try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
+    try std.testing.expect((try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})) == null);
 }
 
 test "a Bash binding that is unknown, unattempted or without its revision is stale, and fences nothing" {
@@ -272,7 +262,6 @@ test "a Bash binding that is unknown, unattempted or without its revision is sta
     var unknown = action;
     unknown.action_id += 1000;
     try std.testing.expectError(error.StaleActionAttemptBinding, storage.readActionExecutionInput(.bash, unknown, &input));
-    // The other Action of the call pair, never attempted: its timeout is NULL.
     var unattempted = action;
     unattempted.action_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT action_id FROM action_operation WHERE session_ref=?1 AND attempt_ordinal=0", .{session.slice()});
     try std.testing.expectError(error.StaleActionAttemptBinding, storage.readActionExecutionInput(.bash, unattempted, &input));
@@ -297,7 +286,6 @@ test "revoking a sender runs main's statements, with no transaction, and a missi
     const held = "SELECT count(*) FROM action_operation WHERE session_ref=?1 AND sender_handle IS NOT NULL";
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, held, .{session.slice()}));
 
-    // Main: its UPDATE, then its touch's Workspace read. Now: the read, then the UPDATE.
     var statements: TestingStatements = .{};
     statements.begin(storage.sqliteDatabase());
     try storage.revokeActionSender(action);
@@ -348,7 +336,7 @@ test "Bash admission entry points agree on readiness" {
                 .stopped => try store_testing.sqlite_only.exec(&storage, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) SELECT 'bash-matrix',session_ref,turn_id,0,1 FROM turn", .{}),
             }
             result.* = if (entry == 0)
-                (try storage.admitNextActionAttempt(300_000, .{})) != null
+                (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})) != null
             else
                 (try storage.admitActionAttempt(.{ .action_id = id, .runner = .bash }, 300_000, .{})) != null;
         }

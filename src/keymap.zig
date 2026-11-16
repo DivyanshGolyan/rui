@@ -1,15 +1,7 @@
-//! The keys a screen may bind, each screen's one table of what they do
-//! there, and the values a terminal key is classified into
-//! (`keypress.zig` classifies). Nothing here edits: the draft editor turns
-//! a `Key` it has no editing use for into the screen's own action.
 const std = @import("std");
 const unicode = @import("terminal_unicode");
 
-/// A key that is a key, not text. It names the key, never a meaning: each
-/// screen's `Keymap` says what it does there. Adding one fails the build at
-/// every screen's table until that screen decides.
 pub const Key = enum {
-    /// Esc and Alt-Esc in every encoding, and a lone ESC once it expires.
     escape,
     ctrl_c,
     ctrl_d,
@@ -24,13 +16,10 @@ pub const Key = enum {
     alt_down,
     up,
     down,
-    /// The bare arrows; the draft moves its caret with them, and a choice
-    /// drawn in place of the draft takes any its screen leaves unbound.
     left,
     right,
     shift_up,
     shift_down,
-    /// With or without Shift.
     page_up,
     page_down,
     home,
@@ -38,8 +27,6 @@ pub const Key = enum {
     ctrl_end,
 };
 
-/// One screen's meaning for every `Key`: one of its actions, or null when
-/// the key does nothing there. `init` takes every key, so no screen forgets one.
 pub fn Keymap(comptime A: type) type {
     return struct {
         pub const Action = A;
@@ -55,27 +42,15 @@ pub fn Keymap(comptime A: type) type {
     };
 }
 
-/// What one input means at a choice drawn in place of the draft, through the
-/// draft's own classification: a typed `Key` means what the screen's keymap
-/// says, the arrows and Enter are the choice's own, typed text and a marked
-/// paste begin typing, a chord, control or malformed input is refused, and
-/// the draft's other unmodified edit keys do nothing. Nothing here edits.
 pub fn Selection(comptime A: type) type {
     return union(enum) { none, action: A, left, right, enter, text, refused };
 }
 
-/// Why the editor refused input.
 pub const Refusal = enum {
-    /// Enter on a line rejected earlier because it held input that is not
-    /// text. The caller drops the line.
     invalid,
-    /// Enter on a line rejected earlier for its length.
     overflow,
-    /// A whole marked paste exceeded the limit; the prior draft stays.
     paste_overflow,
-    /// A refused edit; the draft stands as it was.
     edit_rejected,
-    /// An Alt, Super, Hyper or Meta chord nothing binds, dropped whole.
     unbound,
 
     pub fn endsLine(self: Refusal) bool {
@@ -83,23 +58,15 @@ pub const Refusal = enum {
     }
 };
 
-/// What one input did on a screen whose keys mean `A`s: an edit of the
-/// draft, or the screen's action for a key the editor had no use for.
 pub fn Outcome(comptime A: type) type {
     return union(enum) {
-        /// Nothing visible changed, or a key this screen binds to nothing.
         none,
-        /// Text was added at the end of the draft.
         append,
-        /// The draft or caret changed elsewhere.
         redraw,
-        /// Enter: the draft is a line.
         submit,
         refused: Refusal,
         action: A,
 
-        /// Enter ended the line, sent or refused. A screen's own keys end
-        /// whatever that screen says they end.
         pub fn endsLine(self: @This()) bool {
             return switch (self) {
                 .submit => true,
@@ -110,30 +77,19 @@ pub fn Outcome(comptime A: type) type {
     };
 }
 
-/// Whether `point` may be text: tab always, a line feed only where a draft
-/// takes lines, and no other C0 or C1 control or format character except
-/// the zero-width joiner emoji sequences need. A terminal key code past
-/// Unicode, such as the one for a several-scalar cluster, has no category.
 pub fn textScalar(point: u21, multiline: bool) bool {
     return !((point < 32 and !(point == '\t' or (multiline and point == '\n'))) or
         (point >= 0x7f and point < 0xa0) or
         (point <= 0x10ffff and unicode.generalCategory(point) == .other_format and point != 0x200d));
 }
 
-/// An edit the draft makes with a typed key.
 pub const Edit = enum { tab, newline, left, right, line_start, line_end, delete_next, delete_previous, delete_to_line_start, delete_to_line_end, delete_word, delete_word_part, word_left, word_right };
 
-/// What one typed (not pasted) key is, before the draft or a choice gives it
-/// a use: the one classification both share.
 pub const Press = union(enum) {
-    /// A named screen key.
     key: Key,
     enter,
     edit: Edit,
-    /// An unbound Ctrl, Alt, Super, Hyper or Meta chord or C0 control:
-    /// dropped whole and reported.
     chord,
-    /// An invalid scalar: never text.
     control,
     text: []const u8,
     none,
@@ -146,16 +102,12 @@ test "text excludes controls and format characters but keeps the joiner, and a k
     try std.testing.expect(!textScalar('\n', false));
 }
 
-/// Every key as itself, for tests of an editor without a screen.
 pub const every: Keymap(Key) = blk: {
     var map: Keymap(Key) = .{ .meanings = .initFill(null) };
     for (std.enums.values(Key)) |key| map.meanings.set(key, key);
     break :blk map;
 };
 
-/// The app's one reference list, in pairs across a fitting panel. Each
-/// screen key is represented directly or explicitly grouped under a listed
-/// key as an alias. Empty `keys` name input handled separately from `Key`.
 pub const Reference = struct {
     key: []const u8,
     meaning: []const u8,
@@ -171,8 +123,6 @@ pub const list = [_]Reference{
     .{ .key = "⇧tab", .meaning = "previous panel/footer field" },
     .{ .key = "ctrl+x", .meaning = "stop", .keys = &.{.ctrl_x} },
     .{ .key = "↑↓", .meaning = "scroll", .keys = &.{ .up, .down }, .aliases = &.{ .shift_up, .shift_down, .page_up, .page_down, .home, .end, .ctrl_end } },
-    // Left (an empty draft back to the list) and the info panel's actions
-    // are handled apart from the screen keymaps, so only Right is checked.
     .{ .key = "←→", .meaning = "list/chat · info actions", .keys = &.{.right} },
     .{ .key = "ctrl+o", .meaning = "tool output", .keys = &.{.ctrl_o} },
     .{ .key = "ctrl+p", .meaning = "earlier message", .keys = &.{.ctrl_p}, .aliases = &.{.ctrl_n} },
@@ -185,9 +135,6 @@ pub const list = [_]Reference{
 
 pub const ListError = enum { missing_bound_key, unbound_row, duplicate_key };
 
-/// Check the union: every bound key is listed or explicitly aliased exactly
-/// once; neither a row nor an alias can name a key neither screen binds. The
-/// caller supplies actual maps, keeping this value-only owner independent.
 pub fn listError(maps: anytype) ?ListError {
     return referenceError(&list, maps);
 }
@@ -208,8 +155,6 @@ fn referenceError(rows: []const Reference, maps: anytype) ?ListError {
     return if (shown.eql(bound)) null else .missing_bound_key;
 }
 
-/// Every key as itself except Left, which no screen's table binds: an
-/// empty draft and the info panel take it apart from the tables.
 const bindable: Keymap(Key) = blk: {
     var map = every;
     map.meanings.set(.left, null);

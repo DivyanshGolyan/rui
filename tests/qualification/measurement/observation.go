@@ -19,12 +19,11 @@ const (
 	observationRecordBytes  = 512
 	observationHeaderBytes  = 28
 	observationStateBytes   = 40
-	observationCountOffset  = 24 // Sequence count above the sticky loss bit.
+	observationCountOffset  = 24
 	observationActiveOffset = 32
 	observationSealed       = uint64(1) << 63
 )
 
-// The stable field IDs of src/TestObservation.zig.
 var observationFields = [...]string{
 	"rui_test_phase", "at_ns", "subject_kind", "subject", "turn", "operation", "attempt", "action",
 	"scratch_used_bytes", "command_key", "kind", "control_key", "store_queued_at_ns", "lock_acquired_at_ns",
@@ -36,11 +35,8 @@ var observationFields = [...]string{
 	"synchronous", "temp_store", "busy_timeout_ms", "journal_mode",
 }
 
-// Observations is the Host's private test observation channel. Stderr phase
-// traces are best effort and drop records when threads contend for stderr;
-// this channel instead marks any selected record it cannot deliver as loss.
 type Observations struct {
-	shared  []byte // The Host's MAP_SHARED state, read and sealed atomically.
+	shared  []byte
 	process int
 	done    chan struct{}
 	mu      sync.Mutex
@@ -49,13 +45,8 @@ type Observations struct {
 	err     error
 }
 
-// Launch adjusts how StartHostWith starts a Host process.
 type Launch struct {
-	// DescriptorLimit, when positive, is the Host's soft and hard
-	// RLIMIT_NOFILE, so the Host cannot raise it and fits intake to it.
 	DescriptorLimit int
-	// ObservationPlan, when set, selects a src/TestObservation.zig plan and
-	// returns its records through Observations.
 	ObservationPlan string
 }
 
@@ -77,7 +68,6 @@ func StartHostWith(
 			return nil, nil, err
 		}
 		defer writer.Close()
-		// ExtraFiles become descriptors 3 and 4 in the Host.
 		arguments = append(arguments, "--test-observation-fd", "3", "--test-observation-state-fd", "4",
 			"--test-observation-plan", launch.ObservationPlan)
 	}
@@ -108,7 +98,6 @@ func StartHostWith(
 	return host, observations, nil
 }
 
-// newObservations maps the state file and closes it.
 func newObservations(state *os.File, process int) (*Observations, error) {
 	defer state.Close()
 	shared, err := syscall.Mmap(int(state.Fd()), 0, observationStateBytes, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
@@ -133,8 +122,6 @@ func observationFiles() (reader, writer, state *os.File, err error) {
 	syscall.CloseOnExec(descriptors[1])
 	syscall.ForkLock.RUnlock()
 	reader = os.NewFile(uintptr(descriptors[0]), "observation-reader")
-	// Wrap the writer while it is blocking, so exec does not reset it; the
-	// Host requires a nonblocking writer and the flag is shared with it.
 	writer = os.NewFile(uintptr(descriptors[1]), "observation-writer")
 	if err := syscall.SetNonblock(descriptors[1], true); err != nil {
 		reader.Close()
@@ -186,7 +173,6 @@ func (o *Observations) read(reader *os.File) {
 			o.fail(fmt.Errorf("duplicate observation sequence %d", sequence))
 			return
 		}
-		// Arrival may be reordered; expose only the complete sequence prefix.
 		o.pending[sequence] = record
 		for next := uint64(len(o.records)) + 1; o.pending[next] != nil; next++ {
 			o.records = append(o.records, o.pending[next])
@@ -239,22 +225,18 @@ func (o *Observations) fail(err error) {
 	}
 }
 
-// Records returns every delivered record in sequence order, failing once the
-// Host has recorded a loss. It remains readable after Stop.
 func (o *Observations) Records() ([]map[string]any, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.err != nil {
 		return nil, o.err
 	}
-	// After Stop the state is unmapped and its final loss already failed Stop.
 	if o.shared != nil && o.word(observationCountOffset).Load()&1 != 0 {
 		return nil, errors.New("native observation loss invalidates evidence")
 	}
 	return append([]map[string]any{}, o.records...), nil
 }
 
-// Phase returns every delivered record of phase.
 func (o *Observations) Phase(phase string) ([]map[string]any, error) {
 	records, err := o.Records()
 	if err != nil {
@@ -269,8 +251,6 @@ func (o *Observations) Phase(phase string) ([]map[string]any, error) {
 	return result, nil
 }
 
-// Settle waits until every publication the Host has begun is delivered, so
-// Records covers all work whose replies the caller has already received.
 func (o *Observations) Settle(deadline Deadline) error {
 	return WaitFor(deadline, time.Millisecond, "observation delivery", func() (bool, error) {
 		active, count := o.word(observationActiveOffset).Load(), o.word(observationCountOffset).Load()
@@ -284,7 +264,6 @@ func (o *Observations) Settle(deadline Deadline) error {
 	})
 }
 
-// Wait returns the records of phase once at least count have arrived.
 func (o *Observations) Wait(deadline Deadline, phase string, count int) ([]map[string]any, error) {
 	var records []map[string]any
 	err := WaitFor(deadline, 25*time.Millisecond, phase, func() (bool, error) {
@@ -295,20 +274,15 @@ func (o *Observations) Wait(deadline Deadline, phase string, count int) ([]map[s
 	return records, err
 }
 
-// Stop revokes new publications, drains those in flight, stops the Host and
-// then requires the final state to account for every record: a loss or a
-// publication cut by the stop fails the evidence.
 func (o *Observations) Stop(host *Host, allowance time.Duration) error {
 	return o.StopWith(func() error { return host.Stop(allowance) }, allowance)
 }
 
-// StopWith is Stop with the caller's Host stop, such as one that keeps the
-// exit status.
 func (o *Observations) StopWith(stop func() error, allowance time.Duration) error {
 	o.mu.Lock()
 	stopped := o.shared == nil
 	o.mu.Unlock()
-	if stopped { // A retried stop after a failed one only retries the Host.
+	if stopped {
 		return stop()
 	}
 	defer func() {

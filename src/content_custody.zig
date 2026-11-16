@@ -2,8 +2,6 @@ const std = @import("std");
 const ScratchBudget = @import("ScratchBudget.zig");
 const command_input = @import("command_input.zig");
 
-/// The Host's content custody: a parsed value's bytes sit in an unlinked
-/// scratch file, charged to the Host's scratch budget until released.
 pub const File = std.Io.File;
 pub const Budget = ScratchBudget;
 pub const Io = std.Io;
@@ -19,8 +17,6 @@ pub const Configuration = commands.Configuration;
 pub const ConfigureCommand = commands.ConfigureCommand;
 pub const MessageCommand = commands.MessageCommand;
 
-/// Borrowed from one sealed capture. This range owns neither its descriptor
-/// nor any scratch charge. Only the capture closes or refunds them.
 pub const Range = struct {
     file: File,
     offset: u64,

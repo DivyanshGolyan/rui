@@ -1,5 +1,3 @@
-//! Bounded public Activity presentation with one forward-only content pass.
-//! A failed stream may leave a visible prefix; the terminal owner must not retry it.
 const std = @import("std");
 const tool_fold = @import("tool_fold.zig");
 const client = @import("client.zig");
@@ -14,7 +12,6 @@ const marks = @import("marks.zig");
 const work_line = @import("work_line.zig");
 const unicode = @import("terminal_unicode");
 
-/// Only presentation-owned foreground changes. Content cannot select a style.
 pub const Style = enum {
     user,
     quiet,
@@ -44,9 +41,6 @@ pub const Style = enum {
     }
 };
 
-/// Codes only the conversation view interprets, written whatever the colour
-/// setting: it draws them dim (user body, summary) or in the right margin
-/// (sidenote), and `reset` ends all three. Escaped content cannot form them.
 pub const Mark = struct {
     pub const body = "\x1b[2m";
     pub const summary = "\x1b[2;8m";
@@ -57,8 +51,6 @@ pub const Mark = struct {
 const Tm = extern struct { sec: c_int, min: c_int, hour: c_int, mday: c_int, mon: c_int, year: c_int, wday: c_int, yday: c_int, isdst: c_int, gmtoff: c_long, zone: ?[*:0]const u8 };
 extern "c" fn localtime_r(time: *const c_long, result: *Tm) ?*Tm;
 
-/// Local 24-hour `HH:MM` of a Host wall-clock second, or null when the C
-/// library cannot represent it.
 pub fn clock(second: u64, buffer: *[5]u8) ?[]const u8 {
     const time = std.math.cast(c_long, second) orelse return null;
     var local: Tm = undefined;
@@ -66,7 +58,6 @@ pub fn clock(second: u64, buffer: *[5]u8) ?[]const u8 {
     return std.fmt.bufPrint(buffer, "{d:0>2}:{d:0>2}", .{ @as(u8, @intCast(local.hour)), @as(u8, @intCast(local.min)) }) catch unreachable;
 }
 
-/// A user block's first row up to its body: `›` and the admission time.
 pub fn userPrefix(sink: anytype, colour: bool, admitted_at: u64) !void {
     try sink.feed(Style.user.code(colour));
     try sink.feed("›");
@@ -111,15 +102,12 @@ test "peer Messages render as one dim line each, named, with time in the margin 
     var sink: Sink = .{};
     try peerLine(&sink, .inbound, peer, 1_800_000_000);
     try std.testing.expectEqualStrings(S ++ "← Received message from " ++ comptime L("9f8e7d", "9f8e7d") ++ N ++ "08:00" ++ R ++ "\n", sink.bytes[0..sink.length]);
-    // Without a time the margin stays empty.
     sink = .{};
     try peerLine(&sink, .outbound, peer, std.math.maxInt(u64));
     try std.testing.expectEqualStrings(S ++ "→ Messaged " ++ comptime L("9f8e7d", "9f8e7d") ++ R ++ "\n", sink.bytes[0..sink.length]);
     var failed: Sink = .{};
     try sendFailed(&failed, peer);
     try std.testing.expectEqualStrings(S ++ "× Messaged " ++ comptime L("9f8e7d", "9f8e7d") ++ R ++ "\n", failed.bytes[0..failed.length]);
-    // A named peer shows by its name, escaped as a label is. Each row is its
-    // own line; the feed packs peer rows by adjacency (`tight`).
     var named = peer;
     try named.label.set("Review\x1b[2m the WAL");
     var group: Sink = .{};
@@ -129,7 +117,6 @@ test "peer Messages render as one dim line each, named, with time in the margin 
         S ++ "← Received message from " ++ L("9f8e7d", "Review\\x1b[2m the WAL") ++ N ++ "08:00" ++ R ++ "\n", group.bytes[0..group.length]);
 }
 
-/// A peer's name as its row writes it: a link to its Session.
 fn peerLink(comptime id: []const u8, comptime name: []const u8) []const u8 {
     return Text.link_open ++ Text.session_link ++ id ++ Text.link_end ++ "\x1b[4m" ++ name ++ Text.link_close ++ Mark.reset ++ Mark.summary;
 }
@@ -161,11 +148,6 @@ test "failed peer Messages distinguish absent targets without changing named out
     }
 }
 
-/// One peer Message as one upright dim line, never `›`, in the tool rows'
-/// group: `← Received message from NAME` from a peer, `→ Messaged NAME` sent
-/// to one, NAME being its label or, with none, its ID. Its admission time goes
-/// in the right margin. The Message's text never shows; the model reads it.
-/// The row is tight: it packs with tool rows (see `tight`).
 pub fn peerLine(sink: anytype, direction: enum { inbound, outbound }, peer: protocol.NamedPeer, admitted_at: u64) !void {
     try sink.feed(Mark.summary);
     try sink.feed(if (direction == .inbound) "← Received message from " else "→ Messaged ");
@@ -178,8 +160,6 @@ pub fn peerLine(sink: anytype, direction: enum { inbound, outbound }, peer: prot
     try sink.feed(Mark.reset ++ "\n");
 }
 
-/// A Message this Session sent that was rejected: set apart, as a failed
-/// tool row is. No target means the attempt named no valid Session reference.
 pub fn sendFailed(sink: anytype, target: ?protocol.NamedPeer) !void {
     try sink.feed(Mark.summary);
     if (target) |peer| {
@@ -189,12 +169,8 @@ pub fn sendFailed(sink: anytype, target: ?protocol.NamedPeer) !void {
     try sink.feed(Mark.reset ++ "\n");
 }
 
-/// A peer's label, escaped as any label is, or its ID when it has none,
-/// underlined as a link to its Session. The view keeps the ID as the link's
-/// hidden address. The row's dim summary style resumes after the name.
 fn peerName(sink: anytype, peer: protocol.NamedPeer) !void {
     const id = peer.session.slice();
-    // An ID that could end the sequence it rides in is shown, not linked.
     const linked = id.len != 0 and for (id) |byte| {
         if (byte <= ' ' or byte >= 0x7f or byte == '\\') break false;
     } else true;
@@ -209,16 +185,12 @@ fn peerName(sink: anytype, peer: protocol.NamedPeer) !void {
     if (linked) try sink.feed(Text.link_close ++ Mark.reset ++ Mark.summary);
 }
 
-/// Size as a reader says it: thousands of bytes, one decimal below 9.95,
-/// both rounded half-up.
 pub fn kilobytes(bytes: u64, buffer: *[24]u8) []const u8 {
     const tenths = (bytes + 50) / 100;
     if (tenths < 100) return std.fmt.bufPrint(buffer, "{d}.{d} KB", .{ tenths / 10, tenths % 10 }) catch unreachable;
     return std.fmt.bufPrint(buffer, "{d} KB", .{(bytes + 500) / 1000}) catch unreachable;
 }
 
-/// The Message behind a collapsed user block, for its Ctrl-O page: which
-/// read returns its bytes, and whether a conversation row exports them.
 pub const Collapsed = struct {
     source: enum { activity, conversation },
     position: u64,
@@ -227,15 +199,12 @@ pub const Collapsed = struct {
     row: bool,
 };
 
-/// Publish a complete summary and the Message it opens as one value. Bounded
-/// sinks may omit both, but never retain a summary without its exact target.
 pub fn writeCollapsed(sink: anytype, value: Collapsed, bytes: []const u8) !void {
     if (comptime std.meta.hasMethod(@TypeOf(sink), "collapsedSummary")) {
         try sink.collapsedSummary(value, bytes);
     } else try sink.feed(bytes);
 }
 
-/// A Message longer than any of these shows a preview and a summary row.
 pub const collapse_bytes = 1024;
 const collapse_nonblank = 4;
 const collapse_lines = 12;
@@ -246,10 +215,6 @@ fn blank(byte: u8) bool {
     return byte == ' ' or byte == '\t' or byte == '\r';
 }
 
-/// A user Message's body, fed its exact bytes after `userPrefix`. The view
-/// draws it dim; a long one keeps its first two non-blank lines and a
-/// `┄ N more lines` row, and trailing blank lines never show. `whole`
-/// shows every byte in a Message page. Initialize in final storage.
 pub fn UserBody(comptime Sink: type) type {
     return struct {
         const Self = @This();
@@ -259,7 +224,6 @@ pub fn UserBody(comptime Sink: type) type {
         whole: bool,
         received: u64 = 0,
         small: [collapse_bytes]u8 = undefined,
-        // Collapsed: the current line's prefix and the lines shown and seen.
         line: [256]u8 = undefined,
         line_bytes: u64 = 0,
         line_blank: bool = true,
@@ -283,7 +247,6 @@ pub fn UserBody(comptime Sink: type) type {
             try self.scan(bytes);
         }
 
-        /// Returns whether the body collapsed.
         pub fn finish(self: *Self) anyerror!bool {
             return self.finishTarget(null);
         }
@@ -314,8 +277,6 @@ pub fn UserBody(comptime Sink: type) type {
                 }});
                 if (target) |value| {
                     try writeCollapsed(&self.out, value, summary);
-                    // A bounded sink may omit the entire summary, including
-                    // its reset. End the preview's body style independently.
                     try self.out.feed(Mark.reset);
                 } else try self.out.feed(summary);
                 collapsed = true;
@@ -356,8 +317,6 @@ pub fn UserBody(comptime Sink: type) type {
     };
 }
 
-/// Whether a Message of at most `collapse_bytes` collapses: more non-blank
-/// lines or lines from its first to last non-blank one than the view keeps.
 fn collapses(bytes: []const u8) bool {
     var nonblank: usize = 0;
     var first: ?usize = null;
@@ -376,7 +335,6 @@ fn collapses(bytes: []const u8) bool {
     return nonblank > collapse_nonblank or (first != null and last - first.? + 1 > collapse_lines);
 }
 
-/// The bytes before trailing blank lines.
 fn beforeBlankLines(bytes: []const u8) usize {
     var end: usize = 0;
     var start: usize = 0;
@@ -391,8 +349,6 @@ fn beforeBlankLines(bytes: []const u8) usize {
     return end;
 }
 
-/// The longest prefix of whole graphemes within `limit` bytes. `bytes` may
-/// end early inside a grapheme; a cluster reaching its end does not fit.
 fn graphemeCut(bytes: []const u8, limit: usize) usize {
     var cut: usize = 0;
     var clusters = unicode.graphemeIterator(bytes);
@@ -421,7 +377,6 @@ test "a Message's time is the local hour and minute of its Host second" {
         _ = if (previous) |value| setenv("TZ", value, 1) else unsetenv("TZ");
         tzset();
     }
-    // 1,800,000,000 is 2027-01-15 08:00:00 UTC.
     var buffer: [5]u8 = undefined;
     for ([_]struct { zone: [*:0]const u8, time: []const u8 }{
         .{ .zone = "UTC0", .time = "08:00" },
@@ -473,22 +428,16 @@ test "a long user Message shows two non-blank lines and what it hides" {
     const more = comptime repeat("\n  line", 29);
     const Case = struct { input: []const u8, whole: bool = false, output: []const u8 };
     for ([_]Case{
-        // At every limit: 4 non-blank lines in exactly 1,024 bytes.
         .{ .input = a ++ "\n" ++ a ++ "\n" ++ a ++ "\n" ++ a ++ "a", .output = B ++ a ++ "\n  " ++ a ++ "\n  " ++ a ++ "\n  " ++ a ++ "a" ++ R },
         .{ .input = "1\n2\n3\n4\n5", .output = B ++ "1\n  2\n  " ++ S ++ "┄ 3 more lines" ++ R },
-        // Twelve lines from the first non-blank to the last fit; thirteen do not.
         .{ .input = "a" ++ six ++ "b" ++ five ++ "c", .output = B ++ "a" ++ six ++ "  b" ++ five ++ "  c" ++ R },
         .{ .input = "a" ++ six ++ "b" ++ six ++ "c", .output = B ++ "a\n  b\n  " ++ S ++ "┄ 1 more line" ++ R },
-        // Leading and trailing blank lines do not count; trailing ones never show.
         .{ .input = twenty ++ "a\n \t\r\n", .output = B ++ twenty ++ "  a" ++ R },
         .{ .input = "a\r\n", .output = B ++ "a\\x0d" ++ R },
-        // Long only by its bytes: a cut line counts as shown.
         .{ .input = x[0..1025], .output = B ++ x[0..200] ++ cut ++ "\n  " ++ S ++ "┄" ++ R },
-        // Cuts count source bytes and never split a grapheme.
         .{ .input = "\x01" ++ a[0..197] ++ "😀" ++ x[0..900], .output = B ++ "\\x01" ++ a[0..197] ++ cut ++ "\n  " ++ S ++ "┄" ++ R },
         .{ .input = a[0..199] ++ "e\u{301}" ++ x[0..900], .output = B ++ a[0..199] ++ cut ++ "\n  " ++ S ++ "┄" ++ R },
         .{ .input = a[0..200] ++ "\n" ++ x[0..900], .output = B ++ a[0..200] ++ "\n  " ++ x[0..200] ++ cut ++ "\n  " ++ S ++ "┄" ++ R },
-        // Preview lines skip blank ones; a large Message streams.
         .{ .input = "\n \nfirst\n\nsecond\nthird\n" ++ x ++ "\n\n", .output = B ++ "first\n  second\n  " ++ S ++ "┄ 2 more lines" ++ R },
         .{ .input = lines, .whole = true, .output = B ++ "line" ++ more ++ R },
     }) |case| {
@@ -512,6 +461,7 @@ fn toolState(code: protocol.ToolPresentation.Code) struct { glyph: []const u8, s
     const state: struct { mark: marks.Mark, suffix: []const u8 } = switch (code) {
         .unresolved => .{ .mark = .active, .suffix = "" },
         .pending_permission => .{ .mark = .needs_you, .suffix = "" },
+        .background => .{ .mark = .finished, .suffix = " · background" },
         .succeeded => .{ .mark = .finished, .suffix = "" },
         .denied => .{ .mark = .stopped, .suffix = " · denied" },
         .unknown_tool => .{ .mark = .failed, .suffix = " · rejected" },
@@ -576,10 +526,8 @@ test "list rows share every mark and script with the chat heading table" {
             const row = try overview.rowSegments(arena.allocator(), &state, 0, 80, caps, 4);
             try std.testing.expectEqualStrings(" ", row[0].text);
             try std.testing.expectEqualStrings(if (unicode_script) shared.unicode else shared.ascii, row[1].text);
-            // List colours remain their own policy, including idle and finished.
             try std.testing.expectEqual(case.colour, row[1].style.colour);
         }
-        // Tool headings use Unicode; queued and idle have no Tool outcome.
         if (case.tool) |code| {
             var heading: Sink = .{};
             try toolHeading(.{ .description = null, .code = code, .publication_position = null }, &heading, false);
@@ -588,7 +536,7 @@ test "list rows share every mark and script with the chat heading table" {
         }
     }
     var states: std.enums.EnumSet(marks.Mark) = .full;
-    states.remove(.newer); // The navigation chip is not a Session work state.
+    states.remove(.newer);
     try std.testing.expect(seen.eql(states));
 }
 
@@ -596,7 +544,6 @@ pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, colou
     return toolHeadingWith(presentation, sink, colour, "", false);
 }
 
-/// `exit` is a digits-only exit status, shown only for a failed call.
 fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, exit: []const u8, foldable: bool) !void {
     const state = toolState(presentation.code);
     if (foldable) try sink.feed(tool_fold.heading_marker);
@@ -617,7 +564,6 @@ fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colou
     try sink.feed("\n");
 }
 
-/// Presentation of the Store-owned, cursor-relative Activity capture.
 pub const Live = struct {
     pub const Entry = protocol.CallActivity.Entry;
     entries: [3]Entry = undefined,
@@ -628,15 +574,11 @@ pub const Live = struct {
         return .{ .entries = facts.entries, .count = facts.count, .total = facts.total };
     }
 
-    // The escaped description, then glyph and suffix, or a running call's
-    // clock.
     pub const line_bytes = Text.max_bytes_per_byte * protocol.max_tool_description_bytes + 96;
     comptime {
         std.debug.assert(marks.marks.get(.active).unicode.len + " ".len + work_line.max_clock_bytes <= line_bytes - Text.max_bytes_per_byte * protocol.max_tool_description_bytes);
     }
 
-    /// The call's row; `running` is the clock after the words of the
-    /// running call the work line names, and empty for every other call.
     pub fn line(self: *const Live, index: usize, buffer: *[line_bytes]u8, running: []const u8) ![]const u8 {
         const entry = self.entries[index];
         const state = toolState(entry.presentation.code);
@@ -655,12 +597,6 @@ pub const Live = struct {
     }
 };
 
-/// Live conversation and inspection share hanging indentation. Input is already
-/// escaped or rendered; cell layout owns wrapping in the alternate screen.
-/// `prefix` begins each later non-empty line: two spaces, or a mark that sets
-/// quoted content apart from the lines around it. A mark also begins each
-/// empty line, without its trailing space, so quoted blank lines stay quoted,
-/// including the one a final newline leaves at `finish`.
 pub fn Indented(comptime Sink: type) type {
     return struct {
         sink: Sink,
@@ -733,7 +669,6 @@ test "hanging indentation survives split windows and trusted styles" {
     }
 }
 
-/// A time limit as exactly as the model set it, in its largest whole unit.
 fn writeTimeLimit(out: anytype, milliseconds: u64) !void {
     if (milliseconds != 0 and milliseconds % 60_000 == 0) return print(out, "{d} min", .{milliseconds / 60_000});
     if (milliseconds != 0 and milliseconds % 1000 == 0) return print(out, "{d} s", .{milliseconds / 1000});
@@ -765,13 +700,8 @@ test "a time limit shows in its largest whole unit, never rounded" {
     }
 }
 
-/// The request block of one Bash Action: what it is for, the exact command,
-/// then a time limit and piped-in input only when the model set them.
-/// Begins each line of an Action's command after its first, and each line of
-/// its stdin. ConversationViewport hangs wrapped rows under the text after it.
 pub const content_mark = "│ ";
 
-/// Frozen call identity and its saved conversation line, never the latest tool set.
 pub const ActionTool = struct {
     name: protocol.Bounded(protocol.max_tool_name_bytes),
     description: protocol.Bounded(protocol.max_tool_description_bytes),
@@ -789,7 +719,6 @@ pub const ActionTool = struct {
     }
 };
 
-/// Selects frozen identity and saved presentation from a verified Current capture.
 pub fn actionToolFromCapture(observed: *const protocol_reply.Current, io: std.Io, scratch: std.Io.File, action: u64) !?ActionTool {
     const Selection = struct {
         action: u64,
@@ -815,25 +744,18 @@ pub fn actionToolFromCapture(observed: *const protocol_reply.Current, io: std.Io
     return selection.selected;
 }
 
-/// Reads unresolved call identity and saved line before arguments reuse the capture.
-/// A resolved or absent Action has no current approval metadata.
 pub fn actionTool(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File) !?ActionTool {
     const observed = try current(requests, store, session, scratch);
     return actionToolFromCapture(&observed, requests.io, scratch, action);
 }
 
-/// False means the selected approval target resolved since the activity scan,
-/// so no request was shown.
 pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool) !bool {
     const tool = try actionTool(requests, store, session, action, scratch) orelse return false;
     try permissionForTool(requests, store, session, action, scratch, sink, colour, &tool);
     return true;
 }
 
-/// The CLI's inspection and the conversation approval share the same MCP
-/// presentation; neither guesses a runner from the arguments' shape.
 pub fn permissionForTool(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !void {
-    // Action reads write at the descriptor's streaming offset, not positionally.
     try requests.io.vtable.fileSeekTo(requests.io.userdata, scratch, 0);
     try scratch.setLength(requests.io, 0);
     var reply: client.ReplyBuffer = .{};
@@ -862,8 +784,6 @@ const ArgumentSource = struct {
     }
 };
 
-/// Renders a complete captured argument file; the consent owner applies the
-/// same viewport bound to either runner before offering a decision.
 pub fn renderPermissionArguments(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !void {
     return switch (try tool.runner()) {
         .bash => request(io, scratch, sink, colour),
@@ -872,9 +792,6 @@ pub fn renderPermissionArguments(io: std.Io, scratch: std.Io.File, sink: anytype
     };
 }
 
-/// The leading bytes of the command a Bash Action's captured arguments
-/// hold, as many as `buffer` takes; null for every other tool, whatever
-/// its arguments look like, and for arguments that are not a command.
 pub fn bashCommand(io: std.Io, scratch: std.Io.File, tool: *const ActionTool, buffer: []u8) !?[]const u8 {
     if (try tool.runner() != .bash) return null;
     var read_buffer: [4096]u8 = undefined;
@@ -897,9 +814,6 @@ pub fn bashCommand(io: std.Io, scratch: std.Io.File, tool: *const ActionTool, bu
     return if (shown) buffer[0..leading.len] else null;
 }
 
-/// Arguments remain exact JSON, not a Bash command or a schema interpretation.
-/// Like Bash, render to the Action file in full: SessionScreen applies its
-/// viewport bound and refuses consent when that file is only a preview.
 fn mcpRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !void {
     var buffer: [4096]u8 = undefined;
     var reader = scratch.reader(io, &buffer);
@@ -935,15 +849,12 @@ fn mcpRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, too
     try indented.finish();
 }
 
-/// The request block from an Action's arguments JSON in `scratch`.
 fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool) !void {
     var buffer: [4096]u8 = undefined;
     var reader = scratch.reader(io, &buffer);
     var source: ArgumentSource = .{ .reader = &reader.interface };
     const arguments = try tools.inspectBashArguments(&source) orelse return error.InvalidBashArguments;
     try reader.seekTo(0);
-    // What it is for, then the exact command; the description is the
-    // model's label, never a substitute for the command.
     try sink.feed("\n");
     try sink.feed(Style.attention.code(colour));
     try sink.feed("?");
@@ -956,8 +867,6 @@ fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool) !void 
         try label.finish();
     }
     try indented.feed("\n$ ");
-    // Every later line of the command and of stdin carries the content mark,
-    // so their text can never pass for the fields between them.
     var command: Indented(*Indented(@TypeOf(sink))) = .{ .sink = &indented, .prefix = content_mark, .marks_empty = true };
     var escaped: Escaped(@TypeOf(&command)) = .{ .sink = &command, .text = .{ .mode = .multiline } };
     if (!try tools.writeBashCommand(&source, &escaped)) return error.InvalidBashArguments;
@@ -970,7 +879,6 @@ fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool) !void 
     if (arguments.stdin_present) {
         try reader.seekTo(0);
         try indented.feed("\nstdin:\n");
-        // Every line of stdin, its first included, carries the mark.
         var lines: Indented(*Indented(@TypeOf(sink))) = .{ .sink = &indented, .prefix = content_mark, .marks_empty = true, .line_start = true };
         var input: Escaped(@TypeOf(&lines)) = .{ .sink = &lines, .text = .{ .mode = .multiline } };
         if (!try tools.writeBashStdin(&source, &input)) return error.InvalidBashArguments;
@@ -1078,8 +986,6 @@ pub fn Escaped(comptime Sink: type) type {
     };
 }
 
-/// Initialize in final storage: Renderer borrows the embedded Writer. Preserve
-/// the original rendezvous error rather than narrowing Cancelled to WriteFailed.
 pub fn Answer(comptime Sink: type) type {
     return struct {
         sink: Sink,
@@ -1202,11 +1108,6 @@ fn print(sink: anytype, comptime format: []const u8, args: anytype) !void {
     try sink.feed(try std.fmt.bufPrint(&storage, format, args));
 }
 
-/// Which Message states a read labels. Live output labels none: its next
-/// pages show what became of each Message. A read that stays on screen
-/// labels a stop's exclusion, which lasts, and a queued Message only while
-/// work under way holds the queue (`WorkState.holdsQueue`). A pending
-/// Session acts at once, so that label would be stale at the next frame.
 pub const Labels = enum {
     none,
     excluded,
@@ -1217,7 +1118,6 @@ pub const Labels = enum {
     }
 };
 
-/// What a Message's state was when read; an excluded Message was not sent.
 pub fn messageLabel(state: @FieldType(protocol.ActivityItem.Message, "state"), labels: Labels) ?[]const u8 {
     if (labels == .none) return null;
     return switch (state) {
@@ -1229,20 +1129,14 @@ pub fn messageLabel(state: @FieldType(protocol.ActivityItem.Message, "state"), l
 
 test "a queued Message is labelled only while work under way holds it" {
     const working: protocol.WorkState = .{ .working = .{ .since = 1 } };
-    // Opened between admission and the model request that reads it: the
-    // Session is pending, so a label would be stale by the next frame.
     const starting: protocol.WorkState = .{ .pending = .{ .since = 1 } };
     try std.testing.expect(messageLabel(.queued, .lasting(starting.holdsQueue())) == null);
     try std.testing.expectEqualStrings("Queued", messageLabel(.queued, .lasting(working.holdsQueue())).?);
-    // A stop's exclusion asks the person to act whatever the work is doing.
     try std.testing.expectEqualStrings("◌ not sent", messageLabel(.excluded, .lasting(false)).?);
     try std.testing.expect(messageLabel(.applied, .excluded_and_queued) == null);
-    // Live output's next pages say what became of each Message.
     inline for (.{ .queued, .excluded, .applied }) |state| try std.testing.expect(messageLabel(state, .none) == null);
 }
 
-/// One Message in full, labelled unless applied: live, in the opening and in
-/// a transcript's listing alike.
 pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool) !void {
     if (messageLabel(value.state, labels)) |text| {
         try print(sink, "{s}{s}{s}\n", .{ Style.quiet.code(colour), text, Style.normal.code(colour) });
@@ -1304,7 +1198,6 @@ pub fn toolResult(presentation: protocol.ToolPresentation, facts: ToolHeaderFact
     return toolResultRow(presentation, facts, false, sink, colour);
 }
 
-/// `foldable` marks the heading of a row whose saved output can open under it.
 fn toolResultRow(presentation: protocol.ToolPresentation, facts: ToolHeaderFacts, foldable: bool, sink: anytype, colour: bool) !void {
     var buffer: [3]u8 = undefined;
     const exit = if (facts.exit) |value| try std.fmt.bufPrint(&buffer, "{d}", .{value}) else "";
@@ -1329,6 +1222,7 @@ test "tool header hides all body lines for every outcome and first-line split" {
     const cases = .{
         .{ protocol.ToolPresentation.Code.unresolved, "⠹ Tool call" },
         .{ protocol.ToolPresentation.Code.pending_permission, "? Tool call" },
+        .{ protocol.ToolPresentation.Code.background, "✓ Tool call · background" },
         .{ protocol.ToolPresentation.Code.succeeded, "✓ Tool call" },
         .{ protocol.ToolPresentation.Code.failed, "× Tool call · 7" },
         .{ protocol.ToolPresentation.Code.timed_out, "× Tool call · timed out" },
@@ -1357,7 +1251,7 @@ test "tool header hides all body lines for every outcome and first-line split" {
                     if (colour) try expected.feed(switch (case[0]) {
                         .unresolved => "\x1b[94m",
                         .pending_permission => "\x1b[33m",
-                        .succeeded => "\x1b[90m",
+                        .succeeded, .background => "\x1b[90m",
                         .denied, .cancelled => "\x1b[39m",
                         else => "\x1b[91m",
                     });
@@ -1425,7 +1319,6 @@ test "tool header numeric exit accepts only a complete canonical first line" {
     }
 }
 
-/// One state line. Optional tails are quiet destinations or future key hints.
 const Ending = struct {
     mark: marks.Mark,
     words: []const u8,
@@ -1460,13 +1353,11 @@ fn ending(sink: anytype, end: Ending, colour: bool) !void {
     try sink.feed("\n");
 }
 
-/// `provider` is the Session's, which picks where a quota refusal sends the person.
 fn workEnded(sink: anytype, code: []const u8, provider: ?protocol.Provider, colour: bool) !void {
     const cause = marks.cause(code, provider);
     try ending(sink, .{ .mark = if (failure_class.of(code) == .interrupted) .stopped else .failed, .words = cause.words, .place = cause.place }, colour);
 }
 
-/// A descendant's outcome names that agent, never a saved code or report.
 fn agentEnded(sink: anytype, agent: []const u8, code: []const u8, colour: bool) !void {
     const stopped = failure_class.of(code) == .interrupted;
     try ending(sink, .{ .mark = if (stopped) .stopped else .failed, .words = if (stopped) "stopped" else marks.cause(code, null).words, .agent = agent }, colour);
@@ -1496,7 +1387,6 @@ test "an ended Turn shows one plain cause line for every failure class, and its 
         }
     };
     const cases = .{
-        // The Session's provider, when known, picks only a quota refusal's place.
         .{ "provider_policy", null, "× Refused by the provider" },
         .{ "provider_quota", null, "× Out of quota · Settings" },
         .{ "provider_quota", .codex, "× Out of quota · Settings" },
@@ -1568,8 +1458,6 @@ test "ending tails are quiet and joined in destination then key order" {
     try std.testing.expectEqualStrings("× Cause · Key\n", out.buffered());
 }
 
-/// Only the oldest waiting Message echoes in the feed when no work holds it.
-/// This row is provisional: once applied, the Message belongs at its user row.
 pub fn showsAtAdmission(position: u64, value: protocol.ActivityItem.Message, queued: protocol.Queued, held: bool) bool {
     return value.state == .queued and !held and position == queued.oldest_position;
 }
@@ -1578,15 +1466,9 @@ test "a waiting Message shows at its Admission only when nothing holds it and no
     const body: protocol.ActivityItem.Content = .{ .length = 1, .digest = @splat(0) };
     const waiting: protocol.ActivityItem.Message = .{ .admission = 12, .key = .{}, .turn = null, .state = .queued, .content = body, .admitted_at = 1, .sender = null };
     const alone: protocol.Queued = .{ .count = 1, .oldest_position = 30, .newest_admission = 12, .newest_position = 30 };
-    // A pending Session can wait long before it takes the Message, as after
-    // Ctrl-R recovery: the conversation shows it at once, as on an idle send.
     try std.testing.expect(showsAtAdmission(30, waiting, alone, false));
-    // Work under way holds it: it waits in the queued row.
     try std.testing.expect(!showsAtAdmission(30, waiting, alone, true));
-    // An older Message waits, which the queued row shows: this one waits
-    // with it, so the conversation shows both in order once taken.
     try std.testing.expect(!showsAtAdmission(34, waiting, .{ .count = 2, .oldest_position = 30, .newest_admission = 12, .newest_position = 34 }, false));
-    // Taken or excluded by the page's end.
     var taken = waiting;
     taken.state = .applied;
     try std.testing.expect(!showsAtAdmission(30, taken, .{}, false));
@@ -1594,16 +1476,8 @@ test "a waiting Message shows at its Admission only when nothing holds it and no
     try std.testing.expect(!showsAtAdmission(30, taken, alone, false));
 }
 
-/// How a tool row's saved output shows: not offered, hidden under a heading
-/// that can open, or shown under it through the row's own bounded buffer.
 pub const Fold = union(enum) { none, closed, open: *tool_fold.Output };
 
-/// Whether a row packs with its neighbours: two adjacent tight rows have no
-/// blank line between them, any other adjacent pair has one. Successful tool
-/// rows and peer Messages are tight; a failed or refused tool row, a failed
-/// send and everything else stand apart. Only the row's own kind decides,
-/// so a row's text never depends on its neighbour; whoever lays rows out
-/// draws the gap from `gap` (feed_window.Window.gapAfter).
 pub fn tight(value: protocol.ActivityItem.Value) bool {
     return switch (value) {
         .tool_result => |result| result.presentation.code == .succeeded,
@@ -1614,17 +1488,10 @@ pub fn tight(value: protocol.ActivityItem.Value) bool {
     };
 }
 
-/// Whether one blank line separates two adjacent shown rows, by their `tight`.
 pub fn gap(above: bool, below: bool) bool {
     return !(above and below);
 }
 
-/// Writes one Activity row, independent of traversal direction, prior reads
-/// and its neighbours: never a leading or trailing blank line between rows
-/// (see `tight`). Returns whether its output is provisional and must be
-/// replaced when the current page's queue/work facts change. Settled rows
-/// use only Store content, and `provider`, the Session's own, which never
-/// changes.
 pub fn render(requests: client.Requests, store: []const u8, session: []const u8, provider: ?protocol.Provider, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
     switch (item.value) {
         .admission => |value| {
@@ -1649,7 +1516,6 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             switch (fold) {
                 .none, .closed => try content(requests, store, session, item, result.content, &scan),
                 .open => |output| {
-                    // The one authenticated read of the result feeds both.
                     const Both = struct {
                         scan: *ToolHeaderScan,
                         output: *tool_fold.Output,
@@ -1666,26 +1532,18 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             try toolResultRow(result.presentation, scan.facts(result.presentation.code), fold != .none, sink, colour);
             if (fold == .open) try fold.open.finish(sink);
         },
-        // A call the provider ran is its line alone, grouped with
-        // other tool rows like a result with no output.
         .hosted_call => |presentation| {
             try toolResult(presentation, .{}, sink, colour);
         },
-        // Hidden call rows use admission-certified page metadata. Exact
-        // proposal and permission inspection authenticate originals instead.
         .call => {},
         .turn_ended => |ended| {
-            // A done Turn's answer is its final assistant row, never a second answer.
             if (ended.ending == .done) return false;
-            // The report is deliberately not read: the shared cause owns the words.
             if (!std.mem.eql(u8, ended.session.slice(), session)) {
                 try agentEnded(sink, ended.session.slice(), ended.code.slice(), colour);
             } else try workEnded(sink, ended.code.slice(), provider, colour);
         },
         .stop => |stop| {
             const excluded = try excludedAtStop(requests, store, session, item, sink, colour);
-            // A selected Turn owns its terminal line, even across page boundaries.
-            // Without a Turn, the stop itself is the completed outcome.
             if (stop.turn == null) {
                 if (excluded) try sink.feed("\n");
                 try ending(sink, .{ .mark = .stopped, .words = "Stopped" }, colour);
@@ -1693,18 +1551,11 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
         },
         .sent => |sent| try peerLine(sink, .outbound, sent.target, sent.admitted_at),
         .send_failed => |failed| try sendFailed(sink, failed.target),
-        // The call's own line and the work status show the wait.
         .approval_requested, .session_changed, .compacted, .model_call => {},
     }
     return false;
 }
 
-/// A stop owns the admission-order prefix it excluded, labelled oldest first.
-/// At the instant before the stop, these were the queued suffix through its
-/// cutoff. Earlier applied/excluded Messages end the search. Two bounded
-/// passes keep oldest-first output without retaining pages or recursing.
-/// Messages within the stop's row stand apart from each other by a blank
-/// line, as separate Message rows do. Returns whether it wrote any.
 fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, stop: protocol.ActivityItem, sink: anytype, colour: bool) !bool {
     if (stop.value.stop.cutoff == 0) return false;
     var cursor: protocol_reply.ActivityCursor = .{ .end = stop.position - 1, .direction = .backward, .kinds = .initOne(.admission) };
@@ -1752,7 +1603,6 @@ test "hosted calls draw as tool rows: successes pack together, a failure stands 
             self.length += bytes.len;
         }
     };
-    // Each row alone is its line; the rows joined by `gap` read as before.
     var joined: Sink = .{};
     var above: ?bool = null;
     for ([_]struct { []const u8, protocol.ToolPresentation.Code, []const u8 }{
@@ -1850,18 +1700,14 @@ test "only a Bash Action names a command for its row, whatever another tool's ar
     try mcp.server.?.set("shell");
     var other: ActionTool = .{ .name = .{}, .description = .{} };
     try other.name.set("web_search");
-    // Arguments every one of the three would accept as Bash's.
     const arguments = "{\"cmd\":\"rm -rf build\\nzig build\",\"description\":\"Clean and build\"}";
     try scratch.writePositionalAll(std.testing.io, arguments, 0);
     var buffer: [8]u8 = undefined;
-    // Bash: the command's leading bytes, as many as the buffer holds.
     try std.testing.expectEqualStrings("rm -rf b", (try bashCommand(std.testing.io, scratch, &bash, &buffer)).?);
     var wide: [64]u8 = undefined;
     try std.testing.expectEqualStrings("rm -rf build\nzig build", (try bashCommand(std.testing.io, scratch, &bash, &wide)).?);
-    // An MCP call or another built-in tool names none.
     try std.testing.expectEqual(null, try bashCommand(std.testing.io, scratch, &mcp, &wide));
     try std.testing.expectEqual(null, try bashCommand(std.testing.io, scratch, &other, &wide));
-    // Bash arguments that are not a command name none either.
     try scratch.setLength(std.testing.io, 0);
     try scratch.writePositionalAll(std.testing.io, "{\"description\":\"No command\"}", 0);
     try std.testing.expectEqual(null, try bashCommand(std.testing.io, scratch, &bash, &wide));
@@ -1897,7 +1743,6 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
     try tool.description.set("Saved \x1b[2J");
     const prefix = "{\n\"rui_call_description\":\"Fetch \\u001b[2J\",\n\"body\":\"";
     try scratch.writePositionalAll(std.testing.io, prefix, 0);
-    // Literal bidi content is valid JSON, but cannot direct the terminal.
     try scratch.writePositionalAll(std.testing.io, "‮", prefix.len);
     var at: u64 = prefix.len + "‮".len;
     const fill: [4096]u8 = @splat('a');

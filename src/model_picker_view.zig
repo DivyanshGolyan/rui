@@ -1,4 +1,3 @@
-//! Shared model field-choice row rendering.
 const std = @import("std");
 const model_catalog = @import("model_catalog.zig");
 const gwidth = @import("terminal_width");
@@ -10,7 +9,6 @@ pub const Read = enum { unread, read, unanswered, invalid };
 
 const Columns = struct { context: bool = true };
 
-/// A model field-choice row. Width is the full field-choice width.
 pub fn modelLine(arena: std.mem.Allocator, entry: picker.Entry, row: picker.Row, id_width: usize, width: usize, unicode: bool) !Line {
     const buffer = try arena.alloc(u8, @max(entry.id.len, id_width) + 256);
     var columns: Columns = .{};

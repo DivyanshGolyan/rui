@@ -1,7 +1,3 @@
-"""Canonical invocation failure cases at real producers and current caller boundaries.
-
-canonical_failure_integration.py runs them; the human CLI fixture runs them too
-in its full mode."""
 import errno
 import json
 import os
@@ -27,7 +23,6 @@ from canonical_fixture import ERROR, ERROR_BYTES, ReplyProxy, announced, invoke
 from conversation_page_fixture import request
 
 def content_failure(result):
-    """Content readers keep stdout content-only: the typed diagnostic is stderr's first line."""
     assert result.returncode == 1 and result.stdout == "", result
     return json.loads(result.stderr.splitlines()[0])
 
@@ -42,7 +37,6 @@ def expect_fatal(result, status=1):
 
 def expect_mutation_error(result, saved, *, human=False, status=500,
         reason="CanonicalStoreFailure", diagnostic=ERROR):
-    """Original request context, never the substituted reply's claimed target."""
     context = {field: saved[field] for field in ("store", "key", "kind")}
     context["session"] = saved["target"]["session"] if "target" in saved else saved["session"]
     if human:
@@ -54,7 +48,6 @@ def expect_mutation_error(result, saved, *, human=False, status=500,
             assert f"type: {diagnostic['type']}\ncode: {diagnostic['code']}\n" in result.stdout, result
         assert '"version"' not in result.stdout and '"answer"' not in result.stdout, result
         return
-    # Metadata is exactly one JSON value on stdout.
     observed = json.loads(result.stdout)
     expected = {"context": context, "error": {
         "status": str(status), "reason": reason, "certainty": "unconfirmed",
@@ -79,7 +72,6 @@ def producer_cases(state):
     }
     for name, command in commands.items():
         kind = "permission-decision" if name == "permission-denial" else name
-        # Every mutation kind supports explicit and generated captures.
         for mode in ("raw", "generated"):
             home = state / f"{name}-{mode}"
             home.mkdir(mode=0o700)
@@ -101,8 +93,6 @@ def producer_cases(state):
                 original = record.read_bytes()
                 assert json.loads(original)["key"] == key, original
                 expect_mutation_error(result, json.loads(original))
-                # The production fault must fence/shut down, not just return a
-                # fixture-owned fatal reply while the Host keeps admitting.
                 assert host.wait(timeout=10) != 0, "Store fault did not fence the Host"
             finally:
                 fixture.stop_host(host)
@@ -139,8 +129,6 @@ def wrong_target(response, null_code=False):
     elif "input" in value:
         value["input"]["sha256"] = "00" * 32
     else:
-        # Creation has no caller-chosen identity to compare. Reject an
-        # invalid allocation, while updates must reject another canonical ID.
         answer["session"] = ("other/session" if answer.get("created") is True else
             "000000" if answer.get("session") != "000000" else "111111")
     encoded = json.dumps(value, separators=(",", ":")).encode()
@@ -200,8 +188,6 @@ def binding_cases(state, null_code=False):
                         proxy.close()
                     expect_mutation_error(failed, saved, status=200, reason=reason, diagnostic=None)
                     assert record.read_bytes() == request
-                # Replay returns the original saved answer; a saved rejection
-                # still arrives on stdout and exits 3.
                 original_answer = json.loads(original_reply.split(b"\r\n\r\n", 1)[1])["answer"]
                 for recovery in (["request", "recover", "--store", store, "--record", record, "--kind", kind],
                         *([["request", "recover", key]] if mode != "raw" else [])):
@@ -249,8 +235,6 @@ def committed_cases(state):
             assert recovered.returncode == 0, recovered
             assert json.loads(recovered.stdout)["answer"] == {**answer, "replayed": True}, recovered
             assert record.read_bytes() == original, "fatal diagnosis replaced original recovery inputs"
-        # Keyed reads retain typed diagnostics and the queried key; the distinct
-        # inspection/report route remains outside this owner correction.
         for route, args in (
             ("/v1/observe-command", ["request", "inspect", "--key", key]),
             ("/v1/read-result", ["request", "read-result", "--key", key]),
@@ -267,7 +251,6 @@ def committed_cases(state):
                 assert len(proxy.exchanges) == 1, (route, proxy.exchanges)
             finally:
                 proxy.close()
-        # The saved-handle observation keeps the same typed diagnostic.
         proxy = ReplyProxy(host, "/v1/observe-command")
         try:
             result = invoke(home, "request", "inspect", key)
@@ -277,7 +260,6 @@ def committed_cases(state):
             assert len(proxy.exchanges) == 1, proxy.exchanges
         finally:
             proxy.close()
-        # The Host holds its Store exclusively; count the replays once it exits.
         fixture.stop_host(host)
         with sqlite3.connect(store / "rui.sqlite3") as database:
             assert database.execute("SELECT count(*) FROM core_command WHERE command_key=?", (key,)).fetchone() == (1,)
@@ -289,7 +271,7 @@ def committed_cases(state):
 def interactive_cases(state, binding=False, null_code=False):
     import human_cli_fixture as human
     import codex_fixture as codex
-    binding = binding or null_code  # Both are recoverable unconfirmed replies.
+    binding = binding or null_code
     reason = "InvalidResponse" if null_code else "RequestBindingMismatch"
     rewrite = (lambda response: wrong_target(response, null_code=null_code)) if binding else None
     home = state / ("null-interactive" if null_code else "binding-interactive" if binding else "interactive")
@@ -312,7 +294,7 @@ def interactive_cases(state, binding=False, null_code=False):
                 ("/v1/message", "original terminal bytes"), ("/v1/control/permission-decision", ""),
                 ("/v1/configure", None), ("/v1/activity-page", "confirmed terminal bytes")):
             if binding and route == "/v1/activity-page":
-                continue  # Activity framing/binding is covered by opening cases.
+                continue
             master, slave = open_pty()
             original_terminal = termios.tcgetattr(slave)
             ready_read, ready_write = os.pipe()
@@ -332,8 +314,6 @@ def interactive_cases(state, binding=False, null_code=False):
                     env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                     pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 if line is None:
-                    # Bare rui opens the list. New Session sends Configure
-                    # only; a malformed reply must retain that exact capture.
                     requested = len(endpoint.requests)
                     human.overview_frame(master, human.overview_title)
                     os.write(master, b"\x1b[H\r")
@@ -343,20 +323,15 @@ def interactive_cases(state, binding=False, null_code=False):
                 else:
                     if route == "/v1/control/permission-decision":
                         title = "? Check successful shell exit"
-                        # read_terminal joins earlier activity frames too. Count
-                        # titles only in one committed request-and-choice frame.
                         proposal = human.keyed_frame(master, b"",
                             lambda frame, x, y: human.CHOICE in frame and title in frame)
                         rows = [row.strip() for row in proposal.splitlines()]
                         assert rows.count(title) == 1 and "$ true" in rows, proposal
                         proposal += human.action_ready(ready_read, master)
-                        # Deny is picked and shown before Enter counts.
                         proposal += human.pick_deny(master)
                     else:
                         human.read_terminal(master, "› ")
                         if route == "/v1/activity-page":
-                            # Keep opening and pre-Message Activity polls healthy.
-                            # Backend delivery is not frontend Admission settlement.
                             proxy = ReplyProxy(host, "/v1/message", lambda response: response)
                         else:
                             proxy = ReplyProxy(host, route, rewrite)
@@ -373,12 +348,8 @@ def interactive_cases(state, binding=False, null_code=False):
                     accepted_request = proxy.exchanges[0][0]
                     accepted_key = json.loads(accepted_request)["key"]
                     deadline = time.monotonic() + 10
-                    # A backend reply does not join the visible transcript.
-                    # Finish this answer before a diagnostic command can cancel it.
                     human.read_terminal(master, "accepted work remains accepted",
                         timeout=deadline - time.monotonic(), composer=True)
-                    # A joined answer has released Admission. Chat info is an
-                    # independent read of the same open chat, not a submission.
                     def settled_info():
                         status = human.chat_info_frame(master, timeout=deadline - time.monotonic())
                         assert "Original reserved request:" not in status, status
@@ -418,9 +389,6 @@ def interactive_cases(state, binding=False, null_code=False):
                             human=True, status=200, reason=reason, diagnostic=None)
                         assert len(proxy.exchanges) == 1, "unconfirmed Configure automatically retried"
                     else:
-                        # An unresolved Message intentionally suppresses consent
-                        # until exact recovery. Its composer, not Action readiness,
-                        # owns this diagnostic handoff.
                         if route == "/v1/control/permission-decision":
                             if "denied tool saved" not in output:
                                 output += human.read_terminal(master, "denied tool saved",
@@ -430,7 +398,6 @@ def interactive_cases(state, binding=False, null_code=False):
                         os.write(master, b"\x1bd")
                         diagnostic = human.read_terminal(master, f"Last submission error: {reason}", composer=True)
                         assert key in diagnostic and "Ctrl-R retries this exact original" in diagnostic, diagnostic
-                        # No ordinary no-op may retry an unresolved submission.
                         human.return_to_live(master, lambda screen: "Last submission error" not in screen)
                         os.write(master, b"\r")
                         human.settle_screen(master, quiet=0.5)
@@ -445,12 +412,8 @@ def interactive_cases(state, binding=False, null_code=False):
                         if route == "/v1/message":
                             output += human.await_screen(master, human.CHOICE)
                             output += human.action_ready(ready_read, master)
-                    # A waiting choice retains its draft. Leave
-                    # from the selector with Ctrl-D, without adding an unsent draft.
                     card = binding and route == "/v1/message"
                     os.write(master, b"\x04" if card else b"\x03")
-                # Supply output credit during the original exit budget for
-                # fatal cleanup and recoverable explicit detachment alike.
                 try:
                     transcript, errors = human.terminal_exit(caller, master, timeout=10)
                 except AssertionError as error:
@@ -465,14 +428,11 @@ def interactive_cases(state, binding=False, null_code=False):
                     assert caller.returncode != 0, "fatal mutation resumed the Session prompt"
                 errors = errors.decode()
                 if line is None:
-                    # The unresolved empty creation names its exact recovery key.
                     started = json.loads(proxy.exchanges[0][0])["key"]
                     assert f"Check with: rui request recover {started}" in errors, errors
                 if not binding:
                     assert "[internal_unexpected]" in errors, errors
                 elif route == "/v1/configure" and line is not None:
-                    # The in-screen command showed its own diagnostic; exit
-                    # prints only command output that was never shown.
                     assert reason in output and reason not in errors, (output, errors)
                 else:
                     assert "CanonicalStoreFailure" not in errors, errors
@@ -592,8 +552,6 @@ def permission_read_cases(state):
                     assert "rui: Read failed: HTTP 503; type: busy; code: host_busy\n" in errors, errors
                 else:
                     assert "rui: Read failed:" not in errors and "type:" not in errors and "code:" not in errors, errors
-                # No committed frame offered the Action that failed to read;
-                # its call row may name it while it waits.
                 frames = []
                 screen = ScreenCapture(COLUMNS, ROWS)
                 screen.listener = lambda shown, x, y: frames.append(shown)
@@ -620,8 +578,6 @@ def permission_read_cases(state):
                     caller.stderr.close()
                 close_pty(master)
                 close_pty(slave)
-        # An ordinary tool-output preparation failure stays live and is delivered
-        # before the next Activity borrower can reset its diagnostic storage.
         configured = invoke(home, "session", "configure", "--store", store,
             "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
         assert configured.returncode == 0, configured
@@ -642,8 +598,6 @@ def permission_read_cases(state):
         response = (b"HTTP/1.1 503 Rejected\r\nContent-Type: application/json\r\n"
             b"X-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\nConnection: close\r\nContent-Length: "
             + str(len(body)).encode() + b"\r\n\r\n" + body)
-        # The overview also reads activity-content, even behind a narrow open
-        # conversation. Its Message prefixes (ordinal 0) are not fold reads.
         head, page = request(host.rui_ready_fields["socket"], store,
             "/v1/activity-page", "activity_page", fold_session, end=None,
             position="0", ordinal=None, direction="forward", kinds=["tool_result"], limit="2")
@@ -667,8 +621,6 @@ def permission_read_cases(state):
             os.write(master, b"\x0f")
             human.read_terminal(master, "host_busy", timeout=10)
             output = human.current_screen(master)
-            # The Footer's right slot names what failed, then the Host's
-            # own words, once. A diagnostic is never an extra or feed row.
             from human_cli_fixture import chat_footer_row
             notice = "! Tool output unavailable. HTTP 503; type: busy; code: host_busy"
             assert output.split("\n")[chat_footer_row(output)].endswith(notice), output
@@ -701,7 +653,6 @@ def permission_read_cases(state):
 
 
 def store_read_cases(state):
-    """A canonical read fault in the Host fences it; it is never an ordinary miss."""
     home = state / "store-read"
     home.mkdir(mode=0o700)
     store = home / "store"
@@ -712,10 +663,6 @@ def store_read_cases(state):
         before = invoke(home, "request", "read-result", "--store", store, "--key", "store-read-message")
         assert before.returncode == 5 and before.stdout == "", before
         assert json.loads(before.stderr.splitlines()[0])["error"]["code"] == "result_not_ready", before
-        # The Host holds its Store exclusively, so corrupt the stopped file:
-        # startup reads core_command only for its greatest command_seq, its
-        # rowid, never its command_key index, and the keyed read then fails
-        # at its first step with SQLITE_CORRUPT.
         fixture.stop_host(host)
         with sqlite3.connect(store / "rui.sqlite3") as database:
             database.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -761,7 +708,6 @@ def keyed_observation_cases(state, only="keyed"):
             args = [*command, *address]
             args += [] if kind == "message" else ["--record", home / f"{kind}.json", "--key", kind]
             submitted = invoke(home, *args, input="submitted bytes" if kind == "message" else None)
-            # A saved rejection is delivered on stdout with exit 3.
             rejected = kind in ("model_interruption", "permission_decision")
             assert submitted.returncode == (3 if rejected else 0), submitted
             if kind == "configure":
@@ -804,7 +750,6 @@ def keyed_observation_cases(state, only="keyed"):
                         assert all(field in rendered for field in ("input", "queue", "binding")), rendered
             finally:
                 proxy.close()
-        # The saved handle reads only the original answer: failed work, not a substitute.
         failed = invoke(home, "request", "read-result", key)
         assert content_failure(failed) == {
             "key": key, "error": {"status": 409, "type": "result_unavailable", "code": "result_failed"}}, failed
@@ -822,9 +767,6 @@ def keyed_observation_cases(state, only="keyed"):
 
 
 def proxy_swap_cases(state):
-    """A client connecting while a ReplyProxy installs or restores always
-    finds a listening socket: after every filesystem step the public path
-    names the Host's or the proxy's live listener, never nothing."""
     import stat
     from types import SimpleNamespace
     from unittest import mock
@@ -852,7 +794,6 @@ def proxy_swap_cases(state):
         self.listener_inode = os.stat(self.server_address).st_ino
         live.add(self.listener_inode)
     def server_close(self):
-        # A failed bind closes before activation: keep its error primary.
         live.discard(getattr(self, "listener_inode", None))
         close_listener(self)
         probe("server_close")
@@ -864,7 +805,6 @@ def proxy_swap_cases(state):
             proxy = ReplyProxy(SimpleNamespace(rui_ready_fields={"socket": str(path)}), "/v1/none")
             probe("installed")
             try:
-                # Exchanges forward through the backend name: it reaches the Host.
                 with os_semantics.unix_stream() as client:
                     client.connect(str(proxy.backend))
             finally:
@@ -872,8 +812,6 @@ def proxy_swap_cases(state):
             probe("restored")
         assert not missing, ("public socket path named no listener", missing)
         assert os.stat(path).st_ino in live and not proxy.backend.exists(), "the Host socket was not restored alone"
-        # A proxy that cannot bind raises its own error and leaves the Host's
-        # socket alone, with no link or staging name of its own behind.
         host_inode = os.stat(path).st_ino
         before = sorted(path.parent.iterdir())
         refused = OSError(errno.ENAMETOOLONG, "injected bind failure")

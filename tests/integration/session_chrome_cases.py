@@ -1,14 +1,3 @@
-"""The Session screen's chrome through a real terminal: the activity tail,
-the last row, the `↓` marker, pages without a heading and the send state.
-
-human_cli_integration.py runs these cases in its full and renderer modes, and
-alone as `session-chrome`. Each case judges the screen the person sees, at
-80×24 unless it says otherwise. Feed capacity and the permanently reserved
-marker row come from the composer's rendered upper rule, not a fixed footer
-height. The chat footer follows input; persistent state can take rows below
-it. Short replies replace the Footer's right slot without adding a row.
-Feed/page/activity rows have one gutter column; input, footer and state
-retain their own margins."""
 import json
 import os
 import pathlib
@@ -51,14 +40,12 @@ def rows(screen):
 
 
 def feed_bottom(screen):
-    """Reserved marker row, immediately above the rendered input's top rule."""
     bounds = composer_bounds(screen)
     assert bounds is not None, ("composer rules", screen)
     return bounds[0] - 1
 
 
 def status(screen):
-    """Persistent state only, below the chat's one facts/keys row."""
     return "\n".join(composer_line(screen, index) for index in range(chat_footer_row(screen) + 1, len(rows(screen)))).strip()
 
 
@@ -67,20 +54,16 @@ def footer(screen):
 
 
 def transcript_rows(screen):
-    """Content coordinates, excluding only the feed gutter, above the input."""
     return [chat_content_row(composer_line(screen, index)) for index in range(feed_bottom(screen) + 1)]
 
 
 def tail_rows(screen):
-    """The feed's final block, excluding the permanently reserved chip row.
-    The activity tail is an entry in that same feed, not separate chrome."""
     shown = transcript_rows(screen)[:-1]
     start = max((n for n, row in enumerate(shown) if not row.strip()), default=-1) + 1
     return shown[start:]
 
 
 def marker(screen):
-    """The chip in its reserved row below the feed, or None."""
     shown = rows(screen)
     row = shown[feed_bottom(screen)].rstrip() if len(shown) == ROWS else ""
     if row.endswith(" new") and "↓ " in row:
@@ -89,7 +72,6 @@ def marker(screen):
 
 
 class Chrome:
-    """One Host, Store and endpoint; Sessions opened in their own PTYs."""
 
     def __init__(self, prefix, responses):
         self.state = screen_fixture_root(prefix)
@@ -137,7 +119,6 @@ class Chrome:
             env={**os.environ, "HOME": str(self.home)}, cwd=str(self.workspace),
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         self.callers.append(caller)
-        # Ready as human_cli_fixture.composer_ready is: the opening read done.
         screen = self.frame(master, b"", lambda screen: ready(screen) and composing(screen, "") and "Opening…" not in screen)
         return master, caller, screen
 
@@ -155,14 +136,12 @@ class Chrome:
         assert caller.returncode == 0, errors
 
     def held_call(self, name, release):
-        """A Bash call that runs until `release` exists in the Workspace."""
         return fixture.sse_tool_calls(f"{name}-calls", [("bash", f"{name}-call", json.dumps({
             "cmd": f"while [ ! -e {release} ]; do sleep 0.05; done; printf done",
             "description": name, "timeout_ms": None}))])
 
 
 def composing(screen, draft):
-    """The composer shows `draft`; an empty editor may show its placeholder."""
     shown = [composer_line(screen, index) for index in range(len(rows(screen)))]
     bounds = composer_bounds(screen)
     expected = {(" › " + draft).rstrip()}
@@ -177,8 +156,6 @@ def latest(screen, text):
 
 
 def frames_until(master, keys, accept, timeout=15):
-    """Every frame committed after `keys`, through the first that `accept`s.
-    One read can commit several frames; the newest hides the ones before."""
     capture = terminal_capture(master)
     frames = []
     capture.listener = lambda screen, x, y: frames.append(screen)
@@ -197,11 +174,6 @@ def frames_until(master, keys, accept, timeout=15):
 
 
 def activity_case():
-    """Work under way shows at the transcript's tail and on the last row:
-    one row per running call with its clock, the waiting Messages as one
-    `◌ [N ·] <newest>` row under them, and `ctrl+x stop` at the right of the
-    last row. When the work ends, each waiting Message is its own row once,
-    in order, and the tail and the stop key go."""
     release = threading.Event()
     with Chrome("rui-chrome-activity.", []) as chrome:
         session = chrome.session()
@@ -213,24 +185,19 @@ def activity_case():
         chrome.answered(session, "seed")
         master, caller, _ = chrome.open(session, lambda screen: "SEED-ANSWER" in screen)
         try:
-            # Idle: no tail or stop key; the footer keeps the chat identity.
             idle = settle_screen(master, quiet=0.5)
             assert footer(idle).strip().startswith("‹ ") and "ctrl+x stop" not in footer(idle) and "⠹" not in idle, idle
             os.write(master, b"HOLD-QUESTION\r")
             release.set()
             running = chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
-            # The activity block is the feed's final entry, directly after
-            # the person's row; no blank separator owns a separate tail pane.
             bottom = feed_bottom(running)
             tail = transcript_rows(running)[bottom - 1:bottom]
             assert [line for line in transcript_rows(running)[:bottom] if line.startswith(("⠹", "◌"))] == tail, running
             assert tail == [tail[-1]] and tail[-1].startswith("⠹ Held call · "), running
             assert transcript_rows(running)[bottom - 1].startswith("⠹ Held call · ") and not rows(running)[bottom].strip(), running
             assert tail[-1].removeprefix("⠹ Held call · ").rstrip("s").isdigit(), running
-            # At the right of the footer, beside the chat identity.
             last = footer(running)
             assert last.strip().startswith("‹ ") and last.endswith("ctrl+x stop") and len(last.rstrip()) == 80, running
-            # Waiting Messages: one row, the newest's first line, counted, never called queued.
             for index in range(3):
                 os.write(master, f"WAITING-{index}\nsecond line {index}\r".encode())
                 count = f"{index + 1} · " if index else ""
@@ -244,11 +211,9 @@ def activity_case():
             assert "second line" not in waiting and "queued" not in waiting.lower(), waiting
             assert footer(waiting).endswith("ctrl+x stop"), waiting
             (chrome.workspace / "release").write_text("")
-            # The waiting Messages join the turn when its call ends.
             done = chrome.frame(master, b"", lambda screen: "HELD-DONE" in screen
                 and "◌" not in screen and "⠹" not in screen, timeout=30)
             assert footer(done).strip().startswith("‹ ") and "ctrl+x stop" not in footer(done), done
-            # Each waiting Message is its own row once, in the order sent.
             order = [done.count(f"› WAITING-{i}") for i in range(3)]
             assert order == [1, 1, 1], done
             assert done.index("› WAITING-0") < done.index("› WAITING-1") < done.index("› WAITING-2"), done
@@ -260,9 +225,6 @@ def activity_case():
 
 
 def send_state_case():
-    """The frame that clears the composer already says `Sending…`, and every
-    frame after it shows `Sending…` or an empty status bar until the
-    Message's own row shows. The status bar never says `Sent`."""
     with Chrome("rui-chrome-send.", [fixture.sse_answer("sent", "r", "m", "SENT-ANSWER")[0]]) as chrome:
         session = chrome.session()
         master, caller, _ = chrome.open(session, lambda screen: True)
@@ -285,17 +247,11 @@ def send_state_case():
 
 
 def scroll_marker_case():
-    """Shift-↑ and PgUp move the feed anchor by half a screen. The reserved
-    chip row shows `↓`, then `↓ N new` as entries arrive below. Esc returns
-    to the identical end frame. Empty feeds cannot scroll or show a chip;
-    scrolling never edits or sends the draft or changes the feed height."""
     release = threading.Event()
     with Chrome("rui-chrome-scroll.", []) as chrome:
         empty = chrome.session()
         master, caller, opened = chrome.open(empty, lambda screen: True)
         for keys in (b"\x1b[1;2A", b"\x1b[5~"):
-            # An empty feed draws nothing new for a scroll key, so the next
-            # frames come from typing after it and clearing that again.
             typed = chrome.frame(master, keys + b"x", lambda screen: composing(screen, "x"))
             assert marker(typed) is None and "Start of conversation" not in typed, typed
             unchanged = chrome.frame(master, b"\x15", lambda screen: composing(screen, ""))
@@ -312,20 +268,11 @@ def scroll_marker_case():
         master, caller, _ = chrome.open(session, lambda screen: "second row 07" in screen)
         requests = len(chrome.endpoint.requests)
         os.write(master, b"keep")
-        # Opening can show the newest answer before older pages fill the
-        # feed's blank prefix. Scrolling that short window drops its top pad,
-        # so it is not yet a full-screen reference. These alternating content
-        # and gap rows fill this odd-height feed with content in its first row;
-        # wait for that rendered fact, not for time or just the draft echo.
         end = chrome.frame(master, b"", lambda screen:
                            composing(screen, "keep") and bool(transcript_rows(screen)[0].strip()))
         bottom = feed_bottom(end)
         assert not rows(end)[bottom].strip(), end
         for keys in (b"\x1b[1;2A", b"\x1b[5~"):
-            # The chip has not stolen a row: every overlapping unique content
-            # line moves by exactly half the feed height, not by half plus one.
-            # Rows above the loaded ones join first, so judge the frame where
-            # the whole move has landed.
             end_rows = rows(end)[:bottom]
             before = {line: n for n, line in enumerate(end_rows) if line.strip() and end_rows.count(line) == 1}
 
@@ -339,9 +286,6 @@ def scroll_marker_case():
             assert "second row 07" not in scrolled and composing(scrolled, "keep"), (keys, scrolled)
             assert status(scrolled) == "" and footer(scrolled).strip().startswith("‹ "), (keys, "no heading or hint", scrolled)
             assert not any(row.startswith("Browsing") for row in transcript_rows(scrolled)), scrolled
-            # End edits this nonempty draft without moving the feed. Empty-
-            # draft End and Ctrl-End delegate to the conversation's end action.
-            # Older pages may still join above; judge the settled view.
             scrolled = settle_screen(master, quiet=0.5)
             os.write(master, b"\x1b[F")
             same = settle_screen(master, quiet=0.5)
@@ -350,13 +294,9 @@ def scroll_marker_case():
             live = chrome.frame(master, back, lambda screen: latest(screen, "second row 07"))
             assert composing(live, "keep"), live
             assert feed_bottom(live) == bottom, (end, live)
-            # Scrolling can load earlier history into the initially blank
-            # prefix. Every already loaded end row (including its gaps and
-            # marker slot) must return at the identical coordinate.
             first_known = next(index for index, row in enumerate(end_rows) if row.strip())
             assert rows(live)[first_known:bottom + 1] == rows(end)[first_known:bottom + 1], (end, live)
         assert len(chrome.endpoint.requests) == requests, "scrolling sent input"
-        # Work arrives below a scrolled-back view: the marker counts it.
         os.write(master, b"\x15HOLD-QUESTION\r")
         release.set()
         chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
@@ -373,10 +313,6 @@ def scroll_marker_case():
 
 
 def pages_case():
-    """Chat info opens above the input and returns to the saved feed;
-    the `↓` marker says more is below; Esc returns to the latest. A page
-    opened while work runs substitutes its own footer; Esc restores the live
-    stop hint without changing work."""
     release = threading.Event()
     with Chrome("rui-chrome-pages.", []) as chrome:
         session = chrome.session()
@@ -392,16 +328,12 @@ def pages_case():
             status = chat_info_open(master)
             assert "Folder" in status and "Model" in status, status
             assert not any(row.startswith("Browsing") for row in transcript_rows(status)), status
-            # Folder is read-only: three Downs reach Model, not Folder.
             choice = model_choice_frame(master, b"\x1b[B\x1b[B\x1b[B\r", query="")
             assert "kept draft" in choice, choice
             assert_chat_info_layout(choice, context=True)
             chrome.frame(master, b"\x1b", lambda screen: not model_choice_shown(screen) and "Copy last answer" in screen)
-            # Context, when present, is read-only: the next selectable row is Rename.
             chrome.frame(master, b"\x1b[B\rCANCELLED-NAME", lambda screen: "CANCELLED-NAME" in screen)
             chrome.frame(master, b"\x1b", lambda screen: "CANCELLED-NAME" not in screen and "Copy last answer" in screen)
-            # Refused paste retains usable name bytes, then the same editor
-            # recovers and submits without closing/reopening the Rename field.
             before_name = json.loads(run(chrome.home, "session", "inspect", "--store", chrome.store,
                                          "--session", session))["session"]["label"]
             chrome.frame(master, b"\rkept-name", lambda screen: "kept-name" in screen)
@@ -415,8 +347,6 @@ def pages_case():
                          and "text couldn't be entered" not in screen)
             assert json.loads(run(chrome.home, "session", "inspect", "--store", chrome.store,
                                   "--session", session))["session"]["label"] == "Recovered rename"
-            # Feed and draft facts can already be visible behind natural-height
-            # info. Wait for its close, not a tick before lone Esc is decoded.
             returned = chrome.frame(master, b"\x1b", lambda screen:
                                     latest(screen, "SEED-ANSWER") and composing(screen, "kept draft")
                                     and "Copy last answer" not in screen and "esc close" not in screen)
@@ -445,7 +375,6 @@ def pages_case():
 
 
 def info_natural_height_case():
-    """The actual feed donates only the rows the open info body needs."""
     answer = "\n".join(f"FEED-{index:02d}" for index in range(1, 25))
     with Chrome("rui-chrome-info-height.", [fixture.sse_answer("feed", "r", "m", answer)[0]]) as chrome:
         session = chrome.session()
@@ -462,8 +391,6 @@ def info_natural_height_case():
             chrome.frame(master, b"", lambda screen: "FEED-24" in screen and "Opening…" not in screen)
             live = chrome.frame(master, b"kept draft", lambda screen:
                                 "FEED-24" in screen and "kept draft" in screen)
-            # Editable words open only their shared choice at every width;
-            # the fitted model and effort, not a possibly dropped name, locate it.
             draft_row = next(index for index in range(height)
                              if composer_line(live, index).rstrip() == " › kept draft")
             for field, marker in (("Model", "gpt-6-sol"), ("Effort", "low")):
@@ -475,8 +402,6 @@ def info_natural_height_case():
                 assert composer_line(choice, draft_row) == composer_line(live, draft_row), (live, choice)
                 live = chrome.frame(master, b"\x1b", lambda screen:
                                     "✓" not in conversation_text(screen) and "FEED-24" in screen and "kept draft" in screen)
-            # Chat info remains available through its actual hint and Alt-I,
-            # rather than treating every identity word as the same action.
             columns = [rows(live)[chat_footer_row(live)].index("alt+i")]
             opened = None
             for column in columns:
@@ -486,7 +411,6 @@ def info_natural_height_case():
                 base = chat_info_geometry(opened)
                 if height >= 30:
                     assert base["top"] > 0 and any("FEED-" in row for row in base["feed"]), opened
-                # A click on the substituted footer is safe and idempotent.
                 chrome.frame(master, footer_click(opened, marker=" · info") + b"\x1b[B\r",
                              lambda screen: "ask first" in screen and "run without asking" in screen)
                 clicked = chrome.frame(master, b"\x1b",
@@ -524,8 +448,6 @@ def info_natural_height_case():
 
 
 def approval_overflow_case():
-    """A clipped request reports its omitted rows; both open gestures reveal
-    them in the same panel, keeping the decision and any draft intact."""
     with Chrome("rui-chrome-approval-overflow.", []) as chrome:
         for count in (40, 3):
             session = chrome.session(permission="ask")
@@ -550,7 +472,6 @@ def approval_overflow_case():
                         continue
                     assert "more lines" in shown and "step-39" not in shown, shown
                     assert "shift+" not in shown, shown
-                    # The draft stays the input when a continuation is opened.
                     shown = chrome.frame(master, b"kept draft", lambda screen: "kept draft" in screen)
                     if click:
                         row, line = next((index, line) for index, line in enumerate(rows(shown)) if "more lines" in line)
@@ -566,9 +487,6 @@ def approval_overflow_case():
 
 
 def opening_case():
-    """A Session reopened while Messages wait shows them as one counted
-    `◌ N · <newest>` row; Ctrl-O opens the lowest tool or collapsed Message, and Esc
-    returns from the Message page to the transcript."""
     release = threading.Event()
     long_text = "\n".join(f"LONG line {i:02d}" for i in range(40))
     with Chrome("rui-chrome-opening.", []) as chrome:
@@ -595,14 +513,10 @@ def opening_case():
             master, caller, reopened = chrome.open(session, lambda screen: "HELD-DONE" in screen)
             assert "    done" not in reopened, reopened
             folded = chrome.frame(master, b"\x1b[5~\x1b[5~", lambda screen: "┄ 38 more lines" in screen)
-            # The newer tool is below the old Message. Ctrl-O therefore opens
-            # the tool, and only this key—not reopening the Session—opens it.
             tool = chrome.frame(master, b"\x0f", lambda screen: "    done" in screen)
             assert "Message · 40 lines" not in tool, tool
             chrome.frame(master, b"\x0f", lambda screen: "    done" not in screen)
             chrome.leave(master, caller)
-            # Now put the long Message below the tool so the same nearest-in-
-            # view rule selects the Message, rather than assuming tools lose.
             chrome.endpoint.responses.append(fixture.sse_answer("later-long", "r", "m", "LATER-LONG-ANSWER")[0])
             chrome.answered(session, long_text)
             master, caller, reopened = chrome.open(session, lambda screen: "LATER-LONG-ANSWER" in screen and "┄ 38 more lines" in screen)
@@ -619,7 +533,6 @@ def opening_case():
 
 
 def keys_case():
-    """Settings > Keys is inert and Esc closes only the topmost layer."""
     with Chrome("rui-chrome-keys.", []) as chrome:
         session = chrome.session()
         chrome.endpoint.responses.append(fixture.sse_answer("keys", "r", "m", "KEYS-ANSWER")[0])
@@ -627,8 +540,6 @@ def keys_case():
         for width in (140, 46):
             master, caller, shown = chrome.open(session, lambda screen: "KEYS-ANSWER" in screen, columns=width)
             if width == 140:
-                # The pinned list remains beside the chat: open Settings
-                # without leaving the conversation or touching its draft.
                 row, line = next((index, line) for index, line in enumerate(rows(shown)) if "Settings" in line)
                 col = line.index("Settings") + 1
                 gesture = f"\x1b[<0;{col};{row + 1}M\x1b[<0;{col};{row + 1}m".encode()
@@ -638,9 +549,6 @@ def keys_case():
             chrome.frame(master, gesture, lambda screen: "Notifications" in screen and "Version" in screen)
             keys = chrome.frame(master, b"\x1b[B" * 6 + b"\r", lambda screen: "earlier message" in screen)
             expected = keys_reference()
-            # Judge actual row-major content independently of padding. The
-            # shared KeyList aligns each column after its widest key; a longer
-            # meaning expands the left column.
             columns = 2 if width == 140 else 1
             key_widths = [max(len(key) for key, _ in expected[column::columns])
                           for column in range(columns)]
@@ -665,7 +573,6 @@ def keys_case():
             assert all(not line.strip() for line in pane_rows[used_rows:]), keys
             for absent in ("/help", "Ctrl-X twice", "shift+enter or ctrl+j", "Commands", "Marks", "Esc returns", "↑↓ · enter change · esc close", "‹ Rui · settings", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select'):
                 assert absent not in keys, (width, absent, keys)
-            # Enter and typing do not edit a setting or the hidden draft.
             settings = chrome.frame(master, b"\rx\x1b", lambda screen: "Notifications" in screen and "Version" in screen)
             assert "earlier message" not in settings, settings
             if width == 140:
@@ -679,8 +586,6 @@ def keys_case():
 
 
 def keys_reference():
-    """Settings > Keys rows as (key, meaning), read from their one owner,
-    src/keymap.zig's `list`, so a keymap change needs no fixture edit."""
     source = (pathlib.Path(__file__).resolve().parents[2] / "src/keymap.zig").read_text()
     body = source.split("pub const list = [_]Reference{", 1)[1].split("\n};", 1)[0]
     rows = tuple(re.findall(r'^    \.\{ \.key = "([^"\\]*)", \.meaning = "([^"\\]*)"', body, re.MULTILINE))
@@ -689,8 +594,6 @@ def keys_reference():
 
 
 def notice_case():
-    """A notice replaces the Footer's right slot until the next key; question
-    marks are ordinary draft text, even on an empty draft."""
     with Chrome("rui-chrome-notice.", []) as chrome:
         session = chrome.session()
         master, caller, _ = chrome.open(session, lambda screen: True)

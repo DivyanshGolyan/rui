@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import time
 
@@ -21,8 +22,6 @@ LABEL = "ci-red"
 FIXED_BY = re.compile(r"Fixed by ([0-9a-f]{40})\b")
 STATE = re.compile(r"<!-- ci-signature: (\{.*?\}) -->")
 STAMP = re.compile(r"^﻿?\d{4}-\d\d-\d\dT[\d:.]+Z ", re.M)
-# The fixture is the first script after the case name, past any `env VAR=…`
-# wrapper and the fixture boundary's `host_process.py exec`, which wraps a binary.
 FIXTURE = re.compile(r'^\s*run_case \S+ (\S+) [^\n]*?"\$directory/(?!host_process\.py")([^"]+)"', re.M)
 RECORD = re.compile(r"^([a-z0-9-]+) (passed|failed): exit=\d+.*$", re.M)
 # Zig prints "failed command:" for any step with stderr, passing or not; only an
@@ -31,25 +30,19 @@ RECORD = re.compile(r"^([a-z0-9-]+) (passed|failed): exit=\d+.*$", re.M)
 COMMAND = re.compile(r"^error: process (?:exited with code \d+|terminated with signal \w+)\n"
                      r"failed command: (.+)$", re.M)
 SCRIPT = re.compile(r"tests/integration/[\w./-]+\.py")
+FAILED_COMMAND = re.compile(r"^failed command: (.+)$", re.M)
 ZIG_CRASH = re.compile(r"^error: '(.+?)' (terminated with signal \w+|failed)", re.M)
 # A failing assertion can print its diagnostics between the test's name and its
 # FAIL record; the record never lies past the next numbered test.
 ZIG_FAIL = re.compile(r"^\d+/\d+ (\S[^\n]*?)\.\.\.(?:(?!\n\d+/\d+ ).)*?FAIL \((\w+)\)$", re.M | re.S)
-# A unittest failure: its id, then its traceback up to the next separator. A
-# subtest's parameters follow the id and stay out of the signature.
 UNITTEST = re.compile(r"^(?:ERROR|FAIL): \w+ \(([\w.]+)\)[^\n]*\n-{70}\n(.*?)(?=^[=-]{70}$|\Z)", re.M | re.S)
 GATE = re.compile(r"^([a-z][\w-]*(?: [\w-]+)*) gate failed: (.+)$", re.M)
-# `git diff --check`, which the plan job runs first: one line per problem.
 WHITESPACE = re.compile(r"^([^\s:][^:\n]*):\d+: (trailing whitespace|new blank line at EOF|space before tab in indent|"
                         r"indent with spaces|tab in indent|leftover conflict marker)\.$", re.M)
-# A sweep of vendored files names thousands; the first few say what to remove.
 WHITESPACE_PATHS = 10
 CARETS = re.compile(r"[\s~^]+")
 FRAME = re.compile(r'^  File "([^"]+)", line \d+, in \S+$')
-# check.yml's linux and macos aggregates only require their needs' results; a
-# suite's failure fails them too, and the suite's own log carries the cause.
 AGGREGATE_STEP = "Require every selected "
-# promotion.py's verdicts on a failed promotion job: one per failed step it replayed.
 BISECT = re.compile(r"^Promotion bisect: .+$", re.M)
 # Seconds before each repeated log download; a log can lag its job's completion.
 LOG_RETRY_DELAYS = (10, 30)
@@ -60,24 +53,31 @@ class Cause:
     signature: str
     paths: list = field(default_factory=list)
     detail: str = ""
+    zig_test: str = ""
+    python_test: str = ""
+    zig_binary: str = ""
 
 
 def gh(*args):
-    return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
+    try:
+        return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
+    except subprocess.CalledProcessError as error:
+        # Older gh releases print escaped output without this newer opt-in.
+        if "--allow-escape-sequences" not in args or "unknown flag: --allow-escape-sequences" not in (error.stderr or ""):
+            raise
+        return subprocess.run(["gh", *(arg for arg in args if arg != "--allow-escape-sequences")],
+                              check=True, capture_output=True, text=True).stdout
 
 
 def untimed(log):
-    """Drop the BOM and the timestamp GitHub prefixes to every log line."""
     return STAMP.sub("", log.lstrip("﻿"))
 
 
 def fixtures(check_sh=Path("tests/integration/check.sh")):
-    """The integration driver's case names mapped to their fixture paths."""
     return {name: f"tests/integration/{script}" for name, script in FIXTURE.findall(check_sh.read_text())}
 
 
 def tracebacks(log):
-    """Each Python traceback as (frames of (file, source statement), exception line)."""
     lines = log.splitlines()
     for start, line in enumerate(lines):
         if line != "Traceback (most recent call last):":
@@ -85,8 +85,6 @@ def tracebacks(log):
         frames, index = [], start + 1
         while index < len(lines) and (frame := FRAME.match(lines[index])):
             index += 1
-            # The whole statement, so assertions sharing a first line stay
-            # distinct; caret markers are dropped.
             source = []
             while index < len(lines) and lines[index].startswith("    "):
                 if not CARETS.fullmatch(lines[index]):
@@ -98,16 +96,34 @@ def tracebacks(log):
 
 
 def zig_paths(test):
-    """The one source file whose name is the test's module, or none if ambiguous."""
-    matches = sorted(Path("src").rglob(test.split(".", 1)[0] + ".zig"))
+    module = re.split(r"\.(?:decltest|test)\.", test, maxsplit=1)[0]
+    if "." in module:
+        path = Path("src", module.replace(".", "/") + ".zig")
+        if path.is_file():
+            return [str(path)]
+    matches = sorted(Path("src").rglob(module.split(".", 1)[0] + ".zig"))
     return [str(matches[0])] if len(matches) == 1 else []
 
 
-def raising_line(parsed, path):
-    """The last traceback's deepest source line inside the fixture, with its exception.
+def zig_binary(log, start):
+    command = FAILED_COMMAND.search(log, start)
+    if command is None or RECORD.search(log, start, command.start()):
+        return ""
+    previous = [match.end() for match in FAILED_COMMAND.finditer(log, 0, start)]
+    previous += [match.end() for match in RECORD.finditer(log, 0, start)]
+    lower = max(previous, default=0)
+    diagnostics = list(ZIG_CRASH.finditer(log, lower, command.start()))
+    diagnostics += list(ZIG_FAIL.finditer(log, lower, command.start()))
+    if len(diagnostics) != 1:
+        return ""
+    try:
+        words = shlex.split(command[1])
+    except ValueError:
+        return ""
+    return Path(words[0]).name if words else ""
 
-    A fixture's own code is its script and the cases library it runs, if any
-    (canonical_failure_integration.py runs canonical_failure_cases.py)."""
+
+def raising_line(parsed, path):
     own = tuple("/" + name for name in (path, re.sub(r"_integration\.py$", "_cases.py", path)))
     found = None
     for frames, error in parsed:
@@ -118,12 +134,6 @@ def raising_line(parsed, path):
 
 
 def case_output(log, records, index):
-    """The output check.sh printed for one case.
-
-    A batch case's record precedes its log; a serial case's output precedes its
-    record. The span before a record belongs to the previous case in a batch,
-    so it is read only when that case runs a different fixture.
-    """
     record = records[index]
     after = log[record.end():records[index + 1].start() if index + 1 < len(records) else len(log)]
     if index == 0:
@@ -132,8 +142,6 @@ def case_output(log, records, index):
 
 
 def fixture_cause(path, spans):
-    """The fixture's raising statement, signed by its path so check.sh's case
-    name and a direct build.zig run of the same script share one issue."""
     for span in spans:
         if raised := raising_line(list(tracebacks(span)), path):
             code, error = raised
@@ -142,12 +150,6 @@ def fixture_cause(path, spans):
 
 
 def failure_causes(log, cases, keep_unexplained=False):
-    """Every failure signature in one job's log, without repeats.
-
-    A failed case without a traceback or a known fixture is dropped once
-    another cause explains the log, unless keep_unexplained, as the flake
-    quarantine needs: there, an unexplained failure must stay a failure.
-    """
     log = untimed(log)
     found, unparsed = [], []
     records = list(RECORD.finditer(log))
@@ -164,7 +166,6 @@ def failure_causes(log, cases, keep_unexplained=False):
             found.append(cause)
         else:
             unparsed.append(Cause(f"{path or name}: exit without a parsed traceback", [path] if path else []))
-    # A gate build.zig runs directly, without check.sh's records.
     for command in COMMAND.findall(log):
         if "check.sh" in command or not (script := SCRIPT.search(command)):
             continue
@@ -172,18 +173,19 @@ def failure_causes(log, cases, keep_unexplained=False):
         found.append(fixture_cause(path, (log,)) or Cause(f"{path}: exit without a parsed traceback", [path]))
     for crash in ZIG_CRASH.finditer(log):
         test, how = crash.groups()
-        # The test's stderr follows, indented: the failed expectation, then the panic.
         following = log[crash.end():].split("\n")[1:4]
         detail = "\n".join(line.strip() for line in following if line.startswith("  "))
-        found.append(Cause(f"zig test '{test}' {how}", zig_paths(test), detail))
-    for test, error in ZIG_FAIL.findall(log):
-        found.append(Cause(f"zig test '{test}' failed ({error})", zig_paths(test)))
+        found.append(Cause(f"zig test '{test}' {how}", zig_paths(test), detail, zig_test=test, zig_binary=zig_binary(log, crash.end())))
+    for failure in ZIG_FAIL.finditer(log):
+        test, error = failure.groups()
+        found.append(Cause(f"zig test '{test}' failed ({error})", zig_paths(test), zig_test=test,
+                           zig_binary=zig_binary(log, failure.end())))
     for test, output in UNITTEST.findall(log):
         modules = sorted(Path("tests").rglob(test.split(".", 1)[0] + ".py"))
         paths = [str(modules[0])] if len(modules) == 1 else []
         raised = raising_line(list(tracebacks(output)), paths[0]) if paths else None
         failure = f"{raised[0]} raised {raised[1].split(':', 1)[0]}" if raised else "failed"
-        found.append(Cause(f"python test '{test}': {failure}", paths, raised[1] if raised else ""))
+        found.append(Cause(f"python test '{test}': {failure}", paths, raised[1] if raised else "", python_test=test))
     for gate, message in GATE.findall(log):
         found.append(Cause(f"{gate} gate failed: {message}"))
     if problems := WHITESPACE.findall(log):
@@ -191,12 +193,30 @@ def failure_causes(log, cases, keep_unexplained=False):
         detail = "\n".join(f"{path}: {kind}" for path, kind in problems[:5])
         found.append(Cause("whitespace check (git diff --check) failed", paths[:WHITESPACE_PATHS],
                            f"{len(problems)} problems in {len(paths)} files, first:\n{detail}"))
-    # A record the logs explain elsewhere (a Zig binary's case) adds nothing.
     found += [cause for cause in unparsed if keep_unexplained or cause.paths or not found]
     unique = {}
     for cause in found:
-        unique.setdefault(cause.signature, cause)
+        unique.setdefault((cause.signature, cause.zig_binary), cause)
     return list(unique.values())
+
+
+def compile_targets(log):
+    lines = untimed(log).splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        line = lines[index]
+        if line.startswith("zig build ci-build "):
+            for arg in shlex.split(line):
+                if arg.startswith("-Dci-targets="):
+                    return arg.partition("=")[2].split(",")
+        if line.strip().startswith("TARGETS: "):
+            value = "\n".join(lines[index:]).lstrip().removeprefix("TARGETS: ")
+            try:
+                targets, _ = json.JSONDecoder().raw_decode(value)
+            except ValueError:
+                continue
+            if isinstance(targets, list) and all(isinstance(target, str) for target in targets):
+                return targets
+    return []
 
 
 def signature_state(body):
@@ -205,7 +225,6 @@ def signature_state(body):
 
 
 def render(state, detail):
-    # Fenced text cannot mention people, link issues or break the markdown.
     lines = ["CI failed with this signature:", "", "~~~", state["signature"], "~~~"]
     if detail:
         lines += ["", "~~~", detail, "~~~"]
@@ -223,7 +242,6 @@ def known_issues(repository):
 
 
 def fixing_commit(repository, number):
-    """The commit that last closed the issue: GitHub's close from a push, or Auto-land's comment."""
     pages = json.loads(gh("api", f"repos/{repository}/issues/{number}/timeline?per_page=100",
                           "--paginate", "--slurp"))
     fix = None
@@ -242,22 +260,17 @@ def contains(repository, sha, ancestor):
 
 
 def file_cause(repository, issues, cause, workflow, sha, url, labels):
-    """Comment on the signature's issue, reopening it after a claimed fix, or open one."""
     note = f"{workflow} failed on `{sha}`: {url}"
-    # Prefer the open issue, then the newest closed one.
     matches = sorted((row for row in issues if row[2]["signature"] == cause.signature),
                      key=lambda row: (row[1] == "OPEN", row[0]))
     if matches:
         number, state, recorded = matches[-1]
         fix = state != "OPEN" and fixing_commit(repository, number)
         if fix and not contains(repository, sha, fix):
-            # A run that started before the fix landed proves nothing about it.
             gh("issue", "comment", str(number), "--repo", repository,
                "--body", f"{note}. This predates its fix `{fix}`, so the issue stays closed.")
             return number
         recorded.update(last_sha=sha, workflows=sorted({*recorded["workflows"], workflow}))
-        # A signature Daily Mac filed first still gains this run's labels,
-        # such as stable-red.
         gh("issue", "edit", str(number), "--repo", repository, "--body", render(recorded, cause.detail),
            *(arg for label in labels for arg in ("--add-label", label)))
         if state != "OPEN":
@@ -280,12 +293,6 @@ def file_cause(repository, issues, cause, workflow, sha, url, labels):
 
 
 def job_log(repository, job_id):
-    """A job's full log, or None after three failed downloads.
-
-    Job logs carry ANSI colour codes, and gh refuses to print a response with
-    escape sequences unless allowed, even into a pipe. That refusal filed
-    every red as "log unavailable" (#631, #638).
-    """
     for delay in (*LOG_RETRY_DELAYS, None):
         try:
             return gh("api", "--allow-escape-sequences", f"repos/{repository}/actions/jobs/{job_id}/logs")
@@ -296,20 +303,19 @@ def job_log(repository, job_id):
         time.sleep(delay)
 
 
-def run_jobs(repository, run_id):
+def run_jobs(repository, run_id, attempt=None):
+    suffix = f"/attempts/{attempt}" if attempt is not None else ""
     pages = json.loads(gh("api", "--paginate", "--slurp",
-                          f"repos/{repository}/actions/runs/{run_id}/jobs?per_page=100"))
+                          f"repos/{repository}/actions/runs/{run_id}{suffix}/jobs?per_page=100"))
     return [job for page in pages for job in page["jobs"]]
 
 
 def aggregate_only(job):
-    """A job whose every failed step is an aggregate's check of its needs."""
     failed = [step["name"] for step in job.get("steps") or () if step.get("conclusion") == "failure"]
     return bool(failed) and all(name.startswith(AGGREGATE_STEP) for name in failed)
 
 
 def job_causes(log, cases, workflow, job):
-    """A failed job's causes; a failure always has one."""
     if log is None:
         return [Cause(f"{workflow}: job '{job['name']}' log unavailable")]
     return failure_causes(log, cases) or [Cause(f"{workflow}: job '{job['name']}' failed; cause not parsed")]
@@ -335,7 +341,6 @@ def main():
         causes = job_causes(log, cases, args.workflow, job)
         for cause in causes:
             if verdicts:
-                # Each verdict bisects one failed step; a step can hold several causes.
                 scope = ([f"The job '{job['name']}' failed with {len(causes)} causes; each line above bisects one "
                           "failed step, and a step with several causes names only its earliest."]
                          if len(causes) > 1 else [])

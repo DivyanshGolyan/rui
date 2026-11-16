@@ -1,5 +1,3 @@
-//! Fixed-memory content chunks. The connection owns the streaming buffers;
-//! a sink holds only framing state, out of line in Mysql.State.
 const std = @import("std");
 const wire = @import("../wire/mysql_connection.zig");
 const literal = @import("../mysql_literal.zig");
@@ -8,8 +6,6 @@ const Failure = @import("../engine.zig").Failure;
 pub const chunk_bytes = @import("../schema.zig").content_chunk_bytes;
 pub const ContentSink = *SinkState;
 
-/// The core owns transaction state. Content responses report server errors
-/// through this hook before mapping them, so deadlock transitions have one owner.
 pub const Observer = struct {
     context: *anyopaque,
     server_error: *const fn (*anyopaque, u16) void,
@@ -20,13 +16,9 @@ pub const Observer = struct {
     }
 };
 
-/// A chunk INSERT's text before its payload's hex.
 pub const insert_prefix = "INSERT INTO content_chunk(content_id,chunk_index,bytes) VALUES({d},{d},X'";
-/// A chunk INSERT's text after its payload's hex, the batch's separator
-/// included.
 pub const insert_suffix = "');";
 
-/// The batch text of a chunk INSERT whose payload is `n` bytes.
 pub fn chunkStatementBytes(id: u64, index: u64, n: usize) usize {
     return std.fmt.count(insert_prefix, .{ id, index }) + 2 * n + insert_suffix.len;
 }
@@ -38,16 +30,8 @@ fn serverFailure(code: u16) Failure {
     };
 }
 
-/// Where a sink puts its chunk INSERTs: the Access whose transaction holds
-/// the content row. `chunk` queues one INSERT of `n` payload bytes into the
-/// open batch, after a round when the batch or its queue lacks room, and
-/// returns the batch's writer with the text up to the payload written; the
-/// Access steps its result in order with the rest of its round. When it
-/// cannot, the Access records why and the sink fails.
 pub const Host = @import("../engine.zig").ContentHost;
 
-/// Opens a sink on the content row `id`, whose payload holds `length`
-/// bytes. It sends nothing: each chunk rides the Access's batch.
 pub fn openSink(state: *SinkState, id: u64, length: u64, host: Host) ContentSink {
     std.debug.assert(!state.open);
     state.* = .{ .open = true, .host = host, .id = id, .length = length };
@@ -60,11 +44,8 @@ pub const SinkState = struct {
     id: u64 = 0,
     length: u64 = 0,
     position: u64 = 0,
-    /// The writer of the chunk INSERT being written, and the payload bytes
-    /// it still owes; null between chunks.
     writer: ?*std.Io.Writer = null,
     remaining: usize = 0,
-    /// A chunk could not be queued: the Access holds the cause.
     failed: bool = false,
 
     fn append(self: *SinkState, bytes: []const u8) error{ContentWriteFailed}!void {
@@ -77,7 +58,6 @@ pub const SinkState = struct {
             }
             const w = self.writer.?;
             const n = @min(rest.len, self.remaining);
-            // The Access made room for the whole statement.
             literal.writeHex(w, rest[0..n]) catch unreachable;
             self.remaining -= n;
             self.position += n;
@@ -105,9 +85,6 @@ pub const SinkState = struct {
         };
     }
 
-    /// Ends the sink. A chunk begun but not filled is padded with zeros so
-    /// the batch stays whole text; the caller's failed Access drops it with
-    /// the rest of its transaction.
     pub fn close(self: ContentSink) void {
         if (!self.open) return;
         defer self.* = .{};
@@ -127,8 +104,6 @@ const select_piece = "SELECT chunk_index,SUBSTRING(bytes,{d},{d}) AS part FROM c
 const select_start = "SELECT part FROM (";
 const select_end = ") AS chunks ORDER BY chunk_index";
 
-/// One COM_QUERY for all touched chunks; response bytes go straight to dest.
-/// Normal domain windows touch one or two chunks, never a payload-sized buffer.
 pub fn readRaw(connection: *wire.Connection, id: u64, offset: u64, dest: []u8, observer: Observer) Failure!void {
     if (dest.len == 0) return;
     if (dest.len > std.math.maxInt(u64) - offset) return error.RangeOutOfBounds;

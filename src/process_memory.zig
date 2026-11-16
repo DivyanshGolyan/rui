@@ -1,27 +1,14 @@
-//! What the overview's counts line says of live memory: `rui`, this TUI
-//! plus its Host, and `tools`, every process the Host runs below it. Values
-//! in, totals out; the shell's native readers answer for each process.
-
 const std = @import("std");
 
-/// Live physical memory: `rui` is this TUI plus its Host; `tools` the
-/// processes the Host runs, null while none runs.
 pub const Memory = struct { rui: u64, tools: ?u64 };
 
-/// The most tool processes one read counts, and the most children it reads
-/// of each.
 pub const max_tools = 256;
 
-/// Totals for the TUI `self` and its Host `host`, null when none is known.
-/// `source` answers `footprint(pid) ?u64` and `children(pid, buffer)
-/// ?[]const i32`, each null once the process is gone. The walk goes down
-/// from the Host, counts each process once, and stops at `max_tools`.
 pub fn read(source: anytype, self: i32, host: ?i32) Memory {
     var rui = source.footprint(self) orelse 0;
     const root = host orelse return .{ .rui = rui, .tools = null };
     rui +|= source.footprint(root) orelse return .{ .rui = rui, .tools = null };
 
-    // Breadth first: `seen` holds every pid met, the walk reads them in turn.
     var seen: [max_tools + 1]i32 = undefined;
     seen[0] = root;
     var count: usize = 1;
@@ -32,7 +19,6 @@ pub fn read(source: anytype, self: i32, host: ?i32) Memory {
     while (next < count) : (next += 1) {
         const pid = seen[next];
         if (next != 0) {
-            // A tool gone since its parent listed it counts for nothing.
             tools +|= source.footprint(pid) orelse continue;
             counted += 1;
         }
@@ -48,7 +34,6 @@ pub fn read(source: anytype, self: i32, host: ?i32) Memory {
 }
 
 test "rui adds this TUI and its Host, and tools add every process below the Host" {
-    // Host 10 runs two Bash calls; one of them runs a compiler with a child.
     var source: Fake = .{ .processes = &.{
         .{ .pid = 1, .bytes = 20 * mb },
         .{ .pid = 10, .bytes = 24 * mb, .children = &.{ 11, 12 } },
@@ -63,7 +48,6 @@ test "with no tool process, or no Host, tools is null; an unreadable Host leaves
     var idle: Fake = .{ .processes = &.{ .{ .pid = 1, .bytes = 20 * mb }, .{ .pid = 10, .bytes = 24 * mb } } };
     try std.testing.expectEqual(Memory{ .rui = 44 * mb, .tools = null }, read(&idle, 1, 10));
     try std.testing.expectEqual(Memory{ .rui = 20 * mb, .tools = null }, read(&idle, 1, null));
-    // The Host exited between the listing and this read.
     try std.testing.expectEqual(Memory{ .rui = 20 * mb, .tools = null }, read(&idle, 1, 99));
 }
 
@@ -72,7 +56,6 @@ test "a tool that exits mid-walk is left out, and its listed children with it" {
         .processes = &.{
             .{ .pid = 1, .bytes = 20 * mb },
             .{ .pid = 10, .bytes = 24 * mb, .children = &.{ 11, 12 } },
-            // 11 is gone: neither its footprint nor its children read.
             .{ .pid = 12, .bytes = 5 * mb },
         },
     };
@@ -88,7 +71,6 @@ test "a process listed twice, or a cycle a reused pid makes, counts once, and th
     } };
     try std.testing.expectEqual(Memory{ .rui = 44 * mb, .tools = 5 * mb }, read(&cycle, 1, 10));
 
-    // A fan wider than the bound counts the first `max_tools` processes.
     var wide: [max_tools + 10]i32 = undefined;
     var processes: [max_tools + 12]Fake.Process = undefined;
     processes[0] = .{ .pid = 1, .bytes = 1 };
@@ -113,7 +95,6 @@ test "totals saturate rather than wrap" {
 
 const mb = 1024 * 1024;
 
-/// A process table: each pid's footprint and direct children.
 const Fake = struct {
     processes: []const Process,
 

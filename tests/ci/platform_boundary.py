@@ -22,30 +22,18 @@ import build_files
 
 ROOT = Path(__file__).resolve().parents[2]
 
-# Changing any of these can change Mac behaviour by itself.
 MAC_PATHS = (
     "src/os/*", "tests/integration/os_semantics.py",
-    # The PTY launcher: Darwin revokes a terminal when its session leader
-    # exits and keeps different hangup and EOF rules, so Linux can't vouch.
     "tests/integration/terminal_process.py", "tests/integration/terminal_leader.py",
-    # PTY backpressure and terminal restoration differ between kernels.
     "tests/integration/terminal_restoration_cases.py",
-    # The self-contained HTTP/2 client cannot import src/os, so its sockets,
-    # waker and trust paths name the platform themselves.
     "src/h2/*",
-    # Trust loading reads the host's bundles, which differ on macOS.
     "src/tls_client/*",
     "src/*.c", "src/*.h", "src/*.inc", "src/*.patch", "src/*.sh", "tests/integration/*.c",
     ".github/workflows/qualify-macos.yml",
     "install.sh", "release/*",
     "build/darwin.zig",
 )
-# Other build plumbing (build.zig, build.zig.zon, the setup action, the CI qualification
-# helpers) is not here: Linux runs it, typecheck-macos compiles Rui for
-# Darwin on every PR, and promotion links and runs it on a Mac.
 
-# fnmatch patterns, as prepush.py and the selector read them: `*` spans
-# directories, so src/*.zig covers src/http1/Exchange.zig too.
 SCANNED = ("src/*.zig", "tests/integration/*.zig", "tests/integration/*.py", "tests/integration/*.sh", "clients/ts/test/*.ts")
 
 # Darwin differs on these: shutdown of a closed or listening socket returns
@@ -67,22 +55,17 @@ TRUST_VARIABLE = re.compile(r"\bSSL_CERT_(?:FILE|DIR)\b")
 STRING_TOKENS = (tokenize.NAME, tokenize.STRING, getattr(tokenize, "FSTRING_MIDDLE", tokenize.STRING))
 TS_COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
 
-# Zig tokens with comments and multiline string lines removed; strings stay
-# whole so `@import("builtin")` is recognizable and string contents are inert.
 ZIG_TOKEN = re.compile(r'//[^\n]*|\\\\[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|@?[A-Za-z_][A-Za-z_0-9]*|[^\s]')
 
 
 def build_violations(source, name="build.zig"):
-    """Keep Darwin-only build branches in the native Mac CI path."""
     tokens = [m.group() for m in ZIG_TOKEN.finditer(source) if not m.group().startswith(("//", "\\\\", '"', "'"))]
     code = " ".join(tokens)
-    # These target declarations and the portable transport predicate execute on Linux.
     code = re.sub(r'\bos_tag = \. macos\b', 'os_tag = portable_target', code)
     code = code.replace('target . result . os . tag = = . macos or target . result . os . tag = = . linux',
                         'portable_transport_predicate')
     code = code.replace('. macos = > { macos_cross_step . dependOn ( & executable . step ) ; }',
                         'portable_cross_check_arm')
-    # A Darwin branch may only invoke helpers with simple arguments.
     call = (r'darwin \. [A-Za-z_][\w]* \( '
             r'(?:[A-Za-z_][\w.]*(?: [.,] [A-Za-z_][\w]*)* )?\)')
     code = re.sub(r'\bif \( [A-Za-z_][\w]*(?: \. [A-Za-z_][\w]*)* '
@@ -102,7 +85,6 @@ def zig_sites(source):
             sites += 1
         elif token == "@import" and tokens[i + 1:i + 6] == ["(", '"builtin"', ")", ".", "os"]:
             sites += 1
-        # Linux uses MSG_NOSIGNAL; Darwin configures SO_NOSIGPIPE on the socket.
         elif (token, *following) in (("MSG", ".", "NOSIGNAL"), ("SO", ".", "NOSIGPIPE")):
             sites += 1
         elif (token in SYSCALL_NAMESPACES and following[:1] == ["."] and following[1:] and following[1] in DIVERGENT_SYSCALLS
@@ -130,7 +112,6 @@ def unix_socket_sites(tokens):
 
 
 def shell_sites(source):
-    # Shell fixtures embed Python in PY* heredocs; tokenize only their bodies.
     lines = iter(source.splitlines(keepends=True))
     count = 0
     for line in lines:
@@ -153,12 +134,6 @@ def typescript_sites(source):
 
 
 def unlistened_binds(source):
-    """Zig functions and tests that bind a socket but never listen on it.
-
-    Linux refuses a connection to such a port; Darwin drops its SYN without a
-    reset, so a connect waits out its deadline (#999). A test that wants a
-    refusing port takes socket_fixture.refusedPort().
-    """
     tokens = [m.group() for m in ZIG_TOKEN.finditer(source) if not m.group().startswith(("//", "\\\\"))]
     found = []
     for start, token in enumerate(tokens):
@@ -185,12 +160,10 @@ def unlistened_binds(source):
 
 
 def mac_path(path):
-    """Whether a change to `path` needs Mac evidence before merge."""
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in MAC_PATHS)
 
 
 def scanned(root=ROOT):
-    """Every file under SCANNED, at any depth."""
     tops = sorted({pattern.split("/*", 1)[0] for pattern in SCANNED})
     for file in sorted(f for top in tops for f in (root / top).rglob("*") if f.is_file()):
         path = file.relative_to(root).as_posix()
@@ -216,7 +189,6 @@ def violations(found):
 
 
 def bind_sites(root=ROOT):
-    """Each Zig file's functions and tests that bind a socket without listening on it."""
     found = {}
     for pattern in ("src/**/*.zig", "tests/integration/*.zig"):
         for file in sorted(root.glob(pattern)):
@@ -233,7 +205,6 @@ def bind_violations(found):
 
 
 def pty_close_violations(source, name="fixture.py"):
-    """PTY descriptors must retire registration before their numbers are reused."""
     tree = ast.parse(source, filename=name)
     violations = []
     for scope in (node for node in ast.walk(tree) if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef))):
@@ -246,8 +217,6 @@ def pty_close_violations(source, name="fixture.py"):
             for target in node.targets:
                 targets = target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]
                 owned.update(ast.unparse(item) for item in targets if isinstance(item, (ast.Name, ast.Attribute)))
-        # Track descriptor lists across methods, then their loop variables (including
-        # comprehensions used to construct deferred cleanup callbacks).
         containers = set()
         for node in ast.walk(scope):
             if isinstance(node, ast.AugAssign) and any(ast.unparse(item) in owned for item in ast.walk(node.value)):
@@ -271,7 +240,6 @@ def pty_close_violations(source, name="fixture.py"):
 
 
 def flag_violations(root=ROOT):
-    """Reject raw F_GETFL equality comparisons outside the flag owners."""
     messages = []
 
     def getfl(node):

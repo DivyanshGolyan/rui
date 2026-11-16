@@ -1,9 +1,3 @@
-"""Bounded lexical copying of ALREADY VALIDATED canonical fixture JSON.
-
-This is not a provider-output validator. Values, including unknown fields,
-are copied with exact string spelling. Only top-level created_by is removed.
-No full object, string, property name or list is decoded into memory.
-"""
 import tempfile
 from core import ResourceExceeded, Unavailable
 from adapter import selected
@@ -81,7 +75,6 @@ class Sink:
 def string(source, sink, match=None):
     source.expect(34)
     sink.byte(34)
-    # Small decoded key prefix only; a long unknown key is still copied whole.
     prefix = bytearray()
     matching = match is not None
     while True:
@@ -115,7 +108,6 @@ def copy_value(source,sink):
         string(source,sink)
         return
     if first in (91,123):
-        # Accepted syntax already establishes matching nesting and UTF-8.
         depth = 0
         while True:
             byte = source.peek()
@@ -159,18 +151,13 @@ def copy_object(view,ref,sink,strip_created_by=False,braces=True):
             source.space()
         source.expect(125)
         if braces: sink.byte(125)
-        source.finish()  # Exhaust reader and verify digest before sealing request.
+        source.finish()
         return not first
     finally:
         source.close()
 
 
 def prepare(view,allowance=128*1024*1024,file_factory=tempfile.TemporaryFile,compacting=False):
-    """Return complete scratch at offset zero; failure closes it, never dispatches.
-
-    Caller owns returned scratch through transport cleanup. No database read
-    transaction or payload handle remains active when this returns.
-    """
     file = file_factory(mode='w+b')
     sink = Sink(file,allowance)
     try:

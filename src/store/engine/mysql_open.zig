@@ -1,6 +1,3 @@
-//! MySQL admission and ownership acquisition. The caller connects first;
-//! admission never performs DDL. On failure we close, releasing GET_LOCK
-//! and rolling back any unfinished metadata/epoch transaction.
 const std = @import("std");
 const wire = @import("../wire/mysql_connection.zig");
 const rows = @import("../mysql_row.zig");
@@ -18,7 +15,6 @@ pub const Options = struct {
 pub const State = struct {
     epoch: u64,
     commit_seq: u64,
-    /// The server session holding GET_LOCK, which `reclaim` ends.
     connection_id: u64,
     doublewrite: Bounded(32),
     store_id: [2 * schema.store_id_bytes]u8,
@@ -50,8 +46,6 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
     // GET_LOCK accepts at most 64 characters; do not truncate and collide.
     if (options.database.len == 0 or options.database.len > 64) return error.WrongStoreIdentity;
     if (selector.len > store_path.max_bytes or !std.unicode.utf8ValidateSlice(selector)) return error.WrongStoreIdentity;
-    // Every message carries the settings, so none relies on the server
-    // connection a proxy sent the last one on.
     conn.useSettings(session_settings, schema.mysql_session.len);
     const w = conn.batch();
     try w.writeAll(facts_sql ++ ";SELECT GET_LOCK(");
@@ -72,15 +66,9 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
     var meta_columns = try columns(Meta, conn);
     var store_id: [2 * schema.store_id_bytes]u8 = undefined;
     var seen: schema.MetaPresence = .empty;
-    // An unknown key is refused once every row is read, so a Store at
-    // another format, whose keys differ (format 73 still has its wire
-    // label), is told about its format whatever order the rows come in.
     var unexpected_key = false;
     while (try nextRow(conn)) {
         var meta: Meta = undefined;
-        // The decoder fills fields in order. Preserve the key if its value
-        // exceeds the bound (or is otherwise malformed), so that refusal is
-        // still attributed to that metadata, not an unclassified row error.
         meta.key.len = 0;
         rows.decodeRow(Meta, &meta_columns, conn, &meta) catch |err| switch (err) {
             error.CorruptStore => return switch (std.meta.stringToEnum(schema.MetaKey, meta.key.slice()) orelse return error.WrongStoreSchema) {
@@ -103,7 +91,6 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
                 if (found < schema.schema_version) return error.StoreSchemaBehind;
                 if (found > schema.schema_version) return error.StoreSchemaAhead;
             },
-            // The canonical selector is checked independently of the durable id.
             .store_selector => if (!std.mem.eql(u8, value, selector)) return error.WrongStoreIdentity,
             .store_id => {
                 if (!validStoreId(value)) return error.WrongStoreIdentity;
@@ -123,31 +110,27 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
     }
     if (digest != comptime schema.catalogDigest()) return error.StoreCatalogMismatch;
 
-    // All existing identity and schema state is validated before any write.
-    // Repair missing metadata atomically with ownership and the sender sweep.
     const batch = conn.batch();
     try batch.writeAll("START TRANSACTION;");
     if (!seen.contains(.store_id)) store_id = schema.drawStoreId(io);
     try schema.writeMissingMeta(batch, seen, &store_id, selector);
     try batch.writeAll("INSERT INTO store_owner(owner_key,epoch,commit_seq) SELECT 1,0,0 WHERE NOT EXISTS(SELECT 1 FROM store_owner WHERE owner_key=1);UPDATE store_owner SET epoch=epoch+1 WHERE owner_key=1;UPDATE action_operation SET sender_handle=NULL WHERE sender_handle IS NOT NULL;SELECT epoch,commit_seq FROM store_owner WHERE owner_key=1;COMMIT");
     try conn.sendBatch();
-    try expectOk(conn); // START TRANSACTION
+    try expectOk(conn);
     for (comptime schema.metaSeed(.mysql)) |entry| {
         if (!seen.contains(entry.key)) try expectOk(conn);
     }
-    try expectOk(conn); // missing owner row
+    try expectOk(conn);
     const updated = try expectOkCount(conn);
     if (updated != 1) return error.OwnershipLost;
-    try expectOk(conn); // sender sweep
+    try expectOk(conn);
     const owner = try one(struct { epoch: u64, commit_seq: u64 }, conn);
     if (owner.epoch == 0) return error.CorruptStore;
-    // A missing acknowledgement is never reported as a successful open.
     expectOk(conn) catch return error.CommitOutcomeUnknown;
     if (!conn.isReady()) return error.ProtocolViolation;
     return .{ .epoch = owner.epoch, .commit_seq = owner.commit_seq, .connection_id = facts.connection_id, .doublewrite = facts.doublewrite, .store_id = store_id };
 }
 
-/// The server facts admission checks, and the session's id.
 const facts_sql = "SELECT @@version,@@version_comment,@@global.read_only,@@global.super_read_only,@@global.innodb_flush_log_at_trx_commit,@@global.sync_binlog,@@global.log_bin,@@global.binlog_format,@@global.innodb_doublewrite,@@max_allowed_packet,DATABASE(),CONNECTION_ID()";
 
 fn refusal(facts: *const FactsRow) ?policy.StartError {
@@ -175,16 +158,7 @@ pub fn releaseLock(conn: *wire.Connection) void {
 
 pub const Reclaimed = struct { epoch: u64, commit_seq: u64, connection_id: u64 };
 
-/// On a fresh connection after the last was lost: checks the server and
-/// the Store first, since a failover may reach another server; ends the
-/// session the Store's GET_LOCK was taken on only when that session still
-/// holds the lock and no Host has opened the Store since (`epoch`), so a
-/// reused connection id never ends someone else's session; then takes the
-/// lock again once that session is gone and reads the ownership row. With
-/// the old session gone, no statement it was sent can still commit, so
-/// `commit_seq` is final.
 pub fn reclaim(conn: *wire.Connection, database: []const u8, store_id: *const [2 * schema.store_id_bytes]u8, epoch: u64, old_connection_id: u64) !Reclaimed {
-    // The kept trust serves the next attempt.
     errdefer conn.disconnect();
     conn.useSettings(session_settings, schema.mysql_session.len);
     var w = conn.batch();
@@ -200,7 +174,6 @@ pub fn reclaim(conn: *wire.Connection, database: []const u8, store_id: *const [2
     if (refusal(&facts)) |failure| return failure;
     if (before.epoch != epoch) return error.OwnershipLost;
     if (holder.id) |session| {
-        // Another session holds the Store's lock: never ours to end.
         if (session != old_connection_id) return error.StoreLocked;
         // Alone: a session that ended meanwhile fails KILL, which would stop a batch.
         try conn.batch().print("KILL {d}", .{old_connection_id});
@@ -225,8 +198,6 @@ pub fn reclaim(conn: *wire.Connection, database: []const u8, store_id: *const [2
     return .{ .epoch = owner.epoch, .commit_seq = owner.commit_seq, .connection_id = lock.connection_id };
 }
 
-/// How long `reclaim` waits for the old session to end, well inside the
-/// round deadline.
 const reclaim_lock_wait_s = 10;
 
 fn text(w: *std.Io.Writer, value: []const u8) !void {
@@ -287,7 +258,6 @@ test "store.mysql open access denials keep the login refusal" {
     for ([_]u16{ 1044, 1045, 1130, 1698, 1142, 1143 }) |code| {
         try std.testing.expectEqual(error.LoginRefused, serverError(code));
     }
-    // Authentication plugins are a handshake concern, not statement access.
     for ([_]u16{ 1251, 1524, 1040, 1129 }) |code| {
         try std.testing.expectEqual(error.StatementFailed, serverError(code));
     }

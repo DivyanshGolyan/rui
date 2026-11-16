@@ -1,4 +1,3 @@
-//! State marks shared by terminal surfaces; each tone names a role, not a style.
 const std = @import("std");
 const failure_class = @import("failure_class.zig");
 const Provider = @import("provider_name.zig").Provider;
@@ -20,17 +19,9 @@ pub const marks = std.enums.EnumArray(Mark, struct { unicode: []const u8, ascii:
 pub const Cause = struct {
     words: []const u8,
     place: ?[]const u8 = null,
-    /// Offered only when the latest ending can resend the person's Message.
     key: ?[]const u8 = null,
 };
 
-/// Plain words shared by chat and list surfaces, never a saved code or report.
-/// Retry policy lives here: Settings destinations need repair first, policy and
-/// overflow cannot be fixed by resending, and an interruption is not a failure.
-/// Surfaces still decide whether this is the latest, currently actionable ending.
-/// `provider` is the ending Session's, when the surface knows it: a quota
-/// refusal sends the person where that provider raises its limit, and to
-/// Settings otherwise. No other cause depends on it.
 pub fn cause(code: []const u8, provider: ?Provider) Cause {
     if (std.mem.eql(u8, code, "malformed_provider_output")) return .{ .words = "Model reply unreadable", .key = "ctrl+r retries" };
     return switch (failure_class.of(code)) {
@@ -49,7 +40,6 @@ pub fn cause(code: []const u8, provider: ?Provider) Cause {
     };
 }
 
-/// Frames for work under way. `active`'s still glyph is one of these frames.
 pub const spinner = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
 
 test "marks have distinct state meanings, nonempty scripts and printable ASCII" {

@@ -98,7 +98,6 @@ if os.environ.get("TEST_INVALID_BUILD"):
 '''
 
 def installer_command(*args, **kwargs):
-    """The fake build records the new native handoff, not lifecycle policy."""
     command = fake_rui.script(*args, **kwargs)
     return command.replace('case "$*" in', r'''case "$*" in
     "host restart --all")
@@ -125,7 +124,6 @@ class ReleaseInstallerTest(NativeInstallerCase):
         self.tools.mkdir()
         self.served = self.root / "served"
         self.served.mkdir()
-        # Fake curl serves only this release's exact archive URL.
         (self.tools / "curl").write_text(f'''#!/bin/sh
 for argument; do
     case $argument in
@@ -142,7 +140,6 @@ cp "{self.served}/${{url##*/download/}}" "$output"
                             "RUI_TEST_PUBLISH_HELPER": str(self.publisher)}
 
     def archive(self, version, reported=None):
-        """Serve a release archive whose rui reports `reported`; return its digest."""
         name = f"rui-{version}-{PLATFORM}"
         path = self.served / f"v{version}" / f"{name}.tar.gz"
         if path.exists() and reported is None:
@@ -167,12 +164,10 @@ cp "{self.served}/${{url##*/download/}}" "$output"
                               capture_output=True, text=True, timeout=30)
 
     def report(self, result):
-        """What the installer said after publishing: the lines after its progress."""
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.split("\n\n", 1)[1].splitlines()
 
     def command(self):
-        """The build the command runs, as the report prints it."""
         return "~/" + str(Path(os.readlink(self.bin / "rui")).relative_to(self.home))
 
     def start_over(self):
@@ -220,7 +215,6 @@ cp "{self.served}/${{url##*/download/}}" "$output"
                     self.assertFalse(profile.exists())
 
     def test_missing_path_profile_cases(self):
-        """Which startup file a missing PATH lands in, for each shell and existing file."""
         installed = "Installed Rui 0.40.0 at ~/.local/bin/rui."
         missing = f"{self.bin} is not on your PATH. Add the installation directory to your shell profile, then open a new terminal:"
         advice = [installed, NEXT, missing, f"  export PATH=$'{self.bin}':\"$PATH\""]
@@ -230,7 +224,6 @@ cp "{self.served}/${{url##*/download/}}" "$output"
         bash = {"SHELL": "/bin/bash"}
         darwin = os_semantics.terminal_bash_reads_login_files()
         cases = {
-            # name: (environment, files before, report, files after)
             "opted out": ({"RUI_NO_MODIFY_PATH": "1"}, {}, advice, {}),
             "fish keeps the advice": ({"SHELL": "/usr/bin/fish"}, {}, advice, {}),
             "zsh": ({}, {}, into(".zshrc"), {".zshrc": added}),
@@ -277,7 +270,6 @@ cp "{self.served}/${{url##*/download/}}" "$output"
         self.assertEqual(github_path.read_text(), f"/earlier\n{self.home}/.local/bin\n")
 
     def test_advice_text_never_decides_a_profile_change(self):
-        """A shadowing rui whose directory name repeats the advice text stays shadowed."""
         decoy = self.root / "x is not on your PATH"
         self.other_rui(decoy)
         result = self.install("0.40.0", PATH=f"{decoy}:{self.tools}:{self.bin}:/usr/bin:/bin")
@@ -443,7 +435,6 @@ cp "{self.served}/${{url##*/download/}}" "$output"
         self.assertEqual(result.stderr, "")
 
     def test_an_unreachable_host_is_paused_with_its_own_builds_word(self):
-        # Builds from 0.41 call the Host shutdown host pause; the report asks the old build.
         self.report(self.install("0.41.0"))
         previous = self.command()
         fake_rui.saved_work(self.home, 41)
@@ -555,7 +546,6 @@ class SourceInstallerTest(NativeInstallerCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="rui install ")
         self.addCleanup(self.temporary.cleanup)
-        # Resolved, so that git's top level matches install.sh's checkout path on macOS.
         self.root = Path(self.temporary.name).resolve()
         self.repo = self.root / "source checkout"
         self.repo.mkdir()
@@ -605,7 +595,6 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
             "PATH": f"{self.tools}:{self.bin}:{os.environ['PATH']}",
             "ZIG_LOCAL_PKG_DIR": str(self.root / "selected packages"),
             "RUI_TEST_PUBLISH_HELPER": str(self.publisher),
-            # An unreleased build: the report names it by its revision file.
             "TEST_RUI_SCRIPT": installer_command("rui unreleased (0000000)", "40", "GENERATION"),
         }
 
@@ -616,12 +605,10 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
         )
 
     def report(self, result):
-        """What the installer said after publishing: the lines after its build output."""
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.split("\n\n", 1)[1].splitlines()
 
     def commit(self):
-        """Commit the fixture checkout, so its build is named by a short revision."""
         def git(*args):
             return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=self.repo,
                                   check=True, capture_output=True, text=True).stdout.strip()
@@ -753,7 +740,6 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
         cached_manifest = self.root / "selected packages/test-translator-hash/build.zig.zon"
         self.assertEqual(cached_manifest.read_text(), manifests["test-translator-hash"])
         self.assertFalse((self.root / "selected packages/test-parser-hash").exists())
-        # The translator is already cached; its missing child still needs preparation.
         result = self.install(**environment)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.repo / "build.zig.zon").read_text(), manifest)
@@ -769,7 +755,6 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
             "git+https://github.com/ziglang/translate-c.git#f978dca",
         )
         (self.repo / "build.zig.zon").write_text(manifest)
-        # If revision validation is removed, fake curl would accept this archive.
         curl = self.tools / "curl"
         curl.write_text(curl.read_text().replace(
             '"https://github.com/ziglang/translate-c/archive/f978dca0f2b2a782d06591989e80aae7c74d0183.tar.gz",',

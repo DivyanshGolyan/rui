@@ -1,15 +1,3 @@
-//! Session overview: every decision behind bare `rui`, over values.
-//!
-//! `step` applies one event (a key, a tick, a list page, a first line, a
-//! stop or creation result) to the overview's `State` and returns the effects
-//! its shell runs: list again, read first lines, create, open, stop or exit.
-//! Row projections turn the state into styled lines. Neither reads a
-//! clock or the Host: time arrives as a tick at `State.wakeAt`, the
-//! animation frame as an argument, and the shell branches only on which
-//! effect to run. What each
-//! work state looks like lives in `rules`, what each key does in `keys`.
-//! The rows are a client view over `session list`; the Host keeps no
-//! overview state.
 const std = @import("std");
 const session_archive = @import("session_archive.zig");
 const Bounded = @import("bounded.zig").Bounded;
@@ -42,35 +30,24 @@ pub const Token = change_ring.Token;
 pub const ArchiveState = session_archive.State;
 pub const ArchiveFilter = session_archive.Filter;
 
-/// A Session reference: six characters of the Session alphabet.
 pub const Reference = change_ring.Id;
 
-/// A Label obeys the saved Bash description rule.
 pub const max_label_bytes = @import("tool_presentation.zig").max_label_bytes;
 
-/// Rows on one `session list` page.
 pub const max_page_rows = 8;
 
-/// First lines one refresh asks for.
 pub const max_first_line_reads = 8;
 
-/// Bytes of a first line kept for its title; a longer line ends in an ellipsis.
 pub const max_line_bytes = session_line.max_line_bytes;
 
-/// The shell reads this much of a first line: one byte more than a row keeps,
-/// so a longer line shows that it was cut.
 pub const max_line_read_bytes = max_line_bytes + 1;
 
-/// Starts and stops the ledger holds at once.
 pub const max_requests = 8;
 
-/// The least time between two list requests.
 pub const list_interval_ms = 1000;
 
-/// How long each frame of the spinner shows: one turn in two seconds.
 pub const spin_interval_ms = 200;
 
-/// A generated request handle, as `rui request recover` takes it.
 pub const max_handle_bytes = 36;
 
 const OrderClass = enum { needs_you, working, done, queued };
@@ -80,31 +57,21 @@ pub const Mark = state_marks.Mark;
 pub const Colour = overview_style.Colour;
 pub const Background = overview_style.Background;
 
-/// How one work state looks and what Ctrl-X may do to it. A row that
-/// `says` its work says what `work_line` says, in its tone; `word` names an
-/// idle or ended state, which has no work line.
 pub const Rule = struct {
     mark: Mark,
 
     colour: Colour,
     word: ?[]const u8 = null,
 
-    /// The row says its work line beside its title: what needs the person
-    /// or explains a wait. The mark says the rest. The line's
-    /// tone colours the mark either way.
     says: bool = false,
 
-    /// The model or a tool is at work, so your own row's mark turns the
-    /// spinner. A retry counting down or a stop holds still.
     spins: bool = false,
 
-    /// A failed row names its failure's cause.
     cause: bool = false,
 
     stoppable: bool,
 };
 
-/// The one per-kind table. `step` and `render` read it and switch on no kind.
 pub const rules = std.enums.EnumArray(Kind, Rule).init(.{
     .idle = .{ .mark = .waiting, .colour = .normal, .word = "idle", .stoppable = false },
     .pending = .{ .mark = .queued, .colour = .quiet, .stoppable = true },
@@ -120,7 +87,6 @@ pub const rules = std.enums.EnumArray(Kind, Rule).init(.{
 
 pub const marks = state_marks.marks;
 
-/// Your own Session's active mark turns through the shared frames.
 pub const spinner = state_marks.spinner;
 
 pub const Action = enum {
@@ -136,11 +102,9 @@ pub const Action = enum {
     exit,
     stop,
     archive,
-    /// Right opens a Session row or moves from the Sessions tab to Archived.
     open_session,
 };
 
-/// The one key table.
 pub const keys: keymap.Keymap(Action) = .init(.{
     .escape = .clear,
     .ctrl_g = .clear,
@@ -171,14 +135,8 @@ test "keys list covers both screens without unbound or duplicate keys" {
     try std.testing.expectEqual(@as(?keymap.ListError, null), keymap.listError(.{ keys, @import("session_keys.zig").keys }));
 }
 
-/// Semantic list input: printable text has no editing route. The bare
-/// `left` the key table leaves unbound is a choice's own, as
-/// `keymap.Selection` reads it; it moves only between the view tabs.
-/// Right is the table's `open_session`.
 pub const Input = union(enum) { action: Action, enter, left, ignored };
 
-/// The screen and paste context captured when this semantic key arrived.
-/// Covered Settings admits only exit and a still-cancellable Upgrade Escape.
 pub const InputDelivery = struct {
     key: Input,
     under: bool = false,
@@ -190,7 +148,6 @@ pub const Delta = enum {
     changed,
     full,
 
-    /// The same answer from a decoded list page's `protocol.ListDelta`.
     pub fn of(delta: anytype) Delta {
         return switch (delta) {
             .not_modified => .not_modified,
@@ -201,15 +158,12 @@ pub const Delta = enum {
 };
 
 pub const First = struct {
-    /// The first Message's activity position and admission; neither changes.
     position: u64,
     admission: u64,
 
-    /// The Session that sent it; null for a person or a script.
     sender: ?Reference,
 };
 
-/// One list row as the shell decoded it. Slices borrow the page.
 pub const Listed = struct {
     reference: Reference,
     read_version: Token = .{ .instance = @splat(0), .generation = 0 },
@@ -226,11 +180,9 @@ pub const Listed = struct {
     first_action: ?u64 = null,
     first: ?First = null,
 
-    /// When the latest Message with no Session sender was admitted.
     from_person_at: ?u64 = null,
     last_line: ?session_list.LastLine = null,
 
-    /// From a decoded `*const protocol.SessionRow`, whose bytes it borrows.
     pub fn of(row: anytype) Listed {
         return .{
             .reference = referenceOf(row.reference.slice()),
@@ -260,23 +212,15 @@ pub const Listed = struct {
     }
 };
 
-/// What a whole listing answers, relative to the token it was asked with.
 pub const Answer = struct { delta: Delta, since: Token };
 
-/// One `session list` page, as the listing's traversal reads it.
 pub const Page = struct {
     rows: []const Listed,
 
-    /// The page starts the listing over: earlier pages' rows no longer belong to it.
     restarts: bool = false,
 
-    /// Set on the listing's last page.
     answer: ?Answer,
 
-    /// Takes `page`, a decoded `*const protocol_reply.SessionListPage` that
-    /// `traversal`'s cursor returned, into that `*protocol_reply.SessionTraversal`.
-    /// While `answer` is null, the traversal's cursor asks for the next page.
-    /// Rows borrow the page through `buffer`.
     pub fn of(traversal: anytype, page: anytype, buffer: *[max_page_rows]Listed) Page {
         for (page.rows[0..page.count], buffer[0..page.count]) |*row, *listed| listed.* = .of(row);
         const restarts = traversal.restarts(page);
@@ -289,29 +233,23 @@ pub const Page = struct {
     }
 };
 
-/// A list request's answer: a page, or no answer from the Host.
 pub const ListReply = union(enum) { page: Page, failed };
 
 pub const FirstLine = struct {
     reference: Reference,
     admission: u64,
 
-    /// The unverified first line, or null when the Host refused it.
     line: ?[]const u8,
 
     unanswered: bool = false,
 };
 
-/// What host-info says of the serving Host.
-/// Bytes in a mebibyte, the unit memory shows in below a gibibyte.
 pub const mib = 1024 * 1024;
 
-/// Live physical memory, as the shell reads it about once a second.
 pub const Memory = @import("process_memory.zig").Memory;
 
 pub const Host = struct {
     instance: [16]u8 = @splat(0),
-    /// Unix seconds.
     started_at: u64,
     slots: u64,
     slots_in_use: u64,
@@ -320,7 +258,6 @@ pub const Host = struct {
 pub const StopOutcome = union(enum) {
     stopped,
 
-    /// The Host refused it, or it was never captured.
     failed: []const u8,
 
     unconfirmed: []const u8,
@@ -348,26 +285,19 @@ pub const StopResult = struct {
     outcome: StopOutcome,
 };
 
-/// A complete captured Configure outcome for an empty Session.
 pub const CreateResult = union(enum) {
-    /// Configure accepted creation; retain the known reference before opening.
     created: struct { reference: Reference, handle: []const u8 },
 
-    /// Creation was rejected or never captured, so another attempt is safe.
     failed: []const u8,
 
-    /// The capture may have reached the Host; recover it instead of duplicating.
     unconfirmed: []const u8,
 };
 
 pub const Event = union(enum) {
     input: InputDelivery,
 
-    /// The size of the screen the shell draws next; keys read until the
-    /// next one act on that screen.
     resized: Size,
 
-    /// The shell's clock, in Unix milliseconds.
     tick: u64,
     list: ListReply,
     first_line: FirstLine,
@@ -376,40 +306,28 @@ pub const Event = union(enum) {
     pin: PinResult,
     created: CreateResult,
 
-    /// The overview ended: later results are kept for `writeDeparture`.
     leave,
 
     open: Reference,
 
-    /// The Host's facts, read as a listing starts; null when it gave none.
     host: ?Host,
 
-    /// A memory read ended.
     memory: Memory,
 
-    /// Where the run app settings started stands now.
     upgrade: upgrade_status.Run,
     conversed: Conversed,
 
-    /// A model-list read ended.
     models: ModelsRead,
 
-    /// A write of app settings ended: the default a
-    /// fresh launch would now take from them, null when they decide none.
     defaults_saved: ?Default,
 
-    /// The app settings page asked for the Upgrade the Version row starts.
     start_upgrade,
 
-    /// A read the open conversation applied.
     observed: Observed,
-    /// The conversation now shown, or null on return to the list.
     conversation: ?Reference,
 
     clicked: struct { target: Click },
 
-    /// Esc left a conversation whose original is unconfirmed. The shell
-    /// sends it only while `canHoldSend` says the ledger has room.
     unconfirmed: Unconfirmed,
 };
 
@@ -422,7 +340,6 @@ pub const Click = union(enum) {
     settings,
 };
 
-/// What a click on a list item names; an empty slot takes none.
 pub fn clickOf(state: *const State, item: Item) ?Click {
     return switch (item) {
         .empty, .views, .gap => null,
@@ -431,7 +348,6 @@ pub fn clickOf(state: *const State, item: Item) ?Click {
     };
 }
 
-/// The desired value and target come from the drawn Session, not live selection.
 pub fn pinClickOf(state: *const State, item: Item) ?Click {
     return switch (item) {
         .row => |at| blk: {
@@ -444,19 +360,14 @@ pub fn pinClickOf(state: *const State, item: Item) ?Click {
 
 pub const Unconfirmed = struct { reference: Reference, recovery: submission.Recovery };
 
-/// Bytes `unconfirmedLine` takes at most.
 pub const max_unconfirmed_line_bytes = 80;
 
-/// What the status bar says while a send Esc left unconfirmed waits for
-/// the person: the newest one, with its recover key when it has one. Every
-/// one prints on departure. Null while none waits.
 pub fn unconfirmedLine(state: *const State, buffer: *[max_unconfirmed_line_bytes]u8) ?[]const u8 {
     var at = state.request_count;
     while (at > 0) {
         at -= 1;
         const request = &state.requests[at];
         if (request.kind != .send or request.status != .unknown) continue;
-        // Fits 80 columns whole, key included.
         return switch (request.sent) {
             .saved => |saved| std.fmt.bufPrint(buffer, "! Not confirmed · rui request recover {s}", .{&saved.original.key}),
             else => std.fmt.bufPrint(buffer, "! {s}: send not confirmed; details on exit", .{&request.session.?}),
@@ -469,10 +380,6 @@ pub const StatusBuffer = [@max(upgrade_status.max_line_bytes, max_unconfirmed_li
 
 pub const StatusLine = struct { text: []const u8, colour: Colour };
 
-/// Persistent status: an Upgrade, else the newest unconfirmed send;
-/// null when all is quiet. Transient notices belong to the Footer. It
-/// shows on rows of its own above the Footer, as `noticeRows` lays it out.
-/// Borrows `state` and `buffer`.
 pub fn statusLine(state: *const State, caps: Caps, buffer: *StatusBuffer) ?StatusLine {
     if (statusSaid(state, caps, buffer[0..upgrade_status.max_line_bytes])) |line| return line;
     const unconfirmed = unconfirmedLine(state, buffer[0..max_unconfirmed_line_bytes]) orelse return null;
@@ -481,11 +388,6 @@ pub fn statusLine(state: *const State, caps: Caps, buffer: *StatusBuffer) ?Statu
 
 pub const max_notice_rows = 2;
 
-/// The rows `text` takes above the Footer at `width`, borrowed from it.
-/// Each of its lines gets a row first, as many as `max_notice_rows` hold,
-/// so a result's warning is never dropped for its success; rows left over
-/// wrap a line too long for one at its last space that fits, so a recover
-/// handle stays whole on a narrow screen.
 fn noticeRows(text: []const u8, width: u16, caps: Caps, rows: *[max_notice_rows][]const u8) []const []const u8 {
     const glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs;
     const room = width -| 2;
@@ -507,8 +409,6 @@ fn noticeRows(text: []const u8, width: u16, caps: Caps, rows: *[max_notice_rows]
     return rows[0..count];
 }
 
-/// Where `line`, too long for `room` cells, breaks: at its last space
-/// before which it fits; null when it fits or has no such space.
 fn wrapAt(caps: Caps, glyphs: Glyphs, line: []const u8, room: usize) ?usize {
     if (measured(caps, glyphs, line) <= room) return null;
     var cut: ?usize = null;
@@ -520,8 +420,6 @@ fn wrapAt(caps: Caps, glyphs: Glyphs, line: []const u8, room: usize) ?usize {
     return cut;
 }
 
-/// The status's rows above the Footer, as `noticeRows` lays them out at
-/// `width`, joined by newline segments; null while all is quiet.
 pub fn noticeSegments(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}!?[]const Segment {
     var buffer: StatusBuffer = undefined;
     const line = statusLine(state, caps, &buffer) orelse return null;
@@ -543,24 +441,17 @@ pub fn noticeSegments(arena: Allocator, state: *const State, width: u16, caps: C
     return try std.mem.concat(arena, Segment, parts[0..count]);
 }
 
-/// The ledger can hold a conversation's unconfirmed original.
 pub fn canHoldSend(state: *const State) bool {
     return state.request_count < max_requests;
 }
 
-/// How a model-list read ended.
 pub const ModelsRead = union(enum) {
-    /// The menu of the Host's lists, which the core now owns.
     menu: model_picker.Menu,
 
-    /// The Host did not answer.
     unanswered,
 
-    /// The Host answered with a list Rui cannot read.
     invalid,
 
-    /// How a failed read ended: a list Rui cannot read, else no answer,
-    /// which leaves the person the catalog choices until a later read.
     pub fn failed(err: anyerror) ModelsRead {
         return switch (err) {
             error.InvalidModelList, error.InvalidResponse, error.ResponseTooLarge => .invalid,
@@ -571,13 +462,8 @@ pub const ModelsRead = union(enum) {
 
 const ReasoningEffort = model_capability.ReasoningEffort;
 
-/// A read the open conversation of `reference` applied, which showed its
-/// work as `work`; `opening` when it is the read the conversation opened on.
 pub const Observed = struct { read_version: Token, reference: Reference, work: session_work.Work, last_line: ?session_list.SavedLastLine = null, opening: bool };
 
-/// An input in the open conversation of `reference`, whose work it shows as
-/// `work`: Ctrl-X there stops it as Ctrl-X on the Session's row does, and
-/// any other input clears the overview's notice.
 pub const ConversationInput = union(enum) {
     other,
     stop,
@@ -587,8 +473,6 @@ pub const ConversationInput = union(enum) {
 
     cancel_upgrade,
 
-    /// The conversation could not settle its Client work for the run, or
-    /// read itself again after it: Host intents wait until another Upgrade.
     upgrade_failed,
 };
 pub const Conversed = struct { reference: Reference, work: Kind, input: ConversationInput };
@@ -605,12 +489,9 @@ pub const Reads = struct {
 };
 
 pub const Effect = union(enum) {
-    /// List every Session again through a `protocol_reply.SessionTraversal`
-    /// from the last completed listing's token.
     list: ?Token,
     read_first_lines: Reads,
 
-    /// Copied prospective configuration; the model bytes do not borrow state.
     create: ?Default,
     open: Reference,
     focus_chat,
@@ -621,7 +502,6 @@ pub const Effect = union(enum) {
     archive: ArchiveRequest,
     pin: PinRequest,
 
-    /// Read the Host's model lists.
     list_models,
 
     cancel_upgrade,
@@ -631,7 +511,6 @@ pub const Effect = union(enum) {
 
 pub const Provider = provider_name.Provider;
 
-/// The provider and model prospective Sessions get.
 pub const Default = struct {
     provider: Provider,
     model: Bounded(model_capability.max_model_bytes),
@@ -652,14 +531,10 @@ pub const Binding = struct {
     model: ?[]const u8 = null,
 };
 
-/// The screen in cells.
 pub const Size = struct { width: u16 = 0, height: u16 = 0 };
 
-/// A synchronous organization intent either admitted one new request or did not.
-/// Existing pending or uncertain requests are not a second admission.
 pub const IntentAdmission = enum { admitted, refused };
 
-/// Effects are run in order; admission describes only this event's attempt.
 pub const Effects = struct {
     intent_admission: IntentAdmission = .refused,
     items: [3]Effect = undefined,
@@ -676,8 +551,6 @@ pub const Effects = struct {
     }
 };
 
-/// The overview's notice for the exact conversation, and whether Ctrl-X
-/// stops it.
 pub const Said = struct {
     text: ?[]const u8,
     notice: ?[]const u8 = null,
@@ -689,8 +562,6 @@ pub fn conversation(state: *const State, ref: Reference, work: Kind, caps: Caps,
     return .{ .text = if (line) |value| value.text else null, .notice = footerNotice(state), .stoppable = stoppable(state, ref, work) };
 }
 
-/// Persistent Upgrade state, independent of the Footer's transient reply.
-/// Borrows `state` and `buffer`.
 fn statusSaid(state: *const State, caps: Caps, buffer: *[upgrade_status.max_line_bytes]u8) ?StatusLine {
     const upgrade: ?upgrade_status.Line = if (state.upgrade.run) |run| upgrade_status.line(run, buffer, if (caps.unicode) .unicode else .ascii) else null;
     if (upgrade) |line| if (line.lasts == .until_done) return .{ .text = line.text, .colour = .normal };
@@ -699,27 +570,18 @@ fn statusSaid(state: *const State, caps: Caps, buffer: *[upgrade_status.max_line
     return null;
 }
 
-/// A creation, stop or archive `step` asked the shell to send. Its answer removes
-/// it, and only while the overview shows that answer; one that may have
-/// reached the Host keeps its recover handle until departure. A `send` is
-/// a conversation's original left unconfirmed, held for its departure line.
-/// Nothing is evicted: a full ledger refuses new requests.
 pub const Request = struct {
     kind: enum { create, stop, archive, unarchive, pin, unpin, send },
 
-    /// The request target, or the reference returned by accepted creation.
     session: ?Reference = null,
     status: enum { pending, done, failed, unknown } = .pending,
 
-    /// The failure code, or the handle of an unknown or accepted request.
     text: Bounded(@max(max_handle_bytes, session_work.max_code_bytes)) = .{},
 
-    /// A `send`'s recovery, as the conversation would have printed it.
     sent: submission.Recovery = .none,
 };
 
 pub const Notice = struct {
-    /// Room for a Host failure or request-recovery notice.
     bytes: [768]u8 = undefined,
     len: usize = 0,
     colour: Colour,
@@ -729,40 +591,29 @@ pub const Notice = struct {
     }
 };
 
-/// A first line, as far as the overview has read it. A read line is its
-/// index in `State.lines`, which keeps rows small to copy.
 pub const Line = union(enum) { unread, requested, unavailable, read: u32 };
 
-/// What the overview keeps of one Session.
 pub const Row = struct {
     reference: Reference,
-    /// Listing membership, independent of which read last settled presentation.
     listed: bool = true,
     read_version: ?Token = null,
     operation: ?u64 = null,
     archive_state: ArchiveState = .active,
     pin_order: ?@import("session_pin.zig").PinOrder = null,
 
-    /// Index of its Workspace in `State.workspaces`.
     workspace: u32,
-    /// Listing metadata: whose sign-in or key a failure names. Only a
-    /// hidden row observed before its first listing can lack this fact.
     provider: ?Provider = null,
     label: ?Bounded(max_label_bytes),
     state: WorkState,
 
-    /// The Turn the state belongs to: which finish or failure the row shows.
     turn: ?u64,
 
-    /// The earliest Action awaiting a decision: which wait for approval the
-    /// row shows.
     first_action: ?u64,
     first: ?First,
     from_person_at: ?u64,
     last_line: ?session_list.SavedLastLine = null,
     line: Line = .unread,
 
-    /// The one accepted presentation value, whatever read supplied it.
     fn work(self: *const Row) session_work.Work {
         return .{ .state = self.state, .turn = self.turn, .operation = self.operation, .first_action = self.first_action };
     }
@@ -783,112 +634,73 @@ pub const State = struct {
     cwd: u32,
     now_ms: u64 = 0,
 
-    /// The terminal's own last successful `rui auth login`, Unix seconds.
     login_at: ?u64 = null,
 
     archive: ArchiveFilter = .active,
 
-    /// The in-flight traversal's filter, or null once a view change
-    /// invalidates it. Returning to that filter cannot revive its pages.
     listing_archive: ?ArchiveFilter = .active,
     rows: Vec(Row) = .{},
 
-    /// Row indices by reference.
     by_reference: Vec(Keyed) = .{},
 
-    /// Row indices in screen order: by group, newest state first.
     order: Vec(u32) = .{},
 
-    /// What the top lines say of the rows, kept as they change so a frame
-    /// reads it without walking every row.
     summary: Summary = .{},
 
-    /// Distinct Workspaces, owned, and their indices by `workspaceKey`.
     workspaces: Vec([]const u8) = .{},
     workspace_order: Vec(Keyed) = .{},
 
-    /// First lines read, for rows whose `line` is `.read`: at most one per
-    /// Session, since a Session's first Message never changes.
     lines: Vec(Bounded(max_line_bytes)) = .{},
 
     selected: Selection = .new_session,
 
-    /// The Session whose conversation holds the terminal, if any.
     conversing: ?Reference = null,
-    /// Only a Host handshake establishes an epoch; row arrival cannot rebase it.
     read_instance: ?[16]u8 = null,
     notice: ?Notice = null,
 
-    /// Unsettled requests and retained recovery outcomes, oldest first.
     requests: [max_requests]Request = undefined,
     request_count: usize = 0,
 
-    /// The person left, so answers wait for `writeDeparture`.
     left: bool = false,
 
-    /// The serving Host's facts, from the latest host-info read.
     host: ?Host = null,
 
-    /// The latest memory read; null before the first.
     memory: ?Memory = null,
 
-    /// The Upgrade: Upgrade's run and what the last one left Host intents.
-    /// The one value both screens read.
     upgrade: session_upgrade.Upgrade = .{},
 
-    /// The prospective default, refreshed after confirmed shared settings saves.
     default: ?Default = null,
 
-    /// The screen the shell draws, which `layout` divides.
     size: Size = .{},
 
-    /// The shell shows its one Host line above the input this frame. The
-    /// shell owns what the line says; `layout` owns the row it takes.
     host_line: bool = false,
 
-    /// Shared live model choices, borrowed by app settings and chat info.
     menu: model_picker.Menu = .{},
 
-    /// Changes before a borrowed list is replaced or released.
     menu_revision: u64 = 0,
 
-    /// How the latest shared model-list read ended.
     menu_read: model_picker_view.Read = .unread,
 
-    /// A model-list read is in flight.
     asking_models: bool = false,
 
-    /// The token of the last completed listing.
     token: ?Token = null,
 
-    /// Each Session's record, by reference key: the outcome the person
-    /// opened, what the last listing read, the program status record the
-    /// terminal should show and the one it holds.
     seen: Vec(Seen) = .{},
 
-    /// Entries of `seen` whose record the terminal does not hold as wanted.
     unsettled: usize = 0,
 
-    /// Counts changes to any wanted record, so the shell knows reports it
-    /// built still stand.
     status_changes: u64 = 0,
 
-    /// Sessions the listing in progress brings to `seen`.
     arrivals: Vec(Seen) = .{},
 
-    /// A list request is in flight.
     listing: bool = false,
 
-    /// Rows the listing in progress has read.
     pending: Vec(Row) = .{},
     next_list_ms: u64 = 0,
     listed_at_ms: ?u64 = null,
 
-    /// The latest listing failed. Rows remain visible but faded and still;
-    /// this is list freshness, not a Host availability observation.
     list_stale: bool = false,
 
-    /// Sort scratch reused across refreshes.
     sort_keys: Vec(SortKey) = .{},
 
     pub const Options = struct {
@@ -898,15 +710,12 @@ pub const State = struct {
         default: ?Default = null,
     };
 
-    /// The caller owns `home` for the state's lifetime.
     pub fn init(self: *State, gpa: Allocator, options: Options) error{OutOfMemory}!void {
         self.* = .{ .gpa = gpa, .home = options.home, .cwd = 0, .login_at = options.login_at, .default = options.default };
         errdefer self.deinit();
         self.cwd = try self.intern(options.cwd);
     }
 
-    /// A failed read deliberately permits the retained/shipped fallback;
-    /// an unread or still-loading list cannot yet back a stable choice.
     pub fn modelsReady(self: *const State) bool {
         if (self.asking_models) return false;
         return switch (self.menu_read) {
@@ -916,9 +725,6 @@ pub const State = struct {
         };
     }
 
-    /// The provider for a confirmed defaults refresh. Keep explicit and
-    /// saved authority ahead of the committed choice; never invent a
-    /// first-run provider.
     pub fn savedProvider(self: *const State, explicit: ?[]const u8, saved: ?[]const u8) ?[]const u8 {
         return explicit orelse saved orelse if (self.default) |binding| @tagName(binding.provider) else null;
     }
@@ -926,7 +732,6 @@ pub const State = struct {
     pub fn nextBinding(self: *const State) Binding {
         return .{ .provider = if (self.default) |binding| @tagName(binding.provider) else null, .model = if (self.default) |*binding| binding.model.slice() else null };
     }
-    /// The prospective provider/model, copied into an admitted creation intent.
     pub fn nextStart(self: *const State) ?Default {
         return self.default;
     }
@@ -942,7 +747,6 @@ pub const State = struct {
         inline for (.{ &self.rows, &self.by_reference, &self.order, &self.workspaces, &self.workspace_order, &self.lines, &self.pending, &self.sort_keys, &self.seen, &self.arrivals }) |vec| vec.deinit(self.gpa);
     }
 
-    /// The keyed row, including the active conversation before it is listed.
     pub fn find(self: *const State, ref: Reference) ?*const Row {
         const at = lookup(self.by_reference.items, ref) orelse return null;
         return &self.rows.items[at];
@@ -952,17 +756,10 @@ pub const State = struct {
         return row.work();
     }
 
-    /// The first line read for `row`, if any. It borrows the state until the
-    /// next `step`.
     pub fn lineOf(self: *const State, row: *const Row) ?[]const u8 {
         return if (row.line == .read) self.lines.items[row.line.read].slice() else null;
     }
 
-    /// When the overview next needs a `tick`, in Unix milliseconds: the next
-    /// listing, a retry falling due, or the shown
-    /// quota reset passing. Null while nothing falls due before the listing
-    /// in flight answers. A time already past means at once. The shell keeps
-    /// no timer of its own.
     pub fn wakeAt(self: *const State) ?u64 {
         var at: ?u64 = if (self.listing) null else self.next_list_ms;
         for (self.rows.items) |*row| {
@@ -976,13 +773,10 @@ pub const State = struct {
         return at;
     }
 
-    /// Upgrade's run has not ended: the shell runs and polls its worker.
     pub fn upgrading(self: *const State) bool {
         return self.upgrade.going();
     }
 
-    /// Host intents wait: an Upgrade runs, or the last one left them held.
-    /// The one rule every Host intent and the shell's lending ask.
     pub fn holdsHost(self: *const State) bool {
         return self.upgrade.held();
     }
@@ -993,7 +787,6 @@ pub const State = struct {
         return if (visible(self, row)) row else null;
     }
 
-    /// Pending or uncertain creation blocks duplicate submissions.
     pub fn creating(self: *const State) bool {
         return blk: {
             for (self.requests[0..self.request_count]) |held| {
@@ -1003,8 +796,6 @@ pub const State = struct {
         };
     }
 
-    /// A stop of `ref` still in flight, or one that may have reached the
-    /// Host. While one is open the row takes no other stop.
     fn openStop(self: *const State, ref: Reference) ?*const Request {
         for (self.requests[0..self.request_count]) |*held| {
             if (held.kind == .stop and std.mem.eql(u8, &held.session.?, &ref) and (held.status == .pending or held.status == .unknown)) return held;
@@ -1020,8 +811,6 @@ pub const State = struct {
         return null;
     }
 
-    /// Records a request `step` asks the shell to send; false when the
-    /// ledger is full, and the overview says so.
     fn request(self: *State, kind: @FieldType(Request, "kind"), ref: ?Reference) bool {
         if (self.request_count == max_requests) {
             self.say(.attention, "! Busy; try again shortly.", .{});
@@ -1032,9 +821,6 @@ pub const State = struct {
         return true;
     }
 
-    /// The answer to the request at `at`. One shown on screen is gone; one
-    /// that may have reached the Host, or that came after the person left,
-    /// stays for `writeDeparture`.
     fn answer(self: *State, at: usize, status: @FieldType(Request, "status"), text: []const u8) void {
         if (status != .unknown and !self.left) {
             std.mem.copyForwards(Request, self.requests[at .. self.request_count - 1], self.requests[at + 1 .. self.request_count]);
@@ -1043,14 +829,10 @@ pub const State = struct {
         }
         const held = &self.requests[at];
         held.status = status;
-        // A long failure, such as a refused environment, keeps its start,
-        // cut between characters.
         const end = utf8_validation.scalarStart(text, @min(text.len, held.text.bytes.len));
         held.text.set(text[0..end]) catch unreachable;
     }
 
-    /// Completed activity and listing reads settle exactly the same row.
-    /// Only opening acknowledges attention; program status remains listing-owned.
     fn observe(self: *State, read: Observed) error{OutOfMemory}!void {
         if (!self.accepts(read.read_version)) return;
         if (self.conversing) |open| if (std.mem.eql(u8, &open, &read.reference)) {
@@ -1082,14 +864,10 @@ pub const State = struct {
         return std.mem.eql(u8, &instance, &version.instance);
     }
 
-    /// Records a listing's read of `ref`'s work and its program status
-    /// record. A Session new to `seen` waits in `arrivals` until
-    /// `settleArrivals`, so a listing inserts all at once.
     fn readListed(self: *State, ref: Reference, work: session_work.Work, opening: bool) error{OutOfMemory}!void {
         if (self.entryOf(ref)) |entry| {
             const now: attention.Reading = .of(work, entry.acknowledged);
             const status = attention.Status.next(entry.status, entry.listed, now, opening);
-            // A later finish or wait in the same status is a record again.
             const later = status == entry.status and if (entry.listed) |was| now.after(was) else false;
             self.want(entry, status, later);
             entry.listed = now;
@@ -1099,7 +877,6 @@ pub const State = struct {
         try self.arrivals.append(self.gpa, .{ .key = referenceKey(ref), .listed = now, .status = attention.Status.next(null, null, now, opening) });
     }
 
-    /// Merges a listing's `arrivals` into `seen`, keeping it in key order.
     fn settleArrivals(self: *State) error{OutOfMemory}!void {
         const arrivals = self.arrivals.items;
         if (arrivals.len == 0) return;
@@ -1130,7 +907,6 @@ pub const State = struct {
         }
     }
 
-    /// `ref`'s entry in `seen`, added empty if it has none.
     fn record(self: *State, ref: Reference) error{OutOfMemory}!*Seen {
         if (self.entryOf(ref)) |entry| return entry;
         const key = referenceKey(ref);
@@ -1140,7 +916,6 @@ pub const State = struct {
         return &self.seen.items[at];
     }
 
-    /// `ref`'s entry in `seen`, if it has one.
     fn entryOf(self: *State, ref: Reference) ?*Seen {
         const key = referenceKey(ref);
         const at = self.seenAt(key);
@@ -1158,27 +933,21 @@ pub const State = struct {
         return low;
     }
 
-    /// Sets the program status record `entry`'s Session should have on the
-    /// terminal: `status`, a new record when `again` even in the same one.
     fn want(self: *State, entry: *Seen, status: ?attention.Status, again: bool) void {
         if (entry.status == status and !again) return;
         const was = entry.settled();
         entry.status = status;
         entry.version +%= 1;
         self.status_changes +%= 1;
-        // A new version matches no report the terminal took.
         const now = status == null and entry.delivered == .none;
         if (was and !now) self.unsettled += 1;
         if (!was and now) self.unsettled -= 1;
     }
 
-    /// Every Session's record is on the terminal as wanted.
     pub fn statusesSettled(self: *const State) bool {
         return self.unsettled == 0;
     }
 
-    /// The records the terminal does not hold as wanted, in key order. They
-    /// borrow the state until the next `step`.
     pub fn unsettledStatuses(self: *const State) Unsettled {
         return .{ .state = self, .left = self.unsettled };
     }
@@ -1205,7 +974,6 @@ pub const State = struct {
         }
     };
 
-    /// The terminal took `record` whole.
     pub fn statusTaken(self: *State, taken: StatusRecord.Taken) void {
         const entry = self.entryOf(taken.reference) orelse return;
         const was = entry.settled();
@@ -1215,13 +983,10 @@ pub const State = struct {
         if (!was and now) self.unsettled -= 1;
     }
 
-    /// A clear of every record may reach the terminal from now on, whole or
-    /// not: what it holds of each Session that had one is unknown.
     pub fn statusesClearing(self: *State) void {
         self.recount(.unknown);
     }
 
-    /// The terminal took a clear of every record whole.
     pub fn statusesCleared(self: *State) void {
         self.recount(.none);
     }
@@ -1234,7 +999,6 @@ pub const State = struct {
         }
     }
 
-    /// Interns a Workspace: Sessions share few, and a row keeps an index.
     fn intern(self: *State, bytes: []const u8) error{OutOfMemory}!u32 {
         const key = workspaceKey(bytes);
         const order = self.workspace_order.items;
@@ -1264,17 +1028,12 @@ pub const State = struct {
     }
 };
 
-/// What the counts line shows, one count per mark.
 pub const Counts = struct { needs_you: usize = 0, working: usize = 0, queued: usize = 0, failed: usize = 0 };
 
 pub const Summary = struct { counts: Counts = .{} };
 
 const Keyed = struct { key: u64, index: u32 };
 
-/// One Session's record: the latest state a conversation opened on, an
-/// outcome the person has seen; what the last listing read; and the program status the
-/// terminal should show, from listings alone, which read in order, beside
-/// the one it holds. A Session no longer listed has no program status.
 const Seen = struct {
     key: u64,
     acknowledged: ?attention.Attention = null,
@@ -1283,7 +1042,6 @@ const Seen = struct {
 
     version: u16 = 0,
 
-    /// What the terminal holds of this Session's record.
     delivered: Delivered = .none,
 
     fn settled(self: *const Seen) bool {
@@ -1295,18 +1053,14 @@ const Seen = struct {
     }
 };
 
-/// What the terminal holds of a Session's record: none, the `version` of a
-/// report it took whole, or a record a clear of them all may have removed.
 const Delivered = union(enum) { none, unknown, version: u16 };
 
-/// A program status record for the shell to send: `status`, or a clear.
 pub const StatusRecord = struct {
     reference: Reference,
     name: []const u8,
     status: ?attention.Status,
     version: u16 = 0,
 
-    /// What the terminal holds once it takes this report whole.
     pub const Taken = struct { reference: Reference, delivered: Delivered };
 
     pub fn taken(self: StatusRecord) Taken {
@@ -1315,7 +1069,6 @@ pub const StatusRecord = struct {
 };
 const SortKey = struct { pin_order: ?u64, key: u128, index: u32 };
 
-/// A growable array of the state's allocator. Cores name no `std` list.
 fn Vec(comptime T: type) type {
     return struct {
         items: []T = &.{},
@@ -1355,7 +1108,6 @@ fn Vec(comptime T: type) type {
     };
 }
 
-/// FNV-1a: Workspaces share long prefixes, so comparing bytes is slower.
 fn workspaceKey(bytes: []const u8) u64 {
     var hash: u64 = 0xcbf29ce484222325;
     for (bytes) |byte| hash = (hash ^ byte) *% 0x100000001b3;
@@ -1378,7 +1130,6 @@ fn lookup(keyed: []const Keyed, ref: Reference) ?u32 {
     return null;
 }
 
-/// Applies one event and returns what the shell runs next.
 pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
     var effects: Effects = .{};
     switch (event) {
@@ -1412,7 +1163,6 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             std.debug.assert(canHoldSend(state));
             state.requests[state.request_count] = .{ .kind = .send, .session = left.reference, .status = .unknown, .sent = left.recovery };
             state.request_count += 1;
-            // `unconfirmedLine` says it until the overview ends.
             state.notice = null;
         },
         .conversed => |input| {
@@ -1425,7 +1175,6 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 .cancel_upgrade => if (state.upgrade.takesEscape()) effects.add(.cancel_upgrade),
                 .upgrade_failed => {
                     state.upgrade.block();
-                    // A run that never got to start ends cancelled.
                     if (state.upgrade.takesEscape()) effects.add(.cancel_upgrade);
                 },
             }
@@ -1454,7 +1203,6 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             switch (result.outcome) {
                 .requested => {
                     state.answer(at, .done, "");
-                    // Archive confirmation is the server's facts badge, not a reply.
                     if (!result.request.archived) state.say(.quiet, "Restored {s}; work was not restarted.", .{&ref});
                 },
                 .failed => |code| {
@@ -1496,7 +1244,6 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 },
                 .failed => |code| {
                     state.answer(at, .failed, code);
-                    // Name the configured provider when creation lacks its sign-in.
                     const next = state.nextBinding().provider;
                     const missing = if (std.mem.eql(u8, code, "model_capability_unavailable")) std.meta.stringToEnum(Provider, next orelse "") else null;
                     if (missing) |provider| {
@@ -1507,7 +1254,6 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                     } else state.say(.attention, "! Not created: {s}", .{code});
                 },
                 .unconfirmed => |handle| {
-                    // Recovery, never a duplicate creation, settles the capture.
                     state.answer(at, .unknown, handle);
                     state.next_list_ms = 0;
                     state.say(.attention, "! Creation unsure; details on exit", .{});
@@ -1537,8 +1283,6 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 if (state.read_instance) |known| if (!std.mem.eql(u8, &known, &host.instance)) {
                     state.pending.items.len = 0;
                     state.token = null;
-                    // An old traversal cannot commit membership or a token
-                    // after the handshake establishes the replacement Host.
                     if (state.listing) state.listing_archive = null;
                 };
                 state.read_instance = host.instance;
@@ -1546,15 +1290,11 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         },
         .memory => |memory| state.memory = memory,
         .upgrade => |run| {
-            // The shell reports only the run Upgrade asked for.
             state.upgrade.stand(run);
             if (run == .ended) {
-                // An ending that is only news is a notice, which the next
-                // key clears; one that holds stays as the Upgrade's line.
                 var said: [upgrade_status.max_line_bytes]u8 = undefined;
                 const line = upgrade_status.line(run, &said, .unicode);
                 if (line.lasts == .notice) state.say(if (line.tone == .attention) .attention else .normal, "{s}", .{line.text});
-                // Unless blocked the overview lists again before Host intents resume.
                 state.next_list_ms = 0;
             }
         },
@@ -1564,8 +1304,6 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         },
         .start_upgrade => startUpgrade(state),
     }
-    // Semantic openings request the shared choices here, never in a shell.
-    // The same admission also owns a loading list's later retry.
     for (effects.slice()) |effect| switch (effect) {
         .open => |reference| {
             if (state.entryOf(reference)) |entry| state.want(entry, attention.Status.opened(entry.status), false);
@@ -1577,7 +1315,6 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
     return effects;
 }
 
-/// Takes a shared model-list answer. A failed read keeps the last menu.
 fn readModels(state: *State, read: ModelsRead) void {
     state.asking_models = false;
     switch (read) {
@@ -1598,8 +1335,6 @@ fn readModels(state: *State, read: ModelsRead) void {
     }
 }
 
-/// What the shell prints once the terminal is restored: one line for each
-/// request left in the ledger and any command the person did not see end.
 pub fn writeDeparture(state: *const State, _: ?ReasoningEffort, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     for (state.requests[0..state.request_count]) |*request| {
         const text = request.text.slice();
@@ -1647,7 +1382,6 @@ fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
         state.listing_archive = state.archive;
         state.next_list_ms = now_ms + list_interval_ms;
         effects.add(.{ .list = state.token });
-        // A list still loading is read again with the next listing.
         if (state.menu.loading()) askModels(state, effects);
     }
 }
@@ -1659,7 +1393,6 @@ fn askModels(state: *State, effects: *Effects) void {
     effects.add(.list_models);
 }
 
-/// Whether the shell may accept an app-settings write.
 pub fn admitsDefaultsEdit(state: *const State) bool {
     return !state.left and !state.upgrade.held();
 }
@@ -1687,7 +1420,6 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
             return;
         }
         const shown = listed.state.asOf(state.now_ms);
-        // A row new to the overview takes its state's start as its mark's.
         state.pending.appendAssumeCapacity(.{
             .reference = listed.reference,
             .read_version = listed.read_version,
@@ -1713,8 +1445,6 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
     try readFirstLines(state, effects);
 }
 
-/// Drain the current shell traversal without accepting any of its token or
-/// membership. The next existing listing starts full against the known Host.
 fn rejectPage(state: *State, page: Page) void {
     state.pending.items.len = 0;
     state.list_stale = true;
@@ -1722,11 +1452,8 @@ fn rejectPage(state: *State, page: Page) void {
     if (page.answer != null) state.listing = false else state.listing_archive = null;
 }
 
-/// Records each Session the pending listing shows. The first listing is
-/// what the overview opened on.
 fn readListing(state: *State) error{OutOfMemory}!void {
     const opening = state.token == null;
-    // Left by a listing that failed to settle them.
     state.arrivals.items.len = 0;
     for (state.pending.items) |*incoming| {
         if (!state.archive.includes(incoming.archive_state)) continue;
@@ -1736,12 +1463,9 @@ fn readListing(state: *State) error{OutOfMemory}!void {
 }
 
 fn labelOf(text: []const u8) Bounded(max_label_bytes) {
-    // The list decoder validated the Label; this bound is its own.
     return Bounded(max_label_bytes).from(text) catch unreachable;
 }
 
-/// Applies a completed listing: `changed` replaces rows by reference, `full`
-/// replaces the set, `not_modified` keeps every row.
 fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
     const selected_at = if (state.selected == .session) position(state, state.selected.session) else null;
     const opening = state.token == null;
@@ -1749,8 +1473,6 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         row.listed = false;
     };
     if (answer.delta != .not_modified) {
-        // Build the union index once, not once per new Session. Reindex also
-        // collapses duplicate additions before any presentation is settled.
         const before = state.rows.items.len;
         for (state.pending.items) |incoming| if (lookup(state.by_reference.items, incoming.reference) == null) {
             var row = incoming;
@@ -1791,7 +1513,6 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
     reconcileSelection(state, selected_at, opening);
 }
 
-/// Keep the same screen position when its selected row leaves the projection.
 fn reconcileSelection(state: *State, selected_at: ?usize, opening: bool) void {
     if (state.selected == .session and state.selectedRow() == null) {
         state.selected = if (selected_at) |at| if (at < state.order.items.len) .{ .session = state.rows.items[state.order.items[at]].reference } else .new_session else .new_session;
@@ -1800,9 +1521,6 @@ fn reconcileSelection(state: *State, selected_at: ?usize, opening: bool) void {
     }
 }
 
-/// One presentation transition for every read. Generation orders committed
-/// facts within the handshake's epoch; arrival and conversation focus do not.
-/// Equal revisions retain the accepted value, normalized at the common clock.
 fn settleRow(state: *const State, row: *Row, read: session_list.Snapshot) void {
     row.state = row.state.asOf(state.now_ms);
     if (!state.accepts(read.read_version)) return;
@@ -1817,8 +1535,6 @@ fn settleRow(state: *const State, row: *Row, read: session_list.Snapshot) void {
     row.last_line = read.last_line;
 }
 
-/// The list owns membership. Only its one active conversation may need a
-/// hidden row before metadata arrives; closing retires that producer first.
 fn retainRows(state: *State) error{OutOfMemory}!void {
     var kept: usize = 0;
     for (state.rows.items) |row| {
@@ -1833,14 +1549,11 @@ fn retainRows(state: *State) error{OutOfMemory}!void {
     }
 }
 
-/// The terminal's record names a Session by its row's title, so a row
-/// whose title is no longer `was` wants a new record.
 fn retitle(state: *State, row: *const Row, was: []const u8) void {
     if (std.mem.eql(u8, title(state, row).text, was)) return;
     if (state.entryOf(row.reference)) |entry| state.want(entry, entry.status, true);
 }
 
-/// Rebuilds `by_reference`. A reference listed twice keeps its later row.
 fn reindex(state: *State) error{OutOfMemory}!void {
     const rows = state.rows.items;
     try state.by_reference.ensure(state.gpa, rows.len);
@@ -1859,8 +1572,6 @@ fn reindex(state: *State) error{OutOfMemory}!void {
         kept += 1;
     }
     if (kept == rows.len) return;
-    // Move the survivors down in row order, so no copy lands on a survivor
-    // not yet moved, then key them again.
     const survivors = state.by_reference.items[0..kept];
     std.mem.sortUnstable(Keyed, survivors, {}, struct {
         fn less(_: void, a: Keyed, b: Keyed) bool {
@@ -1880,13 +1591,10 @@ fn reindex(state: *State) error{OutOfMemory}!void {
     state.by_reference.items.len = kept;
 }
 
-/// List membership and observed facts survive independently of presentation.
-/// An empty Session appears while pinned or while its conversation is open.
 fn visible(state: *const State, row: *const Row) bool {
     return row.listed and (row.pin_order != null or row.first != null or if (state.conversing) |open| std.mem.eql(u8, &open, &row.reference) else false);
 }
 
-/// Rebuilds the flat screen order and the summary.
 fn arrange(state: *State) error{OutOfMemory}!void {
     const rows = state.rows.items;
     try state.sort_keys.ensure(state.gpa, rows.len);
@@ -1897,7 +1605,6 @@ fn arrange(state: *State) error{OutOfMemory}!void {
     for (rows, 0..) |*row, at| {
         if (!visible(state, row)) continue;
         const queued = shownKind(state, row) == .pending;
-        // Priority class first, then newest; queued rows keep longest wait first.
         const since = @min(shownSince(state, row), latest);
         const age: u128 = if (queued) since else latest - since;
         state.sort_keys.appendAssumeCapacity(.{ .pin_order = row.pin_order, .key = @as(u128, @backingInt(orderClass(state, row))) << 82 | age << 48 | referenceKey(row.reference), .index = @intCast(at) });
@@ -1914,7 +1621,6 @@ fn arrange(state: *State) error{OutOfMemory}!void {
     for (state.order.items, state.sort_keys.items) |*slot, key| slot.* = key.index;
 }
 
-/// How many rows show each mark the counts line counts.
 fn counts(state: *const State) Counts {
     var result: Counts = .{};
     for (state.rows.items) |*row| if (visible(state, row)) switch (rules.get(shownKind(state, row)).mark) {
@@ -1942,7 +1648,6 @@ fn position(state: *const State, ref: Reference) ?usize {
     return null;
 }
 
-/// Asks for the first lines of up to eight unlabelled rows a person can see.
 fn readFirstLines(state: *State, effects: *Effects) error{OutOfMemory}!void {
     var reads: Reads = .{};
     for (state.order.items) |at| {
@@ -1971,7 +1676,6 @@ fn firstLine(state: *State, result: FirstLine) error{OutOfMemory}!void {
         row.line = .unavailable;
         return;
     };
-    // A Label or the reference, not a read line: `lines` growing leaves it.
     const was = title(state, row).text;
     try state.lines.append(state.gpa, session_line.cut(max_line_bytes, session_line.firstLine(bytes)));
     row.line = .{ .read = @intCast(state.lines.items.len - 1) };
@@ -1980,9 +1684,6 @@ fn firstLine(state: *State, result: FirstLine) error{OutOfMemory}!void {
 
 const StopTarget = struct { reference: Reference, work: Kind };
 
-/// Ctrl-X on either screen stops at once: null targets the selection,
-/// otherwise the exact conversation. Stopping loses nothing the Host cannot
-/// replay, so it asks nothing.
 fn stopKey(state: *State, exact: ?StopTarget, effects: *Effects) void {
     if (!admitHostRequest(state)) return;
     state.notice = null;
@@ -1996,8 +1697,6 @@ fn stopKey(state: *State, exact: ?StopTarget, effects: *Effects) void {
     if (state.request(.stop, ref)) effects.add(.{ .stop = ref });
 }
 
-/// Says why `ref` takes no stop. An unconfirmed one says leaving gives the
-/// details; work being stopped says so in its work line's words.
 fn refuseStop(state: *State, ref: Reference, kind: Kind) void {
     if (state.openStop(ref)) |held| if (held.status == .unknown)
         return state.say(.attention, "! {s} stop unsure; details on exit", .{&ref});
@@ -2006,31 +1705,23 @@ fn refuseStop(state: *State, ref: Reference, kind: Kind) void {
     state.say(.quiet, "{s}: {s}", .{ &ref, work_line.stopping.words });
 }
 
-/// The kind `ref` shows: `stopping` while a stop of it is open, else `work`.
 fn kindShown(state: *const State, ref: Reference, work: Kind) Kind {
     return if (state.openStop(ref) != null) .stopping else work;
 }
 
-/// Ctrl-X would ask to stop `ref`, whose work shows as `work`.
 fn stoppable(state: *const State, ref: Reference, work: Kind) bool {
     return rules.get(kindShown(state, ref, work)).stoppable;
 }
 
-/// The kind a row shows, with a retry that has fallen due as the work it
-/// became.
 fn shownKind(state: *const State, row: *const Row) Kind {
     if (state.openStop(row.reference) == null and needsDecision((&row.state))) return .approval;
     return kindShown(state, row.reference, (&row.state).asOf(state.now_ms));
 }
 
-/// When the row's shown state began: a retry that has fallen due waits
-/// from its due time.
 fn shownSince(state: *const State, row: *const Row) u64 {
     return (&row.state).asOf(state.now_ms).since();
 }
 
-/// What a row's work is doing now, as `shownKind` reads it; null for idle or
-/// ended work.
 fn workLine(words: *[work_line.max_words_bytes]u8, state: *const State, row: *const Row) ?work_line.Line {
     return if (state.openStop(row.reference) != null) work_line.stopping else work_line.of(words, (&row.state), null, state.now_ms);
 }
@@ -2041,25 +1732,19 @@ fn clickOpen(state: *State, reference: Reference, effects: *Effects) error{OutOf
     try enter(state, effects);
 }
 
-/// Moves the selection where the Sessions show.
 fn select(state: *State, action: Action) void {
     move(state, action);
 }
 
 pub const upgrade_recovery = "! Host requests paused after Upgrade; draft retained. Upgrade or reopen with the selected Rui.";
 
-/// Admission applies only to new Host intents, never to their completions.
 fn admitHostRequest(state: *State) bool {
     if (!state.holdsHost()) return true;
     state.say(.attention, upgrade_recovery, .{});
     return false;
 }
 
-/// Upgrade checks at once; Host intents wait until it ends. The shell
-/// runs the worker for as long as `upgrading` says.
 fn startUpgrade(state: *State) void {
-    // The run going on keeps its progress and its Esc. An ending that
-    // holds is newer than any notice.
     if (state.upgrade.start()) state.notice = null;
 }
 
@@ -2106,7 +1791,6 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
     }
 }
 
-/// A list selection cannot move the open chat's navigation anchor.
 fn adjacentSession(state: *State, direction: Action, effects: *Effects) error{OutOfMemory}!void {
     const order = state.order.items;
     if (order.len == 0) return;
@@ -2133,7 +1817,6 @@ fn enter(state: *State, effects: *Effects) error{OutOfMemory}!void {
     }
     if (state.selected == .sessions) return selectView(state, .active, effects);
     if (state.selected == .archived) return selectView(state, .archived, effects);
-    // Resuming the drawn open chat is navigation, not a new Host intent.
     if (state.selected == .session) if (state.conversing) |open| if (std.mem.eql(u8, &state.selected.session, &open)) {
         effects.add(.focus_chat);
         return;
@@ -2186,7 +1869,7 @@ fn archiveIntent(state: *State, intent: ArchiveIntent, effects: *Effects) void {
 
 fn askArchive(state: *State, ref: Reference, work: Kind, archive: ArchiveState, effects: *Effects) IntentAdmission {
     _ = work;
-    if (archive != .active) return .refused; // Its durable badge already says so.
+    if (archive != .active) return .refused;
     return archiveSession(state, .{ .reference = ref }, effects);
 }
 
@@ -2235,8 +1918,6 @@ fn changeArchiveView(state: *State, filter: ArchiveFilter, effects: *Effects) er
     for (state.rows.items) |*row| row.listed = false;
     try retainRows(state);
     state.pending.items.len = 0;
-    // Only the active conversation can survive this membership reset.
-    // Keep its cached first line, not the old listing's population.
     var saved: [1]Bounded(max_line_bytes) = undefined;
     var saved_count: usize = 0;
     for (state.rows.items) |*row| {
@@ -2259,10 +1940,8 @@ fn changeArchiveView(state: *State, filter: ArchiveFilter, effects: *Effects) er
     if (!state.listing) try tick(state, state.now_ms, effects);
 }
 
-/// What a key or command that needs a selected Session says without one.
 const no_selection = "! Select a Session first.";
 
-/// Selection includes the two ends even when there are no Sessions.
 fn move(state: *State, action: Action) void {
     const order = state.order.items;
     const current: usize = switch (state.selected) {
@@ -2283,41 +1962,28 @@ fn move(state: *State, action: Action) void {
     else if (target > order.len + 1) .settings else .{ .session = state.rows.items[order[target - 2]].reference };
 }
 
-/// Sign-in, quota or rate-limit trouble that stops every Session reaching
-/// the model, from rows alone: rows survive Host restarts, so no Host memory
-/// is needed.
 pub const Trouble = enum { sign_in, api_key, quota, rate_limit };
 pub const Band = struct {
     trouble: Trouble,
 
-    /// Rows retrying a rate limit.
     sessions: u32 = 0,
 
-    /// When the provider said the quota resets, Unix seconds.
     resets_at: ?u64 = null,
 
-    /// The provider of the newest failure the band names; null for a rate
-    /// limit, which counts rows.
     provider: ?Provider = null,
 };
 
 const BandRule = struct {
     trouble: Trouble,
 
-    /// `failed`: the newest failure with a matching code, when newer than
-    /// the newest finished Turn. `retrying`: any row retrying for a
-    /// matching cause.
     kind: Kind,
     matches: *const fn ([]const u8) bool,
 
-    /// Hidden while not newer than this terminal's own login.
     after_login: bool = false,
 
-    /// Hidden once its saved reset time passes.
     until_reset: bool = false,
 };
 
-/// In priority order.
 const band_rules = [_]BandRule{
     .{ .trouble = .sign_in, .kind = .failed, .matches = signInCode, .after_login = true },
     .{ .trouble = .api_key, .kind = .failed, .matches = apiKeyCode, .after_login = true },
@@ -2374,29 +2040,18 @@ pub fn band(state: *const State) ?Band {
 
 pub const Rgb = @import("theme.zig").Rgb;
 
-/// The Khadi skins. Day is an undyed cotton ground with indigo ink; night is
-/// an indigo-dyed ground with cotton text. Both alarm in station-board
-/// yellow with black and fail in madder.
 pub const Skin = enum { day, night };
 
 pub const Caps = struct {
-    /// Unicode marks and text; false draws ASCII only, a cell a character.
     unicode: bool = true,
     devanagari: bool = false,
 
-    /// How the terminal measures Unicode text, from its report.
     width: gwidth.Method = .wcwidth,
 
-    /// How many colours the terminal draws.
     depth: Depth = .direct,
 
-    /// The terminal's background as it answered OSC 11; null without an
-    /// answer.
     background: ?Rgb = null,
 
-    /// `none` under NO_COLOR draws in the terminal's own colours with bold,
-    /// dim, reverse and underline; `indexed` uses the nearest 256-colour entries;
-    /// `direct` uses 24-bit colour.
     pub const Depth = enum { none, indexed, direct };
 
     pub const Environment = struct {
@@ -2407,10 +2062,6 @@ pub const Caps = struct {
         colorterm: ?[]const u8 = null,
     };
 
-    /// The locale that sets the character set is the first of LC_ALL,
-    /// LC_CTYPE and LANG that is set; one that does not name UTF-8 draws
-    /// ASCII. With none set, Unicode. A non-empty NO_COLOR turns colour off;
-    /// otherwise COLORTERM `truecolor` or `24bit` gives 24-bit colour.
     pub fn of(environment: Environment) Caps {
         const locale = for ([_]?[]const u8{ environment.lc_all, environment.lc_ctype, environment.lang }) |value| {
             if (value) |text| if (text.len != 0) break text;
@@ -2429,11 +2080,8 @@ pub const Caps = struct {
         return .{ .unicode = utf8, .depth = depth };
     }
 
-    /// Day on a light terminal background, night on a dark one or when the
-    /// terminal did not say.
     pub fn skin(self: Caps) Skin {
         const rgb = self.background orelse return .night;
-        // Relative luminance with the BT.709 weights, against half scale.
         const luminance = 2126 * @as(u32, rgb[0]) + 7152 * @as(u32, rgb[1]) + 722 * @as(u32, rgb[2]);
         return if (luminance >= 10000 * 128) .day else .night;
     }
@@ -2445,7 +2093,6 @@ pub const Segment = overview_style.Segment;
 pub const Span = struct {
     column: u16,
 
-    /// Display cells `text` takes.
     cells: u16,
     text: []const u8,
     style: Style,
@@ -2459,14 +2106,10 @@ pub const Layout = struct {
     top: u16 = 0,
     list: Rows = .{},
 
-    /// The pinned tail under the list: its rule and the Settings row.
     settings: Rows = .{},
 
-    /// The shell's Host line between the Settings tail and the input, when
-    /// it shows.
     host: Rows = .{},
 
-    /// The bottom stack's first row: status lines and one footer, not an editor.
     input: u16 = 0,
 
     pub const Rows = struct {
@@ -2489,10 +2132,8 @@ pub fn layout(state: *const State) Layout {
     return .{ .top = top, .list = .{ .start = top, .end = settings }, .settings = .{ .start = settings, .end = host }, .host = .{ .start = host, .end = input }, .input = input };
 }
 
-/// The Settings tail's rows: its rule and the Settings row.
 const settings_rows = 2;
 
-/// Rows the status takes above the Footer: none while all is quiet.
 fn statusRows(state: *const State) u16 {
     var buffer: StatusBuffer = undefined;
     const line = statusLine(state, .{}, &buffer) orelse return 0;
@@ -2500,15 +2141,10 @@ fn statusRows(state: *const State) u16 {
     return @intCast(noticeRows(line.text, state.size.width, .{}, &rows).len);
 }
 
-/// Provider bands, as `headerSegments` draws them.
 fn topRows(state: *const State) usize {
     return @as(usize, @intFromBool(band(state) != null)) + 2;
 }
 
-/// One line's spans, placed left to right at their columns, its text made
-/// terminal-safe and clipped to the room it has. Each span keeps the role
-/// it was given; only `widget_style.of` normalizes that role for terminal
-/// capabilities when the widget draws it.
 const Spans = struct {
     arena: Allocator,
     caps: Caps,
@@ -2522,7 +2158,6 @@ const Spans = struct {
         return .{ .arena = arena, .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width };
     }
 
-    /// The glyph set `work_line` draws this screen's clocks with.
     fn script(self: *const Spans) work_line.Script {
         return if (self.caps.unicode) .unicode else .ascii;
     }
@@ -2536,8 +2171,6 @@ const Spans = struct {
         return self.arena.dupe(Span, self.spans[0..self.count]);
     }
 
-    /// Moves to `column`, filling the cells passed when `wanted` shows a
-    /// ground of its own.
     fn pad(self: *Spans, column: usize, wanted: Style) error{OutOfMemory}!void {
         const to = @min(column, self.width);
         if (to <= self.column) return;
@@ -2556,13 +2189,10 @@ const Spans = struct {
         self.column += cells;
     }
 
-    /// Puts `bytes` at `column` within `limit` cells, ending in an ellipsis
-    /// when cut. Returns the cells it took.
     fn put(self: *Spans, column: usize, bytes: []const u8, limit: usize, wanted: Style) error{OutOfMemory}!usize {
         return self.putKept(column, bytes, limit, wanted, .head);
     }
 
-    /// Like `put`, keeping the end of `bytes` when it is cut.
     fn putTail(self: *Spans, column: usize, bytes: []const u8, limit: usize, wanted: Style) error{OutOfMemory}!usize {
         return self.putKept(column, bytes, limit, wanted, .tail);
     }
@@ -2576,7 +2206,6 @@ const Spans = struct {
         return shown.cells;
     }
 
-    /// Puts `bytes` so they end at `end`.
     fn putRight(self: *Spans, end: usize, bytes: []const u8, wanted: Style) error{OutOfMemory}!void {
         const cells = self.measure(bytes);
         if (cells > end or end - cells < self.column) return;
@@ -2590,9 +2219,6 @@ const Spans = struct {
 
 pub const Keep = enum { head, tail };
 
-/// `bytes` made terminal-safe and clipped to `room` cells, as `Pieces`
-/// shows it, with an ellipsis where it was cut: at the end, or at the
-/// start when keeping the tail.
 pub fn fitted(arena: Allocator, caps: Caps, bytes: []const u8, room: usize, keep: Keep) error{OutOfMemory}!Piece {
     return (try fittedMarked(arena, caps, bytes, room, keep, null)).piece;
 }
@@ -2651,7 +2277,6 @@ pub fn fittedMarked(arena: Allocator, caps: Caps, bytes: []const u8, room: usize
     return .{ .piece = .{ .bytes = out[0..used], .cells = cells + @intFromBool(total > room) }, .span = displayed };
 }
 
-/// The cells `bytes` takes as `Pieces` shows it.
 fn measured(caps: Caps, glyphs: Glyphs, bytes: []const u8) usize {
     var total: usize = 0;
     var pieces: Pieces = .{ .bytes = bytes, .caps = caps, .glyphs = glyphs };
@@ -2659,12 +2284,8 @@ fn measured(caps: Caps, glyphs: Glyphs, bytes: []const u8) usize {
     return total;
 }
 
-/// The glyph shown for a code point that cannot reach the terminal: a
-/// control character or an invalid byte, or without Unicode anything past
-/// ASCII.
 fn standIn(caps: Caps, glyphs: Glyphs, codepoint: u21) ?[]const u8 {
     if (codepoint == '\n') return glyphs.newline;
-    // A tab shows as one space, as in a conversation.
     if (codepoint == '\t') return " ";
     if (TerminalText.isControl(codepoint) or codepoint == replacement) return "?";
     if (!caps.unicode and codepoint > 0x7e) return "?";
@@ -2673,9 +2294,6 @@ fn standIn(caps: Caps, glyphs: Glyphs, codepoint: u21) ?[]const u8 {
 
 pub const Piece = struct { bytes: []const u8, cells: usize };
 
-/// Text as the terminal draws it: whole grapheme clusters, measured as the
-/// terminal measures them, with a one-cell stand-in for each code point
-/// that cannot reach it.
 const Pieces = struct {
     bytes: []const u8,
     caps: Caps,
@@ -2690,8 +2308,6 @@ const Pieces = struct {
             self.at += first.len;
             return .{ .bytes = glyph, .cells = 1 };
         }
-        // Printable ASCII before ASCII or the end is a whole cluster of one
-        // cell under every method; this keeps long ASCII text cheap.
         if (!self.caps.unicode or (first.codepoint < 0x80 and (rest.len == 1 or rest[1] < 0x80))) {
             self.at += 1;
             return .{ .bytes = rest[0..1], .cells = 1 };
@@ -2711,7 +2327,6 @@ const Pieces = struct {
 
 const replacement = 0xfffd;
 
-/// One UTF-8 code point; an invalid byte decodes alone as U+FFFD.
 fn decode(bytes: []const u8) struct { codepoint: u21, len: usize } {
     const first = bytes[0];
     const len: usize = switch (first) {
@@ -2727,7 +2342,6 @@ fn decode(bytes: []const u8) struct { codepoint: u21, len: usize } {
     return .{ .codepoint = codepoint, .len = len };
 }
 
-/// The list's line while it has no rows: loading, or the empty view.
 fn emptyLine(built: *Spans, state: *const State) error{OutOfMemory}![]const Span {
     built.begin();
     const text = if (state.listed_at_ms == null)
@@ -2742,7 +2356,6 @@ fn emptyLine(built: *Spans, state: *const State) error{OutOfMemory}![]const Span
     return built.finish();
 }
 
-/// A full-width alarm line, dark on yellow.
 fn bandLine(built: *Spans, text: []const u8) error{OutOfMemory}![]const Span {
     built.begin();
     const style: Style = .{ .colour = .on_band, .background = .band, .bold = true };
@@ -2755,14 +2368,11 @@ fn bandLine(built: *Spans, text: []const u8) error{OutOfMemory}![]const Span {
 fn providerBand(built: *Spans, trouble: Band, now_ms: u64) error{OutOfMemory}![]const Span {
     var buffer: [8]u8 = undefined;
     return bandLine(built, switch (trouble.trouble) {
-        // Each names the provider of the newest failure it shows.
         .sign_in => sign_in: {
             if (trouble.provider.?.login()) |command| {
                 const run = try std.fmt.allocPrint(built.arena, "Sign-in expired. Run {s}.", .{command});
                 if (run.len <= built.width -| 2) break :sign_in run;
             }
-            // No command, or the narrow list pane cannot hold it whole: the
-            // name alone, which fits.
             break :sign_in try std.fmt.allocPrint(built.arena, "{s} sign-in expired.", .{trouble.provider.?.shown()});
         },
         .api_key => if (trouble.provider.?.login()) |command|
@@ -2778,20 +2388,16 @@ fn providerBand(built: *Spans, trouble: Band, now_ms: u64) error{OutOfMemory}![]
                 const managed = try std.fmt.allocPrint(built.arena, "{s} {s}", .{ used, usage });
                 if (managed.len <= built.width -| 2) break :quota managed;
             }
-            // No place to raise the limit, or the narrow list pane cannot
-            // hold it whole: the limit alone, which fits.
             break :quota used;
         },
         .rate_limit => try std.fmt.allocPrint(built.arena, "Rate limited. {d} Session{s} will retry.", .{ trouble.sessions, if (trouble.sessions == 1) "" else "s" }),
     });
 }
 
-/// `count` grouped the Indian way: 1,00,000 and 1,00,00,000.
 pub fn grouped(buffer: *[32]u8, count: u64) []const u8 {
     var digits: [20]u8 = undefined;
     const text = std.fmt.bufPrint(&digits, "{d}", .{count}) catch unreachable;
     var used: usize = 0;
-    // The last three digits stand together; pairs go before them.
     const head = text.len -| 3;
     for (text, 0..) |digit, at| {
         if (at != 0 and at <= head and (head - at) % 2 == 0) {
@@ -2804,13 +2410,10 @@ pub fn grouped(buffer: *[32]u8, count: u64) []const u8 {
     return buffer[0..used];
 }
 
-/// Items use the same words and click meanings whether pinned or scrolled.
 pub const Item = union(enum) { new_session, views, gap, row: usize, empty };
 
 const new_session_name = "New Session";
 
-/// The canonical order puts pins first. A separator exists only where
-/// that pinned prefix meets an unpinned suffix; it owns no selection.
 fn pinGap(state: *const State) ?usize {
     const order = state.order.items;
     if (order.len < 2 or state.rows.items[order[0]].pin_order == null or state.rows.items[order[order.len - 1]].pin_order != null) return null;
@@ -2831,20 +2434,16 @@ fn listLine(state: *const State, at: usize) usize {
     return at + @intFromBool(if (pinGap(state)) |gap| at >= gap else false);
 }
 
-/// Sessions remaining from a rendered line; the separator is never counted.
 pub fn sessionsFrom(state: *const State, line: usize) usize {
     const before = line -| @intFromBool(if (pinGap(state)) |gap| line > gap else false);
     return state.order.items.len -| before;
 }
 
-/// Pinned controls have no scrollable list line.
 pub fn selectedLine(state: *const State) ?usize {
     const ref = selectedSession(state) orelse return null;
     return if (position(state, ref)) |at| listLine(state, at) else null;
 }
 
-/// Keyboard list focus projects its selected row; otherwise the open chat
-/// supplies the inactive highlight. The shell reads no parallel predicates.
 pub fn focusedLine(state: *const State, list_focused: bool) ?usize {
     if (!list_focused) return selectedLine(state);
     return switch (state.selected) {
@@ -2853,8 +2452,6 @@ pub fn focusedLine(state: *const State, list_focused: bool) ?usize {
     };
 }
 
-/// The open chat owns sidebar selection, independently of list navigation.
-/// Until its canonical listing arrives there is no projected line to select.
 fn selectedSession(state: *const State) ?Reference {
     return state.conversing orelse switch (state.selected) {
         .session => |ref| ref,
@@ -2877,7 +2474,6 @@ pub fn listItem(state: *const State, line: usize) ?Item {
     return .{ .row = at };
 }
 
-/// One Session line: state mark, primary name, and compact state duration.
 pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, caps: Caps, frame: u64) error{OutOfMemory}![]const Segment {
     var built: Spans = .of(arena, caps, width);
     const row = &state.rows.items[state.order.items[at]];
@@ -2905,7 +2501,6 @@ pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16,
     const age_cells = @min(built.measure(age), end -| 3);
     const name_end = end -| age_cells -| @intFromBool(age_cells != 0);
     const selected = rowSelected(state, row);
-    // The archived-only list already supplies this fact; mixed lists do not.
     const archived = if (row.archive_state == .archived and state.archive != .archived)
         if (caps.unicode) " · archived" else " . archived"
     else
@@ -2917,40 +2512,30 @@ pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16,
     return segmentsOf(arena, try built.finish(), width, .{ .dim = quiet });
 }
 
-/// Whether `item`'s mark turns with the frame. Your own Session at work
-/// turns the spinner, every one in step; any other mark holds still. Only
-/// Unicode in colour spins, and a faded row's state is stale, so it holds
-/// still.
 pub fn markSpins(state: *const State, item: Item, caps: Caps) bool {
     if (item != .row or state.list_stale or !caps.unicode or caps.depth == .none) return false;
     const row = &state.rows.items[state.order.items[item.row]];
     return yours(row) and rules.get(shownKind(state, row)).spins;
 }
 
-/// The person wrote in this chat. The open empty chat is theirs even before
-/// its first Message is admitted.
 fn yours(row: *const Row) bool {
     return row.first == null or row.from_person_at != null;
 }
 
-/// The row needs the person: it sorts under Needs you, or its work failed.
 fn needsPerson(state: *const State, row: *const Row) bool {
     return orderClass(state, row) == .needs_you or row.state == .failed;
 }
 
-/// A chat you never wrote in recedes unless it needs you.
 fn rowQuiet(state: *const State, row: *const Row) bool {
     return !yours(row) and !needsPerson(state, row);
 }
 
-/// Provider recovery bands above the list.
 pub fn headerSegments(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}![]const Segment {
     const trouble = band(state) orelse return &.{};
     var built: Spans = .of(arena, caps, width);
     return segmentsOf(arena, try providerBand(&built, trouble, state.now_ms), width, .{});
 }
 
-/// Control text and its actually drawn tab destinations. Blank cells take no tab press.
 pub const ListRow = struct {
     segments: []const Segment,
     heading: bool,
@@ -2995,19 +2580,16 @@ pub fn listSegments(arena: Allocator, state: *const State, item: Item, width: u1
     return result;
 }
 
-/// Enter opens the selected identity; no overview facts or focus domain exist.
 pub fn footerRight(state: *const State) []const u8 {
     if (state.upgrade.takesEscape()) return "esc cancels";
     if (state.creating() or (state.holdsHost() and state.selected != .settings)) return "";
     return "enter open";
 }
 
-/// The transient reply belongs to the footer, not persistent status rows.
 pub fn footerNotice(state: *const State) ?[]const u8 {
     return if (state.notice) |*notice| notice.text() else null;
 }
 
-/// `spans` as segments that fill `width` cells, gaps in `fill`.
 fn segmentsOf(arena: Allocator, spans: []const Span, width: u16, fill: Style) error{OutOfMemory}![]const Segment {
     const segments = try arena.alloc(Segment, spans.len * 2 + 1);
     var count: usize = 0;
@@ -3034,21 +2616,17 @@ fn blankCells(arena: Allocator, cells: usize) error{OutOfMemory}![]const u8 {
     return bytes;
 }
 
-/// Empty chats use the pinned control's words; admitted conversations use
-/// their Label, first Message line, or reference in the usual precedence.
 fn title(state: *const State, row: *const Row) session_line.Name {
     if (row.first == null) return .{ .text = new_session_name, .hint = false };
     return session_line.name(if (row.label) |*text| text.slice() else null, state.lineOf(row), &row.reference);
 }
 
-/// Compact age: 42s, 7m, 3h, 12d.
 fn ageText(buffer: *[8]u8, seconds: u64) []const u8 {
     const units = [_]struct { u64, u8 }{ .{ 86400, 'd' }, .{ 3600, 'h' }, .{ 60, 'm' } };
     for (units) |unit| if (seconds >= unit[0]) return std.fmt.bufPrint(buffer, "{d}{c}", .{ @min(seconds / unit[0], 999), unit[1] }) catch unreachable;
     return std.fmt.bufPrint(buffer, "{d}s", .{seconds}) catch unreachable;
 }
 
-/// Host seconds at the tests' first tick.
 const test_now_s = 1_792_937_000;
 
 fn testState() error{OutOfMemory}!State {
@@ -3100,8 +2678,6 @@ fn ago(seconds: u64) WorkState.Since {
     return .{ .since = test_now_s - seconds };
 }
 
-/// Starts the overview's clock and answers its first list request with
-/// `rows` as one full listing.
 fn opened(rows: []const Listed) !State {
     var state = try testState();
     errdefer state.deinit();
@@ -3110,7 +2686,6 @@ fn opened(rows: []const Listed) !State {
     return state;
 }
 
-/// Answers the listing in flight with `rows`, eight per page.
 fn respond(state: *State, delta: Delta, since: Token, rows: []const Listed) !Effects {
     var at: usize = 0;
     while (true) {
@@ -3128,7 +2703,6 @@ fn respond(state: *State, delta: Delta, since: Token, rows: []const Listed) !Eff
     }
 }
 
-/// Lets the list interval pass and answers the request it brings.
 fn refresh(state: *State, delta: Delta, since: Token, rows: []const Listed) !Effects {
     const asked = try step(state, .{ .tick = state.now_ms + list_interval_ms });
     try std.testing.expectEqual(@as(usize, 1), asked.len);
@@ -3136,8 +2710,6 @@ fn refresh(state: *State, delta: Delta, since: Token, rows: []const Listed) !Eff
     return respond(state, delta, since, rows);
 }
 
-/// Renders `state` at `width` by `height`, which the shell steps before it
-/// draws.
 var test_edits: u32 = 0;
 
 fn press(state: *State, action: Action) !Effects {
@@ -3181,8 +2753,6 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
     }
 }
 
-/// The core's raw notice value. Production Footer rendering is covered by
-/// Overview's widget tests, not by the logical list/status Frame below.
 fn expectNotice(state: *State, expected: ?[]const u8) !void {
     if (expected) |text| {
         const notice = state.notice orelse return error.TestExpectedNotice;
@@ -3265,7 +2835,6 @@ const Frame = struct {
             if (at != 0) try out.writer.writeByte('\n');
             for (line) |segment| try out.writer.writeAll(segment.text);
         }
-        // A terminal shows trailing blanks as nothing.
         const all = try out.toOwnedSlice();
         defer std.testing.allocator.free(all);
         var trimmed: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -3279,9 +2848,6 @@ const Frame = struct {
         return trimmed.toOwnedSlice();
     }
 
-    /// The style of the cell at `row`, `column`, as the terminal measures
-    /// each segment's text; null for a blank on the ground, which shows no
-    /// style.
     fn styleAt(self: *Frame, row: usize, column: usize) ?Style {
         if (row >= self.lines.len) return null;
         var at: usize = 0;
@@ -3307,7 +2873,6 @@ fn expectScreen(state: *State, width: u16, height: u16, caps: Caps, expected: []
     try std.testing.expectEqualStrings(expected, actual);
 }
 
-/// Twenty Sessions in every order class, as the Rui Khadi mock shows them.
 const mixed = [_]Listed{
     session("k7m2qx", .{ .working = ago(40) }, .{ .label = "Fix the flaky resize test", .yours = true }),
     session("h8q2mz", .{ .finished = ago(12 * 60) }, .{ .yours = true }),
@@ -3331,7 +2896,6 @@ const mixed = [_]Listed{
     session("y1z2a3", .{ .failed = .{ .since = test_now_s - 50 * 60, .code = bounded(session_work.max_code_bytes, "provider_http_500"), .resets_at = null } }, .{ .label = "Retry the flaky upload" }),
 };
 
-/// One row of each kind, in Unicode and ASCII.
 const kind_cases = [_]struct { state: WorkState, unicode: []const u8, ascii: []const u8, colour: Colour, stoppable: bool }{
     .{ .state = .{ .idle = ago(7200) }, .unicode = " ○ Write the notes                                                           2h", .ascii = " o Write the notes                                                           2h", .colour = .normal, .stoppable = false },
     .{ .state = .{ .pending = ago(5) }, .unicode = " ◌ Write the notes                                                           5s", .ascii = " : Write the notes                                                           5s", .colour = .quiet, .stoppable = true },
@@ -3355,8 +2919,6 @@ test "every work state follows the rules table, in Unicode and ASCII" {
         defer state.deinit();
         const rule = rules.get(kind);
         try std.testing.expectEqual(case.stoppable, rule.stoppable);
-        // Only work under way has a work line, and only idle or ended work
-        // a word of its own.
         try std.testing.expectEqual(case.state.progress() == null, rule.word != null);
         for ([_]Caps{ .{}, .{ .unicode = false } }, [_][]const u8{ case.unicode, case.ascii }) |caps, expected| {
             const text = try screenText(&state, 80, 24, caps);
@@ -3366,12 +2928,9 @@ test "every work state follows the rules table, in Unicode and ASCII" {
             try std.testing.expectEqualStrings("  Sessions  Archived", lines.next().?);
             try std.testing.expectEqualStrings(expected, lines.next().?);
         }
-        // The mark takes its colour, and the word one only when it needs
-        // the person or is quiet. (GroupedList paints the selection.)
         state.selected = .new_session;
         var unselected = try Frame.of(&state, 80, 24, .{}, 0);
         defer unselected.deinit();
-        // The sender/work domain below owns whole-row dim expectations.
         try std.testing.expectEqual(case.colour, unselected.styleAt(2, 1).?.colour);
     }
 }
@@ -3390,7 +2949,6 @@ test "a retry that has fallen due reads as queued in its group, mark and colour"
     try std.testing.expect(std.mem.indexOf(u8, text, " Active ·") == null);
     var screen = try Frame.of(&state, 80, 24, .{ .depth = .none }, 0);
     defer screen.deinit();
-    // The core retains the pending mark's role, even without colour.
     try std.testing.expectEqual(Style{ .colour = .quiet, .dim = true }, screen.styleAt(2, 1).?);
 }
 
@@ -3421,14 +2979,11 @@ test "overview an Action wait leads regardless of sender" {
         session("f1n1sh", .{ .finished = ago(60) }, .{ .label = "Theirs, finished" }),
     });
     defer state.deinit();
-    // Newest wait first, regardless of who messaged the Session.
     try expectOrder(&state, &.{ "Theirs, asking", "Mine, asking", "Theirs, asking beside Bash", "Theirs, running Bash", "Mine, thinking", "Theirs, finished" });
-    // The list opens on what needs you.
     try std.testing.expectEqualStrings("a5k1ng", &state.selected.session);
 }
 
 test "overview queued rows follow done and work, longest wait first" {
-    // A retry already due waits for a slot as a queued Session does.
     const due: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 - 2_000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
     const later: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = (test_now_s + 18) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
     var state = try opened(&.{
@@ -3469,7 +3024,6 @@ test "the summary counts row marks: needs you, working, queued and failed" {
     try std.testing.expectEqual(Counts{ .needs_you = 2, .working = 3, .queued = 3, .failed = 1 }, state.summary.counts);
 }
 
-/// The row titled `label` as `rowSegments` gives it at `width`, unselected.
 fn rowOf(arena: Allocator, state: *State, label: []const u8, width: u16, caps: Caps) ![]const Segment {
     const selected = state.selected;
     state.selected = .new_session;
@@ -3481,12 +3035,10 @@ fn rowOf(arena: Allocator, state: *State, label: []const u8, width: u16, caps: C
     return error.TestUnexpectedResult;
 }
 
-/// What a row says, as its non-blank segments, and the cells it fills.
 fn expectRow(segments: []const Segment, width: u16, expected: []const struct { []const u8, Colour }) !void {
     var said: usize = 0;
     var cells: usize = 0;
     for (segments) |segment| {
-        // One cell per code point: these rows hold no wide text.
         for (segment.text) |byte| cells += @intFromBool(byte & 0xc0 != 0x80);
         const text = std.mem.trim(u8, segment.text, " ");
         if (text.len == 0) continue;
@@ -3496,7 +3048,6 @@ fn expectRow(segments: []const Segment, width: u16, expected: []const struct { [
         said += 1;
     }
     try std.testing.expectEqual(expected.len, said);
-    // Padded to the width, so a list draws it as one row.
     try std.testing.expectEqual(@as(usize, width), cells);
 }
 
@@ -3518,15 +3069,10 @@ test "row segments show each state mark name and state duration" {
     defer state.deinit();
     state.selected = .new_session;
     const a = arena.allocator();
-    // Needs you: `?` in the attention colour and no word, beside running
-    // Bash too; the command comes from the Action once read.
     try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Fix flaky store test", .normal }, .{ "2m", .quiet } });
     try expectRow(try rowOf(a, &state, "Asking beside Bash", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Asking beside Bash", .normal }, .{ "1m", .quiet } });
-    // Queued: a dim `◌`, the title and the wait, no word.
     try expectRow(try rowOf(a, &state, "Check install script", 100, .{}), 100, &.{ .{ "◌", .quiet }, .{ "Check install script", .normal }, .{ "10s", .quiet } });
-    // Retrying keeps its state duration without a countdown or attempt number.
     try expectRow(try rowOf(a, &state, "Investigate retry storm", 100, .{}), 100, &.{ .{ "⠹", .attention }, .{ "Investigate retry storm", .normal }, .{ "30s", .quiet } });
-    // Failure and stop remain distinguishable by mark; neither adds detail.
     try expectRow(try rowOf(a, &state, "Benchmark memory", 100, .{}), 100, &.{ .{ "×", .failure }, .{ "Benchmark memory", .normal }, .{ "20m", .quiet } });
     try expectRow(try rowOf(a, &state, "Odd failure", 100, .{}), 100, &.{ .{ "×", .failure }, .{ "Odd failure", .normal }, .{ "1m", .quiet } });
     try expectRow(try rowOf(a, &state, "Stopped by me", 100, .{}), 100, &.{ .{ "■", .normal }, .{ "Stopped by me", .normal }, .{ "1m", .quiet } });
@@ -3543,13 +3089,11 @@ test "row segments keep mark title and state duration on a narrow screen" {
     try expectRow(try rowOf(arena.allocator(), &state, "Benchmark memory", 40, .{}), 40, &.{ .{ "×", .failure }, .{ "Benchmark memory", .normal }, .{ "20m", .quiet } });
 }
 
-/// The style of the segment that holds `needle`.
 fn styleOf(segments: []const Segment, needle: []const u8) !Style {
     for (segments) |segment| if (std.mem.indexOf(u8, segment.text, needle) != null) return segment.style;
     return error.TestUnexpectedResult;
 }
 
-/// What a line of segments says, its non-blank pieces in order.
 fn expectLine(segments: []const Segment, width: u16, expected: []const []const u8) !void {
     var line: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer line.deinit();
@@ -3601,14 +3145,10 @@ test "the band names the provider of the newest sign-in or key failure" {
         const text = try segmentText(arena.allocator(), try headerSegments(arena.allocator(), &state, 200, .{}));
         try std.testing.expect(std.mem.indexOf(u8, text, case[1]) != null);
     }
-    // Too narrow for the command, the band still fits the 40-column list
-    // pane whole.
     var state = try opened(&rows);
     defer state.deinit();
     const narrow = try segmentText(arena.allocator(), try headerSegments(arena.allocator(), &state, 40, .{}));
     try std.testing.expectEqualStrings("ChatGPT sign-in expired.", std.mem.trim(u8, narrow, " "));
-    // A device-code chat's command fits a 60-column screen whole, and the
-    // 40-column pane falls back to its name.
     var device = try opened(rows[0..1]);
     defer device.deinit();
     const sixty = try segmentText(arena.allocator(), try headerSegments(arena.allocator(), &device, 60, .{}));
@@ -3617,7 +3157,6 @@ test "the band names the provider of the newest sign-in or key failure" {
     try std.testing.expectEqualStrings("ChatGPT (device code) sign-in expired.", std.mem.trim(u8, forty, " "));
 }
 
-/// Your Sessions at work and waiting, beside others' work and ends.
 const spinning = [_]Listed{
     session("y0urs1", .{ .working = ago(40) }, .{ .label = "Mine, thinking", .yours = true }),
     session("y0urs2", .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .{ .label = "Mine, running", .yours = true }),
@@ -3629,7 +3168,6 @@ const spinning = [_]Listed{
     session("f1n1sh", .{ .finished = ago(1) }, .{ .label = "Theirs, finished" }),
 };
 
-/// The glyph that the row titled `label` shows on `text`.
 fn markOf(text: []const u8, label: []const u8) []const u8 {
     const at = std.mem.indexOf(u8, text, label).?;
     const line = text[if (std.mem.lastIndexOfScalar(u8, text[0..at], '\n')) |newline| newline + 1 else 0..at];
@@ -3655,12 +3193,9 @@ test "your Sessions at work turn the spinner in step, and every other mark holds
         var screen = try Frame.of(&state, 80, 24, .{}, frame);
         defer screen.deinit();
         try std.testing.expect(anySpins(&state, .{}));
-        // The spinner keeps its rule's colour.
         const mine = std.mem.count(u8, text[0..std.mem.indexOf(u8, text, "Mine, thinking").?], "\n");
         try std.testing.expectEqual(Style{ .colour = .ink }, screen.styleAt(mine, 1).?);
     }
-    // A stop the person asked for holds the mark still before the Host
-    // reports it.
     state.selected = .{ .session = "y0urs1".* };
     _ = try press(&state, .stop);
     _ = try press(&state, .stop);
@@ -3668,7 +3203,6 @@ test "your Sessions at work turn the spinner in step, and every other mark holds
     const asked = try frameText(&state, 80, 24, .{}, 1);
     defer std.testing.allocator.free(asked);
     try std.testing.expectEqualStrings("⠹", markOf(asked, "Mine, thinking"));
-    // ASCII, NO_COLOR and a faded screen hold still on every frame.
     for ([_]Caps{ .{ .unicode = false }, .{ .depth = .none }, .{ .unicode = false, .depth = .none }, .{} }, 0..) |caps, at| {
         if (at == 3) state.list_stale = true;
         const first = try screenText(&state, 80, 24, caps);
@@ -3682,7 +3216,6 @@ test "your Sessions at work turn the spinner in step, and every other mark holds
     }
 }
 
-/// Whether any list line's mark spins.
 fn anySpins(state: *const State, caps: Caps) bool {
     var line: usize = 0;
     while (listItem(state, line)) |item| : (line += 1) if (markSpins(state, item, caps)) return true;
@@ -3701,11 +3234,9 @@ test "the screen asks for frames only while a spinner shows" {
         var state = try opened(&rows);
         defer state.deinit();
         try std.testing.expect(anySpins(&state, .{}));
-        // Its work ending stops the frames.
         _ = try refresh(&state, .changed, testToken(2), &.{session("w0rk00", .{ .finished = ago(0) }, .{ .label = "Write the notes", .yours = true })});
         try std.testing.expect(!anySpins(&state, .{}));
     }
-    // Others' work holds still, so it needs no frames.
     rows[0] = session("w0rk00", .{ .working = ago(0) }, .{ .label = "Write the notes" });
     var state = try opened(&rows);
     defer state.deinit();
@@ -3725,8 +3256,6 @@ test "ctrl-x stops at once a row its rule lets it stop, and asks nothing" {
         }
         try expectEffects(&.{.{ .stop = "k7m2qx".* }}, try press(&state, .stop));
         try expectNotice(&state, null);
-        // Until its result arrives the row says it is stopping, and a second
-        // ctrl-x finds nothing to stop.
         const text = try screenText(&state, 80, 24, .{});
         defer std.testing.allocator.free(text);
         try std.testing.expectEqual(Kind.stopping, shownKind(&state, state.find("k7m2qx".*).?));
@@ -3751,24 +3280,20 @@ test "ctrl-x in a conversation stops its Session as on its row, listed or not" {
     const ctrl_x: Conversed = .{ .reference = ref, .work = .working, .input = .stop };
     try expectSaid(null, true, conversation(&state, ref, .working, .{}, &test_said));
     try expectEffects(&.{.{ .stop = ref }}, try step(&state, .{ .conversed = ctrl_x }));
-    // Until its answer the work is stopping: no hint, and ctrl-x says so.
     try std.testing.expect(!conversation(&state, ref, .working, .{}, &test_said).stoppable);
     try expectEffects(&.{}, try step(&state, .{ .conversed = ctrl_x }));
     try expectNotice(&state, "k7m2qx: Stopping");
     try expectSaid("k7m2qx: Stopping", false, conversation(&state, ref, .working, .{}, &test_said));
-    // Any other input there clears the notice.
     try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .input = .other } }));
     try std.testing.expectEqual(@as(?[]const u8, null), conversation(&state, ref, .working, .{}, &test_said).text);
     try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = ref, .outcome = .{ .failed = "session_not_found" } } }));
     try expectNotice(&state, "! k7m2qx not stopped: session_not_found");
-    // Ended work takes no stop.
     try std.testing.expect(conversation(&state, ref, .working, .{}, &test_said).stoppable and !conversation(&state, ref, .finished, .{}, &test_said).stoppable);
     try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .finished, .input = .stop } }));
     try expectNotice(&state, "k7m2qx is already finished.");
 }
 
 const read_order_states = [_]WorkState{
-    // All tags, with independent older/newer source revisions below.
     .{ .idle = ago(10) },                                                                                                                                                              .{ .pending = ago(10) },                                                                                  .{ .working = ago(10) },
     .{ .retrying = .{ .since = test_now_s - 10, .due_at_ms = (test_now_s + 60) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 1 } }, .{ .bash = .{ .since = test_now_s - 10, .call = 1, .description = null, .running = 1, .approvals = 0 } }, .{ .approval = ago(10) },
     .{ .stopping = ago(10) },                                                                                                                                                          .{ .finished = ago(10) },                                                                                 .{ .failed = .{ .since = test_now_s - 10, .code = bounded(session_work.max_code_bytes, "malformed_provider_output"), .resets_at = null } },
@@ -3889,12 +3414,8 @@ test "snapshot and listing rows render identical stopped failed and done endings
         try std.testing.expectEqualDeep(case.state, state.find(ref).?.state);
         const snapshot = try screenText(&state, 80, 24, .{});
         defer std.testing.allocator.free(snapshot);
-        // Neither row's mark, name nor age can depend on which read
-        // supplied it. Use the same clock, with no intervening refresh.
         var from_list = try opened(&.{initial});
         defer from_list.deinit();
-        // Compare the same sidebar presentation: the standalone list
-        // additionally draws its pinned New Session control.
         _ = try step(&from_list, .{ .conversation = ref });
         _ = try step(&from_list, .{ .tick = state.now_ms });
         var listed = session(&ref, case.state, .{ .label = "Same Session", .turn = 8 });
@@ -3942,7 +3463,7 @@ test "activity before metadata and an omitted open row use the same bounded row 
     try std.testing.expectEqualDeep(settled.work, state.workOf(state.find(ref).?));
     try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
     _ = try step(&state, .{ .conversation = null });
-    _ = try step(&state, .{ .observed = settled }); // The producer was retired.
+    _ = try step(&state, .{ .observed = settled });
     try std.testing.expectEqual(@as(usize, 0), state.rows.items.len);
 }
 
@@ -3979,7 +3500,6 @@ test "full and changed metadata supply every provider without replacing newer ac
         _ = try step(&state, .{ .conversation = null });
         try std.testing.expectEqualDeep(latest.work, state.find(ref).?.work());
         try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = provider }, band(&state).?);
-        // Existing metadata is replaced too, without a separate provider cache.
         var changed = session(&ref, latest.work.state, .{ .provider = other, .turn = 8 });
         changed.last_line = .{ .position = 9, .text = null };
         _ = try refresh(&state, delta, testToken(4), &.{changed});
@@ -4030,17 +3550,12 @@ test "an original Esc left unconfirmed is named at once and recovered on departu
     const reserved_key: [36]u8 = "fedcba98-7654-4321-8fed-cba987654321".*;
     try std.testing.expectEqual(null, unconfirmedLine(&state, &line));
     try expectEffects(&.{}, try step(&state, .{ .unconfirmed = .{ .reference = refs[0], .recovery = .{ .saved = .{ .original = .{ .kind = .decision, .key = saved_key }, .rejected = false } } } }));
-    // It needs the person, so it lives on the status bar, not as a notice
-    // the next key clears.
     try std.testing.expectEqualStrings("! Not confirmed · rui request recover " ++ saved_key, unconfirmedLine(&state, &line).?);
     try std.testing.expectEqual(null, state.notice);
     _ = try press(&state, .next);
     try std.testing.expectEqualStrings("! Not confirmed · rui request recover " ++ saved_key, unconfirmedLine(&state, &line).?);
-    // A capture that may not be published has no key to recover yet; the
-    // newest unconfirmed send is the one named.
     try expectEffects(&.{}, try step(&state, .{ .unconfirmed = .{ .reference = refs[1], .recovery = .{ .uncertain = reserved_key } } }));
     try std.testing.expectEqualStrings("! r4t9vw: send not confirmed; details on exit", unconfirmedLine(&state, &line).?);
-    // Each takes a ledger slot, so the shell asks before the last one.
     while (canHoldSend(&state)) try expectEffects(&.{}, try step(&state, .{ .unconfirmed = .{ .reference = refs[0], .recovery = .{ .saved = .{ .original = .{ .kind = .message, .key = saved_key }, .rejected = false } } } }));
     try std.testing.expectEqual(@as(usize, max_requests), state.request_count);
     var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -4073,8 +3588,6 @@ test "unconfirmed stops keep their handles until departure; a full ledger refuse
         try expectEffects(&.{.{ .stop = ref.* }}, try press(&state, .stop));
         try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = ref.*, .outcome = .{ .unconfirmed = handle } } }));
         try expectNotice(&state, recover);
-        // The row stays stopping: another Ctrl-X sends nothing and says
-        // so again.
         try std.testing.expectEqual(Kind.stopping, shownKind(&state, state.find(ref.*).?));
         state.notice = null;
         try expectEffects(&.{}, try press(&state, .stop));
@@ -4082,7 +3595,6 @@ test "unconfirmed stops keep their handles until departure; a full ledger refuse
         try expectNotice(&state, recover);
         try expected.writer.print("rui: Not sure {s} stopped. Check with: rui request recover {s}\n", .{ ref, handle });
     }
-    // A full ledger refuses a stop of a Session it does not hold.
     try expectEffects(&.{}, try press(&state, .next));
     const last = state.selected.session;
     for (stopped) |earlier| try std.testing.expect(!std.mem.eql(u8, &earlier, &last));
@@ -4113,7 +3625,6 @@ test "session resume opens its Session through the overview, which then keeps it
     var state = try testState();
     defer state.deinit();
     try expectEffects(&.{ .{ .open = "c3d4e5".* }, .list_models }, try step(&state, .{ .open = "c3d4e5".* }));
-    // The first listing finds the row; the selection waited for it.
     try expectEffects(&.{.{ .list = null }}, try step(&state, .{ .tick = test_now_s * 1000 }));
     _ = try respond(&state, .full, testToken(1), &mixed);
     try expectSelected(&state, "c3d4e5");
@@ -4152,39 +3663,28 @@ test "a first line arriving titles its unlabelled row" {
         reads.items[reads.len] = .{ .reference = read[0].*, .position = 1, .admission = read[1] };
         reads.len += 1;
     }
-    // Rows in screen order; a labelled row or one with no Message needs none.
     try expectEffects(&.{.{ .read_first_lines = reads }}, try respond(&state, .full, testToken(1), &mixed));
     try expectEffects(&.{}, try step(&state, .{ .first_line = .{ .reference = "h8q2mz".*, .admission = 4, .line = "  summarize yesterday's CI failures\r\nand say which are new" } }));
     try expectEffects(&.{}, try step(&state, .{ .first_line = .{ .reference = "f6g7h8".*, .admission = 9, .line = null } }));
-    // Another admission is another Message: ignored.
     try expectEffects(&.{}, try step(&state, .{ .first_line = .{ .reference = "p3q4r5".*, .admission = 5, .line = "not this one" } }));
     try std.testing.expectEqualStrings("summarize yesterday's CI failures", state.lineOf(state.find("h8q2mz".*).?).?);
     try std.testing.expectEqual(Line.unavailable, state.find("f6g7h8".*).?.line);
     try std.testing.expectEqual(Line.requested, state.find("p3q4r5".*).?.line);
     try expectScreenLine(&state, position(&state, "h8q2mz".*).? + 2, " ✓ summarize yesterday's CI failures                                        12m");
-    // Lines in flight or unreadable are not asked for again, and a refresh
-    // that replaces a row keeps the line of its unchanged first Message.
     try expectEffects(&.{}, try refresh(&state, .changed, testToken(2), &.{session("h8q2mz", .{ .working = ago(0) }, .{ .yours = true })}));
     try std.testing.expectEqualStrings("summarize yesterday's CI failures", state.lineOf(state.find("h8q2mz".*).?).?);
-    // An unreadable line is not asked for again while listings, changed or
-    // full, name its unchanged first Message.
     const f6g7h8 = session("f6g7h8", .{ .idle = ago(0) }, .{ .workspace = "/home/d/code/other", .first = .{ .position = 1, .admission = 9, .sender = "k7m2qx".* } });
     try expectEffects(&.{}, try refresh(&state, .changed, testToken(3), &.{f6g7h8}));
-    // The full listing finds h8q2mz's next Turn finished after the working
-    // above.
     var next_turn = mixed;
     next_turn[1].turn = 2;
     try expectEffects(&.{}, try refresh(&state, .full, testToken(4), &next_turn));
     try std.testing.expectEqual(Line.unavailable, state.find("f6g7h8".*).?.line);
     try std.testing.expectEqualStrings("summarize yesterday's CI failures", state.lineOf(state.find("h8q2mz".*).?).?);
-    // Results nobody asked for are ignored: a second answer for a read line,
-    // or one for a row whose line is unread.
     try expectEffects(&.{}, try step(&state, .{ .first_line = .{ .reference = "h8q2mz".*, .admission = 4, .line = "a second answer" } }));
     try expectEffects(&.{}, try step(&state, .{ .first_line = .{ .reference = "f6g7h8".*, .admission = 9, .line = "a late answer" } }));
     try std.testing.expectEqual(@as(usize, 1), state.lines.items.len);
     try std.testing.expectEqualStrings("summarize yesterday's CI failures", state.lineOf(state.find("h8q2mz".*).?).?);
     try std.testing.expectEqual(Line.unavailable, state.find("f6g7h8".*).?.line);
-    // A new first Message is asked for.
     var again: Reads = .{};
     again.items[0] = .{ .reference = "f6g7h8".*, .position = 2, .admission = 12 };
     again.len = 1;
@@ -4232,7 +3732,6 @@ test "a row from another Workspace keeps its title at every width" {
     for (40..120) |width| {
         const text = try screenText(&state, @intCast(width), 24, .{});
         defer std.testing.allocator.free(text);
-        // The title remains primary; Workspace detail takes no row space.
         try std.testing.expect(std.mem.indexOf(u8, text, "Profile") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "Trace") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "project") == null);
@@ -4248,25 +3747,20 @@ test "the selection stays on its Session when it moves from active to finished" 
     try expectSelected(&state, "e5f6g7");
     try std.testing.expectEqual(OrderClass.done, orderClass(&state, state.find("e5f6g7".*).?));
     try expectEffects(&.{ .{ .open = "e5f6g7".* }, .list_models }, try submit(&state));
-    // It leads the finished, newest first.
     const text = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "✓ List unused build steps") != null);
-    // Moving on goes to the next row on screen, not the next old index.
     _ = try press(&state, .next);
     try expectSelected(&state, "h8q2mz");
     _ = try press(&state, .next);
     try expectSelected(&state, "t7v8w9");
     _ = try press(&state, .next);
     try expectSelected(&state, "m1n2p3");
-    // A selected row remains selected when its age moves it to the end.
     _ = try refresh(&state, .changed, testToken(3), &.{session("m1n2p3", .{ .finished = ago(10 * 86400) }, .{ .label = "Explain provider output parsing" })});
     try expectSelected(&state, "m1n2p3");
     try std.testing.expectEqual(state.order.items.len, listLength(&state));
 }
 
-/// Takes every program status record waiting for the shell, as sent.
-/// Takes every record the terminal does not hold as wanted, as delivered.
 fn sentRecords(state: *State, into: []StatusRecord) []StatusRecord {
     var count: usize = 0;
     var unsettled = state.unsettledStatuses();
@@ -4294,15 +3788,12 @@ test "listings give each Session one program status record that follows its chan
     var state = try opened(&listed);
     defer state.deinit();
     var records: [8]StatusRecord = undefined;
-    // What the overview opened on: work under way and waiting, in key order.
     try expectRecords(&.{
         .{ .reference = "a1b2c3".*, .name = "Waits", .status = .blocked },
         .{ .reference = "b4n8wd".*, .name = "Busy", .status = .working },
     }, sentRecords(&state, &records));
-    // Unchanged, nothing waits, not even the old finish.
     _ = try refresh(&state, .full, testToken(2), &listed);
     try std.testing.expect(state.statusesSettled());
-    // b4n8wd finishes, a new Session fails, and a1b2c3 is listed no more.
     _ = try refresh(&state, .full, testToken(3), &.{
         listed[0],
         session("b4n8wd", .{ .finished = ago(0) }, .{ .label = "Busy", .turn = 1 }),
@@ -4314,14 +3805,10 @@ test "listings give each Session one program status record that follows its chan
         .{ .reference = "b4n8wd".*, .name = "Busy", .status = .done },
         .{ .reference = "z9y8x7".*, .name = "New", .status = .failed },
     }, sentRecords(&state, &records));
-    // Opening b4n8wd sees its finish; listing it again keeps that.
     _ = try step(&state, .{ .open = "b4n8wd".* });
     try expectRecords(&.{.{ .reference = "b4n8wd".*, .name = "Busy", .status = .idle }}, sentRecords(&state, &records));
     _ = try refresh(&state, .changed, testToken(4), &.{session("b4n8wd", .{ .finished = ago(0) }, .{ .label = "Busy", .turn = 1 })});
     try std.testing.expect(state.statusesSettled());
-    // Its next Turn's finish is a record again, and the Turn after it,
-    // though no listing read it working between; after the terminal
-    // cleared every record, each held one waits again.
     _ = try refresh(&state, .changed, testToken(5), &.{session("b4n8wd", .{ .finished = ago(0) }, .{ .label = "Busy", .turn = 2 })});
     try expectRecords(&.{.{ .reference = "b4n8wd".*, .name = "Busy", .status = .done }}, sentRecords(&state, &records));
     _ = try refresh(&state, .changed, testToken(6), &.{session("b4n8wd", .{ .finished = ago(0) }, .{ .label = "Busy", .turn = 3 })});
@@ -4387,8 +3874,6 @@ test "one click on a row opens it, under Enter's rules" {
     defer state.deinit();
     try expectEffects(&.{ .{ .open = "b2c3d4".* }, .list_models }, try step(&state, .{ .clicked = .{ .target = .{ .open = "b2c3d4".* } } }));
     try expectSelected(&state, "b2c3d4");
-    // While Host requests wait on an Upgrade, the click selects but does
-    // not open, as Enter would not.
     state.upgrade.run = .checking;
     try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .{ .open = "g7h8j9".* } } }));
     try expectSelected(&state, "g7h8j9");
@@ -4427,7 +3912,6 @@ test "a click that names a Session gone from the list since it was drawn changes
     try expectSelected(&state, &selected);
 }
 
-/// Each row once in `rows`, `by_reference` and `order`.
 fn expectEachOnce(state: *const State, expected: []const []const u8) !void {
     try std.testing.expectEqual(expected.len, state.rows.items.len);
     try std.testing.expectEqual(expected.len, state.order.items.len);
@@ -4448,14 +3932,11 @@ test "merging list pages keeps each Session once" {
     defer state.deinit();
     try std.testing.expectEqual(testToken(1), state.token.?);
 
-    // changed: replace by reference, insert what is new.
     _ = try refresh(&state, .changed, testToken(2), &.{ session("bbbbbb", .{ .finished = ago(0) }, .{ .label = "B" }), session("dddddd", .{ .pending = ago(0) }, .{ .label = "D" }) });
     try expectEachOnce(&state, &.{ "aaaaaa", "bbbbbb", "cccccc", "dddddd" });
     try std.testing.expect(state.find("bbbbbb".*).?.state == .finished);
     try std.testing.expectEqual(testToken(2), state.token.?);
 
-    // A page that restarts the listing supersedes the rows earlier pages
-    // gave, and the listing replaces the set at its end.
     var nine: [9]Listed = undefined;
     for (&nine, 0..) |*row, n| row.* = session(&[6]u8{ 'e', 'e', 'e', 'e', 'e', '0' + @as(u8, @intCast(n)) }, .{ .idle = ago(n) }, .{ .label = "E" });
     var asked = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
@@ -4468,13 +3949,11 @@ test "merging list pages keeps each Session once" {
     try expectEachOnce(&state, &.{ "aaaaaa", "bbbbbb", "cccccc", "eeeee0", "eeeee8" });
     try std.testing.expectEqual(testToken(6), state.token.?);
 
-    // not_modified keeps every row.
     asked = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
     try expectEffects(&.{.{ .list = testToken(6) }}, asked);
     _ = try respond(&state, .not_modified, testToken(6), &.{});
     try expectEachOnce(&state, &.{ "aaaaaa", "bbbbbb", "cccccc", "eeeee0", "eeeee8" });
 
-    // A full listing that names a Session twice keeps its later row.
     _ = try refresh(&state, .full, testToken(7), &.{ session("aaaaaa", a.state, .{ .label = "A", .read_version = testToken(6) }), b, session("aaaaaa", .{ .finished = ago(0) }, .{ .label = "A", .read_version = testToken(7) }) });
     try expectEachOnce(&state, &.{ "aaaaaa", "bbbbbb" });
     try std.testing.expect(state.find("aaaaaa".*).?.state == .finished);
@@ -4484,7 +3963,6 @@ test "a Session listed twice keeps its later row, whatever the order" {
     const a = session("aaaaaa", .{ .working = ago(10) }, .{ .label = "A" });
     const b = session("bbbbbb", .{ .working = ago(20) }, .{ .label = "B" });
     const c = session("cccccc", .{ .working = ago(30) }, .{ .label = "C" });
-    // The later duplicate sorts last by row but not by reference.
     var state = try opened(&.{ b, c, a, session("bbbbbb", .{ .finished = ago(0) }, .{ .label = "B", .read_version = testToken(2) }) });
     defer state.deinit();
     try expectEachOnce(&state, &.{ "aaaaaa", "bbbbbb", "cccccc" });
@@ -4497,7 +3975,6 @@ test "a Session listed twice keeps its later row, whatever the order" {
     try expectSelected(&state, "cccccc");
     try expectEffects(&.{.{ .stop = "cccccc".* }}, try press(&state, .stop));
 
-    // One full listing that delivers the same page twice.
     var rows: [10]Listed = undefined;
     for (&rows, 0..) |*row, n| row.* = session(&[6]u8{ 'r', 'r', 'r', 'r', 'r', '0' + @as(u8, @intCast(n)) }, .{ .idle = ago(n) }, .{ .label = "R" });
     try expectEffects(&.{.{ .list = testToken(1) }}, try step(&state, .{ .tick = state.now_ms + list_interval_ms }));
@@ -4514,19 +3991,15 @@ test "the overview says when it next needs a tick" {
     const start = test_now_s * 1000;
     try std.testing.expectEqual(@as(?u64, 0), state.wakeAt());
     _ = try step(&state, .{ .tick = start });
-    // Nothing falls due while the first listing is in flight.
     try std.testing.expectEqual(@as(?u64, null), state.wakeAt());
     const quota = failedRow("q1q1q1", 60, "provider_quota", test_now_s + 300);
     _ = try respond(&state, .full, testToken(1), &.{ retryRow("r1r1r1", "provider_temporary_http_429", 12), quota });
-    // The next listing comes first; while it is in flight, the retry falling
-    // due, then the quota reset.
     try std.testing.expectEqual(@as(?u64, start + list_interval_ms), state.wakeAt());
     _ = try step(&state, .{ .tick = start + list_interval_ms });
     try std.testing.expectEqual(@as(?u64, start + 12_000), state.wakeAt());
     _ = try step(&state, .{ .list = .failed });
     _ = try step(&state, .{ .tick = start + 12_000 });
     try std.testing.expect(state.find("r1r1r1".*).?.state == .pending);
-    // Then the quota resets.
     try std.testing.expectEqual(@as(?u64, (test_now_s + 300) * 1000), state.wakeAt());
     _ = try respond(&state, .full, testToken(2), &.{failedRow("q1q1q1", 60, "provider_quota", std.math.maxInt(i64))});
     _ = try step(&state, .{ .tick = start + 16_000 });
@@ -4542,7 +4015,6 @@ test "the overview lists once a second, one listing at a time" {
     _ = try respond(&state, .full, testToken(1), &mixed);
     try expectEffects(&.{.{ .list = testToken(1) }}, try step(&state, .{ .tick = start + 2 * list_interval_ms }));
     try expectEffects(&.{}, try step(&state, .{ .tick = start + 2 * list_interval_ms + 500 }));
-    // Host failures retain the rows without the removed Host-stopped band.
     try expectEffects(&.{}, try step(&state, .{ .list = .failed }));
     try expectEffects(&.{.{ .list = testToken(1) }}, try step(&state, .{ .tick = start + 3 * list_interval_ms }));
     try expectEffects(&.{}, try step(&state, .{ .list = .failed }));
@@ -4634,30 +4106,23 @@ test "an observed retry's own deadline updates row order counts and wake through
 
 test "the band derives provider trouble from rows, in priority order" {
     const done = session("ffffff", .{ .finished = ago(600) }, .{ .label = "Done" });
-    // Sign-in: an authentication failure newer than the newest completion.
     for ([_][]const u8{ "provider_http_401", "provider_sign_in_required", "provider_sign_in_refresh_token_expired" }) |code| try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = .codex }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, code, null) }, null)).?);
     try std.testing.expect(signInCode("provider_sign_in_refresh_token_expired") and signInCode("provider_http_401") and signInCode("provider_sign_in_required"));
     try std.testing.expect(!signInCode("provider_authentication_backend_failed"));
-    // A later completion clears it; a login in this terminal hides it until a newer failure.
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ session("ffffff", .{ .finished = ago(30) }, .{}), failedRow("aaaaaa", 60, "provider_http_401", null) }, null));
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_http_401", null) }, test_now_s - 30));
     try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = .codex }, (try bandOf(&.{ done, failedRow("aaaaaa", 10, "provider_http_401", null) }, test_now_s - 30)).?);
-    // A rejected API key: its own remedy, not a sign-in.
     try std.testing.expectEqual(Band{ .trouble = .api_key, .provider = .codex }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, failure_class.api_key_rejected, null) }, null)).?);
     try std.testing.expect(!signInCode(failure_class.api_key_rejected));
-    // Quota: shown with its reset time until that time passes.
     try std.testing.expectEqual(Band{ .trouble = .quota, .resets_at = test_now_s + 1200, .provider = .codex }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_quota", test_now_s + 1200) }, null)).?);
     try std.testing.expectEqual(Band{ .trouble = .quota, .provider = .codex }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_quota", null) }, null)).?);
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_plan", test_now_s) }, null));
-    // Rate limit: while any row retries for a 429.
     try std.testing.expectEqual(Band{ .trouble = .rate_limit, .sessions = 2 }, (try bandOf(&.{ retryRow("aaaaaa", "provider_temporary_http_429", 10), retryRow("bbbbbb", "provider_temporary_http_429", 20), retryRow("cccccc", "provider_temporary_error", 20) }, null)).?);
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{retryRow("aaaaaa", "provider_temporary_error", 10)}, null));
-    // A retry already due is pending, not retrying.
     var state = try opened(&.{retryRow("aaaaaa", "provider_temporary_http_429", 10)});
     defer state.deinit();
     state.now_ms = (test_now_s + 10) * 1000;
     try std.testing.expectEqual(@as(?Band, null), band(&state));
-    // Priority: sign-in, then quota, then rate limit.
     try std.testing.expectEqual(Trouble.sign_in, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), failedRow("bbbbbb", 90, "provider_http_401", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
     try std.testing.expectEqual(Trouble.quota, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
 }
@@ -4676,15 +4141,12 @@ test "a quota band adds where its provider raises the limit only when the line h
     const Case = struct { provider: Provider, resets_at: ?u64 = null, width: u16, shown: []const u8 };
     for ([_]Case{
         .{ .provider = .chatgpt, .width = 200, .shown = managed },
-        // The band keeps one cell each side: the exact fit holds it, a cell
-        // less does not.
         .{ .provider = .chatgpt, .width = managed.len + 2, .shown = managed },
         .{ .provider = .chatgpt, .width = managed.len + 1, .shown = "Quota used up." },
         .{ .provider = .chatgpt, .width = 60, .shown = "Quota used up." },
         .{ .provider = .chatgpt, .width = 40, .shown = "Quota used up." },
         .{ .provider = .chatgpt, .resets_at = test_now_s + 1200, .width = 200, .shown = "Quota used up. Resets in 20m. " ++ usage },
         .{ .provider = .chatgpt, .resets_at = test_now_s + 1200, .width = 60, .shown = "Quota used up. Resets in 20m." },
-        // A provider with no such place keeps the limit alone at any width.
         .{ .provider = .codex, .width = 200, .shown = "Quota used up." },
         .{ .provider = .openai, .resets_at = test_now_s + 1200, .width = 200, .shown = "Quota used up. Resets in 20m." },
     }) |case| {
@@ -4829,7 +4291,6 @@ test "the skin follows the terminal's background, night when it gave none" {
     try std.testing.expectEqual(Skin.night, (Caps{ .background = .{ 0, 0, 0 } }).skin());
     try std.testing.expectEqual(Skin.day, (Caps{ .background = .{ 0xf3, 0xee, 0xe2 } }).skin());
     try std.testing.expectEqual(Skin.day, (Caps{ .background = .{ 0xff, 0xff, 0xff } }).skin());
-    // Mid grey sits on the line; green weighs most.
     try std.testing.expectEqual(Skin.day, (Caps{ .background = .{ 128, 128, 128 } }).skin());
     try std.testing.expectEqual(Skin.night, (Caps{ .background = .{ 127, 127, 127 } }).skin());
     try std.testing.expectEqual(Skin.day, (Caps{ .background = .{ 0, 200, 0 } }).skin());
@@ -4848,24 +4309,19 @@ test "the status bar says the Upgrade at work, else the newest notice, else an U
     try expectStatus(&state, "Checking for updates…", .normal);
     _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none } } } });
     try expectStatus(&state, "Preparing Upgrade · no Hosts running · esc cancels", .normal);
-    // A notice never hides the run's line, where Esc is offered.
     state.say(.attention, "! Select a Session first.", .{});
     try expectStatus(&state, "Preparing Upgrade · no Hosts running · esc cancels", .normal);
     _ = try press(&state, .next);
-    // An ending that is news is a notice: it goes with the next key and
-    // the unconfirmed send shows again.
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 60, .patch = 0 }, .restarted = false } }, .outcome = .compatible } } });
     try std.testing.expectEqualStrings("Upgraded to 0.60.0", footerNotice(&state).?);
     try expectStatus(&state, "! Not confirmed · rui request recover " ++ key, .attention);
     _ = try press(&state, .next);
     try expectStatus(&state, "! Not confirmed · rui request recover " ++ key, .attention);
-    // A release this client cannot use stays until another Upgrade.
     _ = try step(&state, .start_upgrade);
     _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none } } } });
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
     _ = try press(&state, .next);
     try expectStatus(&state, "Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave", .attention);
-    // ASCII spells the line's dots.
     var ascii: StatusBuffer = undefined;
     try std.testing.expectEqualStrings("Rui 0.61.0 installed - restart rui to continue - your draft is kept until you leave", statusLine(&state, .{ .unicode = false }, &ascii).?.text);
 }
@@ -4932,7 +4388,6 @@ test "archive row marker follows the whole filter and row-state domain" {
     for ([_]ArchiveFilter{ .active, .archived, .all }) |filter| for ([_]ArchiveState{ .active, .archived }) |archive| for ([_]bool{ false, true }) |selected| for ([_]u16{ 40, 46, 140 }) |width| for ([_]bool{ false, true }) |unicode_marks| {
         var state = try opened(&.{session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "Archive audit" })});
         defer state.deinit();
-        // Exercise the draw owner even for pairs that a filtered listing omits.
         state.archive = filter;
         state.rows.items[0].archive_state = archive;
         state.selected = if (selected) .{ .session = "aaaaaa".* } else .new_session;
@@ -5059,7 +4514,6 @@ test "Alt-A conversation archive uses exact unlisted Session at once and shares 
         defer state.deinit();
         const archive: Event = .{ .conversed = .{ .reference = ref, .work = work, .input = .{ .archive = .active } } };
         try expectEffects(&.{.{ .archive = .{ .reference = ref } }}, try step(&state, archive));
-        // A second Alt-A while the first is pending sends nothing more.
         try expectEffects(&.{}, try step(&state, archive));
         try std.testing.expectEqual(@as(usize, 1), state.request_count);
         _ = try step(&state, .{ .archive = .{ .request = .{ .reference = ref }, .outcome = .{ .unconfirmed = "saved-handle" } } });
@@ -5085,13 +4539,10 @@ test "upgrade holds settle accepted archive restore and stop completions without
             for (outcomes) |outcome| {
                 var state = try testState();
                 defer state.deinit();
-                // Admit before the hold, then deliver the worker's answer.
                 try std.testing.expect(state.request(if (archived) .archive else .unarchive, ref));
                 state.left = left;
                 state.upgrade.after = if (blocked) .blocked else .reobserving;
                 try expectEffects(&.{}, try step(&state, .{ .archive = .{ .request = .{ .reference = ref, .archived = archived }, .outcome = outcome } }));
-                // A confirmed answer retires from the attached ledger; only
-                // unknown outcomes or departure custody retain a record.
                 const retained = left or outcome == .unconfirmed;
                 try std.testing.expectEqual(@as(usize, if (retained) 1 else 0), state.request_count);
                 if (retained) {
@@ -5168,8 +4619,6 @@ test "a saved MCP running line fits overview rows without narrowing its saved bo
 }
 
 test "overview order covers every Kind sender age queue and reference tie" {
-    // Every kind appears twice at the same age. Sender never affects order;
-    // references are the independent tie-break expectation within each class.
     var rows: [kind_cases.len * 2 + 4]Listed = undefined;
     for (kind_cases, 0..) |case, at| {
         for (0..2) |owner| {
@@ -5207,7 +4656,6 @@ test "overview order covers every Kind sender age queue and reference tie" {
     };
     try std.testing.expectEqual(expected.len, state.order.items.len);
     for (expected, state.order.items) |ref, at| try std.testing.expectEqualStrings(ref, &state.rows.items[at].reference);
-    // Bash with approvals belongs before every work row regardless of sender.
     var waiting = rows[8];
     waiting.state.bash.approvals = 1;
     _ = try refresh(&state, .changed, testToken(2), &.{waiting});
@@ -5267,10 +4715,6 @@ test "overview Listed copies last line into bounded owned rows and refresh repla
 }
 
 test "overview quiet rows: a chat never written in recedes unless it needs you, in every kind, stop, selection, width and depth" {
-    // Independent expectations from the approved mock: a chat the person
-    // never wrote in recedes unless it waits for approval or failed. A stop
-    // asked of an awaited decision, pending or unconfirmed, leaves the row
-    // under Needs you as main sorts it, so it stays loud.
     const Stop = enum { none, pending, unconfirmed };
     const cases = .{
         .{ kind_cases[0].state, false },
@@ -5309,7 +4753,6 @@ test "overview quiet rows: a chat never written in recedes unless it needs you, 
         try std.testing.expectEqual(selected, first.selected);
         try std.testing.expectEqual(selected, name.bold);
         try std.testing.expectEqual(if (selected) Colour.strong else Colour.normal, name.colour);
-        // The mark, name, state age and padding recede together.
         for (first.segments) |segment| try std.testing.expectEqual(quiet, segment.style.dim);
     };
     var empty = try opened(&.{session("newone", .{ .idle = ago(0) }, .{ .first = null })});
@@ -5353,7 +4796,6 @@ test "overview long name truncates while mark and state age remain visible" {
     defer arena.deinit();
     const first = try rowSegments(arena.allocator(), &state, 0, 40, .{}, 0);
     try std.testing.expectEqualStrings(" ✓ abcdefghijklmnopqrstuvwxyzABCDE… 19s ", try segmentText(arena.allocator(), first));
-    // A stale listing does not grey ended names, and unsafe bytes never escape.
     state.list_stale = true;
     const faded = try rowSegments(arena.allocator(), &state, 0, 40, .{}, 0);
     try std.testing.expectEqual(Colour.strong, (try styleOf(faded, "abcdefghijklmnopqrstuvwxyzABCDE…")).colour);
@@ -5416,7 +4858,6 @@ test "shared model reads are admitted by core openings and deduplicated across f
         try std.testing.expect(state.menu.loading() and !state.asking_models);
         try expectEffects(&.{ show, .list_models }, try openModelConsumer(&state, opening));
         try expectEffects(&.{show}, try openModelConsumer(&state, opening));
-        // A loading answer is retried on the next listing without any shell open.
         try expectEffects(&.{}, try step(&state, .{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .pending }}) } }));
         try expectEffects(&.{ .{ .list = testToken(1) }, .list_models }, try step(&state, .{ .tick = state.next_list_ms }));
         try expectEffects(&.{show}, try openModelConsumer(&state, opening));
@@ -5451,7 +4892,6 @@ test "shared model reads respect every Upgrade hold for opening and loading retr
         try expectEffects(if (wanted) &.{ .open_settings, .list_models } else &.{.open_settings}, try step(&state, .{ .clicked = .{ .target = .settings } }));
         try std.testing.expectEqual(wanted, state.asking_models);
         try expectEffects(&.{.open_settings}, try step(&state, .{ .clicked = .{ .target = .settings } }));
-        // Periodic loading retries must use exactly the same hold admission.
         const ticked = try step(&state, .{ .tick = state.next_list_ms });
         try expectEffects(&.{.{ .list = testToken(1) }}, ticked);
         if (hold == .reobserving) {
@@ -5492,7 +4932,6 @@ test "New Session Enter and click create exactly once with a copied default" {
         const input: Event = if (click) .{ .clicked = .{ .target = .new_session } } else .{ .input = .{ .key = .enter } };
         const effects = try step(&state, input);
         try expectEffects(&.{.{ .create = state.default }}, effects);
-        // The effect owns its bounded binding, not the mutable defaults slot.
         state.default.?.model.set("changed-after-admission") catch unreachable;
         state.default.?.provider = .codex;
         try std.testing.expectEqual(Provider.openai, effects.slice()[0].create.?.provider);
@@ -5655,7 +5094,6 @@ test "archive admission reports only a new ledger request across every surface c
             _ = try step(&state, .{ .tick = test_now_s * 1000 });
             _ = try respond(&state, .full, testToken(1), &.{session(&ref, .{ .working = ago(1) }, .{ .archive_state = archive })});
             if (held != .none) {
-                // Either pending archive direction blocks another intent.
                 try std.testing.expect(state.request(if (case.restore) .archive else .unarchive, ref));
                 if (held == .unknown) state.answer(0, .unknown, "01234567-89ab-4cde-8012-0123456789ab");
             }
@@ -5689,13 +5127,12 @@ test "archive admission reports only a new ledger request across every surface c
             if (hold != .active) {
                 try std.testing.expectEqualStrings(upgrade_recovery, state.notice.?.text());
             } else if (!case.restore and archive != .active) {
-                try std.testing.expect(state.notice == null); // The durable archive badge is the feedback.
+                try std.testing.expect(state.notice == null);
             } else if (held != .none) {
                 try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), if (held == .pending) "request pending" else "request unsure") != null);
             } else if (full) {
                 try std.testing.expectEqualStrings("! Busy; try again shortly.", state.notice.?.text());
             }
-            // Admission belongs to this one attempt, never retained State.
             try std.testing.expectEqual(IntentAdmission.refused, (try step(&state, .{ .resized = .{ .width = 46, .height = 18 } })).intent_admission);
         }
     };
@@ -5894,7 +5331,6 @@ test "empty Session projection retains full and delta metadata until any sender'
         try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
         try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
         try std.testing.expect(state.selected == .new_session);
-        // A Label, workspace or provider choice alone does not admit a Message.
         empty.label = "Renamed";
         empty.workspace = "/another/workspace";
         empty.provider = .openai;
@@ -5910,7 +5346,6 @@ test "empty Session projection retains full and delta metadata until any sender'
         try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
         try expectOrder(&state, &.{"Renamed"});
         try std.testing.expectEqual(empty.first, state.find(empty.reference).?.first);
-        // A full read applies the same visibility, without dropping empty rows.
         empty.first = null;
         _ = try refresh(&state, .full, testToken(4), &.{empty});
         try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
@@ -5936,7 +5371,6 @@ test "empty Session projection shows only the current open empty and reconciles 
     try expectOrder(&state, &.{"Admitted"});
     try expectSelected(&state, "filled");
     try std.testing.expectEqual(@as(usize, 3), state.rows.items.len);
-    // An explicit stale selection cannot authorize hidden-row operations.
     state.selected = .{ .session = "empty1".* };
     try std.testing.expect(state.selectedRow() == null);
     try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .enter } }));
@@ -6029,8 +5463,6 @@ test "empty chat name and selection agree across listing arrival orders and firs
         _ = try step(&state, .{ .open = empty.reference });
         _ = try step(&state, .{ .conversation = empty.reference });
         if (!listed_first) {
-            // Neither opening nor a metadata-less Current fabricates a list
-            // member. In particular a provider-less failure is not a band.
             try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
             try std.testing.expect(selectedLine(&state) == null);
             _ = try step(&state, .{ .observed = .{ .reference = empty.reference, .read_version = testToken(2), .work = .{ .state = failedRow("empty1", 1, "provider_http_401", null).state }, .opening = false } });
@@ -6039,8 +5471,6 @@ test "empty chat name and selection agree across listing arrival orders and firs
             try std.testing.expect(band(&state) == null);
             _ = try refresh(&state, .changed, testToken(3), &.{empty});
         }
-        // A pre-list reconciliation or a covered Settings selection cannot
-        // choose a different sidebar row from the conversation being shown.
         for ([_]Selection{ .new_session, .settings, .{ .session = "other1".* } }) |navigation| {
             state.selected = navigation;
             try std.testing.expectEqual(@as(?usize, 0), selectedLine(&state));
@@ -6065,8 +5495,6 @@ test "empty chat name and selection agree across listing arrival orders and firs
         _ = try step(&state, .{ .conversation = null });
         try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
         try std.testing.expect(selectedLine(&state) == null);
-        // Canonical admission, not naming/configuration choices, restores the
-        // normal row title. It remains visible after leaving the chat.
         var admitted = empty;
         admitted.first = .{ .position = 1, .admission = 4, .sender = null };
         _ = try refresh(&state, .changed, testToken(4), &.{admitted});
@@ -6090,7 +5518,6 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
         .{ .upgrade = .{ .after = .blocked }, .held = true },
     };
     const creations = enum { none, pending, uncertain };
-    // The entire semantic key domain, independent of the terminal decoder.
     var inputs: [std.enums.values(Action).len + 3]Input = undefined;
     for (std.enums.values(Action), 0..) |action, at| inputs[at] = .{ .action = action };
     inputs[inputs.len - 3] = .left;
@@ -6116,12 +5543,10 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
             try std.testing.expectEqual(Selection.new_session, state.selected);
             try std.testing.expectEqual(before_requests, state.request_count);
         } else if (key == .action and key.action == .exit) {
-            // Exit remains live even while creation or a covered page waits.
             try expectEffects(&.{.exit}, effects);
             try std.testing.expect(std.meta.eql(before_notice, state.notice));
             try std.testing.expectEqual(before_requests, state.request_count);
         } else if (key == .action and key.action == .clear and phase.escape) {
-            // Cancellable Escape precedes both Settings and creation isolation.
             try expectEffects(&.{.cancel_upgrade}, effects);
             try std.testing.expect(std.meta.eql(before_notice, state.notice));
             try std.testing.expectEqual(before_requests, state.request_count);
@@ -6463,7 +5888,6 @@ test "session list tabs have explicit destinations active no-op and one selectio
         try std.testing.expectEqual(Selection.archived, state.selected);
         try std.testing.expectEqual(ArchiveFilter.archived, state.archive);
         _ = try respond(&state, .full, testToken(2), &.{});
-        // Repeated and old-frame clicks still name Archived, never toggle it.
         try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .archived } }));
         try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .enter } }));
         _ = try step(&state, .{ .input = .{ .key = .left } });
@@ -6562,7 +5986,6 @@ test "session list has exactly one noninteractive gap only between both pin grou
         }
         try std.testing.expectEqual(@as(usize, @intFromBool(both)), gaps);
         try std.testing.expectEqual(n, seen);
-        // Keyboard moves through the order, never through the separator.
         state.selected = .new_session;
         _ = try press(&state, .next);
         try std.testing.expectEqual(Selection.sessions, state.selected);

@@ -1,5 +1,3 @@
-//! Tool set SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
@@ -12,7 +10,7 @@ const historical_domain = @import("../domain/historical.zig");
 const sqlite = @import("../sqlite.zig");
 const store_testing = @import("../testing.zig");
 const HistoricalSettings = historical_domain.HistoricalSettings;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
 const submitTestMessage = store_testing.submitTestMessage;
@@ -40,8 +38,6 @@ test "loaded tools hide configured tools from frozen requests reports and call s
     const empty_reply = try storage.configure(&empty, .{});
     try std.testing.expect(empty_reply == .accepted);
     const session = try configureTestSessionAsk(&storage, "loaded-hidden");
-    // An empty loaded set is deliberately unreachable through configure. Seed
-    // its durable representation to exercise frozen settlement defensively.
     try store_testing.setLoadedToolsForTesting(&storage, session.slice(), empty_reply.accepted.session.slice());
     for ([_]protocol.ReportProfile{ .current, .full }) |profile| {
         const bytes = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, profile);
@@ -60,8 +56,8 @@ test "loaded tools hide configured tools from frozen requests reports and call s
     try submitTestMessage(&storage, &tmp, "loaded-hidden-message", "loaded-hidden-message", session.slice(), "classify");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     {
-        var view: HistoricalView = undefined;
-        storage.openHistoricalView(binding, &view);
+        var view: TestingPage = undefined;
+        view.open(&storage, binding);
         defer view.close();
         var settings: HistoricalSettings = undefined;
         try view.settings(&settings);
@@ -69,7 +65,6 @@ test "loaded tools hide configured tools from frozen requests reports and call s
         var tool: historical_domain.HistoricalTool = .{};
         try std.testing.expect(!try view.nextTool(&tool));
     }
-    // Loading Bash after admission does not widen that frozen Operation.
     var update: wire_request.ConfigureCommand = .{};
     try update.key.set("loaded-hidden-grow");
     update.session = session;
@@ -86,8 +81,6 @@ test "loaded tools hide configured tools from frozen requests reports and call s
 test "a tool set at its bound saves and opens again" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    // Reserve all required built-ins (including skill), then fill the rest
-    // with independent synthetic records up to the tool set's declared bound.
     const count = tool_defs.max_host_tool_records - tool_defs.built_in_tool_set.records.len;
     var names: [count][9]u8 = undefined;
     var records: [tool_defs.max_host_tool_records]tool_defs.Record = undefined;
@@ -134,12 +127,9 @@ test "a Store opened without a tool set reads back the last one saved, an MCP se
         var saved = (try storage.readHostToolSet(std.testing.allocator)).?;
         defer saved.deinit(std.testing.allocator);
         try expectHostToolSet(&mcp_tool_set, &saved);
-        // The Host saves what it read when it reaches no server.
         const read = saved.toolSet();
         try storage.saveHostToolSet(&read);
     }
-    // A later tool set without the server's tool replaces it, and saving
-    // the earlier one again finds its set.
     try storage.saveHostToolSet(&testing_tool_set);
     {
         var saved = (try storage.readHostToolSet(std.testing.allocator)).?;
@@ -169,8 +159,6 @@ test "a saved tool set whose text no longer matches its digest fences the Store"
 }
 
 test "find_tools fences a description whose bytes no longer match its digest, searched or listed" {
-    // "fetch" matches the tool's name, so only its listing reads the
-    // description; "absent" matches nothing, so the search reads it whole.
     for ([_][]const u8{ "fetch", "absent" }) |word| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -186,7 +174,7 @@ test "find_tools fences a description whose bytes no longer match its digest, se
         const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         const calls = [_]TestingCall{.{ .item_id = "find", .name = "find_tools", .encoded_call_id = "find", .decoded_call_id = "find", .encoded_arguments = "{\\\"words\\\":\\\"fetch\\\"}", .decoded_arguments = "{\"words\":\"fetch\"}" }};
         try settleCallsForTesting(&storage, &tmp, model, "find-corrupt", &calls);
-        const input = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
+        const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
         try std.testing.expect(input.tool == .find_tools);
         try sqlite.exec(storage.sqliteDatabase(), "UPDATE content SET payload=CAST(upper(CAST(payload AS TEXT)) AS BLOB) WHERE content_id=(SELECT description_content_id FROM tool_record WHERE owner='mcp')");
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -211,7 +199,6 @@ test "a Session offering an MCP server's tool is listed, reported and settled" {
     const reply = try storage.configure(&command, .{});
     try std.testing.expect(reply == .accepted);
     const session = reply.accepted.session;
-    // Reading and reconfiguring it neither refuses nor fences.
     _ = try storage.inspectSessionForTesting(session.slice());
     var reworded: wire_request.ConfigureCommand = .{};
     try reworded.key.set("mcp-reconfigure");
@@ -227,7 +214,6 @@ test "a Session offering an MCP server's tool is listed, reported and settled" {
 
     try submitTestMessage(&storage, &tmp, "mcp-message", "mcp-message", session.slice(), "fetch");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    // MCP calls settle as Actions beside Bash, even before the runner lands.
     const calls = [_]TestingCall{
         .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"one\\\"}", .decoded_arguments = "{\"description\":\"Run\",\"cmd\":\"one\"}" },
         .{ .item_id = "item-2", .name = "fetch_page", .encoded_call_id = "call-2", .decoded_call_id = "call-2", .encoded_arguments = "{}", .decoded_arguments = "{}" },
@@ -241,7 +227,6 @@ test "a Session offering an MCP server's tool is listed, reported and settled" {
         const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, profile);
         defer std.testing.allocator.free(report);
         try std.testing.expect(std.mem.indexOf(u8, report, offered) != null);
-        // The full profile's revision lists them too.
         if (profile == .full) try std.testing.expect(std.mem.indexOf(u8, report[std.mem.indexOf(u8, report, offered).? + 1 ..], offered) != null);
     }
     var used = std.atomic.Value(u64).init(0);
@@ -256,7 +241,6 @@ test "a record names a server exactly when an MCP server owns it" {
     try std.testing.expect(!tool_defs.validServer(&.{ .name = "fetch_page", .owner = .mcp }));
     try std.testing.expect(!tool_defs.validServer(&.{ .name = "fetch_page", .owner = .mcp, .server = "docs server" }));
     try std.testing.expect(!tool_defs.validServer(&.{ .name = "bash", .owner = .rui, .server = "docs" }));
-    // Moving servers makes another record.
     var moved = mcp_record;
     moved.server = "wiki";
     try std.testing.expect(!std.mem.eql(u8, &tool_defs.recordDigest(&mcp_record), &tool_defs.recordDigest(&moved)));

@@ -1,9 +1,3 @@
-//! Tool records and tool sets (D48, D49). A record is one tool as the model
-//! is told about it, saved once by content; a set is an ordered list of
-//! records, saved once by its digest. A Session's settings, and so every
-//! revision and the Operations admitted under it, name the set they offer,
-//! and a request renders the saved text, so a reworded built-in changes
-//! only the sets saved after it.
 const std = @import("std");
 const command_input = @import("../../command_input.zig");
 const content_string = @import("../../content_string.zig");
@@ -41,26 +35,17 @@ const insert_set = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// SQL for loaded intent on a Session or configuration revision: its explicit
-/// loaded set, otherwise all configured names. Frozen offers live on Operations.
 pub fn offeredSetSql(comptime revision_alias: []const u8) []const u8 {
     return "coalesce(" ++ revision_alias ++ ".loaded_tool_set_id," ++ revision_alias ++ ".tool_set_id)";
 }
 
-/// A Rui SQL expression for the names of the set `set_column`'s members,
-/// joined by commas in no set order, since ordering them would sort; NULL
-/// for an empty set. A name has no comma (`tool_name.valid`), and
-/// a Session's names, as configure bounds them, fit `max_names_bytes`.
 pub fn namesSql(comptime set_column: []const u8) []const u8 {
     return "(SELECT @list(tool.name) FROM tool_set_member member " ++
         "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=" ++ set_column ++ ")";
 }
 
-/// The longest `namesSql` text of a Session's set.
 pub const max_names_bytes = tool_name.max_names_bytes;
 
-/// A Session's member named `name` in the source set `source`, as
-/// member `ordinal` of `set`. One row, or the source lacks it.
 const insert_selected_member = rsql.Write(.{
     .sql = "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) SELECT ?1,?2,member.tool_record_id " ++
         "FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=?3 AND tool.name=?4",
@@ -68,8 +53,6 @@ const insert_selected_member = rsql.Write(.{
     .expect = .{ .counted = .{ .otherwise = error.CorruptStore } },
 });
 
-/// The record with these name, owner and texts, as member `ordinal` of
-/// `set`. One row, or the record was never saved.
 const insert_tool_set_member = rsql.Write(.{
     .sql = "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) SELECT ?1,?2,tool.tool_record_id FROM tool_record tool " ++
         "JOIN content description ON description.content_id=tool.description_content_id " ++
@@ -91,26 +74,15 @@ const insert_tool_set_member = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// The digest of `tool_set`'s set: its records, in order.
 pub fn toolSetDigest(tool_set: *const tool_record.HostToolSet) [32]u8 {
     var digest: tool_record.SetDigest = .init();
     for (tool_set.digests) |*each| digest.add(each);
     return digest.final();
 }
 
-/// How many records one transaction of `SavingRecords` saves: each
-/// imports at most its two texts, within an Access's `max_inserted`.
 pub const records_per_transaction = 2;
 
-/// Saves each of `records` and its texts that no row holds yet, in rounds
-/// its caller runs: `lookup` queues the lookup of each record's texts;
-/// `importTexts`, after that round, imports the missing ones and queues the
-/// lookup of each record whose texts both existed, true when it queued
-/// one, a round its caller runs; `insert` then queues each record no row
-/// holds. A record that exists is left as it is. A transition keeps it in
-/// its value, so the rounds' rows land there.
 pub const SavingRecords = struct {
-    /// The caller's, which outlive the transaction.
     records: []const tool_record.Record,
     pairs: [records_per_transaction]content_domain.Pair = undefined,
     descriptions: [records_per_transaction]content_domain.Import = undefined,
@@ -127,9 +99,7 @@ pub const SavingRecords = struct {
         }
     }
 
-    /// After `lookup`'s round.
     pub fn importTexts(saving: *SavingRecords, a: anytype) !bool {
-        // A record can exist only when both its texts already do.
         var known = false;
         for (saving.records, 0..) |*each, index| {
             content_domain.foundPair(&saving.pairs[index], &saving.descriptions[index], &saving.schemas[index]);
@@ -148,7 +118,6 @@ pub const SavingRecords = struct {
         return known;
     }
 
-    /// After `importTexts`, and the round it asked for, if any.
     pub fn insert(saving: *SavingRecords, a: anytype) !void {
         for (saving.records, 0..) |*each, index| if (saving.existing[index] == null) {
             const ids = saving.content_ids[index];
@@ -158,21 +127,12 @@ pub const SavingRecords = struct {
     }
 };
 
-/// One transaction of `Store.saveHostToolSet`, by `start`. With none, round
-/// `.set` finds the saved set that holds `offered`: none ends with null,
-/// and one the Host does not point at yet is pointed at in the commit
-/// round. Below the record count, rounds `.texts` and `.records` save the
-/// records from `start` (`SavingRecords`), which the commit round writes.
-/// At it, the commit round saves the set and points the Host at it.
 pub const SaveHostToolSet = struct {
     pub const rounds = transition.rounds(.{ .set = .{.branch}, .texts = .{.branch}, .records = .{.branch} });
     pub const round_budget = 1;
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = .set;
-    /// The caller's, which outlive the transition.
     pub const Input = struct { offered: *const tool_record.HostToolSet, digest: *const [32]u8, start: ?usize };
-    /// The set's id: the saved one, or the one saved; null when no set
-    /// holds `offered` or the transaction saved records.
     pub const Result = ?u64;
     pub const Ordinary = store_core.Ordinary.none;
     pub const Guards = error{};
@@ -221,8 +181,6 @@ pub const SaveHostToolSet = struct {
     }
 };
 
-/// The tool_set's saved set, by its digest, and whether host_tool_set
-/// names it already.
 const lookup_tool_set = rsql.Read(.{
     .sql = "SELECT tool_set_id,EXISTS(SELECT 1 FROM host_tool_set host WHERE host.tool_set_id=tool_set.tool_set_id) AS current FROM tool_set WHERE digest=?1",
     .Args = struct { digest: [32]u8 },
@@ -230,7 +188,6 @@ const lookup_tool_set = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// host_tool_set's one row, on the first save.
 const start_host_tool_set = rsql.Write(.{
     .sql = "INSERT INTO host_tool_set(slot,tool_set_id) SELECT 1,?1 WHERE NOT EXISTS(SELECT 1 FROM host_tool_set)",
     .Args = struct { set: u64 },
@@ -243,20 +200,15 @@ const update_host_tool_set = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// Queues reading the tool_set's saved set, by `digest`.
 pub fn lookupHostToolSet(a: anytype, digest: *const [32]u8, set: *lookup_tool_set.Result) void {
     a.read(lookup_tool_set, .{ .digest = digest.* }, set);
 }
 
-/// Queues making `set_id` the Host's tool_set, the one the next start
-/// reads back.
 pub fn pointHostToolSet(a: anytype, set_id: u64) void {
     a.write(start_host_tool_set, .{ .set = set_id });
     a.write(update_host_tool_set, .{ .set = set_id });
 }
 
-/// The Host's tool_set set and its record count; none before the first
-/// tool_set is saved.
 const saved_tool_set = rsql.Read(.{
     .sql = "SELECT host.tool_set_id,tool_set.member_count FROM host_tool_set host JOIN tool_set ON tool_set.tool_set_id=host.tool_set_id",
     .Args = struct {},
@@ -266,7 +218,6 @@ const saved_tool_set = rsql.Read(.{
 
 pub const SavedHostToolSet = saved_tool_set.Result;
 
-/// One round: the Host's tool_set set.
 pub fn savedHostToolSetOf(a: anytype) !SavedHostToolSet {
     var set: SavedHostToolSet = null;
     a.read(saved_tool_set, .{}, &set);
@@ -274,8 +225,6 @@ pub fn savedHostToolSetOf(a: anytype) !SavedHostToolSet {
     return set;
 }
 
-/// One round: the tool_set set `set`'s records from `ordinal`, at most a
-/// batch and `rows.len`, in order; how many it read.
 pub fn hostToolRecordsOf(a: anytype, set: u64, ordinal: usize, rows: []host_tool_records.Row) !usize {
     var batch: RecordBatch = .{ .rows = rows };
     a.readEach(host_tool_records, .{ .set = set, .ordinal = ordinal }, @min(rows.len, host_tool_record_batch), &batch);
@@ -294,8 +243,6 @@ const RecordBatch = struct {
     }
 };
 
-/// A tool_set set's members from ordinal ?2 on: each record and where
-/// its texts are.
 pub const host_tool_records = rsql.Read(.{
     .sql = "SELECT member.ordinal,tool.name,tool.owner,tool.server,tool.read_only,description.content_id AS description_id,description.byte_length AS description_length," ++
         "description.digest AS description_digest,description.private AS description_private,input_schema.content_id AS schema_id," ++
@@ -323,10 +270,8 @@ pub const host_tool_records = rsql.Read(.{
     .cardinality = .each,
 });
 
-/// How many records one round of `host_tool_records` reads.
 pub const host_tool_record_batch = 16;
 
-/// Queues saving `tool_set`'s set, whose every record is saved, as `set_id`.
 pub fn insertHostToolSet(a: anytype, tool_set: *const tool_record.HostToolSet, digest: *const [32]u8, set_id: u64) void {
     a.write(insert_set, .{ .id = set_id, .digest = digest.*, .count = tool_set.records.len });
     for (tool_set.records, 0..) |*each, ordinal| a.write(insert_tool_set_member, .{
@@ -343,14 +288,11 @@ pub fn insertHostToolSet(a: anytype, tool_set: *const tool_record.HostToolSet, d
     });
 }
 
-/// The set a configure saves: the tool_set's records `names` names, in
-/// name order, and the digest it is saved under.
 pub const Selection = struct {
     names: *const command_input.ToolsField,
     digest: [32]u8,
     set: lookup_set.Result = null,
 
-    /// Null when the tool_set lacks one of `names`.
     pub fn of(tool_set: *const tool_record.HostToolSet, names: *const command_input.ToolsField) ?Selection {
         var digest: tool_record.SetDigest = .init();
         var each = names.iterator();
@@ -376,11 +318,6 @@ const selection_records = rsql.Read(.{
     .cardinality = .each,
 });
 
-/// A selection from an already saved set, not today's tool_set, in one
-/// round its caller runs: `queue` queues the source set's records, and
-/// `selection`, after that round, is the selection. The digest and
-/// finishSelection's inserted members must use the same source. A transition keeps it, as the round's visitor, in storage
-/// that outlives the round.
 pub const SavedSelection = struct {
     names: *const command_input.ToolsField,
     digest: tool_record.SetDigest = .init(),
@@ -390,7 +327,6 @@ pub const SavedSelection = struct {
         a.readEach(selection_records, .{ .set = source_set }, tool_name.max_tools + 1, self);
     }
 
-    /// After `queue`'s round.
     pub fn selection(self: *SavedSelection) !Selection {
         if (self.count != self.names.count) return error.CorruptStore;
         return .{ .names = self.names, .digest = self.digest.final() };
@@ -415,13 +351,10 @@ pub const SavedSelection = struct {
     }
 };
 
-/// Queues the read `finishSelection` follows: the set by its digest.
 pub fn lookupSelection(a: anytype, selection: *Selection) void {
     a.read(lookup_set, .{ .digest = selection.digest }, &selection.set);
 }
 
-/// After `lookupSelection`'s round: the id of the set `selection` names,
-/// the saved one or one queued now from the source set `source_set`.
 pub fn finishSelection(a: anytype, selection: *const Selection, source_set: u64) !u64 {
     if (selection.set) |row| return row.tool_set_id.get();
     const set_id = try a.identity(.tool_set_id);
@@ -432,23 +365,15 @@ pub fn finishSelection(a: anytype, selection: *const Selection, source_set: u64)
     return set_id;
 }
 
-/// An already saved record, named within its source set. Mixed-source sets
-/// preserve frozen built-ins while selecting today's MCP records.
 pub const Member = struct {
     name: Bounded(tool_record.max_name_bytes),
     source: u64,
     digest: [32]u8,
 };
 
-/// Interns a name-ordered effective offer in the rounds its caller runs:
-/// `queue` queues the lookup of the set by its digest, and `finish`, after
-/// that round, answers the saved set's id, or takes a new id and queues the
-/// set's rows. All members and their names must outlive the round that
-/// runs those rows.
 pub const Interning = struct {
     digest: [32]u8 = undefined,
     saved: lookup_set.Result = null,
-    /// Whether `finish` queued a new set's rows.
     inserted: bool = false,
 
     pub fn queue(interning: *Interning, a: anytype, members: []const Member) void {
@@ -458,7 +383,6 @@ pub const Interning = struct {
         a.read(lookup_set, .{ .digest = interning.digest }, &interning.saved);
     }
 
-    /// After `queue`'s round.
     pub fn finish(interning: *Interning, a: anytype, members: []const Member) !u64 {
         if (interning.saved) |row| return row.tool_set_id.get();
         const id = try a.identity(.tool_set_id);

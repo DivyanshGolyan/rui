@@ -1,4 +1,3 @@
-/* Synthetic empty-table scheduler CPU probe; not a whole-runtime idle baseline. */
 #include <assert.h>
 #include <errno.h>
 #include <inttypes.h>

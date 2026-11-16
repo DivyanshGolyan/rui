@@ -1,16 +1,13 @@
-//! Independent panels painted above a base, each on its own ground.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Self = @This();
 
 base: vxfw.Widget,
-/// Borrowed, bottom to top. Widgets and callback data outlive the surface.
 panels: []const Panel = &.{},
 
 pub const Panel = struct {
     child: vxfw.Widget,
-    /// Exclusive bottom row and inclusive top row, in base coordinates.
     bottom: u16,
     top: u16 = 0,
     style: vaxis.Style = .{},
@@ -35,8 +32,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     return self.drawAbove(ctx, try self.base.draw(ctx));
 }
 
-/// Compose an already drawn base when panel bounds depend on its layout.
-/// Tree metadata belongs to ctx.arena; cell buffers belong to ctx.cell_arena.
 pub fn drawAbove(self: *const Self, ctx: vxfw.DrawContext, base: vxfw.Surface) std.mem.Allocator.Error!vxfw.Surface {
     std.debug.assert(self.panels.len <= 254);
     if (base.size.width == 0 or base.size.height == 0) return .empty(self.widget());

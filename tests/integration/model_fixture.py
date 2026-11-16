@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Shared model endpoints and caller/process lifecycle fixtures."""
 import email.utils
 import http.server
 import json
@@ -76,7 +75,6 @@ def builtin_instructions(model):
 
 
 def model_instructions(workspace, baseline="", *, store, session, model):
-    """Shared prose with independently encoded, caller-supplied fixture facts."""
     parts = MODEL_CONTEXT_PARTS
     workspace = json.dumps(str(workspace), ensure_ascii=False)[1:-1]
     assert len(session) == 6 and all(c in "0123456789abcdefghjkmnpqrstvwxyz" for c in session), session
@@ -85,21 +83,16 @@ def model_instructions(workspace, baseline="", *, store, session, model):
 
 
 def instructions_session(instructions):
-    """The Session ID in the slot after the escaped Workspace, located by the
-    prompt file's own parts rather than its wording."""
     return instructions.split(MODEL_CONTEXT_PARTS[1], 1)[1][:6]
 
 
 def instructions_workspace(instructions):
-    """The decoded Workspace slot, located by the prompt file's own parts."""
     quoted = instructions.split(MODEL_CONTEXT_PARTS[0], 1)[1].split(MODEL_CONTEXT_PARTS[1], 1)[0]
     return json.loads('"' + quoted + '"')
 
 
 class FailureEndpoint(HeldReplies, TestHTTPServer):
     allow_reuse_address = True
-    # One stream per h2c connection, so a dropped connection (/disconnect)
-    # fails one request only, as it does over HTTP/1.1.
     h2_max_concurrent_streams = 1
 
     def __init__(self):
@@ -364,11 +357,6 @@ class SuccessEndpoint(HeldReplies, TestHTTPServer):
         self.responses = list(responses)
         self.responses_by_input = responses_by_input
         self.chunk_sizes = (1, 2, 5, 3, 7, 4, 1, 6) if chunk_sizes is None else chunk_sizes
-        # Default chunking fragments the first 8 KiB of each response, which
-        # splits its first events at every offset. h2c makes every write a
-        # DATA frame, which costs both sides a send, a receive and a capture
-        # write: ~35 us per frame on Linux and roughly ten times that on the
-        # macOS runners, where a 64 KiB prefix (18,000 frames) timed out.
         self.fragmented_bytes = 8 * 1024 if chunk_sizes is None else None
         self.requests = []
         self.request_times = []
@@ -431,7 +419,6 @@ class SuccessHandler(http.server.BaseHTTPRequestHandler):
             self.send_header(name, value)
         self.send_header("Connection", "close")
         self.end_headers()
-        # Default chunks split SSE fields, JSON punctuation, escapes and UTF-8.
         offsets = self.server.chunk_sizes
         cursor = 0
         index = 0
@@ -495,7 +482,6 @@ def finish_command(process, expect=0):
 
 
 def host_arguments(store, endpoint, *extra, accelerated_retries=True, active_capacity=1):
-    # Settings apply in order: caller assignments override these fixture defaults.
     explicit = {str(argument) for argument in extra}
     args = [
         str(RUI),
@@ -536,7 +522,6 @@ def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacit
 
 
 def stop_host(process):
-    # Fixture disposal is an unclean SIGKILL, not evidence of graceful shutdown.
     stop_process(process)
 
 
@@ -548,8 +533,6 @@ def crash_host(process, state, label, diagnostics=None):
         observations = getattr(process, "rui_observations", None)
         try:
             if observations is not None:
-                # Frame receipt precedes native retirement. Keep this cut
-                # unsealed and reserve reap credit from the same allowance.
                 observations.wait_for_publication_retirement(deadline - 1)
         except BaseException as error:
             errors.append(error)
@@ -576,10 +559,6 @@ def crash_host(process, state, label, diagnostics=None):
             "stderr": stderr,
         }
     finally:
-        # Reap/observation validity and pipe closure retain an explicit owner,
-        # including when bounded diagnostic collection or persistence fails.
-        # A failed first kill/reap must not turn this cut into sealed disposal
-        # or renew its original crash allowance.
         stop_process(process, timeout=max(0, deadline - time.monotonic()), seal_observations=False)
 
 
@@ -782,7 +761,6 @@ def completed_observation(store, key, *, deadline=None):
 
 
 def wait_for_result_release(store, key, session, deadline, *, inspect=None):
-    """Read one terminal result and its release within the original budget."""
     observation = wait_for(
         lambda: (value if (value := observe(store, key, deadline=deadline)).get("state") in TERMINAL_MESSAGE_STATES else None),
         f"{key} terminal result", deadline=deadline,
@@ -797,8 +775,6 @@ def wait_for_result_release(store, key, session, deadline, *, inspect=None):
 
 
 def wait_model_cleanup(diagnostics, store, session, observation, deadline, *, peers=None):
-    # A saved result is semantic authority, not physical release. Match the
-    # admitted owner before checking its final accounting, with no fresh budget.
     diagnostics.wait_model_cleanup(observation["binding"], deadline)
 
     def inspect(remaining):
@@ -825,8 +801,6 @@ def stop_endpoint(endpoint, endpoints):
             try:
                 endpoint.shutdown()
             except BaseException:
-                # A pre-effect refusal leaves serve_forever alive. Retry once,
-                # retaining the first failure even if retirement then succeeds.
                 dispose_all(endpoint.shutdown)
                 raise
 
@@ -835,14 +809,11 @@ def stop_endpoint(endpoint, endpoints):
             thread.join(timeout=5)
             assert not thread.is_alive(), "Dispatch endpoint thread did not retire"
 
-    # shutdown/server_close may block; the join timeout is not a shutdown bound.
     dispose_all(
         shutdown,
         endpoint.server_close,
         join,
     )
-    # dispose_all retains an active body error; inspect retirement rather than
-    # treating its return as proof that every disposal succeeded.
     if endpoint.fileno() == -1 and not thread.is_alive():
         del endpoints[endpoint]
 

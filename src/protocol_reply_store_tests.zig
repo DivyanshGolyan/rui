@@ -1,4 +1,3 @@
-//! Contracts between Store replies and the client reply decoder.
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const protocol_reply = @import("protocol_reply.zig");
@@ -67,9 +66,6 @@ test "a Session with message_agent keeps it through its list row and report, as 
 }
 
 test "Session settings Current report and typed Settings round trip every setting" {
-    // This is a codec contract, not an engine conformance test. Use the same
-    // SQLite fixture as the other native decoder contracts so presentation
-    // imports do not become dependencies of live-engine acceptance.
     const settings = @import("session_settings.zig");
     const reply = protocol_reply;
     const io = std.testing.io;
@@ -152,4 +148,289 @@ test "Session settings Current report and typed Settings round trip every settin
     try std.testing.expectEqualStrings("Every setting", current.label.?.slice());
     try std.testing.expectEqualStrings(&std.fmt.bytesToHex(protocol.contentDigest("Every setting instructions."), .lower), current.instructions.sha256.slice());
     try std.testing.expectEqualStrings(&std.fmt.bytesToHex(protocol.contentDigest("{}"), .lower), current.output_schema.?.sha256.slice());
+}
+
+const PromotedApproval = struct {
+    fn expect(storage: *store.Store, tmp: *std.testing.TmpDir, session: []const u8, action: u64, present: bool) !void {
+        const bytes = try store.testingSessionReportWithProfile(storage, tmp, session, 1024 * 1024, .current);
+        defer std.testing.allocator.free(bytes);
+        const expected: ?u64 = if (present) action else null;
+        var request: protocol.ActivityPage = .{};
+        try request.session.set(session);
+        var page: @import("activity_facts.zig").Page = undefined;
+        try storage.activityPage(&request, &page);
+        const report_file = try tmp.dir.createFile(std.testing.io, "native-promotion-report", .{ .read = true });
+        defer report_file.close(std.testing.io);
+        try report_file.writePositionalAll(std.testing.io, bytes, 0);
+        const report_read = protocol_reply.CurrentReply.decode(std.testing.io, report_file, session, .{ .report = .{ .bytes = bytes.len } }) catch |err| {
+            std.debug.print("native promotion Current decode: {s} present={any}\n", .{ @errorName(err), present });
+            return err;
+        };
+        try std.testing.expect(report_read == .current);
+        try std.testing.expectEqual(expected, report_read.current.first_action);
+        var rendered: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer rendered.deinit();
+        try @import("host_reply.zig").renderActivityPage(.{ .writer = &rendered.writer }, &page);
+        const parsed = try std.testing.allocator.create(protocol_reply.ActivityPage);
+        defer std.testing.allocator.destroy(parsed);
+        parsed.* = protocol_reply.ActivityPage.parse(rendered.written(), .{}) catch |err| {
+            std.debug.print("native promotion Activity decode: {s} present={any}\n", .{ @errorName(err), present });
+            return err;
+        };
+        try std.testing.expectEqual(expected, parsed.facts.work.work.first_action);
+    }
+};
+
+const PromotedAction = struct {
+    session: protocol.Bounded(protocol.max_session_bytes),
+    action: u64,
+    receipt_position: u64,
+
+    fn make(storage: *store.Store, tmp: *std.testing.TmpDir, mode: @import("cli_value.zig").PermissionMode) !PromotedAction {
+        const io = std.testing.io;
+        var workspace_buffer: [@import("workspace_path.zig").max_bytes]u8 = undefined;
+        const workspace = try store.testingCanonicalCwd(io, &workspace_buffer);
+        var configure = try store.testingCompleteConfiguration("configure", "", workspace, "model-a");
+        try configure.configuration.permission_mode.value.set(@tagName(mode));
+        const session = (try storage.configure(&configure, .{})).accepted.session;
+        try store.testingSubmitMessage(storage, tmp, "input", "task", session.slice(), "Run the tool.");
+        const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const arguments = "{\"description\":\"Held tool\",\"cmd\":\"true\"}";
+        const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, arguments, .{});
+        defer std.testing.allocator.free(encoded);
+        try store.settleCallsForTesting(storage, tmp, model, "calls", &.{.{
+            .item_id = "call-item",
+            .name = "bash",
+            .encoded_call_id = "call-id",
+            .decoded_call_id = "call-id",
+            .encoded_arguments = encoded[1 .. encoded.len - 1],
+            .decoded_arguments = arguments,
+        }});
+        const action = try store.testing.queryU64(storage, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1", .{model.operation_id});
+        const free: usize = 2;
+        var promote: @import("command_input.zig").ActionBackgroundCommand = .{ .action_id = action, .session = session };
+        try promote.key.set("promote");
+        const promoted = storage.backgroundAction(&promote, .{ .total = 2, .context = &free, .freeFn = struct {
+            fn read(context: *const anyopaque) usize {
+                return @as(*const usize, @ptrCast(@alignCast(context))).*;
+            }
+        }.read }, .{});
+        try std.testing.expect(promoted == .accepted);
+        return .{ .session = session, .action = action, .receipt_position = promoted.accepted.selection.position };
+    }
+
+    fn attempt(self: PromotedAction, storage: *store.Store) !store.ActionAttemptBinding {
+        const selected = (try storage.nextAction(.bash, .fromFree(2, true))).?;
+        const binding = (try storage.admitActionAttempt(selected, 30_000, .{})).?.permit.binding;
+        try std.testing.expectEqual(self.action, binding.action_id);
+        return binding;
+    }
+
+    fn finish(storage: *store.Store, tmp: *std.testing.TmpDir, continuation: store.AttemptBinding) !void {
+        try store.settleAnswerItemsForTesting(storage, tmp, continuation, &.{"{\"type\":\"message\",\"id\":\"answer-item\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done.\"}]}"}, "Done.");
+    }
+
+    const Stage = enum { pending, resolved_open, resolved_closed };
+
+    fn expectCurrent(self: PromotedAction, storage: *store.Store, tmp: *std.testing.TmpDir, stage: Stage) !void {
+        const read = try std.testing.allocator.create(@import("action_read.zig").Read);
+        defer std.testing.allocator.destroy(read);
+        try storage.readAction(&.{ .session = self.session, .action_id = self.action }, read);
+        if (stage == .pending) {
+            try std.testing.expect(read.status == .pending);
+        } else {
+            try std.testing.expect(read.status == .resolved);
+            try std.testing.expectEqualStrings("succeeded", read.status.resolved.resolution.code.slice());
+            try std.testing.expect(read.status.resolved.resolution.position > self.receipt_position);
+        }
+        const bytes = try store.testingSessionReportWithProfile(storage, tmp, self.session.slice(), 1024 * 1024, .current);
+        defer std.testing.allocator.free(bytes);
+        const file = try tmp.dir.createFile(std.testing.io, "background-current", .{ .read = true });
+        defer file.close(std.testing.io);
+        try file.writePositionalAll(std.testing.io, bytes, 0);
+        const decoded = try protocol_reply.CurrentReply.decode(std.testing.io, file, self.session.slice(), .{ .report = .{ .bytes = bytes.len } });
+        try std.testing.expect(decoded == .current);
+        const Sink = struct {
+            action: u64,
+            final: ?@import("action_read.zig").Resolution,
+            unresolved: usize = 0,
+            resolved: usize = 0,
+            pub fn visit(self_: *@This(), attention: protocol_reply.Current.Attention) !void {
+                switch (attention) {
+                    .unresolved => |row| {
+                        try std.testing.expectEqual(self_.action, row.action.value);
+                        try std.testing.expect(row.presentation.value.publication_position == null);
+                        self_.unresolved += 1;
+                    },
+                    .resolved => |row| {
+                        const final = self_.final orelse return error.TestUnexpectedResult;
+                        try std.testing.expectEqual(self_.action, row.action.value);
+                        try std.testing.expectEqualStrings(final.code.slice(), row.code.slice());
+                        try std.testing.expectEqual(final.position, row.acceptance_position.value);
+                        try std.testing.expectEqual(final.content.length, row.result.bytes.value);
+                        try std.testing.expectEqualStrings(&std.fmt.bytesToHex(final.content.digest, .lower), row.result.sha256.slice());
+                        try std.testing.expect(row.presentation.value.publication_position == null);
+                        self_.resolved += 1;
+                    },
+                    else => {},
+                }
+            }
+        };
+        var sink: Sink = .{ .action = self.action, .final = if (read.status == .resolved) read.status.resolved.resolution else null };
+        try decoded.current.traverse(std.testing.io, file, &sink);
+        try std.testing.expectEqual(@as(usize, if (stage == .pending) 1 else 0), sink.unresolved);
+        try std.testing.expectEqual(@as(usize, if (stage == .resolved_open) 1 else 0), sink.resolved);
+        try std.testing.expect(!storage.isFenced());
+    }
+
+    fn receipt(self: PromotedAction, storage: *store.Store) !@import("activity_facts.zig").Item.Content {
+        var request: protocol.ActivityPage = .{ .kinds = .initOne(.tool_result) };
+        try request.session.set(self.session.slice());
+        const page = try std.testing.allocator.create(protocol_reply.ActivityPage);
+        defer std.testing.allocator.destroy(page);
+        try readNativeActivity(storage, &request, page);
+        try std.testing.expectEqual(@as(usize, 1), page.facts.count);
+        const item = page.facts.items[0];
+        try std.testing.expectEqual(self.receipt_position, item.position);
+        try std.testing.expect(item.value == .tool_result);
+        try std.testing.expectEqual(protocol.ToolPresentation.Code.background, item.value.tool_result.presentation.code);
+        try std.testing.expectEqual(@as(?u64, self.receipt_position), item.value.tool_result.presentation.publication_position);
+        return item.value.tool_result.content;
+    }
+};
+
+fn readNativeActivity(storage: *store.Store, request: *const protocol.ActivityPage, decoded: *protocol_reply.ActivityPage) !void {
+    const produced = try std.testing.allocator.create(@import("activity_facts.zig").Page);
+    defer std.testing.allocator.destroy(produced);
+    try storage.activityPage(request, produced);
+    var rendered: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer rendered.deinit();
+    try @import("host_reply.zig").renderActivityPage(.{ .writer = &rendered.writer }, produced);
+    decoded.* = try protocol_reply.ActivityPage.parse(rendered.written(), .{ .end = request.end, .position = request.position, .ordinal = request.ordinal, .direction = request.direction, .kinds = request.kinds, .limit = request.limit });
+}
+
+test "client decoders retain promoted old Turn approval before and after continuation" {
+    for ([_]enum { allow, deny, stop }{ .allow, .deny, .stop }) |choice| {
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: store.Store = undefined;
+        try store.testing.testingSqliteStore(&storage, &tmp, io);
+        defer storage.close() catch unreachable;
+        const promoted = try PromotedAction.make(&storage, &tmp, .ask);
+        const session = promoted.session;
+        const action = promoted.action;
+        const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try PromotedApproval.expect(&storage, &tmp, session.slice(), action, true);
+        try store.settleAnswerItemsForTesting(&storage, &tmp, continuation, &.{"{\"type\":\"message\",\"id\":\"answer-item\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done.\"}]}"}, "Done.");
+        try PromotedApproval.expect(&storage, &tmp, session.slice(), action, true);
+        if (choice == .stop) {
+            var stop = try store.testingCompleteSessionStop("stop-pending", session.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+        } else {
+            var decision: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = action, .decision = if (choice == .allow) .allow_once else .deny };
+            try decision.key.set("decide-old-turn");
+            try std.testing.expect(storage.decidePermission(&decision, .{}) == .accepted);
+            if (choice == .allow) {
+                const selected = (try storage.nextAction(.bash, .fromFree(2, true))).?;
+                const binding = (try storage.admitActionAttempt(selected, 30_000, .{})).?.permit.binding;
+                _ = try storage.settleActionAttempt(binding, .succeeded, "Approved after Turn ended", .{});
+            }
+        }
+        try PromotedApproval.expect(&storage, &tmp, session.slice(), action, false);
+    }
+}
+
+test "saved invalid Action targets round trip through Store observation and exact replay" {
+    inline for (.{ @as(u64, 0), std.math.maxInt(u64) }) |target| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: store.Store = undefined;
+        try store.testing.testingSqliteStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        var command: @import("command_input.zig").ActionBackgroundCommand = .{ .action_id = target };
+        try command.key.set("invalid-action-target");
+        try command.session.set("k7m2qx");
+        const free: usize = 2;
+        const capacity: store.ActionCapacityView = .{ .total = 2, .context = &free, .freeFn = struct {
+            fn read(context: *const anyopaque) usize {
+                return @as(*const usize, @ptrCast(@alignCast(context))).*;
+            }
+        }.read };
+        const refused = storage.backgroundAction(&command, capacity, .{});
+        try std.testing.expect(refused == .rejected and refused.rejected.code == .invalid_target and !refused.rejected.replayed);
+        const observed = try store.testing.observeCommandForTesting(&storage, command.key.slice());
+        var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer output.deinit();
+        try @import("host_reply.zig").renderFullCommandObservation(.{ .writer = &output.writer }, command.key.slice(), &observed, null);
+        const decoded = try protocol_reply.CommandObservation.parse(.{ .status = 200, .body = output.written() }, command.key.slice());
+        try std.testing.expectEqual(target, decoded.action_target.?);
+        try std.testing.expectEqualStrings("invalid_target", decoded.failureCode().?);
+        const replay = storage.backgroundAction(&command, capacity, .{});
+        try std.testing.expect(replay == .rejected and replay.rejected.code == .invalid_target and replay.rejected.replayed);
+    }
+}
+
+test "native Current separates background fulfillment from final Resolution across continuation" {
+    for ([_]enum { before, during, after }{ .before, .during, .after }) |settle| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: store.Store = undefined;
+        try store.testing.testingSqliteStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const promoted = try PromotedAction.make(&storage, &tmp, .bypass);
+        const original = try promoted.receipt(&storage);
+        try promoted.expectCurrent(&storage, &tmp, .pending);
+        const binding = try promoted.attempt(&storage);
+        try promoted.expectCurrent(&storage, &tmp, .pending);
+        if (settle == .before) _ = try storage.settleActionAttempt(binding, .succeeded, "Sole final result", .{});
+        try promoted.expectCurrent(&storage, &tmp, if (settle == .before) .resolved_open else .pending);
+        const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try promoted.expectCurrent(&storage, &tmp, if (settle == .before) .resolved_open else .pending);
+        if (settle == .during) _ = try storage.settleActionAttempt(binding, .succeeded, "Sole final result", .{});
+        try promoted.expectCurrent(&storage, &tmp, if (settle == .after) .pending else .resolved_open);
+        try PromotedAction.finish(&storage, &tmp, continuation);
+        try promoted.expectCurrent(&storage, &tmp, if (settle == .after) .pending else .resolved_closed);
+        if (settle == .after) _ = try storage.settleActionAttempt(binding, .succeeded, "Sole final result", .{});
+        try promoted.expectCurrent(&storage, &tmp, .resolved_closed);
+        try std.testing.expectEqualDeep(original, try promoted.receipt(&storage));
+    }
+}
+
+test "native Activity round trips selected and Action-only stops before and after settlement" {
+    for ([_]bool{ false, true }) |close_turn| {
+        for ([_]bool{ false, true }) |settle_before_stop| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: store.Store = undefined;
+            try store.testing.testingSqliteStore(&storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const promoted = try PromotedAction.make(&storage, &tmp, .bypass);
+            const binding = try promoted.attempt(&storage);
+            if (close_turn) {
+                const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try PromotedAction.finish(&storage, &tmp, continuation);
+            }
+            if (settle_before_stop) _ = try storage.settleActionAttempt(binding, .succeeded, "Before stop", .{});
+            var stop = try store.testingCompleteSessionStop("stop-domain", promoted.session.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+            var request: protocol.ActivityPage = .{ .kinds = .initOne(.stop) };
+            try request.session.set(promoted.session.slice());
+            const page = try std.testing.allocator.create(protocol_reply.ActivityPage);
+            defer std.testing.allocator.destroy(page);
+            try readNativeActivity(&storage, &request, page);
+            try std.testing.expectEqual(@as(usize, 1), page.facts.count);
+            const captured_end = page.facts.end;
+            const original = page.facts.items[0].value.stop;
+            try std.testing.expectEqual(!close_turn, original.turn != null);
+            try std.testing.expectEqual(if (settle_before_stop) @import("mutation_answer.zig").SessionStopCompletion.completed else .pending, original.completion);
+            if (!settle_before_stop) _ = try storage.settleActionAttempt(binding, .succeeded, "After stop", .{});
+            try readNativeActivity(&storage, &request, page);
+            try std.testing.expectEqual(@import("mutation_answer.zig").SessionStopCompletion.completed, page.facts.items[0].value.stop.completion);
+            request.end = captured_end;
+            try readNativeActivity(&storage, &request, page);
+            try std.testing.expectEqualDeep(original, page.facts.items[0].value.stop);
+            try std.testing.expect(!storage.isFenced());
+        }
+    }
 }

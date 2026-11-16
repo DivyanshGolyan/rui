@@ -20,13 +20,7 @@ pub const copy_window_bytes: usize = 16 * 1024;
 const fault_observation_delay_ms: u64 = 500;
 pub const fault_gate_name = "bash-fault-gate";
 
-/// Reads the Host's facts for every Bash child once, at Host start: the
-/// running executable's directory, so ordinary `rui` is this exact build, the
-/// OS system PATH, and the Host's HOME when absolute. Nothing else from the
-/// Host environment, including provider settings or credentials, reaches the
-/// child. Free with `freeHostFacts`.
 pub fn readHostFacts(io: std.Io, allocator: std.mem.Allocator, home: ?[]const u8) !environment.HostFacts {
-    // Read once, so its buffers live in pages mapped for the call.
     const mapped = try pages.Mapped(struct {
         executable: [std.fs.max_path_bytes]u8,
         system: system_path.Buffer,
@@ -49,14 +43,10 @@ pub fn freeHostFacts(allocator: std.mem.Allocator, facts: environment.HostFacts)
     if (facts.home) |value| allocator.free(value);
 }
 
-/// Facts for a Host built without `readHostFacts`, as tests build one: the
-/// fixed system PATH and no directory or HOME.
 pub const default_facts: environment.HostFacts = .{ .executable_dir = null, .system_path = system_path.fixed, .home = null };
 
 const fault_padding_bytes = 4 << 20;
 
-/// `block` plus RUI_FAULT_PADDING, over Linux's 128 KiB per-string limit and
-/// macOS's 1 MiB ARG_MAX, so the OS refuses it with a real E2BIG.
 fn padArguments(arena: std.mem.Allocator, block: environment.Block) !environment.Block {
     const padding = try arena.allocSentinel(u8, "RUI_FAULT_PADDING=".len + fault_padding_bytes, 0);
     @memcpy(padding[0.."RUI_FAULT_PADDING=".len], "RUI_FAULT_PADDING=");
@@ -69,7 +59,6 @@ fn padArguments(arena: std.mem.Allocator, block: environment.Block) !environment
 
 pub const ArgumentSizes = struct { command: usize = 0, environment: usize = 0, variables: usize = 0 };
 
-/// Bytes of a "NAME=VALUE" block as exec counts them, each with its NUL.
 fn blockBytes(block: []const ?[*:0]const u8) usize {
     var total: usize = 0;
     for (block) |entry| total += std.mem.len(entry.?) + 1;
@@ -78,7 +67,6 @@ fn blockBytes(block: []const ?[*:0]const u8) usize {
 
 pub const arguments_message_bytes = 320;
 
-/// The saved result when the OS refuses Bash's arguments (E2BIG).
 pub fn argumentsTooLargeMessage(buffer: *[arguments_message_bytes]u8, sizes: ArgumentSizes) []const u8 {
     return std.fmt.bufPrint(buffer, "Bash was not started: the system refused its arguments as too large. The command is {d} bytes; the environment is {d} bytes in {d} variables. Put long content in stdin or a file, or send from a shell with a smaller environment.", .{ sizes.command, sizes.environment, sizes.variables }) catch unreachable;
 }
@@ -118,7 +106,6 @@ pub const Faults = struct {
     preparation: bool = false,
     preparation_after_captures: bool = false,
     spawn: bool = false,
-    /// Pads the child environment until the OS refuses it with E2BIG.
     arguments: bool = false,
     service: bool = false,
     capture_read: bool = false,
@@ -198,9 +185,6 @@ test "native Bash observation agrees with reap for wide process exit values" {
     }
 }
 
-/// What every Bash capture of one Host shares: its io, its scratch
-/// directory, and its Bash view of the scratch account. Captures sit in
-/// execution slots, so they keep none of it and their owner passes it in.
 pub const Scratch = struct {
     io: std.Io,
     path: []const u8,
@@ -232,8 +216,6 @@ const OwnedFile = struct {
         const io = scratch.io;
         if (self.unlinked) {
             if (self.published) return;
-            // Reclaim bytes even if a descendant escaped the owned process
-            // group holding fd 0. Keep the charge and writer if this fails.
             try self.file.?.setLength(io, 0);
             self.close(io);
             scratch.budget.release(self.charged);
@@ -247,8 +229,6 @@ const OwnedFile = struct {
         var directory = try std.Io.Dir.cwd().openDir(io, scratch.path, .{});
         defer directory.close(io);
         directory.deleteFile(io, self.name.slice()) catch |err| switch (err) {
-            // The owned descriptor is already closed, so an absent private
-            // name establishes reclamation rather than a cleanup failure.
             error.FileNotFound => {},
             else => return err,
         };
@@ -261,7 +241,6 @@ const OwnedFile = struct {
 pub const Prepared = struct {
     scratch: Scratch,
     allocator: std.mem.Allocator,
-    // The Session whose Action this is, in the Host's Store (borrowed).
     session: protocol.Bounded(protocol.max_session_bytes),
     sender_handle: protocol.Bounded(32) = .{},
     store_selector: []const u8,
@@ -269,8 +248,6 @@ pub const Prepared = struct {
     bash_path: []const u8,
     timeout_ms: u64,
     faults: Faults,
-    /// Decoded command, owned through `allocator` until launch or cleanup,
-    /// at most tools.bash_max_command_bytes.
     command: ?[:0]u8,
     stdin_capture: ?OwnedFile = null,
     stdout_capture: ?OwnedFile,
@@ -299,16 +276,6 @@ pub const Prepared = struct {
         self.command = null;
     }
 
-    /// `bash -c` lets Bash replace itself with an eligible final command;
-    /// `$0` is `bash`, so diagnostics read `bash: line N:`. The native spawn
-    /// resets the child's signal mask and dispositions and opens its own
-    /// /dev/null stdin unless an unlinked read-only input was supplied.
-    /// The child starts from `base`, the Session's client environment, or
-    /// from `facts` alone when it has none (`environment.childBlock`).
-    /// `runtime_dir` is the caller's resolved optional MySQL routing hint,
-    /// borrowing the socket lease's directory, not canonical scratch storage.
-    /// The caller passes null for SQLite, including separately launched Hosts.
-    /// On error.BashArgumentsTooLarge, `refused` holds what the OS refused.
     pub fn launch(self: *Prepared, facts: environment.HostFacts, base: ?environment.Value, runtime_dir: ?[]const u8, refused: *ArgumentSizes) !Execution {
         if (self.faults.spawn) return error.BashSpawnFailed;
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);
@@ -370,9 +337,6 @@ pub const PreparedCleanup = struct {
         return cleanupOwnedFiles(scratch, &.{ &self.stdout_capture, &self.stderr_capture, &self.stdin_capture });
     }
 
-    /// Test/slow-check aid: no file in this cleanup remains unreclaimed.
-    /// Partial success nulls reclaimed slots and retains the rest with
-    /// their residual charges; only a complete pass satisfies this.
     pub fn isComplete(self: *const PreparedCleanup) bool {
         return self.stdout_capture == null and self.stderr_capture == null and self.stdin_capture == null;
     }
@@ -400,9 +364,6 @@ fn cleanupOwnedFiles(
     if (first_error) |err| return err;
 }
 
-/// Shell observations consumed at the service boundary. Production passes
-/// `.live`; deterministic tests substitute explicit outcomes so deadline and
-/// owner-state logic can be verified without elapsed time or syscalls.
 const ObservationSource = union(enum) {
     live,
     none,
@@ -410,15 +371,10 @@ const ObservationSource = union(enum) {
     failed,
 };
 
-/// A running or retired Bash process. It sits in an execution slot, so it
-/// keeps no Scratch; its owner passes the Host's to each call that needs it.
 pub const Execution = struct {
     lifecycle: BashLifecycle,
-    /// Direct child until its status is consumed by the reap.
     leader: ?std.process.Child.Id,
-    /// Anchored original process group: the cancellation scope.
     pgid: std.process.Child.Id,
-    /// Open while the matching lifecycle pipe is not closed.
     pipes: std.enums.EnumArray(BashLifecycle.Stream, ?std.Io.File),
     stdout_capture: OwnedFile,
     stderr_capture: OwnedFile,
@@ -538,10 +494,6 @@ pub const Execution = struct {
         return self.lifecycle.retired();
     }
 
-    /// Test/slow-check aid: the process is gone and both pipes are closed.
-    /// Capture cleanup may still remain outstanding; retirement
-    /// never claims reclamation. Lets tests verify the precondition
-    /// without tripping the reclaim assertion.
     pub fn checkRetired(self: *const Execution) !void {
         if (!self.retired()) return error.BashNotRetired;
     }
@@ -583,8 +535,6 @@ pub const Execution = struct {
             first_error = err;
         };
         if (self.output_reservation != null) {
-            // Reserved entries are protected from eviction. Relinquish the
-            // producer aliases before publication makes the names reclaimable.
             self.stdout_capture.close(scratch.io);
             self.stderr_capture.close(scratch.io);
             if (self.stdout_capture.injectedCleanupFault(scratch)) {
@@ -603,11 +553,6 @@ pub const Execution = struct {
         if (first_error) |err| return err;
     }
 
-    /// Publishes a reserved output pair after the producer aliases are
-    /// relinquished. The boundary is executable: publishing with an open
-    /// alias fails instead of making output evictable while the producer
-    /// can still write. Production reclaim closes the aliases first, then
-    /// calls this; tests exercise the boundary directly.
     pub fn publishReservedOutput(self: *Execution, retention: *output_retention.Queue) !void {
         const pair = self.output_reservation orelse return error.NoOutputReservation;
         if (self.stdout_capture.file != null or self.stderr_capture.file != null) {
@@ -655,8 +600,6 @@ pub const Execution = struct {
         };
     }
 
-    /// Closes the descriptor once the lifecycle closes its pipe. The
-    /// descriptor is open exactly while the lifecycle pipe is not closed.
     fn releaseClosedDescriptor(self: *Execution, io: std.Io, stream: BashLifecycle.Stream) void {
         if (self.lifecycle.pipes.get(stream) != .closed) return;
         const slot = self.pipes.getPtr(stream);
@@ -683,19 +626,13 @@ pub const Execution = struct {
             fault.* = fault.* orelse err;
             break :failed BashLifecycle.PipeRead{ .failed = .read };
         };
-        // Apply the read at an observation taken after the potentially
-        // blocking pipe operation.
         now.* = time.observe();
         const signal = self.lifecycle.observePipe(stream, read, now.*);
-        // Close a failed pipe before signaling its writers.
         self.releaseClosedDescriptor(scratch.io, stream);
         self.sendSignal(signal);
         return read != .empty or !std.meta.eql(before, self.lifecycle.pipes.get(stream));
     }
 
-    /// One bounded, non-blocking read. A tail never reads past the bytes it
-    /// owes; with nothing owed, a one-byte probe distinguishes EOF from a
-    /// writer that still holds the pipe. Probe bytes are never retained.
     fn readPipe(self: *Execution, scratch: Scratch, stream: BashLifecycle.Stream, window: []u8) !BashLifecycle.PipeRead {
         const state = self.lifecycle.pipes.get(stream);
         const pipe = self.pipes.get(stream).?;
@@ -710,7 +647,6 @@ pub const Execution = struct {
             .events = std.posix.POLL.IN,
             .revents = 0,
         }};
-        // A tail that still owes bytes has them queued, so it reads directly.
         if (!(state == .tail and wanted != 0) and try std.posix.poll(&descriptor, 0) == 0) return .empty;
         const reserved: usize = if (wanted == 0) 0 else @intCast(scratch.budget.allocateUpTo(wanted));
         if (reserved == 0) {
@@ -720,7 +656,6 @@ pub const Execution = struct {
                 return .{ .failed = .read };
             };
             if (count == 0) return .end;
-            // Output that capture wanted but the scratch budget cannot hold.
             if (wanted != 0) return .{ .failed = .exhausted };
             return .{ .bytes = count };
         }
@@ -835,11 +770,6 @@ pub const Execution = struct {
         } else if (self.lifecycle.captureIncomplete()) {
             try writer.writeAll("Capture may be incomplete because writers outlived process-group termination.\n");
         }
-        // A result exists only after the reap and an ESRCH absence probe
-        // confirmed retirement; a probe EPERM keeps the group present until the
-        // cleanup watchdog fences instead. macOS group-signal EPERM (an exited,
-        // unreaped leader) therefore needs no qualification here and stays a
-        // lifecycle fact only. Other signal failures remain visible.
         if (self.lifecycle.signal_failure) try writer.writeAll("Process-group signaling reported a failure.\n");
         const stdout_length = try self.stdout_capture.file.?.length(scratch.io);
         const stderr_length = try self.stderr_capture.file.?.length(scratch.io);
@@ -857,7 +787,6 @@ pub const Execution = struct {
             stderr_excerpt.encodedLength() - stderr_encoded_base,
             excerpt_bytes - stderr_encoded_base - stdout_allowance,
         );
-        // Empty streams have no section. Only truncated streams name files.
         var stdout_omitted = false;
         if (stdout_length != 0) {
             try writer.writeAll("stdout:\n");
@@ -883,8 +812,6 @@ pub const Outcome = struct {
     code: store.ActionResolutionCode,
     content: [excerpt_bytes + 4096]u8 = undefined,
     content_len: usize = 0,
-    /// Bounded head/tail samples plus UTF-8 boundary lookaround and the byte
-    /// before each tail, before encoding.
     tail: [excerpt_bytes + 14]u8 = undefined,
 
     pub fn text(self: *const Outcome) []const u8 {
@@ -907,12 +834,8 @@ pub const Preparation = struct {
     parser: tools.BashParser = .{},
     cleanup: PreparedCleanup = .{},
     command: std.ArrayList(u8) = .empty,
-    /// Decoded stdin staged between parser steps.
     input_window: [copy_window_bytes]u8 = undefined,
 
-    /// Builds the preparation in place, opens its arguments reader in place
-    /// and creates both output captures. On failure nothing is live except
-    /// the returned cleanup.
     pub fn start(
         self: *Preparation,
         scratch: Scratch,
@@ -951,8 +874,6 @@ pub const Preparation = struct {
 
     pub const Progress = union(enum) { pending, prepared, failed: PreparationFailure };
 
-    /// On `.prepared`, `out` holds the launch inputs and this preparation is
-    /// spent.
     pub fn advance(self: *Preparation, out: *Prepared) Progress {
         var writer = PreparationWriter{ .owner = self };
         var input = PreparationInputWriter{ .owner = self };
@@ -1048,8 +969,6 @@ const PreparationInputWriter = struct {
         if (!self.owner.scratch.budget.allocate(self.used)) return error.ScratchCapacityExhausted;
         const offset = input.charged;
         input.charged += self.used;
-        // Positional writes leave the independent read-only fd at offset zero.
-        // A failed write retains its whole reservation until reclamation.
         try input.file.?.writePositionalAll(self.owner.scratch.io, self.owner.input_window[0..self.used], offset);
         self.used = 0;
     }
@@ -1101,7 +1020,6 @@ fn runningWithDeadline(started: std.Io.Clock.Timestamp, timeout_ms: u64) Executi
         .stderr_capture = undefined,
         .started = started,
         .timeout_ms = timeout_ms,
-        // Signaling is faulted to a no-op so no real process is signaled.
         .faults = .{ .lifecycle = .signal },
     };
 }
@@ -1109,35 +1027,27 @@ fn runningWithDeadline(started: std.Io.Clock.Timestamp, timeout_ms: u64) Executi
 test "service acts on its service-time observation rather than an earlier one" {
     const started = std.Io.Timestamp.fromNanoseconds(0).withClock(.awake);
     const timeout_at = deadline.after(started, 20);
-    // A pre-work observation is before the deadline: no timeout.
     const before = deadline.after(started, 1);
     var execution = runningWithDeadline(started, 20);
     const scratch: Scratch = .{ .io = std.testing.io, .path = "", .budget = undefined };
     try std.testing.expect(execution.applyDueDeadline(before) == null);
     try std.testing.expect(execution.lifecycle.process == .running);
-    // The service-time observation is after the deadline: the real owner
-    // requests termination through the production service path. No clock is
-    // sampled and no syscall runs; both observations are explicit inputs.
     const after = deadline.after(started, 21);
     var window: [copy_window_bytes]u8 = undefined;
     const result = execution.serviceAt(scratch, &window, after, .none);
     const timeout = result.timeout_action orelse return error.TestExpectedResult;
     try std.testing.expectEqual(@as(u64, @intCast(timeout_at.raw.nanoseconds)), timeout.deadline_ns);
-    // The faulted TERM is reported with the timeout that sent it.
     try std.testing.expect(timeout.signal_failed);
     try std.testing.expect(result.fault == null);
     try std.testing.expect(result.made_progress);
     try std.testing.expect(!result.retired);
     try std.testing.expect(execution.lifecycle.process == .grace);
     try std.testing.expectEqual(BashLifecycle.StopReason.timed_out, execution.lifecycle.stop_reason);
-    // Substituting the earlier observation performs no timeout.
     var stale = runningWithDeadline(started, 20);
     const idle = stale.serviceAt(scratch, &window, before, .none);
     try std.testing.expect(idle.timeout_action == null);
     try std.testing.expect(idle.fault == null);
     try std.testing.expect(stale.lifecycle.process == .running);
-    // A failed observation is reported without a timeout, and the grace
-    // deadlines derive from the supplied service-time observation.
     var unobservable = runningWithDeadline(started, 20);
     const failed = unobservable.serviceAt(scratch, &window, before, .failed);
     try std.testing.expect(failed.timeout_action == null);
@@ -1152,12 +1062,10 @@ test "service acts on its service-time observation rather than an earlier one" {
         before.raw.nanoseconds + BashLifecycle.cleanup_observation_ms * std.time.ns_per_ms,
         grace.cleanup_deadline.raw.nanoseconds,
     );
-    // A later stop is acknowledged without a new TERM or deadlines.
     const stop = unobservable.requestStop(deadline.after(before, 50));
     try std.testing.expect(!stop.attempted);
     try std.testing.expectEqual(BashLifecycle.StopReason.infrastructure_shutdown, unobservable.lifecycle.stop_reason);
     try std.testing.expectEqual(grace.kill_at.raw.nanoseconds, unobservable.lifecycle.process.grace.kill_at.raw.nanoseconds);
-    // An observed leader retires the running state without a deadline.
     var witnessed = runningWithDeadline(started, 20);
     const seen = witnessed.serviceAt(scratch, &window, before, .{ .observed = .{ .exited = 0 } });
     try std.testing.expect(seen.timeout_action == null);
@@ -1241,7 +1149,6 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
             },
             .reaping => {
                 execution.lifecycle.process = .{ .reaping = .{ .cleanup_deadline = cleanup_at, .observed = null } };
-                // The reap gate suppresses the syscall, not reading its PID.
                 execution.leader = 1;
                 execution.faults.lifecycle = .reap_watchdog;
             },
@@ -1307,14 +1214,10 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
     try std.testing.expect(!gone_repeated.made_progress);
     try std.testing.expect(gone_repeated.retired);
 
-    // Group-signal EPERM after confirmed retirement had no live targets: the
-    // result stays the plain outcome. Empty streams have no sections.
     gone.lifecycle.recordSignal(.group_permission_denied);
     var quiet: Outcome = undefined;
     try gone.outcome(scratch, false, &quiet);
-    // The fixture keeps a writer open, so incomplete capture is genuine.
     try std.testing.expectEqualStrings("Bash succeeded. Exit code: 0.\nCapture may be incomplete because writers outlived process-group termination.\n", quiet.text());
-    // Any other signaling failure stays visible next to it.
     gone.lifecycle.recordSignal(.failed);
     var warned: Outcome = undefined;
     try gone.outcome(scratch, false, &warned);
@@ -1398,10 +1301,6 @@ test "prepared cleanup reclaims partially and retries through the same owner" {
     const budget = ScratchBudget{ .used = &used, .limit = baseline + 5 };
     const scratch: Scratch = .{ .io = std.testing.io, .path = root, .budget = budget };
     try std.testing.expect(budget.charge(5));
-    // Acquire each file before installing the aggregate guard: a later
-    // acquisition failure must not leave earlier files unguarded. The
-    // per-file guards live in this block so a successful break transfers
-    // sole ownership into the aggregate cleanup owner.
     var cleanup: PreparedCleanup = blk: {
         var stdout_capture = try createOwnedFile(scratch, .@"bash-stdout", 1, 1, .persistent);
         errdefer stdout_capture.cleanup(scratch) catch {};
@@ -1419,17 +1318,12 @@ test "prepared cleanup reclaims partially and retries through the same owner" {
         if (cleanup.stdout_capture) |*file| file.cleanup_fault = .none;
         cleanup.cleanup(scratch) catch {};
     };
-    // One file fails while the others reclaim: only the residual charge
-    // stays with the same owner. Bash removal failure does not retain the
-    // same descriptor set as named-scratch failure: the failed descriptor
-    // is already closed here.
     try std.testing.expectError(error.InjectedBashCleanupFailure, cleanup.cleanup(scratch));
     try std.testing.expect(cleanup.stdout_capture != null);
     try std.testing.expect(cleanup.stdout_capture.?.file == null);
     try std.testing.expect(cleanup.stderr_capture == null);
     try std.testing.expect(!cleanup.isComplete());
     try std.testing.expectEqual(baseline + 2, used.load(.acquire));
-    // Retry through the same owner releases the residual exactly once.
     cleanup.stdout_capture.?.cleanup_fault = .none;
     try cleanup.cleanup(scratch);
     complete = true;
@@ -1466,8 +1360,6 @@ fn launchForTest(root: []const u8, budget: ScratchBudget, retention: *output_ret
     try execution.reclaim(scratch, retention);
 }
 
-/// Lists, as `leaked-N` lines, the /dev/null descriptors this process would
-/// pass to any child because they lack close-on-exec.
 fn inheritableDevNull(buffer: []u8) ![]const u8 {
     const null_file = try std.Io.Dir.openFileAbsolute(std.testing.io, "/dev/null", .{});
     defer null_file.close(std.testing.io);
@@ -1500,7 +1392,6 @@ test "MySQL Bash preserves a short runtime alias with an overlong canonical targ
     try lease.acquireMysql(io, runtime, socket);
     defer lease.release();
     try lease.prepareForServing(false);
-    // Scratch is canonical storage, not the socket's routing address.
     const canonical_runtime = std.fs.path.dirname(lease.paths.scratch.slice()).?;
     try std.testing.expect(canonical_runtime.len > platform.max_launch_socket_path_bytes);
     const store_id = "0123456789abcdef0123456789abcdef";
@@ -1516,9 +1407,6 @@ test "MySQL Bash preserves a short runtime alias with an overlong canonical targ
     defer retention.cleanupAll();
     var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
     try workspace.set(runtime);
-    // Launch consumes the resolved hint; selector spelling is not another
-    // source of engine policy. Cover both hint presence and absence, even
-    // when the string alone would suggest the opposite routing choice.
     for ([_]struct { selector: []const u8, hint: ?[]const u8 }{
         .{ .selector = store_id, .hint = lease.paths.runtimeHint() },
         .{ .selector = runtime, .hint = lease.paths.runtimeHint() },
@@ -1571,17 +1459,10 @@ test "launched Bash starts with default signal actions, an empty mask and no /de
     var entries: [8]output_retention.Entry = @splat(.{});
     var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
     defer retention.cleanupAll();
-    // Descriptors the Host itself inherited without close-on-exec still reach
-    // Bash. Launch must add none: Bash sees exactly the set held before any
-    // launch, so a /dev/null cached by the spawn path appears as an extra.
     var inherited_buffer: [512]u8 = undefined;
     const inherited = try inheritableDevNull(&inherited_buffer);
-    // The child's listing is bracketed by its own markers, so notices or
-    // headers the result adds around stdout cannot change what is compared.
     var expected_buffer: [600]u8 = undefined;
     const expected_descriptors = try std.fmt.bufPrint(&expected_buffer, "begin\n{s}checked\n", .{inherited});
-    // The Host may inherit an ignored SIGHUP (nohup) and its spawning thread
-    // may block signals; neither may reach the tool.
     const ignore: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.IGN }, .mask = std.posix.sigemptyset(), .flags = 0 };
     var previous_hangup: std.posix.Sigaction = undefined;
     std.posix.sigaction(.HUP, &ignore, &previous_hangup);
@@ -1595,7 +1476,6 @@ test "launched Bash starts with default signal actions, an empty mask and no /de
     for ([_]struct { []const u8, []const u8, []const u8 }{
         .{ "kill -HUP $$; echo survived", std.fmt.comptimePrint("Signal: {d}.", .{@backingInt(std.posix.SIG.HUP)}), "" },
         .{ "kill -USR2 $$; echo survived", std.fmt.comptimePrint("Signal: {d}.", .{@backingInt(std.posix.SIG.USR2)}), "" },
-        // fds 0-2 are the tool's own; any later /dev/null was inherited.
         .{ "echo begin; for f in /dev/fd/*; do n=${f##*/}; [ \"$n\" -gt 2 ] && [ \"$f\" -ef /dev/null ] && echo leaked-$n; done | sort -t- -k2,2n; echo checked", succeeded, expected_descriptors },
     }, 1..) |case, ordinal| {
         var result: Outcome = undefined;
@@ -1605,7 +1485,6 @@ test "launched Bash starts with default signal actions, an empty mask and no /de
             std.debug.print("expected {s} and {s}; got:\n{s}\n", .{ case[1], case[2], text });
             return error.TestUnexpectedResult;
         }
-        // Each platform's log records the parent baseline beside the child's set.
         if (case[2].len != 0) std.debug.print("inheritable /dev/null before launch, matched exactly by Bash:\n{s}(end)\n", .{inherited});
     }
 }
@@ -1656,9 +1535,7 @@ test "an argument list the OS refuses reports the command and environment sizes"
     prepared.stdout_capture = try createOwnedFile(scratch, .@"bash-stdout", 1, 1, .none);
     prepared.stderr_capture = try createOwnedFile(scratch, .@"bash-stderr", 1, 1, .none);
     var refused: ArgumentSizes = .{};
-    // This SQLite fixture has no MySQL routing hint, even with a separate runtime.
     try std.testing.expectError(error.BashArgumentsTooLarge, prepared.launch(default_facts, null, null, &refused));
-    // The fixed PATH, RUI_ADDRESS=k7m2qx, RUI_STORE=/s and the padding, each with its NUL.
     const environment_bytes = "PATH=".len + system_path.fixed.len + 1 + "RUI_ADDRESS=k7m2qx".len + 1 + "RUI_STORE=/s".len + 1 + "RUI_FAULT_PADDING=".len + fault_padding_bytes + 1;
     try std.testing.expectEqual(ArgumentSizes{ .command = 4, .environment = environment_bytes, .variables = 4 }, refused);
     var message: [arguments_message_bytes]u8 = undefined;
@@ -1680,14 +1557,10 @@ test "an owned file closes its descriptor before reporting removal failure" {
     try std.testing.expect(budget.charge(2));
     var file = try createOwnedFile(scratch, .@"bash-stdout", 1, 1, .persistent);
     file.charged = 2;
-    // The fault strikes after the descriptor closes: the handle is gone
-    // while the charge and the pathname stay with the owner.
     try std.testing.expectError(error.InjectedBashCleanupFailure, file.cleanup(scratch));
     try std.testing.expect(file.file == null);
     try std.testing.expect(!file.published);
     try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
-    // An absent private name establishes reclamation once the fault clears:
-    // descriptor closure and pathname removal are distinct facts.
     file.cleanup_fault = .none;
     var directory = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{});
     defer directory.close(std.testing.io);
@@ -1713,20 +1586,14 @@ test "retired execution is independent of outstanding capture reclamation" {
         .timeout_ms = 100,
         .faults = .{},
     };
-    // Gone with both pipes closed retires even though capture cleanup
-    // remains outstanding.
     try std.testing.expect(execution.retired());
     try execution.checkRetired();
-    // A closed capture cannot release custody while process/group cleanup is
-    // still unconfirmed.
     execution.lifecycle.process = .{ .checking_group = .{
         .term = .{ .exited = 0 },
         .cleanup_deadline = started,
     } };
     try std.testing.expect(!execution.retired());
     try std.testing.expectError(error.BashNotRetired, execution.checkRetired());
-    // A running process is not retired regardless of closed pipes, and
-    // delivery state never substitutes for this ownership fact.
     execution.lifecycle.process = .{ .running = .{ .deadline = started } };
     try std.testing.expect(!execution.retired());
     try std.testing.expectError(error.BashNotRetired, execution.checkRetired());
@@ -1745,8 +1612,6 @@ test "output publication closes producer aliases before making output evictable"
     defer retention.cleanupAll();
     try std.testing.expect(budget.charge(4));
     const started = std.Io.Timestamp.fromNanoseconds(0).withClock(.awake);
-    // Acquire each file before installing the execution guard: a later
-    // acquisition failure must not leave earlier files unguarded.
     var execution: Execution = undefined;
     {
         var stdout_capture = try createOwnedFile(scratch, .@"bash-stdout", 1, 1, .none);
@@ -1777,21 +1642,14 @@ test "output publication closes producer aliases before making output evictable"
         execution.stderr_capture.cleanup(scratch) catch {};
     };
     try execution.checkRetired();
-    // Reserving output records entry charges without touching scratch bytes.
     try std.testing.expect(try execution.reserveOutput(&retention));
     try std.testing.expect(execution.output_reservation != null);
     try std.testing.expectEqual(@as(u64, 4), used.load(.acquire));
-    // The ordering boundary is executable, not just a postcondition:
-    // publishing with open producer aliases fails and retains the
-    // reservation instead of making output evictable while writable.
     try std.testing.expectError(error.ProducerAliasesOpen, execution.publishReservedOutput(&retention));
     try std.testing.expect(execution.output_reservation != null);
     try std.testing.expect(!execution.stdout_capture.published);
     try std.testing.expect(!execution.stderr_capture.published);
-    // The reservation holds both entries while the aliases are open.
     try std.testing.expectEqual(@as(usize, 2), retention.occupied());
-    // Reclaim closes producer aliases first, then publishes: the names
-    // become reclaimable only after the aliases close.
     try execution.reclaim(scratch, &retention);
     done = true;
     try std.testing.expect(execution.stdout_capture.file == null);
@@ -1800,13 +1658,11 @@ test "output publication closes producer aliases before making output evictable"
     try std.testing.expect(execution.stderr_capture.published);
     try std.testing.expectEqual(@as(u64, 4), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 2), retention.occupied());
-    // The published output is evictable through the ordinary queue path.
     retention.cleanupAll();
     try std.testing.expectEqual(@as(usize, 0), retention.occupied());
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
-/// Decoded content read a byte at a time, as the argument parsers read it.
 pub const ContentSource = struct {
     reader: store.ContentReader = undefined,
     length: u64,
@@ -1875,11 +1731,9 @@ fn validUtf8Length(bytes: []const u8) usize {
     return length;
 }
 
-/// Borrowed source spans in Outcome.tail; no complete capture is copied.
 const Excerpt = struct {
     head: []const u8,
     tail: []const u8,
-    /// The source byte before `tail` is a newline, or `tail` starts the source.
     tail_starts_line: bool,
     source_length: u64,
 
@@ -1898,8 +1752,6 @@ const Excerpt = struct {
         if (std.mem.lastIndexOfScalar(u8, self.head[head_window..head_end], '\n')) |newline| {
             head_end = head_window + newline + 1;
         }
-        // A complete sample doubles as both ends when only replacement
-        // expansion, rather than source length, exceeds the allowance.
         const tail = if (self.head.len == self.source_length) self.head else self.tail;
         var tail_start = utf8TailStart(tail, allowance - head_allowance);
         const tail_starts_line = if (tail_start == 0) self.tail_starts_line else tail[tail_start - 1] == '\n';
@@ -1926,8 +1778,6 @@ fn readExcerpt(file: std.Io.File, io: std.Io, length: u64, take: usize, buffer: 
     while (head_end < head_take) head_end += utf8Unit(buffer[0..head_read], head_end).source_length;
     const tail_take = take - head_take;
     const tail_offset = length - tail_take;
-    // Up to three bytes reach back to a UTF-8 boundary, and one more keeps
-    // the byte before the tail for the tail's newline snap.
     const context: usize = @intCast(@min(tail_offset, 4));
     const tail_read = tail_take + context;
     const tail = buffer[head_read..][0..tail_read];
@@ -2040,7 +1890,6 @@ test "Bash excerpts snap only inside the 256-byte newline windows" {
         .{ .newlines = &.{1536}, .head_end = 512, .tail_start = 1537 },
         .{ .newlines = &.{1791}, .head_end = 512, .tail_start = 1792 },
         .{ .newlines = &.{1792}, .head_end = 512, .tail_start = 1536 },
-        // A cut that already falls on a line boundary keeps its whole line.
         .{ .newlines = &.{ 1535, 1600 }, .head_end = 512, .tail_start = 1536 },
         .{ .newlines = &.{ 300, 511 }, .head_end = 512, .tail_start = 1536 },
         .{ .newlines = &.{ 300, 511, 1535, 1600 }, .head_end = 512, .tail_start = 1536 },
@@ -2048,8 +1897,6 @@ test "Bash excerpts snap only inside the 256-byte newline windows" {
         @memset(&source, 'a');
         for (case.newlines) |newline| source[newline] = '\n';
         try file.writePositionalAll(std.testing.io, &source, 0);
-        // A complete sample and a file read reach the tail's preceding byte
-        // differently; both must snap the same way.
         for ([_]Excerpt{
             .{ .head = &source, .tail = "", .tail_starts_line = true, .source_length = source.len },
             try readExcerpt(file, std.testing.io, source.len, 1024, &sample),
@@ -2086,8 +1933,6 @@ test "Bash excerpts preserve heads tails UTF-8 boundaries and newline cuts" {
     var entries: [16]output_retention.Entry = @splat(.{});
     var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
     defer retention.cleanupAll();
-    // Full-output paths for truncated streams are covered natively by the
-    // Bash and owner integrations, where retention names real files.
     const head = @as([9999]u8, @splat('a'));
     const tail = @as([10000]u8, @splat('a'));
     const replacements = @as([4998]u8, @bitCast(@as([1666][3]u8, @splat("�".*))));
@@ -2264,8 +2109,6 @@ test "Bash capture reclaims MCP output from the same scratch budget" {
     try std.testing.expect(retention.writeFile("mcp-output-1-1.tmp", length, ended, result_text.writeFull));
     try std.testing.expectEqual(@as(u64, length), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), retention.occupied());
-    // Actual Bash capture needs four bytes and must evict the MCP file, not
-    // allocate from an independent budget or leave the old charge behind.
     var result: Outcome = undefined;
     try launchForTest(root, retention.sharedBudget(), &retention, 2, "printf bash", &result);
     try std.testing.expectEqual(store.ActionResolutionCode.succeeded, result.code);

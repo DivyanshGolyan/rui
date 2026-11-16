@@ -1,4 +1,3 @@
-//! MCP settings kept at one Host-owned address until shutdown.
 const std = @import("std");
 const hs = @import("../host_settings.zig");
 const secret_value = @import("../secret_value.zig");
@@ -46,7 +45,6 @@ pub const Servers = struct {
     }
 
     fn wipeToken(allocator: std.mem.Allocator, token: []u8) void {
-        // An empty token was never allocated.
         if (token.len != 0) secret_value.wipeAndFree(allocator, token, .of(u8), @returnAddress());
     }
 
@@ -80,7 +78,5 @@ test "MCP Host configurations own target strings and wipe tokens" {
     try std.testing.expectEqualStrings("/mcp?q=1", configs.entries[0].target.path);
     try std.testing.expectEqual(@as(u64, 600_000), configs.entries[0].timeout_ms);
     configs.deinit(fixed.allocator());
-    // FixedBufferAllocator releases no backing memory, so this observes the
-    // owned bytes after disposal without reading a freed allocation.
     try std.testing.expect(std.mem.allEqual(u8, token, 0));
 }

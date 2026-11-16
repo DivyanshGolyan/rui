@@ -1,8 +1,3 @@
-"""Overview pointer behavior: Session rows and New Session open chats,
-and panels never open rows.
-The flat list exposes admitted conversations without group headings or folds;
-empty Configure-created Sessions appear only while currently open.
-"""
 import json
 import pathlib
 import re
@@ -13,9 +8,7 @@ from host_process import wait_for
 from overview_fixture import world
 
 MODEL = "gpt-6-luna"
-WIDTH = 99  # Whole-list hit targets; split-shell routing has its own owner tests.
-# A peer Message's first content part, up to its sender: the fixture keys
-# replies by that part, so every peer Message shares one reply.
+WIDTH = 99
 PEER_PREFIX = (pathlib.Path(__file__).resolve().parents[2] / "src" / "peer_message.txt").read_text().split("{}")[0]
 
 
@@ -24,10 +17,6 @@ def answer(name, text):
 
 
 class FanOutReplies(dict):
-    """The lead's first request gets one Bash call that sends each peer a
-    Message from the lead's own Bash, so their first Message is no person's
-    and they finish without changing their sender; its second gets a plain answer.
-    Peer Messages get a plain answer. Truthy while empty, so World keeps it."""
 
     def __init__(self):
         super().__init__()
@@ -58,14 +47,12 @@ def finished(report):
 
 
 def row_of(frame, label):
-    """The 1-based screen row of the Session row titled `label`."""
     found = [n + 1 for n, line in enumerate(frame.split("\n")) if re.match(rf" \S {re.escape(label)}( |$)", line)]
     assert len(found) == 1, (label, found, frame)
     return found[0]
 
 
 def line_of(frame, predicate, description):
-    """The 1-based screen row of the only line `predicate` accepts."""
     found = [n + 1 for n, line in enumerate(frame.split("\n")) if predicate(line)]
     assert len(found) == 1, (description, found, frame)
     return found[0]
@@ -77,13 +64,10 @@ def click_label(screen, frame, label):
 
 
 def is_overview(frame):
-    """Pinned actions and the list footer, never a chat editor or facts."""
     return "+ New Session" in frame and "Settings" in frame and "enter open" in frame and "Type a task" not in frame and not any(line.startswith(" ‹ ") for line in frame.split("\n"))
 
 
 def conversation_of(label):
-    """A frame showing `label`'s conversation: the facts row under its
-    composer leads with `‹` and names it."""
     return lambda frame: any(line.startswith(f" ‹ {label} · {MODEL}") for line in frame.split("\n")) and not is_overview(frame)
 
 
@@ -106,7 +90,6 @@ def opening_and_views():
 
         with w.overview(columns=WIDTH, rows=30) as screen:
             screen.wait(lambda frame: " ✓ alpha" in frame and " ✓ bravo" in frame, "both answered rows")
-            # Enter opens the selected Session: that names it.
             screen.keys(b"\r")
             opened = screen.wait(lambda frame: conversation_of("alpha")(frame) or conversation_of("bravo")(frame),
                                  "Enter opens the selected Session")
@@ -122,7 +105,6 @@ def opening_and_views():
             assert f"ask {other}" in screen.text, screen.text
             listed = back_to_overview(screen, " ✓ alpha", " ✓ bravo")
 
-            # And a click on the row now selected opens it too.
             click_label(screen, listed, other)
             screen.wait(lambda frame: conversation_of(other)(frame) and f"answer from {other}" in frame,
                         f"a click on selected {other} opens it")
@@ -170,11 +152,9 @@ def flat_list():
             assert lines[0] == "  + New Session" and lines[1] == "  Sessions  Archived" and re.fullmatch(r" ✓ (?:lead|peer-[0-6]) +\d+[smhd]", lines[2]), listed
             assert not any(re.fullmatch(r" \S.* · \d+", line) for line in lines), listed
             assert " more" not in listed, listed
-            # New Session opens an empty chat, then returns to this flat list.
             screen.click(4, 1)
             screen.wait(lambda frame: "Type a task" in frame and not is_overview(frame), "New Session opens chat")
             listed = back_to_overview(screen, *peers_by_label)
-            # Every formerly hidden row is directly clickable.
             lines = listed.split("\n")
             label = lines[max(row_of(listed, peer) for peer in peers_by_label) - 1].split()[1]
             click_label(screen, listed, label)
@@ -228,8 +208,6 @@ def empty_list():
                                     and all(reference not in frame for reference in abandoned)
                                     and (gesture != "Enter" or "first task" in frame),
                                     "only the same Session with an admitted Message becomes a named list row")
-                # Visibility is derived, not destructive: abandoned Configure
-                # outcomes remain inspectable with no Messages or provider turn.
                 for reference in abandoned:
                     report = w.inspect(reference)
                     assert report["selected_message"] is None and report["recent_messages"] == [], report
@@ -257,7 +235,6 @@ def new_chat_aliases():
                 assert w.inspect(old) == before
                 listed = back_to_overview(screen, "Old unchanged")
                 assert "Old unchanged" in listed
-        # Only the old Session and two Configure-created empty Sessions exist.
         rows = json.loads(w.run("session", "list", "--store", w.store))["sessions"]
         assert len(rows) == 3, rows
         for row in rows:

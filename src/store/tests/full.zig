@@ -1,5 +1,3 @@
-//! Full Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -168,7 +166,6 @@ test "Full attributes unbound Messages to the earliest covering stop" {
     }.run);
 }
 
-/// A list whose statement fails at its first row's step.
 const FailingList = struct {
     pub const S = rsql.Page(.{
         .arms = &.{.{ .on = .{ .index = "turn_session_latest" }, .alias = "t", .columns = "abs(-9223372036854775808+0*t.turn_id) AS failing" }},
@@ -179,7 +176,6 @@ const FailingList = struct {
     pub const list = session_report.FullList.turns;
     pub const kept_rows = 0;
 
-    /// Its statement fails before any row is visited.
     pub fn values(_: *reads_domain.ReadAccess, _: *const S.Row) error{}!session_report.FullRow {
         unreachable;
     }
@@ -234,9 +230,6 @@ test "a Full list declares its statement, list and values, and each group of hoo
 test "Full history answers a list's first check before a later list's failed step in its round" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            // Conversation's first read finds an assistant message without its
-            // entry, and in the same round the list after it fails its step: main
-            // checked the entries before it read any later list.
             for ([_]bool{ false, true }) |check| {
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
@@ -299,7 +292,6 @@ test "Full history refuses content whose bytes no longer match their digest" {
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                 defer storage.close() catch unreachable;
                 const session = try configureTestSessionAsk(&storage, "digest-config");
-                // Longer than one content window, so the digest spans windows.
                 const text: [2100]u8 = @splat('d');
                 try submitTestMessage(&storage, &tmp, "digest-message", "digest-message", session.slice(), &text);
                 if (fault) {
@@ -325,15 +317,7 @@ test "Full history takes a round per chunk" {
             var rounds: u32 = 0;
             const content_before = storage.testing_content_work.content_rounds;
             std.testing.allocator.free(try testingFullHistory(&storage, &tmp, session.slice(), &rounds));
-            // Every list fits one chunk, so the rounds are the reads' depth: one
-            // for the revisions, whose one revision's empty instructions read no
-            // content, then one per run of `renderFull`: Messages; Conversation,
-            // Turns and Operations; calls; Actions; decisions, stops,
-            // interruptions and results. A run's lists share a round because
-            // every list but its last renders all its rows in the pass.
             try std.testing.expectEqual(@as(u32, 1 + 5), rounds);
-            // The Message's and the answer's content are content rounds,
-            // which differ by engine: on SQLite a `readRaw` window each.
             const content_rounds: u16 = switch (case.engine) {
                 .sqlite, .mysql => 2,
             };
@@ -379,10 +363,6 @@ test "Full revision queries bound the rows MySQL must drain after a streaming st
             defer entry.release();
             var a: reads_domain.ReadAccess = .open(&entry);
             defer a.deinit();
-            // Consume the SQL result, not just RevisionChunk's prefix: this
-            // includes every row the MySQL server must compute and send even
-            // when the renderer stops at the first owned nonempty content.
-            // Test both the initial query and a seek after a streaming stop.
             for ([_]u64{ 0, 2 }) |after| {
                 var rows: Rows = .{ .after = .{ .session = session.slice(), .revision = after } };
                 a.readEach(report_domain.full_revisions, rows.after, 256 + 1, &rows);
@@ -410,9 +390,6 @@ test "Full revision owners pin both covering indexes in both dialects" {
 test "Full revisions show each content whole where it first occurs" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            // `mixed`: new, older and repeated content, an output schema that is
-            // none, the instructions or other content. `same`: one older content
-            // throughout. `grown`: `mixed` with more than 512 distinct values.
             const Shape = enum { mixed, same, grown };
             const capacity = 1024;
             for ([_]Shape{ .mixed, .same, .grown }, [_]usize{ 70, 130, capacity * 2 }) |shape, revisions| {
@@ -421,15 +398,12 @@ test "Full revisions show each content whole where it first occurs" {
                 var storage: Store = undefined;
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                 defer storage.close() catch unreachable;
-                // Content another Session admitted first is older than this
-                // Session's.
                 const other = try configureTestSessionAsk(&storage, "owners-other");
                 const session = try configureTestSessionAsk(&storage, "owners-session");
                 const texts = try std.testing.allocator.alloc([32]u8, 4 * capacity);
                 defer std.testing.allocator.free(texts);
                 const lengths = try std.testing.allocator.alloc(usize, 4 * capacity);
                 defer std.testing.allocator.free(lengths);
-                // Text 0 is the first revision's empty instructions.
                 lengths[0] = 0;
                 for (1..11) |index| {
                     lengths[index] = (try std.fmt.bufPrint(&texts[index], "{{\"title\":\"old {d}\"}}", .{index})).len;
@@ -440,7 +414,6 @@ test "Full revisions show each content whole where it first occurs" {
                     reconfigure.configuration.instructions = try testingBytesContent(&tmp, try std.fmt.bufPrint(&key, "owners-other-i-{d}", .{index}), texts[index][0..lengths[index]]);
                     try std.testing.expect(try storage.configure(&reconfigure, .{}) == .accepted);
                 }
-                // Each revision's text, as an index into `texts` (`null`: none).
                 const instructions = try std.testing.allocator.alloc(?usize, revisions + 1);
                 defer std.testing.allocator.free(instructions);
                 const output_schema = try std.testing.allocator.alloc(?usize, revisions + 1);
@@ -448,7 +421,6 @@ test "Full revisions show each content whole where it first occurs" {
                 instructions[1] = 0;
                 output_schema[1] = null;
                 var fresh: usize = 11;
-                // The texts the Session holds.
                 const held = try std.testing.allocator.alloc(bool, 4 * capacity);
                 defer std.testing.allocator.free(held);
                 @memset(held, false);
@@ -456,9 +428,7 @@ test "Full revisions show each content whole where it first occurs" {
                 var distinct: usize = 1;
                 for (2..revisions + 1) |revision| {
                     instructions[revision] = if (shape == .same) 1 else switch (revision % 5) {
-                        // Older content, out of id order.
                         0 => 1 + (revision * 7) % 10,
-                        // An earlier revision's instructions.
                         1 => instructions[revision - 3],
                         else => blk: {
                             lengths[fresh] = (try std.fmt.bufPrint(&texts[fresh], "{{\"title\":\"fresh {d}\"}}", .{revision})).len;
@@ -493,7 +463,6 @@ test "Full revisions show each content whole where it first occurs" {
                 defer parsed.deinit();
                 const listed = parsed.value.object.get("full").?.object.get("session_revisions").?.array.items;
                 try std.testing.expectEqual(revisions, listed.len);
-                // Each text's first occurrence, found by walking the revisions.
                 const owners = try std.testing.allocator.alloc(?report_domain.ContentOwner, 4 * capacity);
                 defer std.testing.allocator.free(owners);
                 @memset(owners, null);
@@ -519,8 +488,6 @@ test "Full revisions show each content whole where it first occurs" {
                         }
                     }
                 }
-                // Owners are the Session's own: the other Session's revisions each
-                // own their instructions, which this one's revisions also hold.
                 const again = try testingSessionReportWithProfile(&storage, &tmp, other.slice(), 64 * 1024 * 1024, .full);
                 defer std.testing.allocator.free(again);
                 var reparsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, again, .{});
@@ -542,8 +509,6 @@ test "Full Message projection work does not multiply Messages by stops, in round
             const more_messages = try measure(case, 128, 32);
             const more_stops = try measure(case, 32, 128);
             const both_larger = try measure(case, 128, 128);
-            // The Messages' rounds grow with their chunks; stops add none
-            // at either Message count.
             std.testing.expect(more_messages > baseline and more_stops == baseline and both_larger == more_messages) catch |err| {
                 std.debug.print("rounds: {d} {d} {d} {d}\n", .{ baseline, more_messages, more_stops, both_larger });
                 return err;

@@ -284,7 +284,6 @@ class FramesTest(unittest.TestCase):
             self.assertIsNotNone(self.helper["frame_dim_failure"](state, committed("Missing")))
             state["expect_dim"][0]["min_columns"] = 140
             self.assertIsNone(self.helper["frame_dim_failure"](state, committed("Missing", columns=46)))
-        # One wrongly styled character must not pass a whole-label assertion.
         frame = committed("Row")
         frame = frame._replace(cells=((frame.cells[0][0]._replace(faint=True), *frame.cells[0][1:]),))
         self.assertIsNotNone(self.helper["frame_dim_failure"](
@@ -441,7 +440,6 @@ class FramesTest(unittest.TestCase):
                 before = terminal.frame
                 hovered = before._replace(cells=((before.cells[0][0]._replace(bg="345678"),)
                                                  + before.cells[0][1:],))
-                # Neither uncommitted changes nor new identical commits confirm input.
                 pending = iter(((1, hovered), (2, before), (3, hovered)))
 
                 def repaint(_timeout):
@@ -529,7 +527,6 @@ class FramesTest(unittest.TestCase):
             with self.subTest(entries=entries):
                 actual = playback((t, committed(text)) for t, text in entries)
                 self.assertEqual([(frame.text, delay) for frame, delay in actual], expected)
-        # Cursor-only changes are not a new cell picture.
         frame = committed("same")
         changed_cursor = frame._replace(cursor=Cursor(0, 0), visible=True)
         self.assertEqual(list(playback(iter([(0, frame), (100_000_000, changed_cursor)]))), [(frame, 2)])
@@ -540,7 +537,6 @@ class FramesTest(unittest.TestCase):
     def test_replay_timed_bytes_resize_stop_and_silent_queries(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            # Multiple commits in one chunk and a frame close split across chunks.
             chunks = [b"\x1b]11;?\x1b\\\x1b[?2026hfirst\x1b[?2026l\x1b[?2026h\rsecond\x1b[?2026",
                       b"l\x1b[?2026h\rthird \x1b[?2026l", b"\x1b[?2026h\rignored\x1b[?2026l"]
             with open(root / "output.bin", "wb") as raw, open(root / "output.jsonl", "w") as events:
@@ -604,7 +600,7 @@ class FramesTest(unittest.TestCase):
         with patch("subprocess.run", return_value=types.SimpleNamespace(returncode=0, stderr="")) as run:
             self.helper["encode_recording"](Path("/tmp/frames.concat"), Path("/tmp/movie.gif"))
         commands = [call.args[0] for call in run.call_args_list]
-        self.assertEqual(len(commands), 3)  # Palette, GIF, optional MP4.
+        self.assertEqual(len(commands), 3)
         self.assertIn("palettegen=max_colors=128:stats_mode=diff", commands[0])
         self.assertIn("[0:v][1:v]paletteuse=diff_mode=rectangle:dither=bayer:bayer_scale=5", commands[1])
         self.assertIn("/tmp/palette.png", commands[0])
@@ -768,7 +764,7 @@ while True:
             terminal.fail_feed = phase != "final-commit"
             terminal.write(b"q" if phase == "final-commit" else b"f")
             wait_for(lambda: terminal.collected, "injected collector outcome", drain=False)
-            self.assertNotIn("error", vars(terminal))  # There is no adapter-owned copy.
+            self.assertNotIn("error", vars(terminal))
             for read in (lambda: terminal.frame,
                          lambda: terminal.wait(lambda _capture: True, "already visible", timeout=0, allow_exit=True)):
                 with self.assertRaises(RuntimeError) as raised:
@@ -920,7 +916,7 @@ while True:
             snapshot = self.helper["scenario_snapshot"](loaded)
             path.write_text(json.dumps(snapshot))
             self.assertEqual(self.helper["load_scenario"](path), loaded)
-            self.assertEqual(data, self.scenario())  # Loading leaves caller data untouched.
+            self.assertEqual(data, self.scenario())
         default = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         self.assertEqual(default["sizes"], [(140, 40), (46, 30)])
         self.assertGreater(len(default["states"]), 25)
@@ -962,7 +958,6 @@ while True:
                             self.assertIn("unexpected row matching", record["reason"])
                             self.assertIn(sid, record["reason"])
                         self.assertEqual((Path(temp) / record["files"]["txt"]).read_text(), frame + "\n")
-                    # Transition captures may skip readiness, never the saved oracle.
                     terminal = types.SimpleNamespace(wait=unittest.mock.Mock(), frame=committed(bad, *size))
                     transition = {**state, "first_frame": True}
                     self.helper["frame_ready"](terminal, transition)
@@ -979,7 +974,6 @@ while True:
                     " ○ Existing 9xt4vy  2m │chat", " ○ 9xt4vy extra  2m │chat"):
             with self.subTest(named_sidebar=row):
                 self.assertIsNone(self.helper["frame_row_failure"](state, row))
-        # The helper remains generic: only recipes opt into row exclusions.
         self.assertIsNone(self.helper["frame_row_failure"]({"name": "unrelated"}, " ○ 9xt4vy  0s"))
 
     def test_empty_chat_roundtrips_and_current_chat_labels_exclude_raw_ids(self):
@@ -1015,8 +1009,6 @@ while True:
         opened = model.index({"mouse": {"at": "gpt-6.1-sol", "do": "click"}})
         typed = model.index({"text": "ter"})
         picked = model.index({"keys": ["Down", "Enter"]})
-        # A sidebar's completed row already has ✓ before the choice opens.
-        # Standalone Model puts its filter on the next row, not Settings' inline value.
         self.assertEqual(model[opened + 1:typed], [{"wait": "Model"}])
         self.assertEqual(model[typed + 1:picked], [{"wait": "ter\n"}, {"wait": "gpt-6.1-terra"}])
         self.assertNotIn({"wait": "Model           ter"}, model)
@@ -1116,7 +1108,6 @@ while True:
                 self.assertIn(label, state["expect"])
                 self.assertFalse(any(step.get("gone", "").startswith(("Bash ", "stdout:", "stderr:")) for step in state["steps"]))
                 self.assertTrue(any(text.startswith("    ") for text in state["expect"]))
-                # Do not capture the asynchronous opening notice as the finished fold.
                 self.assertIn({"gone": "Opening tool output…"}, state["steps"])
         self.assertEqual(states["tool-open-nocolor"]["env"], {"NO_COLOR": "1"})
         for name in ("tool-open", "tool-open-two", "tool-open-long", "tool-open-nocolor"):
@@ -1176,8 +1167,6 @@ while True:
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         state = next(state for state in scenario["states"] if state["name"] == "tool-open-two")
         self.assertEqual(state["sizes"], [(46, 30), (140, 40)])
-        # Reach a known narrow tail, then move rows rather than four half-pages:
-        # the wider terminal now gives only 99 columns to the chat beside the list.
         self.assertEqual(state["steps"][:13], [
             {"wait": "The project has a README"},
             {"keys": ["C-o"]},
@@ -1292,7 +1281,7 @@ while True:
     def test_invalid_scenarios(self):
         mutations = [
             lambda d: d.update(states=[]),
-            lambda d: d["states"][0].update(open="Fix it"),  # Not seeded yet.
+            lambda d: d["states"][0].update(open="Fix it"),
             lambda d: d["states"][1].update(open="missing"),
             lambda d: d["states"][1].update(open=[]),
             lambda d: d["states"][1].update(theme=[]),
@@ -1320,7 +1309,7 @@ while True:
             lambda d: d["states"][1]["cast"][0].update(workspace="/outside"),
             lambda d: d["states"][1]["cast"][0].update(mode="unsafe"),
             lambda d: d["states"][1]["cast"][0].update(messages=[]),
-            lambda d: d["states"][1]["cast"][0].update(count=2),  # Missing {n}.
+            lambda d: d["states"][1]["cast"][0].update(count=2),
             lambda d: d["states"][1]["cast"][0].update(count=True),
             lambda d: d["states"][1]["cast"].append(copy.deepcopy(d["states"][1]["cast"][0])),
         ]
@@ -1460,7 +1449,6 @@ while True:
 
     def run_frames_scenario(self, scenario, sizes=None, capture_ok=True, only=None, failing_state=None,
                             initial_frames=("›",), real_steps=False):
-        """Run the real loader/orchestrator with an inert OS and capture adapter."""
         command = self.helper["cmd_frames"]
         calls = []
         with tempfile.TemporaryDirectory() as temp:
@@ -1557,7 +1545,6 @@ while True:
             ([listed.replace("enter open", ""), listed], None, 2),
             ([listed + " Opening…", listed], None, 2),
             ([listed, listed + " Ready"], "Ready", 2),
-            # Before captures use the old image with the same new recipes.
             ([" › Type a task"], None, 1),
             ([" › ChatGPT    API key"], None, 1),
         ]
@@ -1574,7 +1561,6 @@ while True:
                 self.assertTrue(records[0]["ok"])
 
     def test_initial_readiness_requires_complete_guided_account_controls(self):
-        # Nonblank rows from the actual4be first-run140x40 committed capture.
         modal = (
             '                                  ────────────────────────────────────────────────────────────────────────\n'
             '                                   Sign in to Rui\n'
@@ -1658,7 +1644,7 @@ while True:
                 self.assertEqual([c[1] for c in calls if c[0] == "capture"], expected * 2)
                 self.assertEqual([r["size"] for r in records], [self.helper["size_name"](size) for size in expected] * 2)
                 first = next(i for i, call in enumerate(calls) if call[0] == "capture")
-                self.assertEqual(calls[first - 1], ("ready", "default"))  # No first-size resize or sleep after the wait.
+                self.assertEqual(calls[first - 1], ("ready", "default"))
                 second = next(i for i, call in enumerate(calls) if i > first and call[0] == "capture")
                 self.assertEqual(calls[second - 2:second + 1], [("resize", expected[1]), ("ready", "default"), ("capture", expected[1])])
 
@@ -1703,7 +1689,7 @@ while True:
         self.assertIn("not selected; its failure does not fail this run", err.getvalue())
         self.assertEqual([r["name"] for r in records], ["selected"])
         self.assertTrue(records[0]["ok"])
-        self.assertEqual(calls.count(("steps",)), 2)  # Still drive the predecessor for side effects.
+        self.assertEqual(calls.count(("steps",)), 2)
         for only in (None, "earlier,selected", "earlier"):
             with self.subTest(only=only), contextlib.redirect_stderr(io.StringIO()), \
                     self.assertRaises(SystemExit) as result:
@@ -1806,7 +1792,6 @@ while True:
                         self.assertEqual(captured["reason"],
                                          None if bad is None else f"{marker!r} must have background=#{color}")
                         self.assertTrue((Path(temp) / captured["files"]["txt"]).exists())
-                        # Style is a capture verdict: readiness never waits on colour.
                         observed = []
                         terminal.wait = lambda check, *_args, **_kw: observed.append(check(
                             types.SimpleNamespace(completed=frame.text, frame=frame)))
@@ -1889,7 +1874,6 @@ while True:
 
     def test_frame_exit_key_allows_dead_pane_but_text_does_not(self):
         steps = self.helper["frame_steps"]
-        # A Rui that has already exited: only the exit key expects that.
         terminal = types.SimpleNamespace(status=0, write=lambda _data: None)
         self.assertTrue(steps(None, terminal, [{"keys": [steps.__globals__["EXIT_KEY"]]}]))
         with self.assertRaises(self.helper["FrameFailure"]):
@@ -1902,8 +1886,6 @@ while True:
         run = types.SimpleNamespace(meta={"sha": "a" * 40}, store="/unused/store", sid=lambda _label: "session",
                                     rui_cmd=lambda *_args, **_kw: types.SimpleNamespace(returncode=0))
         terminal = types.SimpleNamespace(frame=committed(stale))
-        # Combined readiness must reject an old sidebar's Stopping text even
-        # when the conversation already contains the stopped ending.
         ready = self.helper["frame_ready"]
         def wait(predicate, *_args, **_kwargs):
             self.assertFalse(predicate(types.SimpleNamespace(completed=stale)))
@@ -1947,7 +1929,6 @@ while True:
             good = "\n" * (height - 1) + "Sidebar chat  alt+i info\n"
             self.assertIsNone(failure(state, good))
             self.assertIsNotNone(failure(state, good + "\n"))
-            # A nonempty sidebar tail must not hide the chat's blank last row.
             self.assertIsNotNone(failure(state, good + "  Settings  │\n"))
 
     def test_stop_waits_for_a_running_bash_not_an_approval(self):

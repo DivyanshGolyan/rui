@@ -1,4 +1,3 @@
-//! Tool-loading behaviour runs through the same engine seam as core commands.
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const core = @import("core_tools.zig");
@@ -13,11 +12,10 @@ fn call(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, argument
     const encoded = try std.json.Stringify.valueAlloc(arena, arguments, .{});
     const calls = [_]store.TestingCall{.{ .item_id = id, .name = "find_tools", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = arguments }};
     try store.settleCallsForTesting(storage, tmp, model, id, &calls);
-    const input = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
+    const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     try std.testing.expect(input.tool == .find_tools);
     try std.testing.expectEqualStrings(session, input.session.slice());
-    // A core call never becomes a process Attempt.
-    try std.testing.expect(try storage.admitNextActionAttempt(30000, .{}) == null);
+    try std.testing.expect(try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 30000, .{}) == null);
     return input;
 }
 
@@ -44,7 +42,6 @@ fn result(storage: *Store, session: protocol.Bounded(protocol.max_session_bytes)
     const page = try arena.create(protocol.ActivityFacts);
     var request: protocol.ActivityPage = .{ .session = session, .direction = .backward, .limit = 16, .kinds = .initOne(.tool_result) };
     try storage.activityPage(&request, page);
-    // The loader is the first call; grouped rejected calls can have a later ordinal.
     const reference = for (page.items[0..page.count]) |*item| {
         if (item.ordinal == 1) break item.value.tool_result.content;
     } else return error.MissingFindToolsResult;
@@ -68,7 +65,6 @@ test "find_tools loads saved name and description matches once in one revision a
             defer arena.deinit();
             const alloc = arena.allocator();
             const session = try configure(&storage, "find-matches", &.{ "bash", "find_tools", "message_agent", "read_transcript" }, &.{"find_tools"});
-            // Another Session with the resulting subset proves set interning.
             const donor = try configure(&storage, "find-donor", &.{ "bash", "find_tools", "message_agent", "read_transcript" }, &.{ "bash", "find_tools", "read_transcript" });
             try testing.submitTestMessage(&storage, &tmp, "find-message", "find-message", session.slice(), "find tools");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -80,7 +76,7 @@ test "find_tools loads saved name and description matches once in one revision a
             };
             try store.settleCallsForTesting(&storage, &tmp, model, "find-first", &calls);
             try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE operation_id=?1 AND rejection_code='unknown_tool'", .{model.operation_id}));
-            const input = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
+            const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
             try std.testing.expect(input.tool == .find_tools);
             const revisions = try count(&storage, session.slice(), "session_revision");
             const changes = try count(&storage, session.slice(), "session_change");
@@ -94,20 +90,19 @@ test "find_tools loads saved name and description matches once in one revision a
             try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(DISTINCT loaded_tool_set_id) FROM session WHERE session_ref=?1 OR session_ref=?2", .{ session.slice(), donor.slice() }));
             const names = try result(&storage, session, alloc);
             try std.testing.expect(std.mem.indexOf(u8, names, "bash") != null and std.mem.indexOf(u8, names, "read_transcript") != null);
-            // Replay is harmless even if the caller retained a stale input.
             try loader.run(&storage, alloc, &input, .{});
             try std.testing.expectEqual(revisions + 1, try count(&storage, session.slice(), "session_revision"));
             try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key=?1", .{try std.fmt.allocPrint(alloc, "rui.core/find_tools/{d}", .{input.binding.action_id})}));
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            var view: store.HistoricalView = undefined;
-            storage.openHistoricalView(next, &view);
+            var view: store.testing.TestingPage = undefined;
+            view.open(&storage, next);
             var settings: store.HistoricalSettings = undefined;
             try view.settings(&settings);
             try std.testing.expectEqual(@as(u64, 3), settings.tool_count);
             view.close();
             const found = [_]store.TestingCall{.{ .item_id = "found", .name = "read_transcript", .encoded_call_id = "found", .decoded_call_id = "found", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
             try store.settleCallsForTesting(&storage, &tmp, next, "find-found", &found);
-            const read = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
+            const read = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
             try std.testing.expect(read.tool == .read_transcript);
             try @import("read_transcript.zig").run(&storage, alloc, &read, .{});
             try std.testing.expect(!storage.isFenced());
@@ -138,12 +133,9 @@ test "find_tools no match and bad words resolve without revisions then equality 
                 const code = if (index == 0) "succeeded" else "failed";
                 try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code=?2", .{ input.binding.action_id, code }));
                 if (index != 0) try std.testing.expect(std.mem.indexOf(u8, try result(&storage, session, alloc), "words") != null);
-                // A refused call's command saves why, as its typed code.
                 const key = try std.fmt.allocPrint(alloc, "rui.core/find_tools/{d}", .{input.binding.action_id});
                 try std.testing.expectEqual(@as(u64, @intFromBool(index != 0)), try testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key=?1 AND accepted=0 AND code='invalid_arguments'", .{key}));
             }
-            // A huge argument is refused before it is read: a 16 KiB arena
-            // cannot hold its 64 KiB, so success proves it was never copied.
             const huge = try alloc.alloc(u8, 64 * 1024);
             @memset(huge, 'x');
             @memcpy(huge[0..10], "{\"words\":\"");
@@ -173,7 +165,6 @@ test "find_tools lists a match's whole first line, however many windows it takes
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
             const alloc = arena.allocator();
-            // A first line past two of the Store's verified windows.
             const line_bytes = 5000;
             const description = try alloc.alloc(u8, line_bytes + 16);
             for (description[0..line_bytes], 0..) |*byte, index| byte.* = 'a' + @as(u8, @intCast(index % 26));
@@ -245,7 +236,7 @@ test "find_tools caps eight sorted matches skips loaded and out of set and rolls
             try std.testing.expectEqual(@as(u64, 1), try count(&storage, session.slice(), "session_revision"));
             try std.testing.expectEqual(@as(u64, 0), try count(&storage, session.slice(), "session_change"));
             try std.testing.expect(!try loaded(&storage, session.slice(), "match_01"));
-            const retry = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
+            const retry = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
             try std.testing.expectEqual(input.binding.action_id, retry.binding.action_id);
             try loader.run(&storage, alloc, &retry, .{});
             for (1..9) |index| try std.testing.expect(try loaded(&storage, session.slice(), names[index + 1]));
@@ -279,12 +270,9 @@ test "find_tools searches saved descriptions across MySQL chunk boundaries with 
             @memcpy(description[0..8], "Preview\n");
             @memcpy(description[chunk_bytes - 4 ..][0..8], "BoUnDaRy");
             @memcpy(description[3 * chunk_bytes + 5 ..][0..7], "Late%_Z");
-            // Exercise carry at the actual Host read edge as well as the
-            // durable MySQL chunk edge, including a maximum-length word.
             const read_bytes = store.ContentReader.content_window_bytes;
             @memset(description[read_bytes - 32 ..][0..64], 'Q');
             @memcpy(description[2 * chunk_bytes - 3 ..][0..7], "LiT%_Er");
-            // A NUL and non-ASCII letters do not stop or broaden ASCII folding.
             description[chunk_bytes + 10] = 0;
             @memcpy(description[chunk_bytes + 11 ..][0..5], "CAFÉ");
             var records: [tools.built_in_tool_set.records.len + 1]tools.Record = undefined;
@@ -309,7 +297,6 @@ test "find_tools searches saved descriptions across MySQL chunk boundaries with 
                 .{ .words = "cafÉ", .match = true },
                 .{ .words = "café", .match = false },
                 .{ .words = "%_no", .match = false },
-                // Every checked word participates in the shared matcher search.
                 .{ .words = "absent1 absent2 absent3 absent4 absent5 absent6 absent7 BOUNDARY", .match = true },
             };
             for (cases, 0..) |item, index| {
@@ -327,8 +314,6 @@ test "find_tools searches saved descriptions across MySQL chunk boundaries with 
                     try std.testing.expect(std.mem.indexOf(u8, bytes, "Preview") != null);
                     try std.testing.expect(std.mem.indexOf(u8, bytes, "xxx") == null);
                 }
-                // This Session's continuation would otherwise run before the
-                // next Session's initial call in the shared engine harness.
                 const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try testing.settleItemsForTesting(&storage, &tmp, next, &.{"{\"type\":\"message\",\"id\":\"done\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}"}, "done");
             }

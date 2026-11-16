@@ -1,7 +1,5 @@
-//! Model retry policy: the wait before each retry and the Attempt maximum.
 const std = @import("std");
 
-/// Waits before Attempts 2, 3 and 4. The maximum follows from their count.
 pub const default_waits_ms = Waits{ 2_000, 4_000, 8_000 };
 pub const Waits = [3]u64;
 pub const maximum_attempts: u64 = default_waits_ms.len + 1;
@@ -17,7 +15,6 @@ pub const Decision = union(enum) {
     exhausted,
 };
 
-/// Every wait must name a deadline from `now_ms`.
 pub fn validateWaits(waits_ms: Waits, now_ms: i64) error{InvalidRetryWait}!void {
     for (waits_ms) |wait_ms| {
         if (wait_ms == 0 or wait_ms > std.math.maxInt(i64)) return error.InvalidRetryWait;
@@ -25,8 +22,6 @@ pub fn validateWaits(waits_ms: Waits, now_ms: i64) error{InvalidRetryWait}!void 
     }
 }
 
-/// `random` is one draw from the settlement owner's RNG. Jitter is added
-/// after all retry floors, never subtracted from a provider constraint.
 pub fn decide(attempt_ordinal: u64, input: Input, now_ms: i64, random: u64) !Decision {
     if (attempt_ordinal == 0 or attempt_ordinal > maximum_attempts) {
         return error.InvalidAttemptOrdinal;
@@ -41,15 +36,11 @@ pub fn decide(attempt_ordinal: u64, input: Input, now_ms: i64, random: u64) !Dec
     const index: usize = @intCast(attempt_ordinal - 1);
     var due_at_ms = try std.math.add(i64, now_ms, @intCast(input.waits_ms[index]));
     if (input.retry_after_ms) |delay_ms| {
-        // An external constraint that cannot name a deadline is invalid, not
-        // an infrastructure failure. Preserve normal backoff and valid dates.
         const provider_due = std.math.add(i64, now_ms, @intCast(delay_ms)) catch due_at_ms;
         due_at_ms = @max(due_at_ms, provider_due);
     }
     due_at_ms = @max(due_at_ms, input.retry_after_deadline_ms orelse 0);
     const jitter_ms: i64 = @intCast(1 + random % @max(1, input.waits_ms[index] / 4));
-    // Preserve an extreme provider floor even when no later millisecond is
-    // representable. Saturation cannot wrap into immediate eligibility.
     return .{ .schedule_at_ms = due_at_ms +| jitter_ms };
 }
 
@@ -86,8 +77,6 @@ test "model retry decision applies configured waits Retry-After and exhaustion" 
 test "retry dates stay absolute across body transfer and checked settlement arithmetic" {
     const now_ms: i64 = 1_700_000_015_000;
     const waits = default_waits_ms;
-    // Headers arrived fifteen seconds ago with a date ten seconds ahead.
-    // A progressing body crossed that deadline: only normal backoff remains.
     for ([_]i64{ now_ms - 5_000, now_ms, now_ms + 1_000 }) |deadline| {
         try std.testing.expectEqual(Decision{ .schedule_at_ms = now_ms + 2_001 }, try decide(1, .{
             .waits_ms = waits,
@@ -142,8 +131,6 @@ test "retry jitter is positive and bounded after every backoff and provider floo
         .{ .delay = 7_000, .date = 40_000, .floor = 40_000 },
     };
     for (cases) |case| {
-        // Exhaust every first-backoff jitter value, plus wrap and maximal RNG
-        // draws. No clock, sleep or probabilistic distribution assertions.
         for (0..501) |draw| {
             const decision = try decide(1, .{
                 .waits_ms = default_waits_ms,

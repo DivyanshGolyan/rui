@@ -1,9 +1,3 @@
-//! Terminal-safe JSON text: one writer that re-spells every DEL and
-//! non-ASCII code point of valid JSON text as a `\u` escape. In JSON such
-//! bytes occur only inside strings, so the decoded value is unchanged while a
-//! terminal receives printable ASCII, whitespace and structure only. Bidi
-//! controls, C1 controls and DEL in names, Action proposals or Host replies
-//! cannot then reorder or hide surrounding output.
 const std = @import("std");
 
 pub const Escaping = struct {
@@ -13,18 +7,15 @@ pub const Escaping = struct {
     pending_len: u3 = 0,
     invalid: bool = false,
 
-    /// The returned value must stay in place while `writer` is used.
     pub fn init(out: *std.Io.Writer, buffer: []u8) Escaping {
         return .{ .out = out, .writer = .{ .buffer = buffer, .vtable = &.{ .drain = drain, .flush = flush } } };
     }
 
-    /// Flush through to `out` and reject a truncated or invalid sequence.
     pub fn finish(self: *Escaping) !void {
         self.writer.flush() catch |err| if (!self.invalid) return err;
         if (self.invalid or self.pending_len != 0) return error.InvalidUtf8;
     }
 
-    /// Flushing reaches `out` too, so callers keep ordinary flush points.
     fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
         try std.Io.Writer.defaultFlush(w);
         const self: *Escaping = @alignCast(@fieldParentPtr("writer", w));
@@ -81,7 +72,6 @@ fn sequenceLength(lead: u8) ?u3 {
     };
 }
 
-/// Shortest-form scalar values only: no overlong spelling or surrogate.
 fn decode(bytes: []const u8) ?u21 {
     var value: u21 = bytes[0] & (@as(u8, 0x7f) >> @intCast(bytes.len));
     for (bytes[1..]) |byte| value = (value << 6) | (byte & 0x3f);
@@ -110,8 +100,6 @@ fn escaped(input: []const []const u8, output: []u8) ![]const u8 {
 }
 
 test "dangerous code points leave as ASCII escapes and decode to the same value" {
-    // RLO, CSI (C1), DEL, ESC as already escaped by JSON, a 4-byte scalar
-    // split across every window, and ASCII structure that must pass through.
     const value = "a\u{202e}b\u{9b}c\x7fd\x1b雪😀";
     var json: [128]u8 = undefined;
     var json_writer = std.Io.Writer.fixed(&json);

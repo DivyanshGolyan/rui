@@ -1,5 +1,3 @@
-/* Throwaway protocol fixture, not Rui runtime code. SQLite owns durable
- * Attempt/Resolution facts; one process-local slot owns its child and pipes. */
 #define _POSIX_C_SOURCE 200809L
 #include <sqlite3.h>
 #include <stdio.h>
@@ -90,7 +88,7 @@ static Child launch(Slot *s) {
         char c; read_all(command[0], &c, 1);
         Event e = { s->attempt, s->generation };
         write_all(event[1], &e, sizeof(e));
-        read_all(command[0], &c, 1); /* Explicit cleanup gate. */
+        read_all(command[0], &c, 1);
         close(command[0]); close(event[1]); _exit(0);
     }
     close(command[0]); close(event[1]); s->live = 1;
@@ -105,7 +103,6 @@ static void cleanup(Slot *s, Child c) {
 static int settle(Slot *s, Event e) {
     if (!s->occupied) return 0;
     if (!broken && (s->attempt != e.attempt || s->generation != e.generation)) return 0;
-    /* The intentionally broken variant trusts only slot position. */
     char query[300];
     snprintf(query, sizeof(query), "INSERT INTO completions SELECT %lld WHERE NOT EXISTS(SELECT 1 FROM resolutions WHERE attempt=%lld) ON CONFLICT DO NOTHING;",
              (long long)s->attempt, (long long)s->attempt);
@@ -126,7 +123,6 @@ static void crash_case(int dispatched) {
         close(marker[0]); open_db(); Slot s = {0}; require(reserve(&s, 1), "reserve crash slot");
         add_attempt(1, "bash"); s.permit = 1;
         if (dispatched) { s.permit = 0; write_all(marker[1], "X", 1); }
-        /* abrupt process exit with open SQLite connection: no runtime cleanup */
         _exit(0);
     }
     close(marker[1]); join(pid);
@@ -135,7 +131,7 @@ static void crash_case(int dispatched) {
     open_db(); Slot reconstructed = {0};
     require(count("attempts") == 1 && count("completions") == 0, "committed unresolved Attempt survives reopen");
     if (broken) {
-        if (dispatched) add_attempt(2, "bash"); /* blind retry of an uncertain Bash */
+        if (dispatched) add_attempt(2, "bash");
         else { reserve(&reconstructed, 1); reconstructed.permit = 1; }
     }
     require(!reconstructed.permit, "recovery must not fabricate a Dispatch Permit");
@@ -148,9 +144,9 @@ static void cancellation_case(void) {
     sql("BEGIN IMMEDIATE; INSERT INTO resolutions VALUES(1,'interrupted'); COMMIT;");
     require(count("completions") == 0, "interruption invents no Attempt Completion");
     require(settle(&s, e) == 0, "late output cannot override interruption");
-    if (broken) s.occupied = 0; /* bug: durable interruption frees live custody */
+    if (broken) s.occupied = 0;
     int reused_early = reserve(&s, 2);
-    cleanup(&s, c); /* even negative controls clean up before failing */
+    cleanup(&s, c);
     require(!reused_early, "cannot reserve slot while old executor retains pipes/resources");
     release(&s); require(reserve(&s, 2), "slot reusable after local cleanup"); release(&s);
 }

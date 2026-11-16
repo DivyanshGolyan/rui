@@ -1,4 +1,3 @@
-"""Throwaway readiness-cost probe, not a production schema or Host benchmark."""
 import json, sqlite3, statistics, tempfile, time, platform, os
 from pathlib import Path
 
@@ -24,7 +23,6 @@ with tempfile.TemporaryDirectory(prefix='rui-readiness-') as root:
         ''')
         db.executemany('INSERT INTO dependency VALUES(?,2)', ((i+1,) for i in range(N)))
         db.executemany('INSERT INTO dependency VALUES(?,1)', ((N+i+1,) for i in range(fanout)))
-        # Saved results that have no current dependent are a separate history cost.
         db.executemany('INSERT INTO work VALUES(?,7)', ((i+3,) for i in range(N)))
         db.commit()
         db.execute('ANALYZE')
