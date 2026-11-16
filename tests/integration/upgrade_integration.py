@@ -1081,7 +1081,36 @@ def future_target_case(root, binary, releases):
         print("upgrade native: target-public status proved future-wire new instance and actual installed release", flush=True)
 
 
+def alias_restart_cases(root, binary, releases):
+    for spelling in ("symlink", "dot"):
+        for saved in (False, True):
+            with case(root, binary, releases, f"restart-alias-{spelling}-{saved}") as c:
+                canonical_store = c.store
+                canonical_store.mkdir(mode=0o700)
+                if saved:
+                    document = canonical_store / "host.json"
+                    document.write_text(json.dumps({"providers": {}, "execution": {"activeCapacity": 3}}))
+                    document.chmod(0o600)
+                if spelling == "symlink":
+                    alias = c.root / "host-alias"
+                    alias.symlink_to(canonical_store, target_is_directory=True)
+                else:
+                    alias = canonical_store / ".." / canonical_store.name
+                c.store = alias
+                old, previous = c.start_host(sources_only=True)
+                c.store = canonical_store
+                c.select(c.build("selected-alias"))
+                c.binary = c.link
+                output = c.run("host", "restart", "--all", timeout=60)
+                assert "1 restarted" in output, output
+                current = proof_ready(c, previous, old)
+                assert current["store"] == str(canonical_store), current
+                assert str(canonical_store) in output, output
+    print("upgrade native: absolute symlink/dot Host selectors restart with bare and saved sources", flush=True)
+
+
 def restart_all_cases(root, binary, releases):
+    alias_restart_cases(root, binary, releases)
     adopted_replacement_case(root, binary, releases)
     refused_source_cases(root, binary, releases)
     mysql_restart_cases(root, binary, releases)
