@@ -3843,6 +3843,12 @@ test "unconfirmed guidance names the generated handle or the quoted explicit rec
     var explicit = std.Io.Writer.fixed(&buffer);
     try writeUnconfirmed(&explicit, context, .{ .explicit = .{ .record = "stop\x1b.json" } }, error.TruncatedResponse);
     try std.testing.expectEqualStrings(prefix ++ "--store $'/it\\'s \\\\store' --record $'stop\\033.json' --kind session-stop" ++ suffix, explicit.buffered());
+    // The immutable request identity is not a round-trip command selector.
+    var replay: Replay = .{ .explicit = .{ .record = "stop.json" } };
+    try replay.explicit.host_directory.set("/selected-host");
+    explicit = std.Io.Writer.fixed(&buffer);
+    try writeUnconfirmed(&explicit, context, replay, error.TruncatedResponse);
+    try std.testing.expectEqualStrings(prefix ++ "--store $'/selected-host' --record $'stop.json' --kind session-stop" ++ suffix, explicit.buffered());
 }
 
 const SavedRequest = protocol_reply.MutationIdentity;
