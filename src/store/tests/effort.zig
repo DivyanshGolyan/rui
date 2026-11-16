@@ -14,7 +14,7 @@ const store_testing = @import("../testing.zig");
 const AttemptBinding = store_core.AttemptBinding;
 const CurrentConfiguration = configuration_domain.CurrentConfiguration;
 const HistoricalSettings = historical_domain.HistoricalSettings;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const answerTestTurn = store_testing.answerTestTurn;
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
@@ -239,8 +239,8 @@ test "effort refusal requires an emitted Operation update across configure cycle
                     try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE refused_operation_id=?1 AND revision=(SELECT effort_source_revision FROM model_operation WHERE operation_id=?1)", .{binding.operation_id}));
                     var retry = (try storage.tryAdmitNextModelRetry(.empty(), .{}, null)).?;
                     const retried = try retry.permit.consume();
-                    var view: HistoricalView = undefined;
-                    storage.openHistoricalView(retried, &view);
+                    var view: TestingPage = undefined;
+                    view.open(&storage, retried);
                     defer view.close();
                     var settings: HistoricalSettings = undefined;
                     try view.settings(&settings);
@@ -260,8 +260,8 @@ test "effort refusal requires an emitted Operation update across configure cycle
 test "effort provenance excludes refused Operations across unrelated revisions" {
     try store_testing.forEachEngine(struct {
         fn expectEffort(storage: *Store, binding: AttemptBinding, effort: ?protocol.ReasoningEffort) !void {
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(binding, &view);
+            var view: TestingPage = undefined;
+            view.open(storage, binding);
             defer view.close();
             var settings: HistoricalSettings = undefined;
             try view.settings(&settings);

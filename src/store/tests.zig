@@ -71,9 +71,9 @@ const Faults = store_core.Faults;
 const HistoricalContent = historical_domain.HistoricalContent;
 const HistoricalEntry = historical_domain.HistoricalEntry;
 const HistoricalEntryKind = historical_domain.HistoricalEntryKind;
-const HistoricalReader = historical_domain.HistoricalReader;
+const TestingReader = store_testing.TestingReader;
 const HistoricalSettings = historical_domain.HistoricalSettings;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const MessageReply = command_domain.MessageReply;
 const ModelAdmissionKind = model_admission_domain.ModelAdmissionKind;
 const ModelFailure = model_settlement_domain.ModelFailure;
@@ -122,7 +122,7 @@ test {
 }
 
 /// Tests read a view's settings by value; the Host fills them in place.
-pub fn testSettings(view: *HistoricalView) !HistoricalSettings {
+pub fn testSettings(view: *TestingPage) !HistoricalSettings {
     var settings: HistoricalSettings = undefined;
     try view.settings(&settings);
     return settings;
@@ -954,8 +954,8 @@ pub fn denyForTesting(storage: *Store, session: []const u8, key: []const u8, act
     try std.testing.expect(storage.decidePermission(&deny, .{}) == .accepted);
 }
 
-pub fn readTestingContent(view: *HistoricalView, content: HistoricalContent, out: *std.Io.Writer) !void {
-    var reader: HistoricalReader = undefined;
+pub fn readTestingContent(view: *TestingPage, content: HistoricalContent, out: *std.Io.Writer) !void {
+    var reader: TestingReader = undefined;
     try view.openContent(content, &reader);
     defer reader.close();
     var bytes: [256]u8 = undefined;
@@ -971,7 +971,7 @@ pub fn readTestingContent(view: *HistoricalView, content: HistoricalContent, out
 /// Renders a historical entry as the Store holds it: a user entry's text,
 /// an earlier Operation's effort (`operation.high`), or an output item's
 /// kind, bag, call fields and parts (`array.kind=text{bag}`).
-pub fn renderTestingEntry(view: *HistoricalView, entry: HistoricalEntry, buffer: []u8) ![]const u8 {
+pub fn renderTestingEntry(view: *TestingPage, entry: HistoricalEntry, buffer: []u8) ![]const u8 {
     var out = std.Io.Writer.fixed(buffer);
     if (entry.kind == .operation) {
         try out.print("operation.{s}", .{if (entry.effort) |effort| @tagName(effort) else "default"});
@@ -1006,7 +1006,7 @@ pub fn renderTestingEntry(view: *HistoricalView, entry: HistoricalEntry, buffer:
 pub const TestingHistoryCursor = struct {
     position: u64 = 0,
 
-    pub fn next(self: *@This(), view: *HistoricalView) !?HistoricalEntry {
+    pub fn next(self: *@This(), view: *TestingPage) !?HistoricalEntry {
         const entry = try nextTestingItem(view, self.position);
         if (entry) |item| self.position = item.position;
         return entry;
@@ -1016,7 +1016,7 @@ pub const TestingHistoryCursor = struct {
 /// The next history entry after `after` that is no earlier Operation's
 /// effort boundary: the history these tests check, without the boundaries
 /// the codec places between it (tested on their own).
-pub fn nextTestingItem(view: *HistoricalView, after: u64) !?HistoricalEntry {
+pub fn nextTestingItem(view: *TestingPage, after: u64) !?HistoricalEntry {
     var position = after;
     while (try view.nextEntry(position)) |entry| {
         if (entry.kind != .operation) return entry;
@@ -1027,8 +1027,8 @@ pub fn nextTestingItem(view: *HistoricalView, after: u64) !?HistoricalEntry {
 
 /// Opens `view` and reads its settings, whose round checks the binding;
 /// a view that fails is closed.
-pub fn openCheckedView(storage: *Store, binding: AttemptBinding, view: *HistoricalView) !void {
-    storage.openHistoricalView(binding, view);
+pub fn openCheckedView(storage: *Store, binding: AttemptBinding, view: *TestingPage) !void {
+    view.open(storage, binding);
     var settings: HistoricalSettings = undefined;
     view.settings(&settings) catch |err| {
         view.close();

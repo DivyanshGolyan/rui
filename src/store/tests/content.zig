@@ -10,7 +10,7 @@ const historical_domain = @import("../domain/historical.zig");
 const store_testing = @import("../testing.zig");
 const ContentReader = content_domain.ContentReader;
 const ContentReference = content_domain.ContentReference;
-const HistoricalReader = historical_domain.HistoricalReader;
+const TestingReader = store_testing.TestingReader;
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
 const configureTestSession = store_testing.configureTestSession;
@@ -331,7 +331,7 @@ test "large raw content opens without materializing its payload" {
 
 test "content readers hold no decode window" {
     try std.testing.expect(@sizeOf(ContentReader) <= 512);
-    try std.testing.expect(@sizeOf(HistoricalReader) <= 1024);
+    try std.testing.expect(@sizeOf(TestingReader) <= 1024);
 }
 
 /// Tests use the production transaction runner and raw Content sink. The

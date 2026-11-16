@@ -149,8 +149,9 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn("    timeout-minutes: ${{ inputs.batch-base && 300 || 45 }}", upgrade)
         self.assertEqual(step_budget(upgrade, 'Start detached, then install, save real work, reinstall and '
                                      'restart the same Store'), 45)
-        for name in ('linux_build_unit', 'macos_build_unit'):
-            self.assertEqual(budget(job(text, name)), 15)
+        self.assertEqual(budget(job(text, 'linux_build_unit')), 15)
+        # An evicted Mac cache compiles the unit roots cold too (Promote 43815243585).
+        self.assertEqual(budget(job(text, 'macos_build_unit')), budget(job(text, 'macos_build')))
 
     def test_main_ruleset_requires_admission_and_prs_with_only_an_admin_pr_bypass(self):
         ruleset = json.loads((ROOT / '.github/main-ruleset.json').read_text())

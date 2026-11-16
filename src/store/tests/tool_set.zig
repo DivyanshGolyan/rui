@@ -10,6 +10,8 @@ const Store = store_core.Store;
 const command_domain = @import("../domain/command.zig");
 const historical_domain = @import("../domain/historical.zig");
 const store_testing = @import("../testing.zig");
+const TestingReader = store_testing.TestingReader;
+const TestingPage = store_testing.TestingPage;
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
 const submitTestMessage = store_testing.submitTestMessage;
@@ -204,8 +206,8 @@ fn membershipCall(name: []const u8) TestingCall {
 fn expectMembershipRemovedOutput(storage: *Store, binding: store_core.AttemptBinding) !void {
     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try std.testing.expectEqual(binding.turn_id, continuation.turn_id);
-    var view: historical_domain.HistoricalView = undefined;
-    storage.openHistoricalView(continuation, &view);
+    var view: TestingPage = undefined;
+    view.open(storage, continuation);
     defer view.close();
     var position: u64 = 0;
     while (try view.nextEntry(position)) |entry| {
@@ -213,7 +215,7 @@ fn expectMembershipRemovedOutput(storage: *Store, binding: store_core.AttemptBin
         if (entry.kind == .tool_results) break;
     } else return error.MissingToolResults;
     const result = (try view.nextToolResult()).?;
-    var output: historical_domain.HistoricalReader = undefined;
+    var output: TestingReader = undefined;
     try view.openContent(result.output, &output);
     defer output.close();
     var buffer: [tool_defs.removed_tool_result.len + 1]u8 = undefined;

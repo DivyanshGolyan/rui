@@ -306,7 +306,8 @@ jobs:
     needs: plan
     if: ${{ needs.plan.outputs.macos_split == 'true' }}
     runs-on: macos-15
-    timeout-minutes: 15
+    # A cold cache compiles the unit roots from scratch; match the cold producer budget.
+    timeout-minutes: 60
     outputs:
       artifact: ${{ steps.publish.outputs.artifact-id }}
     steps:

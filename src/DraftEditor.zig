@@ -279,6 +279,24 @@ fn insert(self: *Editor, bytes: []const u8, multiline: bool) KeyOutcome {
     return outcome;
 }
 
+/// One complete multiline edit at the existing caret. Rejection, paste,
+/// partial input and failed preflight leave bytes and editor state untouched.
+pub fn insertMultiline(self: *Editor, gpa: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error!KeyOutcome {
+    if (self.rejected) |why| return .{ .refused = why };
+    if (self.pasting() or self.area.partial_length != 0) return .{ .refused = .edit_rejected };
+    if (bytes.len > self.area.buffer.len - self.text().len) return .{ .refused = .overflow };
+    if (bytes.len == 0) return .none;
+    const caret = self.cursor();
+    // TextArea.replace repairs after each scalar and can cross a joining suffix.
+    const combined = try gpa.alloc(u8, self.text().len + bytes.len);
+    defer gpa.free(combined);
+    @memcpy(combined[0..caret], self.text()[0..caret]);
+    @memcpy(combined[caret..][0..bytes.len], bytes);
+    @memcpy(combined[caret + bytes.len ..], self.text()[caret..]);
+    if (self.set(combined, caret + bytes.len) != null) return .{ .refused = .edit_rejected };
+    return .redraw;
+}
+
 /// A screen's Tab: the edit it makes to `draft` with the caret at `caret`,
 /// or null to add the tab.
 pub const Completion = struct {
@@ -915,5 +933,57 @@ test "Option arrows leave a draft intact and return its screen navigation key" {
         try std.testing.expectEqual(KeyOutcome{ .action = case.key }, stream.send(&editor, case.bytes));
         try std.testing.expectEqualStrings("own draft", editor.text());
         try std.testing.expectEqual(@as(usize, 8), editor.cursor());
+    }
+}
+
+test "quote insertion is multiline and atomic at an existing caret" {
+    var storage: [128]u8 = undefined;
+    var editor: Editor = .initText(&storage, "leftRIGHT", 4);
+    try std.testing.expectEqual(KeyOutcome.redraw, try editor.insertMultiline(std.testing.allocator, "\n> 雪e\u{301}\n>\n> final\n"));
+    try std.testing.expectEqualStrings("left\n> 雪e\u{301}\n>\n> final\nRIGHT", editor.text());
+    try std.testing.expectEqual(@as(usize, "left\n> 雪e\u{301}\n>\n> final\n".len), editor.cursor());
+    const before = editor.edits;
+    const caret = editor.cursor();
+    for ([_][]const u8{ "ok\x1bBAD", "ok\xff", "ok\xc3" }) |invalid| {
+        try std.testing.expect((try editor.insertMultiline(std.testing.allocator, invalid)) == .refused);
+        try std.testing.expectEqualStrings("left\n> 雪e\u{301}\n>\n> final\nRIGHT", editor.text());
+        try std.testing.expectEqual(caret, editor.cursor());
+        try std.testing.expectEqual(before, editor.edits);
+        try std.testing.expectEqual(null, editor.rejected);
+    }
+    var small: [10]u8 = undefined;
+    var full: Editor = .initText(&small, "leftRIGHT", 4);
+    try std.testing.expectEqual(KeyOutcome{ .refused = .overflow }, try full.insertMultiline(std.testing.allocator, "\n> a\n"));
+    try std.testing.expectEqualStrings("leftRIGHT", full.text());
+    try std.testing.expectEqual(@as(usize, 4), full.cursor());
+    try std.testing.expectEqual(null, full.rejected);
+}
+
+test "quote insertion refuses active paste partial input and rejected drafts without edits" {
+    const State = enum { paste, partial, rejected };
+    for (std.enums.values(State)) |state| {
+        var storage: [64]u8 = undefined;
+        var editor: Editor = .initText(&storage, "leftRIGHT", 4);
+        switch (state) {
+            .paste => {
+                _ = editor.appEvent(keymap.every, .paste_start, false);
+            },
+            .partial => {
+                _ = editor.insert("\xc3", true);
+            },
+            .rejected => {
+                _ = editor.insert("\x01", true);
+            },
+        }
+        const before = editor.edits;
+        const caret = editor.cursor();
+        const refusal = editor.rejected;
+        const was_pasting = editor.pasting();
+        try std.testing.expect((try editor.insertMultiline(std.testing.allocator, "\n> quote\n")) == .refused);
+        try std.testing.expectEqualStrings("leftRIGHT", editor.text());
+        try std.testing.expectEqual(caret, editor.cursor());
+        try std.testing.expectEqual(before, editor.edits);
+        try std.testing.expectEqual(refusal, editor.rejected);
+        try std.testing.expectEqual(was_pasting, editor.pasting());
     }
 }

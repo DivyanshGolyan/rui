@@ -70,7 +70,7 @@ test "interleaved large content readers bound repeated SQLite page reads" {
     readers[1].open(try storage.openContent(.{ .length = length, .digest = protocol.contentDigest(second) }));
     defer for (&readers) |*reader| reader.close();
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    readers[0].allocator = failing.allocator();
+    readers[0].window.allocator = failing.allocator();
     var buffer: [4096]u8 = undefined;
     // EOF needs no read-ahead allocation. A real allocation failure preserves
     // the existing bounded reads and leaves this same Store usable.
@@ -81,7 +81,7 @@ test "interleaved large content readers bound repeated SQLite page reads" {
     try std.testing.expect(failing.has_induced_failure);
     try std.testing.expect(!storage.isFenced());
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
-    for (&readers) |*reader| reader.allocator = std.testing.allocator;
+    for (&readers) |*reader| reader.window.allocator = std.testing.allocator;
     var misses: c_int = 0;
     var ignored: c_int = 0;
     try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_db_status(storage.sqliteDatabase(), c.SQLITE_DBSTATUS_CACHE_MISS, &misses, &ignored, 1));
@@ -106,15 +106,15 @@ test "interleaved large content readers bound repeated SQLite page reads" {
     {
         const corrupt = try sqlite.prepare(storage.sqliteDatabase(), "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=?1");
         defer _ = c.sqlite3_finalize(corrupt);
-        try sqlite.bindI64(corrupt, 1, readers[0].content_id);
+        try sqlite.bindI64(corrupt, 1, readers[0].window.content_id);
         try sqlite.expectDone(corrupt);
     }
     // Copied bytes belong only to their original reader. A newly resolved
     // raw reader must see the changed row, not another reader's old window.
     var fresh: ContentReader = undefined;
-    fresh.open(try storage.openContent(readers[0].reference));
+    fresh.open(try storage.openContent(readers[0].window.reference));
     defer fresh.close();
-    fresh.allocator = std.testing.allocator;
+    fresh.window.allocator = std.testing.allocator;
     try std.testing.expectEqual(@as(usize, 1), try readers[0].read(length - 1, buffer[0..1]));
     try std.testing.expectEqual(first[length - 1], buffer[0]);
     try std.testing.expectEqual(@as(usize, 1), try fresh.read(length - 1, buffer[0..1]));
@@ -122,7 +122,7 @@ test "interleaved large content readers bound repeated SQLite page reads" {
     {
         const remove = try sqlite.prepare(storage.sqliteDatabase(), "DELETE FROM content WHERE content_id=?1");
         defer _ = c.sqlite3_finalize(remove);
-        try sqlite.bindI64(remove, 1, readers[0].content_id);
+        try sqlite.bindI64(remove, 1, readers[0].window.content_id);
         try sqlite.expectDone(remove);
     }
     try std.testing.expectEqual(@as(usize, 1), try readers[0].read(length - 1, buffer[0..1]));

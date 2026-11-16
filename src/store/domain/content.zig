@@ -99,13 +99,14 @@ pub const Windows = struct {
     }
 };
 
-pub const ContentReader = struct {
-    pub const content_window_bytes = 64 * 1024;
-
+/// One content value's read state without the Store that reads it: its
+/// identity, the digest check of its in-order bytes, its read-ahead window
+/// and the whole bytes an owner already holds. `ContentReader` reads one
+/// through its Store; a request page's reader holds one and asks its Store
+/// to read it (`readContent`).
+pub const ContentWindow = struct {
     content_id: i64,
-    store: *Store,
     reference: ContentReference,
-    active: bool = true,
     allocator: std.mem.Allocator = std.heap.c_allocator,
     prefetch: ?[]u8 = null,
     prefetch_source: i64 = 0,
@@ -119,13 +120,12 @@ pub const ContentReader = struct {
     /// so read-ahead is sized to that range, not the whole row.
     first: u64 = 0,
     /// The content's whole bytes, borrowed from an owner that already read
-    /// them and outlives this reader: its reads copy from here and enter
+    /// them and outlives this window: its reads copy from here and enter
     /// no Store.
     inline_bytes: ?[]const u8 = null,
 
-    /// Builds the reader where it lives. Needs no Store access.
-    pub fn open(self: *ContentReader, location: ContentLocation) void {
-        self.* = .{ .content_id = location.content_id, .store = location.store, .reference = location.reference };
+    pub fn of(content_id: i64, reference: ContentReference) ContentWindow {
+        return .{ .content_id = content_id, .reference = reference };
     }
 
     // Allocate outside Store access. Read-ahead is optional: allocation failure
@@ -133,7 +133,7 @@ pub const ContentReader = struct {
     // value the caller's window holds whole reads straight into it; one that
     // runs past it is read ahead, in a window no larger than what is left,
     // so each later window is not a round of its own.
-    fn prepareRead(self: *ContentReader, start: u64, wanted: usize) void {
+    fn prepareRead(self: *ContentWindow, start: u64, wanted: usize) void {
         const left = self.reference.length - start;
         if (self.prefetch == null and left > wanted) {
             const size: usize = @intCast(@min(content_prefetch_bytes, left));
@@ -144,44 +144,72 @@ pub const ContentReader = struct {
         }
     }
 
+    /// How many bytes a read of `destination` at `start` fills.
+    pub fn fills(self: *const ContentWindow, start: u64, destination: []u8) !usize {
+        if (destination.len > ContentReader.content_window_bytes) return error.WindowTooLarge;
+        if (start > self.reference.length) return error.RangeOutOfBounds;
+        return @intCast(@min(destination.len, self.reference.length - start));
+    }
+
+    /// Fills `destination[0..count]` from the borrowed whole bytes, if the
+    /// window holds them; a read of them enters no Store.
+    pub fn copyInline(self: *const ContentWindow, start: u64, destination: []u8, count: usize) bool {
+        const bytes = self.inline_bytes orelse return false;
+        @memcpy(destination[0..count], bytes[@intCast(start)..][0..count]);
+        return true;
+    }
+
+    /// `DigestCheck.absorb` against this window's reference.
+    pub fn absorb(self: *ContentWindow, start: u64, bytes: []const u8) bool {
+        return self.check.absorb(self.reference, start, bytes);
+    }
+
+    pub fn release(self: *ContentWindow) void {
+        // Raw, as allocated: free would write 0xAA over the window first.
+        if (self.prefetch) |bytes| self.allocator.rawFree(bytes, .of(u8), @returnAddress());
+        self.prefetch = null;
+    }
+};
+
+pub const ContentReader = struct {
+    pub const content_window_bytes = 64 * 1024;
+
+    window: ContentWindow,
+    store: *Store,
+    active: bool = true,
+
+    /// Builds the reader where it lives. Needs no Store access.
+    pub fn open(self: *ContentReader, location: ContentLocation) void {
+        self.* = .{ .window = .of(location.content_id, location.reference), .store = location.store };
+    }
+
     pub fn read(self: *ContentReader, start: u64, destination: []u8) !usize {
         std.debug.assert(self.active);
-        const count = try readOwnedContent(self.store, self, start, destination);
-        if (!self.absorb(start, destination[0..count])) return store_core.fence(self.store, error.CorruptStore);
-        return count;
+        return readContent(self.store, &self.window, start, destination);
     }
 
     /// Streams inside an existing read access, without re-entering the Store
     /// queue. No read-ahead: the caller's content-byte budget is exact.
     pub fn readWithAccess(self: *ContentReader, a: anytype, start: u64, destination: []u8) !usize {
         std.debug.assert(self.active and a.store == self.store);
-        if (destination.len > content_window_bytes) return error.WindowTooLarge;
-        if (start > self.reference.length) return error.RangeOutOfBounds;
-        const wanted: usize = @intCast(@min(destination.len, self.reference.length - start));
-        try readWindow(a, self, start, destination[0..wanted]);
-        if (!self.absorb(start, destination[0..wanted])) return error.CorruptStore;
+        const wanted = try self.window.fills(start, destination);
+        try readWindow(a, &self.window, start, destination[0..wanted]);
+        if (!self.window.absorb(start, destination[0..wanted])) return error.CorruptStore;
         if (@import("builtin").is_test) _ = self.store.testing_content_work.read.fetchAdd(wanted, .monotonic);
         return wanted;
-    }
-
-    /// `DigestCheck.absorb` against this reader's reference.
-    pub fn absorb(self: *ContentReader, start: u64, bytes: []const u8) bool {
-        return self.check.absorb(self.reference, start, bytes);
     }
 
     /// Read at any public byte offset.
     pub fn readRange(self: *ContentReader, start: u64, destination: []u8) !usize {
         std.debug.assert(self.active and destination.len > 0);
         if (destination.len > content_window_bytes) return error.WindowTooLarge;
-        if (start > self.reference.length) return error.RangeOutOfBounds;
+        if (start > self.window.reference.length) return error.RangeOutOfBounds;
         return self.read(start, destination);
     }
 
     pub fn close(self: *ContentReader) void {
         std.debug.assert(self.active);
-        // Raw, as allocated: free would write 0xAA over the window first.
-        if (self.prefetch) |bytes| self.allocator.rawFree(bytes, .of(u8), @returnAddress());
-        self.prefetch = null;
+        self.window.release();
         self.active = false;
         if (@import("builtin").is_test) _ = self.store.testing_content_work.closes.fetchAdd(1, .monotonic);
     }
@@ -340,52 +368,56 @@ pub fn contentIdOf(a: anytype, reference: ContentReference, private: bool) !i64 
     return @intCast(row.content_id.get());
 }
 
-fn readOwnedContent(self: *Store, reader: *ContentReader, start: u64, destination: []u8) !usize {
-    if (destination.len > ContentReader.content_window_bytes) return error.WindowTooLarge;
-    if (start > reader.reference.length) return error.RangeOutOfBounds;
-    const wanted: usize = @intCast(@min(destination.len, reader.reference.length - start));
-    if (reader.inline_bytes) |bytes| {
-        @memcpy(destination[0..wanted], bytes[@intCast(start)..][0..wanted]);
-    } else {
-        if (wanted != 0) reader.prepareRead(start, wanted);
-        try self.queue().run(readOwnedContentHeld, .{ self, reader, start, destination[0..wanted] });
+/// Reads `window`'s content at `start` through `self`, and checks the digest
+/// of its in-order bytes: a mismatch fences the Store.
+pub fn readContent(self: *Store, window: *ContentWindow, start: u64, destination: []u8) !usize {
+    const count = try readOwnedContent(self, window, start, destination);
+    if (!window.absorb(start, destination[0..count])) return store_core.fence(self, error.CorruptStore);
+    return count;
+}
+
+fn readOwnedContent(self: *Store, window: *ContentWindow, start: u64, destination: []u8) !usize {
+    const wanted = try window.fills(start, destination);
+    if (!window.copyInline(start, destination, wanted)) {
+        if (wanted != 0) window.prepareRead(start, wanted);
+        try self.queue().run(readOwnedContentHeld, .{ self, window, start, destination[0..wanted] });
     }
     if (@import("builtin").is_test) _ = self.testing_content_work.read.fetchAdd(wanted, .monotonic);
     return wanted;
 }
 
-fn readOwnedContentHeld(self: *Store, reader: *ContentReader, start: u64, destination: []u8) !void {
+fn readOwnedContentHeld(self: *Store, window: *ContentWindow, start: u64, destination: []u8) !void {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     var a: Access(.read, error{}) = .open(&entry);
     defer a.deinit();
-    try entry.finish(Ordinary.none, readWindow(&a, reader, start, destination));
+    try entry.finish(Ordinary.none, readWindow(&a, window, start, destination));
 }
 
-/// Fills all of `destination` from `reader`'s content at `start`, or
+/// Fills all of `destination` from `window`'s content at `start`, or
 /// fails, so no reader sees a short window. Each reader owns its copied
 /// source window: neither interleaved readers nor another row at the same
 /// offset can borrow those bytes.
-fn readWindow(a: anytype, reader: *ContentReader, start: u64, destination: []u8) !void {
+fn readWindow(a: anytype, window: *ContentWindow, start: u64, destination: []u8) !void {
     if (destination.len == 0) return;
-    const content_id: u64 = @intCast(reader.content_id);
-    const window = reader.prefetch orelse return a.readRaw(content_id, start, destination);
+    const content_id: u64 = @intCast(window.content_id);
+    const bytes = window.prefetch orelse return a.readRaw(content_id, start, destination);
     var filled: usize = 0;
     while (filled < destination.len) {
         const position = start + filled;
-        if (reader.prefetch_source != reader.content_id or position < reader.prefetch_start or
-            position >= reader.prefetch_start + reader.prefetch_length)
+        if (window.prefetch_source != window.content_id or position < window.prefetch_start or
+            position >= window.prefetch_start + window.prefetch_length)
         {
-            reader.prefetch_length = 0;
-            const wanted: usize = @intCast(@min(window.len, reader.reference.length - position));
-            try a.readRaw(content_id, position, window[0..wanted]);
-            reader.prefetch_source = reader.content_id;
-            reader.prefetch_start = position;
-            reader.prefetch_length = wanted;
+            window.prefetch_length = 0;
+            const wanted: usize = @intCast(@min(bytes.len, window.reference.length - position));
+            try a.readRaw(content_id, position, bytes[0..wanted]);
+            window.prefetch_source = window.content_id;
+            window.prefetch_start = position;
+            window.prefetch_length = wanted;
         }
-        const offset: usize = @intCast(position - reader.prefetch_start);
-        const count = @min(destination.len - filled, reader.prefetch_length - offset);
-        @memcpy(destination[filled..][0..count], window[offset..][0..count]);
+        const offset: usize = @intCast(position - window.prefetch_start);
+        const count = @min(destination.len - filled, window.prefetch_length - offset);
+        @memcpy(destination[filled..][0..count], bytes[offset..][0..count]);
         filled += count;
     }
 }

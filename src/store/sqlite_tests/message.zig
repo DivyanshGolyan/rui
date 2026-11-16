@@ -11,8 +11,8 @@ const historical_domain = @import("../domain/historical.zig");
 const sqlite = @import("../sqlite.zig");
 const store_testing = @import("../testing.zig");
 const ContentReader = content_domain.ContentReader;
-const HistoricalReader = historical_domain.HistoricalReader;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingReader = store_testing.TestingReader;
+const TestingPage = store_testing.TestingPage;
 const TestingAnswerPart = store_testing.TestingAnswerPart;
 const answerTestTurn = store_testing.answerTestTurn;
 const canonicalCwd = store_testing.canonicalCwd;
@@ -141,8 +141,8 @@ test "a message's text is stored once and its parts replay as lengths of it" {
     }) |case| try std.testing.expectEqual(case[0], try probeConstraint(storage.sqliteDatabase(), case[1]));
     try submitTestMessage(&storage, &tmp, "text-once-next", "text-once-next", session.slice(), "next");
     const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    var view: HistoricalView = undefined;
-    storage.openHistoricalView(next, &view);
+    var view: TestingPage = undefined;
+    view.open(&storage, next);
     defer view.close();
     var cursor: TestingHistoryCursor = .{};
     var bytes: [512]u8 = undefined;
@@ -172,8 +172,8 @@ test "a large message's parts read only their own ranges" {
     try answerTestTurn(&storage, &tmp, session.slice(), "large-parts", &answer);
     try submitTestMessage(&storage, &tmp, "large-parts-next", "large-parts-next", session.slice(), "next");
     const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    var view: HistoricalView = undefined;
-    storage.openHistoricalView(next, &view);
+    var view: TestingPage = undefined;
+    view.open(&storage, next);
     defer view.close();
     var cursor: TestingHistoryCursor = .{};
     while (try cursor.next(&view)) |entry| {
@@ -184,7 +184,7 @@ test "a large message's parts read only their own ranges" {
         var text_bytes: u64 = 0;
         while (try view.nextOutputPart()) |part| {
             const text = part.text orelse continue;
-            var reader: HistoricalReader = undefined;
+            var reader: TestingReader = undefined;
             try view.openContent(text, &reader);
             defer reader.close();
             var offset: u64 = 0;

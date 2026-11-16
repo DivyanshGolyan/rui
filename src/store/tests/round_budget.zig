@@ -18,7 +18,7 @@ const ActionExecutionInput = action_domain.ActionExecutionInput;
 const ContentReader = content_domain.ContentReader;
 const HistoricalEntryKind = historical_domain.HistoricalEntryKind;
 const HistoricalSettings = historical_domain.HistoricalSettings;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const ModelOperationKind = historical_domain.ModelOperationKind;
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
@@ -640,8 +640,8 @@ test "each Store entry point takes its round budget on its common path" {
             try std.testing.expect(try storage.configure(&add_search, .{}) == .accepted);
             const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             {
-                var view: HistoricalView = undefined;
-                storage.openHistoricalView(continuation, &view);
+                var view: TestingPage = undefined;
+                view.open(storage, continuation);
                 defer view.close();
                 meter.start();
                 _ = try view.validateOutputsStep();
@@ -747,8 +747,8 @@ test "each Store entry point takes its round budget on its common path" {
             try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(compaction));
             try settleCompactionForTesting(storage, tmp, compaction, &.{.compaction});
             const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(successor, &view);
+            var view: TestingPage = undefined;
+            view.open(storage, successor);
             defer view.close();
             // The boundary's round brought the base's anchor.
             while (!try view.validateOutputsStep()) {}

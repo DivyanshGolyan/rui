@@ -15,7 +15,7 @@ const model_settlement_domain = @import("../domain/model_settlement.zig");
 const store_testing = @import("../testing.zig");
 const AttemptBinding = store_core.AttemptBinding;
 const ContentReader = content_domain.ContentReader;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const ModelFailure = model_settlement_domain.ModelFailure;
 const PermissionDecisionReply = command_domain.PermissionDecisionReply;
 const canonicalCwd = store_testing.canonicalCwd;
@@ -111,8 +111,8 @@ test "terminal call-result import and read failures preserve canonical authority
             try settleCallsForTesting(&read_store, &read_tmp, read_binding, "result-read-metadata", &rejected_call);
             const continuation = (try read_store.admitNextModelAttempt(.{})).?.permit.binding;
             try store_testing.withoutForeignKeys(&read_store, "UPDATE model_tool_call SET rejection_content_id=9223372036854775807", .{});
-            var view: HistoricalView = undefined;
-            read_store.openHistoricalView(continuation, &view);
+            var view: TestingPage = undefined;
+            view.open(&read_store, continuation);
             defer view.close();
             var position: u64 = 0;
             while (true) {
