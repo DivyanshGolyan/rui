@@ -594,6 +594,11 @@ pub fn anchorPlacement(init: std.process.Init, settings: *hs.Settings, dir: []co
         try text(settings, init.gpa, "interface.dir", try platform.defaultMysqlInterface(host, &runtime), failure);
     }
     hs.anchor(settings, host) catch return invalid(failure, "store.sqlite.dir", "Host directory exceeds the path byte bound");
+    if (settings.store == .sqlite) {
+        var selected: [protocol.max_store_bytes]u8 = undefined;
+        const directory = try platform.canonicalStoreDestination(init.io, settings.store.sqlite.dir.slice(), &selected);
+        try settings.store.sqlite.dir.text.set(directory);
+    }
 }
 
 fn existingPlacement(io: std.Io, dir: []const u8) !platform.Paths {
@@ -1704,17 +1709,16 @@ pub fn checkStart(init: std.process.Init, request: Spawn, failure: *start_report
     settings.* = .{};
     defer settings.deinit();
     try readDetached(init, request, settings, failure);
+    try anchorPlacement(init, settings, request.dir, failure);
     // Only overridden sources need a comparison with the saved placement.
-    if (request.settings_file == null and request.assignments.len == 0) {
-        try anchorPlacement(init, settings, request.dir, failure);
-        return;
-    }
+    if (request.settings_file == null and request.assignments.len == 0) return;
     // Only saved placement is discoverable by subsequent directory clients.
     const saved_settings = try init.gpa.create(hs.Settings);
     defer init.gpa.destroy(saved_settings);
     saved_settings.* = .{};
     defer saved_settings.deinit();
     _ = try readSources(init, .{ .dir = request.dir }, saved_settings, failure);
+    try anchorPlacement(init, saved_settings, request.dir, failure);
     var wiping: secret_value.WipingAllocator = .{ .backing = init.gpa };
     var comparison: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer comparison.deinit();
@@ -1728,7 +1732,6 @@ pub fn checkStart(init: std.process.Init, request: Spawn, failure: *start_report
             return error.SettingsInvalid;
         }
     }
-    try anchorPlacement(init, settings, request.dir, failure);
 }
 
 pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: ?Progress, result: *HostLaunchResult) void {
