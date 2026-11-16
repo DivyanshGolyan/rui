@@ -269,7 +269,6 @@ pub const ActivityPage = struct {
                     fact.value = .{ .turn_ended = .{ .session = ended.session.value, .turn = try id(ended.turn, false), .operation = try id(ended.operation, false), .ending = ending, .code = ended.code.value, .content = if (ended.content) |reference| try content(reference) else null } };
                 },
                 .stop => |stop| {
-                    if (stop.turn == null and stop.completion.value == .pending) return error.InvalidActivityPage;
                     fact.value = .{ .stop = .{ .key = stop.key.value, .turn = if (stop.turn) |turn| try id(turn, false) else null, .cutoff = try id(stop.cutoff, true), .completion = stop.completion.value } };
                 },
             }
