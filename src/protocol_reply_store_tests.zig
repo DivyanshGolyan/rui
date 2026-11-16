@@ -252,7 +252,7 @@ test "saved invalid Action targets round trip through Store observation and exac
         try command.key.set("invalid-action-target");
         try command.session.set("k7m2qx");
         const free: usize = 2;
-        const capacity: @import("store/domain/action_control.zig").CapacityView = .{ .total = 2, .context = &free, .freeFn = struct {
+        const capacity: store.ActionCapacityView = .{ .total = 2, .context = &free, .freeFn = struct {
             fn read(context: *const anyopaque) usize {
                 return @as(*const usize, @ptrCast(@alignCast(context))).*;
             }
