@@ -3221,8 +3221,8 @@ test "Host line and Settings tail show together without overlap at wide and narr
         try std.testing.expectEqual(at.settings.end, at.host.start);
         try std.testing.expectEqual(@as(u16, 1), at.host.len());
         try std.testing.expectEqual(at.host.end, at.input);
-        try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start), "─"));
-        try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start + 1), "  Settings"));
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start), "  Settings"));
+        try std.testing.expectEqualStrings(@import("transport_options").version, std.mem.trim(u8, try shown.line(at.settings.start + 1), " "));
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.host.start), "■ Host stopped ·"));
         try std.testing.expect(std.mem.endsWith(u8, try shown.line(at.input), "enter open"));
         for (at.list.start..at.list.end) |row| {
@@ -5844,7 +5844,7 @@ test "Overview mouse Settings hover persists across frames and never changes sel
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
     try rig.overview.app_settings_line.widget().handleEvent(&ctx, .mouse_enter);
-    try rig.overview.app_settings_line.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 4, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
+    try rig.overview.app_settings_line.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 4, .row = 0, .button = .none, .type = .motion, .mods = .{} } });
     var hovered = try rig.shown(80, 24);
     defer hovered.deinit();
     try std.testing.expectEqual(@import("widget_style.zig").of(rig.overview.caps, .{ .background = .hover }).bg, hovered.screen.readCell(4, row).?.style.bg);
