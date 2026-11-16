@@ -143,6 +143,10 @@ pub fn stoppedSql(comptime session: []const u8, comptime selected: []const u8) [
         ") OR EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=" ++ session ++ " AND owed.settled=0))";
 }
 
+pub fn messageDeclinesApprovalSql(comptime action: []const u8) []const u8 {
+    return "EXISTS(SELECT 1 FROM message_admission m WHERE m.session_ref=" ++ action ++ ".session_ref AND m.source_action_id IS NULL AND m.admission_position>" ++ action ++ ".approval_position)";
+}
+
 pub fn actionStoppedSql(comptime action: []const u8, comptime operation: []const u8) []const u8 {
     return "(" ++ stoppedSql(action ++ ".session_ref", selectedStopSql(action, operation)) ++ " OR EXISTS(SELECT 1 FROM action_stop direct_stop WHERE direct_stop.target_action_id=" ++ action ++ ".action_id))";
 }
@@ -192,9 +196,8 @@ const next_core_action = rsql.Read(.{
         "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "JOIN turn active ON active.turn_id=operation.turn_id JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE action.authorized=0 AND action.resolution_code IS NULL AND action.approval_position IS NOT NULL " ++
-        "AND active.outcome_code IS NULL AND active.operation_id=operation.operation_id AND NOT " ++ actionStoppedSql("action", "operation") ++ " " ++
-        "AND EXISTS(SELECT 1 FROM message_admission m WHERE m.session_ref=action.session_ref AND m.turn_id IS NULL " ++
-        "AND m.source_action_id IS NULL AND m.admission_position>action.approval_position) " ++
+        "AND ((active.outcome_code IS NULL AND active.operation_id=operation.operation_id) OR action.background_position IS NOT NULL) AND NOT " ++ actionStoppedSql("action", "operation") ++ " " ++
+        "AND " ++ messageDeclinesApprovalSql("action") ++ " " ++
         "ORDER BY auto_deny DESC,action_id LIMIT 1",
     .Args = CoreNames.Args(struct {}),
     .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: Bounded(session_id.max_reference_bytes), auto_deny: bool, tool: CoreTool },

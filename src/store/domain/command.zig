@@ -1949,7 +1949,7 @@ pub const InterruptModel = struct {
 const decision_action = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,a.authorized,a.background_position IS NOT NULL AS background," ++ action_domain.actionStoppedSql("a", "operation") ++ " AS stopped,a.resolution_code IS NULL AS unresolved,(t.outcome_code IS NULL OR a.background_position IS NOT NULL) AS turn_open,t.turn_id," ++
         "EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=?2 AND f.kind=1 AND f.source_id=a.action_id AND f.position IS NOT NULL) AS forwarded," ++
-        "EXISTS(SELECT 1 FROM message_admission m WHERE m.session_ref=a.session_ref AND m.turn_id IS NULL AND m.source_action_id IS NULL AND m.admission_position>a.approval_position AND t.outcome_code IS NULL AND t.operation_id=operation.operation_id) AS message_decline " ++
+        action_domain.messageDeclinesApprovalSql("a") ++ " AS message_decline " ++
         "FROM action_operation a JOIN session s ON s.session_ref=a.session_ref " ++
         "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=operation.turn_id WHERE a.action_id=?1",
     .Args = struct { action_id: u64, target: []const u8 },

@@ -897,11 +897,6 @@ test "native promotion preserves old Turn approval discovery without launching b
                 try NativePromotion.expectReported(&storage, &tmp, session.slice(), action, true, true);
                 try NativePromotion.finishModel(&storage, &tmp, continuation);
                 try NativePromotion.expectReported(&storage, &tmp, session.slice(), action, true, true);
-                try submitTestMessage(&storage, &tmp, "queued-after-terminal-file", "queued-after-terminal", session.slice(), "Continue later.");
-                const queued = try store_testing.observeCommandForTesting(&storage, "queued-after-terminal");
-                try std.testing.expectEqual(action, queued.kind.message.?.work.?.first_action.?);
-                const next_turn = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-                try NativePromotion.finishModel(&storage, &tmp, next_turn);
                 try std.testing.expect((try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})) == null);
                 if (choice == .stop) {
                     var stop = try completeSessionStop("stop-pending", session.slice());
@@ -1586,6 +1581,40 @@ test "interrupt regression: a new Message declines pending approvals through the
                 }
             }
             try std.testing.expectEqual(@as(usize, 2), seen);
+        }
+    }.run);
+}
+
+test "interrupt regression: Message declines background approval through originating Turn lifecycle" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]enum { current, continued, completed, selected }{ .current, .continued, .completed, .selected }) |stage| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSessionAsk(&storage, "background-approval");
+                const action = try NativePromotion.promoted(&storage, &tmp, session.slice());
+                if (stage != .current) {
+                    const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    if (stage == .completed or stage == .selected) try NativePromotion.finishModel(&storage, &tmp, continuation);
+                }
+                try submitTestMessage(&storage, &tmp, "background-new", "background-new", session.slice(), "new instructions");
+                if (stage == .selected) _ = try storage.admitNextModelAttempt(.{});
+                var allow: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = action, .decision = .allow_once };
+                try allow.key.set("late-background-allow");
+                const result = storage.decidePermission(&allow, .{});
+                try std.testing.expect(result == .rejected and result.rejected.code == .action_not_pending);
+                const work = (try storage.nextCoreWork(.fromFree(2, true))).?;
+                try std.testing.expect(work == .auto_deny);
+                try std.testing.expectEqual(action, work.auto_deny.action_id);
+                var decision: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = action };
+                try decision.key.set("background-message-denial");
+                try std.testing.expect(storage.declineForMessage(&decision, .{}) == .accepted);
+                const content = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1 AND resolution_code='denied'", .{action});
+                try expectContent(&storage, try testingContentReference(&storage, content), "declined: a new message arrived; ask again if still needed");
+            }
         }
     }.run);
 }
