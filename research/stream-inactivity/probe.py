@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Throwaway timing probe; no response content or credentials are written."""
 import argparse
 import http.client
 import json

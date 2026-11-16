@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Audit recorded evidence without replacing its historical provenance."""
 import argparse
 import hashlib
 import json

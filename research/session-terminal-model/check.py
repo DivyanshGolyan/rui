@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Run the bounded design checks, including expected counterexamples. No LLM calls."""
 import argparse
 import hashlib
 import json

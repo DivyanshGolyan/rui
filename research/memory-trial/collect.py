@@ -1,3 +1,4 @@
+"""Collect a small, local Host memory evidence bundle on macOS."""
 import argparse
 import hashlib
 import json

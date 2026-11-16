@@ -1,4 +1,19 @@
 #!/usr/bin/env python3
+"""Opt-in subscription stream probe; synthetic input, no tools or credential writes.
+
+Run create with a fresh checkpoint path, then resume/retrieve with the same path:
+  python3 research/stream-resumption/probe.py --live --action create --mode ordinary \
+    --checkpoint /tmp/resumption-new.json --results /tmp/resumption-new.jsonl
+  python3 research/stream-resumption/probe.py --live --action resume --mode ordinary \
+    --checkpoint /tmp/resumption-new.json --results /tmp/resumption-new.jsonl
+  python3 research/stream-resumption/probe.py --live --action retrieve --mode ordinary \
+    --checkpoint /tmp/resumption-new.json --results /tmp/resumption-new.jsonl
+
+Create exits 73 after persisting the first text event's cursor, without cleanup.
+The saved cursor is experimental metadata, not a production payload checkpoint.
+Use --mode background or stored with a new checkpoint to test those parameters.
+No automatic retries; 90-second lifetime and byte limits are experiment bounds.
+"""
 import argparse
 import http.client
 import json
