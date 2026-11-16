@@ -1982,8 +1982,8 @@ fn startSelectedOverviewHost(init: std.process.Init, store: []const u8, binding:
     if (result.outcome == .failed) return;
     const provider = std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).?;
     if (protocol.routeOf(result.outcome.ready.facts.capabilities.providers, provider) == .unserved) {
-        const canonical = result.outcome.ready.facts.store;
-        launchFailure(result, .provider_unserved, error.HostModelUnavailable, canonical.slice());
+        const selector = result.outcome.ready.selector;
+        launchFailure(result, .provider_unserved, error.HostModelUnavailable, selector.slice());
     }
 }
 
@@ -5401,7 +5401,7 @@ test "Host selection round trips every Store placement and interface through def
         for ([_]bool{ false, true }) |ready| {
             errdefer std.debug.print("resume ready={}\n", .{ready});
             const preflight = preflightExistingOverview(io, saved.store.slice());
-            if (preflight) |_| {} else |err| std.debug.print("placement-only resume preflight unexpectedly required readiness: {s}\n", .{@errorName(err)});
+            if (std.meta.isError(preflight)) std.debug.print("placement-only resume preflight unexpectedly required Host readiness\n", .{});
             try std.testing.expect(!std.meta.isError(preflight));
             const admitted = try preflight;
             try std.testing.expectEqualStrings(dir, admitted.selector());
@@ -5441,6 +5441,13 @@ test "Host selection round trips every Store placement and interface through def
             lease_paths.store_identity = result.outcome.ready.facts.store;
             lease_paths.retainReachableDirectory(io, dir);
             try std.testing.expectEqualStrings(dir, lease_paths.selector());
+            var binding: new_session_selection.Binding = .{};
+            try binding.provider.set("openai");
+            try binding.model.set("test-model");
+            var unserved: LaunchFixture = .{ .scenario = .already_ready, .openai = false, .store_identity = if (kind == .mysql) mysql_identity else null };
+            startSelectedOverviewHost(init, dir, binding, &readiness, &.{}, unserved.ops(), result);
+            try std.testing.expectEqual(host_launch.Summary.Failure.Kind.provider_unserved, result.outcome.failed.cause.kind);
+            try std.testing.expectEqualStrings(dir, result.outcome.failed.store.slice());
         }
     };
 }
