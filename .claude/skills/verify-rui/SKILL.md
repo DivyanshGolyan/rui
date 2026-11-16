@@ -15,8 +15,10 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
 
    ```sh
    git fetch origin && git worktree add --detach ../rui-verify-pin-SHORT FULLSHA
-   $V build FULLSHA --source ../rui-verify-pin-SHORT --pkg-dir "$ZIG_LOCAL_PKG_DIR"
+   $V build FULLSHA --source ../rui-verify-pin-SHORT --pkg-dir "${ZIG_LOCAL_PKG_DIR:-$PWD/zig-pkg}"
    ```
+
+   If packages are missing, run `src/fetch_dependencies.sh` for the shared package directory and run each pinned worktree’s `src/fetch_screen_dependencies.sh` before building it. Keep its `screen-emulator/zig-pkg` local to that worktree: symlinking it elsewhere breaks relative generator paths in Zig.
 
    The build refuses a dirty or mismatched checkout. Set `RUI_BUILD_JOBS` to a positive integer to control parallelism for both builds (default `2`; use `1` on constrained containers). It runs `zig build -Doptimize=ReleaseSafe` and copies `zig-out/bin` to `~/.cache/verify-rui/builds/SHA/bin`. It then runs `zig build screen-emulator`, which installs the libghostty-vt that decodes committed frames into `~/.cache/verify-rui/builds/SHA/screen`. It also writes `manifest.json` with the SHA, tree and binary and library sha256 values. A cold build takes about 5 minutes on an M-series Mac, plus about 5 for libghostty-vt. A line saying `failed command: sh ./src/build_transport.sh` in the log is normal when rc=0. Use `build FULLSHA --no-screen` to skip libghostty-vt: the manifest records `screen_library: null`. The tap, tapped `term`, `wait` and `frames` refuse such builds with one line; direct untapped tmux terminals still work. A build made before the library existed has none; rebuild it with `--force` to add it.
 
@@ -68,6 +70,29 @@ Runs each named state in `scripts/frames.json` on a plain PTY, with libghostty-v
 `--record` (or state `"record": true`) rebuilds first-size transitions from `frames-pty/STATE/output.{bin,jsonl}` after the run as an inline-PR GIF, plus optional MP4. Every state writes that timed byte log; replay stops at the first resize and sends no replies. Recordings use the same HTML renderer, deduplicate unchanged pictures, coalesce playback into 80 ms buckets (latest wins), bound frame delays to 60–1500 ms and hold the last frame for 2 s. Requires PNG rendering and ffmpeg; recordings refuse missing ffmpeg before allocating a run. The index displays GIFs when present.
 
 Prints `RUN/evidence/frames/` (or `--out`), with ordered `index.html`, `frames.json` results and failure captures. Cleans up unless `--keep`; PTYs always close. `expect`/`absent` apply to every size. These are L1 synthetic PTY layout/transition captures, not physical-input proof. See [scenario format and selection](features/frames.md), including mouse steps: emitted mouse bytes wait for changed committed cells; top-level `"repaint": false` declares an intentional no-op, and no emitted bytes skips the wait.
+
+## Prove a UI PR
+
+Set `HEAD` and `BASE` to full commit SHAs and select the changed screens' states from the [feature map](features/README.md).
+Build both revisions, then capture the same states at both sizes:
+
+```sh
+V=.claude/skills/verify-rui/scripts/verify-rui
+$V build "$HEAD" --pkg-dir "${ZIG_LOCAL_PKG_DIR:-$PWD/zig-pkg}"
+$V build "$BASE" --pkg-dir "${ZIG_LOCAL_PKG_DIR:-$PWD/zig-pkg}"
+$V frames "$HEAD" --before "$BASE" --only <states for the changed screens> --sizes 140x40,46x30 [--record]
+$V publish DIR
+```
+
+Replace the angle-bracket placeholder with comma-separated state names, omit the brackets around optional `--record`, and use the printed frames directory for `DIR`.
+In this container, prefix builds with `zb` and set `RUI_BUILD_JOBS=2`; fetch dependencies as described in Launch and `.agents/setup` if needed.
+Comparison captures live in `before/` and `after/`; `index.html` and `pairs.json` list changed pairs first and mark identical committed cells `same`.
+Both builds must already exist; ordinary `frames` without `--before` keeps its single-build flow.
+The publisher selects changed pairs by default (`--all` includes same pairs, `--states a,b` filters states, and `--repo-remote origin` selects the GitHub remote).
+It appends PNGs and GIFs to the one public orphan branch `pr-evidence` with immutable commit-pinned URLs and leaves your working tree and branch alone.
+Paste its entire `## Screens` block into the PR body before opening it, or before the next push: check.yml reruns PR Shape on push, not body edits.
+A UI-path change that provably draws nothing different may instead carry a line `No screen change: <nonempty reason>`.
+Humans with browsers may also upload `github.com/user-attachments` images or videos.
 
 ## Doctor
 

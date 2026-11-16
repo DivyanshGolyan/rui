@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import tarfile
 import unittest
 from contextlib import redirect_stderr
 from unittest.mock import patch
@@ -87,7 +88,82 @@ class PrShapeTest(unittest.TestCase):
                     self.assertIsNone(pr_shape.refusal(paths, body))
 
 
+class ScreenEvidenceTest(unittest.TestCase):
+    def test_ui_media_forms_and_exemption(self):
+        for evidence in ("![Overview 140x40](https://example.test/a.png)",
+                         '<img src="https://example.test/a.png" alt="Overview">',
+                         '<video src="https://example.test/a.mp4"></video>',
+                         "https://github.com/user-attachments/assets/123",
+                         "No screen change: the refactor preserves all drawn cells.",
+                         "No screen change: reason\r\n"):
+            for path in ("src/overview_view.zig", "src/SessionScreen.zig",
+                         ".claude/skills/verify-rui/scripts/frames.json"):
+                with self.subTest(evidence=evidence, path=path):
+                    self.assertIsNone(pr_shape.refusal([path], "## Shape\n" + evidence))
+
+    def test_ui_requires_visible_embed_or_nonempty_reason(self):
+        for evidence in ("", "No screen change:", "No screen change:   ", "No screen change:\n",
+                         "No screen change:\nthere is no reason on the line",
+                         "[Overview](https://example.test/a.png)", "https://example.test/a.png",
+                         "<!-- ![Overview](a.png) -->", "```md\n![Overview](a.png)\n```",
+                         "```\nNo screen change: hidden reason\n```"):
+            for path in ("src/overview_view.zig", ".claude/skills/verify-rui/scripts/frames.json"):
+                with self.subTest(evidence=evidence, path=path):
+                    reason = pr_shape.refusal([path], "## Shape\n" + evidence)
+                    self.assertIsInstance(reason, str)
+                    self.assertIn("verify-rui publish", reason)
+
+    def test_non_ui_does_not_need_media(self):
+        for path in ("src/server.zig", "src/store/Store.zig", "src/cli.zig", "docs/agents/landing.md"):
+            with self.subTest(path=path):
+                self.assertIsNone(pr_shape.refusal([path], "## Shape"))
+
+    def test_graph_classifies_transitive_ui_but_excludes_host_and_test_imports(self):
+        graph = pr_shape.tree_graph()
+        self.assertIn("src/Overview.zig", graph.production["src/cli.zig"])
+        paths = pr_shape.ui_paths(graph)
+        for path in ("src/TerminalApp.zig", "src/Root.zig", "src/SessionScreen.zig", "src/Composer.zig",
+                     "src/widgets/List.zig", "src/theme.zig", "src/overview_view.zig"):
+            self.assertIn(path, paths)
+        self.assertFalse(paths & graph.host)
+        self.assertFalse(paths & graph.tests)
+        # New imports join the rule automatically; no path list to update.
+        graph = type("Graph", (), dict(production={"src/Overview.zig": {"src/new_screen.zig", "src/shared.zig"}},
+                     host={"src/shared.zig"}, tests=set(), closure=staticmethod(pr_shape.Graph.closure)))()
+        self.assertEqual(pr_shape.ui_paths(graph), {"src/Overview.zig", "src/new_screen.zig"})
+
+    def test_deleted_ui_paths_use_base_graph(self):
+        with patch.object(pr_shape, "revision_ui_paths", return_value={"src/removed_screen.zig"}) as base:
+            reason = pr_shape.refusal(["src/removed_screen.zig"], "## Shape", base="old")
+            self.assertIsInstance(reason, str)
+            self.assertIn("verify-rui publish", reason)
+            base.assert_called_once_with("old")
+
+
+    def test_base_archive_preserves_deleted_ui_edges_and_binary_embeds(self):
+        archive = io.BytesIO()
+        sources = {"src/Overview.zig": b'const view = @import("removed_screen.zig");\n',
+                   "src/removed_screen.zig": b'const image = @embedFile("image.bin");\n',
+                   "src/image.bin": b"\xff\x80",
+                   "src/logic_tests.zig": b"const cores = .{\n};\n",
+                   "tests/ci/stack_frames.json": b'{"host_modules": []}'}
+        with tarfile.open(fileobj=archive, mode="w") as tree:
+            for name, data in sources.items():
+                entry = tarfile.TarInfo(name)
+                entry.size = len(data)
+                tree.addfile(entry, io.BytesIO(data))
+        with patch("subprocess.check_output", return_value=archive.getvalue()):
+            paths = pr_shape.revision_ui_paths.__wrapped__("deleted-ui-base")
+        self.assertIn("src/removed_screen.zig", paths)
+        self.assertIn("src/image.bin", paths)
+
+
 class PrShapeMainTest(unittest.TestCase):
+    def setUp(self):
+        base = patch.object(pr_shape, "revision_ui_paths", return_value=set())
+        base.start()
+        self.addCleanup(base.stop)
+
     def test_argument_overrides_base_environment_and_body_stays_data(self):
         for body, expected in (("", 1), ("Summary\n## Shape\n$(exit 99)", 0)):
             with self.subTest(body=body), \
@@ -126,6 +202,13 @@ class PrShapeMainTest(unittest.TestCase):
             source = Path(directory) / "src/deleted.zig"
             source.parent.mkdir()
             source.write_text("// Deleted source.\n")
+            (Path(directory) / "src/logic_tests.zig").write_text("const cores = .{\n};\n")
+            integration = Path(directory) / "tests/integration"
+            integration.mkdir(parents=True)
+            (integration / "placeholder.txt").write_text("fixture\n")
+            gate = Path(directory) / "tests/ci/stack_frames.json"
+            gate.parent.mkdir()
+            gate.write_text('{"host_modules": []}')
             base = commit()
             source.unlink()
             commit()

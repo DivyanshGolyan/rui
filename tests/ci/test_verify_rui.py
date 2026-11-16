@@ -1906,5 +1906,279 @@ while True:
             self.assertEqual(json.loads((out / "frames.json").read_text()), records)
 
 
+class EvidencePublicationTest(unittest.TestCase):
+    def setUp(self):
+        self.helper = runpy.run_path(str(SCRIPT))
+        self.head, self.base = "a" * 40, "b" * 40
+
+    def capture(self, out, name="overview", size="140x40", cells="same", sha=None):
+        stem = f"{name}@{size}"
+        out.mkdir(parents=True, exist_ok=True)
+        files = {ext: stem + "." + ext for ext in ("png", "gif")}
+        for ext, file in files.items():
+            (out / file).write_bytes((cells + ext).encode())
+        return dict(name=name, size=size, files=files, ok=True, status="ok", reason=None,
+                    sha=sha or self.head, cells_sha256=cells, note="")
+
+    def comparison(self, out):
+        before = [self.capture(out / "before", name="same", sha=self.base),
+                  self.capture(out / "before", name="changed", cells="old", sha=self.base)]
+        after = [self.capture(out / "after", name="same"),
+                 self.capture(out / "after", name="changed", cells="new")]
+        for side, rows in (("before", before), ("after", after)):
+            (out / side / "frames.json").write_text(json.dumps(rows))
+        return self.helper["paired_frames"](out, self.head, self.base)
+
+    def test_pairs_order_cell_identity_and_shared_renderer_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            result = self.comparison(out)
+            self.assertEqual([(r["name"], r["same"]) for r in result["pairs"]], [("changed", False), ("same", True)])
+            self.assertEqual(result, json.loads((out / "pairs.json").read_text()))
+            page = (out / "index.html").read_text()
+            self.assertLess(page.index("changed ·"), page.index("same ·"))
+            self.assertIn("same · 140x40 — same", page)
+            self.assertIn('src="before/changed@140x40.gif"', page)
+            self.assertIn('src="after/changed@140x40.gif"', page)
+            with self.assertRaisesRegex(ValueError, "different states"):
+                (out / "before/frames.json").write_text("[]")
+                self.helper["paired_frames"](out, self.head, self.base)
+
+    def test_committed_cell_hash_detects_style_and_text_but_ignores_cursor(self):
+        capture = self.helper["frame_capture"]
+        run = types.SimpleNamespace(meta={"sha": self.head})
+        state = dict(name="test", expect=[])
+        frame = committed("same text")
+        changed = frame._replace(cells=tuple(tuple(c._replace(bold=True) for c in row) for row in frame.cells))
+        with tempfile.TemporaryDirectory() as directory:
+            hashes = [capture(run, types.SimpleNamespace(frame=f), Path(directory), state, (100, 20), None)["cells_sha256"]
+                      for f in (frame, frame._replace(cursor=Cursor(0, 0)), changed, committed("different"))]
+        self.assertEqual(hashes[0], hashes[1])
+        self.assertEqual(len(set(hashes)), 3)
+
+    def test_manifest_selection_changed_default_all_states_gifs_and_failures(self):
+        select = self.helper["publication_frames"]
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            data = self.comparison(out)
+            head, base, rows, files = select(out)
+            self.assertEqual((head, base), (self.head, self.base))
+            self.assertEqual([r["name"] for r in rows], ["changed"])
+            self.assertEqual(set(files), {f"{side}/changed@140x40.{ext}" for side in ("before", "after") for ext in ("png", "gif")})
+            self.assertEqual(len(select(out, include_same=True)[2]), 2)
+            self.assertEqual([r["name"] for r in select(out, "same", True)[2]], ["same"])
+            with self.assertRaisesRegex(ValueError, "no changed captures"):
+                select(out, "same")
+            with self.assertRaisesRegex(ValueError, "unknown states"):
+                select(out, "absent")
+            data["pairs"][0]["before"].update(ok=False, reason="did not load")
+            (out / "pairs.json").write_text(json.dumps(data))
+            with self.assertRaisesRegex(ValueError, "failed capture.*did not load"):
+                select(out)
+
+    def test_single_build_markdown_pinned_urls_and_remote_spellings(self):
+        for remote in ("https://github.com/owner/repo", "https://github.com/owner/repo.git",
+                       "git@github.com:owner/repo.git", "ssh://git@github.com/owner/repo.git"):
+            self.assertEqual(self.helper["evidence_repo"](remote), "owner/repo")
+        with self.assertRaisesRegex(ValueError, "GitHub"):
+            self.helper["evidence_repo"]("https://example.com/owner/repo")
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            record = self.capture(out)
+            (out / "frames.json").write_text(json.dumps([record]))
+            head, base, rows, files = self.helper["publication_frames"](out)
+            self.assertIsNone(base)
+            text = self.helper["screens_markdown"]("owner/repo", "c" * 40, head + "/capture", head, base, rows)
+            self.assertIn("## Screens", text)
+            self.assertIn("plain PTY, L1 synthetic input", text)
+            self.assertIn("![overview 140x40 after]", text)
+            self.assertIn("![overview 140x40 after recording]", text)
+            self.assertIn("raw.githubusercontent.com/owner/repo/" + "c" * 40 + "/" + head, text)
+            self.assertNotIn("| Before |", text)
+            record["files"]["png"] = "../outside.png"
+            (out / "frames.json").write_text(json.dumps([record]))
+            with self.assertRaisesRegex(ValueError, "invalid capture file"):
+                self.helper["publication_frames"](out)
+
+    def test_paired_markdown_contains_both_images_and_capture_shas(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            self.comparison(out)
+            head, base, rows, _ = self.helper["publication_frames"](out)
+            narrow = copy.deepcopy(rows[0])
+            narrow["size"] = "46x30"
+            rows.append(narrow)
+            text = self.helper["screens_markdown"]("owner/repo", "c" * 40, head + "/capture", head, base, rows)
+            self.assertEqual(text.count("### changed"), 1)
+            self.assertIn("| 46x30 |", text)
+            for marker in (head, base, "| Before | After |", "![changed 140x40 before]", "![changed 140x40 after]",
+                           "/before/changed%40140x40.gif", "/after/changed%40140x40.png"):
+                self.assertIn(marker, text)
+
+    def test_url_verification_rejects_unviewable_publication(self):
+        verify = self.helper["verify_image_url"]
+        for status, content, ok in ((200, "image/png", True), (200, "image/gif", True),
+                                     (200, "text/html", False), (404, "image/png", False)):
+            response = types.SimpleNamespace(status=status, headers={"Content-Type": content})
+            with self.subTest(status=status, content=content), patch("urllib.request.urlopen", return_value=contextlib.nullcontext(response)):
+                if ok:
+                    verify("https://example.test/a.png")
+                else:
+                    with self.assertRaisesRegex(ValueError, "HTTP 200 and image"):
+                        verify("https://example.test/a.png")
+
+    def test_publish_prints_markdown_only_after_push_and_url_verification(self):
+        command = self.helper["cmd_publish"]
+        scope = command.__globals__
+        events = []
+        def push(*_args):
+            events.append("push")
+            return "c" * 40, self.head + "/capture"
+        def verify(url):
+            events.append("verify")
+            self.assertIn("/" + "c" * 40 + "/", url)
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            self.comparison(out)
+            args = types.SimpleNamespace(directory=directory, states=None, all=False, repo_remote="screens")
+            for success in (True, False):
+                events.clear()
+                stdout, stderr = io.StringIO(), io.StringIO()
+                def check(url):
+                    verify(url)
+                    if not success:
+                        raise ValueError("not viewable")
+                with (patch.dict(scope, push_evidence=push, verify_image_url=check),
+                      patch("subprocess.check_output", return_value="git@github.com:owner/repo.git") as remote,
+                      contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr)):
+                    if success:
+                        command(args)
+                    else:
+                        with self.assertRaises(SystemExit):
+                            command(args)
+                self.assertEqual(events, ["push", "verify"])
+                self.assertEqual(remote.call_args.args[0][-1], "screens")
+                if success:
+                    self.assertTrue(stdout.getvalue().startswith("## Screens\n"))
+                    self.assertEqual(stderr.getvalue(), "")
+                else:
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertIn("publish failed: not viewable", stderr.getvalue())
+
+    def test_frames_before_reuses_both_runs_checks_builds_first_and_keeps_failure(self):
+        command = self.helper["cmd_frames"]
+        scope = command.__globals__
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory) / "pairs"
+            calls = []
+            def run(args):
+                calls.append((args.sha, args.only, args.sizes, args.record))
+                target = Path(args.out)
+                record = self.capture(target, sha=args.sha)
+                (target / "frames.json").write_text(json.dumps([record]))
+                if args.sha == self.base:
+                    raise SystemExit(1)
+            args = types.SimpleNamespace(sha=self.head, before=self.base, out=str(out), only="overview",
+                                         sizes="140x40,46x30", record=True)
+            with (patch.dict(scope, run_frames=run, load_build=lambda sha: calls.append(("build", sha)),
+                             require_screen=lambda _: None),
+                  patch("subprocess.check_output", side_effect=[self.head + "\n", self.base + "\n"]),
+                  contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as result):
+                command(args)
+            self.assertEqual(result.exception.code, 1)
+            self.assertEqual(calls[:2], [("build", self.head), ("build", self.base)])
+            self.assertEqual([r[0] for r in calls[2:]], [self.base, self.head])
+            self.assertTrue((out / "pairs.json").is_file())
+        with patch.dict(scope, run_frames=lambda args: "single"):
+            self.assertEqual(command(types.SimpleNamespace(before=None)), "single")
+        def missing(sha):
+            self.assertEqual(sha, self.head)
+            raise SystemExit(2)
+        with (patch.dict(scope, load_build=missing, run_frames=lambda args: self.fail("allocated run")),
+              patch("subprocess.check_output", side_effect=[self.head, self.base]), self.assertRaises(SystemExit)):
+            command(args)
+
+    def test_missing_build_names_head_or_base_before_allocating_either_run(self):
+        command = self.helper["cmd_frames"]
+        scope = command.__globals__
+        for missing in (self.head, self.base):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
+                cache = Path(directory)
+                if missing == self.base:
+                    manifest = cache / "builds" / self.head / "manifest.json"
+                    manifest.parent.mkdir(parents=True)
+                    manifest.write_text("{}")
+                stderr = io.StringIO()
+                args = types.SimpleNamespace(sha=self.head, before=self.base, out=str(cache / "out"))
+                with (patch.dict(scope, CACHE=cache, require_screen=lambda _: None,
+                                 run_frames=lambda args: self.fail("allocated a run before checking builds")),
+                      patch("subprocess.check_output", side_effect=[self.head, self.base]),
+                      contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit)):
+                    command(args)
+                self.assertIn(f"no build for {missing}", stderr.getvalue())
+                self.assertIn(f"verify-rui build {missing}", stderr.getvalue())
+                self.assertFalse((cache / "out").exists())
+
+    def test_git_publication_is_orphan_append_only_and_retries_on_concurrent_tip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, remote = root / "work", root / "remote.git"
+            def git(*args, cwd=repo):
+                return subprocess.check_output(["git", "-C", str(cwd), *args], text=True, stderr=subprocess.PIPE).strip()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+            git("config", "user.name", "Test")
+            git("config", "user.email", "test@example.test")
+            (repo / "source").write_text("original")
+            git("add", "source")
+            git("commit", "-qm", "source")
+            git("remote", "add", "origin", str(remote))
+            original = git("rev-parse", "HEAD")
+            (repo / "source").write_text("staged")
+            git("add", "source")
+            (repo / "source").write_text("unstaged")
+            status, index = git("status", "--porcelain"), (repo / ".git/index").read_bytes()
+            image = root / "a.png"
+            image.write_bytes(b"first")
+            publish = self.helper["push_evidence"]
+            first, prefix = publish(repo, "origin", self.head, {"before/a.png": image})
+            self.assertEqual(git("show", f"{first}:{prefix}/before/a.png"), "first")
+            self.assertEqual(git("rev-list", "--parents", first), first)
+            image.write_bytes(b"second")
+            real_run = subprocess.run
+            pushes = []
+            competing = []
+            def concurrent(argv, **kwargs):
+                if "push" in argv:
+                    pushes.append(argv)
+                    if len(pushes) == 1:
+                        tree = git("rev-parse", first + "^{tree}")
+                        parent = git("-c", "user.name=Other", "-c", "user.email=other@example.test",
+                                     "commit-tree", tree, "-p", first, "-m", "concurrent", cwd=remote)
+                        git("update-ref", "refs/heads/pr-evidence", parent, cwd=remote)
+                        competing.append(parent)
+                return real_run(argv, **kwargs)
+            with patch("subprocess.run", concurrent), patch("time.sleep") as backoff, contextlib.redirect_stderr(io.StringIO()):
+                second, second_prefix = publish(repo, "origin", self.head, {"after/a.png": image})
+            self.assertEqual(len(pushes), 2)
+            backoff.assert_called_once_with(1)
+            self.assertEqual(git("rev-parse", second + "^"), competing[0])
+            self.assertEqual(git("show", f"{second}:{prefix}/before/a.png"), "first")
+            self.assertEqual(git("show", f"{second}:{second_prefix}/after/a.png"), "second")
+            self.assertEqual(git("rev-parse", "HEAD"), original)
+            self.assertEqual(git("status", "--porcelain"), status)
+            self.assertEqual((repo / ".git/index").read_bytes(), index)
+            self.assertEqual(git("for-each-ref", "refs/verify-rui"), "")
+            def rejected(argv, **kwargs):
+                if "push" in argv:
+                    return types.SimpleNamespace(returncode=1, stdout="", stderr="rejected")
+                return real_run(argv, **kwargs)
+            with (patch("subprocess.run", rejected), patch("time.sleep") as backoff,
+                  contextlib.redirect_stderr(io.StringIO()), self.assertRaisesRegex(ValueError, "4 attempts")):
+                publish(repo, "origin", self.head, {"after/a.png": image})
+            self.assertEqual([c.args[0] for c in backoff.call_args_list], [1, 2, 4])
+            self.assertEqual(git("for-each-ref", "refs/verify-rui"), "")
+
+
 if __name__ == "__main__":
     unittest.main()

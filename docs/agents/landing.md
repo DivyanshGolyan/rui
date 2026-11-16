@@ -27,11 +27,15 @@ Every UI PR embeds actual-implementation screenshots or a screen recording in it
 Use [verify-rui](../../.claude/skills/verify-rui/SKILL.md) for the independent plain-PTY journey; reuse its raw captures to render media where possible.
 For interaction changes, show the sequence with a recording or labelled screenshots; include meaningful before/after layout views when available.
 State the source revision, terminal surface and limits, retain raw capture provenance, and exclude secrets.
-Check `gh pr edit --help` for `--attach` before using the native upload command.
-When supported, use `gh pr edit PR --attach '/absolute/image.png#Alt text'`; the help owns body placement and video options.
-If that capability is absent, edit the PR description in GitHub's browser editor and drag the image or video into that description, then save it ([attachment instructions](https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/attaching-files)).
-After either route, read back the description and verify the uploaded media is viewable.
-If upload partially fails, inspect the updated body before retrying.
+Build both pinned revisions with verify-rui, then run `$V frames HEAD --before BASE --only <states for the changed screens> --sizes 140x40,46x30 --record` and `$V publish DIR` (set `V=.claude/skills/verify-rui/scripts/verify-rui`).
+Use the [feature map](../../.claude/skills/verify-rui/features/README.md) to select states.
+The publisher appends PNGs and GIFs to the public orphan branch `pr-evidence`, under the captured head SHA; it never stores evidence on the PR branch.
+It prints a `## Screens` block whose raw.githubusercontent.com image URLs are pinned to the evidence commit.
+Paste that block into the PR description before opening the PR, or before the next push: `Require PR Shape` in check.yml enforces embedded media for UI changes and reruns on pushes, not description edits.
+The check derives UI paths from Overview's production import closure minus the Host's closure, including the base tree for deleted files, and also covers verify-rui's `frames.json`.
+For a UI-path change that provably draws nothing different, put `No screen change: <nonempty reason>` on its own line instead.
+Humans with a browser may still upload images or videos through GitHub's description editor as `github.com/user-attachments` media.
+Read back the description and verify the media is viewable; inspect the updated body before retrying any partial upload.
 A comment, local path or artifact pointer alone does not meet the description requirement; visual evidence does not replace behavior assertions or hosted acceptance.
 Keep published commits unchanged so their CI evidence retains its SHA.
 

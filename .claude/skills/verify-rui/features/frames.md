@@ -39,3 +39,17 @@ An `absent` marker of the form `{session:CAST LABEL}` resolves to that seeded Se
 `absent_regex` is an optional list of nonempty Python regular expressions, validated before launch and matched with multiline anchors against committed text. A match fails both readiness and the saved capture through the same row-check owner; the failure names the pattern and matched text. Literal `absent` markers keep their existing meaning.
 
 Overview and chat states use a pattern for nameless `○ ID` rows followed only by their compact age, optionally ending that left-pane field at `│` before arbitrary right-pane text. Named rows, including `New Session` and names containing an ID, remain valid. The open `chat-empty`, `start-model`, `start-effort` and `start-picked` states wait for the actual `○ New Session` sidebar row with `min_columns: 140` before menu actions or capture; narrow-first runs skip that wide-only step. This acknowledges canonical list membership rather than mistaking the pinned `+ New Session` action for a chat row. Every chat state also rejects raw-ID rows. `empty-chat-model-left` picks a different model and waits for its saved footer facts before leaving; `empty-chat-two-left` leaves two empty chats while existing conversations remain visible. These after-leave companions reject abandoned rows altogether.
+
+## Before / after and publication
+
+`$V frames HEADSHA --before BASESHA --only NAME,... --sizes 140x40,46x30 --record` runs the existing capture flow twice on already-built pinned revisions.
+It writes `before/`, `after/`, `pairs.json` and a side-by-side `index.html` in one output directory, changed pairs first.
+A pair is `same` only when committed cell contents, styles, dimensions and terminal foreground/background are identical; cursor position and timing are not cell differences.
+Both sides retain their capture status and failures still fail the command after preserving the paired evidence.
+
+`$V publish DIR [--states NAME,...] [--all] [--repo-remote origin]` publishes the manifests' PNGs and GIFs, excluding same pairs unless `--all` is given.
+It refuses failed or missing captures and unknown states.
+Each publication gets a content-derived subdirectory under `<head-sha>/` on the append-only orphan branch `pr-evidence`; publication never changes the current checkout or PR branch.
+A rejected push refetches and retries on the new tip, at most four attempts with backoff, without force.
+The command checks one immutable raw image URL for HTTP 200 and an image content type before printing the `## Screens` Markdown to stdout.
+Paste the block into the PR description before opening or pushing the PR; see [Prove a UI PR](../SKILL.md#prove-a-ui-pr).
