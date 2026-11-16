@@ -5615,7 +5615,8 @@ test "capture routing round trips six placements without conflating selector and
         var listener: ?std.Io.net.Server = null;
         var future: ?std.Io.Future(anyerror!void) = null;
         if (kind == .mysql) {
-            try std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(paths.socket.slice()).?, .{ .default_permissions = .fromMode(0o700) });
+            var runtime_dir = try std.Io.Dir.cwd().createDirPathOpen(io, std.fs.path.dirname(paths.socket.slice()).?, .{ .permissions = .fromMode(0o700) });
+            runtime_dir.close(io);
             listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
             future = try io.concurrent(Peer.serve, .{ &listener.?, paths.store_identity.slice() });
         }
