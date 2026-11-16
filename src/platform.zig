@@ -357,7 +357,7 @@ pub fn mysqlRuntimeDirectory(store: []const u8) ?[]const u8 {
 }
 
 /// A routing hint, not Store authority: the Host checks `store` on every call.
-pub fn mysqlClientPaths(io: std.Io, store: []const u8, runtime: []const u8) !Paths {
+pub noinline fn mysqlClientPaths(io: std.Io, store: []const u8, runtime: []const u8) !Paths {
     if (!validStoreId(store) or !std.fs.path.isAbsolute(runtime)) return error.InvalidStorePath;
     var dir = try std.Io.Dir.cwd().openDir(io, runtime, .{});
     defer dir.close(io);
