@@ -5400,7 +5400,9 @@ test "Host selection round trips every Store placement and interface through def
         try preflightNewSession(io, saved.store.slice(), true);
         for ([_]bool{ false, true }) |ready| {
             errdefer std.debug.print("resume ready={}\n", .{ready});
-            const admitted = try preflightExistingOverview(io, saved.store.slice());
+            const preflight = preflightExistingOverview(io, saved.store.slice());
+            try std.testing.expect(!std.meta.isError(preflight));
+            const admitted = try preflight;
             try std.testing.expectEqualStrings(dir, admitted.selector());
             var fixture: LaunchFixture = .{ .scenario = if (ready) .already_ready else .success, .store_identity = if (kind == .mysql) mysql_identity else null };
             const result = try gpa.create(HostLaunchResult);

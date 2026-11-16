@@ -353,3 +353,16 @@ test "upgrade restart results retain unknown failures and other Store guidance w
     try result.hosts.write(&out);
     try std.testing.expectEqualStrings("No running Hosts.\n", out.buffered());
 }
+
+test "upgrade selected activation routes by Host directory not SQLite data or MySQL identity" {
+    const receipt: Installation.Receipt = .{ .operation_build = "/prepared", .selected_after = "/selected" };
+    for ([_][]const u8{ "/data", "0123456789abcdef0123456789abcdef" }) |identity| {
+        var entries = [_]restart_all.Entry{
+            .{ .socket = "/first.sock", .directory = "/first-host", .store = "/selected-host", .state = .{ .outcome = .not_needed } },
+            .{ .socket = "/selected.sock", .directory = "/selected-host", .store = identity, .state = .{ .outcome = .{ .unsupported = .configuration_unavailable } } },
+        };
+        const result: Result = .{ .installation = .{ .installed = receipt }, .store = "/selected-host", .hosts = .{ .entries = &entries } };
+        try std.testing.expectEqual(HostLifecycle.Limitation.configuration_unavailable, result.selectedActivation().unsupported);
+        try std.testing.expect(result.hosts.selectedOutcome(identity) == .not_needed);
+    }
+}

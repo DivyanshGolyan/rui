@@ -155,7 +155,7 @@ fn expectRoundTrip(value: anytype) !void {
 }
 
 fn outcomeEvent(outcome: HostLifecycle.ActivationOutcome) Event {
-    return .{ .entry = .{ .socket = "/socket", .store = "/store/雪\n", .state = .{ .outcome = outcome } } };
+    return .{ .entry = .{ .socket = "/socket", .directory = "/host/\xff", .store = "/store/雪\n", .state = .{ .outcome = outcome } } };
 }
 
 test "coordinator transfers every batch outcome and progress without reduction" {
@@ -197,7 +197,7 @@ test "coordinator events keep each failed Host's cause after the line is freed" 
     defer lines.deinit();
     for ([_]Event{
         .{ .entry = .{ .socket = "/discovery.sock", .state = .{ .failed = .{ .stage = .discovery, .cause = "HostPeerPidMismatch" } } } },
-        .{ .entry = .{ .socket = "/observed.sock", .store = "/store", .state = .{ .failed = .{ .stage = .observation, .cause = "ConnectionRefused" } } } },
+        .{ .entry = .{ .socket = "/observed.sock", .directory = "/selected-host", .store = "/store", .state = .{ .failed = .{ .stage = .observation, .cause = "ConnectionRefused" } } } },
         .done,
     }) |value| {
         try std.json.Stringify.value(value, .{}, &lines.writer);
@@ -210,6 +210,8 @@ test "coordinator events keep each failed Host's cause after the line is freed" 
     defer batch.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("HostPeerPidMismatch", batch.entries[0].state.failed.cause);
     try std.testing.expectEqualStrings("ConnectionRefused", batch.entries[1].state.failed.cause);
+    try std.testing.expectEqualStrings("/selected-host", batch.entries[1].directory.?);
+    try std.testing.expectEqualStrings("/store", batch.entries[1].store.?);
     var buffer: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     try batch.write(&writer);
