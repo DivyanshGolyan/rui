@@ -73,8 +73,14 @@ def untimed(log):
     return STAMP.sub("", log.lstrip("﻿"))
 
 
+def fixture_path(script):
+    path = Path(os.path.normpath(script))
+    return path.as_posix() if path.is_relative_to("tests/integration") else None
+
+
 def fixtures(check_sh=Path("tests/integration/check.sh")):
-    return {name: f"tests/integration/{script}" for name, script in FIXTURE.findall(check_sh.read_text())}
+    return {name: path for name, script in FIXTURE.findall(check_sh.read_text())
+            if (path := fixture_path(f"tests/integration/{script}"))}
 
 
 def tracebacks(log):
@@ -169,8 +175,8 @@ def failure_causes(log, cases, keep_unexplained=False):
     for command in COMMAND.findall(log):
         if "check.sh" in command or not (script := SCRIPT.search(command)):
             continue
-        path = script[0]
-        found.append(fixture_cause(path, (log,)) or Cause(f"{path}: exit without a parsed traceback", [path]))
+        if path := fixture_path(script[0]):
+            found.append(fixture_cause(path, (log,)) or Cause(f"{path}: exit without a parsed traceback", [path]))
     for crash in ZIG_CRASH.finditer(log):
         test, how = crash.groups()
         following = log[crash.end():].split("\n")[1:4]
