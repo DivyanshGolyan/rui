@@ -39,8 +39,7 @@ pub const LaunchSpecification = struct {
 
     fn deinit(self: *const LaunchSpecification, allocator: std.mem.Allocator) void {
         allocator.free(self.options);
-        std.crypto.secureZero(u8, self.values);
-        allocator.free(self.values);
+        @import("secret_value.zig").wipeAndFree(allocator, self.values, .of(u8), @returnAddress());
     }
 };
 
@@ -224,7 +223,7 @@ fn deriveLaunch(allocator: std.mem.Allocator, argv: []const []const u8) !LaunchS
         option.value = values[at..][0..value.len];
         at += value.len;
     };
-    errdefer allocator.free(values);
+    errdefer @import("secret_value.zig").wipeAndFree(allocator, values, .of(u8), @returnAddress());
     return .{ .options = try options.toOwnedSlice(allocator), .values = values };
 }
 
@@ -944,6 +943,7 @@ test "upgrade running source copies wipe on success and every allocation failure
                 return err;
             };
             launch.deinit(probe.allocator());
+            try std.testing.expectEqual(@as(usize, 1), probe.allocated);
             try probe.expectWiped();
         }
     };
