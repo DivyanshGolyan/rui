@@ -1,13 +1,3 @@
-//! The Client's representation and its one control loop. Rui sees only the
-//! opaque `h2.Client` bytes.
-//!
-//! One owner per piece of state:
-//! - `timers` orders every launched stream (pending or open) by its last
-//!   activity; every stream shares one interval, so the head is due first;
-//! - an `Origin` owns its queue of pending streams and its learned limit;
-//! - a `Connection` owns its socket and nghttp2 session, and carries its
-//!   open streams as nghttp2 stream user data;
-//! - `finished` owns ended streams until `nextFinished` hands them back.
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("h2_c");
@@ -30,37 +20,20 @@ origins: [h2.max_endpoints]Origin = undefined,
 origin_count: u8,
 endpoints: [h2.max_endpoints]Endpoint = undefined,
 endpoint_count: u8,
-/// Never moved: open streams name theirs by index + 1. Sized for the
-/// worst case, but each drive walks only the first `connections_len`
-/// entries, which end at the last one not free. An entry is written first
-/// when the table grows to it, so pages no connection ever reached are
-/// never written. Pages a burst reached stay resident after it, at most
-/// one entry per stream of capacity.
 connections: []Connection,
 connections_len: u32,
-/// One entry per walked connection, rebuilt for each routing decision.
 views: []policy.ConnectionView,
-/// The waker first, then one entry per walked connection, two while it
-/// connects with an earlier attempt in flight.
 pollfds: []std.c.pollfd,
 timers: Record.List,
 finished: Record.List,
 finished_count: usize,
 scratch: *Scratch,
-/// Set only while `drive` runs.
 receiver: ?Receiver,
-/// Time spent blocked writing to sinks, excluded from provider time. While
-/// a write blocks nothing else progresses, so one offset shifts every
-/// deadline equally and keeps the timer list ordered.
 stall_ns: u64,
 connection_serial: u64,
 waker: Waker,
-/// Built by the first `https://` endpoint, so a cleartext-only Client
-/// loads no trust store.
 tls_context: ?tls.Context,
-/// The proxy tunneled origins connect through, from `Options.proxy`.
 proxy_route: ?ProxyRoute,
-/// Tests only: seeded faults every socket transfer passes through.
 faults: if (builtin.is_test) ?*Faults else void = if (builtin.is_test) null else {},
 
 pub const Faults = @import("testing/Faults.zig");
@@ -75,36 +48,24 @@ pub const Receiver = struct {
 
 pub const Origin = struct {
     scheme: h2.Scheme,
-    /// Slices of the first endpoint's owned URL with this origin.
     host: []const u8,
     server_name: []const u8,
     authority: []const u8,
     port: u16,
-    /// From the first SETTINGS seen on this origin; until then at most one
-    /// connection is set up at a time.
     learned_max_streams: ?u32,
     pending: Record.Queue,
-    /// The address an IP-literal host names; null for a DNS name.
     literal: ?Resolver.Address,
-    /// Connections go through the proxy's CONNECT tunnel.
     tunneled: bool,
-    /// The one lookup of the name connections dial, shared by the setups
-    /// that use it.
     lookup: ?*Resolver.Job,
     lookup_users: u32,
 };
 
-/// An `http://` proxy, read once at `init`.
 pub const ProxyRoute = struct {
-    /// Owned copy of the proxy URL and NO_PROXY, which `host` and
-    /// `no_proxy` slice.
     settings_copy: []u8,
     host: []const u8,
     port: u16,
-    /// The address an IP-literal proxy host names; null for a DNS name.
     literal: ?Resolver.Address,
     no_proxy: []const u8,
-    /// `Proxy-Authorization`'s value, owned.
     credentials: ?[]u8,
 
     pub fn init(allocator: std.mem.Allocator, settings: h2.Proxy) h2.InitError!ProxyRoute {
@@ -132,14 +93,11 @@ pub const ProxyRoute = struct {
             std.crypto.secureZero(u8, credentials);
             allocator.free(credentials);
         }
-        // The URL's user info is the encoded password.
         std.crypto.secureZero(u8, self.settings_copy);
         allocator.free(self.settings_copy);
     }
 };
 
-/// Where an origin's TCP connections go: the proxy for a tunneled origin,
-/// else the origin itself.
 pub const Dial = struct { host: []const u8, port: u16, literal: ?Resolver.Address };
 
 pub fn dial(self: *const Engine, origin: *const Origin) Dial {
@@ -151,16 +109,11 @@ pub fn dial(self: *const Engine, origin: *const Origin) Dial {
 }
 
 pub const Endpoint = struct {
-    /// Owned exact-length copy of the URL.
     url: []u8,
     origin: u8,
-    /// Slice of `url`.
     path: []const u8,
 };
 
-/// The read buffer and the DATA chunks decoded from it, so each stream gets
-/// one write per socket read. Chunks point into `read_buffer`, which is
-/// not overwritten until the next read.
 pub const Scratch = struct {
     pub const max_chunks = 256;
     read_buffer: [h2.read_buffer_bytes]u8,
@@ -190,7 +143,6 @@ pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2
     var session_options: ?*c.nghttp2_option = null;
     if (c.nghttp2_option_new(&session_options) != 0) return error.OutOfMemory;
     errdefer c.nghttp2_option_del(session_options);
-    // The stream window reopens only once its bytes are on the sink.
     c.nghttp2_option_set_no_auto_window_update(session_options, 1);
 
     const capacity = options.stream_capacity;
@@ -198,8 +150,6 @@ pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2
     errdefer freeUnwritten(allocator, Connection, connections);
     const views = try allocUnwritten(allocator, policy.ConnectionView, capacity);
     errdefer freeUnwritten(allocator, policy.ConnectionView, views);
-    // The waker, then each connection's socket, or its attempts while it
-    // connects. Unwritten until connections need it.
     const pollfds = try allocUnwritten(allocator, std.c.pollfd, policy.max_attempts * capacity + 1);
     errdefer freeUnwritten(allocator, std.c.pollfd, pollfds);
     const scratch = &(try allocUnwritten(allocator, Scratch, 1))[0];
@@ -211,7 +161,6 @@ pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2
     self.* = .{
         .allocator = allocator,
         .io = io,
-        // The proxy settings' slices are the caller's; `route` keeps a copy.
         .options = blk: {
             var kept = options;
             kept.proxy = null;
@@ -238,14 +187,10 @@ pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2
     };
 }
 
-/// The walked table entries; every one past them is free.
 fn active(self: *Engine) []Connection {
     return self.connections[0..self.connections_len];
 }
 
-/// Drops free entries off the walked end, so each drive's work follows
-/// the connections that exist rather than the most there ever were. An
-/// entry whose SecTrust job still runs is not `available` and stays.
 fn trimTable(self: *Engine) void {
     while (self.connections_len > 0 and self.connections[self.connections_len - 1].available())
         self.connections_len -= 1;
@@ -325,8 +270,6 @@ pub fn addEndpoint(self: *Engine, url: []const u8) h2.EndpointError!h2.Endpoint 
     return @fromBackingInt(@intCast(self.endpoint_count - 1));
 }
 
-// ------------------------------------------------------------------ streams
-
 pub fn prepare(self: *Engine, record: *Record, request: h2.Request) h2.PrepareError!void {
     std.debug.assert(self.receiver == null);
     std.debug.assert(record.state == .idle);
@@ -336,10 +279,7 @@ pub fn prepare(self: *Engine, record: *Record, request: h2.Request) h2.PrepareEr
         .file => |file| file.length != 0,
         .bytes => |bytes| bytes.len != 0,
     }) return error.InvalidRequest;
-    // The record keeps a buffer sink's capacity in 32 bits.
     if (request.sink == .buffer and request.sink.buffer.len > std.math.maxInt(u32)) return error.InvalidRequest;
-    // The cap is on the block a copy of every field would take, so it
-    // bounds what is sent whether or not a field is borrowed.
     var copied_len: usize = 0;
     var block_len: usize = 0;
     for (request.fields) |field| {
@@ -383,8 +323,6 @@ pub fn prepare(self: *Engine, record: *Record, request: h2.Request) h2.PrepareEr
     record.state = .prepared;
 }
 
-/// Lowercase tokens; pseudo-headers and the fields the client owns or
-/// HTTP/2 forbids are refused.
 fn validFieldName(name: []const u8) bool {
     if (name.len == 0 or name.len > std.math.maxInt(u16)) return false;
     for (name) |byte| switch (byte) {
@@ -441,8 +379,6 @@ pub fn nextFinished(self: *Engine) ?*h2.Stream {
     return record.public();
 }
 
-/// Ends a pending or open stream. An open one must already be detached
-/// from nghttp2 or closing there, so no callback reaches it again.
 pub fn endStream(self: *Engine, record: *Record, cause: policy.Cause) void {
     std.debug.assert(record.state == .pending or record.state == .open);
     if (record.state == .pending) self.originOf(record).pending.remove(record);
@@ -455,8 +391,6 @@ pub fn endStream(self: *Engine, record: *Record, cause: policy.Cause) void {
     self.finished_count += 1;
 }
 
-/// The stream goes back to the head of its origin's queue, to be sent again
-/// from byte 0 on whichever connection has room.
 pub fn requeue(self: *Engine, record: *Record, replay: bool) void {
     std.debug.assert(record.state == .open and !record.flags.response_started);
     if (replay) record.flags.replays += 1;
@@ -466,7 +400,6 @@ pub fn requeue(self: *Engine, record: *Record, replay: bool) void {
     self.originOf(record).pending.putBack(record);
 }
 
-/// Emits `body_retired` once, and never after a cancel.
 pub fn retireBody(self: *Engine, record: *Record) void {
     if (record.flags.body_retired) return;
     record.flags.body_retired = true;
@@ -486,15 +419,11 @@ fn connectionOf(self: *Engine, record: *const Record) *Connection {
     return &self.connections[record.route.open.connection - 1];
 }
 
-/// Provider time: the awake clock less the time blocked on sinks.
 pub fn now(self: *const Engine) u64 {
     const awake: u64 = @intCast(std.Io.Clock.awake.now(self.io).nanoseconds);
     return awake - self.stall_ns;
 }
 
-// --------------------------------------------------------------------- drive
-
-/// The order is the design; each step is one function.
 pub fn drive(self: *Engine, receiver: Receiver) h2.DriveError!void {
     std.debug.assert(self.receiver == null);
     self.receiver = receiver;
@@ -510,7 +439,6 @@ pub fn drive(self: *Engine, receiver: Receiver) h2.DriveError!void {
     self.trimTable();
 }
 
-/// poll(0) over every socket, so each step below acts only on ready ones.
 fn pollReadiness(self: *Engine) h2.DriveError!void {
     const count = self.fillPollfds();
     if (count == 0) return;
@@ -526,8 +454,6 @@ fn pollReadiness(self: *Engine) h2.DriveError!void {
     }
 }
 
-/// Fills `pollfds` after the waker slot with every connection that has a
-/// socket and returns the number of connection entries.
 fn fillPollfds(self: *Engine) usize {
     var count: usize = 0;
     for (self.active()) |*connection| {
@@ -562,8 +488,6 @@ fn advanceSetups(self: *Engine) void {
     }
 }
 
-/// A connection failed before it was ready, so it carried no stream. Its
-/// origin's pending streams end only when nothing else can carry them.
 pub fn setupFailed(self: *Engine, connection: *Connection, cause: policy.Cause) void {
     const origin_index = connection.origin;
     connection.close(.abrupt);
@@ -579,7 +503,6 @@ pub fn setupFailed(self: *Engine, connection: *Connection, cause: policy.Cause) 
     while (origin.pending.head) |record| self.endStream(record, cause);
 }
 
-/// Marks each connection that stopped at its read allowance.
 fn readAll(self: *Engine) void {
     for (self.active()) |*connection| {
         connection.read_capped = false;
@@ -620,9 +543,6 @@ fn route(self: *Engine, origin_index: u8) ?usize {
     return policy.route(views);
 }
 
-/// A free table entry, closing an empty connection when the table is full.
-/// With one entry per stream of capacity, a full table that still needs a
-/// connection always holds an empty one.
 fn freeConnection(self: *Engine) ?*Connection {
     for (self.active()) |*connection| {
         if (connection.available()) return connection;
@@ -652,8 +572,6 @@ pub fn retireConnections(self: *Engine, endpoint: h2.Endpoint) void {
             },
             .free => {},
             else => {
-                // A cancelled/failed last pending GET can leave setup in
-                // flight. Do not keep its socket, lookup or TLS allocation.
                 if (self.origins[origin].pending.len == 0) connection.close(.abrupt);
             },
         }
@@ -699,9 +617,6 @@ fn livenessFacts(self: *Engine, connection: *const Connection, time: u64) policy
     };
 }
 
-/// Before submitting, so an overdue pending stream never sends a byte. An
-/// open stream on a connection that stopped at its read allowance waits:
-/// its bytes may be unread.
 fn expireInactive(self: *Engine) void {
     const time = self.now();
     var next = self.timers.head;
@@ -717,10 +632,6 @@ fn expireInactive(self: *Engine) void {
     }
 }
 
-/// The batch write: for each stream, everything this read decoded for it
-/// in one write, then its window reopens for exactly what was written.
-/// `only` flushes one stream, which is closing mid-read; the others keep
-/// their chunks for the one write after the read.
 pub fn flush(self: *Engine, connection: *Connection, only: ?*Record) void {
     const scratch = self.scratch;
     defer if (only == null) {
@@ -740,13 +651,10 @@ pub fn flush(self: *Engine, connection: *Connection, only: ?*Record) void {
             chunk.record = null;
         }
         const stream_id = record.route.open.stream_id;
-        // A stream ended during this decode only returns connection credit.
         if (record.state != .open) {
             connection.consume(stream_id, total);
             continue;
         }
-        // A stream that takes no more bytes never gets its window back;
-        // only the connection's credit returns.
         if (self.observe(record, .{ .body = total }) == .refuse) {
             connection.consumeConnection(total);
             connection.endOpen(record, .sink_refused);
@@ -801,7 +709,6 @@ fn writeSink(self: *Engine, record: *Record, iovecs: []std.posix.iovec_const, to
     return true;
 }
 
-/// Called from the DATA chunk callback.
 pub fn gather(self: *Engine, connection: *Connection, record: *Record, bytes: []const u8) void {
     const scratch = self.scratch;
     if (scratch.chunk_count == Scratch.max_chunks) self.flush(connection, null);
@@ -809,15 +716,10 @@ pub fn gather(self: *Engine, connection: *Connection, record: *Record, bytes: []
     scratch.chunk_count += 1;
 }
 
-// ---------------------------------------------------------------------- wait
-
 pub fn wait(self: *Engine, timeout_ms: u32) h2.DriveError!void {
     return self.armWait(timeout_ms).block();
 }
 
-/// The poll set and timeout of one wait, read from the Engine. Blocking on
-/// it reads only `pollfds`, which only `drive` and `armWait` write, and the
-/// waker's descriptor.
 pub const Armed = struct {
     pollfds: []std.c.pollfd,
     timeout_ms: u32,
@@ -863,8 +765,6 @@ fn nextDeadline(self: *Engine) ?u64 {
 test "a large table stays unwritten until connections need it" {
     if (builtin.os.tag != .linux and !builtin.os.tag.isDarwin()) return error.SkipZigTest;
     var client: h2.Client = undefined;
-    // 10,000 entries: several megabytes that a Client never opening a
-    // connection must not make resident.
     try client.init(std.heap.page_allocator, std.testing.io, .{
         .stream_capacity = 10_000,
         .inactivity_ns = std.time.ns_per_s,
@@ -896,7 +796,6 @@ test "drives walk only as far as the last connection not free" {
         .connect_timeout_ns = std.time.ns_per_s,
     });
     defer client.deinit();
-    // A port whose listener just closed refuses the connection.
     const peer = try @import("testing/Peer.zig").start(std.testing.allocator, .{});
     var url_buffer: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buffer, "{s}", .{peer.url()});

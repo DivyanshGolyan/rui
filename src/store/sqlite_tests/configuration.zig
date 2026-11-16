@@ -1,5 +1,3 @@
-//! Configuration SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
@@ -13,7 +11,7 @@ const sqlite = @import("../sqlite.zig");
 const store_testing = @import("../testing.zig");
 const c = sqlite.c;
 const HistoricalSettings = historical_domain.HistoricalSettings;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
 const completeMessage = store_testing.completeMessage;
@@ -31,8 +29,6 @@ test "a fresh Store creates a Session with instructions, an output schema and th
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    // At open, each distinct built-in tool text is saved once (web search's
-    // empty texts share one row); configure has imported nothing yet.
     var texts: std.StringHashMapUnmanaged(void) = .empty;
     defer texts.deinit(std.testing.allocator);
     for (tool_defs.built_in_tool_set.records) |record| for ([_][]const u8{ record.description, record.input_schema }) |text|
@@ -44,7 +40,6 @@ test "a fresh Store creates a Session with instructions, an output schema and th
     command.configuration.instructions = try testingBytesContent(&tmp, "fresh-instructions", "Be brief.");
     command.configuration.output_schema = try testingBytesContent(&tmp, "fresh-schema", "{\"type\":\"object\"}");
     defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-    // The configure adds its two values.
     try std.testing.expect(try storage.configure(&command, .{}) == .accepted);
     try std.testing.expectEqual(tool_texts + 2, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
 }
@@ -71,7 +66,6 @@ test "a Session's tools are saved once and read back as saved, not as today's bu
             };
         }
     };
-    // The Host tool set: one set of every built-in, saved at open.
     const built_ins: u64 = tool_defs.built_in_tool_set.records.len;
     const all_names = comptime names: {
         var names: [tool_defs.built_in_tool_set.records.len][]const u8 = undefined;
@@ -80,29 +74,24 @@ test "a Session's tools are saved once and read back as saved, not as today's bu
         break :names final;
     };
     try std.testing.expectEqual([3]u64{ 1, built_ins, built_ins }, try Tools.counts(&storage));
-    // Two Sessions offering Bash share one set, of the tool set's record.
     const first = try configureTestSessionAsk(&storage, "saved-tools-first");
     const second = try configureTestSessionAsk(&storage, "saved-tools-second");
     try std.testing.expectEqual([3]u64{ 2, built_ins, built_ins + 1 }, try Tools.counts(&storage));
-    // A set with the tool set's members is the Host tool set.
     try Tools.set(&storage, "saved-tools-all", first, &all_names);
     try std.testing.expectEqual([3]u64{ 2, built_ins, built_ins + 1 }, try Tools.counts(&storage));
     try Tools.set(&storage, "saved-tools-both", second, &.{ "bash", "web_search" });
     try std.testing.expectEqual([3]u64{ 3, built_ins, built_ins + 3 }, try Tools.counts(&storage));
     try Tools.set(&storage, "saved-tools-none", first, &.{});
     try std.testing.expectEqual([3]u64{ 4, built_ins, built_ins + 3 }, try Tools.counts(&storage));
-    // Each revision keeps the set it was saved with.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(DISTINCT tool_set_id) FROM session_revision WHERE revision IN (1,2) AND " ++
         "session_ref=(SELECT session_ref FROM session_revision WHERE command_key='saved-tools-both')", .{}));
 
-    // A reworded built-in changes no saved set: the saved text is what an
-    // Operation offers.
     const reworded = "Reworded description.";
     try submitTestMessage(&storage, &tmp, "saved-tools-message", "saved-tools-message", second.slice(), reworded);
     try sqlite.exec(storage.sqliteDatabase(), "UPDATE tool_record SET description_content_id=(SELECT content_id FROM content WHERE CAST(payload AS TEXT)='Reworded description.') WHERE name='bash'");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    var view: HistoricalView = undefined;
-    storage.openHistoricalView(binding, &view);
+    var view: TestingPage = undefined;
+    view.open(&storage, binding);
     defer view.close();
     var settings: HistoricalSettings = undefined;
     try view.settings(&settings);
@@ -152,8 +141,8 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try store_testing.sqlite_only.exec(&storage, "UPDATE session_revision SET provider='other' WHERE session_ref=?1", .{created_session_0.slice()});
-    var view: HistoricalView = undefined;
-    storage.openHistoricalView(binding, &view);
+    var view: TestingPage = undefined;
+    view.open(&storage, binding);
     try std.testing.expectError(error.CorruptStore, testSettings(&view));
     view.close();
     try store_testing.sqlite_only.exec(&storage, "UPDATE session_revision SET provider='codex' WHERE session_ref=?1", .{created_session_0.slice()});
@@ -189,8 +178,8 @@ test "a Session pinned to a codec this Host cannot build fences its settings" {
         try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "text");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         if (fault) |sql| try store_testing.sqliteExec(storage.sqliteDatabase(), sql, .{session.slice()});
-        var view: HistoricalView = undefined;
-        storage.openHistoricalView(binding, &view);
+        var view: TestingPage = undefined;
+        view.open(&storage, binding);
         defer view.close();
         if (fault == null) _ = try testSettings(&view) else try std.testing.expectError(error.CorruptStore, testSettings(&view));
     }

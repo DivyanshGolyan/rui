@@ -1,6 +1,3 @@
-//! The values the Store answers a command or read with, as the Host's
-//! replies render them. They hold no Store state, so the replies' renderers
-//! and their tests need no Store.
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const conversation_read = @import("conversation_read.zig");
@@ -33,7 +30,6 @@ pub const AcceptedConfiguration = struct {
 pub const RejectedConfiguration = struct {
     replayed: bool,
     code: configuration_admission.Rejection,
-    /// Advisory detail from the current Host, not a saved command field.
     message: ?@import("tool_record.zig").HostToolSet.MissingTool = null,
 };
 
@@ -54,7 +50,6 @@ pub const AcceptedMessage = struct {
 pub const RejectedMessage = struct {
     replayed: bool,
     code: message_admission.Rejection,
-    /// Advisory detail from the current Host, not a saved command field.
     message: ?@import("tool_record.zig").HostToolSet.MissingTool = null,
     content: ContentReference,
 };
@@ -78,9 +73,9 @@ pub const CommandObservation = struct {
         model_interruption: ModelInterruptionTarget,
         permission_decision: struct { action_id: u64, decision: mutation_answer.PermissionDecision },
         session_pin: ?mutation_answer.SessionPinObservation,
+        action_background: @import("action_control.zig").Observation,
     } = .{ .configure = .{} },
 
-    /// The Host's one ordered Message-state rule. Clients consume this value.
     pub fn requestState(self: *const CommandObservation) ?message_observation.MessageRequestState {
         if (self.kind != .message or self.status == .absent) return null;
         if (self.status == .rejected) return .rejected;
@@ -162,12 +157,12 @@ pub const PermissionDecisionReply = union(enum) {
 
 pub const PublicConversationItem = struct {
     position: u64,
-    ordinal: u64, // Zero for User/Assistant; one-based call ordinal in a completed Tool Result group.
+    ordinal: u64,
     kind: conversation_read.ConversationItemKind,
     content: ContentReference,
     presentation: ?tool_presentation.ToolPresentation = null,
-    admitted_at: ?u64 = null, // The Host wall-clock second a User item was admitted.
-    sender: ?protocol.NamedPeer = null, // A User item's sending peer Session.
+    admitted_at: ?u64 = null,
+    sender: ?protocol.NamedPeer = null,
 };
 
 pub const PublicConversationPage = struct {
@@ -182,7 +177,6 @@ pub const MessageObservation = struct {
     content: ContentReference,
     queue: ?AcceptedMessageQueue = null,
     admitted_at: u64 = 0,
-    /// The Session's complete work, only while this admission can advance.
     work: ?session_work.Work = null,
     recovery: Recovery = .{},
 };
@@ -219,8 +213,6 @@ pub const AcceptedMessageQueue = struct {
     };
 };
 
-/// A repeat read owns only its token; a full read is filled in the caller's
-/// storage rather than copied through Store/worker frames.
 pub const Observed = union(enum) {
     not_modified: change_ring.SessionToken,
     full: struct {

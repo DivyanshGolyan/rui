@@ -1,18 +1,3 @@
-//! ChatGPT plan sign-in messages as values: the open-source "Sign in with
-//! ChatGPT" flow, which pays from the user's plan.
-//!
-//! Builds the authorization address, reads the loopback callback, builds the
-//! token exchange, refresh and revocation requests, checks the token response
-//! and builds the record it produces, and spells the host id. Callers own the
-//! random bytes, the clock, the listener, the browser and the transport. The
-//! record is `codex_credential_policy.zig`'s and its custody
-//! `codex_credentials.zig`'s, as for a Codex login; this flow adds the client
-//! id the issuer gives it, and the policy reads such a record's account from
-//! its ID token's `sub`, since these tokens carry no ChatGPT account claim. The issuer is the one Codex login uses, so its
-//! token fields and refresh rejections are read by `codex_token_wire.zig`.
-//!
-//! Also reads the plan's model list, the IDs a person signed in this way can
-//! pick, under `model_list.zig`'s bounds.
 const std = @import("std");
 const policy = @import("codex_credential_policy.zig");
 const codex = @import("codex_token_wire.zig");
@@ -23,13 +8,9 @@ const hex_value = @import("hex_value.zig");
 
 pub const Request = codex.Request;
 pub const issuer = codex.issuer;
-/// The client a first sign-in names; the issuer answers with the client id
-/// this installation keeps.
 pub const first_client_id = "dynamic_agent_client";
 pub const agent_name = "Rui";
 pub const scope = "openid profile email offline_access resource.invoke " ++ plan_scope;
-/// The scope that lets the tokens spend the plan. Without it the sign-in is
-/// an identity only.
 pub const plan_scope = "chatgpt.tokens.use.direct";
 pub const resource = "https://api.openai.com/v1";
 pub const max_code_bytes = 2048;
@@ -38,34 +19,22 @@ pub const max_refusal_bytes = 128;
 pub const authorize_url = issuer ++ "/api/accounts/authorize";
 const token_url = issuer ++ "/api/accounts/oauth/token";
 const revoke_url = issuer ++ "/api/accounts/oauth/revoke";
-/// Only the port of the redirect address may vary.
 const loopback_origin = "http://127.0.0.1:";
 const callback_path = "/auth/callback";
 const ClientId = policy.Bounded(policy.max_client_id_bytes);
 
 const secret_bytes = 32;
 const secret_text_len = std.base64.url_safe_no_pad.Encoder.calcSize(secret_bytes);
-/// Random bytes one attempt takes: its state, its nonce and its PKCE verifier.
 pub const random_bytes = 3 * secret_bytes;
 
-/// One sign-in attempt, from the authorization address to the record. Its
-/// verifier is secret: the caller wipes the attempt when the attempt ends.
 pub const Attempt = struct {
     state: [secret_text_len]u8,
     nonce: [secret_text_len]u8,
     verifier: [secret_text_len]u8,
     port: u16,
-    /// The issued client id a returning sign-in names; null on the first.
     saved_client_id: ?ClientId,
 };
 
-/// Starts one attempt from `random` and returns the address the user opens,
-/// written into `buffer`. `saved` is the record of an earlier sign-in, if
-/// any, signed in or out: its issued client id makes this a returning
-/// sign-in, which names no agent. The address is printed for the user to
-/// open, so it never carries a token: it sends no `id_token_hint`, which the
-/// issuer takes as optional, and the user picks the account. On error
-/// `attempt` is zeroed.
 pub fn authorize(random: *const [random_bytes]u8, port: u16, host_id: []const u8, saved: ?*const policy.Record, attempt: *Attempt, buffer: []u8) ![]const u8 {
     std.debug.assert(port != 0);
     try validateHostId(host_id);
@@ -118,25 +87,16 @@ fn redirectParam(writer: *std.Io.Writer, name: []const u8, port: u16) !void {
     try param(writer, name, std.fmt.bufPrint(&address, loopback_origin ++ "{d}" ++ callback_path, .{port}) catch unreachable);
 }
 
-/// What the issuer granted, read from the callback. The code is secret.
 pub const Grant = struct {
     code: policy.Required(max_code_bytes) = .{},
-    /// The issued client id: the callback's, else the saved one.
     client_id: policy.Required(policy.max_client_id_bytes) = .{},
 };
 
 pub const Callback = union(enum) {
     granted: Grant,
-    /// The issuer's `error` code, such as `access_denied`.
     refused: policy.Required(max_refusal_bytes),
 };
 
-/// Reads the callback for `attempt` from `received`: the request target a
-/// loopback listener got (`/auth/callback?...`) or the whole address the user
-/// pasted (`http://127.0.0.1:<port>/auth/callback?...`). A paste may carry
-/// surrounding whitespace or backticks and `&amp;` for `&`, as a chat app
-/// leaves it. The state is checked before anything else the query says. On
-/// error `destination` is zeroed.
 pub fn parseCallback(attempt: *const Attempt, received: []const u8, destination: *Callback) !void {
     destination.* = .{ .granted = .{} };
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(destination));
@@ -190,9 +150,6 @@ pub fn parseCallback(attempt: *const Attempt, received: []const u8, destination:
     }
 }
 
-/// The request target of the HTTP request a loopback listener has read so
-/// far: null until its request line is complete. Only a `GET` can be the
-/// callback; any other request is not one.
 pub fn requestTarget(received: []const u8) !?[]const u8 {
     const end = std.mem.indexOf(u8, received, "\r\n") orelse {
         if (received.len >= max_request_line_bytes) return error.NotCallbackAddress;
@@ -207,13 +164,8 @@ pub fn requestTarget(received: []const u8) !?[]const u8 {
     return target;
 }
 
-/// The most of a request the listener reads before its request line must
-/// have ended: a callback's code, state, scope and client id fit well inside.
 pub const max_request_line_bytes = 8 * 1024;
 
-/// The listener's answers to the browser, each one plain line. A failure
-/// sends the person back to Rui, whether the command line or the first-run
-/// screen is waiting there.
 pub const page_signed_in = page("200 OK", "Signed in. You can close this tab.\n");
 pub const page_failed = page("400 Bad Request", "Sign-in did not finish. Go back to Rui.\n");
 pub const page_not_found = page("404 Not Found", "Not found.\n");
@@ -222,7 +174,6 @@ fn page(comptime status: []const u8, comptime body: []const u8) []const u8 {
     return std.fmt.comptimePrint("HTTP/1.1 {s}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {d}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{s}", .{ status, body.len, body });
 }
 
-/// The callback parameters this flow reads, each borrowing the received text.
 const Query = struct {
     code: ?[]const u8 = null,
     state: ?[]const u8 = null,
@@ -230,16 +181,12 @@ const Query = struct {
     @"error": ?[]const u8 = null,
 };
 
-/// A query value decoded into `out`: `%XX` escapes and `+` for a space. The
-/// value must be nonempty printable ASCII once decoded and fit `out`;
-/// otherwise `refusal` is returned.
 fn decode(value: []const u8, out: []u8, comptime refusal: anyerror) ![]u8 {
     const decoded = url_value.percentDecode(value, out, .space) orelse return refusal;
     if (!policy.safeAscii(decoded)) return refusal;
     return decoded;
 }
 
-/// The authorization-code exchange for a granted callback.
 pub fn exchangeRequest(attempt: *const Attempt, grant: *const Grant, buffer: []u8) !Request {
     var writer = std.Io.Writer.fixed(buffer);
     writeExchange(&writer, attempt, grant) catch return error.RequestTooLong;
@@ -255,19 +202,11 @@ fn writeExchange(writer: *std.Io.Writer, attempt: *const Attempt, grant: *const 
     try param(writer, "&resource=", resource);
 }
 
-/// Room to read one token response into a record: the issuer's parse room
-/// and the tokens it carries. Its owner keeps it off the stack.
 pub const Scratch = struct {
     wire: codex.Scratch = undefined,
     tokens: codex.Tokens = undefined,
 };
 
-/// Builds the record a sign-in installs from the exchange's response, after
-/// checking its ID token and granted scope. The record keeps the issued
-/// client id, which makes its account the ID token's `sub` and its expiry the
-/// access token's (`policy.deriveClaims`). The generation is assigned at
-/// admission. On error the record is zeroed; `PlanScopeMissing` means the
-/// user signed in but has not let this app use the plan.
 pub fn loginRecord(attempt: *const Attempt, grant: *const Grant, status: u16, json: []const u8, now_seconds: i64, record: *policy.Record, scratch: *Scratch) !void {
     defer std.crypto.secureZero(u8, std.mem.asBytes(&scratch.tokens));
     codex.parseTokenResponse(status, json, &scratch.wire.json, &scratch.tokens) catch |err| {
@@ -313,7 +252,6 @@ const IdClaims = struct {
     nonce: ?json_scalar.Text = null,
 };
 
-/// OpenID Connect's `aud`: one string, or an array of them.
 const Audience = struct {
     names: []const json_scalar.Text,
 
@@ -326,8 +264,6 @@ const Audience = struct {
     }
 };
 
-/// A response that names its granted scope must include the plan scope; one
-/// that does not granted what was asked (RFC 6749, 5.1).
 fn requirePlanScope(json: []const u8, arena: *[codex.wire_arena_bytes]u8) !void {
     defer std.crypto.secureZero(u8, arena);
     var fixed = std.heap.FixedBufferAllocator.init(arena);
@@ -339,7 +275,6 @@ fn requirePlanScope(json: []const u8, arena: *[codex.wire_arena_bytes]u8) !void 
     return error.PlanScopeMissing;
 }
 
-/// The refresh of a claimed record, as its issued client.
 pub fn refreshRequest(current: *const policy.Record, buffer: []u8) !Request {
     if (current.client_id.len == 0) return error.MissingClientId;
     var writer = std.Io.Writer.fixed(buffer);
@@ -354,19 +289,12 @@ fn writeRefresh(writer: *std.Io.Writer, current: *const policy.Record) !void {
     try param(writer, "&resource=", resource);
 }
 
-/// Builds the replacement for a claimed plan record from a refresh response.
-/// The issuer answers as it answers a Codex refresh (`codex.parseRefreshResponse`:
-/// rotated tokens for the same account, or a rejection in
-/// `policy.LoginRequired`), and the granted scope must still let the tokens
-/// spend the plan, as at sign-in. The replacement keeps the record's issued
-/// client id. On error the replacement is zeroed.
 pub fn parseRefreshResponse(current: *const policy.Record, status: u16, json: []const u8, refreshed_at: i64, replacement: *policy.Record, scratch: *codex.Scratch) !void {
     try codex.parseRefreshResponse(current, status, json, refreshed_at, replacement, scratch);
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(replacement));
     try requirePlanScope(json, &scratch.json);
 }
 
-/// Revokes the record's refresh token, as its issued client.
 pub fn revokeRequest(current: *const policy.Record, buffer: []u8) !Request {
     if (current.client_id.len == 0) return error.MissingClientId;
     var writer = std.Io.Writer.fixed(buffer);
@@ -374,9 +302,6 @@ pub fn revokeRequest(current: *const policy.Record, buffer: []u8) !Request {
     return .{ .url = revoke_url, .content_type = codex.form_content, .body = writer.buffered() };
 }
 
-/// What a revocation's answer means. A 200 is success, even for a token
-/// already invalid; a server failure may be retried while the refresh token
-/// is still held; any other answer is a refusal.
 pub const Revocation = enum { revoked, retry, refused };
 
 pub fn revocation(status: u16) Revocation {
@@ -396,8 +321,6 @@ fn writeRevoke(writer: *std.Io.Writer, current: *const policy.Record) !void {
 const uuid_prefix = "urn:uuid:";
 pub const host_id_len = uuid_prefix.len + 36;
 
-/// The host id this installation names in every sign-in: a version 4 UUID URN
-/// spelled from 16 random bytes.
 pub fn formatHostId(random: *const [16]u8) [host_id_len]u8 {
     var bytes = random.*;
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
@@ -407,7 +330,6 @@ pub fn formatHostId(random: *const [16]u8) [host_id_len]u8 {
     return text;
 }
 
-/// Accepts exactly what `formatHostId` writes: a lowercase version 4 UUID URN.
 pub fn validateHostId(text: []const u8) !void {
     if (text.len != host_id_len or !std.mem.startsWith(u8, text, uuid_prefix)) return error.InvalidHostId;
     const uuid = text[uuid_prefix.len..];
@@ -418,14 +340,7 @@ pub fn validateHostId(text: []const u8) !void {
     if (uuid[14] != '4' or std.mem.indexOfScalar(u8, "89ab", uuid[19]) == null) return error.InvalidHostId;
 }
 
-/// The model IDs a plan's list (`{"models":[{"slug":...,"visibility":...},...]}`)
-/// offers for picking, in the server's order, written to `out` under
-/// `model_list`'s bounds. Only an entry whose `visibility` is `"list"` is
-/// offered; every entry names its `slug`. `scratch` holds the parse and is
-/// freed by the caller.
 pub fn parseModels(scratch: std.mem.Allocator, body: []const u8, out: *model_list.IdBuffer) !model_list.Ids {
-    // A token walk, as `model_list.parseOpenAi`'s: other members are skipped
-    // unread, so no number is ever converted.
     var scanner: std.json.Scanner = .initCompleteInput(scratch, body);
     var kept: model_list.Kept = .{ .out = out };
     var models_seen = false;
@@ -469,7 +384,6 @@ pub fn parseModels(scratch: std.mem.Allocator, body: []const u8, out: *model_lis
 
 const test_host_id = "urn:uuid:00010203-0405-4607-8809-0a0b0c0d0e0f";
 const test_client_id = "oaiapp_test_client";
-/// RFC 7636, appendix B: the verifier's octets, its text and its S256 challenge.
 const rfc_verifier_bytes = [_]u8{ 116, 24, 223, 180, 151, 153, 224, 37, 79, 250, 96, 125, 216, 173, 187, 186, 22, 212, 37, 77, 105, 214, 191, 240, 91, 88, 5, 88, 83, 132, 141, 121 };
 const rfc_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 const rfc_challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
@@ -485,7 +399,6 @@ fn testAttempt(saved: ?*const policy.Record, attempt: *Attempt) !void {
     _ = try authorize(&testRandom(), 1455, test_host_id, saved, attempt, &url);
 }
 
-/// A compact token whose payload is `claims`, written into `buffer`.
 fn testToken(claims: []const u8, buffer: []u8) []const u8 {
     const encoder = std.base64.url_safe_no_pad.Encoder;
     const header = "e30.";
@@ -496,7 +409,6 @@ fn testToken(claims: []const u8, buffer: []u8) []const u8 {
     return buffer[0 .. end + ".c2ln".len];
 }
 
-/// A compact token whose payload is `claims`, built at compile time.
 fn compactToken(comptime claims: []const u8) []const u8 {
     comptime {
         @setEvalBranchQuota(100_000);
@@ -508,8 +420,6 @@ fn compactToken(comptime claims: []const u8) []const u8 {
     }
 }
 
-/// Made-up ID token claims shaped like the issuer's: the auth object holds no
-/// account claim, and a refreshed token has no nonce.
 const plan_subject = "user-made-up-1";
 fn planClaims(comptime sub: []const u8, comptime nonce_claim: []const u8) []const u8 {
     return "{\"iss\":\"https://auth.openai.com\",\"sub\":\"" ++ sub ++ "\",\"aud\":[\"" ++ test_client_id ++ "\"]," ++ nonce_claim ++
@@ -547,8 +457,6 @@ test "the authorization address names the first or the saved client" {
 
     var saved: policy.Record = undefined;
     try testSavedRecord(&saved);
-    // A returning sign-in names its issued client, no agent and no token,
-    // whether its record is signed in or out.
     const returning = "https://auth.openai.com/api/accounts/authorize?client_id=" ++ test_client_id ++ tail;
     try std.testing.expectEqualStrings(returning, try authorize(&testRandom(), 1455, test_host_id, &saved, &attempt, &url));
     try std.testing.expectEqualStrings(test_client_id, attempt.saved_client_id.?.slice());
@@ -556,11 +464,8 @@ test "the authorization address names the first or the saved client" {
     var signed_out = saved;
     try policy.signOut(&signed_out);
     try std.testing.expectEqualStrings(returning, try authorize(&testRandom(), 1455, test_host_id, &signed_out, &attempt, &url));
-    // Only the port varies in the redirect address.
     try std.testing.expect(std.mem.indexOf(u8, try authorize(&testRandom(), 50001, test_host_id, null, &attempt, &url), "127.0.0.1%3A50001%2Fauth%2Fcallback&") != null);
 
-    // A saved record without an issued client, a bad host id or a short
-    // buffer leaves no attempt behind.
     saved.client_id.wipe();
     try std.testing.expectError(error.MissingClientId, authorize(&testRandom(), 1455, test_host_id, &saved, &attempt, &url));
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&attempt), 0));
@@ -577,14 +482,12 @@ test "a callback yields the code and issued client id from a listener or a paste
     inline for (.{
         "/auth/callback" ++ query,
         "http://127.0.0.1:1455/auth/callback" ++ query ++ "#fragment",
-        // As a chat app hands the address back.
         " \t`http://127.0.0.1:1455/auth/callback?code=ac_made%2Dup%2Bcode&amp;scope=openid+profile&amp;state=" ++ zero_state ++ "&amp;client_id=oaiapp_issued`\n",
     }) |received| {
         try parseCallback(&attempt, received, &callback);
         try std.testing.expectEqualStrings("ac_made-up+code", callback.granted.code.slice());
         try std.testing.expectEqualStrings("oaiapp_issued", callback.granted.client_id.slice());
     }
-    // A returning sign-in may get no client id back and keeps its saved one.
     var saved: policy.Record = undefined;
     try testSavedRecord(&saved);
     var returning: Attempt = undefined;
@@ -593,10 +496,8 @@ test "a callback yields the code and issued client id from a listener or a paste
     try std.testing.expectEqualStrings(test_client_id, callback.granted.client_id.slice());
     try parseCallback(&returning, "/auth/callback?code=c&state=" ++ zero_state ++ "&client_id=" ++ test_client_id, &callback);
     try std.testing.expectEqualStrings(test_client_id, callback.granted.client_id.slice());
-    // An answer for another client is not this sign-in's.
     try std.testing.expectError(error.ClientIdMismatch, parseCallback(&returning, "/auth/callback?code=c&state=" ++ zero_state ++ "&client_id=oaiapp_new", &callback));
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&callback), 0));
-    // The issuer's refusal carries its code.
     try parseCallback(&attempt, "/auth/callback?error=access_denied&error_description=No+thanks&state=" ++ zero_state, &callback);
     try std.testing.expectEqualStrings("access_denied", callback.refused.slice());
 }
@@ -615,7 +516,6 @@ test "a callback that is not this attempt's grant is refused by cause" {
         .{ "/auth/callback?code=c&client_id=x", error.StateMismatch },
         .{ "/auth/callback?code=c&client_id=x&state=" ++ ones_nonce, error.StateMismatch },
         .{ "/auth/callback?code=c&client_id=x&state=", error.StateMismatch },
-        // The state is checked before a refusal is believed.
         .{ "/auth/callback?error=access_denied&state=AAAA", error.StateMismatch },
         .{ "/auth/callback?client_id=x" ++ state, error.MissingCode },
         .{ "/auth/callback?code=&client_id=x" ++ state, error.MissingCode },
@@ -623,7 +523,6 @@ test "a callback that is not this attempt's grant is refused by cause" {
         .{ "/auth/callback?code=c&code=d&client_id=x" ++ state, error.InvalidCallback },
         .{ "/auth/callback?code=%2&client_id=x" ++ state, error.InvalidCallback },
         .{ "/auth/callback?code=a%0Ab&client_id=x" ++ state, error.InvalidCallback },
-        // A raw `+` is a space, which no code or client id holds.
         .{ "/auth/callback?code=a+b&client_id=x" ++ state, error.InvalidCallback },
         .{ "/auth/callback?code=c&client_id=" ++ state, error.InvalidCallback },
         .{ "/auth/callback?error=&client_id=x" ++ state, error.InvalidCallback },
@@ -663,13 +562,11 @@ test "the exchange, refresh and revocation requests are the issued client's form
     try std.testing.expectEqualStrings("token=rt_made%2Bup&token_type_hint=refresh_token&client_id=" ++ test_client_id, revoke.body);
     try std.testing.expectError(error.RequestTooLong, refreshRequest(&record, buffer[0..40]));
     try std.testing.expectError(error.RequestTooLong, revokeRequest(&record, buffer[0..20]));
-    // A Codex record has no issued client to speak for.
     record.client_id.wipe();
     try std.testing.expectError(error.MissingClientId, refreshRequest(&record, &buffer));
     try std.testing.expectError(error.MissingClientId, revokeRequest(&record, &buffer));
 }
 
-/// An exchange response whose ID token carries `claims`.
 fn testResponse(claims: []const u8, scope_field: []const u8, buffer: []u8) ![]const u8 {
     var token: [1024]u8 = undefined;
     return std.fmt.bufPrint(buffer, "{{\"access_token\":\"{s}\",\"id_token\":\"{s}\",\"refresh_token\":\"rt_made_up\",\"expires_in\":3600,\"token_type\":\"Bearer\"{s}}}", .{ policy.fixture_access_token, testToken(claims, &token), scope_field });
@@ -698,13 +595,11 @@ test "a token response becomes a record only for this issuer, client, nonce and 
     try std.testing.expectEqual(now, record.refreshed_at);
     try std.testing.expectEqual(@as(u64, 0), record.generation);
     try policy.validateSelected(&record, false, &scratch.wire.claims);
-    // The record round-trips through the credential file with its client id.
     var file: [policy.max_file_bytes]u8 = undefined;
     var decoded: policy.Record = undefined;
     try policy.parseInto(try policy.encode(&record, &file), &decoded);
     try std.testing.expectEqualStrings(test_client_id, decoded.client_id.slice());
     try std.testing.expectEqualStrings(record.id_token.slice(), decoded.id_token.slice());
-    // A single audience string and an absent scope, which grants what was asked, pass.
     const single = "{\"iss\":\"https://auth.openai.com\",\"aud\":\"" ++ test_client_id ++ "\",\"exp\":1800000001,\"nonce\":\"" ++ ones_nonce ++ "\",\"sub\":\"" ++ plan_subject ++ "\"}";
     try loginRecord(&attempt, &grant, 200, try testResponse(single, "", &json), now, &record, scratch);
 
@@ -720,7 +615,6 @@ test "a token response becomes a record only for this issuer, client, nonce and 
         .{ "{\"iss\":7}", granted_scope, error.InvalidTokenClaims },
         .{ good, ",\"scope\":\"openid profile email offline_access resource.invoke\"", error.PlanScopeMissing },
         .{ good, ",\"scope\":\"chatgpt.tokens.use.direct.extra\"", error.PlanScopeMissing },
-        // A ChatGPT account claim does not stand in for the subject.
         .{ "{\"iss\":\"https://auth.openai.com\",\"aud\":\"" ++ test_client_id ++ "\",\"exp\":1800000001,\"nonce\":\"" ++ ones_nonce ++ "\",\"chatgpt_account_id\":\"acct\"}", granted_scope, error.MissingAccountClaim },
     }) |case| {
         try std.testing.expectError(case[2], loginRecord(&attempt, &grant, 200, try testResponse(case[0], case[1], &json), now, &record, scratch));
@@ -742,13 +636,11 @@ test "a refresh rotates the plan record's tokens and keeps its client" {
     try std.testing.expectEqualStrings("refresh-new", replacement.refresh_token.slice());
     try std.testing.expectEqualStrings(test_client_id, replacement.client_id.slice());
     try std.testing.expectEqual(@as(u64, 5), try policy.admitReplacement(&current, &replacement, 4));
-    // A rotated ID token, without a nonce, for the same subject is taken.
     const rotated = comptime compactToken(planClaims(plan_subject, "\"amr\":[\"pwd\"],"));
     try parseRefreshResponse(&current, 200, "{\"id_token\":\"" ++ rotated ++ "\"}", 78, &replacement, &scratch.wire);
     try std.testing.expectEqualStrings(rotated, replacement.id_token.slice());
     try std.testing.expectEqualStrings(plan_subject, replacement.account_id.slice());
     try std.testing.expectEqual(@as(u64, 5), try policy.admitReplacement(&current, &replacement, 4));
-    // Another subject is another account; a Codex-shaped token names none.
     try std.testing.expectError(error.AccountChanged, parseRefreshResponse(&current, 200, "{\"id_token\":\"" ++ comptime compactToken(planClaims("user-made-up-2", "")) ++ "\"}", 78, &replacement, &scratch.wire));
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&replacement), 0));
     try std.testing.expectError(error.MissingAccountClaim, parseRefreshResponse(&current, 200, "{\"id_token\":\"" ++ policy.fixture_id_token ++ "\"}", 78, &replacement, &scratch.wire));
@@ -760,7 +652,6 @@ test "a refresh rotates the plan record's tokens and keeps its client" {
     }) |case| {
         try std.testing.expectError(case[1], parseRefreshResponse(&current, 401, case[0], 77, &replacement, &scratch.wire));
         try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&replacement), 0));
-        // Each is a failure only a new sign-in resolves.
         const required: policy.LoginRequired = case[1];
         try std.testing.expectEqual(@as(anyerror, case[1]), required);
     }
@@ -768,18 +659,15 @@ test "a refresh rotates the plan record's tokens and keeps its client" {
 
 test "each record validates by its own kind's account claim" {
     var claims: policy.ClaimScratch = undefined;
-    // A Codex record: the ChatGPT account claim, read without a client id.
     var codex_record: policy.Record = undefined;
     try testSavedRecord(&codex_record);
     codex_record.client_id.wipe();
     try codex_record.account_id.set(policy.fixture_account_id);
     try codex_record.id_token.set(policy.fixture_id_token);
     try policy.validateSelected(&codex_record, false, &claims);
-    // Read as a plan record, its token has no subject.
     try codex_record.client_id.set(test_client_id);
     try std.testing.expectError(error.MissingAccountClaim, policy.validateSelected(&codex_record, false, &claims));
 
-    // A plan record: the subject, through every check that reads the tokens.
     var plan: policy.Record = undefined;
     try testSavedRecord(&plan);
     try policy.validateSelected(&plan, false, &claims);
@@ -794,7 +682,6 @@ test "each record validates by its own kind's account claim" {
     try plan.account_id.set(plan_subject);
     plan.fedramp = true;
     try std.testing.expectError(error.AccountMismatch, policy.validateSelected(&plan, false, &claims));
-    // Read as a Codex record, the plan token names no account.
     plan.fedramp = false;
     plan.client_id.wipe();
     try std.testing.expectError(error.MissingAccountClaim, policy.validateSelected(&plan, false, &claims));
@@ -813,7 +700,6 @@ test "sign-in and refresh accept a granted scope only with the plan scope" {
     var record: policy.Record = undefined;
     var json: [2048]u8 = undefined;
     for ([_]struct { []const u8, ?anyerror }{
-        // Absent: granted as asked (RFC 6749, 5.1).
         .{ "", null },
         .{ granted_scope, null },
         .{ ",\"scope\":\"openid profile email offline_access resource.invoke\"", error.PlanScopeMissing },
@@ -825,7 +711,6 @@ test "sign-in and refresh accept a granted scope only with the plan scope" {
             try std.testing.expectError(failure, login);
             try std.testing.expectError(failure, renewal);
             try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&record), 0));
-            // A sign-in failure, distinct from one a new sign-in alone resolves.
             const required: policy.LoginRequired = error.PlanScopeMissing;
             try std.testing.expectEqualStrings("provider_sign_in_plan_scope_missing", policy.failureCode(required));
         } else {
@@ -839,7 +724,6 @@ test "sign-in and refresh accept a granted scope only with the plan scope" {
 test "the listener reads a GET's target once its request line ends" {
     try std.testing.expectEqualStrings("/auth/callback?code=c", (try requestTarget("GET /auth/callback?code=c HTTP/1.1\r\nHost: 127.0.0.1\r\n")).?);
     try std.testing.expectEqualStrings("/favicon.ico", (try requestTarget("GET /favicon.ico HTTP/1.0\r\n")).?);
-    // Not yet a whole line: wait for more.
     for ([_][]const u8{ "", "GET /auth/callback?code=c HTTP/1.1", "GET /auth/callback?code=c HTTP/1.1\r" }) |partial|
         try std.testing.expectEqual(@as(?[]const u8, null), try requestTarget(partial));
     for ([_][]const u8{
@@ -850,7 +734,6 @@ test "the listener reads a GET's target once its request line ends" {
         "GET /auth/callback HTTP/2\r\n",
         "\r\n",
     }) |refused| try std.testing.expectError(error.NotCallbackAddress, requestTarget(refused));
-    // A request line that never ends within the bound is not a callback.
     const endless: [max_request_line_bytes]u8 = @splat('a');
     try std.testing.expectEqual(@as(?[]const u8, null), try requestTarget(endless[0 .. endless.len - 1]));
     try std.testing.expectError(error.NotCallbackAddress, requestTarget(&endless));
@@ -872,8 +755,6 @@ test "the listener's pages are one plain line each" {
         try std.testing.expect(std.mem.endsWith(u8, body, "\n"));
         var length: [32]u8 = undefined;
         try std.testing.expect(std.mem.indexOf(u8, answer[0..head_end], try std.fmt.bufPrint(&length, "Content-Length: {d}\r\n", .{body.len})) != null);
-        // The screen and the command line both wait on a login; no page
-        // names only one of them.
         try std.testing.expect(std.mem.indexOf(u8, body, "terminal") == null);
     }
 }
@@ -904,8 +785,6 @@ test "a plan's model list offers listed slugs in the server's order and skips ot
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    // Shaped like the server's: nested objects and arrays, numbers and
-    // fields in any order.
     const body =
         \\{"models":[
         \\{"slug":"gpt-6-sol","display_name":"Sol","visibility":"list","context_window":400000,"supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}],"auto_compact_token_limit":1.5e5},
@@ -920,7 +799,6 @@ test "a plan's model list offers listed slugs in the server's order and skips ot
     try std.testing.expectEqualStrings("gpt-6-sol\ngpt-5.5\na/b\n", (try parseModels(a, body, &out)).bytes);
     try std.testing.expectEqualStrings("", (try parseModels(a, "{\"models\":[]}", &out)).bytes);
     for ([_][]const u8{
-        // The OpenAI API's shape is not a plan's.
         "{\"object\":\"list\",\"data\":[{\"id\":\"gpt-6-sol\"}]}",
         "{\"models\":[{\"slug\":7,\"visibility\":\"list\"}]}",
         "{\"models\":[{\"slug\":null,\"visibility\":\"list\"}]}",
@@ -943,13 +821,11 @@ test "a plan's model list past either bound is refused, not cut" {
     var body: std.Io.Writer.Allocating = .init(arena.allocator());
     try body.writer.writeAll("{\"models\":[");
     for (0..model_list.max_live_models) |index| try body.writer.print("{s}{{\"slug\":\"m{d}\",\"visibility\":\"list\"}}", .{ if (index == 0) "" else ",", index });
-    // Hidden entries do not count toward the bound.
     try body.writer.writeAll(",{\"slug\":\"hidden\",\"visibility\":\"hide\"}]}");
     try std.testing.expectEqual(@as(usize, model_list.max_live_models), std.mem.count(u8, (try parseModels(arena.allocator(), body.written(), &out)).bytes, "\n"));
     const one_more = try std.mem.concat(arena.allocator(), u8, &.{ body.written()[0 .. body.written().len - 2], ",{\"slug\":\"x\",\"visibility\":\"list\"}]}" });
     try std.testing.expectError(error.ModelListTooLarge, parseModels(arena.allocator(), one_more, &out));
 
-    // Exactly the byte bound fits: 64 IDs of 256 bytes are 16 KiB.
     body.clearRetainingCapacity();
     try body.writer.writeAll("{\"models\":[");
     for (0..64) |index| try body.writer.print("{s}{{\"visibility\":\"list\",\"slug\":\"{d:0>256}\"}}", .{ if (index == 0) "" else ",", index });

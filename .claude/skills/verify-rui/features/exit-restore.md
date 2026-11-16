@@ -14,6 +14,10 @@ Ctrl-C and SIGTERM close the client without stopping Host work. They restore the
 
 ## Driving it with verify-rui
 
+Frame states: `exit`
+
+Run `$V frames FULLSHA --only exit` for the final main-screen message after Ctrl-C.
+
 Preconditions:
 
 - A terminal at the composer.

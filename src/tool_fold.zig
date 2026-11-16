@@ -1,6 +1,3 @@
-//! A tool row's bounded, terminal-safe output lines and the hidden line
-//! markers that say which lines are its heading and its output. The markers
-//! use the document's hidden OSC 8 address representation.
 const std = @import("std");
 const Text = @import("TerminalText.zig");
 const protocol = @import("protocol.zig");
@@ -8,17 +5,13 @@ const protocol = @import("protocol.zig");
 pub const heading_uri = "rui-tool";
 pub const output_uri = "rui-tool-output";
 pub const more_uri = "rui-tool-more";
-/// Starts a tool row's heading line. The row's feed key is its identity.
 pub const heading_marker = Text.link_open ++ heading_uri ++ Text.link_end ++ Text.link_close;
 pub const output_marker = Text.link_open ++ output_uri ++ Text.link_end ++ Text.link_close;
 pub const more_marker = Text.link_open ++ more_uri ++ Text.link_end ++ Text.link_close;
-/// What a line marker's address names: a tool row's heading, or one of its
-/// output lines (a body line or the line saying more follows).
 pub const Marker = enum {
     heading,
     output,
 
-    /// The marker `uri` names, or null for any other address.
     pub fn of(uri: []const u8) ?Marker {
         if (std.mem.eql(u8, uri, heading_uri)) return .heading;
         if (std.mem.eql(u8, uri, output_uri) or std.mem.eql(u8, uri, more_uri)) return .output;
@@ -29,10 +22,6 @@ pub const Marker = enum {
 pub const max_lines = 20;
 pub const max_bytes = 8192;
 
-/// One open row's bounded display prefix of the authenticated stored result.
-/// Every byte is literal input to terminal escaping, including tool envelope
-/// headers, labels and pointers. Display policy never changes stored/model text.
-/// Two fixed buffers retain raw rows and one incoming/escaped line.
 pub const Output = struct {
     raw: [max_bytes]u8 = undefined,
     escaped: [max_bytes]u8 = undefined,
@@ -84,7 +73,6 @@ pub const Output = struct {
         var budget: usize = max_bytes;
         while (at < self.length and shown < max_lines) {
             const end = std.mem.indexOfScalarPos(u8, self.raw[0..self.length], at, '\n') orelse self.length;
-            // A byte-bound cut within a line has no complete line to present.
             if (end == self.length and self.cut) break;
             var writer = std.Io.Writer.fixed(self.escaped[0..budget]);
             var text: Text = .{ .mode = .multiline };
@@ -92,8 +80,8 @@ pub const Output = struct {
             text.finish(&writer) catch break;
             try sink.feed(output_marker);
             try sink.feed("    ");
-            try sink.feed(writer.buffered());
-            try sink.feed("\n");
+            try Text.writeBody(sink, writer.buffered());
+            try Text.writeBody(sink, "\n");
             budget -= writer.buffered().len;
             shown += 1;
             at = end + 1;

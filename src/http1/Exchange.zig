@@ -1,18 +1,3 @@
-//! One HTTP/1.1 request and its response on one nonblocking loopback
-//! connection. The owner polls `fd` for `events()` alongside its other work
-//! and calls `advance` when it is ready; nothing here blocks, sleeps or runs
-//! on its own, so the existing Reactor drives it with no new thread (D66).
-//!
-//! The connection carries exactly one request (`Connection: close`), so
-//! `deinit` closing it is also the cancel an MCP server watches for (D65).
-//! `requestSent` is the evidence a caller needs to tell "failed, not run"
-//! from "outcome unknown" (D146): it is false only while no request byte has
-//! left this process.
-//!
-//! Lifetime: an Exchange is about 16 KiB and has one address; its owner
-//! initializes it in place and keeps it there until `deinit`. The request
-//! bytes are borrowed until the response head arrives or `deinit`; every
-//! slice an event carries is borrowed until the next `advance`.
 const std = @import("std");
 const Parser = @import("Parser.zig");
 const request = @import("request.zig");
@@ -20,37 +5,25 @@ const socket_os = @import("../os/socket.zig");
 
 const Exchange = @This();
 
-/// Unread response bytes. A head must fit here whole.
 pub const buffer_bytes = Parser.max_head_bytes;
 
 pub const Error = Parser.Error || error{
-    /// No socket could be made or set up; nothing was sent.
     LocalFailure,
-    /// The server refused or dropped the connection before it was
-    /// established; nothing was sent.
     ConnectFailed,
-    /// The connection broke after it was established.
     ConnectionLost,
 };
 
 pub const Event = union(enum) {
-    /// Nothing more until `fd` is ready for `events()`.
     waiting,
     head: Parser.Head,
     body: []const u8,
-    /// The response is complete; the exchange is done.
     end,
 };
 
-/// Once connected, the request is sent and the response read at once: a
-/// server may answer (a 401, a 413) before it reads the whole body, and
-/// may then wait for the client to close.
 const State = enum { connecting, open, done };
 
 fd: std.posix.fd_t,
 state: State,
-/// The request bytes still to send; empty once all are sent, or once a
-/// response head arrived, after which the rest would not be read.
 pending: []const u8,
 sent: usize,
 parser: Parser,
@@ -58,8 +31,6 @@ start: usize,
 end: usize,
 buffer: [buffer_bytes]u8 = undefined,
 
-/// Opens the connection and starts the request. `bytes` is the whole
-/// request, head and body, as `request.writePost` and the body make it.
 pub fn init(self: *Exchange, target: request.Target, bytes: []const u8) error{ LocalFailure, ConnectFailed }!void {
     self.* = .{ .fd = -1, .state = .connecting, .pending = bytes, .sent = 0, .parser = .{}, .start = 0, .end = 0 };
     var storage: std.c.sockaddr.in6 = std.mem.zeroes(std.c.sockaddr.in6);
@@ -100,16 +71,12 @@ pub fn init(self: *Exchange, target: request.Target, bytes: []const u8) error{ L
     };
 }
 
-/// Closes the connection, which cancels the request if it is still open.
 pub fn deinit(self: *Exchange) void {
-    // A failed close leaves nothing to retry: the descriptor is released
-    // either way, and no write of ours awaits its result.
     if (self.fd >= 0) _ = std.c.close(self.fd);
     self.fd = -1;
     self.state = .done;
 }
 
-/// The poll events `advance` waits for; none once the exchange is done.
 pub fn events(self: *const Exchange) i16 {
     return switch (self.state) {
         .connecting => std.c.POLL.OUT,
@@ -122,8 +89,6 @@ pub fn requestSent(self: *const Exchange) bool {
     return self.sent != 0;
 }
 
-/// Does all work the socket allows now and returns the first event. Call
-/// again after any event but `.waiting` and `.end` without polling first.
 pub fn advance(self: *Exchange) Error!Event {
     while (true) switch (self.state) {
         .connecting => {
@@ -135,8 +100,6 @@ pub fn advance(self: *Exchange) Error!Event {
             }
         },
         .open => {
-            // The parser runs even on no bytes: a body that has just ended
-            // reports its end without another read.
             const step = try self.parser.next(self.buffer[self.start..self.end]);
             self.start += step.used;
             switch (step.event) {
@@ -163,7 +126,6 @@ pub fn advance(self: *Exchange) Error!Event {
     };
 }
 
-/// Sends what the socket takes now; returns whether it took any.
 fn send(self: *Exchange) Error!bool {
     if (self.pending.len == 0) return false;
     while (true) {
@@ -178,8 +140,6 @@ fn send(self: *Exchange) Error!bool {
             .AGAIN => return false,
             else => {
                 if (self.sent == 0) return error.ConnectFailed;
-                // The server may have answered and closed before reading
-                // the rest; its answer is still there to read.
                 self.pending = &.{};
                 return false;
             },
@@ -189,7 +149,6 @@ fn send(self: *Exchange) Error!bool {
 
 const Received = enum { bytes, closed, none };
 
-/// Reads what has arrived into the buffer after the bytes it holds.
 fn receive(self: *Exchange) Error!Received {
     if (self.start != 0) {
         const held = self.end - self.start;
@@ -197,8 +156,6 @@ fn receive(self: *Exchange) Error!Received {
         self.start = 0;
         self.end = held;
     }
-    // The parser asks for more only while a head or line is incomplete,
-    // both bounded below the buffer.
     std.debug.assert(self.end < self.buffer.len);
     while (true) {
         const read = std.c.recv(self.fd, self.buffer[self.end..].ptr, self.buffer.len - self.end, 0);
@@ -220,22 +177,14 @@ fn finished(self: *Exchange) Event {
     return .end;
 }
 
-// Tests run a real loopback server on a thread. The server reads the whole
-// request before it answers, so what it saw is recorded before the client
-// can finish.
-
 const TestServer = struct {
     listener: std.posix.fd_t,
     port: u16,
     thread: ?std.Thread = null,
-    /// What to write after reading the request head; null closes at once.
     reply: ?[]const []const u8,
     seen: [1024]u8 = undefined,
     seen_len: usize = 0,
-    /// Answer once the head is in, without reading the body, then wait for
-    /// the client to close, as a server rejecting an upload may.
     answer_early: bool = false,
-    /// Keep the upload blocked until the client has consumed the early answer.
     drain_released: std.Io.Event = .unset,
 
     fn start(self: *TestServer) !void {
@@ -247,7 +196,6 @@ const TestServer = struct {
         self.thread = try std.Thread.spawn(.{}, serve, .{self});
     }
 
-    /// Waits for the server to finish, after which `seen` is complete.
     fn join(self: *TestServer) void {
         if (self.thread) |thread| thread.join();
         self.thread = null;
@@ -258,7 +206,6 @@ const TestServer = struct {
         if (fd < 0) return;
         defer _ = std.c.close(fd);
         const replies = self.reply orelse return;
-        // Read until the head and its declared body are in.
         while (std.mem.indexOf(u8, self.seen[0..self.seen_len], "\r\n\r\n") == null or (!self.answer_early and !self.bodyIn())) {
             const read = std.c.recv(fd, self.seen[self.seen_len..].ptr, self.seen.len - self.seen_len, 0);
             if (read <= 0) return;
@@ -273,8 +220,6 @@ const TestServer = struct {
             }
         }
         if (!self.answer_early) return;
-        // Draining now could let the whole upload finish before the client
-        // reads our answer, depending on either backend's speed.
         self.drain_released.waitUncancelable(std.testing.io);
         var drain: [4096]u8 = undefined;
         while (std.c.recv(fd, &drain, drain.len, 0) > 0) {}
@@ -304,14 +249,12 @@ const Outcome = struct {
     sent: bool = false,
 };
 
-/// Drives `exchange` to its end the way an owner would: poll, then advance.
 fn drive(exchange: *Exchange, out: *Outcome) Error!void {
     defer out.sent = exchange.requestSent();
     while (true) {
         switch (try exchange.advance()) {
             .waiting => {
                 var poll_fd = [_]std.c.pollfd{.{ .fd = exchange.fd, .events = exchange.events(), .revents = 0 }};
-                // Bounded so a broken test fails instead of hanging.
                 if (std.c.poll(&poll_fd, 1, 10_000) <= 0) return error.ConnectionLost;
             },
             .head => |head| out.status = head.status,
@@ -384,8 +327,6 @@ test "an answer that arrives while the request is still uploading is read" {
     defer server.stop();
     var url_buffer: [64]u8 = undefined;
     const target = try request.parseTarget(try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/mcp", .{server.port}));
-    // Far more than loopback socket buffers hold, so sending blocks long
-    // before the body is out.
     const body_len = 16 * 1024 * 1024;
     const bytes = try std.testing.allocator.alloc(u8, 512 + body_len);
     defer std.testing.allocator.free(bytes);

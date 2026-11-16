@@ -1,16 +1,3 @@
-//! The Host's wire contract as an OpenAPI 3.1 document, built from
-//! protocol.zig's JSON shapes: the request shapes the client writes and the
-//! reply shapes the Host writes. `zig build openapi` writes it to
-//! `openapi.json`; a test fails when the checked-in file differs from what
-//! this emits. Generated requests with all or no optional members, in their
-//! original and seeded random orders, exercise the Host's own parser. Clients in other languages are
-//! generated from that file.
-//!
-//! A shape is a tuple of literal JSON text and `protocol.Hole`s. To turn one
-//! into a schema, each hole is written as a marker string, the text is parsed
-//! as JSON, and each marker becomes its hole's schema. A shape here may also
-//! hold a marker type (see `Optional`, `ListOf`, `State`, `Content`) for the parts the
-//! Host and client write in code rather than as one shape.
 const std = @import("std");
 const model_catalog = @import("model_catalog.zig");
 const session_settings = @import("session_settings.zig");
@@ -27,19 +14,15 @@ const Hole = protocol.Hole;
 const Value = std.json.Value;
 const ObjectMap = std.json.ObjectMap;
 
-/// One route: its path, its request variants, and its reply.
 const Route = struct {
     path: []const u8,
     kind: protocol.Kind,
     summary: []const u8,
-    /// One object shape, or genuinely exclusive target alternatives.
     variants: []const Variant,
     reply: Reply,
-    /// The reply under HTTP 409 when a retried key meets different input.
     conflict: ?Reply = null,
 };
 
-/// A request shape, kept as its two uses so `Route` stays a runtime value.
 const Variant = struct {
     schema: *const fn (*Document) anyerror!Value,
     example: *const fn (*std.Io.Writer, bool) anyerror!void,
@@ -59,13 +42,9 @@ fn variant(comptime shape: anytype, comptime examples: anytype) Variant {
 }
 
 const Reply = union(enum) {
-    /// A JSON reply, any one of these.
     json: *const fn (*Document) anyerror!Value,
-    /// Raw content bytes (`application/octet-stream`).
     bytes,
-    /// Text content (`text/plain`), as the result and Action reads send it.
     text,
-    /// A described Session report (JSON), or a failed response's raw bytes.
     report,
 };
 
@@ -80,7 +59,6 @@ fn jsonReply(comptime shapes: anytype) Reply {
     return .{ .json = S.schema };
 }
 
-/// Every route, in the order the document lists them.
 pub const routes = [_]Route{
     .{
         .path = "/v1/host-info",
@@ -124,8 +102,6 @@ pub const routes = [_]Route{
         } ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.text_tail ++ .{
             Optional(protocol.message_request.require_model),
         } ++ protocol.message_request.tail, .{
-            // Only creation carries configuration and require_model. Exercise
-            // an addressed Message without them, and both nullable senders.
             .{ 2, "\"\"", "\"aaaaaa\"" },
             .{ 3, "{\"store\":\"/s\",\"session\":\"aaaaaa\"}", "null" },
         })},
@@ -171,6 +147,14 @@ pub const routes = [_]Route{
         .variants = &.{variant(protocol.permission_decision_request, .{})},
         .reply = jsonReply(.{ protocol.permission_decision_reply.accepted, protocol.permission_decision_reply.rejected }),
         .conflict = jsonReply(.{protocol.permission_decision_reply.conflict}),
+    },
+    .{
+        .path = protocol.CommandKind.action_background.route(),
+        .kind = .action_background,
+        .summary = "Promotes the same Action to Session-owned background work and returns its immutable call receipt selection. Completion is read explicitly with read-action; no final input or model wake is delivered. Retried by its key.",
+        .variants = &.{variant(protocol.action_background_request, .{})},
+        .reply = jsonReply(.{ protocol.action_background_reply.accepted, protocol.action_background_reply.rejected }),
+        .conflict = jsonReply(.{protocol.action_background_reply.conflict}),
     },
     .{
         .path = "/v1/read-action",
@@ -297,7 +281,6 @@ pub const routes = [_]Route{
 const since_example = "00000000000000000000000000000000.1";
 
 comptime {
-    // Every request kind has exactly one route.
     for (std.meta.tags(protocol.Kind)) |kind| {
         var count = 0;
         for (routes) |route| count += @intFromBool(route.kind == kind);
@@ -305,12 +288,6 @@ comptime {
     }
 }
 
-// Marker types. Each has `openapi_shape` (a named component built from that
-// shape), or `openapi_inline` (an inline schema) with `openapi_example` when
-// requests use it.
-
-/// One omittable object member, including its leading comma. Unlike a nullable
-/// hole, this marker changes presence, not the member's value schema.
 fn Optional(comptime shape: anytype) type {
     return struct {
         pub const optional_shape = shape;
@@ -327,7 +304,6 @@ fn isOptional(comptime part: anytype) bool {
     return @TypeOf(part) == type and @hasDecl(part, "optional_shape");
 }
 
-/// A sender is required, but its value may be null or a full address.
 const Sender = struct {
     pub fn openapi_inline(d: *Document) !Value {
         return d.nullable(try d.shapeSchema(protocol.message_request.sender));
@@ -337,7 +313,6 @@ const Sender = struct {
     }
 };
 
-/// A JSON array of `item`, which is a type or a shape.
 fn ListOf(comptime item: anytype) type {
     return struct {
         pub const is_list = true;
@@ -361,7 +336,6 @@ fn BoundedListOf(comptime item: anytype, comptime capacity: usize, comptime uniq
     };
 }
 
-/// A string of any length, which the Host saves as content.
 const Content = struct {
     pub fn openapi_inline(d: *Document) !Value {
         return d.object(.{ .type = Value{ .string = "string" }, .description = Value{ .string = "Text of any length, saved as content." } });
@@ -371,7 +345,6 @@ const Content = struct {
     }
 };
 
-/// Plain spec values can be null only where the setting table permits it.
 fn Plain(comptime value: anytype, comptime allow_null: bool) type {
     return struct {
         pub fn openapi_inline(d: *Document) !Value {
@@ -395,7 +368,6 @@ const TokenCount = struct {
 
 const Tool = protocol.BuiltInTool;
 
-/// A configure's `tools`: names the Host offers, sorted by bytes, none repeated.
 const ToolNameList = struct {
     pub fn openapi_inline(d: *Document) !Value {
         return d.object(.{
@@ -412,7 +384,6 @@ const ToolNameList = struct {
     }
 };
 
-/// A tool name (`tool_name.valid`).
 fn toolName(d: *Document) !Value {
     return d.object(.{
         .type = Value{ .string = "string" },
@@ -420,8 +391,6 @@ fn toolName(d: *Document) !Value {
     });
 }
 
-/// A sparse plain agent spec. Creation completeness is checked by the parser;
-/// updates may omit any member. Both native mutation doors share this shape.
 fn configurationShape(comptime name: []const u8) type {
     return struct {
         pub const openapi_name = name;
@@ -446,7 +415,6 @@ fn configurationMembers(comptime index: usize) type {
     };
 }
 
-/// Schemas have arbitrary JSON members; no object is a content reference.
 const SchemaObject = struct {
     pub fn openapi_inline(d: *Document) !Value {
         return d.object(.{ .type = Value{ .string = "object" }, .additionalProperties = Value{ .bool = true } });
@@ -459,8 +427,6 @@ const SchemaObject = struct {
 const Configuration = configurationShape("Configuration");
 const MessageConfiguration = Configuration;
 
-/// One `conversation-page` item: what every kind carries, then what only
-/// its kind carries.
 const ConversationItem = struct {
     pub fn openapi_inline(d: *Document) !Value {
         const page = protocol.conversation_page_reply;
@@ -476,21 +442,16 @@ const ConversationItem = struct {
     }
 };
 
-/// One provider of a `model-list` reply, as `model_list.writeProviders`
-/// writes it in code. A test checks a rendered list against this.
 const ModelListEntry = struct {
     pub const openapi_shape = .{ "{\"provider\":\"", Hole{ .tag = protocol.Provider }, "\",\"source\":\"", Hole{ .tag = model_list.Source }, "\",\"models\":", ListOf(.{ "{\"id\":", Hole{ .string = protocol.max_model_bytes }, ",\"known\":", Hole.boolean, "}" }), "}" };
 };
 
-/// `SessionRow`'s `tools`, written as raw JSON text.
 const ToolNames = struct {
     pub fn openapi_inline(d: *Document) !Value {
         return ToolNameList.openapi_inline(d);
     }
 };
 
-/// A `command_observation` reply: `absent`, or one object per command kind
-/// whose parts depend on what became of the command.
 fn observationSchema(d: *Document) anyerror!Value {
     const o = protocol.command_observation_reply;
     var kinds: [std.meta.tags(protocol.CommandKind).len + 2]Value = undefined;
@@ -505,6 +466,7 @@ fn observationSchema(d: *Document) anyerror!Value {
             .session_pin => .{ .{}, o.session_pin },
             .model_interruption => .{ .{}, o.model_interruption },
             .permission_decision => .{ .{}, o.permission_decision },
+            .action_background => .{ o.action_target, o.action_target ++ o.action_selection },
         };
         var variants: [2 * bodies.len]Value = undefined;
         inline for (bodies, 0..) |body, at| {
@@ -516,9 +478,6 @@ fn observationSchema(d: *Document) anyerror!Value {
     return d.anyOf(&kinds);
 }
 
-/// Consumes the settings owner's grammar, not its storage representation.
-/// Groups arrive parent-first; assembling them in reverse attaches complete
-/// children without retaining pointers into growable JSON object maps.
 const SettingsSchema = struct {
     document: *Document,
     groups: std.ArrayList(host_settings.Group) = .empty,
@@ -584,7 +543,6 @@ const SettingsSchema = struct {
     }
 };
 
-/// The document under construction, with its arena and named schemas.
 pub const Document = struct {
     arena: std.mem.Allocator,
     schemas: ObjectMap,
@@ -593,7 +551,6 @@ pub const Document = struct {
         return .{ .arena = arena, .schemas = .empty };
     }
 
-    /// An object with these fields in order, from a struct literal.
     fn object(d: *Document, fields: anytype) !Value {
         var map: ObjectMap = .empty;
         inline for (@typeInfo(@TypeOf(fields)).@"struct".field_names) |name| try map.put(d.arena, name, @field(fields, name));
@@ -614,7 +571,6 @@ pub const Document = struct {
         return d.anyOf(&.{ schema, try d.object(.{ .type = Value{ .string = "null" } }) });
     }
 
-    /// One schema when every alternative is the same, else `anyOf`.
     fn anyOf(d: *Document, alternatives: []const Value) !Value {
         var distinct: std.ArrayList(Value) = .empty;
         var texts: std.ArrayList([]const u8) = .empty;
@@ -631,8 +587,6 @@ pub const Document = struct {
         return d.object(.{ .anyOf = try d.array(distinct.items) });
     }
 
-    /// One object schema that accepts each of `variants`, all objects: every
-    /// property any of them has, required when all have it.
     fn merge(d: *Document, variants: []const Value) !Value {
         var properties: ObjectMap = .empty;
         var alternatives: std.StringArrayHashMapUnmanaged(std.ArrayList(Value)) = .empty;
@@ -660,7 +614,6 @@ pub const Document = struct {
         });
     }
 
-    /// A reference to `T`'s named schema, built on first use.
     fn typeRef(d: *Document, comptime T: type) !Value {
         if (@hasDecl(T, "openapi_inline")) return T.openapi_inline(d);
         if (@hasDecl(T, "openapi_list")) return d.object(.{ .type = Value{ .string = "array" }, .items = try d.typeRef(T.openapi_list) });
@@ -669,7 +622,6 @@ pub const Document = struct {
         if (@hasDecl(T, "openapi_content")) return Content.openapi_inline(d);
         const name = comptime componentName(T);
         if (!d.schemas.contains(name)) {
-            // Claim the name first, so a type that refers to itself ends.
             try d.schemas.put(d.arena, name, .null);
             try d.schemas.put(d.arena, name, try d.typeSchema(T));
         }
@@ -725,7 +677,6 @@ pub const Document = struct {
         return .{ .number_string = try std.fmt.allocPrint(d.arena, "{d}", .{number}) };
     }
 
-    /// A closed exactly-one source or Adapter alternative.
     fn singleProperty(d: *Document, name: []const u8, schema: Value) !Value {
         var properties: ObjectMap = .empty;
         try properties.put(d.arena, name, schema);
@@ -741,7 +692,6 @@ pub const Document = struct {
         return d.object(.{
             .type = Value{ .string = "string" },
             .maxLength = try d.unsigned(maximum),
-            // JSON Schema lengths count Unicode scalars; the owner bounds bytes.
             .@"x-maxBytes" = try d.unsigned(maximum),
         });
     }
@@ -803,8 +753,6 @@ pub const Document = struct {
         return value;
     }
 
-    /// JSON decoded directly into a Zig wire type. Defaults permit omission,
-    /// whereas optional types permit null; these are independent on the wire.
     fn wireSchema(d: *Document, comptime T: type) anyerror!Value {
         return switch (@typeInfo(T)) {
             .bool => d.object(.{ .type = Value{ .string = "boolean" } }),
@@ -837,9 +785,6 @@ pub const Document = struct {
     }
 
     fn settingsSchemas(d: *Document) !void {
-        // Reuse start_agent's field vocabulary. Presets are complete specs,
-        // not partial overrides, and parseAgentSpec also permits creation's
-        // provider and workspace fields (start_agent inherits them instead).
         const start_agent = try std.json.parseFromSliceLeaky(Value, d.arena, core_tools.start_agent_schema, .{});
         var spec = start_agent.object.get("properties").?.object.get("spec").?;
         try spec.object.put(d.arena, "required", try d.array(&.{
@@ -857,13 +802,10 @@ pub const Document = struct {
         }));
     }
 
-    /// The schema of a JSON shape.
     pub fn shapeSchema(d: *Document, comptime shape: anytype) !Value {
         return d.shapeSchemaWith(shape, null);
     }
 
-    /// The schema of a JSON shape whose unquoted text holes, raw JSON, have
-    /// the schema of `Raw`.
     fn shapeSchemaWith(d: *Document, comptime shape: anytype, comptime Raw: ?type) !Value {
         var text: std.Io.Writer.Allocating = .init(d.arena);
         var holes: std.ArrayList(Value) = .empty;
@@ -897,7 +839,6 @@ pub const Document = struct {
                     try text.writer.print("@H{d}@", .{holes.items.len});
                 } else try text.writer.print("\"@H{d}@\"", .{holes.items.len});
                 if (comptime @TypeOf(part) == type) {
-                    // A list marker's schema is the whole array.
                     try holes.append(d.arena, try d.typeRef(part));
                     try lists.append(d.arena, @hasDecl(part, "is_list"));
                 } else if (comptime !quoted and @as(Hole, part) == .text) {
@@ -941,7 +882,6 @@ pub const Document = struct {
                 });
             },
             .string => |text| {
-                // A list marker outside brackets writes its own.
                 if (marker(json)) |index| return holes[index];
                 if (std.mem.indexOf(u8, text, "@H") != null) return error.HoleInsideText;
                 return d.object(.{ .@"const" = json });
@@ -979,7 +919,6 @@ pub const Document = struct {
         };
     }
 
-    /// A u64 written as a decimal string, which JSON numbers cannot carry exactly.
     fn decimal(d: *Document) !Value {
         if (!d.schemas.contains("Decimal")) try d.schemas.put(d.arena, "Decimal", try d.object(.{
             .type = Value{ .string = "string" },
@@ -990,8 +929,6 @@ pub const Document = struct {
     }
 
     fn string(d: *Document, comptime bytes: usize) !Value {
-        // Every character takes at least one byte and at most as many
-        // UTF-16 units as bytes, so the byte bound bounds both.
         return d.object(.{
             .type = Value{ .string = "string" },
             .maxLength = Value{ .integer = bytes },
@@ -1009,7 +946,6 @@ pub const Document = struct {
         return d.object(.{ .type = Value{ .string = "string" }, .@"enum" = Value{ .array = names } });
     }
 
-    /// The whole document.
     pub fn build(d: *Document) !Value {
         var paths: ObjectMap = .empty;
         var request_schemas: [routes.len]Value = undefined;
@@ -1147,7 +1083,6 @@ const SortKeys = struct {
     }
 };
 
-/// A shape returned as a declared tuple type, as a tuple literal that `++` joins.
 fn tuple(comptime shape: anytype) TupleFrom(shape, 0) {
     return tupleFrom(shape, 0);
 }
@@ -1168,7 +1103,6 @@ fn isLiteral(comptime part: anytype) bool {
     return @typeInfo(@TypeOf(part)) == .pointer;
 }
 
-/// Whether the hole at `index` sits inside a JSON string of the shape.
 fn isQuoted(comptime shape: anytype, comptime index: usize) bool {
     if (index == 0 or index + 1 >= shape.len) return false;
     const before = shape[index - 1];
@@ -1218,9 +1152,6 @@ fn camel(arena: std.mem.Allocator, snake: []const u8) ![]const u8 {
     return out;
 }
 
-/// Writes `shape` with an example value in each hole: the hole's default,
-/// or the JSON `examples` gives for its index, as `.{ index, json }` pairs.
-/// A third entry overrides the example when optional members are absent.
 fn writeExampleWith(out: *std.Io.Writer, comptime shape: anytype, comptime examples: anytype, optional: bool) anyerror!void {
     return writeExampleFrom(out, shape, examples, optional, 0);
 }
@@ -1280,8 +1211,6 @@ fn writeHoleExample(out: *std.Io.Writer, comptime hole: Hole, comptime quoted: b
     };
 }
 
-/// The document as `openapi.json` holds it: two-space indented, with a
-/// final newline.
 pub fn render(gpa: std.mem.Allocator) ![]u8 {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -1346,8 +1275,6 @@ test "openapi requests parse with all or no optional members in any order" {
                 var body: std.Io.Writer.Allocating = .init(allocator);
                 try each.example(&body.writer, optional);
                 const json = try std.json.parseFromSliceLeaky(Value, allocator, body.written(), .{});
-                // Independently check coverage, so accidentally skipping a marker
-                // cannot silently turn the all-members example into a subset.
                 const expected = if (optional) schema.object.get("properties").?.object.count() else schema.object.get("required").?.array.items.len;
                 try std.testing.expectEqual(expected, json.object.count());
                 try std.testing.expect(conforms(document.schemas, schema, json));
@@ -1395,8 +1322,6 @@ fn parseRequestExample(route: *const Route, index: usize, bytes: []const u8, scr
     try request.removeTemporaryContent(io);
 }
 
-/// Materializes a derived path (named entries use a valid representative) so
-/// the full document, not just a disconnected leaf schema, reaches both doors.
 fn settingsSample(d: *Document, pattern: []const u8, value: Value) !Value {
     const dot = std.mem.indexOfScalar(u8, pattern, '.');
     const key = pattern[0 .. dot orelse pattern.len];
@@ -1561,8 +1486,6 @@ fn report(route: *const Route, index: usize, bytes: []const u8, err: anyerror) a
     return err;
 }
 
-/// Checks `json` against `schema`, resolving references in `schemas`: the
-/// subset of JSON Schema this document uses.
 fn conforms(schemas: ObjectMap, schema: Value, json: Value) bool {
     if (schema == .bool) return schema.bool;
     const rules = schema.object;
@@ -1586,8 +1509,6 @@ fn conforms(schemas: ObjectMap, schema: Value, json: Value) bool {
         for (names.array.items) |name| if (equal(name, json)) return true;
         return false;
     }
-    // JSON Schema patterns constrain strings even when no explicit type is present
-    // (for example propertyNames, whose instance is always a string).
     if (json == .string) if (rules.get("pattern")) |pattern| if (!matches(pattern.string, json.string)) return false;
     const type_rule = rules.get("type") orelse return true;
     if (type_rule == .array) {
@@ -1658,7 +1579,6 @@ fn equal(a: Value, b: Value) bool {
     };
 }
 
-/// The pattern forms this document writes: decimal, tool names and fixed-length hex.
 fn matches(pattern: []const u8, text: []const u8) bool {
     if (std.mem.eql(u8, pattern, "^(0|[1-9][0-9]*)$")) {
         if (text.len == 0 or (text.len > 1 and text[0] == '0')) return false;
@@ -1712,7 +1632,6 @@ test "replies the Host renders conform to their schemas" {
     const a = arena.allocator();
     var out: std.Io.Writer.Allocating = .init(a);
 
-    // Render the real request refusal, including its advisory server names.
     const reply = @import("command_reply.zig");
     const host_reply = @import("host_reply.zig");
     const action_read = @import("action_read.zig");
@@ -1745,7 +1664,6 @@ test "replies the Host renders conform to their schemas" {
     try Case.check(schemas, "MessageReply", out.written(), a);
     out.clearRetainingCapacity();
 
-    // The model list is written in code, not as a shape.
     const ids = "gpt-6.1-sol\nmy\"model\n";
     try out.writer.writeAll(protocol.model_list_reply.head);
     try model_list.writeProviders(&out.writer, model_catalog.shipped, &.{
@@ -1770,8 +1688,6 @@ test "replies the Host renders conform to their schemas" {
     try protocol.writeShape(&out.writer, protocol.session_list_reply.last_tail, .{ protocol.ListDelta.full, "x" });
     try Case.check(schemas, "ListSessionsReply", out.written(), a);
 
-    // These are the Store's real streaming reports, not schema examples:
-    // an added hand-written field must fail additionalProperties here.
     try store.checkSessionReportsForTesting(Case{ .schemas = schemas, .allocator = a });
 }
 
@@ -1791,8 +1707,6 @@ test "Host information has one schema with an omittable bounded diagnostic" {
     for (schema.object.get("required").?.array.items) |required|
         try std.testing.expect(!std.mem.eql(u8, "innodb_doublewrite", required.string));
 
-    // One schema accepts both Host-emitted forms, and the diagnostic's
-    // presence does not narrow the selector to a MySQL id.
     const host_reply = @import("host_reply.zig");
     const stores = [_][]const u8{ "/sqlite", "0123456789abcdef0123456789abcdef", &@as([protocol.max_store_bytes]u8, @splat('s')) };
     for (stores) |selector| {
@@ -1813,7 +1727,6 @@ test "Host information has one schema with an omittable bounded diagnostic" {
             var json = try std.json.parseFromSliceLeaky(Value, arena.allocator(), response.slice(), .{});
             try std.testing.expect(conforms(document.schemas, schema, json));
             try std.testing.expectEqual(doublewrite != null, json.object.contains("innodb_doublewrite"));
-            // Omission is not nullability, and the string has an actual bound.
             try json.object.put(arena.allocator(), "innodb_doublewrite", .null);
             try std.testing.expect(!conforms(document.schemas, schema, json));
             try json.object.put(arena.allocator(), "innodb_doublewrite", .{ .string = &@as([33]u8, @splat('x')) });
@@ -1868,7 +1781,7 @@ test "statuses, media types and required headers match what the Host sends" {
     var document: Document = .init(arena.allocator());
     const built = try document.build();
     const paths = built.object.get("paths").?.object;
-    const mutations = [_]protocol.CommandKind{ .configure, .message, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision };
+    const mutations = [_]protocol.CommandKind{ .configure, .message, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background };
     for (mutations) |kind| {
         const responses = paths.get(kind.route()).?.object.get("post").?.object.get("responses").?.object;
         try std.testing.expect(responses.contains("409"));
@@ -1954,8 +1867,6 @@ test "Activity schema requires a nullable failed-send target without weakening o
     const cases = .{
         .{ prefix ++ ",\"target\":null}}}", true },
         .{ prefix ++ ",\"target\":{\"session\":\"absent\",\"label\":null}}}}", true },
-        // NamedPeer's generated schema describes bounded wire strings, not
-        // canonical ID semantics. Native JsonNamedPeer still rejects this.
         .{ prefix ++ ",\"target\":{\"session\":\"\",\"label\":null}}}}", true },
         .{ prefix ++ "}}}", false },
         .{ prefix ++ ",\"target\":{}}}}", false },

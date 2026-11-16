@@ -1,5 +1,3 @@
-//! Model call Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const named_scratch = @import("../../named_scratch.zig");
@@ -35,9 +33,7 @@ test "model_call derives frozen model and usage from the resolved Operation" {
             patch.configuration.model.state = .value;
             try patch.configuration.model.value.set("model-b");
             try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
-            // A later revision must not change which revision names this call.
             try submitTestMessage(&storage, &tmp, "model-call-followup", "model-call-followup", session.slice(), "next");
-            // Real adapter certification supplies model evidence and normalized usage.
             const response_bytes = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}}\n\n" ++
                 "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"model\":\"served-model\",\"output\":[],\"usage\":{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":40},\"output_tokens\":7}}}\n\n";
             const source = try tmp.dir.createFile(std.testing.io, "model-call-response", .{ .read = true });
@@ -87,8 +83,6 @@ test "model_call derives frozen model and usage from the resolved Operation" {
             try std.testing.expectEqual(@as(?u64, 5), call.first_event_ms);
             try std.testing.expectEqual(@as(u64, 1), call.attempts);
             try std.testing.expectEqualStrings("answer", call.status.slice());
-            // D219 places this newly resolved row at the earlier admission,
-            // including on an end captured while the Operation was unresolved.
             request.end = unresolved.end;
             try std.testing.expectEqual(@as(usize, 1), (try store_core.activityPageForTesting(&storage, request)).count);
         }
@@ -116,7 +110,6 @@ test "model_call retry emits one row with final timings and no-event resolution 
             try std.testing.expectEqual(first.operation_id, final.operation_id);
             try std.testing.expectEqual(@as(u64, 2), final.attempt_ordinal);
             try store_testing.settleModelFailureWithTimings(&storage, final, .{ .uncorrelated = "provider_final" }, .ordinary, .{ .latency_ms = 37, .first_event_ms = 7 }, .{});
-            // Check the durable public read after reopen, not just an in-memory projection.
             try storage.close();
             storage_open = false;
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);

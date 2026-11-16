@@ -1,7 +1,3 @@
-//! The Session's last row, as `session_chrome.bar` decides it: what needs
-//! the person on the left, its key clickable where it
-//! has one (`ctrl+r retries`), and `ctrl+x stop` at the right while work
-//! can be stopped. Clicking a key runs the same action as pressing it.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -11,8 +7,6 @@ const Hover = @import("widgets/Hover.zig");
 const Self = @This();
 
 bar: chrome.Bar = .{},
-/// The clickable key that ends `bar.left`, such as `ctrl+r retries`; its
-/// label is empty when the left side has none.
 key: Chip,
 stop: Chip,
 method: vaxis.gwidth.Method = .unicode,
@@ -85,12 +79,10 @@ test "the status row shows what needs the person with its key clickable, and the
     try std.testing.expectEqualStrings("!", drawn.readCell(0, 0).char.grapheme);
     try std.testing.expectEqual(vaxis.Color{ .index = 3 }, drawn.readCell(0, 0).style.fg);
     try std.testing.expectEqual(@as(usize, 2), drawn.children.len);
-    // The key is its own target, where the text puts it.
     try std.testing.expectEqual(@as(i17, 18), drawn.children[0].origin.col);
     try std.testing.expectEqualStrings("c", drawn.children[0].surface.readCell(0, 0).char.grapheme);
     try std.testing.expect(drawn.children[0].surface.widget.eql(row.key.widget()));
     try std.testing.expectEqual(vaxis.Color{ .index = 3 }, drawn.children[0].surface.readCell(0, 0).style.fg);
-    // The stop key ends one cell before the edge.
     try std.testing.expectEqual(@as(i17, 68), drawn.children[1].origin.col);
     try std.testing.expectEqualStrings("ctrl+x stop", row.stop.label);
     try std.testing.expect(drawn.children[1].surface.widget.eql(row.stop.widget()));
@@ -114,14 +106,12 @@ test "the status row shows what needs the person with its key clickable, and the
     try std.testing.expectEqual(@as(usize, 1), actions.retried);
     try std.testing.expectEqual(@as(usize, 1), actions.stopped);
 
-    // Notices belong to Footer: the persistent status row stays empty.
     row.bar = chrome.bar(.{ .notice = "Copied 12 lines", .width = 40 });
     const notice = try row.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 1 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(usize, 0), notice.children.len);
     try std.testing.expectEqualStrings(" ", notice.readCell(0, 0).char.grapheme);
     try std.testing.expectEqual(vaxis.Color{ .index = 8 }, notice.readCell(0, 0).style.fg);
 
-    // Narrow: the left side wins, the stop key drops.
     row.bar = chrome.bar(.{ .needs = needs, .stoppable = true, .width = 30 });
     const narrow = try row.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 1 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(usize, 1), narrow.children.len);

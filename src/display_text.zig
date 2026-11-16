@@ -1,13 +1,9 @@
-//! Display clusters and their cell widths. The viewport normalizes clusters it
-//! cannot retain in a cell; a plain terminal draws the safe text as emitted.
 const std = @import("std");
 const gwidth = @import("terminal_width");
 const unicode = @import("terminal_unicode");
 pub const Method = gwidth.Method;
 pub const terminal_method: Method = .wcwidth;
 
-/// A viewport's negotiated method travels with its destination, never as an
-/// independent renderer default. CLI reads have no width negotiation.
 pub const Target = union(enum) { terminal, viewport: Method };
 
 pub const widest_cluster = 8;
@@ -26,9 +22,6 @@ fn represented(cluster: []const u8, method: Method) ?Piece {
 
 pub const Piece = struct { bytes: []const u8, cells: u16 };
 
-/// The exact pieces a viewport retains for one complete UTF-8 grapheme.
-/// Oversized/invisible clusters escape scalar runs, with fixed scratch only.
-/// A returned escape borrows this iterator until its next call.
 pub const Cluster = struct {
     raw: []const u8,
     method: Method,
@@ -59,9 +52,6 @@ pub const Cluster = struct {
 };
 
 fn piece(bytes: []const u8, method: Method) Piece {
-    // Word wrapping draws ASCII whitespace separately from graphemes. In
-    // particular a prepend character can join a following space during
-    // normalization but is drawn as a word followed by that space.
     var cells: u16 = 0;
     var start: usize = 0;
     for (bytes, 0..) |byte, index| if (byte == ' ' or byte == '\t' or byte == '\n') {
@@ -73,11 +63,6 @@ fn piece(bytes: []const u8, method: Method) Piece {
     return .{ .bytes = bytes, .cells = cells };
 }
 
-/// Measure the representation the destination actually draws. TerminalText
-/// has already escaped terminal controls; only the viewport additionally
-/// replaces unrepresentable clusters. No SGR or OSC address reaches here.
-/// Like Vaxis widths, the result saturates at its maximum cell count; table
-/// cells are bounded below that, and a code indent clamps to its window.
 pub fn width(bytes: []const u8, target: Target) u16 {
     const method = switch (target) {
         .terminal => terminal_method,

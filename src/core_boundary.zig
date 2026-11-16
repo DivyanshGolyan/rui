@@ -1,12 +1,3 @@
-//! Source check for functional cores: decisions over values.
-//!
-//! A core may name only the `std` members below, and may import only `std`,
-//! `builtin`, other cores and the value-only Unicode modules below. It may
-//! not reach C or assembly, alias `std`, or name a clock method. The check
-//! reads tokens to catch accidental effects.
-//! Effects reached by reflection (a computed `@field` name) or through an
-//! injected context, such as an `anytype` or a `*std.Io.Writer` that drains to
-//! a file, are left to review.
 const std = @import("std");
 
 pub const Violation = struct {
@@ -14,8 +5,6 @@ pub const Violation = struct {
     text: []const u8,
 };
 
-/// `std` members a core may name, with everything beneath them. The rest of
-/// `std` is an effect or reaches one.
 const allowed_std = [_][]const u8{
     "std.ascii",               "std.base64",                     "std.enums",
     "std.fmt",                 "std.json",                       "std.math",
@@ -30,32 +19,20 @@ const allowed_std = [_][]const u8{
     "std.StringHashMap",       "std.Uri",
 };
 
-/// Pure constants and parsers exposed beside effectful standard-library APIs.
-/// Unlike namespace allowances, these grant no sibling or child access.
 const allowed_std_exact = [_][]const u8{
+    "std.hash.Wyhash.hash",
     "std.posix.PATH_MAX",
     "std.fs.path.isAbsolute",
     "std.Io.net.Ip6Address.parse",
     "std.Io.net.HostName.max_len",
 };
 
-/// Explicit value-only modules: Unicode tables without vaxis's TTY/event
-/// loop, and URL parsing without the transport's sockets or TLS.
 const value_modules = [_][]const u8{ "terminal_unicode", "terminal_width", "url" };
 
-/// Allowed only inside `test` declarations, for failure diagnostics.
 const test_only_std = [_][]const u8{ "std.debug.print", "std.testing.expectEqualDeep" };
 
-/// Clock methods: every public function of a time value a core can hold that
-/// takes an `Io`, so it reads or waits on a clock. A member with one of these
-/// names reads as a clock call; give a received time another name. `Clock`
-/// itself adds only `now`, already here, and `resolution`, a common name for
-/// a decision's outcome.
 const clock_methods = ioMethods(time_types);
 
-/// Time types a core can hold: the allowed `std.Io` members, with their
-/// paths, and the durations they return. The test below requires every other
-/// allowed `std.Io` member to be `Writer`.
 const time_types = .{
     .{ "std.Io.Timestamp", std.Io.Timestamp },
     .{ "std.Io.Clock.Timestamp", std.Io.Clock.Timestamp },
@@ -79,8 +56,6 @@ fn ioMethods(comptime types: anytype) []const []const u8 {
     }
 }
 
-/// Returns the first violation in `source`, or null. `cores` lists the file
-/// names a core may import besides `std` and `builtin`.
 pub fn check(source: [:0]const u8, cores: []const []const u8) ?Violation {
     const found = scan(source, cores) orelse return null;
     return .{ .line = 1 + std.mem.count(u8, source[0..found.offset], "\n"), .text = found.text };
@@ -90,18 +65,15 @@ const Found = struct { offset: usize, text: []const u8 };
 
 fn scan(source: [:0]const u8, cores: []const []const u8) ?Found {
     var tokens = std.zig.Tokenizer.init(source);
-    // The three tokens before the current one, most recent first.
     const blank: std.zig.Token = .{ .tag = .invalid, .loc = .{ .start = 0, .end = 0 } };
     var before = [3]std.zig.Token{ blank, blank, blank };
     var depth: usize = 0;
-    // Brace depth inside the current `test` declaration's body, if any.
     var test_depth: ?usize = null;
     var test_pending = false;
     while (true) {
         const token = tokens.next();
         if (token.tag == .eof) return null;
         defer {
-            // Copy first: the new array would otherwise alias the old one.
             const shifted = [3]std.zig.Token{ token, before[0], before[1] };
             before = shifted;
         }
@@ -121,12 +93,9 @@ fn scan(source: [:0]const u8, cores: []const []const u8) ?Found {
         }
         const at: Found = .{ .offset = token.loc.start, .text = text };
         switch (token.tag) {
-            // Escapes would hide the name from every comparison below.
             .identifier => if (std.mem.indexOfScalar(u8, text, '\\') != null) {
                 return at;
             } else if (before[0].tag == .period) {
-                // A member access follows an expression; `.wait` alone is an
-                // enum literal or field name. `x.std` reaches std another way.
                 const member = switch (before[1].tag) {
                     .identifier, .r_paren, .r_bracket, .question_mark, .period_asterisk => true,
                     else => false,
@@ -137,21 +106,17 @@ fn scan(source: [:0]const u8, cores: []const []const u8) ?Found {
                 const end = tokens.index;
                 const path = dottedPath(source, &tokens, token, &buffer) orelse return at;
                 if (std.mem.eql(u8, path, "std")) {
-                    // `std` stands alone only where `const std = @import("std");` declares it.
                     if (before[0].tag != .keyword_const) return at;
                 } else if (!allowedStd(path) and !(test_depth != null and contains(&test_only_std, path))) return .{ .offset = at.offset, .text = std.mem.trim(u8, source[token.loc.start..@max(end, tokens.index)], " \n") };
             },
             .builtin => if (std.mem.eql(u8, text, "@import")) {
                 const name = importName(source, &tokens) orelse return at;
                 if (std.mem.eql(u8, name, "std")) {
-                    // Every other spelling would bypass the member allowlist.
                     const declared = before[0].tag == .equal and before[1].tag == .identifier and
                         std.mem.eql(u8, source[before[1].loc.start..before[1].loc.end], "std") and before[2].tag == .keyword_const;
                     if (!declared or peek(&tokens).tag != .semicolon) return .{ .offset = at.offset, .text = name };
                 } else if (!std.mem.eql(u8, name, "builtin") and !contains(cores, name) and !contains(&value_modules, name)) return .{ .offset = at.offset, .text = name };
             } else if (std.mem.eql(u8, text, "@field")) {
-                // `@field(T, "now")` names a clock method or `std` by string;
-                // a name built from literals would hide it.
                 if (fieldName(source, &tokens)) |field| switch (field) {
                     .literal => |name| if (contains(clock_methods, name) or
                         std.mem.eql(u8, name, "std") or std.mem.indexOfScalar(u8, name, '\\') != null)
@@ -176,9 +141,6 @@ fn peek(tokens: *const std.zig.Tokenizer) std.zig.Token {
     return ahead.next();
 }
 
-/// Consumes `.name` pairs after `first` and returns the names joined by
-/// periods, such as `std.Io.Writer`, whatever the spacing; null if the path
-/// outgrows `buffer`.
 fn dottedPath(source: []const u8, tokens: *std.zig.Tokenizer, first: std.zig.Token, buffer: []u8) ?[]const u8 {
     var path = std.Io.Writer.fixed(buffer);
     path.writeAll(unquoted(source[first.loc.start..first.loc.end])) catch return null;
@@ -193,20 +155,16 @@ fn dottedPath(source: []const u8, tokens: *std.zig.Tokenizer, first: std.zig.Tok
     return path.buffered();
 }
 
-/// An identifier's name, without `@"` quoting.
 fn unquoted(identifier: []const u8) []const u8 {
     if (std.mem.startsWith(u8, identifier, "@\"") and identifier.len >= 3) return identifier[2 .. identifier.len - 1];
     return identifier;
 }
 
-/// The member name of a `@field(object, name)` call when it starts with a
-/// string literal: `.literal` alone, `.built` when more follows it.
 fn fieldName(source: []const u8, tokens: *const std.zig.Tokenizer) ?union(enum) { literal: []const u8, built: []const u8 } {
     var ahead = tokens.*;
     if (ahead.next().tag != .l_paren) return null;
     var parens: usize = 1;
     var second = false;
-    // The second argument: its first token, its token count and its end.
     var first: ?std.zig.Token = null;
     var count: usize = 0;
     var end: usize = 0;
@@ -214,14 +172,13 @@ fn fieldName(source: []const u8, tokens: *const std.zig.Tokenizer) ?union(enum) 
         const token = ahead.next();
         switch (token.tag) {
             .eof => return null,
-            // Braces and brackets nest too, so their commas stay inside.
             .l_paren, .l_brace, .l_bracket => parens += 1,
             .r_paren, .r_brace, .r_bracket => {
                 parens -= 1;
                 if (parens == 0) break;
             },
             .comma => if (parens == 1) {
-                if (second) continue; // a trailing comma
+                if (second) continue;
                 second = true;
                 continue;
             },
@@ -234,8 +191,6 @@ fn fieldName(source: []const u8, tokens: *const std.zig.Tokenizer) ?union(enum) 
     }
     const start = first orelse return null;
     if (count == 1 and start.tag == .string_literal) return .{ .literal = source[start.loc.start + 1 .. start.loc.end - 1] };
-    // A lone computed name, such as an `inline for` capture, is left to
-    // review; any other expression could spell a hidden name.
     if (count == 1 and start.tag == .identifier) return null;
     return .{ .built = source[start.loc.start..end] };
 }
@@ -332,7 +287,6 @@ test "the boundary check reads names, not comments or strings" {
         .{ "const t = @field(T, &[_]u8{ 'n', 'o', 'w' });", "&[_]u8{ 'n', 'o', 'w' }" },
         .{ "const p = @field(@This(), \"std\").posix;", "std" },
         .{ "const p = @\"\\x73td\".posix;", "@\"\\x73td\"" },
-        // A path too long to compare fails closed.
         .{ "const p = std.mem.member00.member01.member02.member03.member04.member05.member06.member07.member08.member09.member10.member11.member12.member13.member14.member15.member16.member17.member18.member19.member20.member21.member22.member23.member24.member25.member26.member27.member28.member29;", "std" },
         .{ "comptime { @export(&f, .{ .name = \"read\" }); }", "@export" },
         .{ "fn f() void { std.debug.print(\"x\", .{}); }", "std.debug.print" },
@@ -364,7 +318,7 @@ test "clock methods are reflected from every time type a core may hold" {
 test "pure standard leaves do not grant sibling I/O or child namespaces" {
     inline for (.{
         "std.posix.PATH_MAX",          "std.fs.path.isAbsolute", "std.Io.net.Ip6Address.parse",
-        "std.Io.net.HostName.max_len",
+        "std.Io.net.HostName.max_len", "std.hash.Wyhash.hash",
     }) |path| {
         try std.testing.expectEqual(@as(?Violation, null), check("const value = " ++ path ++ ";", &.{}));
         try std.testing.expect(check("const value = " ++ path ++ ".effect;", &.{}) != null);
@@ -373,8 +327,7 @@ test "pure standard leaves do not grant sibling I/O or child namespaces" {
     inline for (.{
         "std.posix.read",               "std.posix",                     "std.fs.path",         "std.fs.openFileAbsolute",
         "std.Io.net.Ip6Address",        "std.Io.net.Ip6Address.resolve", "std.Io.net.HostName", "std.Io.net.HostName.lookup",
-        "std.Io.net.IpAddress.connect", "std.builtin.Type.StructField",
+        "std.Io.net.IpAddress.connect", "std.builtin.Type.StructField",  "std.hash.Wyhash",     "std.hash.Wyhash.init",
     }) |path| try std.testing.expect(check("const value = " ++ path ++ ";", &.{}) != null);
-    // A path to an unregistered core remains forbidden even with a named value module.
     try std.testing.expect(check("const url = @import(\"url.zig\");", &.{}) != null);
 }

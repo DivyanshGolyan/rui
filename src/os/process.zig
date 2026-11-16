@@ -1,11 +1,8 @@
-//! Process control whose Linux and Darwin results differ.
-
 const std = @import("std");
 const os = @import("os.zig");
 
 pub const GroupSignal = enum { sent, absent, zombie_group_denied, failed };
 
-/// Signal every process in group `pgid`.
 pub fn signalGroup(pgid: std.posix.pid_t, signal: std.posix.SIG) GroupSignal {
     std.posix.kill(-pgid, signal) catch |err| return classifyGroupSignal(err, os.tag);
     return .sent;

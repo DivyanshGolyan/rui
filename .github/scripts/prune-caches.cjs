@@ -1,4 +1,3 @@
-// Only trusted main workflows invoke this with actions:write. PR jobs never do.
 module.exports = async function pruneCaches({github, context, core}) {
   const {actions} = github.rest;
   const caches = await github.paginate(actions.getActionsCacheList, {
@@ -13,21 +12,14 @@ module.exports = async function pruneCaches({github, context, core}) {
     candidates.push({cache, pull, created});
   }
 
-  // Plan from the complete inventory before deleting anything. Retain by creation,
-  // not access: a frequently restored obsolete snapshot must not displace a new one.
   candidates.sort((a, b) => b.created - a.created || b.cache.id - a.cache.id);
   const retained = new Set();
   const obsolete = [];
   for (const {cache, pull} of candidates) {
-    // Only main publishes (setup's publish-caches default), so a PR's Rui cache
-    // came from a run before that rule and only takes quota from main's.
     if (pull) {
       obsolete.push(cache);
       continue;
     }
-    // Main keeps the newest snapshot of each group, replacing old tool,
-    // dependency and build-runner generations too. This is a snapshot-count
-    // policy, not a byte quota; ungrouped namespaces survive.
     const group = mainGroup(cache.key);
     if (group === null) continue;
     if (retained.has(group)) obsolete.push(cache);
@@ -45,7 +37,11 @@ module.exports = async function pruneCaches({github, context, core}) {
 };
 
 function mainGroup(key) {
-  // Both layouts share a group so the newest snapshot wins during migration.
+  const partial = /^(.*)-partial-[1-9][0-9]*-[1-9][0-9]*$/.exec(key);
+  if (partial) {
+    const complete = mainGroup(partial[1]);
+    return complete !== null && /^(build|runner)\//.test(complete) ? `partial/${complete}` : null;
+  }
   const reordered = /^rui-build-v2-(Linux-X64|macOS-ARM64)-0\.17\.[0-9]+-[a-f0-9]{64}-([a-z][a-z0-9-]*)\.[a-f0-9]{64}-[a-f0-9]{64}$/.exec(key);
   if (reordered) return `build/${reordered[1]}/${reordered[2]}`;
   const build = /^rui-build-v2-(Linux-X64|macOS-ARM64)-0\.17\.[0-9]+-[a-f0-9]{64}-[a-f0-9]{64}-[a-f0-9]{64}-([a-z][a-z0-9-]*)$/.exec(key);

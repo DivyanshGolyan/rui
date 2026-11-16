@@ -1,5 +1,3 @@
-//! Context window Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -11,7 +9,7 @@ const Store = store_core.Store;
 const historical_domain = @import("../domain/historical.zig");
 const store_testing = @import("../testing.zig");
 const AttemptBinding = store_core.AttemptBinding;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
 const configureTestSession = store_testing.configureTestSession;
@@ -25,7 +23,6 @@ const renderTestingEntry = shared_fixtures.renderTestingEntry;
 const settleCallsForTesting = shared_fixtures.settleCallsForTesting;
 const settleMessagesForTesting = shared_fixtures.settleMessagesForTesting;
 
-/// One model's selected facts; the caller controls chronology, not a live provider.
 fn saveFrozenContextWindow(storage: *Store, model: []const u8, window: ?u32) !void {
     try storage.saveModelFacts(&.{.{ .id = model, .context_window = window, .efforts = .{}, .openai_listed = true }}, null);
 }
@@ -123,8 +120,6 @@ test "frozen context window rides every model admission kind without another rou
     }.run);
 }
 
-/// A compact history with independently chosen byte sizes: at window=100 the
-/// three targets (400,100,25) retain first+[120,30,10], first+[30,10], first+[10].
 fn frozenWindowHistory(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8) !void {
     try submitTestMessage(storage, tmp, "window-first", "window-first", session, "first");
     inline for (.{ .{ "window-big", 600, 'b' }, .{ "window-middle", 120, 'm' }, .{ "window-small", 30, 's' }, .{ "window-last", 10, 'n' } }) |item| {
@@ -138,7 +133,7 @@ fn expectFrozenFloor(storage: *Store, binding: AttemptBinding, level: u64, oldes
     try std.testing.expectEqual(position - 1, try store_testing.queryU64(storage, "SELECT history_floor FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
     try std.testing.expectEqual(level, try store_testing.queryU64(storage, "SELECT history_level FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
     try std.testing.expectEqual(dropped, try store_testing.queryU64(storage, "SELECT history_dropped FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
-    var view: HistoricalView = undefined;
+    var view: TestingPage = undefined;
     try openCheckedView(storage, binding, &view);
     defer view.close();
     var cursor: TestingHistoryCursor = .{};
@@ -160,8 +155,6 @@ fn expectFrozenFloor(storage: *Store, binding: AttemptBinding, level: u64, oldes
 test "frozen context window refresh before settlement and successor admission cannot change escalation" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            // Both directions, plus a frozen exhausted walk that a live read
-            // would incorrectly turn into another compaction.
             for ([_]u32{ 100, 1000, 100000 }) |original| {
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
@@ -178,7 +171,6 @@ test "frozen context window refresh before settlement and successor admission ca
                 try saveFrozenContextWindow(&storage, "model-a", if (original == 100) 100000 else 100);
                 try storage.settleModelAttemptFailure(full, .{ .uncorrelated = "context_overflow" }, .context_overflow, .{});
                 try saveFrozenContextWindow(&storage, "model-a", if (original == 100) 200000 else 200);
-                // Restart with a settled overflow and a different catalog.
                 try storage.close();
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                 const next = try storage.admitNextModelAttempt(.{});
@@ -231,12 +223,11 @@ test "frozen context window covers all levels reservation exhaustion and inherit
                         try expectActivityOutcome(&storage, session.slice(), previous, .context_full, "ResourceExceeded");
                         continue;
                     }
-                    // A successful base transfers its floor to the assistant's recipe.
                     try settleCompactionForTesting(&storage, &tmp, previous, &.{.compaction});
                     const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                     try expectFrozenContextWindow(&storage, successor, 100);
                     {
-                        var view: HistoricalView = undefined;
+                        var view: TestingPage = undefined;
                         try openCheckedView(&storage, successor, &view);
                         defer view.close();
                         const coverage = try view.coverage();
@@ -245,7 +236,6 @@ test "frozen context window covers all levels reservation exhaustion and inherit
                     }
                     try storage.settleModelAttemptFailure(successor, .{ .uncorrelated = "context_overflow" }, .context_overflow, .{});
                     try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
-                    // A new model must not inherit the old model's base or floor.
                     try saveFrozenContextWindow(&storage, "model-b", 700);
                     var patch: wire_request.ConfigureCommand = .{};
                     try patch.key.set("window-base-switch");
@@ -258,7 +248,7 @@ test "frozen context window covers all levels reservation exhaustion and inherit
                     try submitTestMessage(&storage, &tmp, "window-new-model", "window-new-model", session.slice(), "new");
                     const switched = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                     try expectFrozenContextWindow(&storage, switched, 700);
-                    var view: HistoricalView = undefined;
+                    var view: TestingPage = undefined;
                     try openCheckedView(&storage, switched, &view);
                     defer view.close();
                     const coverage = try view.coverage();

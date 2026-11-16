@@ -1,5 +1,3 @@
-//! Guided sign-in decisions. Credentials, editors, processes and saved defaults
-//! remain their existing owners' facts.
 const std = @import("std");
 pub const Provider = @import("provider_name.zig").Provider;
 pub const Readinesses = @import("provider_selection.zig").Readinesses;
@@ -72,7 +70,6 @@ pub const Input = union(enum) {
 pub const Effect = union(enum) { none, start: Attempt, cancel, close, copy: Code, copy_text: []const u8, open: Link, callback };
 pub const State = struct {
     page: Page = .account,
-    /// Identifies the joined worker whose controls were drawn, not a wire id.
     attempt: u64 = 0,
     focus: Control = .chatgpt,
 

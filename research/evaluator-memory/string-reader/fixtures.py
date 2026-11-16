@@ -1,4 +1,3 @@
-"""Streaming inputs and a Python UTF-16/structure oracle, independent of C."""
 import codecs
 import dataclasses
 import hashlib

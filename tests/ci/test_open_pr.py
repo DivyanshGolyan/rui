@@ -1,5 +1,7 @@
 import io
 import subprocess
+import tempfile
+from pathlib import Path
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
 from unittest.mock import call, patch
@@ -9,11 +11,11 @@ import open_pr
 
 class OpenPrTest(unittest.TestCase):
     def test_opens_ready_over_rest(self):
-        args = open_pr.create_args("o/r", "Title", "body.md", "main", "fix-x")
+        args = open_pr.create_args("o/r", "Title", "Description", "main", "fix-x")
         self.assertEqual(args[:4], ["api", "-X", "POST", "repos/o/r/pulls"])
         self.assertIn("draft=false", args)
         self.assertIn("head=fix-x", args)
-        self.assertIn("body=@body.md", args)
+        self.assertIn("body=Description", args)
 
     def test_open_requests_codex_review_on_the_ready_candidate(self):
         url = "https://github.com/example/rui/pull/9"
@@ -26,12 +28,13 @@ class OpenPrTest(unittest.TestCase):
                      patch.object(open_pr, "origin_repo", return_value="example/rui"), \
                      patch.object(open_pr, "gh", return_value=created) as gh, \
                      patch.object(open_pr, "github", side_effect=[comment_error or None]) as github, \
+                     patch.object(open_pr.Path, "read_text", return_value="Description"), \
                      patch.object(open_pr, "branch_changes", return_value=([], {})), \
                      patch.object(open_pr, "overlaps", return_value=[]), \
                      patch.object(open_pr, "report"), redirect_stdout(stdout), redirect_stderr(stderr):
                     result = open_pr.main()
                 self.assertEqual(gh.call_args_list, [
-                    call(*open_pr.create_args("example/rui", "Title", "body.md", "main", "fix-x"))])
+                    call(*open_pr.create_args("example/rui", "Title", "Description", "main", "fix-x"))])
                 self.assertEqual(github.call_args_list, [
                     call("POST", "repos/example/rui/issues/9/comments", [("body", "@codex review")])])
                 self.assertIn(url, stdout.getvalue())
@@ -43,6 +46,67 @@ class OpenPrTest(unittest.TestCase):
                     self.assertEqual(result, 0)
                     self.assertIn("Selected CI runs beside review", stdout.getvalue())
                     self.assertIn("clean Codex evidence", stdout.getvalue())
+
+    def test_open_validates_body_before_github_with_the_selected_base(self):
+        cases = (
+            ({"src/cli.zig"}, "Description", False),
+            ({"src/cli.zig"}, "## Summary\n```text\ninput -> owner\n```", True),
+            ({"src/cli.zig"}, "## Shape\nLegacy description", True),
+            ({"docs/guide.md"}, "Description", True),
+        )
+        for paths, body, accepted in cases:
+            with self.subTest(paths=paths, body=body), tempfile.TemporaryDirectory() as directory:
+                body_file = Path(directory) / "body.md"
+                body_file.write_text(body, encoding="utf-8")
+                stderr = io.StringIO()
+                removed = {"old_name"}
+
+                def change_body_after_validation(*args):
+                    body_file.write_text("Replaced after validation", encoding="utf-8")
+                    return []
+
+                with patch("sys.argv", ["open_pr.py", "open", "--title", "Title",
+                                        "--body-file", str(body_file), "--base", "parent"]), \
+                     patch.object(open_pr, "git", side_effect=["fix-x", "a" * 40, "a" * 40, ""]), \
+                     patch.object(open_pr, "origin_repo", return_value="example/rui"), \
+                     patch.object(open_pr, "branch_changes", return_value=(paths, removed)) as changes, \
+                     patch.object(open_pr, "overlaps", side_effect=change_body_after_validation) as overlaps, \
+                     patch.object(open_pr, "gh", return_value='{"number": 9, "html_url": "url"}') as gh, \
+                     patch.object(open_pr, "github") as github, \
+                     redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                    result = open_pr.main()
+                changes.assert_called_once_with("origin/parent")
+                self.assertEqual(result, 0 if accepted else 1)
+                if accepted:
+                    overlaps.assert_called_once_with(github, "example/rui", "fix-x", paths, removed)
+                    gh.assert_called_once_with(*open_pr.create_args(
+                        "example/rui", "Title", body, "parent", "fix-x"))
+                    self.assertEqual(body_file.read_text(encoding="utf-8"), "Replaced after validation")
+                    github.assert_called_once()
+                else:
+                    self.assertIn("nonempty fenced sketch", stderr.getvalue())
+                    overlaps.assert_not_called()
+                    gh.assert_not_called()
+                    github.assert_not_called()
+
+    def test_open_reports_unreadable_body_without_github(self):
+        for error in (FileNotFoundError("missing body"), PermissionError("unreadable body"),
+                      UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid body")):
+            with self.subTest(error=error):
+                stderr = io.StringIO()
+                with patch("sys.argv", ["open_pr.py", "open", "--title", "Title", "--body-file", "body.md"]), \
+                     patch.object(open_pr, "git", side_effect=["fix-x", "a" * 40, "a" * 40, ""]), \
+                     patch.object(open_pr, "origin_repo", return_value="example/rui"), \
+                     patch.object(open_pr.Path, "read_text", side_effect=error), \
+                     patch.object(open_pr, "branch_changes") as changes, \
+                     patch.object(open_pr, "gh") as gh, patch.object(open_pr, "github") as github, \
+                     redirect_stderr(stderr):
+                    self.assertEqual(open_pr.main(), 1)
+                self.assertIn("Cannot read PR body", stderr.getvalue())
+                self.assertNotIn("Cannot reach GitHub", stderr.getvalue())
+                changes.assert_not_called()
+                gh.assert_not_called()
+                github.assert_not_called()
 
     def test_ready_finds_the_pr_over_rest(self):
         head = "c" * 40

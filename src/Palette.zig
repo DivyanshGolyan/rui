@@ -1,5 +1,3 @@
-//! The slash-command overlay. The screen owns its draft and completion;
-//! the same Shown value supplies both these rows and the screen's key policy.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -12,19 +10,12 @@ shown: *commands.Shown,
 caps: overview.Caps = .{ .width = .unicode },
 style: vaxis.Style = .{},
 quiet: vaxis.Style = .{ .dim = true },
-/// Total panel budget, including chrome, supplied by the screen owner.
 max_height: u16 = std.math.maxInt(u16),
-/// The pointer's row: only its background, reverse and underline apply, and the highlighted
-/// row keeps its reverse under the pointer.
 hover_style: vaxis.Style = .{ .ul_style = .single },
 userdata: ?*anyopaque = null,
-/// Receives the pressed row as the latest frame drew it: its absolute entry
-/// index and that frame's list identity. The screen's owner decides what it
-/// does; the list may have changed since.
 on_select: ?*const fn (*anyopaque, *vxfw.EventContext, commands.Shown.Pick) anyerror!void = null,
 hover: Hover = .{},
 first: usize = 0,
-/// The list identity the latest frame drew, which a press names.
 drawn: commands.Shown.Pick = .{ .index = 0, .revision = 0, .source = 0 },
 
 pub fn widget(self: *Self) vxfw.Widget {
@@ -35,7 +26,6 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     try self.hover.handleEvent(ctx, input);
     if (input != .mouse) return;
-    // Never let a click through to a covered transcript or Session row.
     ctx.consumeEvent();
     if (self.shown.seen != .drawn) return;
     switch (input.mouse.button) {
@@ -111,7 +101,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const count = commands.named(list.count, placed.content.height);
     const first = list.firstShown(self.shown.highlight, placed.content.height);
     self.first = first;
-    self.drawn = self.shown.pick(first);
+    self.drawn = self.shown.pick(self.shown.highlight);
     const targets = try ctx.arena.alloc(Hover.Rect, if (self.on_select != null) count else 0);
     for (targets, 0..) |*rect, index| rect.* = placed.row(index);
     self.hover.targets = targets;
@@ -189,7 +179,6 @@ test "Palette hover is transient and clicks activate only visible command rows" 
     const motion: vaxis.Mouse = .{ .row = 2, .col = 2, .button = .none, .mods = .{}, .type = .motion };
     try palette.widget().handleEvent(&ctx, .{ .mouse = motion });
     const hovered = try palette.widget().draw(draw_ctx);
-    // Hover takes the quieter look; the keyboard's row keeps its reverse.
     try std.testing.expect(!hovered.readCell(2, 2).style.reverse);
     try std.testing.expectEqual(vaxis.Style.Underline.single, hovered.readCell(2, 2).style.ul_style);
     try std.testing.expect(hovered.readCell(2, 1).style.reverse);
@@ -206,7 +195,6 @@ test "Palette hover is transient and clicks activate only visible command rows" 
     press.type = .press;
     try palette.widget().handleEvent(&ctx, .{ .mouse = press });
     try std.testing.expectEqual(@as(?usize, 1), selected.index);
-    // A press names the list the frame drew, not one stored since.
     shown.revision = 8;
     try palette.widget().handleEvent(&ctx, .{ .mouse = press });
     try std.testing.expectEqual(@as(?u64, 7), selected.revision);
@@ -215,13 +203,11 @@ test "Palette hover is transient and clicks activate only visible command rows" 
     const left = try palette.widget().draw(draw_ctx);
     try std.testing.expectEqual(initial.readCell(2, 2).style, left.readCell(2, 2).style);
     try std.testing.expectEqual(vaxis.Mouse.Shape.default, ctx.cmds.items[ctx.cmds.items.len - 1].set_mouse_shape);
-    // One-row viewport maps to the selected absolute index, not row zero.
     shown.highlight = shown.list.count - 1;
     _ = try palette.widget().draw(draw_ctx.withConstraints(.{}, .{ .width = 80, .height = 1 }));
     press.row = 0;
     try palette.widget().handleEvent(&ctx, .{ .mouse = press });
     try std.testing.expectEqual(@as(?usize, shown.highlight), selected.index);
-    // Closed, clipped, and callback-free overlays expose no targets.
     selected.index = null;
     _ = try palette.widget().draw(draw_ctx.withConstraints(.{}, .{ .width = 2, .height = 1 }));
     try palette.widget().handleEvent(&ctx, .{ .mouse = press });

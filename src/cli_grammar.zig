@@ -1,10 +1,8 @@
-//! Option grammar shared by CLI and Host.
 const std = @import("std");
 const caller_error = @import("caller_error.zig");
 const session_id = @import("session_id.zig");
 pub const Resource = enum { session, request, action, host, defaults, auth, store };
 
-/// Detection-owned argv witness. Text and policy belong to caller_error.
 pub const Refusal = struct {
     code: caller_error.Code,
     token: []const u8,
@@ -33,15 +31,10 @@ pub const Option = struct {
     choices: ?[]const []const u8 = null,
     number: ?Number = null,
     argument: ?[]const u8 = null,
-    /// A hex spelling of this exact-identity option's bytes, which argv cannot
-    /// carry. Both spellings fill the named option; giving both conflicts.
     hex_of: ?[]const u8 = null,
-    /// The identity's byte bound; `cli.zig` pins each to its protocol bound.
     hex_limit: usize = 0,
     hex_grammar: ?[]const u8 = null,
-    /// Test-only: accepted by its owning operation but absent from help.
     hidden: bool = false,
-    /// Accepted more than once; Parsed.all yields every value in order.
     repeated: bool = false,
 };
 pub fn value(comptime name: []const u8, argument: []const u8) Option {
@@ -89,10 +82,6 @@ fn checkOptionName(comptime name: []const u8) void {
     if (name.len != 0 and !@import("cli_option_names.zig").contains(name)) @compileError("no CLI option is named --" ++ name);
 }
 
-/// A retired flag and the --set assignments that replace it; VALUE stands for
-/// the flag's value. It never declares an accepted option: a typed one is
-/// refused with `replacement`, and serve_grammar translates a running Host's
-/// argv through `assignments`.
 pub const RetiredOption = struct { name: []const u8, assignments: []const []const u8, replacement: []const u8 };
 
 pub fn retired(comptime name: []const u8, comptime assignments: []const []const u8, comptime note: []const u8) RetiredOption {
@@ -103,7 +92,6 @@ pub fn retired(comptime name: []const u8, comptime assignments: []const []const 
 
 pub const Definition = struct {
     retired_options: []const RetiredOption = &.{},
-    /// Optional second positional; requires the first declaration.
     positional_tail: ?[]const u8 = null,
     resource: Resource,
     name: []const u8,
@@ -112,11 +100,8 @@ pub const Definition = struct {
     options: []const Option = &.{},
     positional: ?[]const u8 = null,
     mutation: bool = false,
-    /// Each group needs one alternative; "" names the first positional, "#2" the second.
     requires: []const []const []const u8 = &.{},
-    /// Option pairs an invocation may not combine.
     conflicts: []const Conflict = &.{},
-    /// Options an invocation may not combine with the positional.
     positional_conflicts: []const PositionalConflict = &.{},
 
     pub fn help(self: Definition, writer: *std.Io.Writer) !void {
@@ -146,8 +131,6 @@ pub const Definition = struct {
         if (self.mutation and self.optionNamed("kind") == null) try writer.writeAll("Keep the pre-send recovery identity printed on stderr. Recover with rui request recover HANDLE, or --store PATH --record FILE --kind KIND. Nonzero exit can follow acceptance: inspect the original with rui request inspect; never infer permission to resubmit with a fresh key.\n");
     }
 
-    /// The argument shape of option `name`: null when there is no such
-    /// option, a null shape for a flag.
     pub fn argumentOf(self: Definition, name: []const u8) ??[]const u8 {
         return (self.optionNamed(name) orelse return null).argument;
     }
@@ -177,12 +160,6 @@ pub const Definition = struct {
         }
     }
 
-    /// Parse the whole invocation before any capture or environment access.
-    /// Values are consumed before interpreting help; `--model --help` is data.
-    /// Hex spellings decode into their named option, through `allocator`,
-    /// unless help is requested. Typed values use the same table as help.
-    /// The most tokens an invocation can spell: every option once, with its
-    /// value when it takes one.
     pub fn tokenCapacity(comptime self: Definition) usize {
         var count: usize = 0;
         for (self.options) |option| count += if (option.argument == null) 1 else 2;
@@ -208,8 +185,6 @@ pub const Definition = struct {
         return false;
     }
 
-    /// The shell checks capture existence before applying fresh-invocation
-    /// value rules. Existing captures retain their original admission answer.
     pub fn parseSyntax(self: Definition, args: []const []const u8, allocator: std.mem.Allocator, problem: *Refusal) Error!Parsed {
         problem.* = .{ .code = .memory_exhausted, .token = "argv", .option = false };
         var parsed: Parsed = .{ .definition = self };
@@ -279,8 +254,6 @@ pub const Definition = struct {
                     problem.* = .{ .code = .option_repeat_limit, .token = option.name, .accepted = .{ .grammar = std.fmt.comptimePrint("at most {d} repeated option values", .{@as(Parsed, undefined).repeats.len}) } };
                     return error.DuplicateArgument;
                 }
-                // Each option's values stay together, in order, so `all`
-                // answers a slice.
                 var at = parsed.repeat_count;
                 while (at > 0 and parsed.repeat_options[at - 1] != n) : (at -= 1) {}
                 if (at == 0) at = parsed.repeat_count;
@@ -291,7 +264,6 @@ pub const Definition = struct {
                 parsed.repeat_count += 1;
                 continue;
             }
-            // Both spellings of one identity fill the same value.
             const slot = if (option.hex_of) |named| self.indexOf(named).? else n;
             if (parsed.values[slot] != null) {
                 for (self.options) |other| {
@@ -336,7 +308,6 @@ fn validateValue(option: Option, text: []const u8, refusal: *Refusal) Definition
     }
     if (option.number) |number| {
         refusal.* = .{ .code = number.code, .token = option.name, .value = text, .accepted = .{ .grammar = number.grammar } };
-        // parseInt accepts signs and underscores; argv's decimal grammar does not.
         if (text.len == 0) return error.InvalidOptionValue;
         for (text) |byte| if (byte < '0' or byte > '9') return error.InvalidOptionValue;
         const n = std.fmt.parseInt(u64, text, 10) catch return error.InvalidOptionValue;
@@ -346,44 +317,32 @@ fn validateValue(option: Option, text: []const u8, refusal: *Refusal) Definition
 
 pub const decodeHex = @import("hex_value.zig").decodeIdentity;
 
-/// One invocation's values, keyed by option name. Handlers read these; none
-/// walks argv again.
 pub const Parsed = struct {
     definition: Definition,
-    /// Each option's value by index; a hex spelling fills its named option.
     values: [64]?[]const u8 = @splat(null),
-    /// Options spelled in the invocation, by index.
     seen: u64 = 0,
     repeats: [16][]const u8 = undefined,
-    /// The option index of each of `repeats`.
     repeat_options: [16]usize = undefined,
     repeat_count: usize = 0,
     positional: ?[]const u8 = null,
-    /// Second declared positional, preserving the first-position API.
     positional_tail: ?[]const u8 = null,
-    /// The positional followed `--`, so a lone dash is literal text.
     literal_positional: bool = false,
     help: bool = false,
 
-    /// The value of `name` in either spelling; null when not given or not
-    /// part of this grammar.
     pub fn get(self: *const Parsed, comptime name: []const u8) ?[]const u8 {
         comptime checkOptionName(name);
         return self.getNamed(name);
     }
 
-    /// Runtime lookup for names from a table; prefer `get` for known names.
     pub fn getNamed(self: *const Parsed, name: []const u8) ?[]const u8 {
         return self.values[self.definition.indexOf(name) orelse return null];
     }
 
-    /// Whether the invocation spelled `name` ("" is the positional).
     pub fn has(self: *const Parsed, comptime name: []const u8) bool {
         comptime checkOptionName(name);
         return self.hasNamed(name);
     }
 
-    /// Runtime lookup for names from a table; "" still names the positional.
     pub fn hasNamed(self: *const Parsed, name: []const u8) bool {
         if (name.len == 0) return self.positional != null;
         if (std.mem.eql(u8, name, "#2")) return self.positional_tail != null;
@@ -391,13 +350,11 @@ pub const Parsed = struct {
         return self.seen & (@as(u64, 1) << @as(u6, @intCast(n))) != 0;
     }
 
-    /// Every value of the repeatable option, in order.
     pub fn all(self: *const Parsed, comptime name: []const u8) []const []const u8 {
         comptime checkOptionName(name);
         return self.allNamed(name);
     }
 
-    /// Runtime lookup for names from a table; prefer `all` for known names.
     pub fn allNamed(self: *const Parsed, name: []const u8) []const []const u8 {
         const n = self.definition.indexOf(name) orelse return &.{};
         if (!self.definition.options[n].repeated) return &.{};
@@ -407,7 +364,6 @@ pub const Parsed = struct {
         return self.repeats[first..end];
     }
 
-    /// Validate only fresh argv. The capture owner remains the replay authority.
     pub fn validateValues(self: *const Parsed, refusal: *Refusal) Definition.Error!void {
         if (self.help) return;
         if (self.get("instructions")) |source| {
@@ -427,7 +383,6 @@ pub const Parsed = struct {
         }
     }
 
-    /// A decimal value of `name`, when given.
     pub fn number(self: *const Parsed, comptime T: type, comptime name: []const u8) !?T {
         comptime checkOptionName(name);
         return try std.fmt.parseInt(T, self.get(name) orelse return null, 10);
@@ -438,8 +393,6 @@ pub const Parsed = struct {
         return false;
     }
 
-    /// The first unmet requirement of a parsed invocation, including an
-    /// explicit capture identity given only half. Help skips this check.
     pub fn missing(self: *const Parsed) ?[]const []const u8 {
         const definition = self.definition;
         for (definition.requires) |group| {
@@ -450,7 +403,6 @@ pub const Parsed = struct {
             .{ &.{"record"}, if (recovery) &.{"kind"} else &.{ "key", "key-hex" } },
             .{ &.{ "key", "key-hex" }, &.{"record"} },
             .{ &.{"kind"}, &.{"record"} },
-            // Only recovery has --kind; its record form names no saved Store.
             .{ &.{"record"}, if (recovery) &.{ "store", "store-hex" } else &.{"record"} },
         };
         if (definition.mutation) for (halves) |half| {

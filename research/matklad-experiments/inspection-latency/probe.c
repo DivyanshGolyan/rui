@@ -1,5 +1,3 @@
-// Measurement fixture, not the proposed Rui schema or server implementation.
-// One owner thread, DELETE journal, bounded buffers, indexed relational lookup.
 #include "sqlite3.h"
 #include <assert.h>
 #include <libproc.h>
@@ -66,7 +64,6 @@ static void seed(long rows, int width) {
 }
 
 
-// Synthetic single-owner workload; no server/protocol implementation.
 static void pause_ms(double ms) {
     struct timespec t={(time_t)(ms/1000), (long)((ms/1000-(time_t)(ms/1000))*1e9)};
     while(nanosleep(&t,&t)!=0) {}
@@ -79,7 +76,6 @@ static void escaped(FILE *f,const unsigned char *s) {
     char buffer[8192];size_t n=0;buffer[n++]='"';
     const char hex[]="0123456789abcdef";
     for(;*s;s++) {
-        // Selected fixture fields are at most 1024 bytes; this is not a general string API.
         assert(n+7<sizeof(buffer));
         if(*s=='"'||*s=='\\') {buffer[n++]='\\';buffer[n++]=(char)*s;}
         else if(*s<32) {buffer[n++]='\\';buffer[n++]='u';buffer[n++]='0';buffer[n++]='0';buffer[n++]=hex[*s>>4];buffer[n++]=hex[*s&15];}
@@ -90,7 +86,6 @@ static void escaped(FILE *f,const unsigned char *s) {
 static FILE *capture(long expected,int batch,double delay,double budget,long byte_budget,
                      double *elapsed,long *written,long *seen,int *aborted) {
     double start=now(); FILE *f=tmpfile(); assert(f);
-    // stdio's fixed default buffer is independent of report size.
     sql("BEGIN"); long revision=scalar("SELECT revision FROM head");
     assert(fprintf(f,"{\"revision\":%ld}\n",revision)>0);
     long rows=0; *aborted=0;
@@ -135,23 +130,19 @@ int main(int argc,char **argv) {
     for(int i=0;i<8;i++) {
         double elapsed;long written,seen;int aborted;
         FILE *f=capture(rows,batch,delay,budget,bytes,&elapsed,&written,&seen,&aborted);
-        // Two not-yet-delivered reports maximum; close previous only after new capture.
         if(held_size+written>peak_scratch)peak_scratch=held_size+written;
         if(held){assert(fclose(held)==0);held=NULL;held_size=0;}
         if(f){held=f;held_size=written;complete++;}else failed++;
         total+=written;
-        // Both requests are ready at capture start (worst phase). No network delay.
         if(i==0) {
             sql("BEGIN IMMEDIATE; UPDATE head SET revision=revision+1; COMMIT");
             control_ms=(now()-start)*1000;
-            // Synchronous stand-in for releasing post-commit interruption consequence.
             dispatch_ms=(now()-start)*1000;
         }
         if(i==0 && fair) {sql("BEGIN IMMEDIATE; UPDATE head SET revision=revision+1; COMMIT");settle_ms=(now()-start)*1000;}
         printf("{\"event\":\"capture\",\"ordinal\":%d,\"ms\":%.6f,\"bytes\":%ld,\"rows\":%ld,\"aborted\":%s}\n",i,elapsed,written,seen,aborted?"true":"false");
     }
     if(!fair){sql("BEGIN IMMEDIATE; UPDATE head SET revision=revision+1; COMMIT");settle_ms=(now()-start)*1000;}
-    // Delivery occurs after both commits, with no connection resource retained.
     if(held) {
         const char *export_path=getenv("RUI_PROBE_REPORT");
         FILE *export=export_path?fopen(export_path,"wb"):NULL;assert(!export_path || export);

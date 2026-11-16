@@ -1,5 +1,3 @@
-//! Process-local, sparse drafts. Only inactive chats with draft state own
-//! storage; taking a draft transfers its exact-length bytes to the caller.
 const std = @import("std");
 const session_id = @import("session_id.zig");
 const Input = @import("SessionInput.zig");
@@ -13,7 +11,6 @@ pub const Draft = struct {
 };
 
 pub const Drafts = struct {
-    // One small node per saved draft, no retained capacity for stateless chats.
     first: ?*Node = null,
 
     const Node = struct {
@@ -26,7 +23,6 @@ pub const Drafts = struct {
     pub const Iterator = struct {
         node: ?*const Node,
 
-        /// Borrows each snapshot until the collection is changed.
         pub fn next(self: *Iterator) ?Entry {
             const node = self.node orelse return null;
             self.node = node.next;
@@ -46,8 +42,6 @@ pub const Drafts = struct {
         }
     }
 
-    /// Copies a snapshot's bytes. Replacement is atomic on allocation failure;
-    /// a stateless empty composition removes the entry and frees its storage.
     pub fn put(self: *Drafts, gpa: std.mem.Allocator, id: []const u8, snapshot: Input.Snapshot) !void {
         std.debug.assert(session_id.valid(id));
         std.debug.assert(snapshot.cursor <= snapshot.bytes.len);
@@ -72,7 +66,6 @@ pub const Drafts = struct {
         next.* = node;
     }
 
-    /// Removes the saved draft; the caller owns the returned bytes.
     pub fn take(self: *Drafts, gpa: std.mem.Allocator, id: []const u8) ?Draft {
         var next = &self.first;
         while (next.*) |node| : (next = &node.next) {
@@ -107,7 +100,6 @@ test "session_drafts put take replace and empty release only their Session's byt
     try std.testing.expectEqual(@as(usize, 3), taken.snapshot.cursor);
     try std.testing.expect(drafts.take(gpa, "aaaaaa") == null);
     try std.testing.expect(drafts.first == null);
-    // The store owns a copy, not the editor's borrowed buffer.
     var bytes = [_]u8{ 'o', 'k' };
     try drafts.put(gpa, "aaaaaa", .{ .bytes = &bytes, .cursor = 1 });
     bytes[0] = 'X';
@@ -125,7 +117,6 @@ test "session_drafts allocation failure keeps the previous draft" {
     var failing: std.heap.FixedBufferAllocator = .init(&space);
     try std.testing.expectError(error.OutOfMemory, drafts.put(failing.allocator(), "aaaaaa", .{ .bytes = "replacement", .cursor = 7 }));
     try std.testing.expectError(error.OutOfMemory, drafts.put(failing.allocator(), "bbbbbb", .{ .bytes = "new", .cursor = 0 }));
-    // The text fits, but a node cannot be allocated: the copy is released.
     var text_only: [3]u8 = undefined;
     var no_node: std.heap.FixedBufferAllocator = .init(&text_only);
     try std.testing.expectError(error.OutOfMemory, drafts.put(no_node.allocator(), "bbbbbb", .{ .bytes = "new", .cursor = 0 }));
@@ -147,7 +138,6 @@ test "session_drafts many Sessions retain independent bytes and carets and deini
         _ = try std.fmt.bufPrint(&id, "{x:0>6}", .{i});
         try drafts.put(gpa, &id, .{ .bytes = &id, .cursor = i % (id.len + 1) });
     }
-    // Reverse order exercises unlinking the tail, middle and head.
     for (0..128) |at| {
         const i = 255 - at * 2;
         var id: [session_id.bytes]u8 = undefined;

@@ -1,4 +1,3 @@
-//! Classification and descriptions of tool calls over supplied sources.
 const std = @import("std");
 const codec_abi = @import("codec_abi.zig");
 const core_tools = @import("message_agent_arguments.zig");
@@ -17,25 +16,19 @@ const record = records.record;
 const bash_record = records.bash_record;
 const start_agent_record = records.start_agent_record;
 
-/// Bash's argument bound is independent of the saved call-line bound.
 pub const max_bash_description_bytes = 100;
 
-/// One call, as `describe` needs it.
 pub const Call = union(Tool) {
-    /// Arguments the parser accepted, whose description it required.
     bash: *const BashArguments,
-    /// The core checks its arguments when it runs the call.
     find_tools,
     message_agent: *const core_tools.MessageAgentArguments,
+    read_action,
     read_transcript: ?Bounded(session_id.bytes),
     skill,
     start_agent,
     web_search: WebSearchCall,
 };
 
-/// What a web search call did: its action and the decoded bytes of its
-/// strings, of which the first `WebSearchCall.excerpt_bytes` are enough.
-/// A string Rui could not read is empty, since the line only shows it.
 pub const WebSearchCall = struct {
     action: codec_abi.HostedAction,
     target: []const u8 = "",
@@ -51,7 +44,6 @@ pub fn describe(call: Call) Description {
             out.set(arguments.description.slice()) catch unreachable;
             break :blk out;
         },
-        // The core writes its own tools' lines (D105).
         .message_agent => |arguments| blk: {
             var out: Description = .{};
             compose(&out, &.{ "Message ", "" }, &.{arguments.id.slice()});
@@ -60,6 +52,11 @@ pub fn describe(call: Call) Description {
         .find_tools => blk: {
             var out: Description = .{};
             out.set("Find tools") catch unreachable;
+            break :blk out;
+        },
+        .read_action => blk: {
+            var out: Description = .{};
+            out.set("Read an Action") catch unreachable;
             break :blk out;
         },
         .read_transcript => |id| blk: {
@@ -115,17 +112,12 @@ fn describeWebSearch(call: WebSearchCall) Description {
     return out;
 }
 
-/// The first bytes of a string, on one line: each line break, control and
-/// other separator becomes a space, and runs of spaces and the ends are
-/// trimmed. Enough is kept to fill a description.
 const Excerpt = struct {
     bytes: [WebSearchCall.excerpt_bytes]u8 = undefined,
     len: usize = 0,
 
     fn read(self: *Excerpt, bytes: []const u8) void {
         const raw = bytes[0..@min(bytes.len, WebSearchCall.excerpt_bytes)];
-        // A cut scalar at the end is dropped; anything else invalid means
-        // the source was not what it claimed, and shows nothing.
         const valid = utf8_validation.wholePrefix(raw) orelse return;
         var scalars = std.unicode.Utf8View.initUnchecked(valid).iterator();
         var space = false;
@@ -155,10 +147,6 @@ const Excerpt = struct {
     }
 };
 
-/// `literals` around `values`, alternating and starting with a literal,
-/// within the description bound: a value that does not fit is cut at a
-/// scalar and ends in "…", and the first value yields room to the second
-/// down to half of what the values share.
 fn compose(out: *Description, comptime literals: []const []const u8, values: []const []const u8) void {
     std.debug.assert(literals.len == values.len + 1 or (values.len == 0 and literals.len == 1));
     comptime var fixed: usize = 0;
@@ -182,12 +170,10 @@ fn compose(out: *Description, comptime literals: []const []const u8, values: []c
     out.len = writer.end;
 }
 
-/// `text` within `width` bytes: whole, or its scalars that fit and "…".
 fn writeCut(writer: *std.Io.Writer, text: []const u8, width: usize) void {
     if (text.len <= width) return writer.writeAll(text) catch unreachable;
     const ellipsis = "…";
     var end = utf8_validation.scalarStart(text, width -| ellipsis.len);
-    // A cut after a word reads as the word's end, not a blank before "…".
     while (end > 0 and text[end - 1] == ' ') end -= 1;
     writer.writeAll(text[0..end]) catch unreachable;
     writer.writeAll(ellipsis) catch unreachable;
@@ -200,18 +186,9 @@ pub const BashArguments = struct {
 };
 
 pub const CallFacts = struct {
-    /// The offered record the call names; null when it names none that
-    /// Rui runs, so it is an unknown tool.
-    // A small value: MCP calls synthesize only the matched name and owner,
-    // borrowing the name from Offered instead of retaining full records.
     tool: ?Record,
-    /// A call named bash's checked arguments, offered or not; null for any
-    /// other name.
     bash: ?BashCheck,
-    /// A call named message_agent's checked arguments, offered or not; null
-    /// for any other name.
     message_agent: ?core_tools.MessageAgentCheck = null,
-    /// Whether an unknown call names a tool the Session withdrew.
     removed: bool = false,
     invalid_mcp_arguments: bool = false,
     find_tools: bool = false,
@@ -219,10 +196,7 @@ pub const CallFacts = struct {
     read_transcript: bool = false,
     transcript_id: ?Bounded(session_id.bytes) = null,
 
-    /// The arguments of a bash call the parser accepted.
     pub fn bashArguments(self: *const CallFacts) ?*const BashArguments {
-        // Captured by pointer: `&(self.bash orelse ...)` would point at a copy
-        // that ends with this call.
         const check = if (self.bash) |*bash| bash else return null;
         return switch (check.*) {
             .accepted => |*accepted| accepted,
@@ -230,7 +204,6 @@ pub const CallFacts = struct {
         };
     }
 
-    /// The arguments of a message_agent call the parser accepted.
     pub fn messageAgentArguments(self: *const CallFacts) ?*const core_tools.MessageAgentArguments {
         const check = if (self.message_agent) |*value| value else return null;
         return switch (check.*) {
@@ -239,21 +212,20 @@ pub const CallFacts = struct {
         };
     }
 
-    /// The line a call is shown as, when its arguments carry one.
     pub fn description(self: *const CallFacts) ?Description {
         if (self.bashArguments()) |arguments| return describe(.{ .bash = arguments });
         if (self.messageAgentArguments()) |arguments| return describe(.{ .message_agent = arguments });
         if (self.find_tools) return describe(.find_tools);
         if (self.skill) return describe(.skill);
         if (self.read_transcript) return describe(.{ .read_transcript = self.transcript_id });
-        if (self.tool) |*selected| if (selected.runner() == .core and std.mem.eql(u8, selected.name, start_agent_record.name)) return describe(.start_agent);
+        if (self.tool) |*selected| if (selected.runner() == .core) {
+            if (std.mem.eql(u8, selected.name, "read_action")) return describe(.read_action);
+            if (std.mem.eql(u8, selected.name, start_agent_record.name)) return describe(.start_agent);
+        };
         return null;
     }
 };
 
-/// Why a Bash call's arguments were rejected. Its text goes back to the
-/// model as the call's result, so the model can correct the call: the
-/// provider does not check arguments against the schema, Rui does.
 pub const BashProblem = enum {
     malformed_json,
     unknown_field,
@@ -280,9 +252,6 @@ pub const BashProblem = enum {
     }
 };
 
-/// Inspect certified decoded sources against the records the request
-/// offered (D49). The caller retains the sources' storage and calls this
-/// under the transaction that publishes the proposal and Action.
 pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, offered: *const Offered) !CallFacts {
     var name: [max_name_bytes]u8 = undefined;
     var length: usize = 0;
@@ -296,15 +265,12 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
     const skill = core == .skill;
     const transcript = core == .read_transcript;
     const messaging = core == .message_agent;
-    // Provider-run tools return inside the reply, never as function calls.
     const provider = if (complete) if (records.builtIn(name[0..length])) |builtin| record(builtin).owner == .provider else false else false;
     const tool: ?Record = if (complete and !provider) if (offered.find(name[0..length])) |candidate|
         if (records.builtIn(candidate)) |builtin| record(builtin).* else .{ .name = candidate, .owner = .mcp }
     else
         null else null;
     const removed = tool == null and complete and !provider and offered.wasWithdrawn(name[0..length]);
-    // A call's arguments are read whether or not it was offered, so a
-    // rejected call keeps its description for presentation.
     var discard: Discard = .{};
     const runner = if (tool) |*selected| selected.runner() else null;
     return .{
@@ -348,8 +314,6 @@ fn checkMcpArguments(source: anytype) !bool {
     return true;
 }
 
-/// Presentation only, not settlement validation. Oversized, malformed or
-/// unusual arguments still reach the runtime checker unchanged.
 noinline fn transcriptDescriptionId(source: anytype) !?Bounded(session_id.bytes) {
     var memory: [256]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&memory);
@@ -422,7 +386,6 @@ noinline fn transcriptDescriptionId(source: anytype) !?Bounded(session_id.bytes)
 
 pub const removed_tool_result = "This tool was removed.";
 
-/// A rejected call's result text, from `classifyCall`'s code for `facts`.
 pub fn rejectionResult(code: tool_proposal.Rejection, facts: *const CallFacts, name: anytype, name_length: u64, name_digest: [32]u8, buffer: *[192]u8) ![]const u8 {
     switch (code) {
         .invalid_arguments => {
@@ -450,9 +413,6 @@ pub fn rejectionResult(code: tool_proposal.Rejection, facts: *const CallFacts, n
     }
 }
 
-/// Admission policy over adapter-certified call facts: a call to a tool
-/// the request did not offer gets the rejected-call result and never runs
-/// (D49), before its arguments are judged.
 pub fn classifyCall(facts: *const CallFacts) ?tool_proposal.Rejection {
     if (facts.tool == null) return .unknown_tool;
     if (facts.invalid_mcp_arguments) return .invalid_arguments;
@@ -502,7 +462,6 @@ fn checkBash(source: anytype, writer: anytype, input: anytype) !BashCheck {
     var parser: BashParser = .{};
     while (true) {
         const progress = parser.advance(source, writer, input, 4096) catch |err| {
-            // A decoding failure outside a string's bytes.
             if (isBashDescriptorError(err)) return .{ .rejected = .malformed_json };
             return err;
         };
@@ -763,17 +722,13 @@ pub const BashParser = struct {
         return .{ .complete = self.result };
     }
 
-    /// A string's bytes that cannot be held or are not UTF-8 reject the
-    /// call as that string's problem; any other failure is the caller's.
     fn emitFailure(self: *const BashParser, err: anyerror) !BashParseProgress {
         if (isBashDescriptorError(err)) return .{ .invalid = self.stringProblem() };
         return err;
     }
 
-    /// What is wrong when the string being read cannot be decoded or held.
     fn stringProblem(self: *const BashParser) BashProblem {
         return switch (self.string_target) {
-            // No accepted key is longer than a few bytes or needs escapes.
             .key => .unknown_field,
             .command => .cmd_invalid,
             .description => .description_invalid,

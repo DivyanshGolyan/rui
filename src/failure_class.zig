@@ -1,40 +1,23 @@
-//! What a person can do about a saved Turn failure code. Views branch on
-//! the class, never on code spellings of their own.
 const std = @import("std");
 const transport_policy = @import("transport_policy.zig");
 
 pub const Class = enum {
-    /// The provider refused the content; resending it will be refused again.
     policy,
-    /// The account is out of quota or credit until it resets or is topped up.
     quota,
-    /// The account's plan does not include the model.
     plan,
-    /// The provider does not serve the model.
     model,
-    /// Only a new login resolves it.
     sign_in,
-    /// The provider rejected the API key; only a new key resolves it.
     api_key,
-    /// The conversation no longer fits, even after compaction.
     overflow,
-    /// The provider answered with a permanent HTTP error: the same request
-    /// gets the same answer.
     refused,
-    /// The provider could not be reached in a way retrying does not fix.
     unreachable_provider,
     retries_exhausted,
     interrupted,
-    /// Anything else, including malformed output, which a new try may avoid.
     other,
 };
 
-/// A sign-in source saves a failure that only a new sign-in resolves under
-/// this prefix; the rest of the code is its own detail.
 pub const sign_in_prefix = "provider_sign_in_";
 
-/// A Host saves this, not `provider_http_401`, when a provider rejects the
-/// API key it presented: the remedy is a new key, not a sign-in.
 pub const api_key_rejected = "provider_api_key_rejected";
 
 pub fn of(code: []const u8) Class {
@@ -44,11 +27,8 @@ pub fn of(code: []const u8) Class {
         .policy => .policy,
         .model_unavailable => .model,
     };
-    // A provider's 401 that no source named otherwise asks for a sign-in.
     if (std.mem.startsWith(u8, code, sign_in_prefix) or std.mem.eql(u8, code, "provider_http_401")) return .sign_in;
     if (std.mem.eql(u8, code, api_key_rejected)) return .api_key;
-    // Temporary statuses save `provider_temporary_http_`, so this prefix
-    // names only permanent ones.
     if (std.mem.startsWith(u8, code, "provider_http_")) return .refused;
     const fixed = .{
         .{ "ResourceExceeded", Class.overflow },
@@ -63,8 +43,6 @@ pub fn of(code: []const u8) Class {
     return .other;
 }
 
-/// A retry's saved cause is a provider's temporary HTTP 429: the provider
-/// asked for fewer requests, and the retry waits it out.
 pub fn rateLimited(cause: []const u8) bool {
     return std.mem.eql(u8, cause, "provider_temporary_http_429");
 }

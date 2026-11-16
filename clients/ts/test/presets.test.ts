@@ -1,4 +1,3 @@
-// Presets against the real Host, with Turns paused so no provider is called.
 import assert from "node:assert/strict";
 import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -65,8 +64,6 @@ test("connect presets seed creation, overrides win and edited presets replay by 
 			(error: unknown) => error instanceof RuiRequestError && error.code === "preset_on_update");
 		await rui.close();
 		rui = await Rui.connect({ ...options, presets: { review: { ...spec, model: "gpt-6-sol" }, missing: spec } }, { binary: binary ?? "rui" });
-		// Defining a formerly unknown preset must not turn its saved refusal
-		// into creation when the caller retries the same key and fields.
 		await assert.rejects(rui.sessions.create({ preset: "missing" }, { idempotencyKey: "preset:missing" }),
 			(error: unknown) => error instanceof RuiRequestError && error.code === "unknown_preset");
 		await assert.rejects(rui.getSession(base.id).update({ preset: "review" } as never, { idempotencyKey: "preset:update" }),

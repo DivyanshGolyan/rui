@@ -1,11 +1,6 @@
-"""Each format PR appends its own schema version and forward step (D226).
-
-Main's existing digests and migration steps are immutable, unreleased ones
-included. Released formats also remain checked against their release tag.
-Every step is string literals only, so the source compared is what runs.
-"""
 from pathlib import Path
 import re
+import subprocess
 import textwrap
 import unittest
 
@@ -13,33 +8,41 @@ from release_numbers import (MIGRATIONS, SCHEMA, digest_rows, drifted_row_fix, g
                              schema_version)
 
 ROOT = Path(__file__).resolve().parents[2]
+BASELINES = ("src/store/migration_baseline.sqlite.sql", "src/store/migration_baseline.mysql.sql",
+             "src/store/migration_baseline_rows.sql")
+BASELINE_VERSION = re.compile(r"^pub const migration_baseline: u32 = (\d+);$", re.MULTILINE)
 TAG = re.compile(r"v0\.(\d+)\.\d+")
 STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
 LITERALS = r'(?:"(?:,")*,?)?'
 LITERAL_STEP = re.compile(r"\{\.from=\d+,\.sqlite=&\.\{" + LITERALS + r"\},\.mysql=&\.\{" + LITERALS + r"\},?\}")
 
 
+def baseline_version(source):
+    match = BASELINE_VERSION.search(source)
+    if match is None:
+        raise AssertionError(f"{SCHEMA} declares no migration_baseline")
+    return int(match[1])
+
+
+def baseline_changed_without_bump(candidate_version, reference_version, candidate, reference):
+    return candidate_version == reference_version and candidate != reference
+
+
 def non_literal_steps(steps):
-    """The `from` of each step whose statements are not all string literals:
-    a helper call or a `++` would let shared code change a step's text."""
     return sorted(start for start, text in steps.items() if not LITERAL_STEP.fullmatch(STRING.sub('"', text)))
 
 
 def edited_shipped_steps(candidate, shipped, released):
-    """The `from` of each shipped step (from below `released`) that the
-    candidate dropped, added or changed against the release's text."""
     return sorted(start for start in set(candidate) | set(shipped)
                   if start < released and candidate.get(start) != shipped.get(start))
 
 
 def edited_released_rows(candidate, released_rows, released):
-    """The released rows the candidate dropped or changed."""
     return sorted(version for version, digest in released_rows.items()
                   if version <= released and candidate.get(version) != digest)
 
 
 def schema_bump_error(candidate, base):
-    """A format PR may preserve main's format or append exactly one (D226)."""
     if candidate < base:
         return f"schema_version {candidate} goes back below main's {base}"
     if candidate > base + 1:
@@ -48,6 +51,35 @@ def schema_bump_error(candidate, base):
 
 
 class StoreSchemaVersionTest(unittest.TestCase):
+    def test_baseline_snapshot_rule(self):
+        self.assertTrue(baseline_changed_without_bump(51, 51, b"changed", b"original"))
+        self.assertFalse(baseline_changed_without_bump(52, 51, b"changed", b"original"))
+        self.assertFalse(baseline_changed_without_bump(51, 51, b"original", b"original"))
+
+    def test_baseline_snapshots_stay_unchanged(self):
+        base = main_base(ROOT)
+        if base is None:
+            self.skipTest("no origin/main in this checkout to take the merge base from")
+        candidate_version = baseline_version((ROOT / SCHEMA).read_text())
+        tag = released_tag(ROOT)
+        references = [("main merge base", base)]
+        if tag is not None:
+            references.append((f"release {tag}", tag))
+        for label, ref in references:
+            reference_version = baseline_version(git(ROOT, "show", f"{ref}:{SCHEMA}"))
+            if candidate_version != reference_version:
+                continue
+            for path in BASELINES:
+                with self.subTest(reference=label, path=path):
+                    reference = subprocess.run(["git", "-C", str(ROOT), "show", f"{ref}:{path}"],
+                                               check=True, capture_output=True).stdout
+                    changed = baseline_changed_without_bump(candidate_version, reference_version,
+                                                            (ROOT / path).read_bytes(), reference)
+                    self.assertFalse(changed, f"{path} differs from {label} with unchanged migration_baseline: "
+                                     "append a migration step instead")
+        if tag is None:
+            self.skipTest("no v0.S.N release tags in this checkout; the policy job checks out with fetch-depth 0")
+
     def test_reads_the_owner(self):
         source = (ROOT / SCHEMA).read_text()
         self.assertEqual(max(digest_rows(source)), schema_version(source), "the last row is the current version")
@@ -78,7 +110,6 @@ class StoreSchemaVersionTest(unittest.TestCase):
         self.assertEqual(sorted(released), [51, 52])
         reformatted = released_source.replace(".{ .from = 52, .sqlite = &.{ ", ".{\n    .from = 52,\n    .sqlite = &.{\n        ")
         self.assertEqual(migration_steps(reformatted), released, "a reformat is no edit")
-        # A shipped step's text edited, with its neighbours and the version moved too.
         candidate = migration_steps(released_source
                                     .replace("a(x INTEGER)", "a(x INTEGER, y INTEGER)")
                                     .replace("SELECT '}'", "SELECT 1")
@@ -113,8 +144,6 @@ class StoreSchemaVersionTest(unittest.TestCase):
         self.assertIsNone(schema_bump_error(55, 54))
         self.assertIsNotNone(schema_bump_error(53, 54))
         self.assertIsNotNone(schema_bump_error(56, 54))
-        # The same prefix checks used below protect unreleased main formats,
-        # not just the rows and steps covered by the last release.
         self.assertEqual(edited_released_rows({53: 1, 54: 3, 55: 4}, {53: 1, 54: 2}, 54), [54])
         self.assertEqual(edited_shipped_steps({53: "changed", 54: "new"}, {53: "original"}, 54), [53])
         self.assertEqual(edited_shipped_steps({53: "original", 54: "new"}, {53: "original"}, 54), [])

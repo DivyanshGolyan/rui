@@ -18,43 +18,24 @@ import build_files
 
 ROOT = Path(__file__).resolve().parents[2]
 ROOTS = ("src/cli.zig",)
-# build.zig's addTest roots. Zig compiles a file's tests only when the test
-# build analyzes the file, and a production import is analyzed only if
-# something the tests run uses it. A test that names the file is the
-# guarantee. The test-only roots name their imports from tests, so each
-# of their imports counts; a module root counts only what its tests name.
 TEST_ONLY_ROOTS = ("src/tests.zig", "src/logic_tests.zig", "src/parser_fuzz_tests.zig", "tests/integration/mysql_wire_test.zig")
-# The shared URL value module is named by the logic cores and HTTP/2 tests.
-# Its named import preserves module identity, so path-only traversal cannot
-# discover it through those roots.
 MODULE_TEST_ROOTS = ("src/h2/h2.zig", "src/store/wire/pg.zig", "src/url.zig")
 BASELINE = Path(__file__).with_name("import_cycles.json")
 STORE_DIRECTORY = "src/store/"
 STORE_FACADE = "src/store.zig"
-# Wire clients are protocol leaves with no Store types: any root may test them,
-# and they import nothing else of the Store.
 STORE_WIRE = "src/store/wire/"
 STORE_TESTS = "src/store/tests.zig"
-# Test files hold no entry point, so the round-budget test does not read them.
 STORE_TEST_FILES = (STORE_TESTS, "src/store/sqlite_tests.zig", "src/store/mysql_dialect_check.zig",
                     "src/store/mysql_session_tests.zig", "src/store/mysql_testing.zig")
-# The per-domain test files beside tests.zig and sqlite_tests.zig.
 STORE_TEST_DIRECTORIES = ("src/store/tests/", "src/store/sqlite_tests/")
-# The tests that scan every Store file's source, each by its own embed list.
 SOURCE_SCAN_TESTS = ("Store entry points queue and fence only through canonical access",
                      "every function that enters the Store has a round budget")
-# The source-scan test that also reads the test files, where only the
-# transition runner may open a writing Access.
 WRITER_SCAN_TEST = SOURCE_SCAN_TESTS[0]
 BOOTSTRAP_BASE = "cdad5aaf4dc43cbb7864f0fa0a4a08bf4f25a8ff"
-# Preserve strings as tokens so braces/import spellings inside them are inert.
 TOKEN = re.compile(r'//[^\n]*|\\\\[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|@[A-Za-z_][A-Za-z_0-9]*|[A-Za-z_][A-Za-z_0-9]*|[^\s]')
 
 
 def scoped_imports(source):
-    """Literal imports outside test declarations, the imports a test
-    declaration references (literally or through a top-level alias), and
-    whether the source declares a test."""
     tokens = [m.group() for m in TOKEN.finditer(source)
               if not m.group().startswith(("//", "\\\\"))]
     depth = 0
@@ -63,7 +44,6 @@ def scoped_imports(source):
     production, tested, aliases, named = set(), set(), {}, set()
     for i, token in enumerate(tokens):
         if token == "test" and test_depth is None and (i == 0 or tokens[i - 1] != "@"):
-            # Preserve the outermost test scope, including nested container tests.
             following = i + 1
             if following < len(tokens) and tokens[following].startswith('"'):
                 following += 1
@@ -86,15 +66,12 @@ def scoped_imports(source):
             if test_depth is None and i >= 3 and tokens[i - 3] == "const" and tokens[i - 1] == "=":
                 aliases[tokens[i - 2]] = json.loads(literal)
         elif test_depth is not None:
-            # Zig forbids a local from shadowing a declaration. A name after
-            # "." still counts, since nested aliases are reached that way.
             named.add(token)
     tested.update(target for name, target in aliases.items() if name in named)
     return production, tested, has_tests
 
 
 def production_imports(source, tests=False):
-    """Literal imports outside test declarations, or every import with tests=True."""
     production, tested, _ = scoped_imports(source)
     return production | tested if tests else production
 
@@ -115,7 +92,6 @@ def graph(root, roots=ROOTS, read_source=None):
             raise ValueError(f"missing first-party source: {name}") from error
         for imported in production_imports(source):
             if imported == "root":
-                # Zig's special module alias refers to addRui's executable root.
                 target = (root / roots[0]).resolve()
             elif imported.endswith(".zig"):
                 target = (path.parent / imported).resolve()
@@ -129,10 +105,11 @@ def graph(root, roots=ROOTS, read_source=None):
 
 
 def tests_reached(root, test_only=TEST_ONLY_ROOTS, modules=MODULE_TEST_ROOTS):
-    """Every Zig file under src/ and tests/ that declares tests is named by a
-    test reached from a test root, so its tests cannot silently stop running."""
     build = build_files.source(root)
-    if stale := [name for name in (*test_only, *modules) if f'b.path("{name}")' not in build]:
+    registered = ({row["source"] for row in build_files.unit_root_rows(root)}
+                  if (root / "build/unit.zig").is_file() else set())
+    if stale := [name for name in (*test_only, *modules)
+                 if name not in registered and f'b.path("{name}")' not in build]:
         raise ValueError(f"The build no longer builds test roots {stale}; update TEST_ONLY_ROOTS/MODULE_TEST_ROOTS")
     scanned = {path.resolve(): scoped_imports(path.read_text())
                for directory in ("src", "tests") for path in (root / directory).rglob("*.zig")}
@@ -157,7 +134,6 @@ def tests_reached(root, test_only=TEST_ONLY_ROOTS, modules=MODULE_TEST_ROOTS):
 
 
 def widgets_boundary(root):
-    """Every widget import, including tests, stays inside the generic folder."""
     directory = root / "src/widgets"
     resolved = directory.resolve()
     for path in sorted(directory.rglob("*.zig")):
@@ -172,9 +148,6 @@ def widgets_boundary(root):
 
 
 def store_boundary(root):
-    """Across every file under src/, test declarations included: outside
-    src/store/ only the facade imports a Store file, no Store file imports
-    the facade, and a wire client imports no Store file outside wire/."""
     resolved = root.resolve()
     for path in sorted((root / "src").rglob("*.zig")):
         source = path.relative_to(root).as_posix()
@@ -190,7 +163,6 @@ def store_boundary(root):
             if target.startswith(STORE_WIRE):
                 continue
             if source == "src/logic_tests.zig" and target == "src/store/engine/mysql_refusal.zig":
-                # The refusal decision is a registered value-only core.
                 continue
             if target.startswith(STORE_DIRECTORY) and not source.startswith(STORE_DIRECTORY) and source != STORE_FACADE:
                 raise ValueError(f"{source} imports {target}; import {STORE_FACADE} instead")
@@ -199,14 +171,6 @@ def store_boundary(root):
 
 
 def store_access_sources(root):
-    """Each source-scan test (`SOURCE_SCAN_TESTS`) reads every Store file
-    but its test files (`STORE_TEST_FILES` and those under
-    `STORE_TEST_DIRECTORIES`) and the wire clients, which hold no Store
-    state. `WRITER_SCAN_TEST` reads the test files as well.
-
-    The facade holds only re-exports, so it has no entry point to check; a
-    function there must join the tests' sources.
-    """
     directory = root / STORE_DIRECTORY
 
     def test_file(path):
@@ -216,8 +180,6 @@ def store_access_sources(root):
     expected = sorted(path.relative_to(directory).as_posix() for path in directory.rglob("*.zig")
                       if not test_file(path) and not path.is_relative_to(root / STORE_WIRE))
     tests = sorted(path.relative_to(directory).as_posix() for path in directory.rglob("*.zig") if test_file(path))
-    # The scan tests live in tests.zig or a per-domain file beside it; each
-    # embed path is relative to the file that holds it.
     holders = [root / STORE_TESTS, *sorted((root / STORE_TEST_DIRECTORIES[0]).rglob("*.zig"))]
     for name in SOURCE_SCAN_TESTS:
         found = [(path, test) for path in holders if path.is_file()
@@ -236,13 +198,6 @@ def store_access_sources(root):
 
 
 def store_unit(dependencies):
-    """Collapse src/store/ into its facade for the cycle ratchet.
-
-    The Store's files hold one type's declarations: Store.zig's entry points
-    call the domain files, which call back into Store.zig's locking and
-    statement helpers. Those cycles are inherent to splitting one type, so
-    they are not counted; store_boundary keeps them inside src/store/.
-    """
     def unit(name):
         return STORE_FACADE if name.startswith(STORE_DIRECTORY) and not name.startswith(STORE_WIRE) else name
 
@@ -254,7 +209,6 @@ def store_unit(dependencies):
 
 
 def cyclic_edges(dependencies):
-    """Every edge with a return path, including self edges (no SCC exemptions)."""
     def reaches(start, goal):
         pending = [start]
         visited = set()
@@ -283,8 +237,6 @@ def trusted_allowance(root, baseline, roots):
     name = baseline.resolve().relative_to(root.resolve()).as_posix()
     if git(root, "ls-tree", "--name-only", review_base, "--", name):
         return json.loads(git(root, "show", f"{review_base}:{name}"))["cyclic_edges"]
-    # First introduction: derive the original exceptions from the authorized
-    # immutable source, never from the candidate's self-declared measurement.
     git(root, "merge-base", "--is-ancestor", BOOTSTRAP_BASE, review_base)
     return cyclic_edges(graph(root, roots, lambda path: git(root, "show", f"{BOOTSTRAP_BASE}:{path}")))
 

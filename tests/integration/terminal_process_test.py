@@ -1,5 +1,3 @@
-"""Native checks for processes on test PTYs: each runs as the foreground job
-of the PTY's session leader, and its conversation owner retires it."""
 
 import errno
 import fcntl
@@ -24,7 +22,6 @@ from terminal_process import (close_pty, CAPTURES, TerminalOutput, answers_to, c
 from terminal_screen import ScreenCapture
 
 
-# libghostty-vt's answer to DA1: a VT220 with ANSI colour.
 DEVICE_ANSWER = b"\x1b[?62;22c"
 
 
@@ -37,7 +34,6 @@ class TerminalProcessTest(unittest.TestCase):
                 with self.subTest(prefix=prefix, text=text):
                     capture = ScreenCapture(columns=80, rows=4)
                     self.assertFalse(capture.draft("", 2))
-                    # An earlier identical User row is not the focused draft.
                     capture.feed(("\x1b[?2026h\x1b[2J\x1b[H › " + text + "\r\n" +
                                   prefix + "› " + text + "\x1b[?2026l").encode())
                     cursor = capture.screen.cursor
@@ -62,7 +58,6 @@ class TerminalProcessTest(unittest.TestCase):
         from terminal_screen import Cell
 
         def capture(prefix, text, caret, *, quiet=False, colour=8, faint=False):
-            # Mock committed cells only: this owner test never loads a terminal.
             current = ScreenCapture.__new__(ScreenCapture)
             current.synchronized, current.generation = False, 1
             current.completed = " › earlier message\n" + "".join(prefix) + text
@@ -145,8 +140,6 @@ class TerminalProcessTest(unittest.TestCase):
             overview_frame(17, lambda screen: "Settings" in screen)
         predicate = keyed.call_args.args[2]
         listed = "  + New Session\n  Settings\nenter open"
-        # A list accepts keys with no editor cursor, including a cursor
-        # position that could not be an input row.
         self.assertTrue(predicate(listed, 0, 0))
         self.assertFalse(predicate(listed.replace("enter open", ""), 0, 0))
         self.assertFalse(predicate(listed + "\n › Type a task", 3, 3))
@@ -193,14 +186,12 @@ class TerminalProcessTest(unittest.TestCase):
         from terminal_screen import Cell
         self.assertEqual(Cell("X", None, False), Cell("X", None, False, False))
         capture = ScreenCapture(12, 3, foreground=(47, 43, 37), background=(243, 238, 226))
-        # Override a palette slot: the oracle must use the terminal's palette,
-        # not a second ANSI table. Erased blank cells also retain backgrounds.
         capture.feed(b"\x1b]4;1;rgb:12/34/56\x1b\\"
                      b"\x1b[?2026h\x1b[38;5;1;48;2;1;2;3;1;2;3;4:3;7;9;53mX"
                      b"\x1b[0;48;2;4;5;6m\x1b[K\x1b[?25l\x1b[?2026l")
         frame = capture.frame
         cell = frame.cells[0][0]
-        self.assertEqual(cell.fg, 1)  # Existing style oracles retain their vocabulary.
+        self.assertEqual(cell.fg, 1)
         self.assertEqual((cell.fg_rgb, cell.bg), ("123456", "010203"))
         self.assertEqual(frame.colors(cell), ("010203", "123456"))
         self.assertTrue(all((cell.bold, cell.reverse, cell.italic, cell.faint, cell.strike, cell.overline)))
@@ -209,7 +200,7 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertFalse(frame.visible)
         self.assertEqual((frame.cursor.x, frame.cursor.y), (1, 0))
         capture.feed(b"\x1b[?2026h\x1b[0mY\x1b[?25h\x1b[?2026l")
-        self.assertEqual(frame.cells[0][1].data, " ")  # Immutable old commit.
+        self.assertEqual(frame.cells[0][1].data, " ")
         self.assertTrue(capture.frame.visible)
         self.assertEqual(capture.frame.cells[0][1].data, "Y")
 
@@ -249,7 +240,6 @@ class TerminalProcessTest(unittest.TestCase):
 
     def tearDown(self):
         self.allocation.stop()
-        # Keep a broken owner from leaking descriptors during a negative control.
         for fd in self.descriptors:
             try:
                 close_pty(fd)
@@ -269,8 +259,6 @@ class TerminalProcessTest(unittest.TestCase):
         completed = threading.Event()
         program = "import os, tty; tty.setraw(0); os.write(1, b'Detached. Host work continues.')"
         with terminal_process([sys.executable, "-c", program], env=os.environ) as (process, master):
-            # Start collection after exit: the final drain, not the live read
-            # loop, must collect the tail from the still-retained terminal.
             self.assertEqual(process.wait(timeout=5), 0)
             slave = self.descriptors[1]
 
@@ -399,7 +387,6 @@ class TerminalProcessTest(unittest.TestCase):
         register_capture(master, type("Capture", (), {"feed": received.extend})())
         self.assertIn(master, capture_descriptors())
         os.write(slave, b"pending")
-        # The opt-out must leave PTY output unread.
         wait_for(lambda: True, "without drainage", drain=False)
         self.assertEqual(received, b"")
         self.assertTrue(select.select([master], [], [], 0)[0])
@@ -428,16 +415,12 @@ class TerminalProcessTest(unittest.TestCase):
         def refilling(readers, writers, errors, timeout=None):
             nonlocal just_read
             if readers == [master] and timeout == 0 and just_read:
-                # Model Darwin's writer not having refilled its small PTY
-                # buffer yet: every bounded drain batch ends after one read.
                 just_read = False
                 return [], [], []
             return real_select(readers, writers, errors, timeout)
 
         with patch("terminal_process.os.read", side_effect=small_read), \
              patch("terminal_process.select.select", side_effect=refilling):
-            # Blind 25ms sleeps need at least 128 polls (3.2s). Readability
-            # must wake the waiter instead, without enlarging the drain batch.
             wait_for(lambda: writer.poll() is not None and len(received) == 131072,
                      "small-buffer PTY writer", timeout=2)
             self.assertEqual(writer.returncode, 0)
@@ -471,8 +454,6 @@ class TerminalProcessTest(unittest.TestCase):
         master, slave = open_pty()
         received = bytearray()
         register_capture(master, type("Capture", (), {"feed": received.extend})())
-        # Simulate a chatty PTY without a timing-dependent writer. The last
-        # empty chunk bounds the old unbounded loop for the negative control.
         for observe in (lambda: wait_for(lambda: len(received), "continuous output"),
                         lambda: human.draining(master, lambda: len(received), received.extend)()):
             received.clear()
@@ -490,7 +471,6 @@ class TerminalProcessTest(unittest.TestCase):
             observations.append(len(received))
             return len(received) >= 65536
 
-        # Darwin can return small chunks even with a much larger read buffer.
         with patch("terminal_process.select.select", return_value=([master], [], [])), \
              patch("terminal_process.os.read", return_value=b"x" * 128):
             wait_for(observe, "short terminal reads", interval=0)
@@ -547,8 +527,6 @@ class TerminalProcessTest(unittest.TestCase):
                 capture.feed(("\x1b[?1049h\x1b[?2026h\x1b[H\x1b[2J" + title +
                               "\r\n? Needs approval\x1b[?2026l").encode())
                 generation = capture.generation
-                # The next frame contains the request and the choice, but its
-                # final synchronized-write boundary arrives in a separate read.
                 capture.feed(("\x1b[?2026h\x1b[H\x1b[2J  " + title +
                               "\r\n    $ true\r\n────────────────────────\r\n"
                               " › " + human.CHOICE + "\r\n────────────────────────").encode())
@@ -564,8 +542,6 @@ class TerminalProcessTest(unittest.TestCase):
                 self.assertEqual(rows.count(title), expected_titles)
                 self.assertIn("$ true", rows)
                 self.assertIn(human.CHOICE, proposal)
-                # The committed choice frame itself always has exactly one
-                # title and the command above it, never an intermediate write.
                 current = [row.strip() for row in capture.completed.splitlines()]
                 self.assertEqual(current.count(title), 1)
                 self.assertLess(current.index(title), current.index("› " + human.CHOICE))
@@ -586,8 +562,6 @@ class TerminalProcessTest(unittest.TestCase):
             os.fstat(fd)
 
     def assert_retired(self, process):
-        # The leader reported the job's status after reaping it; the kernel
-        # must agree that no such process remains.
         self.assertIsNotNone(process.returncode)
         with self.assertRaises(ProcessLookupError):
             os.kill(process.pid, 0)
@@ -620,7 +594,6 @@ class TerminalProcessTest(unittest.TestCase):
         failure = OSError("injected retirement failure")
 
         def stop(process, **kwargs):
-            # The slave must remain alive until child retirement on Darwin.
             for fd in self.descriptors:
                 os.fstat(fd)
             stop_process(process, **kwargs)
@@ -634,7 +607,6 @@ class TerminalProcessTest(unittest.TestCase):
         self.assert_retired(process)
 
     def job(self, source, slave, **options):
-        """Run Python `source` as a job on `slave`."""
         options.setdefault("stdout", slave)
         options.setdefault("stderr", slave)
         process = spawn([sys.executable, "-I", "-c", source], stdin=slave, **options)
@@ -642,8 +614,6 @@ class TerminalProcessTest(unittest.TestCase):
         return process
 
     def reporter(self):
-        """A pipe whose write end sits at a number no stdio uses; returns
-        (read end, write end). The fixture closes the write end once passed."""
         read, write = os.pipe()
         high = fcntl.fcntl(write, fcntl.F_DUPFD, 37)
         os.close(write)
@@ -651,7 +621,6 @@ class TerminalProcessTest(unittest.TestCase):
         return read, high
 
     def report(self, read):
-        """What the job wrote to the reporter, once it closed its end."""
         data = b""
         deadline = time.monotonic() + 5
         while True:
@@ -672,7 +641,6 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertEqual(seen["tty"], "opened", seen)
         self.assertTrue(seen["same_terminal"], "/dev/tty is not the PTY on stdin")
         self.assertTrue(seen["foreground"], seen)
-        # The three bytes it wrote stay unread: its exit must not wait for them.
         self.assertEqual(process.wait(timeout=5), 0)
         self.assertEqual(changed(termios.tcgetattr(slave)), (False, 7), "the PTY lost the job's termios")
         fresh = os.open(os.ttyname(slave), os.O_RDWR | os.O_NOCTTY)
@@ -681,13 +649,11 @@ class TerminalProcessTest(unittest.TestCase):
         finally:
             os.close(fresh)
         self.assertEqual(os.read(master, 16), b"abc")
-        # Why the PTY survives on Darwin: the job never led the session.
         self.assertTrue(seen["group_leader"], seen)
         self.assertFalse(seen["session_leader"], seen)
         self.assertEqual(seen["session"], process.leader.process.pid, seen)
 
     def test_shell_leaves_the_terminal_usable(self):
-        # On Darwin a shell that leads its own session revokes the PTY on exit.
         master, slave = open_pty()
         shell = spawn(["bash", "-c", "sleep 0.2"], stdin=slave, stdout=slave, stderr=slave)
         self.addCleanup(stop_process, shell, timeout=5)
@@ -715,7 +681,6 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertIsNone(sleeper.poll())
         sleeper.kill()
         self.assertEqual(sleeper.wait(timeout=5), -signal.SIGKILL)
-        # ^C with ISIG on reaches the foreground job only.
         interrupted = self.job("import os, time; os.write(1, b'R'); time.sleep(30)", slave,
                                default_signals=(signal.SIGINT,))
         self.assertEqual(os.read(master, 1), b"R")
@@ -735,7 +700,6 @@ class TerminalProcessTest(unittest.TestCase):
     def test_descriptors_arrive_at_their_numbers(self):
         master, slave = open_pty()
         read, write = self.reporter()
-        # Below the fixture's own limit, which a job inherits (macOS starts at 256).
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         process = self.job(DESCRIPTORS.replace("REPORT", str(write)), slave, stderr=subprocess.PIPE,
                            pass_fds=(write,), rlimits={resource.RLIMIT_NOFILE: (soft - 1, hard)})
@@ -760,8 +724,6 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertEqual(process.leader.process.wait(timeout=5), 0)
 
     def test_fixture_crash_leaves_no_process(self):
-        # Another process holds the master, so only the control socket tells
-        # the leader its fixture is gone.
         master, slave = open_pty()
         marker = os.path.join(self.enterContext(tempfile.TemporaryDirectory()), "hangup")
         fixture = subprocess.Popen([sys.executable, "-c", CRASHING_FIXTURE, os.path.dirname(os.path.abspath(__file__)),
@@ -777,7 +739,6 @@ class TerminalProcessTest(unittest.TestCase):
             self.assertEqual(seen.read(), "SIGHUP")
 
     def converse(self, source, env=None):
-        """Run `source` on a fresh PTY; return (process, master)."""
         master, slave = open_pty()
         process = spawn([sys.executable, "-c", source], env=env, stdin=slave, stdout=slave,
                         stderr=subprocess.PIPE)
@@ -785,8 +746,6 @@ class TerminalProcessTest(unittest.TestCase):
         return process, master
 
     def output(self, process, master, until, capture=None):
-        """Read the master, as fixtures do, until it holds `until`; a
-        `capture` sees each read, as a fixture's screen observer does."""
         output = b""
         while until not in output:
             self.assertTrue(select.select([master], [], [], 5)[0], (output, process.poll()))
@@ -797,9 +756,6 @@ class TerminalProcessTest(unittest.TestCase):
         return output
 
     def test_answers_reach_the_terminal_the_command_reads(self):
-        # stdin and stdout on different PTYs: the observer of stdout's master
-        # sees the request, and its terminal answers on stdin's, where vaxis
-        # reads.
         input_master, input_slave = open_pty()
         output_master, output_slave = open_pty()
         process = spawn([sys.executable, "-c",
@@ -817,8 +773,6 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertFalse(select.select([output_slave], [], [], 0)[0], "answer went to the output PTY")
 
     def test_observer_answers_a_split_request_once_unless_silent(self):
-        # The request arrives in two reads; the answer comes once, before
-        # the next byte the fixture writes. A silent observer answers nothing.
         process, master = self.converse(
             "import os, sys, tty\n"
             "tty.setraw(0)\n"
@@ -842,8 +796,6 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertEqual(process.wait(timeout=5), 0, process.stderr.read())
 
 
-# Reports how the job sees its terminal, changes its termios through /dev/tty,
-# then writes three bytes nobody reads.
 OWNER = """
 import errno, json, os, termios
 seen = {"session": os.getsid(0), "session_leader": os.getsid(0) == os.getpid(),
@@ -878,7 +830,6 @@ sys.stderr.write("err-text")
 os.write(REPORT, json.dumps({"held": held, "nofile": resource.getrlimit(resource.RLIMIT_NOFILE)[0]}).encode())
 """
 
-# Starts one job that records a hangup, prints both pids, then waits to be killed.
 CRASHING_FIXTURE = """
 import json, sys, time
 sys.path.insert(0, sys.argv[1])
@@ -899,13 +850,11 @@ time.sleep(60)
 
 
 def changed(attributes):
-    """(ECHO, VMIN) as the OWNER job sets them."""
     minimum = attributes[6][termios.VMIN]
     return bool(attributes[3] & termios.ECHO), minimum if isinstance(minimum, int) else ord(minimum)
 
 
 def running(pid):
-    """Not gone and not a zombie waiting for its reaper."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

@@ -1,21 +1,13 @@
-//! One line of text in terminal cells: only its first line (up to CR or LF),
-//! cut before the first grapheme that does not fit. Footer and Panel draw
-//! their single-line text through it.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 
 pub const Fit = struct { text: []const u8, width: u16 };
 
-/// The longest prefix of `text`'s first line that fits `limit` cells, and
-/// the cells it takes.
 pub fn fit(ctx: vxfw.DrawContext, text: []const u8, limit: u16) Fit {
     return walk(ctx, text, limit, null);
 }
 
-/// Paints what `fit` keeps of `text` from column `start` on `row`, within
-/// the first `limit` columns, and returns the column after it. A grapheme
-/// that takes no cell is not written.
 pub fn paint(ctx: vxfw.DrawContext, surface: vxfw.Surface, text: []const u8, start: u16, row: u16, style: vaxis.Style, limit: u16) u16 {
     const col = @min(start, limit);
     return col + walk(ctx, text, limit - col, .{ .surface = surface, .row = row, .col = col, .style = style }).width;

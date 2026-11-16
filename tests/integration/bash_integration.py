@@ -51,7 +51,6 @@ def execution_idle(store, session):
 
 
 def prove_stdin(state):
-    """Canonical descriptors, real bidirectional pressure and restart identity."""
     store = state / "stdin-store"
     workspace = state / "stdin-workspace"
     workspace.mkdir()
@@ -69,7 +68,6 @@ def prove_stdin(state):
     )
     probe = "import os,stat; print('null' if stat.S_ISCHR(os.fstat(0).st_mode) else 'file'); print(len(os.read(0,1)))"
     failed_send = "Bash failed. Exit code: 2.\nstderr:\n"
-    # The empty-send cases retain the refusal line itself, measured below.
     retained_output_bytes = {"large": 524288, "over": 0, "null": 7, "missing": 7, "empty": 7,
                              "closed": 6, "timeout": 0}
     cases = [
@@ -90,7 +88,6 @@ def prove_stdin(state):
         host = fixture.start_host(store, url, active_capacity=2)
         recipient = configure(state, store, "stdin-recipient-config", workspace=workspace)
         for name, input_text in (("empty-send", ""), ("null-send", None)):
-            # Trusted Bash peers select the launching Action's Store.
             command = shlex.join([str(fixture.RUI), "session", "send", "--to", recipient,
                                   "--record", str(state / f"{name}.json"), "--key", name])
             cases.append((name, {"cmd": command, "stdin": input_text}, "failed"))
@@ -111,8 +108,6 @@ def prove_stdin(state):
 
             assert saved_arguments() == descriptors[name].encode(), name
             if name == "large":
-                # No Attempt yet: restart must execute this same admitted input,
-                # not a fresh proposal or a reconstructed command string.
                 fixture.stop_host(host)
                 host = None
                 host = fixture.start_host(store, url, active_capacity=2)
@@ -400,8 +395,6 @@ def prove_reused_session(state):
             "session", "inspect", "--store", store, "--session", session
         )["execution"]
         assert int(delayed["custody_occupied"]) >= len(actions_by_ordinal), delayed
-        # Both commands write only files: delayed cleanup holds custody over
-        # empty captures, and the command itself never reaches scratch.
         assert delayed["scratch_used_bytes"] == "0", delayed
 
         fixture.message(
@@ -423,8 +416,6 @@ def prove_reused_session(state):
         second_processing = fixture.observe(store, "reuse-second")["binding"]
         assert second_processing["turn"] != first_processing["turn"], second_processing
         retry_failure_release.set()
-        # The failed Attempt releases its own custody at settlement, while
-        # delayed Bash cleanup still holds the earlier Actions' custody.
         milestones.wait(
             "cleanup_completed",
             operation=str(second_processing["operation"]),
@@ -789,11 +780,285 @@ def walkthrough():
             retain_failure_state("Bash walkthrough failure state", state)
 
 
+def prove_native_background(state, *, deadline=None):
+    from bash_fixture import dispose_owner_case
+
+    deadline = time.monotonic() + 220 if deadline is None else deadline
+
+    def command(*args, **options):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("native promotion body deadline")
+        return fixture.command(*args, timeout=min(15, remaining), **options)
+
+    def wait_for(observe, description):
+        return fixture.wait_for(observe, description, deadline=deadline)
+
+    outcomes = []
+    for name, capacity in (("approval", 2), ("running", 2), ("stopped", 2), ("capacity-one", 1)):
+        if deadline - time.monotonic() < 45:
+            raise TimeoutError("native promotion case startup reserve")
+        case = state / f"native-background-{name}"
+        case.mkdir(mode=0o700)
+        workspace = case / "workspace"
+        workspace.mkdir()
+        gate = ReleaseGate(workspace / "producer-gate")
+        producer = (
+            "import os,pathlib,secrets; "
+            "f=open('launches','a'); f.write(str(os.getpid())+'\\n'); f.flush(); os.fsync(f.fileno()); f.close(); "
+            "pathlib.Path('ready.tmp').write_text(str(os.getpid())); os.replace('ready.tmp','ready'); "
+            "g=open('producer-gate','rb'); g.read(); g.close(); "
+            "value='native-final-'+secrets.token_hex(16)+'\\n'+'é😀'*2200+'\\n'; "
+            "f=open('expected-final','w'); f.write(value); f.flush(); os.fsync(f.fileno()); f.close(); "
+            "print(value,end='')"
+        )
+        arguments = json.dumps({
+            "cmd": "exec " + shlex.join([sys.executable, "-c", producer]),
+            "description": "Wait for native release", "timeout_ms": 30000,
+        }, ensure_ascii=False, separators=(",", ":"))
+        responses = [
+            fixture.sse_tool_calls(f"{name}-calls", [("bash", f"{name}-call", arguments)]),
+            fixture.sse_answer(f"{name}-answer", f"{name}-reason", f"{name}-message", "original answer")[0],
+        ]
+        endpoint = fixture.SuccessEndpoint(responses)
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        host = session = pid = diagnostics = None
+        evidence = {"case": name, "capacity": capacity}
+        try:
+            thread.start()
+            host = fixture.start_host(case / "store", f"http://127.0.0.1:{endpoint.server_port}/responses", active_capacity=capacity)
+            diagnostics = HostDiagnostics(host)
+            store = case / "store"
+            session = configure(case, store, "configure", workspace=workspace)
+            fixture.message(case, store, "message", session, "run ordinary Bash")
+            action = wait_for(lambda: action_for(store, session), "ordinary foreground Action")
+            identity = action["action"]
+            assert fixture.read_action(store, session, identity, "arguments") == arguments.encode(), action
+            pending = command("action", "read", "--store", store, "--session", session, "--action", identity)
+            assert pending["state"] == "waiting_approval" and pending["final"] is None, pending
+            if name != "approval":
+                allow(case, store, "allow", session, identity)
+                wait_for(lambda: (workspace / "ready").exists(), "fsynced producer launch")
+                pid = int((workspace / "launches").read_text())
+                assert process_exists(pid)
+            gate.assert_held()
+            assert len(endpoint.requests) == 1, endpoint.requests
+            assert fixture.completed_observation(store, "message") is None
+            promoted = command(
+                "action", "background", "--store", store, "--session", session,
+                "--action", identity, "--key", "promote", "--record", case / "promote.json",
+                expect=3 if capacity == 1 else 0,
+            )
+            evidence["promotion"] = promoted
+            if capacity == 1:
+                assert promoted["answer"]["status"] == "rejected" and promoted["answer"]["code"] == "background_unavailable", promoted
+                assert fixture.completed_observation(store, "message") is None
+                assert len(endpoint.requests) == 1 and process_exists(pid)
+            else:
+                answer = promoted["answer"]
+                assert answer["status"] == "accepted" and answer["replayed"] is False, promoted
+                assert answer["action_selection"]["kind"] == "background" and int(answer["action_selection"]["position"]) > 0, promoted
+                wait_for(lambda: fixture.completed_observation(store, "message"), "immutable original receipt continuation")
+                assert fixture.read_result(store, "message") == b"original answer"
+                assert len(endpoint.requests) == 2, endpoint.requests
+                continuation = json.loads(endpoint.requests[1])
+                outputs = [item for item in continuation["input"] if item.get("type") == "function_call_output"]
+                assert len(outputs) == 1 and outputs[0]["call_id"] == f"{name}-call", outputs
+                receipt = outputs[0]["output"]
+                assert json.loads(receipt) == {"action": identity, "execution": "background", "accepted": True}, outputs
+                assert "native-final-" not in receipt
+                if name == "approval":
+                    assert not (workspace / "launches").exists()
+                    current = command("session", "inspect", "--store", store, "--session", session)
+                    assert current["work"]["latest_outcome"]["code"] == "completed" and current["work"]["first_action"] == identity, current
+                    assert any(item["turn"] == current["work"]["turn"] and item["outcome"] == "completed" for item in current["recent_messages"]), current
+                    assert [item["action"] for item in current["actionable_permissions"]] == [identity], current
+                    allow(case, store, "allow", session, identity)
+                    wait_for(lambda: (workspace / "ready").exists(), "approval after original Turn closed")
+                    pid = int((workspace / "launches").read_text())
+                assert process_exists(pid)
+                assert (workspace / "launches").read_text() == f"{pid}\n"
+                replay = command("request", "recover", "--store", store, "--record", case / "promote.json", "--kind", "action-background")
+                assert replay["answer"]["replayed"] is True and replay["answer"]["action_selection"] == answer["action_selection"], replay
+                foreign = configure(case, store, "foreign-configure", workspace=workspace)
+                refused = command("action", "background", "--store", store, "--session", foreign, "--action", identity, "--key", "foreign", "--record", case / "foreign.json", expect=3)
+                assert refused["answer"]["status"] == "rejected" and refused["answer"]["code"] == "target_mismatch", refused
+            gate.assert_held()
+            assert (workspace / "launches").read_text() == f"{pid}\n" and process_exists(pid)
+            if name == "stopped":
+                stopped = command("session", "stop", "--store", store, "--session", session, "--key", "stop", "--record", case / "stop.json")
+                assert stopped["answer"]["status"] == "accepted", stopped
+            else:
+                gate.release()
+            first = wait_for(
+                lambda: (value if (value := command("action", "read", "--store", store, "--session", session, "--action", identity))["state"] == "resolved" else None),
+                "explicit sole final Resolution",
+            )
+            wait_for(lambda: not process_exists(pid), "exact producer PID retired")
+            assert (workspace / "launches").read_text() == f"{pid}\n"
+            assert fixture.read_action(store, session, identity, "arguments") == arguments.encode()
+            metadata = {key: first["final"][key] for key in ("position", "code", "content")}
+            assert metadata["code"] == ("cancelled" if name == "stopped" else "succeeded"), metadata
+            page, assembled = first, bytearray()
+            while True:
+                assert {key: page["final"][key] for key in metadata} == metadata
+                window = page["final"]["window"]
+                chunk = window["text"].encode()
+                assert int(window["offset"]) == len(assembled) and int(window["next"]) == len(assembled) + len(chunk), window
+                assert len(chunk) <= 4096 and (chunk or not window["more"]), window
+                assembled.extend(chunk)
+                if not window["more"]:
+                    break
+                page = command("action", "read", "--store", store, "--session", session, "--action", identity, "--offset", window["next"])
+            domain = b"rui/content/v1"
+            digest = hashlib.sha256(len(domain).to_bytes(8, "big") + domain + assembled).hexdigest()
+            assert metadata["content"] == {"bytes": str(len(assembled)), "sha256": digest}, metadata
+            if name != "stopped":
+                assert (workspace / "expected-final").read_bytes() in assembled
+            assert command("action", "read", "--store", store, "--session", session, "--action", identity) == first
+            replay = command("request", "recover", "--store", store, "--record", case / "promote.json", "--kind", "action-background", expect=3 if capacity == 1 else 0)
+            assert replay["answer"]["replayed"] is True
+            if capacity == 1:
+                assert replay["answer"]["code"] == "background_unavailable", replay
+                wait_for(lambda: fixture.completed_observation(store, "message"), "unmodified foreground continuation")
+                outputs = [item for item in json.loads(endpoint.requests[1])["input"] if item.get("type") == "function_call_output"]
+                assert len(outputs) == 1 and outputs[0]["output"].encode() == assembled, outputs
+            else:
+                assert replay["answer"]["action_selection"] == promoted["answer"]["action_selection"], replay
+                assert outputs[0]["output"] == receipt
+            wait_for(lambda: execution_custody_idle(store, session), "producer cleanup before reuse")
+            assert len(endpoint.requests) == 2 and fixture.read_result(store, "message") == b"original answer"
+            evidence.update(action=identity, pid=pid, launches=1, final=metadata, requests=len(endpoint.requests))
+            outcomes.append(evidence)
+        finally:
+            failed = sys.exception() is not None
+            dispose_all(
+                gate.release,
+                lambda: fixture.command("session", "stop", "--store", store, "--session", session, "--key", "dispose", "--record", case / "dispose.json") if failed and session is not None and host.poll() is None else None,
+                lambda: fixture.wait_for(lambda: not process_exists(pid), "owned producer disposal", timeout=5) if pid is not None else None,
+                lambda: dispose_owner_case(host, endpoint, thread),
+                lambda: (case / "witness.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n"),
+                lambda: (case / "host.stderr").write_bytes(diagnostics.tail()) if failed and diagnostics is not None else None,
+                lambda: print("Native background Host diagnostics: " + diagnostics.tail()[-4096:].decode(errors="replace"), file=sys.stderr) if failed and diagnostics is not None else None,
+                lambda: retain_failure_state("native Bash background failure state", case) if failed else None,
+            )
+    return outcomes
+
+
+
+def prove_model_action_read(state, *, deadline=None):
+    from bash_fixture import dispose_owner_case
+
+    deadline = time.monotonic() + 180 if deadline is None else deadline
+    case = state / "model-action-read"
+    case.mkdir(mode=0o700)
+    workspace = case / "workspace"
+    workspace.mkdir()
+    store = case / "store"
+    gate = ReleaseGate(workspace / "producer-gate")
+    producer = (
+        "import os,pathlib,secrets; "
+        "f=open('launches','a'); f.write(str(os.getpid())+'\\n'); f.flush(); os.fsync(f.fileno()); f.close(); "
+        "pathlib.Path('ready.tmp').write_text(str(os.getpid())); os.replace('ready.tmp','ready'); "
+        "g=open('producer-gate','rb'); g.read(); g.close(); "
+        "value='model-read-'+secrets.token_hex(16)+' é😀\\n'; "
+        "f=open('expected-final','w'); f.write(value); f.flush(); os.fsync(f.fileno()); f.close(); "
+        "print(value,end='')"
+    )
+    responses = []
+    add_exchange(responses, "read-target", "exec " + shlex.join([sys.executable, "-c", producer]), answer="producer accepted", timeout_ms=30000)
+    endpoint = fixture.SuccessEndpoint(responses)
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    host = session = pid = None
+    evidence = {}
+
+    def command(*args, **options):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("model Action read body deadline")
+        return fixture.command(*args, timeout=min(15, remaining), **options)
+
+    def wait_for(observe, description):
+        return fixture.wait_for(observe, description, deadline=deadline)
+
+    def model_read(label, native):
+        arguments = json.dumps({"action": identity}, separators=(",", ":"))
+        with endpoint.lock:
+            endpoint.responses.extend([
+                fixture.sse_tool_calls(label + "-calls", [("read_action", label + "-call", arguments)]),
+                fixture.sse_answer(label + "-answer", label + "-reason", label + "-message", label + " observed")[0],
+            ])
+        fixture.message(case, store, label, session, "Inspect your Action with read_action")
+        wait_for(lambda: fixture.completed_observation(store, label), label + " model read continuation")
+        assert fixture.read_result(store, label) == (label + " observed").encode()
+        body = json.loads(endpoint.requests[-1])
+        outputs = [item for item in body["input"] if item.get("type") == "function_call_output" and item.get("call_id") == label + "-call"]
+        assert len(outputs) == 1, outputs
+        assert json.loads(outputs[0]["output"]) == native, outputs
+        evidence[label] = {"native": native, "provider_output": outputs[0]}
+
+    try:
+        thread.start()
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses", active_capacity=2)
+        configured = command(
+            "session", "configure", "--store", store, "--key", "configure", "--record", case / "configure.json",
+            "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol",
+            "--tools", "bash,read_action", "--permission-mode", "ask",
+        )
+        assert configured["answer"]["status"] == "accepted", configured
+        session = configured["context"]["session"]
+        fixture.message(case, store, "target", session, "Start the ordinary gated Bash target")
+        target = wait_for(lambda: action_for(store, session), "ordinary Bash awaiting approval")
+        identity = target["action"]
+        pending = command("action", "read", "--store", store, "--session", session, "--action", identity)
+        assert pending["state"] == "waiting_approval" and pending["final"] is None, pending
+        promoted = command("action", "background", "--store", store, "--session", session, "--action", identity, "--key", "promote", "--record", case / "promote.json")
+        assert promoted["answer"]["status"] == "accepted", promoted
+        wait_for(lambda: fixture.completed_observation(store, "target"), "original receipt continuation")
+        assert len(endpoint.requests) == 2 and not (workspace / "launches").exists()
+        first = json.loads(endpoint.requests[0])
+        offered = [tool["name"] for item in first["input"] if item.get("type") == "additional_tools" for tool in item["tools"]]
+        assert "read_action" in offered, first
+        pending = command("action", "read", "--store", store, "--session", session, "--action", identity)
+        model_read("pending-read", pending)
+        assert len(endpoint.requests) == 4 and not (workspace / "launches").exists()
+        allow(case, store, "allow", session, identity)
+        wait_for(lambda: (workspace / "ready").exists(), "fsynced single producer launch")
+        pid = int((workspace / "launches").read_text())
+        assert process_exists(pid)
+        gate.release()
+        final = wait_for(
+            lambda: value if (value := command("action", "read", "--store", store, "--session", session, "--action", identity))["state"] == "resolved" else None,
+            "sole target Resolution",
+        )
+        assert final["final"]["code"] == "succeeded", final
+        assert final["final"]["window"]["text"].encode() == b"Bash succeeded. Exit code: 0.\nstdout:\n" + (workspace / "expected-final").read_bytes()
+        model_read("final-read", final)
+        assert len(endpoint.requests) == 6
+        assert (workspace / "launches").read_text() == f"{pid}\n"
+        wait_for(lambda: not process_exists(pid), "exact producer retirement")
+        wait_for(lambda: execution_custody_idle(store, session), "model read and producer custody retirement")
+        evidence.update(action=identity, pid=pid, launches=1, requests=len(endpoint.requests))
+    finally:
+        failed = sys.exception() is not None
+        dispose_all(
+            gate.release,
+            lambda: command("session", "stop", "--store", store, "--session", session, "--key", "dispose", "--record", case / "dispose.json") if failed and session is not None and host is not None and host.poll() is None else None,
+            lambda: fixture.wait_for(lambda: not process_exists(pid), "owned model-read producer disposal", timeout=5) if pid is not None else None,
+            lambda: dispose_owner_case(host, endpoint, thread),
+            lambda: (case / "witness.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n"),
+            lambda: (case / "provider-requests.json").write_text(json.dumps([json.loads(body) for body in endpoint.requests], ensure_ascii=False, indent=2) + "\n"),
+        )
+    return evidence
+
+
 def main():
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-bash."))
     fixture_home = state / "home"
     fixture_home.mkdir()
     os.environ["HOME"] = str(fixture_home)
+    prove_native_background(state)
+    prove_model_action_read(state)
     prove_stdin(state)
     prove_reused_session(state)
     responses = []
@@ -827,8 +1092,6 @@ def main():
     )
     rollback_marker = state / "rollback-marker"
     add_exchange(responses, "rollback", f"printf x >> {rollback_marker}")
-    # The limit counts decoded UTF-8 bytes: each "é" is two command bytes,
-    # six JSON bytes and one character.
     command_limit = 120 * 1024
     over_limit_marker = state / "over-limit-marker"
     limit_prefix = f"printf at-limit; printf x >> {over_limit_marker} #"
@@ -948,8 +1211,6 @@ def main():
         "same-group-timeout",
         f"(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & child=$!; "
         f"{publish_pid(same_group_pid, '$child')}; wait \"$child\"",
-        # The budget only has to outlast launch and PID publication: under CPU
-        # load the shell can wait tens of ms for a CPU before it starts.
         timeout_ms=1000,
     )
     add_exchange(
@@ -1178,7 +1439,6 @@ def main():
         output = outputs[0]["output"]
         assert "Bash succeeded." in output and "stderr-mark" in output, output
         assert "�" in output and " bytes left out]" in output, output
-        # Only the truncated stream names its full file.
         assert "Full stdout:" in output and "Full stderr:" not in output, output
         first_read = fixture.command(
             "action", "read", "--store", store, "--session", session,
@@ -1260,8 +1520,6 @@ def main():
                                   models=2, inspection_limit=321 + 2)
         success_milestones = None
         host = fixture.start_host(store, endpoint_url, "--test-phase-trace", active_capacity=0)
-        # A zero-capacity Host with a provider endpoint runs no transport: its
-        # execution loop serves and the Host stays up.
         HostDiagnostics(host).wait("lifecycle_service_observation", timeout=5)
         assert host.poll() is None, host.returncode
         session = configure(state, store, "rollback-config")
@@ -1274,7 +1532,6 @@ def main():
         fixture.stop_host(host)
         host = fixture.start_host(store, endpoint_url, "--fault", "attempt-before-commit")
         allow(state, store, "rollback-allow", session, rollback_action["action"])
-        # The failed Attempt commit rolls back and fences; the Host exits.
         host.wait(timeout=10)
         assert host.returncode != 0, host.returncode
         assert not rollback_marker.exists()
@@ -1335,8 +1592,6 @@ def main():
         assert resolution(store, session) == "cancelled"
         assert not unattempted_marker.exists()
 
-        # stop --all stops each Session whose work is under way, each under
-        # its own generated request, and leaves idle and settled ones alone.
         waiting = []
         for name in ("stop-all-a", "stop-all-b"):
             waiter = configure(state, store, f"{name}-config")
@@ -1344,7 +1599,6 @@ def main():
             fixture.wait_for(lambda: action_for(store, waiter), f"{name} stoppable Action")
             waiting.append(waiter)
         idle = configure(state, store, "stop-all-idle-config")
-        # Generated captures go under this HOME, not the runner's.
         stop_all_env = {**os.environ, "HOME": str(state / "stop-all-home")}
         (state / "stop-all-home").mkdir()
         stopped_all = subprocess.run([str(fixture.RUI), "session", "stop", "--all", "--store", str(store)],
@@ -1361,8 +1615,6 @@ def main():
                                  env=stop_all_env, text=True, capture_output=True, timeout=15)
         assert (nothing.returncode, nothing.stdout) == (0, ""), nothing
         assert nothing.stderr == "\nrui: no Session in this Store has work to stop.\n", nothing
-        # A lost reply leaves each stop saved. Every Session is named before
-        # its own request line, which is what recovers its answer.
         lost = []
         for name in ("stop-all-lost", "stop-all-lost-2"):
             waiter = configure(state, store, f"{name}-config")
@@ -1371,7 +1623,6 @@ def main():
             lost.append(waiter)
         dropped = subprocess.run([str(fixture.RUI), "session", "stop", "--all", "--store", str(store), "--test-drop-reply", "after-commit"],
                                  env=stop_all_env, text=True, capture_output=True, timeout=15)
-        # The second Session is still stopped after the first reply was lost.
         assert dropped.returncode == 4 and dropped.stdout == "", dropped
         unconfirmed = re.findall(r"^rui: stopping (\S+)\n+request: (\S+) ", dropped.stderr, re.M)
         assert {waiter for waiter, _ in unconfirmed} == set(lost) and len(unconfirmed) == 2, dropped
@@ -1457,8 +1708,6 @@ def main():
         )
         milestones = HostDiagnostics(host)
         milestones.wait("prepared_before_handoff", action=str(pending["action"]))
-        # The exact native receipt plus an unreleased, empty FIFO holds the
-        # handoff; marker absence alone cannot establish that launch is barred.
         assert host.poll() is None
         before_launch_gate.assert_held()
         named_first_acquisition = sorted((store / "scratch").glob("bash-*-*.tmp"))
@@ -1918,7 +2167,6 @@ def main():
             allow(state, store, f"{name}-allow", session, action["action"])
             fixture.wait_for(lambda: resolution(store, session) == expected, f"{name} result")
             if name == "arguments":
-                # The OS refused the padded environment; the result names its sizes.
                 text = result_text(store, session)
                 assert "Bash was not started: the system refused its arguments as too large." in text, text
                 assert re.search(r"the environment is \d{7,} bytes in \d+ variables", text), text
@@ -2022,8 +2270,6 @@ def main():
             lambda: fixture.completed_observation(store, "service-message"),
             "service failure continuation",
         )
-        # The shell creates the file for >> before printf writes, so the failure
-        # shutdown can leave it empty. The single attempt row rules out a rerun.
         if service_marker.exists():
             assert service_marker.read_text() in ("", "x")
 
@@ -2112,8 +2358,6 @@ def main():
         host = fixture.start_host(store, endpoint_url, active_capacity=2)
         session = configure(state, store, "sibling-config", "bypass")
         fixture.message(state, store, "sibling-message", session, "execute")
-        # Observe the second sibling's durable result before releasing the first;
-        # command duration alone cannot establish canonical acceptance order.
         def second_sibling_settled():
             actions = list(action_rows_by_id(store, session).values())
             return len(actions) == 2 and {
@@ -2209,14 +2453,14 @@ def main():
             try:
                 cleanup()
             except BaseException as error:
-                cleanup_errors.append(error)  # Attempt every owned resource.
+                cleanup_errors.append(error)
         if completed and incoming_error is None and not cleanup_errors:
             shutil.rmtree(state)
         else:
             try:
                 retain_failure_state("Bash integration failure state", state)
             except Exception:
-                pass  # Reporting cannot replace the original failure.
+                pass
         if cleanup_errors:
             for error in cleanup_errors:
                 try:

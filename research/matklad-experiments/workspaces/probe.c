@@ -37,13 +37,11 @@ int main(int argc,char **argv) {
   sample(&initial_rss,&initial_fp);
   Workspace w={a,n,0,0}; Borrow old=enter(&w,1); enter(&w,2);
   int stale_rejected=!valid(&w,old); assert(stale_rejected);
-  // Negative control: stage-only validity would wrongly accept an old view after ABA.
   Borrow aba=enter(&w,1); enter(&w,2); enter(&w,1);
   int unsafe_stage_only_accepts=(w.stage==aba.stage); assert(unsafe_stage_only_accepts && !valid(&w,aba));
   uint64_t start=ns();
   for(int i=0;i<cycles;i++) { w.p=a; stage(&w,1,i); w.p=b; stage(&w,2,i); }
   uint64_t elapsed=ns()-start; sample(&after_rss,&after_fp);
-  // Return to idle: mappings retained, borrow invalidated, no stage data persists.
   enter(&w,0); sample(&end_rss,&end_fp);
   struct rusage r; assert(!getrusage(RUSAGE_SELF,&r));
   printf("{\"mode\":\"%s\",\"stage_bytes\":%zu,\"cycles\":%d,\"allocated_bytes\":%zu,\"base_rss\":%llu,\"base_footprint\":%llu,\"initial_rss\":%llu,\"initial_footprint\":%llu,\"after_rss\":%llu,\"after_footprint\":%llu,\"idle_rss\":%llu,\"idle_footprint\":%llu,\"peak_rss\":%ld,\"elapsed_ns\":%llu,\"processed_bytes\":%zu,\"stale_rejected\":%d,\"unsafe_stage_only_accepts\":%d,\"checksum\":%llu}\n",mode,n,cycles,shared?n:n*2,base_rss,base_fp,initial_rss,initial_fp,after_rss,after_fp,end_rss,end_fp,r.ru_maxrss,elapsed,n*2*(size_t)cycles,stale_rejected,unsafe_stage_only_accepts,checksum);

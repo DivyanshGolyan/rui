@@ -1,4 +1,3 @@
-// A real Host and a local, deterministic OpenAI-compatible provider; no credentials or network service.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { EventEmitter, once } from "node:events";
@@ -85,10 +84,8 @@ test("follow wakes for two local sends and makes no requests between them while 
 				if (page.delta === "full") {
 					idle = page.queued.count === "0" && ["idle", "finished", "failed", "stopped"].includes(page.work.state.kind);
 				}
-				// An unchanged exhausted page has no rows and retains the last full work state.
 				if (idle && (page.delta === "not_modified" || page.items.length === 0)) {
 					idlePages++;
-					// Let the iterator consume the reply before the observation reaches the test.
 					setImmediate(() => events.emit("idle"));
 				}
 			}
@@ -110,19 +107,17 @@ test("follow wakes for two local sends and makes no requests between them while 
 		});
 		await Promise.race([firstIdle, unexpectedEnd]);
 		const initialPages = pages;
-		await sleep(600); // Observation window: longer than the initial 250 ms polling interval.
+		await sleep(600);
 		assert.equal(pages, initialPages, "initial idle follower must not poll");
 
 		for (let index = 1; index <= 2; index++) {
 			const answered = once(events, "answer", { signal: controller.signal });
 			const idle = once(events, "idle", { signal: controller.signal });
-			// Deliberately use a new handle, not the handle the follower belongs to.
 			await rui.getSession(session.id).send(`message ${index}`, { idempotencyKey: `feed:message:${index}` });
-			// An empty dormant page is not proof that the follower yielded the answer.
 			await Promise.race([Promise.all([answered, idle]), unexpectedEnd]);
 			assert.deepEqual(texts, Array.from({ length: index }, (_, i) => `answer ${i + 1}`));
 			const atIdle = pages;
-			await sleep(2_200); // Also catches the old implementation's capped 2 s polling.
+			await sleep(2_200);
 			assert.equal(pages, atIdle, "completed idle follower must not poll");
 		}
 		assert.deepEqual(texts, ["answer 1", "answer 2"]);

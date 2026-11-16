@@ -1,9 +1,3 @@
-//! A call's arguments as the server receives them (D62). The model fills in
-//! the saved schema, which carries `rui_call_description`; the server is
-//! sent only the fields its own schema lists, and the description stays
-//! with Rui for the conversation line.
-//!
-//! A functional core: checked JSON in, bytes out.
 const std = @import("std");
 const document = @import("document.zig");
 const shape = @import("shape.zig");
@@ -11,15 +5,9 @@ const json = @import("../codecs/json.zig");
 const codec_abi = @import("../codec_abi.zig");
 
 pub const Split = struct {
-    /// The `rui_call_description` string's contents as written, or null
-    /// when the model left it out, sent a non-string, or sent more than
-    /// `shape.description_max_bytes` decoded bytes (D143).
     description: ?[]const u8,
 };
 
-/// Writes `arguments`, a checked JSON object, keeping only the members
-/// whose key is a property of `input_schema`, the saved schema with the
-/// description property added. Members keep their order and spelling.
 pub fn writeForServer(writer: *std.Io.Writer, input_schema: []const u8, arguments: []const u8) std.Io.Writer.Error!Split {
     std.debug.assert(document.kind(arguments) == .object);
     const properties = document.member(input_schema, "properties");
@@ -42,10 +30,6 @@ pub fn writeForServer(writer: *std.Io.Writer, input_schema: []const u8, argument
     return split;
 }
 
-/// Finds the first valid root description without retaining the arguments.
-/// The range names raw string contents; at most 200 decoded bytes (and
-/// therefore at most 1200 raw bytes). Source and JSON errors propagate even
-/// after a description has been found.
 pub fn descriptionRange(source: anytype) !?codec_abi.Range {
     var reader: json.Reader = undefined;
     var capture: DescriptionCapture = .{};
@@ -85,8 +69,6 @@ fn description(value: []const u8) ?[]const u8 {
     return text;
 }
 
-/// Whether `properties` has a member whose key decodes the same as `key`,
-/// both as written; differently escaped spellings are one name.
 fn hasKey(properties: []const u8, key: []const u8) bool {
     var own = document.Members.init(properties);
     while (own.next()) |found| {
@@ -145,8 +127,6 @@ test "escaped names longer than any fixed buffer still match" {
     try std.testing.expectEqualStrings("{}", (try forServer(&buffer, other, "{\"" ++ escaped ++ "\":1}")).text);
 }
 
-// A source with no argument-sized allocation, also able to fail after a
-// valid description to check that extraction still consumes the document.
 const DescriptionSource = struct {
     bytes: []const u8,
     at: usize = 0,

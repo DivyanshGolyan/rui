@@ -1,5 +1,3 @@
-//! Tool set Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -10,6 +8,8 @@ const Store = store_core.Store;
 const command_domain = @import("../domain/command.zig");
 const historical_domain = @import("../domain/historical.zig");
 const store_testing = @import("../testing.zig");
+const TestingReader = store_testing.TestingReader;
+const TestingPage = store_testing.TestingPage;
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
 const submitTestMessage = store_testing.submitTestMessage;
@@ -63,7 +63,6 @@ test "loaded tools configure defaults equality membership and reachability" {
             try std.testing.expect(unreachable_set == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_unreachable, unreachable_set.rejected.code);
 
-            // Membership is checked against saved tools if tools is omitted.
             try update.key.set("loaded-saved-tools");
             update.configuration.tools.state = .omitted;
             update.configuration.loaded_tools = try .of(&.{"web_search"});
@@ -71,7 +70,6 @@ test "loaded tools configure defaults equality membership and reachability" {
             try std.testing.expect(saved_outside == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_not_in_tools, saved_outside.rejected.code);
 
-            // An omitted loaded list continues to follow tools after equality.
             try update.key.set("loaded-follow-tools");
             update.configuration.tools = try .of(&.{ "bash", "web_search" });
             update.configuration.loaded_tools.state = .omitted;
@@ -79,7 +77,6 @@ test "loaded tools configure defaults equality membership and reachability" {
             try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL AND revision=3", .{session.slice()}));
 
-            // Explicit equality is also accepted on create, including empty sets.
             var equal = try completeConfiguration("loaded-create-equal", "", workspace, "model-a");
             equal.configuration.tools = try .of(&.{"bash"});
             equal.configuration.loaded_tools = try .of(&.{"bash"});
@@ -105,7 +102,6 @@ test "loaded tools preserve and intersect a saved subset through the tool set" {
             var storage: Store = undefined;
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            // The production tool set now makes strict loaded subsets reachable.
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var initial = try completeConfiguration("loaded-subset-create", "", workspace, "model-a");
@@ -117,7 +113,6 @@ test "loaded tools preserve and intersect a saved subset through the tool set" {
             const loaded_id = try store_testing.queryU64(&storage, "SELECT loaded_tool_set_id FROM session WHERE session_ref=?1", .{session.slice()});
             try std.testing.expect(loaded_id > 0);
 
-            // An unrelated update must preserve the saved set id.
             var update: wire_request.ConfigureCommand = .{};
             try update.session.set(session.slice());
             try update.key.set("loaded-subset-label");
@@ -133,7 +128,6 @@ test "loaded tools preserve and intersect a saved subset through the tool set" {
                 "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='find_tools'", .{session.slice()}));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT member_count FROM session s JOIN tool_set t ON t.tool_set_id=s.loaded_tool_set_id WHERE s.session_ref=?1", .{session.slice()}));
 
-            // Re-adding a configured tool does not implicitly load it.
             try update.key.set("loaded-subset-grow-tools");
             update.configuration.tools = try .of(&.{ "bash", "find_tools", "web_search" });
             try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
@@ -145,14 +139,11 @@ test "loaded tools preserve and intersect a saved subset through the tool set" {
             try std.testing.expect(unreachable_set == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_unreachable, unreachable_set.rejected.code);
 
-            // Intersection with an empty tools set is equality, not an
-            // unreachable subset, and normalizes to NULL.
             try update.key.set("loaded-subset-clear");
             update.configuration.tools = try .of(&.{});
             try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
 
-            // Explicit equality uses NULL, including when clearing both sets.
             try update.key.set("loaded-subset-equal");
             update.configuration.tools = try .of(&.{ "bash", "find_tools", "web_search" });
             update.configuration.loaded_tools = try .of(&.{ "bash", "find_tools", "web_search" });
@@ -174,7 +165,6 @@ const MembershipCase = struct {
     outcome: MembershipOutcome = .accepted,
     offered: bool = true,
     loaded: bool = true,
-    // Change current Session settings only after freezing the Operation.
     change_after_admission: bool = false,
     withdraw: bool = false,
 };
@@ -204,8 +194,8 @@ fn membershipCall(name: []const u8) TestingCall {
 fn expectMembershipRemovedOutput(storage: *Store, binding: store_core.AttemptBinding) !void {
     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try std.testing.expectEqual(binding.turn_id, continuation.turn_id);
-    var view: historical_domain.HistoricalView = undefined;
-    storage.openHistoricalView(continuation, &view);
+    var view: TestingPage = undefined;
+    view.open(storage, continuation);
     defer view.close();
     var position: u64 = 0;
     while (try view.nextEntry(position)) |entry| {
@@ -213,7 +203,7 @@ fn expectMembershipRemovedOutput(storage: *Store, binding: store_core.AttemptBin
         if (entry.kind == .tool_results) break;
     } else return error.MissingToolResults;
     const result = (try view.nextToolResult()).?;
-    var output: historical_domain.HistoricalReader = undefined;
+    var output: TestingReader = undefined;
     try view.openContent(result.output, &output);
     defer output.close();
     var buffer: [tool_defs.removed_tool_result.len + 1]u8 = undefined;
@@ -260,10 +250,8 @@ test "tool membership settlement covers builtin provider MCP withdrawn unknown a
                     var update: wire_request.ConfigureCommand = .{ .session = session };
                     try update.key.set("membership-current-only");
                     if (test_case.loaded) {
-                        // Withdrawal now must not narrow the frozen offer.
                         update.configuration.tools = try .of(discovery_only);
                     } else {
-                        // Loading now must not widen the frozen offer.
                         update.configuration.loaded_tools = try .of(&offered);
                     }
                     try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
@@ -302,7 +290,6 @@ test "tool membership settlement fences an offered nonbuiltin with a corrupt own
                 const session = try configureMembership(&storage, &.{"fetch_page"}, null);
                 try store_testing.submitTestMessage(&storage, &tmp, "membership-input", "membership-message", session.slice(), "classify");
                 const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-                // Keep the row's SQL shape valid while corrupting its owner.
                 try store_testing.exec(&storage, "UPDATE tool_record SET owner=?1,server='' WHERE name='fetch_page'", .{owner});
                 const calls = [_]TestingCall{membershipCall("fetch_page")};
                 try std.testing.expectError(error.CorruptStore, settleCallsForTesting(&storage, &tmp, binding, "membership-corrupt", &calls));
@@ -359,16 +346,12 @@ test "MCP missing tools refuse create update creating Message and start_agent wi
                 var storage: Store = undefined;
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                 defer storage.close() catch unreachable;
-                // Host listing/fallback belongs to mcp/offered's tests. The
-                // Store consumes only tool set records and configured names.
                 const records = comptime testingHostToolRecords(&.{.{ .name = "kept", .owner = .mcp, .server = "notes", .description = "Saved tool", .input_schema = "{\"type\":\"object\"}" }});
                 var digests: [records.len][32]u8 = undefined;
                 for (&records, &digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
                 var host_tool_set = tool_defs.built_in_tool_set;
                 if (mode == 2 or mode == 3) host_tool_set = .{ .records = &records, .digests = &digests };
                 if (mode == 3) {
-                    // Admit the unavailable server's copies through the same
-                    // saved-tool-set interface a restarted Host reads.
                     try storage.saveHostToolSet(&host_tool_set);
                     const saved = (try storage.readHostToolSet(memory.allocator())).?;
                     host_tool_set = saved.toolSet();
@@ -393,7 +376,6 @@ test "MCP missing tools refuse create update creating Message and start_agent wi
                 const parent = (try storage.configure(&create, .{})).accepted.session;
 
                 try create.key.set("mcp-missing-create");
-                // Captured specs hold canonical name order; skip known names.
                 create.configuration.tools = try .of(&.{ "bash", "lookup", "zz_absent" });
                 try check(try storage.configure(&create, .{}), unavailable, detail, false);
                 try check(try storage.configure(&create, .{}), unavailable, detail, true);
@@ -410,8 +392,6 @@ test "MCP missing tools refuse create update creating Message and start_agent wi
                 const unchanged = try storage.inspectSessionForTesting(parent.slice());
                 try expectToolSetNames(&storage, unchanged.tool_set_id, parent_names);
 
-                // Parent creation shares the tool set refusal before narrowing:
-                // never invent ownership for a name absent from every record.
                 var child: wire_request.ConfigureCommand = .{};
                 try child.key.set("mcp-missing-parent-create");
                 child.configuration = try testingAgentSpec(&.{"lookup"}, "ask");
@@ -425,7 +405,6 @@ test "MCP missing tools refuse create update creating Message and start_agent wi
                 try check(storage.submitMessageWithModel(&parent_message, null, .{}), unavailable, detail, false);
                 try check(storage.submitMessageWithModel(&parent_message, null, .{}), unavailable, detail, true);
 
-                // A known saved copy is admitted by every spec entry point.
                 if (mode == 3) {
                     try child.key.set("mcp-kept-parent-create");
                     child.configuration.tools = try .of(&.{"kept"});
@@ -446,7 +425,7 @@ test "MCP missing tools refuse create update creating Message and start_agent wi
                 const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 const call: TestingCall = .{ .item_id = "missing-child", .name = "start_agent", .encoded_call_id = "missing-child", .decoded_call_id = "missing-child", .encoded_arguments = "{}", .decoded_arguments = "{}" };
                 try settleCallsForTesting(&storage, &tmp, model, "mcp-child-calls", &.{call});
-                const action = (try storage.nextCoreWork()).?.action;
+                const action = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
                 var spec = try testingAgentSpec(if (mode == 3) &.{"kept"} else &.{"lookup"}, "ask");
                 const result = try storage.startAgent(action.binding, parent.slice(), "read", true, &spec, null, .{});
                 if (mode == 3) {
@@ -497,7 +476,6 @@ test "a model admission freezes an offer the Host's tool set no longer holds, an
             try submitTestMessage(&storage, &tmp, "stale-offer-input-one", "stale-offer-message-one", one.slice(), "one");
             try submitTestMessage(&storage, &tmp, "stale-offer-input-two", "stale-offer-message-two", two.slice(), "two");
             const offered = try store_testing.queryU64(&storage, "SELECT tool_set_id FROM session WHERE session_ref=?1", .{one.slice()});
-            // The Host withdraws one of the tools both Sessions offer.
             const kept = comptime testingHostToolRecords(&.{
                 .{ .name = "read_page", .owner = .mcp, .server = "docs", .read_only = true, .description = "Read a page.", .input_schema = "{\"type\":\"object\"}" },
             });
@@ -511,8 +489,6 @@ test "a model admission freezes an offer the Host's tool set no longer holds, an
             try storage.saveHostToolSet(&withdrawn);
             const sets = try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{});
 
-            // The first admission projects the offer, finds no saved set
-            // and saves one without the withdrawn tool.
             const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try std.testing.expectEqual(sets + 1, try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{}));
             const frozen = try store_testing.queryU64(&storage, "SELECT tool_set_id FROM model_operation WHERE operation_id=?1", .{first.operation_id});
@@ -520,7 +496,6 @@ test "a model admission freezes an offer the Host's tool set no longer holds, an
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member m JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE m.tool_set_id=?1 AND t.name='read_page'", .{frozen}));
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member m JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE m.tool_set_id=?1 AND t.name='write_page'", .{frozen}));
 
-            // The second finds the set the first saved.
             const second = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try std.testing.expectEqual(sets + 1, try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{}));
             try std.testing.expectEqual(frozen, try store_testing.queryU64(&storage, "SELECT tool_set_id FROM model_operation WHERE operation_id=?1", .{second.operation_id}));

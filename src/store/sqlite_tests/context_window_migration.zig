@@ -1,5 +1,3 @@
-//! Context window migration SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const std = @import("std");
 const platform = @import("../../store_path.zig");
@@ -35,7 +33,6 @@ test "frozen context window schema 69 migration pins legacy policy and rolls bac
     try sqlite.bindText(meta, 2, root);
     try sqlite.expectDone(meta);
     const step = store_schema.migrations[68 - store_schema.migration_baseline];
-    // Fail after the complete rebuild/backfill, at its new bounded CHECK.
     const bad = step.sqlite[0..step.sqlite.len].* ++ [_][:0]const u8{"UPDATE model_operation SET context_window=-1"};
     try std.testing.expectError(error.SqliteExecFailed, store_schema.migrate(std.testing.io, raw, root, 68, &.{.{ .from = 68, .sqlite = &bad, .mysql = &.{} }}, null));
     try std.testing.expectEqual(@as(u32, 68), try sqlite.pragmaInt(raw, "PRAGMA user_version"));

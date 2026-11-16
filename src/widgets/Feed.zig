@@ -1,11 +1,5 @@
-//! A keyed view over a caller-owned window. No text or layout storage is retained.
 const std = @import("std");
 
-/// Key is an integer, or a value with `pub fn order(Key, Key) std.math.Order`.
-/// Entries have unique, strictly increasing keys. An empty line slice is a hidden keyed entry; visible logical lines
-/// have positive wrapped-row counts at the current width.
-/// Slices are borrowed only during calls. Work is O(total logical lines), with
-/// constant scratch space, no allocations and no cached layout to invalidate.
 pub fn Feed(comptime Key: type) type {
     return struct {
         const Self = @This();
@@ -18,11 +12,9 @@ pub fn Feed(comptime Key: type) type {
         pub const Edges = struct { start: bool, end: bool };
         pub const Need = enum { none, above, below };
         pub const Visible = struct {
-            /// entries.len when empty or height is zero; otherwise a valid index.
             first: usize,
             line: u32 = 0,
             row: u32 = 0,
-            /// Following a short window puts blank rows above its first entry.
             pad: u32 = 0,
         };
         pub const Trim = struct { drop_front: usize = 0, drop_back: usize = 0 };
@@ -30,8 +22,6 @@ pub fn Feed(comptime Key: type) type {
         pub const bank_screens = 4;
 
         anchor: Anchor = .end,
-        /// Unspent scroll intent at an unknown loaded edge, negative above.
-        /// Bounded to bank_screens * height on every scroll/load transition.
         banked_rows: i64 = 0,
 
         pub fn following(self: Self) bool {
@@ -43,9 +33,6 @@ pub fn Feed(comptime Key: type) type {
             self.banked_rows = 0;
         }
 
-        /// An explicit anchor keeps its logical line and wrapped row on top,
-        /// even if less than a screen remains below it. Clamp only coordinates
-        /// that no longer exist. Reads never rewrite the stored anchor.
         pub fn visible(self: Self, entries: []const Entry, height: u32) Visible {
             if (height == 0) return .{ .first = entries.len };
             const layout = self.measure(entries, height);
@@ -54,8 +41,6 @@ pub fn Feed(comptime Key: type) type {
             return view;
         }
 
-        /// Keep three screens on either side. If both margins are short, spend
-        /// banked intent first, otherwise load the nearer edge (above wins ties).
         pub fn need(self: Self, entries: []const Entry, height: u32, edges: Edges) Need {
             if (height == 0) return .none;
             const layout = self.measure(entries, height);
@@ -70,9 +55,6 @@ pub fn Feed(comptime Key: type) type {
             return if (want_below) .below else .none;
         }
 
-        /// Negative rows move up. Loaded-edge overscroll is banked only when
-        /// that edge is not the true history edge. Reversing direction clears
-        /// the bank. Zero moves and zero-height views leave state untouched.
         pub fn scroll(self: *Self, entries: []const Entry, height: u32, rows: i32, edges: Edges) void {
             if (height == 0 or rows == 0) return;
             const same_direction = (rows < 0) == (self.banked_rows < 0);
@@ -80,20 +62,14 @@ pub fn Feed(comptime Key: type) type {
             self.move(entries, height, amount, edges);
         }
 
-        /// Call after prepending entries. Without banked upward intent the
-        /// keyed anchor already preserves the view and nothing is changed.
         pub fn prepend(self: *Self, entries: []const Entry, height: u32, edges: Edges) void {
             self.spend(entries, height, edges, .above);
         }
 
-        /// Call after appending entries. Following still follows; an explicit
-        /// anchor moves only to spend previously banked downward intent.
         pub fn append(self: *Self, entries: []const Entry, height: u32, edges: Edges) void {
             self.spend(entries, height, edges, .below);
         }
 
-        /// Call with the new dimensions after replacing an entry in place.
-        /// Only an anchor naming that key is clamped; following stays following.
         pub fn replace(self: *Self, entry: Entry) void {
             if (self.anchor == .at and order(self.anchor.at.key, entry.key) == .eq) {
                 const point = clamp(entry.lines, self.anchor.at.line, self.anchor.at.row);
@@ -102,11 +78,6 @@ pub fn Feed(comptime Key: type) type {
             }
         }
 
-        /// Best-effort entry-count bound, computed by the caller from its byte
-        /// budget. Drop whole entries from the farther side first (front wins
-        /// ties), preserving the view and the same margins need() loads. If that
-        /// region exceeds the bound, retain it rather than the bound. Apply both
-        /// counts together; no anchor adjustment is needed. Zero height drops none.
         pub fn trim(self: Self, entries: []const Entry, height: u32, max_entries: usize) Trim {
             var result: Trim = .{};
             if (height == 0 or entries.len <= max_entries) return result;
@@ -152,7 +123,7 @@ pub fn Feed(comptime Key: type) type {
             const true_edge = if (up) edges.start else edges.end;
             const extra: i64 = @intCast(if (true_edge) 0 else @min(amount - moved, bank_screens * @as(u64, height)));
             self.banked_rows = if (up) -extra else extra;
-            if (layout.total == 0) return; // Hidden entries cannot become a visual anchor.
+            if (layout.total == 0) return;
             if (!up and target >= bottom and edges.end) {
                 self.follow();
             } else {
@@ -188,8 +159,6 @@ pub fn Feed(comptime Key: type) type {
             return result;
         }
 
-        /// Ordinal proximity: first surviving successor, or last predecessor
-        /// if none. Preserve/clamp logical coordinates, never silently use .end.
         fn measure(self: Self, entries: []const Entry, height: u32) Layout {
             var total: u64 = 0;
             var top: ?u64 = null;
@@ -338,7 +307,7 @@ test "Feed resize preserves logical line within a long entry; replace clamps eac
     try std.testing.expectEqualDeep(F.Visible{ .first = 0, .line = 2, .row = 3 }, feed.visible(&.{narrow}, 8));
     try std.testing.expectEqualDeep(F.Visible{ .first = 0, .line = 2, .row = 1 }, feed.visible(&.{shorter}, 4));
     try std.testing.expectEqualDeep(F.Visible{ .first = 0 }, feed.visible(&.{tiny}, 4));
-    try std.testing.expectEqualDeep(anchored, feed.anchor); // Resize is a pure read.
+    try std.testing.expectEqualDeep(anchored, feed.anchor);
 
     const Case = struct { anchor: F.Anchor, replacement: F.Entry, expected: F.Anchor };
     const other: F.Anchor = .{ .at = .{ .key = 10, .line = 3, .row = 7 } };
@@ -367,12 +336,12 @@ test "Feed banks bounded overscroll, spends loaded rows, and clears reversal and
     const unknown: F.Edges = .{ .start = false, .end = false };
     const known: F.Edges = .{ .start = true, .end = true };
     var feed: F = .{};
-    feed.scroll(entries[2..3], 4, -7, unknown); // Move one loaded row; bank six.
+    feed.scroll(entries[2..3], 4, -7, unknown);
     try std.testing.expectEqualDeep(F.Anchor{ .at = .{ .key = 30 } }, feed.anchor);
     try std.testing.expectEqual(@as(i64, -6), feed.banked_rows);
-    feed.append(entries[2..], 4, unknown); // The wrong side cannot spend the bank.
+    feed.append(entries[2..], 4, unknown);
     try std.testing.expectEqual(@as(i64, -6), feed.banked_rows);
-    feed.prepend(entries[1..3], 4, unknown); // Five rows arrive; one remains banked.
+    feed.prepend(entries[1..3], 4, unknown);
     try std.testing.expectEqualDeep(F.Anchor{ .at = .{ .key = 20 } }, feed.anchor);
     try std.testing.expectEqual(@as(i64, -1), feed.banked_rows);
     feed.prepend(entries[0..3], 4, unknown);
@@ -380,13 +349,13 @@ test "Feed banks bounded overscroll, spends loaded rows, and clears reversal and
     try std.testing.expectEqual(@as(i64, 0), feed.banked_rows);
 
     feed.scroll(entries, 4, std.math.minInt(i32), unknown);
-    feed.scroll(entries, 4, -100, unknown); // Repeated keys cannot grow past four screens.
+    feed.scroll(entries, 4, -100, unknown);
     try std.testing.expectEqual(@as(i64, -16), feed.banked_rows);
-    feed.scroll(entries, 4, 2, unknown); // Opposite movement discards debt, not motion.
+    feed.scroll(entries, 4, 2, unknown);
     try std.testing.expectEqual(@as(i64, 0), feed.banked_rows);
     try std.testing.expectEqualDeep(F.Anchor{ .at = .{ .key = 10, .row = 2 } }, feed.anchor);
     feed.scroll(entries, 4, -100, unknown);
-    feed.prepend(entries, 4, known); // A read discovered the true start.
+    feed.prepend(entries, 4, known);
     try std.testing.expectEqual(@as(i64, 0), feed.banked_rows);
     try std.testing.expect(!feed.following());
 
@@ -411,7 +380,6 @@ test "Feed banks bounded overscroll, spends loaded rows, and clears reversal and
     try std.testing.expectEqual(@as(i64, 0), feed.banked_rows);
     try std.testing.expectEqualDeep(F.Anchor{ .at = .{ .key = 40, .row = 4 } }, feed.anchor);
 
-    // Even an empty window can retain bounded intent until a page arrives.
     feed = .{};
     feed.scroll(&.{}, 4, -7, unknown);
     try std.testing.expectEqual(@as(i64, -7), feed.banked_rows);
@@ -419,7 +387,6 @@ test "Feed banks bounded overscroll, spends loaded rows, and clears reversal and
     try std.testing.expectEqualDeep(F.Anchor{ .at = .{ .key = 30, .row = 4 } }, feed.anchor);
     try std.testing.expectEqual(@as(i64, 0), feed.banked_rows);
 
-    // Without debt, explicit anchors survive both edits; following follows append.
     feed = .{ .anchor = .{ .at = .{ .key = 20, .row = 2 } } };
     const anchor = feed.anchor;
     feed.prepend(entries, 4, known);

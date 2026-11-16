@@ -1,6 +1,3 @@
-//! The terminal outside the full-screen app: prompts read from the shell's
-//! own terminal, its modes, and validation of literal command-line text.
-//! The draft editor is DraftEditor, over libvaxis's TextArea.
 const std = @import("std");
 const termios = @import("posix");
 
@@ -19,9 +16,6 @@ pub fn getAttributes() std.posix.TermiosGetError!Attributes {
     };
 }
 
-/// Puts the terminal in prompt mode: bytes arrive one at a time, unechoed,
-/// with no line editing, flow control or signals (Ctrl+C is a byte). Returns
-/// the attributes `leavePromptMode` restores.
 fn enterPromptMode() !Attributes {
     const original = try getAttributes();
     var mode = original;
@@ -39,10 +33,6 @@ fn leavePromptMode(original: Attributes) error{TerminalRestoreFailed}!void {
     setAttributes(.FLUSH, original) catch return error.TerminalRestoreFailed;
 }
 
-/// One line from the terminal with nothing shown, for a secret. Enter ends
-/// it, Backspace edits it, Ctrl+C cancels it and Ctrl+D on an empty line is
-/// null. No line is returned unless the terminal's own
-/// settings were restored. The caller zeroes `buffer`.
 pub fn readSecretLine(io: std.Io, buffer: []u8, prompt: []const u8) !?[]const u8 {
     const original = try enterPromptMode();
     const result = secretLine(io, buffer, prompt);
@@ -51,8 +41,6 @@ pub fn readSecretLine(io: std.Io, buffer: []u8, prompt: []const u8) !?[]const u8
 }
 
 fn secretLine(io: std.Io, buffer: []u8, prompt: []const u8) !?[]const u8 {
-    // Prompt only once echo is off, so a key typed the moment the prompt
-    // shows is never echoed.
     try std.Io.File.stdout().writeStreamingAll(io, prompt);
     var chunk: [64]u8 = undefined;
     defer std.crypto.secureZero(u8, &chunk);
@@ -88,8 +76,6 @@ pub fn setAttributes(action: std.posix.TCSA, attributes: Attributes) std.posix.T
     };
 }
 
-/// Returns a slice borrowed from buffer until its caller next reuses it.
-/// The shell's canonical terminal handles editing, echo and signals.
 pub fn readLine(io: std.Io, buffer: []u8, prompt: []const u8) !?[]const u8 {
     try std.Io.File.stdout().writeStreamingAll(io, prompt);
     try freshChoice(io);
@@ -111,14 +97,12 @@ pub fn readLine(io: std.Io, buffer: []u8, prompt: []const u8) !?[]const u8 {
     }
 }
 
-/// Complete presentation, then discard pre-prompt input before consent.
 pub fn freshChoice(io: std.Io) !void {
     if (termios.tcdrain(1) != 0 or termios.tcflush(0, termios.TCIFLUSH) != 0) return error.TerminalFlushFailed;
     try testChoiceReady(io);
 }
 
 pub fn testChoiceReady(io: std.Io) !void {
-    // Borrowed fixture descriptor witnesses the completed input boundary.
     if (std.c.getenv("RUI_TEST_ACTION_READY_FD")) |text| {
         const fd = try std.fmt.parseInt(std.posix.fd_t, std.mem.span(text), 10);
         const ready: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };

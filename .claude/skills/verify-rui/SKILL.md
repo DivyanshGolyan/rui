@@ -15,8 +15,10 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
 
    ```sh
    git fetch origin && git worktree add --detach ../rui-verify-pin-SHORT FULLSHA
-   $V build FULLSHA --source ../rui-verify-pin-SHORT --pkg-dir "$ZIG_LOCAL_PKG_DIR"
+   $V build FULLSHA --source ../rui-verify-pin-SHORT --pkg-dir "${ZIG_LOCAL_PKG_DIR:-$PWD/zig-pkg}"
    ```
+
+   If packages are missing, run `src/fetch_dependencies.sh` for the shared package directory and run each pinned worktree’s `src/fetch_screen_dependencies.sh` before building it. Keep its `screen-emulator/zig-pkg` local to that worktree: symlinking it elsewhere breaks relative generator paths in Zig.
 
    The build refuses a dirty or mismatched checkout. Set `RUI_BUILD_JOBS` to a positive integer to control parallelism for both builds (default `2`; use `1` on constrained containers). It runs `zig build -Doptimize=ReleaseSafe` and copies `zig-out/bin` to `~/.cache/verify-rui/builds/SHA/bin`. It then runs `zig build screen-emulator`, which installs the libghostty-vt that decodes committed frames into `~/.cache/verify-rui/builds/SHA/screen`. It also writes `manifest.json` with the SHA, tree and binary and library sha256 values. A cold build takes about 5 minutes on an M-series Mac, plus about 5 for libghostty-vt. A line saying `failed command: sh ./src/build_transport.sh` in the log is normal when rc=0. Use `build FULLSHA --no-screen` to skip libghostty-vt: the manifest records `screen_library: null`. The tap, tapped `term`, `wait` and `frames` refuse such builds with one line; direct untapped tmux terminals still work. A build made before the library existed has none; rebuild it with `--force` to add it.
 
@@ -68,6 +70,35 @@ Runs each named state in `scripts/frames.json` on a plain PTY, with libghostty-v
 `--record` (or state `"record": true`) rebuilds first-size transitions from `frames-pty/STATE/output.{bin,jsonl}` after the run as an inline-PR GIF, plus optional MP4. Every state writes that timed byte log; replay stops at the first resize and sends no replies. Recordings use the same HTML renderer, deduplicate unchanged pictures, coalesce playback into 80 ms buckets (latest wins), bound frame delays to 60–1500 ms and hold the last frame for 2 s. Requires PNG rendering and ffmpeg; recordings refuse missing ffmpeg before allocating a run. The index displays GIFs when present.
 
 Prints `RUN/evidence/frames/` (or `--out`), with ordered `index.html`, `frames.json` results and failure captures. Cleans up unless `--keep`; PTYs always close. `expect`/`absent` apply to every size. These are L1 synthetic PTY layout/transition captures, not physical-input proof. See [scenario format and selection](features/frames.md), including mouse steps: emitted mouse bytes wait for changed committed cells; top-level `"repaint": false` declares an intentional no-op, and no emitted bytes skips the wait.
+
+## Prove a UI PR
+
+Set `HEAD` and `BASE` to full commit SHAs and select the changed screens' states from the [feature map](features/README.md).
+Build both revisions, then capture the same states at both sizes:
+
+```sh
+V=.claude/skills/verify-rui/scripts/verify-rui
+$V build "$HEAD" --pkg-dir "${ZIG_LOCAL_PKG_DIR:-$PWD/zig-pkg}"
+$V build "$BASE" --pkg-dir "${ZIG_LOCAL_PKG_DIR:-$PWD/zig-pkg}"
+$V frames "$HEAD" --before "$BASE" --only <states for the changed screens> --sizes 140x40,46x30 [--record]
+$V publish DIR --pr N --ssh rui-box
+```
+
+Replace the angle-bracket placeholder with comma-separated state names, omit the brackets around optional `--record`, and use the printed frames directory for `DIR`.
+In this container, prefix builds with `zb` and set `RUI_BUILD_JOBS=2`; fetch dependencies as described in Launch and `.agents/setup` if needed.
+Comparison captures live in `before/` and `after/`; `index.html` and `pairs.json` list changed pairs first and mark identical committed cells `same`.
+Both comparison recipes come from their pinned revisions through one reader (`git show SHA:.claude/skills/verify-rui/scripts/frames.json`), including HEAD. Historical HEAD captures ignore the checkout’s newer or uncommitted recipe, and states added after HEAD are unknown. Explicit `--scenario FILE` uses that recipe on both builds. A selected state absent from BASE is `new` with only an after capture. A failure under BASE’s own recipe still fails the comparison.
+Both builds must already exist; ordinary `frames` without `--before` keeps its single-build flow.
+The publisher selects changed/new pairs by default (`--all` includes same pairs and `--states a,b` filters states).
+`publish DIR --pr N [--ssh HOST]` attaches PNGs/GIFs on separate labelled lines with state/size alt text under `## Screens`, retaining the head/base/sizes/surface facts and other PR sections. It batches at the CLI's 50-file limit, reads the body back after each batch, and refuses missing embeds or partial uploads. Inspect the body before retrying a partial upload.
+The upload machine needs gh **2.104.0+** with `--attach`, a classic PAT or gh OAuth token, and repository push access. Without `--ssh` the same worker runs locally, for example on Divyansh's box.
+Cloud threads use `--ssh rui-box`: set up the alias with `bash /mnt/project-files/rui-dev/rui-box-up.sh THREAD-NAME` if needed. The publisher copies only selected media and its worker to a fresh remote directory, uploads and verifies there, and removes that directory. Credentials stay on the box.
+Cloud GitHub writes filter image embeds, and their proxy blocks the CLI's GraphQL lookup. Once images are present, **every later PR body edit must also run on the box**: copy the body file there, then use `ssh rui-box 'gh pr edit N -R OWNER/REPO --body-file /path/on/box/body.md'`. Container REST, open_pr.py and MCP body writes would break the screenshots again.
+Open the PR to obtain `N`, then publish before its next push so the synchronize check sees the images. PR Shape runs on opened/synchronize/reopened/ready_for_review, not body edits; if the opening run already failed, publish and manually rerun the failed jobs. The check reads the current body from GitHub.
+Show the before/after PNGs to the person who requested the work in your own conversation when possible.
+PR Shape accepts a media line only when, after leading whitespace, it starts with `![`, `<img` or `<video` and contains a `https://github.com/user-attachments/` URL outside fenced code and HTML comments. Inline-code examples, reference images, other image hosts, bare URLs and repository page links do not pass.
+A UI-path change that provably draws nothing different may instead carry a line `No screen change: <nonempty reason>`.
+Humans with browsers may also upload `github.com/user-attachments` images or videos.
 
 ## Doctor
 

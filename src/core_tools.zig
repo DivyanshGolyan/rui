@@ -1,7 +1,3 @@
-//! The core's own tools (D24): their record text and their argument
-//! checks. A call to one runs as a core command, never as an Action
-//! process; who runs a tool is derived from its name (D46).
-
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
@@ -19,14 +15,11 @@ pub const find_tools_description = @import("tool_record.zig").find_tools_descrip
 pub const find_tools_schema = @import("tool_record.zig").find_tools_schema;
 
 pub const find_tools_max_word_bytes = 64;
-/// Eight words of 64 bytes fit with room for JSON escapes and spacing; a
-/// larger payload is refused before it is read or parsed.
 pub const find_tools_max_argument_bytes = 4096;
 pub const find_tools_too_long = std.fmt.comptimePrint("words must fit arguments of at most {d} bytes", .{find_tools_max_argument_bytes});
 
 pub const FindTools = @import("find_tools_words.zig").FindTools;
 
-/// Checked when the core call runs, not when its model output settles.
 pub fn checkFindTools(arena: std.mem.Allocator, bytes: []const u8, out: *FindTools) error{OutOfMemory}!StartAgentCheck {
     if (bytes.len > find_tools_max_argument_bytes) return refused(find_tools_too_long);
     const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{ .duplicate_field_behavior = .@"error" }) catch |err| switch (err) {
@@ -42,7 +35,6 @@ pub fn checkFindTools(arena: std.mem.Allocator, bytes: []const u8, out: *FindToo
         if (piece.len == 0) continue;
         if (piece.len > find_tools_max_word_bytes) return refused("words must contain words of at most 64 bytes each");
         if (out.count == out.words.len) return refused("words must contain one to eight space-separated words");
-        // The shared streaming Matcher folds the query, not this parser.
         out.words[out.count] = piece;
         out.count += 1;
     }
@@ -50,7 +42,36 @@ pub fn checkFindTools(arena: std.mem.Allocator, bytes: []const u8, out: *FindToo
     return .accepted;
 }
 
-/// Read arguments are deliberately small; content is read in bounded windows.
+pub const read_action_max_argument_bytes = 4096;
+pub const ReadAction = struct { action: u64, offset: u64 = 0 };
+
+pub fn checkReadAction(arena: std.mem.Allocator, bytes: []const u8, out: *ReadAction) error{OutOfMemory}!StartAgentCheck {
+    if (bytes.len > read_action_max_argument_bytes) return refused("the arguments take more than 4096 bytes");
+    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{ .duplicate_field_behavior = .@"error" }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return refused("the arguments must be one well-formed JSON object without duplicate fields"),
+    };
+    if (root != .object) return refused("the arguments must be one JSON object");
+    if (unknownField(root.object, &.{ "action", "offset" })) |name| return refusedField(arena, name, "is not a read_action field");
+    const action = root.object.get("action") orelse return refused("action is required");
+    if (action != .string) return refused("action must be a positive decimal string");
+    const id = canonicalActionNumber(action.string) orelse return refused("action must be a canonical decimal string at most 9223372036854775807");
+    if (id == 0) return refused("action must be positive");
+    var offset: u64 = 0;
+    if (root.object.get("offset")) |cursor| {
+        if (cursor != .string) return refused("offset must be a nonnegative decimal string");
+        offset = canonicalActionNumber(cursor.string) orelse return refused("offset must be a canonical decimal string");
+        if (offset > @import("content_string.zig").max_bytes) return refused("offset exceeds the Content byte bound");
+    }
+    out.* = .{ .action = id, .offset = offset };
+    return .accepted;
+}
+
+fn canonicalActionNumber(text: []const u8) ?u64 {
+    if (text.len > 1 and text[0] == '0') return null;
+    return addressNumber(text);
+}
+
 pub const read_transcript_max_argument_bytes = 4096;
 
 pub const read_transcript_description = @import("tool_record.zig").read_transcript_description;
@@ -140,17 +161,11 @@ pub fn checkReadTranscript(arena: std.mem.Allocator, bytes: []const u8, out: *Re
     return .accepted;
 }
 
-/// The most bytes a `start_agent` call's arguments take: its task, at most
-/// `message_agent_max_text_bytes` once decoded and six times that escaped
-/// (`\u0001` for each byte), and its spec.
 pub const start_agent_max_argument_bytes = 6 * message_agent_max_text_bytes + 16 * 1024;
 
 pub const start_agent_description = @import("tool_record.zig").start_agent_description;
 pub const start_agent_schema = @import("tool_record.zig").start_agent_schema;
 
-/// A `start_agent` call's checked arguments: the task, whether the agent
-/// is attached, and its spec as a creating Configuration without the
-/// Workspace and provider, which come from the calling Session (D122, D221).
 pub const StartAgent = struct {
     task: []const u8,
     instructions: ?[]const u8 = null,
@@ -160,24 +175,16 @@ pub const StartAgent = struct {
 };
 
 pub const StartAgentCheck = union(enum) {
-    /// The call's `out` holds its checked arguments.
     accepted,
-    /// Why the call's arguments were refused, naming the field (D140).
     rejected: []const u8,
 };
 
-/// Checks a `start_agent` call's decoded arguments. Parsed values live in
-/// `arena`; `task` points into it.
-/// An accepted call fills `out`, whose Configuration, kilobytes, is
-/// written in place and never held in a frame.
 pub fn checkStartAgent(arena: std.mem.Allocator, bytes: []const u8, out: *StartAgent) error{OutOfMemory}!StartAgentCheck {
     return checkStartAgentWithPresets(arena, bytes, &.{}, out);
 }
 
-/// Resolve a named seed and its explicit overrides, then check one whole spec.
 pub fn checkStartAgentWithPresets(arena: std.mem.Allocator, bytes: []const u8, presets: []const Preset, out: *StartAgent) error{OutOfMemory}!StartAgentCheck {
     if (bytes.len > start_agent_max_argument_bytes) return refused(std.fmt.comptimePrint("the arguments take more than {d} bytes", .{start_agent_max_argument_bytes}));
-    // Bound nesting before allocating the arguments DOM.
     var scanner = std.json.Scanner.initCompleteInput(arena, bytes);
     defer scanner.deinit();
     try scanner.ensureTotalStackCapacity(protocol.max_json_depth);
@@ -239,15 +246,12 @@ pub fn checkStartAgentWithPresets(arena: std.mem.Allocator, bytes: []const u8, p
     return .accepted;
 }
 
-/// Applies creation admission to the shared protocol parser for launch presets
-/// and creation seeds. Content borrows `arena` through Store admission.
 pub fn parseAgentSpec(arena: std.mem.Allocator, spec: std.json.ObjectMap, configuration: *wire_request.Configuration) error{OutOfMemory}!StartAgentCheck {
     return parseAgentSpecFor(arena, spec, configuration, false);
 }
 
 fn parseAgentSpecFor(arena: std.mem.Allocator, spec: std.json.ObjectMap, configuration: *wire_request.Configuration, comptime inherits_parent: bool) error{OutOfMemory}!StartAgentCheck {
     if (spec.contains("parent")) return refused("spec.parent: parent is only valid on Session creation");
-    // D221 applies after preset resolution too: no preset can change these.
     if (inherits_parent) {
         if (spec.contains("workspace")) return refused("spec.workspace: an agent always works in your Workspace");
         if (spec.contains("provider")) return refused("spec.provider: an agent always uses your provider");
@@ -256,8 +260,6 @@ fn parseAgentSpecFor(arena: std.mem.Allocator, spec: std.json.ObjectMap, configu
         return .{ .rejected = reason };
     if (protocol.missingCreatingSetting(configuration, inherits_parent)) |name|
         return .{ .rejected = try std.fmt.allocPrint(arena, "spec.{s} is required", .{name}) };
-    // These are semantic admission checks, not a second spec grammar. The
-    // Store still owns tool set availability and parent permission/tool narrowing.
     if (configuration.provider.state == .value and std.meta.stringToEnum(protocol.Provider, configuration.provider.value.slice()) == null)
         return refused("spec.provider must be a provider name");
     if (configuration.workspace.state == .value and configuration.workspace.value.len == 0)
@@ -279,7 +281,6 @@ fn refused(comptime text: []const u8) StartAgentCheck {
     return .{ .rejected = text };
 }
 
-/// A bounded diagnostic, never a selector: keep a complete UTF-8 prefix.
 pub fn diagnosticName(name: []const u8) []const u8 {
     return utf8_validation.validPrefix(name[0..@min(name.len, max_preset_name_bytes)]);
 }
@@ -303,7 +304,6 @@ pub const MessageAgentProblem = @import("message_agent_arguments.zig").MessageAg
 pub const MessageAgentCheck = @import("message_agent_arguments.zig").MessageAgentCheck;
 pub const checkMessageAgent = @import("message_agent_arguments.zig").checkMessageAgent;
 
-/// A call's arguments already in memory, as the checks read them.
 pub const SliceSource = struct {
     bytes: []const u8,
     position: usize = 0,
@@ -399,7 +399,6 @@ test "a start_agent call's arguments carry a task and a whole spec without a pro
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":1,\"tools\":[\"bash\",\"bash\"],\"permissionMode\":\"ask\",\"label\":null}}", .refusal = "spec.tools must be a list of distinct tool names" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":0,\"tools\":[],\"permissionMode\":\"ask\",\"label\":null}}", .refusal = "spec.compactAt must be a positive number of tokens" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":1,\"tools\":[],\"permissionMode\":\"never\",\"label\":null}}", .refusal = "spec.permissionMode must be ask or bypass" },
-        // D221: a child inherits both, so a spec naming either is refused.
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"workspace\":\"/\"}}", .refusal = "spec.workspace: an agent always works in your Workspace" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"provider\":\"codex\"}}", .refusal = "spec.provider: an agent always uses your provider" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"note\":1," ++ spec ++ "}", .refusal = "note is not a start_agent field" },
@@ -419,7 +418,6 @@ test "a start_agent call's arguments carry a task and a whole spec without a pro
             try std.testing.expect(start.attached);
             try std.testing.expectEqualStrings("gpt-6.1-sol", start.configuration.model.value.slice());
             try std.testing.expectEqualStrings("100000", start.configuration.compaction_trigger.value.slice());
-            // Sorted, as the Store's tool list requires.
             try std.testing.expectEqualStrings("bash start_agent", start.configuration.tools.names.slice());
             try std.testing.expect(start.configuration.workspace.state != .value and start.configuration.provider.state != .value and start.configuration.label.state != .value);
         }
@@ -433,7 +431,6 @@ test "a start_agent task at its bound is accepted however it is escaped, and one
         defer arena.deinit();
         var arguments: std.ArrayList(u8) = .empty;
         try arguments.appendSlice(arena.allocator(), "{\"task\":\"");
-        // Every byte takes the longest escape.
         for (0..length) |_| try arguments.appendSlice(arena.allocator(), "\\u0001");
         try arguments.appendSlice(arena.allocator(), "\"" ++ spec);
         try std.testing.expect(arguments.items.len <= start_agent_max_argument_bytes);
@@ -613,7 +610,6 @@ test "read_transcript arguments defaults filters addresses and every refusal" {
     @memset(oversized, ' ');
     const check = try checkReadTranscript(arena.allocator(), oversized, &read);
     try std.testing.expectEqualStrings("the arguments take more than 4096 bytes", check.rejected);
-    // Wire kind tags are the single vocabulary, including kinds introduced later.
     for (std.enums.values(protocol.ActivityItem.Kind)) |kind| {
         const bytes = try std.fmt.allocPrint(arena.allocator(), "{{\"kinds\":[\"{s}\"]}}", .{@tagName(kind)});
         try std.testing.expect(try checkReadTranscript(arena.allocator(), bytes, &read) == .accepted);
@@ -740,8 +736,6 @@ test "start_agent presets cannot supply provider or workspace even with override
         , .{})).object;
         var seeded = spec;
         try seeded.put(arena, field, .{ .string = if (std.mem.eql(u8, field, "provider")) "openai" else "/" });
-        // Configure creation may use these fields, but start_agent inherits
-        // them from its caller regardless of the source of the spec.
         try std.testing.expect(try parseAgentSpec(arena, seeded, configuration) == .accepted);
         const presets = [_]Preset{.{ .name = "review", .spec = seeded }};
         const null_override = try std.fmt.allocPrint(arena, ",\"spec\":{{\"{s}\":null}}", .{field});
@@ -797,8 +791,6 @@ test "skills model arguments separate invoke and reload without authority fields
     }) |invalid| try std.testing.expect(try checkSkill(allocator, invalid, &out) == .rejected);
 }
 
-// The exact same spec text crosses the model-tool and native request doors.
-// Independent expected names include both fields absent from the old tool schema.
 test "start_agent and configure parse the same plain agent spec into the same Configuration" {
     const spec =
         \\{"model":"custom","effort":null,"compactAt":1000,"tools":["web_search","start_agent"],"loadedTools":["web_search"],"permissionMode":"ask","outputReservation":123,"label":"one spec","instructions":"Follow this","outputSchema":{"type":"object","description":"caf\u00e9\/","state":"value","value":{},"bytes":"0","sha256":"not a reference"}}
@@ -858,4 +850,30 @@ test "start_agent spec schema covers every noninherited Session setting" {
             try std.testing.expect(properties.contains(entry.spec));
     }
     try std.testing.expectEqual(@import("session_settings.zig").entries.len - 2, properties.count());
+}
+
+test "read_action accepts only own-Session bounded canonical decimal arguments" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var read: ReadAction = undefined;
+    try std.testing.expect(try checkReadAction(allocator, "{\"action\":\"42\"}", &read) == .accepted);
+    try std.testing.expectEqual(ReadAction{ .action = 42 }, read);
+    try std.testing.expect(try checkReadAction(allocator, "{\"action\":\"9223372036854775807\",\"offset\":\"1073737728\"}", &read) == .accepted);
+    try std.testing.expectEqual(ReadAction{ .action = std.math.maxInt(i64), .offset = @import("content_string.zig").max_bytes }, read);
+    for ([_][]const u8{
+        "not JSON",                             "null",                                         "[]",                                        "{}",                                    "{\"action\":0}",                                       "{\"action\":null}",
+        "{\"action\":\"0\"}",                   "{\"action\":\"01\"}",                          "{\"action\":\"\"}",                         "{\"action\":\"+1\"}",                   "{\"action\":\"-1\"}",                                  "{\"action\":\"1.0\"}",
+        "{\"action\":\" 1\"}",                  "{\"action\":\"1a\"}",                          "{\"action\":\"9223372036854775808\"}",      "{\"action\":\"18446744073709551616\"}", "{\"action\":\"1\",\"offset\":0}",                      "{\"action\":\"1\",\"offset\":\"00\"}",
+        "{\"action\":\"1\",\"offset\":\"-1\"}", "{\"action\":\"1\",\"offset\":\"1073737729\"}", "{\"action\":\"1\",\"session\":\"k7m2qx\"}", "{\"action\":\"1\",\"action\":\"2\"}",   "{\"action\":\"1\",\"offset\":\"0\",\"offset\":\"0\"}",
+    }) |arguments| try std.testing.expect(try checkReadAction(allocator, arguments, &read) == .rejected);
+    const maximum = try allocator.alloc(u8, read_action_max_argument_bytes);
+    @memset(maximum, ' ');
+    const valid = "{\"action\":\"1\",\"offset\":\"0\"}";
+    @memcpy(maximum[0..valid.len], valid);
+    try std.testing.expect(try checkReadAction(allocator, maximum, &read) == .accepted);
+    const oversized = try allocator.alloc(u8, read_action_max_argument_bytes + 1);
+    @memset(oversized, ' ');
+    @memcpy(oversized[0..valid.len], valid);
+    try std.testing.expect(try checkReadAction(allocator, oversized, &read) == .rejected);
 }

@@ -1,17 +1,12 @@
-//! Slim a models.dev response without retaining its unread model metadata.
 const std = @import("std");
 const catalog = @import("model_catalog.zig");
 
 const Error = error{ InvalidCatalog, OutOfMemory };
 
-/// Scratch owns the returned entries and their IDs; release it after use.
-/// Only unique, valid IDs are copied out of the body. No JSON value tree.
 pub fn parse(scratch: std.mem.Allocator, body: []const u8) Error![]catalog.Entry {
     return parseRecords(false, scratch, body);
 }
 
-/// Generator-only metadata. Runtime catalog reads keep just `catalog.Entry`.
-/// Strings, including the ID, are owned by the supplied scratch allocator.
 pub const Generated = struct {
     model: catalog.Entry,
     kind: ?[]const u8 = null,
@@ -29,8 +24,6 @@ pub const Generated = struct {
     }
 };
 
-/// Use the same ID validation, precedence and ordering for generation, while
-/// retaining the type, family and text-modality facts omitted at runtime.
 pub fn parseForGeneration(scratch: std.mem.Allocator, body: []const u8) Error![]Generated {
     return parseRecords(true, scratch, body);
 }
@@ -112,8 +105,6 @@ fn parseRecords(comptime generation: bool, scratch: std.mem.Allocator, body: []c
     const entries = try scratch.alloc(Record(generation), models.count());
     var values = models.valueIterator();
     for (entries) |*entry| entry.* = values.next().?.*;
-    // IDs are unique: stability adds nothing. Block sort keeps a 16 KiB
-    // temporary on the execution stack; pdqsort uses bounded small frames.
     std.mem.sortUnstable(Record(generation), entries, {}, struct {
         fn lessThan(_: void, a: Record(generation), b: Record(generation)) bool {
             const left = if (generation) a.model.id else a.id;
@@ -165,7 +156,6 @@ const Parser = struct {
     }
 
     fn skip(self: *Parser) Error!void {
-        // skipValue requires a value, not an unexpected closing delimiter.
         const tag = self.scanner.peekNextTokenType() catch |err| return parseError(err);
         switch (tag) {
             .object_end, .array_end, .end_of_document => return error.InvalidCatalog,
@@ -299,8 +289,6 @@ const Parser = struct {
     }
 
     fn effortValues(self: *Parser) Error!catalog.Efforts {
-        // Values can precede type; collect recognized strings without assuming
-        // the shape of toggle or budget_tokens options we will ignore.
         const tag = self.scanner.peekNextTokenType() catch |err| return parseError(err);
         if (tag != .array_begin) {
             try self.skip();
@@ -462,7 +450,6 @@ test "models dev generation keeps chat metadata under the same provider preceden
 test "models dev generation classifies every text modality combination and releases failed metadata" {
     const scratch = std.testing.allocator;
     for ([_]?[]const u8{ null, "chat", "image", "embedding", "realtime", "speech", "transcription", "video", "reranking", "" }, 0..) |kind, at| {
-        // Only the absent/chat kind admits the fourth text-modality state.
         const expected = if (at < 2) [4]bool{ false, false, false, true } else [4]bool{ false, false, false, false };
         for (0..4) |modalities| {
             var body: std.Io.Writer.Allocating = .init(scratch);
@@ -495,7 +482,6 @@ test "models dev generation classifies every text modality combination and relea
         ,
         \\{"other":{"models":{"m":{"type":"image","family":"f"}}}}
     }) |body| try std.testing.expectError(error.InvalidCatalog, parseForGeneration(scratch, body));
-    // Generation's extra validation does not tighten runtime catalog reads.
     const runtime = try parse(scratch, "{\"openai\":{\"models\":{\"m\":{\"type\":[],\"family\":null,\"modalities\":42}}}}");
     defer scratch.free(runtime);
     defer for (runtime) |entry| scratch.free(entry.id);

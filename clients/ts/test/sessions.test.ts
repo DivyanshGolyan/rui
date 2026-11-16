@@ -1,4 +1,3 @@
-// Sessions against a real Rui, with the Host paused so no model call is made.
 import assert from "node:assert/strict";
 import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -27,7 +26,6 @@ test("create, list, send, update, interrupt and stop a Session", { skip }, async
 		const session = await rui.sessions.create(spec, { idempotencyKey: "chat:1" });
 		assert.match(session.id, /^[0-9a-z]{6}$/);
 
-		// A repeat of the same key returns the same Session; changed input conflicts.
 		assert.equal((await rui.sessions.create(spec, { idempotencyKey: "chat:1" })).id, session.id);
 		await assert.rejects(
 			rui.sessions.create({ ...spec, label: "other" }, { idempotencyKey: "chat:1" }),
@@ -46,7 +44,7 @@ test("create, list, send, update, interrupt and stop a Session", { skip }, async
 		await session.update({ label: null });
 		assert.equal((await rui.sessions.list())[0]?.label, null);
 
-		await session.interrupt(); // no model call is current: nothing is sent
+		await session.interrupt();
 		await session.stop();
 
 		await assert.rejects(
@@ -97,7 +95,7 @@ test("status reflects an idle Session and paused queued work", { skip }, async (
 			...idle, state: "pending", since: queued.since, pendingMessages: "1", label: "Queued work", effort: "high",
 		});
 		assert.match(queued.since, /^[1-9][0-9]*$/);
-		await session.interrupt(); // Queued input has no model target.
+		await session.interrupt();
 		assert.equal((await session.status()).pendingMessages, "1");
 	} finally {
 		await rui.close();
@@ -142,7 +140,6 @@ test("the feed lists entries, continues after a cursor, and reads long text", { 
 		for await (const entry of session.listActivity({ kinds: ["admission"], after: all[0]?.cursor as string })) rest.push(entry);
 		assert.deepEqual(rest.map((entry) => entry.cursor), [all[1]?.cursor]);
 
-		// Following waits for local writes when idle and ends when the consumer stops.
 		const followed = session.listActivity({ kinds: ["admission"], after: all[1]?.cursor as string, follow: true });
 		const next = followed.next();
 		await session.send("third", { idempotencyKey: "msg:c" });
@@ -162,7 +159,7 @@ test("an idle following feed ends when its signal aborts", { skip }, async () =>
 		const session = await rui.sessions.create(spec, { idempotencyKey: "chat:abort" });
 		const controller = new AbortController();
 		const followed = session.listActivity({ follow: true, signal: controller.signal });
-		const pending = followed.next(); // nothing will arrive
+		const pending = followed.next();
 		setTimeout(() => controller.abort(), 300);
 		const result = await Promise.race([pending, new Promise((resolve) => setTimeout(() => resolve("hung"), 5_000))]);
 		assert.deepEqual(result, { value: undefined, done: true });

@@ -1,9 +1,3 @@
-"""Isolated TLS-byte relay: shared directional rate and per-chunk forwarding delay.
-
-TCP endpoints acknowledge locally. This is not packet-level RTT/loss/congestion
-emulation. Each direction shares a 256-chunk budget plus one pending read per connection
-and asyncio buffers.
-"""
 import asyncio,errno,json,sys,time
 port,upstream,up_rate,down_rate,one_way_ms=map(int,sys.argv[1:])
 forwarded=[0,0];received=[0,0];next_time=[0.,0.];connections=0;active=0;maximum=0
@@ -28,7 +22,6 @@ async def forward(reader,writer,direction):
   if writer.can_write_eof():
    try:writer.write_eof()
    except OSError as error:
-    # Peer shutdown can win EOF forwarding after its complete response.
     if error.errno not in (errno.ENOTCONN,errno.EPIPE,errno.ECONNRESET):raise
  tasks=[asyncio.create_task(read()),asyncio.create_task(write())]
  try:await asyncio.gather(*tasks)

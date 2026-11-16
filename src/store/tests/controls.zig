@@ -1,5 +1,3 @@
-//! Controls Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -8,7 +6,7 @@ const Store = store_core.Store;
 const command_domain = @import("../domain/command.zig");
 const historical_domain = @import("../domain/historical.zig");
 const store_testing = @import("../testing.zig");
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const ModelInterruptionReply = command_domain.ModelInterruptionReply;
 const configureTestSession = store_testing.configureTestSession;
 const submitTestMessage = store_testing.submitTestMessage;
@@ -39,8 +37,6 @@ test "a control marks its durable acceptance while it holds the Store, only when
                 return .{ .control_trace = .{ .context = phases, .mark_fn = mark } };
             }
 
-            /// The last run of the entry point; a run before it, which a
-            /// network Store may repeat, marks no acceptance.
             fn expect(phases: *const Phases, durable: bool) !void {
                 const accepted = [_]store_core.ControlTracePhase{ .lock_acquired, .durable_acceptance, .store_complete };
                 const other = [_]store_core.ControlTracePhase{ .lock_acquired, .store_complete };
@@ -146,7 +142,7 @@ test "Session stop freezes its selection and excludes only the admitted prefix" 
             try std.testing.expectEqual(binding.turn_id, accepted.accepted.selection.selected_turn_id.?);
             try std.testing.expectEqual(@as(u64, 1), accepted.accepted.selection.admission_cutoff);
             try std.testing.expectEqual(binding.operation_id, accepted.accepted.interrupted_operation_id.?);
-            var view: HistoricalView = undefined;
+            var view: TestingPage = undefined;
             try std.testing.expectError(error.SupersededByControl, openCheckedView(&storage, binding, &view));
 
             const cancelled = (try store_testing.observeCommandForTesting(&storage, "message-a")).kind.message.?.queue.?;
@@ -256,7 +252,6 @@ test "idle Session stop excludes queued work but not later admissions" {
             const later = (try storage.admitNextModelAttempt(.{})).?;
             try std.testing.expectEqual(@as(u64, 1), later.permit.binding.turn_id);
 
-            // Replay before and after a real database reopen while newer work is live.
             for (0..2) |pass| {
                 if (pass == 1) {
                     try storage.close();
@@ -305,7 +300,7 @@ test "exact model interruption continues only with applicable pending input" {
             var interrupt = try completeModelInterruption("interrupt", session.slice(), binding);
             const accepted = storage.interruptModel(&interrupt, .{});
             try std.testing.expect(accepted == .accepted);
-            var view: HistoricalView = undefined;
+            var view: TestingPage = undefined;
             try std.testing.expectError(error.SupersededByControl, openCheckedView(&storage, binding, &view));
             const successor = (try storage.admitNextModelAttempt(.{})).?;
             try std.testing.expectEqual(binding.turn_id, successor.permit.binding.turn_id);
@@ -402,7 +397,6 @@ test "controls remove scheduled retries and replay without cancelling newer work
                 try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "temporary" }, .{ .retryable = .{
                     .waits_ms = .{ 60_000, 60_000, 60_000 },
                 } }, .{});
-                // Make the saved retry due without depending on wall-clock scheduling.
                 try store_testing.exec(&storage, "UPDATE model_operation SET retry_due_at_ms=1 WHERE resolution_code IS NULL", .{});
 
                 if (control == .none) {
@@ -472,8 +466,6 @@ test "accepted stop remains discoverable without a control hint" {
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "hintless-config");
             try submitTestMessage(&storage, &tmp, "hintless-file", "hintless-message", session.slice(), "work");
-            // The control generation moves only for a control, which is
-            // what lets the dispatch loop find a stop whose hint was lost.
             const before = storage.controlGeneration();
             var admitted = (try storage.admitNextModelAttempt(.{})).?;
             const binding = try admitted.permit.consume();

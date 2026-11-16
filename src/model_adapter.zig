@@ -21,9 +21,6 @@ const ScratchBudget = provider.ScratchBudget;
 const PreparedRequest = provider.PreparedRequest;
 pub const HistoryMemos = history_memo.Table;
 
-/// What `memos` remembers of each Session's last request, for the
-/// admission that starts its next one: that request's history read then
-/// rides the admission's commit (`store.HistoricalStart`).
 pub fn remembered(memos: *HistoryMemos) store.HistoricalStart.Remembered {
     return .{ .context = memos, .of = rememberedOf };
 }
@@ -45,13 +42,6 @@ test {
     _ = history_memo;
 }
 
-// The model adapter prepares requests through the Session's codec and
-// interprets answers. Credentials and the fields they write belong to the
-// sign-in sources (`providers.zig`). The Host owns only effect scheduling and
-// the provider transport owns only the HTTP/2 Client and sealed byte lifetimes.
-
-/// Schema support is checked before acquiring validation metadata, preserving
-/// the original failure precedence when metadata acquisition would also fail.
 pub fn outputSchemaRejection(structured: bool, source_length: u64) ?output_decode.Rejected {
     if (!structured) return null;
     return .{
@@ -61,9 +51,6 @@ pub fn outputSchemaRejection(structured: bool, source_length: u64) ?output_decod
     };
 }
 
-/// Classifies an HTTP error body in `decode` through `codec`, the one the
-/// request was encoded with. Also fills `provider_failure` with what the
-/// body said, for every answer.
 pub fn interpretErrorResponse(decode: *output_decode.Decode, codec: protocol.Codec, io: std.Io, source: std.Io.File, length: u64, status: u16, provider_failure: *output_decode.ProviderFailure) execution.ErrorResponse {
     return output_decode.classify(decode, codec, io, source, length, status, provider_failure);
 }
@@ -73,7 +60,6 @@ var testing_decode: output_decode.Decode = undefined;
 test "HTTP 429 quota codes are permanent rather than retryable rate limits" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    // A spend limit at HTTP 429 is a quota too, and keeps its reset.
     const cases = [_]struct { []const u8, []const u8 }{
         .{ "usage_limit_reached", "provider_quota" },
         .{ "insufficient_quota", "provider_quota" },
@@ -200,8 +186,6 @@ test "provider interpretation preserves independently reported model evidence" {
             try std.testing.expectEqualStrings("malformed_provider_output", interpreted.rejected.code);
             try std.testing.expectEqual(.response, interpreted.rejected.location.stage);
         }
-        // Interpretation neither closes its borrowed source nor releases the
-        // caller's metadata charge, even on malformed response rejection.
         try std.testing.expect(used.load(.acquire) > 0);
         var first: [1]u8 = undefined;
         try std.testing.expectEqual(@as(usize, 1), try file.readPositionalAll(std.testing.io, &first, 0));
@@ -305,8 +289,6 @@ test "provider interpretation retries unknown stream failures without inferring 
 }
 
 test "provider interpretation keeps quota and policy stream failures permanent" {
-    // Each saves what the person can do about it; the report keeps the
-    // provider's own code.
     const cases = .{
         .{ "insufficient_quota", "provider_quota" },
         .{ "credit_balance_exhausted", "provider_quota" },
@@ -354,7 +336,6 @@ pub fn preparationFailureCode(err: anyerror) []const u8 {
 
 test "the Responses headers are lowercase tokens, header-safe, within bounds and name no Host or h2 field" {
     const affinities = [_][16]u8{ @splat(0x00), @splat(0xff), .{ 0x00, 0x01, 0x7f, 0x80, 0xab, 0xff, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x90, 0xa0, 0xf0 } };
-    // One Headers for every sample: each call writes over the last.
     var headers: codec_abi.Headers = .{ .count = 0 };
     for ([_]?codec_abi.Effort{null} ++ std.enums.values(codec_abi.Effort)) |effort| for (affinities) |affinity| {
         const settings: codec_abi.Settings = .{ .effort = effort, .session_affinity = affinity, .model_length = 0 };
@@ -380,16 +361,8 @@ pub const PreparationFaults = struct {
     write: bool = false,
     seal: bool = false,
     unlink: bool = false,
-    // Test-owned removal gate for the retained unlink-failure owner. When
-    // set alongside unlink, the retained owner uses this gate so the test
-    // can complete reclamation through the production path.
     unlink_removal: ?*const std.atomic.Value(bool) = null,
-    /// Fail the history memo read that would carry the copy past this many
-    /// span bytes, in place of that read. Earlier chunks already reached the
-    /// request, so the rewind must remove a partial span.
     memo_read_failure_after: ?u64 = null,
-    /// Give the codec, in place of this item, an opaque block that carries
-    /// text, which the Store never holds and the Responses codec declines.
     codec_declines: ?codec_abi.ItemKind = null,
 };
 
@@ -400,12 +373,8 @@ const RequestWriter = struct {
     offset: u64 = 0,
     charged: u64 = 0,
     fail_write: bool,
-    /// Accepted bytes not yet in the file. Every preparation advance flushes
-    /// before it yields or seals, so between advances the file holds `offset`.
-    /// Writes are positional, so the file position never matters.
     pending: [preparation_byte_allowance]u8 = undefined,
     pending_length: usize = 0,
-    /// The file closed at seal; the charge stays until `deinit`.
     closed: bool = false,
 
     pub fn write(self: *RequestWriter, bytes: []const u8) !void {
@@ -414,8 +383,6 @@ const RequestWriter = struct {
         const next_charged = std.math.add(u64, self.charged, bytes.len) catch
             return error.RequestLengthOverflow;
         if (!self.budget.allocate(bytes.len)) return error.RequestScratchExhausted;
-        // The complete slice is charged before the OS write. A partial/error
-        // write retains that full reservation until both file aliases close.
         self.charged = next_charged;
         if (self.fail_write and self.offset != 0) return error.InjectedRequestWriteFailure;
         if (bytes.len > self.pending.len - self.pending_length) try self.flush();
@@ -428,17 +395,12 @@ const RequestWriter = struct {
         self.offset = next_offset;
     }
 
-    /// Room for up to `length` bytes after the pending bytes, flushing them
-    /// first when fewer remain. The caller fills a prefix of it and appends
-    /// that prefix with `commit`, before any other write.
     fn reserve(self: *RequestWriter, length: usize) ![]u8 {
         const wanted = @min(length, self.pending.len);
         if (wanted > self.pending.len - self.pending_length) try self.flush();
         return self.pending[self.pending_length..][0..wanted];
     }
 
-    /// Append `count` bytes that the caller placed at the start of the slice
-    /// `reserve` returned, charged like written bytes.
     fn commit(self: *RequestWriter, count: usize) !void {
         std.debug.assert(count <= self.pending.len - self.pending_length);
         const next_offset = std.math.add(u64, self.offset, count) catch
@@ -458,11 +420,6 @@ const RequestWriter = struct {
         self.pending_length = 0;
     }
 
-    /// Continue writing at `offset`, which was flushed, discarding what
-    /// follows. Truncation proves those bytes gone and returns their charge
-    /// above `charged`. Without it they stay charged until both aliases
-    /// close; positional writes overwrite them, and sealing still requires
-    /// the file length to equal the request length.
     fn rewind(self: *RequestWriter, offset: u64, charged: u64) void {
         std.debug.assert(offset <= self.offset and charged <= self.charged);
         self.pending_length = 0;
@@ -472,7 +429,6 @@ const RequestWriter = struct {
         self.charged = charged;
     }
 
-    /// Close the sealed file, whose bytes the read-only alias keeps.
     fn close(self: *RequestWriter) void {
         std.debug.assert(self.pending_length == 0);
         self.file.close(self.io);
@@ -490,8 +446,7 @@ pub const preparation_item_allowance = 64;
 
 pub const PreparationProgress = union(enum) {
     pending,
-    /// The sealed request, in the preparation's own storage, where it stays
-    /// until its owner sends or releases it; the preparation is spent.
+    read,
     prepared: *PreparedRequest,
     failed: anyerror,
 };
@@ -504,8 +459,6 @@ pub const PreparationAdvanceStats = struct {
 
 const writePlainJsonRun = request_encoding.writePlainJsonRun;
 
-// The native source adapter preserves the exact-read contract: the cursor
-// selects a bounded refill size first, and any short canonical read fails.
 const HistoricalSource = struct {
     reader: *store.HistoricalReader,
 
@@ -524,8 +477,6 @@ const HistoricalSource = struct {
     }
 };
 
-// Shared wording, with JSON string contents streamed into each {} slot.
-// Fixtures use the same text but independently encode the supplied identities.
 const context_parts = blk: {
     @setEvalBranchQuota(10_000);
     var parts = std.mem.splitSequence(u8, @embedFile("model_instructions.txt"), "{}");
@@ -540,34 +491,24 @@ const peer_parts = blk: {
     break :blk result;
 };
 
-/// What one of an item's handles names: Rui's own bytes, Store content, or
-/// text the shell composes from Rui's wording.
 const Handle = union(enum) {
     text: []const u8,
     content: store.HistoricalContent,
-    /// Rui's runtime context, the Workspace, the Session's own address and
-    /// the saved baseline instructions.
     instructions,
-    /// Rui's wording of the current Message's peer sender.
     sender,
 };
 
-/// One stretch of a handle's text. A quoted stretch is the contents of a
-/// JSON string literal within that text, so it takes one more escape than
-/// the text around it.
 const Segment = struct {
     source: union(enum) { bytes: []const u8, content: store.HistoricalContent },
     quoted: bool = false,
 };
 
-/// The contract's copy of one of Rui's enums, which shares its names.
 fn contractValue(comptime T: type, value: anytype) T {
     return switch (value) {
         inline else => |tag| @field(T, @tagName(tag)),
     };
 }
 
-/// The contract's copy of a frozen effort.
 fn effortOf(effort: ?protocol.ReasoningEffort) ?codec_abi.Effort {
     return if (effort) |value| contractValue(codec_abi.Effort, value) else null;
 }
@@ -577,76 +518,43 @@ comptime {
 }
 
 pub const Preparation = struct {
-    /// Opened in place by `Store.openHistoricalView` before `init`; it never
-    /// moves.
-    view: store.HistoricalView = undefined,
-    /// Filled in place at the settings stage; valid once `state.stage` is
-    /// past `.settings`.
+    page: store.RequestPage = undefined,
     settings: store.HistoricalSettings = undefined,
     writer: RequestWriter = undefined,
     readonly: std.Io.File = undefined,
-    /// The content the emission reads; open exactly while
-    /// `state.emission.readsContent()`.
     reader: store.HistoricalReader = undefined,
-    /// The window each memo chunk is copied through.
     memo_window: [history_memo.chunk_bytes]u8 = undefined,
-    /// The Session's codec state, begun at the settings stage.
     encoder: codecs.Encoder = undefined,
-    /// The codec's state at the last history-element boundary: the initial
-    /// carry, then each element's own, or a history memo's.
     carry: codecs.Carry = undefined,
-    /// The current item and the pieces the codec wrote for it.
     item: codec_abi.ItemHeader = undefined,
     pieces: codec_abi.Pieces = undefined,
-    /// Built in place: the codec's headers at the settings stage, the rest
-    /// when the request seals.
     request: PreparedRequest = undefined,
-    /// The current item's handles; `item.handles` says which exist.
     handles: [codec_abi.max_handles]Handle = undefined,
-    /// The open output item's provider bag, written at its close.
     output_bag: ?store.HistoricalContent = undefined,
-    /// The current Message's peer sender.
     sender: protocol.Bounded(protocol.max_session_bytes) = undefined,
-    /// The offered tool the tools stage renders, as the Store saved it.
     tool: store.HistoricalTool = undefined,
     state: State,
 
-    /// What one preparation starts from, reset by `init` in one assignment.
-    /// The storage above stays in place and unwritten until its stage.
     const State = struct {
-        /// How the Host serves each provider. The ChatGPT route accepts no
-        /// structured output, so preparing a Session with an output schema
-        /// for it fails.
         routes: protocol.Routes,
         faults: PreparationFaults,
-        /// The Host's history memos, borrowed for the preparation's life.
-        /// Null rebuilds every request in full and keeps nothing.
         memos: ?*history_memo.Table,
-        /// Set once `init` holds the request file; cleared by `finish` and
-        /// `cancel`.
         active: bool = false,
-        /// Where the next item comes from.
         stage: Stage = .settings,
-        /// The current item's next piece, until its pieces are written.
         piece: ?u8 = null,
-        /// The content piece being written, by segment.
         content: ?ContentPiece = null,
         emission: Emission = .none,
-        /// The next tool the tools stage considers.
         history_position: u64 = 0,
-        /// The Operation boundary whose function tools are being declared,
-        /// whether its declaration has opened, and the stage after it.
         declaration: ?store.Declaration = null,
         declaration_open: bool = false,
         after_declaration: Stage = .history,
-        last_advance: PreparationAdvanceStats = .{ .work_bytes = 0, .work_items = 0, .request_bytes = 0 },
-        /// This request's history span, from its start.
+        allowance: Allowance = .{ .bytes = 0, .items = 0, .bytes_left = 0, .items_left = 0 },
         span: ?MemoSpan = null,
-        /// A fully rebuilt span being checked against the Session's seal.
         prefix_check: ?PrefixCheck = null,
-        /// The sealed span being kept as the Session's memo.
         memo_write: ?history_memo.Write = null,
     };
+
+    const Allowance = struct { bytes: usize, items: usize, bytes_left: usize, items_left: usize };
 
     const ContentPiece = struct {
         handle: u8,
@@ -655,37 +563,25 @@ pub const Preparation = struct {
     };
 
     const MemoSpan = struct {
-        /// Request offset of the span's first byte, flushed before a copy.
         start: u64,
         source: MemoSource = .rebuild,
-        /// The finished span, kept as the Session's memo once the request
-        /// seals.
         next: ?history_memo.Memo = null,
     };
 
     const PrefixCheck = struct {
-        /// The span's request offset, and how many of its bytes to hash.
         start: u64,
         length: u64,
         hashed: u64 = 0,
         hasher: prefix_seal.Sha256 = .init(.{}),
-        /// The Session's seal this span must begin with, until its bytes
-        /// are hashed.
         bound: ?store.PrefixSeal,
-        /// Whether the hashed span replaces the seal.
         record: bool,
         anchor: ?u64,
         admission_position: u64,
     };
 
-    /// Where the span's first bytes come from.
     const MemoSource = union(enum) {
-        /// The history is encoded in full from the Store.
         rebuild,
-        /// The Session's memo, being copied as the span's prefix.
         copying: MemoCopy,
-        /// The memo whose copied bytes matched its digest, and the digest
-        /// state after them, which a memo of this span continues.
         copied: history_memo.Prefix,
     };
 
@@ -693,9 +589,7 @@ pub const Preparation = struct {
         memo: history_memo.Memo,
         file: std.Io.File,
         copied: u64 = 0,
-        /// The writer's charge before the copy, restored by a rewind.
         charged: u64,
-        /// Digest state of the bytes copied so far.
         hasher: history_memo.Hasher = history_memo.newHasher(),
     };
 
@@ -705,15 +599,10 @@ pub const Preparation = struct {
         instructions,
         history_start,
         history,
-        /// The parts of the output item being written, then its close.
         output_parts,
         tool_results,
         covered_tool_results,
-        /// The boundary of the Operation being prepared, after the span.
         current_operation,
-        /// An Operation boundary's function tools, for a codec that
-        /// declares them in the history; `declared_tool` writes the one
-        /// `declarations` read before opening.
         declarations,
         declared_tool,
         compaction_trigger,
@@ -722,20 +611,18 @@ pub const Preparation = struct {
         text_format,
         request_end,
         end,
+        sealed,
         history_store,
         complete,
     };
 
     const Next = enum {
-        /// No item yet: the stage moved on or waits for allowance.
         pending,
-        /// `item` holds the next item.
         item,
         end,
     };
 
     const JsonEmission = struct {
-        /// Null when the bytes come from the preparation's reader.
         bytes: ?[]const u8 = null,
         cursor: request_encoding.JsonCursor = .{},
     };
@@ -748,7 +635,6 @@ pub const Preparation = struct {
         base64: request_encoding.Base64Cursor,
         history_memo,
 
-        /// Whether the emission reads the preparation's content reader.
         fn readsContent(self: *const Emission) bool {
             return switch (self.*) {
                 .none, .fixed, .history_memo => false,
@@ -758,10 +644,6 @@ pub const Preparation = struct {
         }
     };
 
-    /// Takes custody of `self.view`, which the caller opened in place with
-    /// `Store.openHistoricalView`, and closes it on error. Only `state` is
-    /// reset: a whole-struct literal would leave the open view undefined, and
-    /// the settings and windows need no bytes before their stages write them.
     pub fn init(
         self: *Preparation,
         io: std.Io,
@@ -773,7 +655,7 @@ pub const Preparation = struct {
         retained: *?named_scratch.Owner,
     ) !void {
         retained.* = null;
-        errdefer self.view.close();
+        errdefer self.page.close();
         self.state = .{ .routes = routes, .faults = faults, .memos = memos };
         if (faults.first_step) return error.InjectedFirstPreparationFailure;
         var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
@@ -781,8 +663,8 @@ pub const Preparation = struct {
         var name_buffer: [96]u8 = undefined;
         const name = try named_scratch.NumericName.@"provider-request".format(
             &name_buffer,
-            self.view.binding.operation_id,
-            self.view.binding.attempt_ordinal,
+            self.page.binding.operation_id,
+            self.page.binding.attempt_ordinal,
         );
         const file = try scratch.createFile(io, name, .{ .exclusive = true, .permissions = .fromMode(0o600) });
         const readonly = scratch.openFile(io, name, .{}) catch |err| {
@@ -808,32 +690,44 @@ pub const Preparation = struct {
         self.state.active = true;
     }
 
-    /// Write the request one item at a time: take the next item from the
-    /// view, have the Session's codec encode it, and write its pieces under
-    /// the allowance before the next item.
     pub fn advance(self: *Preparation, byte_allowance: usize, item_allowance: usize) PreparationProgress {
         std.debug.assert(self.state.active and byte_allowance != 0 and item_allowance != 0);
-        var bytes_left = byte_allowance;
-        var items_left = item_allowance;
-        defer self.state.last_advance = .{
-            .work_bytes = byte_allowance - bytes_left,
-            .work_items = item_allowance - items_left,
-            .request_bytes = self.writer.offset,
-        };
-        while (bytes_left != 0 and items_left != 0) {
+        self.state.allowance = .{ .bytes = byte_allowance, .items = item_allowance, .bytes_left = byte_allowance, .items_left = item_allowance };
+        return self.steps(false);
+    }
+
+    pub fn proceed(self: *Preparation) PreparationProgress {
+        std.debug.assert(self.state.active);
+        return self.steps(true);
+    }
+
+    fn steps(self: *Preparation, resumed: bool) PreparationProgress {
+        const allowance = &self.state.allowance;
+        var bytes_left = allowance.bytes_left;
+        var items_left = allowance.items_left;
+        var items_at = items_left;
+        var again = resumed;
+        defer {
+            allowance.bytes_left = bytes_left;
+            allowance.items_left = items_left;
+        }
+        while (again or (bytes_left != 0 and items_left != 0)) {
+            again = false;
+            items_at = items_left;
             if (self.state.emission != .none) {
-                const finished = self.advanceEmission(&bytes_left, &items_left) catch |err| return .{ .failed = err };
+                const finished = self.advanceEmission(&bytes_left, &items_left) catch |err| return stopped(err, &items_left, items_at);
                 if (!finished) return self.flushAndYield();
                 continue;
             }
             items_left -= 1;
-            if (self.nextPiece() catch |err| return .{ .failed = err }) continue;
-            // The sealed request is the source of the prefix check and the
-            // memo, read once under the allowance; a failure loses only the
-            // memo.
+            if (self.nextPiece() catch |err| return stopped(err, &items_left, items_at)) continue;
+            if (self.state.stage == .sealed) {
+                self.planSpan() catch |err| return stopped(err, &items_left, items_at);
+                self.state.stage = .history_store;
+            }
             if (self.state.stage == .history_store) {
                 if (self.state.prefix_check != null) {
-                    if (!(self.advancePrefixCheck(&bytes_left) catch |err| return .{ .failed = err })) continue;
+                    if (!(self.advancePrefixCheck(&bytes_left) catch |err| return stopped(err, &items_left, items_at))) continue;
                 }
                 const write = &(self.state.memo_write orelse return self.finish());
                 const memos = self.state.memos.?;
@@ -846,7 +740,7 @@ pub const Preparation = struct {
                 self.state.memo_write = null;
                 return self.finish();
             }
-            switch (self.nextItem(&bytes_left, &items_left) catch |err| return .{ .failed = err }) {
+            switch (self.nextItem(&bytes_left, &items_left) catch |err| return stopped(err, &items_left, items_at)) {
                 .pending => {},
                 .item => self.encodeItem() catch |err| return .{ .failed = err },
                 .end => self.seal() catch |err| return .{ .failed = err },
@@ -855,30 +749,29 @@ pub const Preparation = struct {
         return self.flushAndYield();
     }
 
-    /// Move to the request's next item, read from the view into `item` and
-    /// `handles`.
-    /// History decisions live here: which output a compaction base covers,
-    /// where the history memo resumes, and whether a compaction trigger ends
-    /// the input.
+    fn stopped(err: anyerror, items_left: *usize, items_at: usize) PreparationProgress {
+        if (err != error.PageRead) return .{ .failed = err };
+        items_left.* = items_at;
+        return .read;
+    }
+
     fn nextItem(self: *Preparation, bytes_left: *usize, items_left: *usize) !Next {
         switch (self.state.stage) {
             .settings => {
-                try self.view.settings(&self.settings);
+                try self.page.settings(&self.settings);
                 if (self.settings.output_schema != null and !providers.acceptsOutputSchema(protocol.routeOf(self.state.routes, self.settings.provider)))
                     return error.UnsupportedOutputSchemaRoute;
                 const codec = self.settings.codec;
-                self.view.expectTools(if (codecs.declaresTools(codec)) .declared else .all);
+                self.page.expectTools(if (codecs.declaresTools(codec)) .declared else .all);
                 self.carry = codecs.initialCarry(codec, effortOf(self.settings.starting_effort));
                 self.encoder = codecs.resumeFrom(self.carry);
                 codecs.requestHeaders(codec, self.loadSettingsItem(), &self.request.headers);
                 self.state.stage = .history_validation;
             },
             .history_validation => {
-                if (!try self.view.validateOutputsStep()) return .pending;
-                // The selected base must be readable before any request byte.
-                _ = try self.view.coverage();
+                if (!try self.page.validateOutputsStep()) return .pending;
+                _ = try self.page.coverage();
                 self.state.stage = .instructions;
-                // The settings item, loaded at the settings stage.
                 return .item;
             },
             .instructions => {
@@ -886,16 +779,14 @@ pub const Preparation = struct {
                 self.handles[0] = .instructions;
                 return self.loadItemHeader(.instructions, 0b1);
             },
-            // The history span starts here. A memo of this Session's
-            // previous span that this view contains replaces encoding that
-            // prefix; anything else rebuilds it from the Store.
             .history_start => {
+                const next = try self.startSpan();
                 self.state.stage = .history;
-                return self.startSpan();
+                return next;
             },
             .history => {
-                items_left.* += 1; // The semantic cursor charges discovery or parser work.
-                const entry = switch (try self.view.nextEntryStep(self.state.history_position, bytes_left, items_left)) {
+                items_left.* += 1;
+                const entry = switch (try self.page.nextEntryStep(self.state.history_position, bytes_left, items_left)) {
                     .pending => return .pending,
                     .ready => |entry| entry orelse {
                         try self.endSpan();
@@ -904,21 +795,15 @@ pub const Preparation = struct {
                     },
                 };
                 self.state.history_position = entry.position;
-                // The selected base replaces the output before its anchor;
-                // Codex keeps every host input it covers.
-                const anchor = (try self.view.coverage()).anchor;
+                const anchor = (try self.page.coverage()).anchor;
                 const covered = if (anchor) |position| entry.position < position else false;
                 switch (entry.kind) {
-                    // A skill a Message bound reads as its own user message
-                    // right after it, as Codex sends one.
                     .user, .instruction, .skill => {
                         var handles: u8 = 0;
                         if (entry.content) |content| {
                             self.handles[0] = .{ .content = content };
                             handles |= 0b01;
                         }
-                        // A peer Message's sender is the Host's recorded
-                        // fact, never text a peer wrote.
                         if (entry.sender) |sender| {
                             self.sender = sender;
                             self.handles[1] = .sender;
@@ -927,19 +812,14 @@ pub const Preparation = struct {
                         return self.loadItemHeader(.{ .message = if (entry.kind == .instruction) .instruction else .user }, handles);
                     },
                     .tool_results => self.state.stage = if (covered) .covered_tool_results else .tool_results,
-                    // A compaction base covers the boundaries before its
-                    // anchor with the output, so effort there is the top's.
                     .operation => if (!covered) {
                         if (entry.declares and codecs.declaresTools(self.settings.codec)) self.declare(.{ .tool_set_id = entry.tool_set_id, .position = entry.position }, .history);
-                        // Effort is model-specific configuration, not visible
-                        // conversation. Keep old tool declarations, but never
-                        // send another model's effort boundary to this one.
                         if (entry.requested_model.?.eql(self.settings.model.slice()))
                             return self.loadItemHeader(.{ .operation = effortOf(entry.effort) }, 0);
                     },
                     .provider_output => {
                         if (covered) return .pending;
-                        const output = try self.view.replayOutput(entry, self.settings.model.slice()) orelse return .pending;
+                        const output = try self.page.replayOutput(entry, self.settings.model.slice()) orelse return .pending;
                         self.output_bag = output.bag;
                         var handles: u8 = 0;
                         if (output.call) |call| {
@@ -956,7 +836,7 @@ pub const Preparation = struct {
                 }
             },
             .output_parts => {
-                if (try self.view.nextOutputPart()) |part| {
+                if (try self.page.nextOutputPart()) |part| {
                     var handles: u8 = 0;
                     if (part.text) |text| {
                         self.handles[0] = .{ .content = text };
@@ -977,7 +857,7 @@ pub const Preparation = struct {
                 return self.loadItemHeader(.output_close, 0b1);
             },
             .tool_results => {
-                const result = try self.view.nextToolResult() orelse {
+                const result = try self.page.nextToolResult() orelse {
                     self.state.stage = .history;
                     return .pending;
                 };
@@ -986,13 +866,11 @@ pub const Preparation = struct {
                 return self.loadItemHeader(.tool_result, 0b11);
             },
             .covered_tool_results => {
-                if (try self.view.nextToolResult() == null) self.state.stage = .history;
+                if (try self.page.nextToolResult() == null) self.state.stage = .history;
             },
-            // Where a later request's span places this Operation's
-            // boundary: after everything admitted before it.
             .current_operation => {
                 self.state.stage = .compaction_trigger;
-                if (codecs.declaresTools(self.settings.codec)) self.declare(self.view.currentDeclaration(), .compaction_trigger);
+                if (codecs.declaresTools(self.settings.codec)) self.declare(self.page.currentDeclaration(), .compaction_trigger);
                 return self.loadItemHeader(if (self.settings.effort_update)
                     .{ .effort_update = effortOf(self.settings.reasoning_effort) orelse return error.CorruptStore }
                 else
@@ -1000,7 +878,7 @@ pub const Preparation = struct {
             },
             .declarations => {
                 const declaration = &self.state.declaration.?;
-                if (try self.view.nextDeclaredTool(declaration, &self.tool)) {
+                if (try self.page.nextDeclaredTool(declaration, &self.tool)) {
                     if (self.state.declaration_open) return self.loadDeclaredTool();
                     self.state.declaration_open = true;
                     self.state.stage = .declared_tool;
@@ -1025,11 +903,9 @@ pub const Preparation = struct {
                 return self.loadItemHeader(.tools_start, 0);
             },
             .tool => {
-                // A codec that declares function tools in the history gets
-                // only the provider-run ones here.
                 if (codecs.declaresTools(self.settings.codec)) {
-                    if (try self.view.nextProviderTool(&self.tool)) return self.loadProviderTool();
-                } else if (try self.view.nextTool(&self.tool)) {
+                    if (try self.page.nextProviderTool(&self.tool)) return self.loadProviderTool();
+                } else if (try self.page.nextTool(&self.tool)) {
                     switch (self.tool.owner) {
                         .rui, .mcp => {
                             self.handles[0] = .{ .text = self.tool.name.slice() };
@@ -1053,13 +929,11 @@ pub const Preparation = struct {
                 return self.loadItemHeader(.request_end, 0);
             },
             .end => return .end,
-            .history_store, .complete => unreachable,
+            .sealed, .history_store, .complete => unreachable,
         }
         return .pending;
     }
 
-    /// Starts declaring `declaration`'s function tools after the boundary
-    /// item being loaded, then moves on to `after`.
     fn declare(self: *Preparation, declaration: store.Declaration, after: Stage) void {
         self.state.declaration = declaration;
         self.state.declaration_open = false;
@@ -1067,7 +941,6 @@ pub const Preparation = struct {
         self.state.stage = .declarations;
     }
 
-    /// The function tool `self.tool` holds, as a declaration's member.
     fn loadDeclaredTool(self: *Preparation) Next {
         self.handles[0] = .{ .text = self.tool.name.slice() };
         self.handles[1] = .{ .content = self.tool.description };
@@ -1075,24 +948,17 @@ pub const Preparation = struct {
         return self.loadItemHeader(.declared_tool, 0b111);
     }
 
-    /// The provider-run tool `self.tool` holds. Web search is the one
-    /// either OpenAI provider runs (`Provider.runsTool`).
     fn loadProviderTool(self: *Preparation) !Next {
         if (!self.tool.name.eql(tools.web_search_record.name)) return error.CorruptStore;
         return self.loadItemHeader(.web_search, 0);
     }
 
-    /// Load `item` into `self.item`, with the handles whose bits are set in
-    /// `handles`.
     fn loadItemHeader(self: *Preparation, item: codec_abi.Item, handles: u8) Next {
         self.item.item = item;
         self.item.handles = handles;
         return .item;
     }
 
-    /// Load the settings item into `self.item` in place. Its handle 0 is the
-    /// item's own copy of the model, so the codec reads and writes the same
-    /// bytes.
     fn loadSettingsItem(self: *Preparation) *const codec_abi.Settings {
         const model = self.settings.model.slice();
         const header = &self.item;
@@ -1109,11 +975,6 @@ pub const Preparation = struct {
         return settings;
     }
 
-    /// Encode `item`. Before a history element and history_end the codec
-    /// resumes from the last carry, so nothing else crosses a boundary and
-    /// a memo copy continues exactly as a rebuild does. Nothing is sent
-    /// before the request seals, so a codec declining the request discards
-    /// only request scratch.
     fn encodeItem(self: *Preparation) error{CodecDeclined}!void {
         const kind: codec_abi.ItemKind = self.item.item;
         if (kind.resumes()) self.encoder = codecs.resumeFrom(self.carry);
@@ -1124,22 +985,16 @@ pub const Preparation = struct {
         self.state.piece = 0;
     }
 
-    /// Never inlined: it runs once per request, and its memo and key copies
-    /// stay out of the frame every history item uses.
     noinline fn startSpan(self: *Preparation) !Next {
         self.state.span = .{ .start = self.writer.offset };
-        // A compaction's own floor drops history its base's memo holds.
-        if ((try self.view.coverage()).floor.own) return .pending;
+        if ((try self.page.coverage()).floor.own) return .pending;
         const memos = self.state.memos orelse return .pending;
         const memo = memos.held(self.settings.session.slice()) orelse return .pending;
         const key = try self.memoKey();
-        if (!memo.serves(&key, self.view.admissionPosition())) return .pending;
-        // A refusal invalidates the durable seal in its settlement. A memo
-        // encoded before it is not a prefix of the corrected history.
-        if (try self.view.prefixSeal() == null) return .pending;
+        if (!memo.serves(&key, self.page.admissionPosition())) return .pending;
+        if (try self.page.prefixSeal() == null) return .pending;
         try self.writer.flush();
         const file = memos.open(self.writer.io, &memo) orelse return .pending;
-        // A memo is the span's first bytes and records the codec's carry.
         self.state.span.?.source = .{ .copying = .{ .memo = memo, .file = file, .charged = self.writer.charged } };
         self.state.emission = .{ .history_memo = {} };
         return .pending;
@@ -1149,12 +1004,10 @@ pub const Preparation = struct {
         return .{
             .session = self.settings.session,
             .model = self.settings.model,
-            .anchor = (try self.view.coverage()).anchor,
+            .anchor = (try self.page.coverage()).anchor,
         };
     }
 
-    /// Read the memo's next bytes into `destination`. A short file or a
-    /// read failure loses the memo.
     fn readMemo(self: *Preparation, copy: *const MemoCopy, destination: []u8) !usize {
         if (self.state.faults.memo_read_failure_after) |after| {
             if (copy.copied + destination.len > after) return error.InjectedMemoReadFailure;
@@ -1164,8 +1017,6 @@ pub const Preparation = struct {
         return count;
     }
 
-    /// Copy the memo's bytes into the request, hashing as they go, one
-    /// item per chunk. Returns true once the copy ends, matched or lost.
     fn advanceMemoCopy(self: *Preparation, bytes_left: *usize, items_left: *usize) !bool {
         const copy = &self.state.span.?.source.copying;
         while (copy.copied != copy.memo.length) {
@@ -1185,8 +1036,6 @@ pub const Preparation = struct {
         return true;
     }
 
-    /// The copied bytes match the memo's digest: resume encoding exactly as
-    /// the producing request's encoder stood after its last entry.
     fn finishMemoCopy(self: *Preparation) void {
         const source = &self.state.span.?.source;
         const copy = source.copying;
@@ -1194,12 +1043,9 @@ pub const Preparation = struct {
         source.* = .{ .copied = .{ .memo = copy.memo, .hasher = copy.hasher } };
         self.state.history_position = copy.memo.history_position;
         self.carry = copy.memo.carry;
-        self.view.resumeToolGroups(copy.memo.tool_group_cursor);
+        self.page.resumeToolGroups(copy.memo.tool_group_cursor);
     }
 
-    /// A failed read or a digest mismatch loses only the memo that was
-    /// copied: discard the partial span and its charge, drop that memo and
-    /// rebuild the history from the Store.
     fn abandonMemoCopy(self: *Preparation) void {
         const span = &self.state.span.?;
         const copy = span.source.copying;
@@ -1209,21 +1055,17 @@ pub const Preparation = struct {
         self.state.memos.?.forget(self.writer.io, &copy.memo);
     }
 
-    /// The span ends after the last entry; keep it as this Session's next
-    /// memo once the request seals.
     fn endSpan(self: *Preparation) !void {
         const span = &(self.state.span orelse return);
-        // No later request shares a span under a compaction's own floor:
-        // it neither seals nor keeps a memo.
-        if ((try self.view.coverage()).floor.own) return;
+        if ((try self.page.coverage()).floor.own) return;
         span.next = .{
             .key = try self.memoKey(),
-            .admission_position = self.view.admissionPosition(),
+            .admission_position = self.page.admissionPosition(),
             .history_position = self.state.history_position,
-            .tool_group_cursor = self.view.toolGroupCursor(),
+            .tool_group_cursor = self.page.toolGroupCursor(),
             .view = view: {
-                const keys = self.view.resumeKeys();
-                break :view .{ .floor = keys.floor, .first_message = keys.first_message, .base = keys.base, .tool_set = self.view.currentDeclaration().tool_set_id };
+                const keys = self.page.resumeKeys();
+                break :view .{ .floor = keys.floor, .first_message = keys.first_message, .base = keys.base, .tool_set = self.page.currentDeclaration().tool_set_id };
             },
             .carry = self.carry,
             .length = self.writer.offset - span.start,
@@ -1231,7 +1073,6 @@ pub const Preparation = struct {
         };
     }
 
-    /// Bytes of this request's span that a memo supplied.
     fn memoCopied(self: *const Preparation) u64 {
         const span = self.state.span orelse return 0;
         return switch (span.source) {
@@ -1247,11 +1088,14 @@ pub const Preparation = struct {
     }
 
     pub fn advanceStats(self: *const Preparation) PreparationAdvanceStats {
-        return self.state.last_advance;
+        const allowance = &self.state.allowance;
+        return .{
+            .work_bytes = allowance.bytes - allowance.bytes_left,
+            .work_items = allowance.items - allowance.items_left,
+            .request_bytes = self.writer.offset,
+        };
     }
 
-    /// Start writing the next stretch of the current item's pieces.
-    /// Returns false once they are all written.
     fn nextPiece(self: *Preparation) !bool {
         while (true) {
             if (self.state.content) |*content| {
@@ -1279,7 +1123,7 @@ pub const Preparation = struct {
                         .content => |content| content,
                         else => unreachable,
                     };
-                    try self.view.openContent(content, &self.reader);
+                    try self.page.openContent(content, &self.reader);
                     self.state.emission = .{ .base64 = .{ .offset = 0, .carry_length = 0, .encoded_length = 0, .encoded_offset = 0 } };
                     return true;
                 },
@@ -1291,7 +1135,6 @@ pub const Preparation = struct {
         }
     }
 
-    /// The `index`th stretch of a handle's text, or null past its end.
     fn handleSegment(self: *const Preparation, handle: u8, index: u8) ?Segment {
         return switch (self.handles[handle]) {
             .text => |bytes| if (index == 0) .{ .source = .{ .bytes = bytes } } else null,
@@ -1300,7 +1143,6 @@ pub const Preparation = struct {
                 0 => .{ .source = .{ .bytes = context_parts[0] } },
                 1 => .{ .source = .{ .bytes = self.settings.workspace.slice() }, .quoted = true },
                 2 => .{ .source = .{ .bytes = context_parts[1] } },
-                // The originating Operation's ID, rebuilt on every Attempt.
                 3 => .{ .source = .{ .bytes = self.settings.session.slice() }, .quoted = true },
                 4 => .{ .source = .{ .bytes = context_parts[2] } },
                 5 => .{ .source = .{ .bytes = model_catalog.builtinInstructions(self.settings.model.slice()).bytes() } },
@@ -1333,7 +1175,7 @@ pub const Preparation = struct {
             },
             .content => |content| {
                 std.debug.assert(!segment.quoted);
-                try self.view.openContent(content, &self.reader);
+                try self.page.openContent(content, &self.reader);
                 self.state.emission = if (escapes == 0) .{ .raw = .{} } else .{ .json = .{} };
             },
         }
@@ -1361,8 +1203,6 @@ pub const Preparation = struct {
             },
             .history_memo => if (!try self.advanceMemoCopy(bytes_left, items_left)) return false,
         }
-        // Naming the void field stores only the tag; `.none` lowers to a
-        // memset of the whole union, replay validation window included.
         self.state.emission = .{ .none = {} };
         return true;
     }
@@ -1376,34 +1216,24 @@ pub const Preparation = struct {
         return json.cursor.advance(source, &self.writer, bytes_left);
     }
 
-    /// Never inlined: it runs once per request, and its memo bookkeeping stays
-    /// out of the frame every advance uses.
     noinline fn seal(self: *Preparation) !void {
         if (self.state.faults.seal) return error.InjectedRequestSealFailure;
         try self.writer.flush();
         if (try self.readonly.length(self.writer.io) != self.writer.offset) return error.RequestSealFailed;
         self.closeEmission();
-        // The writer closes before a memo file opens.
         self.writer.close();
-        self.state.stage = .history_store;
+        self.state.stage = .sealed;
+    }
+
+    noinline fn planSpan(self: *Preparation) !void {
         const span = &(self.state.span orelse return);
-        // The history_memo emission drains before the history's next item,
-        // so a copy has ended, matched or lost, before the request seals.
         std.debug.assert(span.source != .copying);
         const next = span.next orelse return;
-        // A memo copy is this Host's own earlier encoding; only a full
-        // rebuild can disagree with what an earlier Host sent.
         if (span.source == .rebuild) {
-            const stored = try self.view.prefixSeal();
+            const stored = try self.page.prefixSeal();
             const bound = if (stored) |held| if (held.binds(next.key.anchor, next.admission_position)) held else null else null;
-            // A seal from a later view, as when an earlier Operation is
-            // retried, covers more than this view can: it neither binds
-            // nor is replaced.
             const later = if (stored) |held| held.anchor == next.key.anchor and held.admission_position > next.admission_position else false;
             if (bound) |held| if (held.span_length > next.length) return error.EncodingDrift;
-            // The seal is replaced only once the span has doubled, so a
-            // Session's seal writes are logarithmic in its history and the
-            // seal always covers at least half of a rebuilt span.
             const record = if (bound) |held| next.length >= 2 * held.span_length and next.length != 0 else !later;
             if (!later) self.state.prefix_check = .{
                 .start = span.start,
@@ -1423,12 +1253,6 @@ pub const Preparation = struct {
         self.state.memo_write = memos.begin(self.writer.io, next, span.start, prefix);
     }
 
-    /// Hash the rebuilt span from the sealed request, one window per step
-    /// under the allowance, and hand each window on to the memo being
-    /// written. Its first bytes must match the Session's seal; a mismatch
-    /// fails the Attempt before anything is sent, because the provider
-    /// cached the earlier bytes, and the memo is never kept. Returns true
-    /// once the check, and any new seal, is done.
     fn advancePrefixCheck(self: *Preparation, bytes_left: *usize) !bool {
         const check = &self.state.prefix_check.?;
         while (true) {
@@ -1446,7 +1270,6 @@ pub const Preparation = struct {
                 return error.RequestSealFailed;
             check.hasher.update(window);
             if (self.state.memo_write) |*write| {
-                // A rebuilt span's memo is written from its first byte.
                 std.debug.assert(write.written == check.hashed);
                 history_memo.Table.appendChunk(self.writer.io, write, window) catch self.abandonMemoWrite();
             }
@@ -1454,13 +1277,14 @@ pub const Preparation = struct {
             bytes_left.* -= count;
         }
         if (check.record) {
+            var hasher = check.hasher;
             const next: store.PrefixSeal = .{
                 .anchor = check.anchor,
                 .admission_position = check.admission_position,
                 .span_length = check.length,
-                .digest = check.hasher.finalResult(),
+                .digest = hasher.finalResult(),
             };
-            try self.view.recordPrefixSeal(&next);
+            try self.page.recordPrefixSeal(&next);
         }
         self.state.prefix_check = null;
         return true;
@@ -1473,7 +1297,7 @@ pub const Preparation = struct {
     }
 
     fn finish(self: *Preparation) PreparationProgress {
-        self.view.close();
+        self.page.close();
         self.state.active = false;
         self.state.stage = .complete;
         self.request.file = self.readonly;
@@ -1493,33 +1317,24 @@ pub const Preparation = struct {
         };
         self.abandonMemoWrite();
         self.closeEmission();
-        self.view.close();
+        self.page.close();
         self.readonly.close(self.writer.io);
         self.writer.deinit();
         self.state.active = false;
     }
 
-    /// Preparation-local integrity check. Inspects the current production
-    /// preparation without mutating it. The legal checkpoint is a stable
-    /// point between synchronous advances, while the preparation remains
-    /// in its final storage under the existing single-owner discipline.
-    /// Must not be called after cancellation or completion: an inactive
-    /// preparation owns no request resources. While a sealed request's span
-    /// is kept as a memo the writer is closed and the view still open.
-    /// Reuses the view's reader count, borrowed-reference ownership, and
-    /// reader-active facts; no outstanding-reader registry is added.
     pub fn checkIntegrity(self: *Preparation, expected: store.AttemptBinding) !void {
         if (!self.state.active) return error.PreparationInactive;
-        if (!self.view.isActive()) return error.HistoricalViewInactive;
-        if (!self.view.bindingMatches(expected)) return error.PreparationBindingMismatch;
-        if (self.state.stage != .settings and !self.view.ownsSettings(&self.settings))
+        if (!self.page.isActive()) return error.RequestPageInactive;
+        if (!self.page.bindingMatches(expected)) return error.PreparationBindingMismatch;
+        if (self.state.stage != .settings and !self.page.ownsSettings(&self.settings))
             return error.PreparationForeignContent;
         var expected_readers: usize = 0;
         if (self.state.emission.readsContent()) {
             expected_readers = 1;
-            if (!self.reader.ownedBy(&self.view)) return error.PreparationForeignReader;
+            if (!self.reader.ownedBy(&self.page)) return error.PreparationForeignReader;
         }
-        if (self.view.outstandingReaders() != expected_readers) return error.PreparationReaderCountMismatch;
+        if (self.page.outstandingReaders() != expected_readers) return error.PreparationReaderCountMismatch;
     }
 
     fn closeEmission(self: *Preparation) void {
@@ -1564,9 +1379,6 @@ test "request writer charges exact growth and seals through a readonly descripto
 }
 
 test "request writer failure retains the full reservation until the owner releases" {
-    // The budget arithmetic test covers reserve/release totals; this drives
-    // the real RequestWriter failure seam with independently chosen input
-    // lengths on a nonzero unrelated baseline.
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var used = std.atomic.Value(u64).init(41);
@@ -1581,21 +1393,14 @@ test "request writer failure retains the full reservation until the owner releas
     var writer_owned = true;
     defer if (writer_owned) writer.deinit();
     try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
-    // Five bytes submit successfully from a zero offset.
     try writer.write("hello");
     try std.testing.expectEqual(@as(u64, 5), writer.offset);
     try std.testing.expectEqual(@as(u64, 5), writer.charged);
     try std.testing.expectEqual(@as(u64, 46), used.load(.acquire));
-    // Seven more bytes reserve the full slice, then fail after charging:
-    // the outstanding contribution is 12 reserved bytes, the successful
-    // offset stays 5, and only the owning cleanup path releases it.
     try std.testing.expectError(error.InjectedRequestWriteFailure, writer.write("bye-bye"));
     try std.testing.expectEqual(@as(u64, 5), writer.offset);
     try std.testing.expectEqual(@as(u64, 12), writer.charged);
     try std.testing.expectEqual(@as(u64, 53), used.load(.acquire));
-    // Crossing the remaining shared limit is rejected before either the
-    // injected write seam or the real file sees the slice. The successful
-    // offset, submitted reservation, and file length all stay unchanged.
     try std.testing.expectError(error.RequestScratchExhausted, writer.write(&@as([48]u8, @splat('x'))));
     try std.testing.expectEqual(@as(u64, 5), writer.offset);
     try std.testing.expectEqual(@as(u64, 12), writer.charged);
@@ -1669,7 +1474,7 @@ test "real preparation consumes the configured allowance across multiple advance
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    storage.openHistoricalView(binding, &preparation.view);
+    preparation.page.open(binding);
     try preparation.init(
         std.testing.io,
         root,
@@ -1685,13 +1490,14 @@ test "real preparation consumes the configured allowance across multiple advance
     while (true) {
         advances += 1;
         try std.testing.expect(advances <= preparationTestStepBound(expected.len));
-        const progress = preparation.advance(16, 2);
+        const progress = advanceTesting(&preparation, &storage, 16, 2);
         const stats = preparation.advanceStats();
         try std.testing.expect(stats.work_bytes <= 16);
         try std.testing.expect(stats.work_items <= 2);
         try std.testing.expect(stats.request_bytes >= last_request);
         last_request = stats.request_bytes;
         switch (progress) {
+            .read => unreachable,
             .pending => {},
             .prepared => |request| {
                 defer request.deinit(std.testing.io, preparation.writer.budget);
@@ -1835,7 +1641,7 @@ test "a peer Message leads with its recorded sender facts apart from its text" {
     try setup.submit("peer-seed", "peer-seed", peer.slice(), "send a report");
     const model = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
     try settleComposedForTesting(&setup, model, "peer-calls", .reasoning, "{\"type\":\"reasoning\",\"id\":\"peer-reasoning\",\"encrypted_content\":\"opaque\"}", &.{.{ .item_id = "peer-item", .call_id = "peer-call" }});
-    const action = (try setup.storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    const action = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
     var input: store.ActionExecutionInput = undefined;
     try setup.storage.readActionExecutionInput(.bash, action, &input);
     const handle = input.sender_handle;
@@ -1844,9 +1650,9 @@ test "a peer Message leads with its recorded sender facts apart from its text" {
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    setup.storage.openHistoricalView(try admitted.permit.consume(), &preparation.view);
+    preparation.page.open(try admitted.permit.consume());
     try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
-    const result = try drainPreparation(&preparation, 7, 3, 1 << 16);
+    const result = try drainPreparation(&preparation, &setup.storage, 7, 3, 1 << 16);
     defer std.testing.allocator.free(result.bytes);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
     defer parsed.deinit();
@@ -1868,8 +1674,8 @@ test "Codex affinity separates Sessions and Stores and survives reopening" {
     try setup.submit("message-a", "key-a", session_a.slice(), "same input");
     var admitted_a = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding_a = try admitted_a.permit.consume();
-    var view_a: store.HistoricalView = undefined;
-    setup.storage.openHistoricalView(binding_a, &view_a);
+    var view_a: store.testing.TestingPage = undefined;
+    view_a.open(&setup.storage, binding_a);
     var settings: store.HistoricalSettings = undefined;
     try view_a.settings(&settings);
     const affinity_a = settings.session_affinity;
@@ -1880,8 +1686,8 @@ test "Codex affinity separates Sessions and Stores and survives reopening" {
     try setup.submit("message-b", "key-b", session_b.slice(), "same input");
     var admitted_b = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding_b = try admitted_b.permit.consume();
-    var view_b: store.HistoricalView = undefined;
-    setup.storage.openHistoricalView(binding_b, &view_b);
+    var view_b: store.testing.TestingPage = undefined;
+    view_b.open(&setup.storage, binding_b);
     try view_b.settings(&settings);
     try std.testing.expect(!std.mem.eql(u8, &affinity_a, &settings.session_affinity));
     try std.testing.expectEqualStrings(session_b.slice(), settings.session.slice());
@@ -1891,8 +1697,8 @@ test "Codex affinity separates Sessions and Stores and survives reopening" {
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{setup.root});
     try setup.storage.open(std.testing.io, database, setup.root);
-    var reopened: store.HistoricalView = undefined;
-    setup.storage.openHistoricalView(binding_a, &reopened);
+    var reopened: store.testing.TestingPage = undefined;
+    reopened.open(&setup.storage, binding_a);
     try reopened.settings(&settings);
     try std.testing.expectEqual(affinity_a, settings.session_affinity);
     try std.testing.expectEqualStrings(session_a.slice(), settings.session.slice());
@@ -1904,8 +1710,8 @@ test "Codex affinity separates Sessions and Stores and survives reopening" {
     const other_session = try other.configure("config-a");
     try other.submit("message-a", "key-a", other_session.slice(), "same input");
     var admitted_other = (try other.storage.admitNextModelAttempt(.{})).?;
-    var other_view: store.HistoricalView = undefined;
-    other.storage.openHistoricalView(try admitted_other.permit.consume(), &other_view);
+    var other_view: store.testing.TestingPage = undefined;
+    other_view.open(&other.storage, try admitted_other.permit.consume());
     try other_view.settings(&settings);
     try std.testing.expect(!std.mem.eql(u8, &affinity_a, &settings.session_affinity));
     try std.testing.expectEqualStrings(other_session.slice(), settings.session.slice());
@@ -1923,15 +1729,12 @@ test "a prepared request carries the Responses codec's headers with its Session'
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    setup.storage.openHistoricalView(binding, &preparation.view);
+    preparation.page.open(binding);
     try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
-    const request = try drainLivePreparation(&preparation, preparation_byte_allowance, preparation_item_allowance, 4096);
+    const request = try drainLivePreparation(&preparation, &setup.storage, preparation_byte_allowance, preparation_item_allowance, 4096);
     defer request.deinit(std.testing.io, preparation.writer.budget);
-    // The settings the preparation read stay in place after it seals.
     const session_id = std.fmt.bytesToHex(preparation.settings.session_affinity, .lower);
-    // In the codec's order; Transfer.start sends them after content-type
-    // and before the credential path's fields.
     const expected = [_][2][]const u8{ .{ "accept", "text/event-stream" }, .{ "session-id", &session_id }, .{ "originator", "rui" } };
     try std.testing.expectEqual(@as(u8, expected.len), request.headers.count);
     for (expected, request.headers.names[0..request.headers.count], 0..) |pair, name, index| {
@@ -1942,15 +1745,11 @@ test "a prepared request carries the Responses codec's headers with its Session'
 
 const DrainedRequest = struct { bytes: []u8, length: u64, digest: [32]u8 };
 
-// Share the tool's prose and schema, not the request's tool envelope.
 const bash_tool_json = "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"" ++ tools.bash_record.description ++
     "\",\"strict\":false,\"parameters\":" ++ tools.bash_record.input_schema ++ "}";
-/// Version two's declaration of Bash inside the history, and its top-level
-/// tools for the default set: only the provider-run one.
 const declared_bash_json = "{\"type\":\"additional_tools\",\"role\":\"developer\",\"tools\":[" ++ bash_tool_json ++ "]}";
 const default_top_tools_json = "{\"type\":\"web_search\",\"external_web_access\":true}";
 
-// Share prose, not request construction: independently JSON-encode fixture inputs.
 fn requestGolden(workspace: []const u8, session: []const u8, request: []const u8) ![]u8 {
     const quoted_workspace = try std.json.Stringify.valueAlloc(std.testing.allocator, workspace, .{});
     defer std.testing.allocator.free(quoted_workspace);
@@ -1970,21 +1769,27 @@ fn requestGolden(workspace: []const u8, session: []const u8, request: []const u8
     });
 }
 
-/// Runaway guard for the small golden fixtures, not a production request limit.
-/// Even a one-byte advance must scan and emit the strings and cross item/piece
-/// boundaries. Allow four turns per encoded byte for those passes and transitions;
-/// derive the bound from the whole golden, including shared prose and paths.
 fn preparationTestStepBound(request_bytes: usize) usize {
     return 4 * request_bytes;
 }
 
+fn advanceTesting(preparation: *Preparation, storage: *store.Store, byte_allowance: usize, item_allowance: usize) PreparationProgress {
+    var progress = preparation.advance(byte_allowance, item_allowance);
+    while (progress == .read) {
+        storage.readRequestPage(&preparation.page) catch |err| return .{ .failed = err };
+        progress = preparation.proceed();
+    }
+    return progress;
+}
+
 fn drainPreparation(
     preparation: *Preparation,
+    storage: *store.Store,
     byte_allowance: usize,
     item_allowance: usize,
     step_bound: usize,
 ) !DrainedRequest {
-    const request = try drainLivePreparation(preparation, byte_allowance, item_allowance, step_bound);
+    const request = try drainLivePreparation(preparation, storage, byte_allowance, item_allowance, step_bound);
     defer request.deinit(std.testing.io, preparation.writer.budget);
     const length: usize = @intCast(request.length);
     const bytes = try std.testing.allocator.alloc(u8, length);
@@ -1996,14 +1801,9 @@ fn drainPreparation(
     return .{ .bytes = bytes, .length = request.length, .digest = digest };
 }
 
-/// Drain to a live PreparedRequest, in the preparation's storage, that the
-/// caller owns across later Store changes. The request stays readable until
-/// the caller releases it. The step bound limits completed advances, not
-/// attempted ones: a trip on the sealing advance still acquires its request
-/// first, so the terminal-result guard below must release it before the
-/// bound error escapes.
 fn drainLivePreparation(
     preparation: *Preparation,
+    storage: *store.Store,
     byte_allowance: usize,
     item_allowance: usize,
     step_bound: usize,
@@ -2012,10 +1812,9 @@ fn drainLivePreparation(
     var last_request: u64 = 0;
     while (true) {
         steps += 1;
-        const progress = preparation.advance(byte_allowance, item_allowance);
-        // Guard an owning terminal result adjacent to acquisition, before
-        // any fallible assertion below can drop it.
+        const progress = advanceTesting(preparation, storage, byte_allowance, item_allowance);
         switch (progress) {
+            .read => unreachable,
             .pending => {
                 try std.testing.expect(steps <= step_bound);
                 const stats = preparation.advanceStats();
@@ -2049,22 +1848,15 @@ fn drainLivePreparation(
     }
 }
 
-/// Step a fresh preparation with (1, 1) allowances until exactly `target`
-/// request bytes exist, then return with the emission still in progress.
-/// The writer only appends, so a target strictly inside a known emission
-/// span guarantees that emission's content reader is still open.
-fn stepPreparationToOffset(preparation: *Preparation, target: u64, step_bound: usize) !void {
+fn stepPreparationToOffset(preparation: *Preparation, storage: *store.Store, target: u64, step_bound: usize) !void {
     var steps: usize = 0;
     while (true) {
         steps += 1;
         try std.testing.expect(steps <= step_bound);
-        const progress = preparation.advance(1, 1);
+        const progress = advanceTesting(preparation, storage, 1, 1);
         switch (progress) {
+            .read => unreachable,
             .pending => {},
-            // An unexpectedly sealed request is owned here: release it
-            // before reporting the failed expectation so a statistics or
-            // offset regression cannot leak the descriptor. The preparation
-            // is inactive after sealing, so callers must not cancel it.
             .prepared => |request| {
                 request.deinit(std.testing.io, preparation.writer.budget);
                 try std.testing.expect(false);
@@ -2083,11 +1875,6 @@ const ComposedCall = struct {
     call_id: []const u8,
 };
 
-/// Settle one private item plus valid Bash calls in a single model
-/// success, so the successor's historical view holds replay input and a
-/// complete Tool Result group from ordinary Store transitions. Call items
-/// are stored as complete item JSON exactly like provider validation
-/// stores them, so replay copies them verbatim.
 fn settleComposedForTesting(
     setup: *PreparationTestSetup,
     binding: store.AttemptBinding,
@@ -2145,9 +1932,6 @@ fn settleComposedForTesting(
     }, .{});
 }
 
-/// Build one reasoning item plus two valid Bash calls, deny both Actions
-/// in reverse call order, and admit the successor whose historical view
-/// must derive Tool Results in original call order.
 fn establishComposedHistory(setup: *PreparationTestSetup) !struct { binding: store.AttemptBinding, session: protocol.Bounded(protocol.max_session_bytes) } {
     const schema_json = "{\"type\":\"object\"}";
     const session = configured: {
@@ -2203,10 +1987,6 @@ fn establishComposedHistory(setup: *PreparationTestSetup) !struct { binding: sto
 
 const composed_replayed = "{\"type\":\"reasoning\",\"id\":\"r1\",\"encrypted_content\":\"opaque\"}";
 
-// Replayed call items are rebuilt from Rui's form: the type and call fields
-// first, then the provider bag (`id`, `status`) as received. Written
-// separately from the settle helper so the golden does not share its
-// construction.
 const composed_replayed_call_a = "{\"type\":\"function_call\",\"name\":\"bash\",\"call_id\":\"order-call-a\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}\",\"id\":\"order-item-a\",\"status\":\"completed\"}";
 const composed_replayed_call_b = "{\"type\":\"function_call\",\"name\":\"bash\",\"call_id\":\"order-call-b\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}\",\"id\":\"order-item-b\",\"status\":\"completed\"}";
 
@@ -2249,8 +2029,6 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
         }
 
         fn delete(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8) std.Io.Dir.DeleteFileError!void {
-            // Preparation has exclusively created and opened both aliases,
-            // but its name is still live. Admit through real ingress here.
             admit(body) catch |err| {
                 failure = err;
             };
@@ -2280,7 +2058,6 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
         .io = std.testing.io,
         .content_length = body.len,
         .scratch_path = setup.root,
-        // Match the independent Operation/Attempt counter pair exactly.
         .request_number = binding.operation_id,
         .retained_scratch = &retained_ingress,
         .scratch_budget = .{ .used = &used, .limit = 1024 * 1024 },
@@ -2292,14 +2069,14 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
     Overlap.body = body;
     Overlap.failure = null;
     Overlap.admitted = false;
-    const split = body.len - 3; // Leave the content string and file open.
+    const split = body.len - 3;
     if (!provider_first) try ingress.feed(body[0..split]);
     var vtable = std.testing.io.vtable.*;
     if (provider_first) vtable.dirDeleteFile = Overlap.delete;
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     var retained_provider: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    setup.storage.openHistoricalView(binding, &preparation.view);
+    preparation.page.open(binding);
     try preparation.init(io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained_provider);
     defer preparation.cancel();
     if (Overlap.failure) |err| return err;
@@ -2335,8 +2112,6 @@ test "request preparation minimal golden is exact across schedules" {
     var first_bytes: ?[]u8 = null;
     defer if (first_bytes) |bytes| std.testing.allocator.free(bytes);
     for (schedules, 0..) |schedule, index| {
-        // Each schedule prepares identical logical content through an
-        // independent Store so later admissions cannot observe earlier ones.
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();
@@ -2344,7 +2119,6 @@ test "request preparation minimal golden is exact across schedules" {
         const golden_session = try setup.configure("prep-golden-config");
         const full_expected = try requestGolden(setup.workspace, golden_session.slice(), expected ++ ",\"tools\":[],\"text\":{\"verbosity\":\"low\"}}");
         defer std.testing.allocator.free(full_expected);
-        // Explicit empty tool list selects no tools for an exact small envelope.
         {
             var update: wire_request.ConfigureCommand = .{};
             try update.key.set("prep-golden-tools");
@@ -2363,16 +2137,15 @@ test "request preparation minimal golden is exact across schedules" {
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        setup.storage.openHistoricalView(binding, &preparation.view);
+        preparation.page.open(binding);
         try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         try std.testing.expect(retained == null);
-        const result = try drainPreparation(&preparation, schedule[0], schedule[1], preparationTestStepBound(full_expected.len));
+        const result = try drainPreparation(&preparation, &setup.storage, schedule[0], schedule[1], preparationTestStepBound(full_expected.len));
         defer std.testing.allocator.free(result.bytes);
         const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
         defer parsed.deinit();
         const instructions = parsed.value.object.get("instructions").?.string;
-        // Slots are found by the prompt file's own parts, never its wording.
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[3]));
         const path_start = context_parts[0].len - 1;
         const path_end = std.mem.indexOf(u8, instructions, context_parts[1]).? + 1;
@@ -2385,7 +2158,6 @@ test "request preparation minimal golden is exact across schedules" {
         try std.testing.expectEqual(@as(u64, full_expected.len), result.length);
         try std.testing.expectEqual(protocol.contentDigest(full_expected), result.digest);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-        // Only the allocated own ID differs; compare every other byte.
         const normalized = try readdressRequestForTesting(result.bytes, golden_session.slice(), "000000");
         if (first_bytes == null) {
             first_bytes = normalized;
@@ -2422,10 +2194,10 @@ test "request preparation retains the allocated ID across reopen and replacement
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        setup.storage.openHistoricalView(binding, &preparation.view);
+        preparation.page.open(binding);
         try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
-        const result = try drainPreparation(&preparation, 7, 3, 16384);
+        const result = try drainPreparation(&preparation, &setup.storage, 7, 3, 16384);
         defer std.testing.allocator.free(result.bytes);
         try std.testing.expectEqualStrings(expected, result.bytes);
         try std.testing.expectEqual(@as(u64, expected.len), result.length);
@@ -2435,10 +2207,7 @@ test "request preparation retains the allocated ID across reopen and replacement
     }
 }
 
-// Normalize just the independently identified own-address line, never user
-// content, history, Workspace or any other occurrence of the allocated ID.
 fn readdressRequestForTesting(request: []const u8, session: []const u8, replacement: []const u8) ![]u8 {
-    // The JSON-escaped prompt part before the address slot, not its wording.
     const quoted = try std.json.Stringify.valueAlloc(std.testing.allocator, context_parts[1], .{});
     defer std.testing.allocator.free(quoted);
     const prefix = quoted[1 .. quoted.len - 1];
@@ -2499,16 +2268,14 @@ test "request preparation escapes instructions and user content" {
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    setup.storage.openHistoricalView(binding, &preparation.view);
+    preparation.page.open(binding);
     try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
-    const first = try drainPreparation(&preparation, 2, 2, preparationTestStepBound(expected.len));
+    const first = try drainPreparation(&preparation, &setup.storage, 2, 2, preparationTestStepBound(expected.len));
     defer std.testing.allocator.free(first.bytes);
     try std.testing.expectEqualStrings(expected, first.bytes);
     try setup.storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "prep_escape_release" }, .ordinary, .{});
 
-    // Independent escape expectations: quotes, backslashes, newline and
-    // control bytes use short or \u00xx forms; UTF-8 bytes pass through.
     try std.testing.expect(std.mem.indexOf(u8, first.bytes, "a\\\"b\\\\c\\n\\u0000\\u0001d") != null);
     try std.testing.expect(std.mem.indexOf(u8, first.bytes, "u\\\"v\\\\w\\u0000\x7fé") != null);
     try std.testing.expect(std.mem.indexOf(u8, first.bytes, instructions_text) == null);
@@ -2521,8 +2288,6 @@ test "request preparation escapes instructions and user content" {
     try std.testing.expectEqualStrings(user_text, input[0].object.get("content").?.array.items[0].object.get("text").?.string);
 
     _ = (try setup.storage.admitNextModelAttempt(.{}));
-    // The terminal settlement above leaves no resumable work; re-establish a
-    // second session carrying the same bytes to check schedule equality.
     var setup_two: PreparationTestSetup = undefined;
     try setup_two.init();
     defer setup_two.close();
@@ -2561,13 +2326,11 @@ test "request preparation escapes instructions and user content" {
     var used_two: std.atomic.Value(u64) = .init(0);
     var retained_two: ?named_scratch.Owner = null;
     var preparation_two: Preparation = undefined;
-    setup_two.storage.openHistoricalView(binding_two, &preparation_two.view);
+    preparation_two.page.open(binding_two);
     try preparation_two.init(std.testing.io, setup_two.root, .{ .used = &used_two, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained_two);
     defer if (preparation_two.state.active) preparation_two.cancel();
-    // Both Stores have the same workspace and fixed-width Session addresses.
-    const second = try drainPreparation(&preparation_two, 1, 1, preparationTestStepBound(expected.len));
+    const second = try drainPreparation(&preparation_two, &setup_two.storage, 1, 1, preparationTestStepBound(expected.len));
     defer std.testing.allocator.free(second.bytes);
-    // Only each Operation's own address differs between the two Stores.
     const readdressed = try readdressRequestForTesting(first.bytes, session.slice(), session_two.slice());
     defer std.testing.allocator.free(readdressed);
     try std.testing.expectEqualStrings(readdressed, second.bytes);
@@ -2584,22 +2347,19 @@ test "request preparation frozen selection excludes later messages" {
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    setup.storage.openHistoricalView(binding, &preparation.view);
+    preparation.page.open(binding);
     try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
-    // Advance partially, then submit a later message while the admitted
-    // historical view stays frozen.
     var partial: usize = 0;
     while (partial < 2) : (partial += 1) {
-        const progress = preparation.advance(16, 2);
+        const progress = advanceTesting(&preparation, &setup.storage, 16, 2);
         try std.testing.expect(progress == .pending);
     }
     try setup.submit("prep-frozen-second-file", "prep-frozen-second", session.slice(), "second");
-    const result = try drainPreparation(&preparation, 16, 2, 4096);
+    const result = try drainPreparation(&preparation, &setup.storage, 16, 2, 4096);
     defer std.testing.allocator.free(result.bytes);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
     defer parsed.deinit();
     const input = parsed.value.object.get("input").?.array.items;
-    // The message, then the Operation's declaration of its tools.
     try std.testing.expectEqual(@as(usize, 2), input.len);
     try std.testing.expectEqualStrings("first", input[0].object.get("content").?.array.items[0].object.get("text").?.string);
     try std.testing.expectEqualStrings("additional_tools", input[1].object.get("type").?.string);
@@ -2636,7 +2396,6 @@ test "request preparation keeps the starting effort at the top and changes it at
         try command.configuration.permission_mode.value.set("bypass");
         command.configuration.compaction_trigger.state = .value;
         try command.configuration.compaction_trigger.value.set("115200");
-        // D111: the test client states the effort explicitly.
         if (case.override orelse case.expected) |effort| {
             command.configuration.reasoning_effort.state = .value;
             try command.configuration.reasoning_effort.value.set(effort);
@@ -2648,13 +2407,10 @@ test "request preparation keeps the starting effort at the top and changes it at
         const encoded_builtin = try std.json.Stringify.valueAlloc(std.testing.allocator, model_catalog.builtinInstructions(case.model).bytes(), .{});
         defer std.testing.allocator.free(encoded_builtin);
         const step_bound = 32768 + preparationTestStepBound(encoded_builtin.len - 2);
-        // Ordinary and compaction envelopes must use their admitted effort.
         for (0..2) |purpose| {
             var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
             const binding = try admitted.permit.consume();
             if (case.override != null and purpose == 0) {
-                // A later setting must not rewrite the already admitted
-                // envelope; the following compaction is a new Operation.
                 var update: wire_request.ConfigureCommand = .{};
                 try update.key.set("effort-later");
                 update.session = session;
@@ -2665,10 +2421,10 @@ test "request preparation keeps the starting effort at the top and changes it at
             var used: std.atomic.Value(u64) = .init(0);
             var retained: ?named_scratch.Owner = null;
             var preparation: Preparation = undefined;
-            setup.storage.openHistoricalView(binding, &preparation.view);
+            preparation.page.open(binding);
             try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
             defer if (preparation.state.active) preparation.cancel();
-            const sealed = try drainLivePreparation(&preparation, 1, 1, step_bound);
+            const sealed = try drainLivePreparation(&preparation, &setup.storage, 1, 1, step_bound);
             var owned = true;
             defer if (owned) sealed.deinit(std.testing.io, preparation.writer.budget);
             const buffer = try std.testing.allocator.alloc(u8, @intCast(sealed.length));
@@ -2681,8 +2437,6 @@ test "request preparation keeps the starting effort at the top and changes it at
             const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
             defer parsed.deinit();
             const request = parsed.value.object;
-            // The top keeps the Session's starting effort; a later change
-            // is an update item at its Operation, after the span.
             const expected = case.expected;
             const changed = case.override != null and purpose != 0;
             try std.testing.expectEqual(@as(usize, @intFromBool(changed)), std.mem.count(u8, bytes, "{\"type\":\"configuration_update\",\"reasoning\":{\"effort\":\"low\"}},{\"type\":\"compaction_trigger\"}"));
@@ -2723,9 +2477,6 @@ test "request preparation freezes settings at admission" {
     try setup.submit("prep-settings-file", "prep-settings-message", session.slice(), "hi");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
-    // A legal observable change after admission but before preparation
-    // first reads settings: the admitted view must keep the original
-    // Bash/Edit tool set, not the current empty tool list.
     {
         var update: wire_request.ConfigureCommand = .{};
         try update.key.set("prep-settings-tools");
@@ -2737,9 +2488,9 @@ test "request preparation freezes settings at admission" {
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    setup.storage.openHistoricalView(binding, &preparation.view);
+    preparation.page.open(binding);
     try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
-    const result = try drainPreparation(&preparation, 3, 2, 8192);
+    const result = try drainPreparation(&preparation, &setup.storage, 3, 2, 8192);
     defer std.testing.allocator.free(result.bytes);
     const expected = "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}," ++
         declared_bash_json ++ "],\"tools\":[],\"text\":{\"verbosity\":\"low\"}}";
@@ -2764,37 +2515,29 @@ test "preparation integrity follows live readers and rejects a foreign binding" 
     const baseline = used.load(.acquire);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    setup.storage.openHistoricalView(binding, &preparation.view);
+    preparation.page.open(binding);
     try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
-    // Guard the active preparation separately from any sealed request: a
-    // sealed preparation is inactive, so this guard never cancels a
-    // transferred owner.
     defer if (preparation.state.active) preparation.cancel();
-    // Fresh preparation: active view, admitted binding, no open readers.
     try preparation.checkIntegrity(binding);
-    try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+    try std.testing.expectEqual(@as(usize, 0), preparation.page.outstandingReaders());
     const address_before = @intFromPtr(&preparation);
 
-    // Step inside the user-content emission with the same probe pattern the
-    // cancellation test uses, so the content reader is necessarily open.
     var probe: Preparation = undefined;
     {
         var probe_used: std.atomic.Value(u64) = .init(0);
         var probe_retained: ?named_scratch.Owner = null;
-        setup.storage.openHistoricalView(binding, &probe.view);
+        probe.page.open(binding);
         try probe.init(std.testing.io, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &probe_retained);
         defer if (probe.state.active) probe.cancel();
-        const probe_result = try drainPreparation(&probe, 16, 2, 16384);
+        const probe_result = try drainPreparation(&probe, &setup.storage, 16, 2, 16384);
         defer std.testing.allocator.free(probe_result.bytes);
         const content_start = std.mem.indexOf(u8, probe_result.bytes, text).?;
-        try stepPreparationToOffset(&preparation, content_start + 100, 16384);
+        try stepPreparationToOffset(&preparation, &setup.storage, content_start + 100, 16384);
     }
-    // The owner stayed at its address while borrowed; one live reader.
     try std.testing.expectEqual(address_before, @intFromPtr(&preparation));
-    try std.testing.expectEqual(@as(usize, 1), preparation.view.outstandingReaders());
+    try std.testing.expectEqual(@as(usize, 1), preparation.page.outstandingReaders());
     try preparation.checkIntegrity(binding);
 
-    // A foreign binding is rejected without disturbing the live owner.
     const foreign = store.AttemptBinding{
         .turn_id = binding.turn_id,
         .operation_id = binding.operation_id + 1,
@@ -2803,12 +2546,9 @@ test "preparation integrity follows live readers and rejects a foreign binding" 
     try std.testing.expectError(error.PreparationBindingMismatch, preparation.checkIntegrity(foreign));
     try preparation.checkIntegrity(binding);
 
-    // An extra outstanding reader breaks the count the emission accounts for.
-    // The reader lives in a nested scope so it closes before preparation
-    // cancellation on both success and error paths.
     {
         var extra: store.HistoricalReader = undefined;
-        try preparation.view.openContent(preparation.settings.baseline_instructions, &extra);
+        try preparation.page.openContent(preparation.settings.baseline_instructions, &extra);
         defer extra.close();
         try std.testing.expectError(error.PreparationReaderCountMismatch, preparation.checkIntegrity(binding));
     }
@@ -2832,35 +2572,28 @@ test "request preparation cancellation and failure release ownership" {
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
 
-    // Cancel inside the user-content JSON emission: the target lies
-    // strictly inside the written user bytes, so the content reader is
-    // necessarily still open and a partial charge is outstanding. Reader
-    // closure before view closure is enforced by the close-path asserts;
-    // cancellation must return usage to the starting baseline.
     {
         var used: std.atomic.Value(u64) = .init(7);
         const baseline = used.load(.acquire);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        setup.storage.openHistoricalView(binding, &preparation.view);
+        preparation.page.open(binding);
         try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         var probe: Preparation = undefined;
         {
             var probe_used: std.atomic.Value(u64) = .init(0);
             var probe_retained: ?named_scratch.Owner = null;
-            setup.storage.openHistoricalView(binding, &probe.view);
+            probe.page.open(binding);
             try probe.init(std.testing.io, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &probe_retained);
             defer if (probe.state.active) probe.cancel();
-            const probe_result = try drainPreparation(&probe, 16, 2, 16384);
+            const probe_result = try drainPreparation(&probe, &setup.storage, 16, 2, 16384);
             defer std.testing.allocator.free(probe_result.bytes);
             const content_start = std.mem.indexOf(u8, probe_result.bytes, text).?;
-            try stepPreparationToOffset(&preparation, content_start + 100, 16384);
+            try stepPreparationToOffset(&preparation, &setup.storage, content_start + 100, 16384);
         }
-        // Direct owner prerequisites, not just the target offset: the
-        // intended reader is active and a reservation is outstanding.
         try preparation.checkIntegrity(binding);
-        try std.testing.expectEqual(@as(usize, 1), preparation.view.outstandingReaders());
+        try std.testing.expectEqual(@as(usize, 1), preparation.page.outstandingReaders());
         try std.testing.expect(used.load(.acquire) > baseline);
         preparation.cancel();
         try std.testing.expect(!preparation.state.active);
@@ -2868,29 +2601,28 @@ test "request preparation cancellation and failure release ownership" {
         try std.testing.expect(retained == null);
     }
 
-    // First-step initialization failure owns nothing.
     {
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        setup.storage.openHistoricalView(binding, &preparation.view);
+        preparation.page.open(binding);
         try std.testing.expectError(error.InjectedFirstPreparationFailure, preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{ .first_step = true }, &retained));
         try std.testing.expect(retained == null);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     }
 
-    // Write and seal faults surface through advance and release on cancel.
     for ([_]PreparationFaults{ .{ .write = true }, .{ .seal = true } }) |faults| {
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        setup.storage.openHistoricalView(binding, &preparation.view);
+        preparation.page.open(binding);
         try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, faults, &retained);
         var seen_failure: ?anyerror = null;
         var steps: usize = 0;
         while (steps < 4096) : (steps += 1) {
-            const progress = preparation.advance(64, 8);
+            const progress = advanceTesting(&preparation, &setup.storage, 64, 8);
             switch (progress) {
+                .read => unreachable,
                 .pending => {},
                 .prepared => |request| {
                     request.deinit(std.testing.io, preparation.writer.budget);
@@ -2903,21 +2635,16 @@ test "request preparation cancellation and failure release ownership" {
             }
         }
         try std.testing.expect(seen_failure != null);
-        // Failed writes retain the complete reservation, which may exceed the
-        // successfully written prefix; cancellation still releases it once.
         preparation.cancel();
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     }
 
-    // Unlink faults retain actionable custody until reclamation is
-    // confirmed; clearing the test-owned gate completes the same
-    // production reclamation path without leaking the descriptors.
     {
         var used: std.atomic.Value(u64) = .init(0);
         var gate: std.atomic.Value(bool) = .init(true);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        setup.storage.openHistoricalView(binding, &preparation.view);
+        preparation.page.open(binding);
         try std.testing.expectError(error.InjectedRequestUnlinkFailure, preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{ .unlink = true, .unlink_removal = &gate }, &retained));
         try std.testing.expect(retained != null);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
@@ -2931,8 +2658,6 @@ test "request preparation cancellation and failure release ownership" {
         try std.testing.expectError(error.InjectedScratchRemovalFailure, retained.?.reclaim(setup.root));
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
         gate.store(false, .release);
-        // Record consuming reclamation before asserting the observation, so
-        // a failed expectation cannot retry an already-consumed owner.
         const reclamation = try retained.?.reclaim(setup.root);
         reclaimed = true;
         try std.testing.expectEqual(named_scratch.Reclamation.removed, reclamation);
@@ -2951,37 +2676,25 @@ test "request preparation completed request is fenced by later stop before hando
     try setup.submit("prep-fence-file", "prep-fence-message", session.slice(), "work");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
-    // Nonzero unrelated baseline stays stable; the sealed request owns its
-    // reservation until its recipient releases it.
     var used: std.atomic.Value(u64) = .init(41);
     const baseline = used.load(.acquire);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    setup.storage.openHistoricalView(binding, &preparation.view);
+    preparation.page.open(binding);
     try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
-    // Guard the active preparation before any fallible observation: an
-    // error before the request reaches the caller must still cancel it.
-    // After sealing the preparation is inactive and this guard is inert.
     defer if (preparation.state.active) preparation.cancel();
     try preparation.checkIntegrity(binding);
-    // The sealed request stays owned and readable across the stop and the
-    // refused handoff; only its release returns the charge.
-    const request = try drainLivePreparation(&preparation, preparation_byte_allowance, preparation_item_allowance, 4096);
+    const request = try drainLivePreparation(&preparation, &setup.storage, preparation_byte_allowance, preparation_item_allowance, 4096);
     var released = false;
     defer {
         if (!released) request.deinit(std.testing.io, preparation.writer.budget);
     }
     try std.testing.expect(request.length > 0);
-    // Sealing transfers the writer reservation to the request recipient: the
-    // total is unchanged, only the responsible owner changes, and a
-    // successful seal charges exactly the sealed bytes.
     try std.testing.expectEqual(request.length, request.charged);
     try std.testing.expectEqual(baseline + request.charged, used.load(.acquire));
     const readable = try request.file.length(std.testing.io);
     try std.testing.expectEqual(request.length, readable);
 
-    // A sealed request is not dispatch permission: a stop accepted after
-    // preparation but before handoff refuses the launch callback.
     var stop: protocol.SessionStopCommand = .{};
     try stop.key.set("prep-fence-stop");
     stop.session = session;
@@ -2995,8 +2708,6 @@ test "request preparation completed request is fenced by later stop before hando
     try std.testing.expectError(error.SupersededByControl, setup.storage.withDispatchHandoff(binding, &calls, Launcher.run));
     try std.testing.expectEqual(@as(usize, 0), calls);
     try std.testing.expectEqual(request.length, try request.file.length(std.testing.io));
-    // The refused handoff releases nothing: the live request stays readable
-    // and charged until its recipient releases it.
     try std.testing.expectEqual(baseline + request.charged, used.load(.acquire));
     request.deinit(std.testing.io, preparation.writer.budget);
     released = true;
@@ -3012,26 +2723,21 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
 
-    // Small allowances force many advances, so the probe count supports
-    // both a trip while pending and a trip on the sealing advance.
-    // Deterministic content keeps the count stable across the probe and
-    // the guarded drains below.
     const probe_allowance = [_]usize{ 16, 2 };
     const seal_steps = blk: {
         var probe_used: std.atomic.Value(u64) = .init(0);
         var probe_retained: ?named_scratch.Owner = null;
         var probe: Preparation = undefined;
-        setup.storage.openHistoricalView(binding, &probe.view);
+        probe.page.open(binding);
         try probe.init(std.testing.io, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &probe_retained);
         defer if (probe.state.active) probe.cancel();
         var count: usize = 0;
         while (count < 4096) {
             count += 1;
-            const progress = probe.advance(probe_allowance[0], probe_allowance[1]);
+            const progress = advanceTesting(&probe, &setup.storage, probe_allowance[0], probe_allowance[1]);
             switch (progress) {
+                .read => unreachable,
                 .pending => {},
-                // The probe owns this terminal result with no fallible
-                // step before release, so a single scope holds cleanup.
                 .prepared => |sealed| {
                     sealed.deinit(std.testing.io, probe.writer.budget);
                     break :blk count;
@@ -3041,26 +2747,18 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
         }
         return error.TestExpectedResult;
     };
-    // Both sub-cases below must trip their bound; a degenerate single-step
-    // seal would silently test nothing.
     try std.testing.expect(seal_steps > 2);
 
-    // A trip while preparation is still pending leaves it active with an
-    // outstanding charge: the caller's preparation guard cancels and the
-    // baseline is restored. The same tripwire error fires here and below;
-    // budget and preparation state are the load-bearing assertions.
     {
         var used: std.atomic.Value(u64) = .init(13);
         const baseline = used.load(.acquire);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        setup.storage.openHistoricalView(binding, &preparation.view);
+        preparation.page.open(binding);
         try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
-        // Validation may precede output; establish the charged checkpoint
-        // independently of the first advance's incidental phase count.
-        try stepPreparationToOffset(&preparation, 1, 4096);
-        try std.testing.expectError(error.TestUnexpectedResult, drainLivePreparation(&preparation, probe_allowance[0], probe_allowance[1], 1));
+        try stepPreparationToOffset(&preparation, &setup.storage, 1, 4096);
+        try std.testing.expectError(error.TestUnexpectedResult, drainLivePreparation(&preparation, &setup.storage, probe_allowance[0], probe_allowance[1], 1));
         try std.testing.expect(preparation.state.active);
         try std.testing.expect(used.load(.acquire) > baseline);
         preparation.cancel();
@@ -3069,19 +2767,15 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
         try std.testing.expect(retained == null);
     }
 
-    // A trip on the sealing advance acquires the terminal request inside
-    // the helper before the bound fails: the helper's guard must release
-    // it before the error escapes. The preparation is already inactive,
-    // so the caller's guard stays inert and no second owner exists.
     {
         var used: std.atomic.Value(u64) = .init(13);
         const baseline = used.load(.acquire);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        setup.storage.openHistoricalView(binding, &preparation.view);
+        preparation.page.open(binding);
         try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
-        try std.testing.expectError(error.TestUnexpectedResult, drainLivePreparation(&preparation, probe_allowance[0], probe_allowance[1], seal_steps - 1));
+        try std.testing.expectError(error.TestUnexpectedResult, drainLivePreparation(&preparation, &setup.storage, probe_allowance[0], probe_allowance[1], seal_steps - 1));
         try std.testing.expect(!preparation.state.active);
         try std.testing.expectEqual(baseline, used.load(.acquire));
         try std.testing.expect(retained == null);
@@ -3089,8 +2783,6 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
 }
 
 test "request preparation fences a saved provider bag whose bytes changed" {
-    // A saved bag is copied into the request as the provider sent it; the
-    // Store's digest is what keeps changed bytes out.
     {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
@@ -3107,10 +2799,10 @@ test "request preparation fences a saved provider bag whose bytes changed" {
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        setup.storage.openHistoricalView(binding, &preparation.view);
+        preparation.page.open(binding);
         try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
-        if (drainLivePreparation(&preparation, 1, 1, 16384)) |request| {
+        if (drainLivePreparation(&preparation, &setup.storage, 1, 1, 16384)) |request| {
             request.deinit(std.testing.io, preparation.writer.budget);
             return error.ExpectedCorruptStore;
         } else |err| {
@@ -3135,9 +2827,6 @@ test "request preparation replays a large private reasoning item within each adv
         try setup.submit("large-next", "large-next-key", session.slice(), "next");
         var item_buffer: [64 * 1024]u8 = undefined;
         var item = std.Io.Writer.fixed(&item_buffer);
-        // The replayed item is the saved one without its reasoning text,
-        // rebuilt from Rui's form: type and parts first, then the provider
-        // bag in the order received.
         var replayed_buffer: [64 * 1024]u8 = undefined;
         var replayed = std.Io.Writer.fixed(&replayed_buffer);
         const window: [protocol.content_window_bytes]u8 = @splat('x');
@@ -3158,21 +2847,21 @@ test "request preparation replays a large private reasoning item within each adv
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        setup.storage.openHistoricalView(binding, &preparation.view);
+        preparation.page.open(binding);
         try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         var turns: usize = 0;
         while (true) {
             turns += 1;
             try std.testing.expect(turns < 1000000);
-            // Replay reads and writes no more than each advance charges.
             const written = preparation.writer.offset;
-            const progress = preparation.advance(7, 2);
+            const progress = advanceTesting(&preparation, &setup.storage, 7, 2);
             try std.testing.expect(preparation.advanceStats().work_bytes <= 7);
             try std.testing.expect(preparation.advanceStats().work_items <= 2);
             try std.testing.expect(preparation.writer.offset - written <= 7);
             if (progress == .pending) try preparation.checkIntegrity(binding);
             switch (progress) {
+                .read => unreachable,
                 .pending => {},
                 .failed => |err| return err,
                 .prepared => |request| {
@@ -3180,7 +2869,6 @@ test "request preparation replays a large private reasoning item within each adv
                     var request_buffer: [64 * 1024]u8 = undefined;
                     const length = try request.file.readPositionalAll(std.testing.io, &request_buffer, 0);
                     try std.testing.expect(std.mem.indexOf(u8, request_buffer[0..length], replayed.buffered()) != null);
-                    // The request carries the workspace path, so the marker is one no path contains.
                     try std.testing.expect(std.mem.indexOf(u8, request_buffer[0..length], "REASONING-TEXT") == null);
                     break;
                 },
@@ -3201,9 +2889,9 @@ test "request preparation composes replay tool results and schema" {
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        setup.storage.openHistoricalView(binding, &preparation.view);
+        preparation.page.open(binding);
         try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
-        const result = try drainPreparation(&preparation, schedule[0], schedule[1], 16384);
+        const result = try drainPreparation(&preparation, &setup.storage, schedule[0], schedule[1], 16384);
         defer std.testing.allocator.free(result.bytes);
         const expected = try requestGolden(setup.workspace, history.session.slice(), composed_expected);
         defer std.testing.allocator.free(expected);
@@ -3227,8 +2915,6 @@ test "model switch golden rebuilds visible history without old reasoning or comp
         if (with_compaction) {
             try setup.storage.settleModelAttemptFailure(old_binding, .{ .uncorrelated = "overflow" }, .context_overflow, .{});
             const compact = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
-            // The old model even dropped complete exchanges. Switching must
-            // recover those canonical messages, calls and results too.
             try store.setHistoryFloorForTesting(&setup.storage, compact.operation_id, "second input", 1);
             try store.settleCompactionForTesting(&setup.storage, &setup.tmp, compact, &.{.compaction});
             old_binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -3245,7 +2931,6 @@ test "model switch golden rebuilds visible history without old reasoning or comp
         revision.configuration.model.state = .value;
         try revision.configuration.model.value.set("model-b");
         try std.testing.expect(try setup.storage.configure(&revision, .{}) == .accepted);
-        // An already-frozen request still belongs to model-a.
         const last_answer = "{\"type\":\"message\",\"id\":\"last\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"last old answer\"}]}";
         try store.settleAnswerItemsForTesting(&setup.storage, &setup.tmp, old_binding, &.{last_answer}, "last old answer");
         try setup.submit("switch-after", "switch-after", history.session.slice(), "after switch");
@@ -3253,7 +2938,6 @@ test "model switch golden rebuilds visible history without old reasoning or comp
         const rebuilt = try prepareMemoForTesting(&setup, binding, &memos, .{});
         defer std.testing.allocator.free(rebuilt.bytes);
         try std.testing.expectEqual(@as(usize, 0), rebuilt.copied);
-        // Keep this independent of the replay rule and stored recipe.
         const golden =
             "{\"model\":\"model-b\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[" ++
             "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"do work\"}]}," ++
@@ -3270,7 +2954,6 @@ test "model switch golden rebuilds visible history without old reasoning or comp
         try std.testing.expectEqualStrings(expected, rebuilt.bytes);
         try std.testing.expect(std.mem.indexOf(u8, rebuilt.bytes, "\"encrypted_content\"") == null);
         try std.testing.expect(std.mem.indexOf(u8, rebuilt.bytes, "\"type\":\"compaction\"") == null);
-        // Both a memo hit and a cold rebuild preserve the new model's bytes.
         try std.testing.expect(try expectMemoRebuildEqual(&setup, binding, &memos, .{}) > 0);
     }
 }
@@ -3297,8 +2980,6 @@ test "model switch uses normal compaction pressure without the old base floor or
     revision.configuration.compaction_trigger.state = .value;
     try revision.configuration.compaction_trigger.value.set("1");
     try std.testing.expect(try setup.storage.configure(&revision, .{}) == .accepted);
-    // The ordinary trigger, not the old model's successor exemption,
-    // selects a compaction of the rebuilt visible history.
     const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
     var entries: [1]history_memo.Table.Entry = @splat(.{});
     var memos: history_memo.Table = .{ .entries = &entries, .scratch_path = setup.root };
@@ -3390,10 +3071,10 @@ test "request preparation derives opaque replay from the producing Operation mod
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var prep: Preparation = undefined;
-    setup.storage.openHistoricalView(binding, &prep.view);
+    prep.page.open(binding);
     try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     defer if (prep.state.active) prep.cancel();
-    const request = try drainPreparation(&prep, 1, 1, 32768);
+    const request = try drainPreparation(&prep, &setup.storage, 1, 1, 32768);
     defer std.testing.allocator.free(request.bytes);
     try std.testing.expect(std.mem.indexOf(u8, request.bytes, "\"encrypted_content\"") == null);
     try expectInputTexts(request.bytes, &.{ "original", "additional_tools", "next" });
@@ -3402,8 +3083,6 @@ test "request preparation derives opaque replay from the producing Operation mod
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
-/// Settles `items` (complete provider item JSON) as one model success with
-/// no selected answer, splitting each through acceptance.
 fn settleItemsForTesting(setup: *PreparationTestSetup, binding: store.AttemptBinding, file_prefix: []const u8, items: []const []const u8) !void {
     var source_buffer: [16 * 1024]u8 = undefined;
     var source_writer = std.Io.Writer.fixed(&source_buffer);
@@ -3463,9 +3142,6 @@ fn jsonEqualForTesting(a: std.json.Value, b: std.json.Value) bool {
 }
 
 test "every replayed output item parses equal to the item the provider sent" {
-    // Through acceptance, the Store and the Codex writer. Only `created_by`
-    // and private reasoning text are left out, as the pinned first-party
-    // serializer leaves them out.
     const cases = [_]struct { sent: []const u8, replayed: ?[]const u8 = null }{
         .{
             .sent = "{\"type\":\"reasoning\",\"id\":\"rs_1\",\"created_by\":\"x\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Plan \\u00e9\\/\"},{\"type\":\"summary_text\",\"text\":\"\"}]," ++
@@ -3504,8 +3180,6 @@ test "every replayed output item parses equal to the item the provider sent" {
     const arena = arena_state.allocator();
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, request.bytes, .{});
     const input = parsed.object.get("input").?.array.items;
-    // The user input, the Operation's declared tools, every item in order,
-    // then the rejected call's result.
     try std.testing.expectEqual(cases.len + 3, input.len);
     try std.testing.expectEqualStrings("additional_tools", input[1].object.get("type").?.string);
     for (cases, input[2 .. 2 + cases.len], 0..) |case, actual, index| {
@@ -3519,13 +3193,9 @@ test "every replayed output item parses equal to the item the provider sent" {
 }
 
 test "request preparation replays reasoning continuation without its private reasoning text" {
-    // Saved items stay exact; only the replayed request drops reasoning_text
-    // content, as the pinned first-party serializer does. Empty content has
-    // no reasoning text and stays.
     const cases = [_]struct { saved: []const u8, replayed: []const u8 }{
         .{
             .saved = "{\"type\":\"reasoning\",\"id\":\"r\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"visible\"}],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"REASONING-TEXT\"},{\"type\":\"reasoning_text\",\"text\":\"more REASONING-TEXT\"}],\"encrypted_content\":\"opaque\",\"status\":\"completed\"}",
-            // Rebuilt from Rui's form: parts first, then the provider bag.
             .replayed = "{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"visible\"}],\"id\":\"r\",\"encrypted_content\":\"opaque\",\"status\":\"completed\"}",
         },
         .{
@@ -3554,10 +3224,10 @@ test "request preparation replays reasoning continuation without its private rea
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        setup.storage.openHistoricalView(binding, &preparation.view);
+        preparation.page.open(binding);
         try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
-        const result = try drainPreparation(&preparation, schedule[0], schedule[1], 32768);
+        const result = try drainPreparation(&preparation, &setup.storage, schedule[0], schedule[1], 32768);
         defer std.testing.allocator.free(result.bytes);
         const body = try std.mem.concat(std.testing.allocator, u8, &.{
             "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[",
@@ -3569,7 +3239,6 @@ test "request preparation replays reasoning continuation without its private rea
         const expected = try requestGolden(setup.workspace, session.slice(), body);
         defer std.testing.allocator.free(expected);
         try std.testing.expectEqualStrings(expected, result.bytes);
-        // The request carries the workspace path, so the marker is one no path contains.
         try std.testing.expect(std.mem.indexOf(u8, result.bytes, "REASONING-TEXT") == null);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     };
@@ -3584,7 +3253,7 @@ test "request preparation cancellation yields inside history discovery" {
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    setup.storage.openHistoricalView(binding, &preparation.view);
+    preparation.page.open(binding);
     try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
     const expected = try requestGolden(setup.workspace, history.session.slice(), composed_expected);
@@ -3592,21 +3261,20 @@ test "request preparation cancellation yields inside history discovery" {
     var pending_turns: usize = 0;
     for (0..preparationTestStepBound(expected.len)) |_| {
         const before = preparation.writer.offset;
-        const progress = preparation.advance(1, 1);
+        const progress = advanceTesting(&preparation, &setup.storage, 1, 1);
         try std.testing.expect(progress == .pending);
         try std.testing.expect(preparation.advanceStats().work_bytes <= 1);
         try std.testing.expect(preparation.advanceStats().work_items <= 1);
         try preparation.checkIntegrity(binding);
         if (preparation.state.stage == .history and preparation.state.piece == null and preparation.writer.offset == before) {
             pending_turns += 1;
-            // A step that reads without writing: the tool-group scan's.
             break;
         }
     }
     try std.testing.expectEqual(@as(usize, 1), pending_turns);
     preparation.cancel();
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+    try std.testing.expectEqual(@as(usize, 0), preparation.page.outstandingReaders());
     try std.testing.expect(!setup.storage.isFenced());
 }
 
@@ -3628,18 +3296,15 @@ test "compaction preparation appends request only trigger and replays asymmetric
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var prep: Preparation = undefined;
-        setup.storage.openHistoricalView(binding, &prep.view);
+        prep.page.open(binding);
         try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), &memos, .{}, &retained);
         defer if (prep.state.active) prep.cancel();
-        const request = try drainPreparation(&prep, 1, 1, 16384);
+        const request = try drainPreparation(&prep, &setup.storage, 1, 1, 16384);
         defer std.testing.allocator.free(request.bytes);
-        // The failed Operation declared Bash; the compaction offers the same.
         try std.testing.expect(std.mem.indexOf(u8, request.bytes, "first host input\"}]}," ++ declared_bash_json ++ ",{\"type\":\"compaction_trigger\"}],\"tools\":") != null);
         try std.testing.expect(std.mem.indexOf(u8, request.bytes, "\"store\":false,\"stream\":true") != null);
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, request.bytes, "compaction_trigger"));
     }
-    // The prefix must disappear while both the anchor and following item
-    // survive; an encrypted-item-only reconstruction loses the tail.
     const prefix = "{\"type\":\"reasoning\",\"id\":\"prefix\",\"encrypted_content\":\"covered-private\"}";
     const anchor = "{\"type\":\"compaction\",\"id\":\"anchor\",\"encrypted_content\":\"opaque\",\"created_by\":\"canonical-only\",\"future\":null}";
     const tail = "{\"type\":\"message\",\"id\":\"tail\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"tail retained\"}]}";
@@ -3684,13 +3349,11 @@ test "compaction preparation appends request only trigger and replays asymmetric
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var prep: Preparation = undefined;
-    setup.storage.openHistoricalView(next_binding, &prep.view);
+    prep.page.open(next_binding);
     try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), &memos, .{}, &retained);
     defer if (prep.state.active) prep.cancel();
-    const request = try drainPreparation(&prep, 1, 1, 32768);
+    const request = try drainPreparation(&prep, &setup.storage, 1, 1, 32768);
     defer std.testing.allocator.free(request.bytes);
-    // The compaction's own memo has no anchor; the successor selects one,
-    // so it rebuilds, and its replacement Attempt copies the new span.
     try std.testing.expectEqual(@as(u64, 0), prep.memoCopied());
     try std.testing.expect(memo_entries[0].memo.?.key.anchor != null);
     const after_anchor: usize = @intCast(memo_entries[0].memo.?.length);
@@ -3701,8 +3364,6 @@ test "compaction preparation appends request only trigger and replays asymmetric
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[3]));
     try std.testing.expect(std.mem.endsWith(u8, instructions, context_parts[3]));
     const input = parsed.value.object.get("input").?.array.items;
-    // The base covers the earlier declarations, so the Operation after the
-    // anchor declares its tools again.
     try std.testing.expectEqual(@as(usize, 5), input.len);
     try std.testing.expectEqualStrings("first host input", input[0].object.get("content").?.array.items[0].object.get("text").?.string);
     try std.testing.expectEqualStrings("compaction", input[1].object.get("type").?.string);
@@ -3715,8 +3376,6 @@ test "compaction preparation appends request only trigger and replays asymmetric
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
-/// The texts of `request`'s input items, in order: a message's first
-/// text, else its type.
 fn inputTextsForTesting(request: []const u8, out: [][]const u8) ![]const []const u8 {
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request, .{});
     defer parsed.deinit();
@@ -3741,9 +3400,6 @@ test "a compaction's floor drops whole exchanges and every request on its base r
     var setup: PreparationTestSetup = undefined;
     try setup.init();
     defer setup.close();
-    // Positions: "do work", Operation 1 (reasoning and two calls, then their
-    // denied results), its successor's answer, then "second message", the
-    // new instructions, "answer two" and "third message".
     const composed = try establishComposedHistory(&setup);
     const session = composed.session;
     try store.settleAnswerItemsForTesting(&setup.storage, &setup.tmp, composed.binding, &.{"{\"type\":\"message\",\"id\":\"a1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer one\"}]}"}, "answer one");
@@ -3776,15 +3432,10 @@ test "a compaction's floor drops whole exchanges and every request on its base r
     try setup.storage.settleModelAttemptFailure(fourth_binding, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
     var compact = (try setup.storage.admitNextModelAttempt(.{})).?;
     const compact_binding = try compact.permit.consume();
-    // The floor sits on the instruction entry: "second message" and every
-    // Operation admitted before it go, with Operation 1's results; the first
-    // Message and the instructions stay.
     try store.setHistoryFloorForTesting(&setup.storage, compact_binding.operation_id, "new rules", 1);
     const compaction = try prepareMemoForTesting(&setup, compact_binding, &memos, .{});
     defer std.testing.allocator.free(compaction.bytes);
     try expectInputTexts(compaction.bytes, &.{ "do work", "new rules", "additional_tools", "answer two", "third message", "compaction_trigger" });
-    // The base's memo spans dropped history: the compaction rebuilds and
-    // keeps no memo of its own floor.
     try std.testing.expectEqual(@as(usize, 0), compaction.copied);
     try std.testing.expect(memo_entries[0].memo.?.identical(&kept));
     try store.settleCompactionForTesting(&setup.storage, &setup.tmp, compact_binding, &.{ .compaction, .message });
@@ -3794,10 +3445,7 @@ test "a compaction's floor drops whole exchanges and every request on its base r
     const after = try prepareMemoForTesting(&setup, successor_binding, &memos, .{});
     defer std.testing.allocator.free(after.bytes);
     try expectInputTexts(after.bytes, &.{ "do work", "new rules", "third message", "compaction", "", "later message", "additional_tools" });
-    // Requests on the base share its floor, so their memo serves again.
     try std.testing.expect(try expectMemoRebuildEqual(&setup, successor_binding, &memos, .{}) > 0);
-    // A later compaction that makes no room keeps the floor, and so does
-    // every request on the base it becomes.
     try setup.storage.settleModelAttemptFailure(successor_binding, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
     var again = (try setup.storage.admitNextModelAttempt(.{})).?;
     const again_binding = try again.permit.consume();
@@ -3818,9 +3466,6 @@ test "a compaction that overflows makes room a level at a time, then the Turn en
     try setup.init();
     defer setup.close();
     const session = try setup.configure("room-config");
-    // model-a is unlisted: a 128k window and no reservation, so the levels
-    // aim at 512,000, 128,000 and 32,000 bytes. Newest first, the Messages
-    // reach 40,000, 140,000 and 540,000 bytes at m4, m3 and m2.
     const sizes = [_]usize{ 1, 400_000, 100_000, 30_000, 10_000 };
     var texts: [sizes.len][]u8 = undefined;
     for (&texts, sizes, 0..) |*text, size, index| {
@@ -3836,8 +3481,6 @@ test "a compaction that overflows makes room a level at a time, then the Turn en
     var call = (try setup.storage.admitNextModelAttempt(.{})).?;
     const call_binding = try call.permit.consume();
     try setup.storage.settleModelAttemptFailure(call_binding, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
-    // The full compaction, then levels 1 to 3, each dropping one more
-    // Message; the first Message always stays.
     const expected = [_][]const []const u8{
         &.{ texts[0], texts[1], texts[2], texts[3], texts[4], "additional_tools", "compaction_trigger" },
         &.{ texts[0], texts[2], texts[3], texts[4], "additional_tools", "compaction_trigger" },
@@ -3851,10 +3494,10 @@ test "a compaction that overflows makes room a level at a time, then the Turn en
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var prep: Preparation = undefined;
-        setup.storage.openHistoricalView(binding, &prep.view);
+        prep.page.open(binding);
         try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (prep.state.active) prep.cancel();
-        const request = try drainPreparation(&prep, 64 * 1024, 64, 4096);
+        const request = try drainPreparation(&prep, &setup.storage, 64 * 1024, 64, 4096);
         defer std.testing.allocator.free(request.bytes);
         try expectInputTexts(request.bytes, inputs);
         try setup.storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
@@ -3899,7 +3542,6 @@ test "compaction preparation rebuilds an old-model base and filters its suffix b
         }
         try std.testing.expect(try setup.storage.configure(&revision, .{}) == .accepted);
         const suffix = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
-        // The suffix is produced against a distinct saved revision.
         try setup.submit("binding-two", "binding-two", session.slice(), "later");
         try settleComposedForTesting(&setup, suffix, "binding-suffix", .reasoning, "{\"type\":\"reasoning\",\"id\":\"suffix\",\"encrypted_content\":\"opaque\"}", &.{});
         try revision.key.set("binding-revision-three");
@@ -3910,10 +3552,10 @@ test "compaction preparation rebuilds an old-model base and filters its suffix b
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var prep: Preparation = undefined;
-        setup.storage.openHistoricalView(binding, &prep.view);
+        prep.page.open(binding);
         try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (prep.state.active) prep.cancel();
-        const request = try drainPreparation(&prep, 1, 1, 32768);
+        const request = try drainPreparation(&prep, &setup.storage, 1, 1, 32768);
         defer std.testing.allocator.free(request.bytes);
         try std.testing.expect(std.mem.indexOf(u8, request.bytes, "\"type\":\"compaction\"") == null);
         try std.testing.expectEqual(!incompatible_suffix, std.mem.indexOf(u8, request.bytes, "\"encrypted_content\"") != null);
@@ -3924,11 +3566,6 @@ test "compaction preparation rebuilds an old-model base and filters its suffix b
 }
 
 test "request preparation cancels inside schema and replay emissions" {
-    // Checkpoint offsets come straight from the independently authored
-    // composed golden the dedicated test already verifies byte-for-byte.
-    // Each target lies strictly inside its emission's output span, so the
-    // corresponding raw or replay reader is necessarily still open with a
-    // partial charge outstanding when preparation is cancelled.
     for ([_]bool{ true, false }) |schema| {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
@@ -3945,14 +3582,12 @@ test "request preparation cancels inside schema and replay emissions" {
         const baseline = used.load(.acquire);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        setup.storage.openHistoricalView(binding, &preparation.view);
+        preparation.page.open(binding);
         try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
-        try stepPreparationToOffset(&preparation, target, 16384);
-        // Direct owner prerequisite for each emission family: the intended
-        // reader is active with a reservation outstanding.
+        try stepPreparationToOffset(&preparation, &setup.storage, target, 16384);
         try preparation.checkIntegrity(binding);
-        try std.testing.expectEqual(@as(usize, 1), preparation.view.outstandingReaders());
+        try std.testing.expectEqual(@as(usize, 1), preparation.page.outstandingReaders());
         try std.testing.expect(used.load(.acquire) > baseline);
         preparation.cancel();
         try std.testing.expect(!preparation.state.active);
@@ -3963,8 +3598,6 @@ test "request preparation cancels inside schema and replay emissions" {
 
 const MemoPrepared = struct { bytes: []u8, copied: usize };
 
-/// Prepare one Attempt, optionally through the memo table, with small
-/// allowances so a memo copy spans many chunks.
 fn prepareMemoForTesting(setup: *PreparationTestSetup, binding: store.AttemptBinding, memos: ?*history_memo.Table, faults: PreparationFaults) !MemoPrepared {
     return prepareMemoWithAllowanceForTesting(setup, binding, memos, faults, 7);
 }
@@ -3973,15 +3606,14 @@ fn prepareMemoWithAllowanceForTesting(setup: *PreparationTestSetup, binding: sto
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    setup.storage.openHistoricalView(binding, &preparation.view);
+    preparation.page.open(binding);
     try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), memos, faults, &retained);
     defer if (preparation.state.active) preparation.cancel();
-    // A rewound copy shrinks the request, so this drain does not require
-    // monotonic growth as drainPreparation does.
     var steps: usize = 0;
     const request = while (true) : (steps += 1) {
         try std.testing.expect(steps < 1 << 16);
-        switch (preparation.advance(allowance, 3)) {
+        switch (advanceTesting(&preparation, &setup.storage, allowance, 3)) {
+            .read => unreachable,
             .pending => {},
             .prepared => |sealed| break sealed,
             .failed => |err| return err,
@@ -3996,13 +3628,10 @@ fn prepareMemoWithAllowanceForTesting(setup: *PreparationTestSetup, binding: sto
         break :bytes bytes;
     };
     errdefer std.testing.allocator.free(bytes);
-    // Every charge, including a rewound partial copy, is released.
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     return .{ .bytes = bytes, .copied = @intCast(preparation.memoCopied()) };
 }
 
-/// Prepare through `memos` and again with a full rebuild, and require the
-/// same bytes. Returns how many span bytes the memo supplied.
 fn expectMemoRebuildEqual(setup: *PreparationTestSetup, binding: store.AttemptBinding, memos: *history_memo.Table, faults: PreparationFaults) !usize {
     const memo = try prepareMemoForTesting(setup, binding, memos, faults);
     defer std.testing.allocator.free(memo.bytes);
@@ -4013,15 +3642,10 @@ fn expectMemoRebuildEqual(setup: *PreparationTestSetup, binding: store.AttemptBi
     return memo.copied;
 }
 
-/// Settle `binding` with a reasoning item or a message and one Bash call,
-/// deny that call and admit the successor.
 fn advanceMemoHistoryForTesting(setup: *PreparationTestSetup, session: protocol.Bounded(protocol.max_session_bytes), binding: store.AttemptBinding, round: u64) !store.AttemptBinding {
     return advanceHistoryForTesting(setup, session, binding, round, round);
 }
 
-/// Settles `binding` with one output item and a Bash call, denies the call's
-/// Action `action` (null when the call was not offered, so it made none),
-/// and admits the successor.
 fn advanceHistoryForTesting(setup: *PreparationTestSetup, session: protocol.Bounded(protocol.max_session_bytes), binding: store.AttemptBinding, round: u64, action: ?u64) !store.AttemptBinding {
     var names: [4][32]u8 = undefined;
     const prefix = try std.fmt.bufPrint(&names[0], "memo-round-{d}", .{round});
@@ -4029,8 +3653,6 @@ fn advanceHistoryForTesting(setup: *PreparationTestSetup, session: protocol.Boun
     const item_id = try std.fmt.bufPrint(&names[2], "memo-item-{d}", .{round});
     const call_id = try std.fmt.bufPrint(&names[3], "memo-call-{d}", .{round});
     var json_buffer: [512]u8 = undefined;
-    // Alternate items with parts and bags: a reasoning summary, then a
-    // commentary message whose text parts carry annotations.
     const kind: output_format.OutputItemKind = if (round % 2 == 0) .message else .reasoning;
     const item = if (kind == .reasoning)
         try std.fmt.bufPrint(&json_buffer, "{{\"type\":\"reasoning\",\"id\":\"{s}\",\"summary\":[{{\"type\":\"summary_text\",\"text\":\"plan \\u00e9 {d}\"}}],\"encrypted_content\":\"opaque-{d}\"}}", .{ reasoning_id, round, round })
@@ -4065,7 +3687,6 @@ fn configureMemoSessionModelForTesting(setup: *PreparationTestSetup, model: []co
     command.configuration.tools = try .of(&.{"bash"});
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("ask");
-    // D111: test clients supply an explicit effort using the client product choice.
     if (if (@import("model_capability.zig").supportsModel(model_catalog.shipped, model)) @import("client_defaults.zig").startEffort(model, null) else null) |effort| {
         command.configuration.reasoning_effort.state = .value;
         try command.configuration.reasoning_effort.value.set(@tagName(effort));
@@ -4084,7 +3705,6 @@ fn heldMemoLength(memos: *history_memo.Table, session: []const u8) usize {
 
 const MemoFileDamage = enum { poisoned, flipped, deleted, truncated, extended, directory };
 
-/// Change the Session's memo file behind the table's back.
 fn damageMemoFileForTesting(setup: *PreparationTestSetup, memos: *history_memo.Table, session: []const u8, damage: MemoFileDamage) !void {
     const memo = memos.held(session).?;
     var name_buffer: [64]u8 = undefined;
@@ -4132,9 +3752,7 @@ test "a history memo hit writes exactly the bytes of a full rebuild" {
     defer memos.deinit(std.testing.io);
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     var binding = try admitted.permit.consume();
-    // A fresh Host has no memo: the first request is a full rebuild.
     try std.testing.expectEqual(@as(usize, 0), try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
-    // A replacement Attempt with the same view copies the whole span.
     const whole = heldMemoLength(&memos, session.slice());
     try std.testing.expect(whole != 0);
     try std.testing.expectEqual(whole, try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
@@ -4142,8 +3760,6 @@ test "a history memo hit writes exactly the bytes of a full rebuild" {
     while (round <= 3) : (round += 1) {
         const covered = heldMemoLength(&memos, session.slice());
         binding = try advanceMemoHistoryForTesting(&setup, session, binding, round);
-        // Later Operations copy the previous span and encode only the
-        // reasoning, call and Tool Result that follow it.
         try std.testing.expectEqual(covered, try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
         try std.testing.expect(heldMemoLength(&memos, session.slice()) > covered);
     }
@@ -4157,8 +3773,6 @@ test "request N+1 begins with request N's history span" {
     try setup.submit("memo-first", "memo-first", session.slice(), "start \"work\"\n");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     var binding = try admitted.permit.consume();
-    // Every request is a full rebuild, as after a Host restart; its memo
-    // table only reports where the span ends.
     var previous: ?[]u8 = null;
     defer if (previous) |bytes| std.testing.allocator.free(bytes);
     var round: u64 = 0;
@@ -4172,8 +3786,6 @@ test "request N+1 begins with request N's history span" {
         try std.testing.expectEqual(@as(usize, 0), request.copied);
         const start = std.mem.indexOf(u8, request.bytes, "\"input\":[").? + "\"input\":[".len;
         const span = request.bytes[start..][0..heldMemoLength(&table, session.slice())];
-        // The span ends where the history does: what depends on being
-        // last follows it, the current Operation's declared tools first.
         const after = request.bytes[start + span.len ..];
         const between = after[0 .. std.mem.indexOf(u8, after, "],\"tools\":[") orelse return error.TestUnexpectedResult];
         if (between.len != 0) try std.testing.expectStringStartsWith(between, ",{\"type\":\"additional_tools\"");
@@ -4205,8 +3817,6 @@ test "a legacy null Session continues with its earlier Operation effort" {
     try setup.submit("legacy-first", "legacy-first", session.slice(), "first");
     const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
 
-    // Pre-D111 gpt-5.5 Sessions stored null while Operations froze medium.
-    // Formats 51..53 migrate to the current Store without replacing these rows.
     try store.setLegacyNullEffortForTesting(&setup.storage, session.slice());
     const earlier = try prepareMemoForTesting(&setup, first, null, .{});
     defer std.testing.allocator.free(earlier.bytes);
@@ -4230,7 +3840,6 @@ test "a legacy null Session continues with its earlier Operation effort" {
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .medium), observed.reasoning_effort);
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), observed.reasoning_effort_override);
 
-    // An explicit new spec still wins over the earlier frozen value.
     try update.key.set("legacy-low");
     try update.configuration.reasoning_effort.value.set("low");
     try std.testing.expect(try setup.storage.configure(&update, .{}) == .accepted);
@@ -4271,8 +3880,6 @@ test "an unadmitted effort cycle emits no update and cannot refuse an Operation 
 }
 
 test "Operation effort emission and refused restoration agree after a compaction base" {
-    // The first request after the base has no retained model boundary: its
-    // carry is the initial low, not the previous Operation's admitted high.
     for ([_][]const u8{ "high", "low", "xhigh" }) |chosen| {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
@@ -4326,8 +3933,6 @@ test "Operation effort emission and refused restoration agree after a compaction
             _ = try expectMemoRebuildEqual(&setup, completed, &memos, .{});
             const request = try prepareMemoForTesting(&setup, completed, null, .{});
             defer std.testing.allocator.free(request.bytes);
-            // Refusal restores the admitted high, not the top low. The
-            // rejected choice is gone, but a high restoration is necessary.
             try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, request.bytes, "configuration_update"));
             try std.testing.expect(std.mem.indexOf(u8, request.bytes, "\"effort\":\"xhigh\"") == null);
             try std.testing.expect(std.mem.indexOf(u8, request.bytes, "{\"type\":\"configuration_update\",\"reasoning\":{\"effort\":\"high\"}}") != null);
@@ -4375,8 +3980,6 @@ test "a refused top-level effort remains an ordinary provider failure without a 
         var page: @import("activity_facts.zig").Page = undefined;
         try setup.storage.activityPage(&page_request, &page);
         for (page.items[0..page.count]) |item| try std.testing.expect(item.value.session_changed.field != .reasoning_effort_refused);
-        // The caller sees the provider failure, not a catalog refusal or a
-        // silent omission of the effort. The report survives as ordinary content.
         page_request.kinds = .initOne(.turn_ended);
         try setup.storage.activityPage(&page_request, &page);
         try std.testing.expectEqual(@as(usize, 1), page.count);
@@ -4387,8 +3990,6 @@ test "a refused top-level effort remains an ordinary provider failure without a 
 }
 
 test "a refused effort change retries without the update and later Operations keep the effective effort" {
-    // An unlisted model passes configure-time validation. The provider, not
-    // a catalog guess, decides whether its effort update is accepted.
     for ([_]?protocol.ReasoningEffort{ null, .low }) |initial| for ([_]bool{ false, true }) |unrelated_revision| for ([_]bool{ false, true }) |after_refusal| {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
@@ -4475,7 +4076,6 @@ test "a refused effort change retries without the update and later Operations ke
         try std.testing.expectEqual(initial, observed.reasoning_effort);
         try std.testing.expectEqual(initial, observed.reasoning_effort_override);
         try std.testing.expectEqual(revision + @intFromBool(after_refusal), observed.revision);
-        // The feed is append-only: later work did not edit the refusal row.
         page_request.direction = .backward;
         var after: @import("activity_facts.zig").Page = undefined;
         try setup.storage.activityPage(&page_request, &after);
@@ -4493,8 +4093,6 @@ test "an effort change keeps each request's input a prefix of the next" {
     try setup.init();
     defer setup.close();
     const session = try configureMemoSessionModelForTesting(&setup, "gpt-5.5");
-    // The prefix fixture starts at medium explicitly, independently of the
-    // client's product default (low under C1b).
     var initial: wire_request.ConfigureCommand = .{};
     try initial.key.set("effort-initial-medium");
     initial.session = session;
@@ -4507,8 +4105,6 @@ test "an effort change keeps each request's input a prefix of the next" {
     var memo_entries: [2]history_memo.Table.Entry = @splat(.{});
     var memos: history_memo.Table = .{ .entries = &memo_entries, .scratch_path = setup.root };
     defer memos.deinit(std.testing.io);
-    // The effort set before each round's successor is admitted; null
-    // leaves it, and a repeat changes nothing the model sees.
     const efforts = [_]?[]const u8{ null, "high", null, "xhigh", "xhigh", "medium" };
     var previous: ?[]u8 = null;
     defer if (previous) |bytes| std.testing.allocator.free(bytes);
@@ -4525,14 +4121,11 @@ test "an effort change keeps each request's input a prefix of the next" {
             }
             binding = try advanceMemoHistoryForTesting(&setup, session, binding, round);
         }
-        // A memo copy writes what a rebuild does.
         _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
         const request = try prepareMemoForTesting(&setup, binding, null, .{});
         const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
         defer parsed.deinit();
-        // The top keeps gpt-5.5's starting effort for the Session's life.
         try std.testing.expectEqualStrings("medium", parsed.value.object.get("reasoning").?.object.get("effort").?.string);
-        // Everything up to the end of the input is the next request's start.
         const input_end = std.mem.indexOf(u8, request.bytes, "],\"tools\":[").?;
         if (previous) |earlier| {
             try std.testing.expectStringStartsWith(request.bytes, earlier);
@@ -4540,7 +4133,6 @@ test "an effort change keeps each request's input a prefix of the next" {
         }
         previous = try std.testing.allocator.dupe(u8, request.bytes[0..input_end]);
         if (round == efforts.len - 1) {
-            // high, xhigh, medium: three changes, each written once.
             try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, request.bytes, "configuration_update"));
             try std.testing.expectStringEndsWith(request.bytes[0..input_end], "{\"type\":\"configuration_update\",\"reasoning\":{\"effort\":\"medium\"}}");
         }
@@ -4559,8 +4151,6 @@ test "a tool change keeps each request's input a prefix of the next" {
     var memo_entries: [2]history_memo.Table.Entry = @splat(.{});
     var memos: history_memo.Table = .{ .entries = &memo_entries, .scratch_path = setup.root };
     defer memos.deinit(std.testing.io);
-    // The tools set before each round's successor is admitted; null leaves
-    // them. Bash is removed, then offered again, then web search joins.
     const rounds = [_]?[]const []const u8{ null, &.{}, null, &.{"bash"}, &.{ "bash", "web_search" } };
     var offered = true;
     var actions: u64 = 0;
@@ -4568,7 +4158,6 @@ test "a tool change keeps each request's input a prefix of the next" {
     defer if (previous) |bytes| std.testing.allocator.free(bytes);
     for (rounds, 0..) |tools_round, round| {
         if (round != 0) {
-            // The call the previous request offered Bash for makes an Action.
             const action: ?u64 = if (offered) id: {
                 actions += 1;
                 break :id actions;
@@ -4585,22 +4174,17 @@ test "a tool change keeps each request's input a prefix of the next" {
             binding = try advanceHistoryForTesting(&setup, session, binding, round, action);
             if (tools_round) |names| offered = names.len != 0;
         }
-        // A memo copy writes what a rebuild does.
         _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
         const request = try prepareMemoForTesting(&setup, binding, null, .{});
         defer std.testing.allocator.free(request.bytes);
-        // Everything up to the end of the input is the next request's start.
         const input_end = std.mem.indexOf(u8, request.bytes, "],\"tools\":[").?;
         if (previous) |earlier| {
             try std.testing.expectStringStartsWith(request.bytes, earlier);
             std.testing.allocator.free(earlier);
         }
         previous = try std.testing.allocator.dupe(u8, request.bytes[0..input_end]);
-        // Bash stays declared in the history while removed, and a call to
-        // it gets the removed result; offered again, it is declared again.
         try std.testing.expectEqual(@as(usize, if (round < 3) 1 else 2), std.mem.count(u8, request.bytes, "additional_tools"));
         try std.testing.expectEqual(round >= 2, std.mem.indexOf(u8, request.bytes, tools.removed_tool_result) != null);
-        // The top holds only web search, once it is offered.
         const top = request.bytes[input_end + "],\"tools\":[".len ..];
         try std.testing.expectEqual(round == 4, std.mem.startsWith(u8, top, default_top_tools_json));
         if (round != 4) try std.testing.expect(std.mem.startsWith(u8, top, "]"));
@@ -4620,8 +4204,6 @@ test "a loaded tools revision adds exactly the newly loaded tool without a cache
     configure.configuration.permission_mode.state = .value;
     try configure.configuration.permission_mode.value.set("ask");
     try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
-    // This intentionally unreachable subset exercises the legacy NULL/set
-    // representation independently of the loader. Configured tools stay fixed.
     try store.setLoadedToolsForTesting(&setup.storage, session.slice(), donor.slice());
     try setup.submit("loaded-memo-first", "loaded-memo-first", session.slice(), "start work");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
@@ -4643,7 +4225,6 @@ test "a loaded tools revision adds exactly the newly loaded tool without a cache
     grow.configuration.loaded_tools = try .of(&.{ "bash", "message_agent" });
     try std.testing.expect(try setup.storage.configure(&grow, .{}) == .accepted);
     binding = try advanceHistoryForTesting(&setup, session, binding, 1, 1);
-    // The old request's history is still a valid prefix and the memo is hit.
     try std.testing.expectEqual(covered, try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
     const request = try prepareMemoForTesting(&setup, binding, null, .{});
     defer std.testing.allocator.free(request.bytes);
@@ -4690,7 +4271,7 @@ test "find_tools declares a found tool on the next request without losing the me
     });
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const find = (try setup.storage.nextCoreWork()).?.action;
+    const find = (try setup.storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     try @import("find_tools.zig").run(&setup.storage, arena.allocator(), &find, .{});
     admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     binding = try admitted.permit.consume();
@@ -4714,9 +4295,68 @@ test "find_tools declares a found tool on the next request without losing the me
     try settleItemsForTesting(&setup, binding, "find-codec-found", &.{
         "{\"type\":\"function_call\",\"id\":\"read-item\",\"call_id\":\"read-call\",\"name\":\"read_transcript\",\"arguments\":\"{}\"}",
     });
-    const read = (try setup.storage.nextCoreWork()).?.action;
+    const read = (try setup.storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     try std.testing.expect(read.tool == .read_transcript);
     try @import("read_transcript.zig").run(&setup.storage, arena.allocator(), &read, .{});
+}
+
+test "read_action uses the frozen configured offer and returns one provider tool output" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("read-action-codec");
+    var configure: wire_request.ConfigureCommand = .{};
+    configure.session = session;
+    try configure.key.set("read-action-offer");
+    configure.configuration.tools = try .of(&.{"read_action"});
+    try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
+    try setup.submit("read-action-input", "read-action-input", session.slice(), "read your Action");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    const first = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(first.bytes);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const request = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), first.bytes, .{});
+    const declaration = request.object.get("input").?.array.items[1].object;
+    try std.testing.expectEqualStrings("additional_tools", declaration.get("type").?.string);
+    const definitions = declaration.get("tools").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), definitions.len);
+    try std.testing.expectEqualStrings("read_action", definitions[0].object.get("name").?.string);
+    try std.testing.expectEqual(@as(usize, 0), request.object.get("tools").?.array.items.len);
+    try configure.key.set("withdraw-read-action");
+    configure.configuration.tools = try .of(&.{});
+    try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
+    try settleItemsForTesting(&setup, binding, "read-action-call", &.{
+        "{\"type\":\"function_call\",\"id\":\"read-item\",\"call_id\":\"read-call\",\"name\":\"read_action\",\"arguments\":\"{\\\"action\\\":\\\"1\\\"}\"}",
+    });
+    const read = (try setup.storage.nextCoreWork(.{ .free_credit = .none, .mcp_open = false })).?.action;
+    try std.testing.expect(read.tool == .read_action);
+    try @import("read_action_tool.zig").run(&setup.storage, arena.allocator(), &read, .{});
+    admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    binding = try admitted.permit.consume();
+    const next = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(next.bytes);
+    const successor = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), next.bytes, .{});
+    try std.testing.expectEqual(@as(usize, 0), successor.object.get("tools").?.array.items.len);
+    var outputs: usize = 0;
+    for (successor.object.get("input").?.array.items) |item| {
+        const kind = item.object.get("type") orelse continue;
+        if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
+        try std.testing.expectEqualStrings("read-call", item.object.get("call_id").?.string);
+        const output = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), item.object.get("output").?.string, .{});
+        try std.testing.expectEqualStrings(session.slice(), output.object.get("session").?.string);
+        try std.testing.expectEqualStrings("1", output.object.get("action").?.string);
+        try std.testing.expectEqualStrings("queued", output.object.get("state").?.string);
+        try std.testing.expect(output.object.get("final").? == .null);
+        outputs += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), outputs);
+    try settleItemsForTesting(&setup, binding, "read-action-unoffered", &.{
+        "{\"type\":\"function_call\",\"id\":\"excluded-item\",\"call_id\":\"excluded-call\",\"name\":\"read_action\",\"arguments\":\"{}\"}",
+    });
+    try std.testing.expect(try setup.storage.nextCoreWork(.{ .free_credit = .none, .mcp_open = false }) == null);
+    try std.testing.expectEqual(@as(u64, 1), try store.testing.sqlite_only.queryU64(&setup.storage, "SELECT count(*) FROM model_tool_call WHERE operation_id=?1 AND rejection_code='unknown_tool'", .{binding.operation_id}));
 }
 
 test "a full rebuild must begin with the Session's prefix seal" {
@@ -4727,8 +4367,6 @@ test "a full rebuild must begin with the Session's prefix seal" {
     try setup.submit("memo-first", "memo-first", session.slice(), "start \"work\"\n");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     var binding = try admitted.permit.consume();
-    // Each rebuild runs as a restarted Host's would, with an empty memo
-    // table, and returns its span's length.
     const Rebuild = struct {
         fn span(test_setup: *PreparationTestSetup, attempt: store.AttemptBinding, name: []const u8) !u64 {
             var entries: [2]history_memo.Table.Entry = @splat(.{});
@@ -4743,8 +4381,6 @@ test "a full rebuild must begin with the Session's prefix seal" {
     var length = try Rebuild.span(&setup, binding, session.slice());
     var sealed = (try setup.storage.prefixSealForTesting(binding)).?;
     try std.testing.expectEqual(length, sealed.span_length);
-    // Later Operations begin with the sealed bytes. The seal moves to the
-    // whole span once that span has doubled, and otherwise stays.
     var replaced: usize = 0;
     var round: u64 = 1;
     while (round <= 6) : (round += 1) {
@@ -4760,10 +4396,6 @@ test "a full rebuild must begin with the Session's prefix seal" {
     }
     try std.testing.expect(replaced != 0);
     try std.testing.expect(sealed.span_length < length);
-    // A seal the rebuild disagrees with fails before anything is sent and
-    // stays for every later rebuild. A seal of another anchor does not bind
-    // and is replaced by the whole span; one of a later view, as when an
-    // earlier Operation is retried, neither binds nor is replaced.
     const Outcome = enum { drift, replaced, kept };
     const Case = struct { seal: store.PrefixSeal, outcome: Outcome };
     var flipped = sealed;
@@ -4799,9 +4431,6 @@ test "a full rebuild must begin with the Session's prefix seal" {
         }
     }
     try std.testing.expectEqualStrings("encoding_drift", preparationFailureCode(error.EncodingDrift));
-    // A drifted rebuild keeps no memo, so no later request copies it
-    // unchecked; a memo hit is this Host's own encoding and is not checked
-    // again.
     var entries: [2]history_memo.Table.Entry = @splat(.{});
     var memos: history_memo.Table = .{ .entries = &entries, .scratch_path = setup.root };
     defer memos.deinit(std.testing.io);
@@ -4825,22 +4454,19 @@ test "a codec that declines fails provider_codec_failed before any request exist
     try setup.submit("codec-declines", "codec-declines", session.slice(), "start");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
-    // The first item, a history element and the last item.
     for ([_]codec_abi.ItemKind{ .settings, .message, .request_end }) |kind| {
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        setup.storage.openHistoricalView(binding, &preparation.view);
+        preparation.page.open(binding);
         try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{ .codec_declines = kind }, &retained);
         defer if (preparation.state.active) preparation.cancel();
-        // No request is prepared, so nothing can be sent.
-        try std.testing.expectError(error.CodecDeclined, drainLivePreparation(&preparation, 16, 2, 1 << 16));
+        try std.testing.expectError(error.CodecDeclined, drainLivePreparation(&preparation, &setup.storage, 16, 2, 1 << 16));
         preparation.cancel();
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
         try std.testing.expect(retained == null);
     }
     try std.testing.expectEqualStrings("provider_codec_failed", preparationFailureCode(error.CodecDeclined));
-    // The same Session encodes through its pinned codec.
     const request = try prepareMemoForTesting(&setup, binding, null, .{});
     std.testing.allocator.free(request.bytes);
 }
@@ -4858,8 +4484,6 @@ test "a history memo that does not match the frozen request is rebuilt in full" 
     var binding = try admitted.permit.consume();
     _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
     binding = try advanceMemoHistoryForTesting(&setup, session, binding, 1);
-    // Each mismatch carries poisoned bytes, so using it would change the
-    // request; equality with the full rebuild proves it was not used.
     const Mismatch = enum { anchor, model, older_view, session };
     for (std.enums.values(Mismatch)) |mismatch| {
         try damageMemoFileForTesting(&setup, &memos, session.slice(), .poisoned);
@@ -4867,14 +4491,12 @@ test "a history memo that does not match the frozen request is rebuilt in full" 
         switch (mismatch) {
             .anchor => memo.key.anchor = 1,
             .model => try memo.key.model.set("model-b"),
-            // A retry of an earlier Operation has an older frozen view.
             .older_view => memo.admission_position = std.math.maxInt(u64),
             .session => try memo.key.session.set("zzzzzz"),
         }
         try std.testing.expectEqual(@as(usize, 0), try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
         if (mismatch == .session) memos.forget(std.testing.io, &memos.held("zzzzzz").?);
     }
-    // After a Host restart the table starts empty, whatever files remain.
     var restarted_entries: [2]history_memo.Table.Entry = @splat(.{});
     var restarted: history_memo.Table = .{ .entries = &restarted_entries, .scratch_path = setup.root };
     defer restarted.deinit(std.testing.io);
@@ -4896,9 +4518,6 @@ test "a failed history memo copy rewinds its partial span and rebuilds in full" 
     _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
     binding = try advanceMemoHistoryForTesting(&setup, session, binding, 1);
     _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
-    // A memo read fails on the first chunk, and part-way after several
-    // chunks reached the request. Either way the request is the full
-    // rebuild's, and that rebuild leaves a memo the next request uses.
     for ([_]u64{ 0, 20 }) |after| {
         const held = heldMemoLength(&memos, session.slice());
         try std.testing.expect(held > after + 7);
@@ -4921,18 +4540,12 @@ test "a history memo file that changed on disk is dropped and rebuilt in full" {
     _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
     binding = try advanceMemoHistoryForTesting(&setup, session, binding, 1);
     _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
-    // One changed byte fails the digest after the whole span was copied, so
-    // the copy is rewound. Missing, short, long, or not a file: the length
-    // check refuses it before any byte is copied. Each rebuild stores a
-    // fresh memo.
     for ([_]MemoFileDamage{ .flipped, .deleted, .truncated, .extended, .directory }) |damage| {
         const held = heldMemoLength(&memos, session.slice());
         try std.testing.expect(held != 0);
         try damageMemoFileForTesting(&setup, &memos, session.slice(), damage);
         try std.testing.expectEqual(@as(usize, 0), try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
         if (damage == .directory) {
-            // The directory's removal is unconfirmed, so its slot stays
-            // counted; the rebuilt memo takes the other slot.
             try std.testing.expectEqual(held, heldMemoLength(&memos, session.slice()));
             try std.testing.expectEqual(@as(u64, 2 * held), memos.bytes);
             var name_buffer: [64]u8 = undefined;
@@ -4943,7 +4556,6 @@ test "a history memo file that changed on disk is dropped and rebuilt in full" {
         }
         try std.testing.expectEqual(held, try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
     }
-    // The table's bytes are the files' bytes, and stopping removes them.
     try std.testing.expectEqual(@as(u64, heldMemoLength(&memos, session.slice())), memos.bytes);
     memos.deinit(std.testing.io);
     var name_buffer: [64]u8 = undefined;
@@ -4973,18 +4585,16 @@ test "a cold history memo build yields under the preparation allowance" {
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        setup.storage.openHistoricalView(binding, &preparation.view);
+        preparation.page.open(binding);
         try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), &memos, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
-        // Advances after the request reached its final length copy the
-        // span into the memo file, each within the byte allowance.
         var final_advances: usize = 0;
         var final_work: usize = 0;
         var last_request: u64 = 0;
         var steps: usize = 0;
         const request = while (true) : (steps += 1) {
             try std.testing.expect(steps < 1 << 12);
-            const progress = preparation.advance(preparation_byte_allowance, preparation_item_allowance);
+            const progress = advanceTesting(&preparation, &setup.storage, preparation_byte_allowance, preparation_item_allowance);
             const stats = preparation.advanceStats();
             try std.testing.expect(stats.work_bytes <= preparation_byte_allowance);
             if (stats.request_bytes != last_request) {
@@ -4995,6 +4605,7 @@ test "a cold history memo build yields under the preparation allowance" {
             final_advances += 1;
             final_work += stats.work_bytes;
             switch (progress) {
+                .read => unreachable,
                 .pending => {},
                 .prepared => |sealed| break sealed,
                 .failed => |err| return err,
@@ -5012,33 +4623,27 @@ test "a cold history memo build yields under the preparation allowance" {
         }
     }
     defer for (requests) |bytes| std.testing.allocator.free(bytes);
-    // A replacement Attempt copies the whole kept span and writes the same
-    // request.
     try std.testing.expectEqual(@as(u64, 0), copied[0]);
     try std.testing.expectEqual(@as(u64, heldMemoLength(&memos, session.slice())), copied[1]);
     try std.testing.expectEqualStrings(requests[0], requests[1]);
 }
 
-/// Cancel a preparation through `memos` while it is keeping its span, then
-/// require that the table kept nothing of it and the next request rebuilds
-/// in full and keeps its memo.
 fn expectMemoStoreCancelForTesting(setup: *PreparationTestSetup, session: []const u8, binding: store.AttemptBinding, memos: *history_memo.Table) !void {
     const full = try prepareMemoForTesting(setup, binding, null, .{});
     defer std.testing.allocator.free(full.bytes);
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    setup.storage.openHistoricalView(binding, &preparation.view);
+    preparation.page.open(binding);
     try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), memos, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
     var final_advances: usize = 0;
     var steps: usize = 0;
     while (final_advances < 3) : (steps += 1) {
         try std.testing.expect(steps < 1 << 16);
-        try std.testing.expect(preparation.advance(7, 3) == .pending);
+        try std.testing.expect(advanceTesting(&preparation, &setup.storage, 7, 3) == .pending);
         if (preparation.advanceStats().request_bytes == full.bytes.len) final_advances += 1;
     }
-    // Mid-store: the table counts the span's file bytes but holds no memo.
     try std.testing.expect(memos.held(session) == null);
     try std.testing.expect(memos.bytes != 0);
     preparation.cancel();
@@ -5065,24 +4670,19 @@ test "a preparation cancelled while keeping its memo keeps nothing of it" {
     defer memos.deinit(std.testing.io);
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     var binding = try admitted.permit.consume();
-    // A cold build, then an append after a copied prefix, which rewrites the
-    // held memo's file.
     try expectMemoStoreCancelForTesting(&setup, session.slice(), binding, &memos);
     binding = try advanceMemoHistoryForTesting(&setup, session, binding, 1);
     try expectMemoStoreCancelForTesting(&setup, session.slice(), binding, &memos);
-    // Cancelled part-way through copying the held memo: the memo's file
-    // closes with the request's, and the memo stays whole for the next
-    // request.
     const held = heldMemoLength(&memos, session.slice());
     const descriptors = @import("os/descriptor_limit.zig");
     const baseline = (try descriptors.observe(std.testing.io)).open_descriptors;
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    setup.storage.openHistoricalView(binding, &preparation.view);
+    preparation.page.open(binding);
     try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), &memos, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
-    while (preparation.memoCopied() == 0) try std.testing.expect(preparation.advance(7, 3) == .pending);
+    while (preparation.memoCopied() == 0) try std.testing.expect(advanceTesting(&preparation, &setup.storage, 7, 3) == .pending);
     try std.testing.expect(preparation.memoCopied() < held);
     preparation.cancel();
     try std.testing.expectEqual(baseline, (try descriptors.observe(std.testing.io)).open_descriptors);
@@ -5183,7 +4783,6 @@ test "skills native conversation is append-only across invoke reload replay and 
     defer std.testing.allocator.free(initial_report);
     try std.testing.expect(std.mem.indexOf(u8, initial_report, "\"turn\":null") != null);
 
-    // A user Message that is only the skill's `/name` word.
     const typed = "/demo";
     var invoke: wire_request.MessageCommand = .{ .session = session, .text = .{ .state = .value, .borrowed = typed.ptr, .length = typed.len, .digest = protocol.contentDigest(typed) } };
     try invoke.key.set("skills-user-invoke");
@@ -5195,7 +4794,6 @@ test "skills native conversation is append-only across invoke reload replay and 
     const prepared = try skill_owner.prepareMessage(arena, std.testing.allocator, std.testing.io, &setup.storage, &invoke, null);
     const admitted_message = setup.storage.submitMessageCapturedSkills(&invoke, null, null, &prepared.captured.?, .{});
     try std.testing.expect(admitted_message == .accepted);
-    // The receipt names the text as typed; the model reads the skill after it.
     try std.testing.expectEqual(@as(u64, typed.len), admitted_message.accepted.content.length);
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     var binding = try admitted.permit.consume();
@@ -5207,7 +4805,6 @@ test "skills native conversation is append-only across invoke reload replay and 
     defer std.testing.allocator.free(first.bytes);
     const first_parsed = try std.json.parseFromSlice(std.json.Value, arena, first.bytes, .{});
     try std.testing.expect(std.mem.indexOf(u8, first_parsed.value.object.get("instructions").?.string, "initial-demo-desc") == null);
-    // The typed text, then the skill as its own user message, nothing between.
     var users: std.ArrayList([]const u8) = .empty;
     for (first_parsed.value.object.get("input").?.array.items) |item| {
         const role = item.object.get("role") orelse continue;
@@ -5225,7 +4822,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     try settleItemsForTesting(&setup, binding, "skills-invoke-call", &.{
         "{\"type\":\"function_call\",\"id\":\"skill-invoke-item\",\"call_id\":\"skill-invoke-call\",\"name\":\"skill\",\"arguments\":\"{\\\"operation\\\":\\\"invoke\\\",\\\"name\\\":\\\"demo\\\"}\"}",
     });
-    const action = (try setup.storage.nextCoreWork()).?.action;
+    const action = (try setup.storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     try std.testing.expectEqual(@TypeOf(action.tool).skill, action.tool);
     const current = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .invoke, .name = demo }, null);
     try std.testing.expect(std.mem.endsWith(u8, current.invocation, current_raw));
@@ -5258,7 +4855,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     try settleItemsForTesting(&setup, binding, "skills-reload-call", &.{
         "{\"type\":\"function_call\",\"id\":\"skill-reload-item\",\"call_id\":\"skill-reload-call\",\"name\":\"skill\",\"arguments\":\"{\\\"operation\\\":\\\"reload\\\"}\"}",
     });
-    const reload_action = (try setup.storage.nextCoreWork()).?.action;
+    const reload_action = (try setup.storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     const no_change = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .reload }, null);
     try std.testing.expect(try setup.storage.settleSkillTool(reload_action.binding, arena, &no_change, .{}));
     admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
@@ -5296,9 +4893,6 @@ test "historical accepted assistant output completeness and provenance fence rea
     const testing_absent_model_evidence = store.testing.testing_absent_model_evidence;
     const sqlite = store.testingSqlite;
     const OutputMetadataWriter = output_format.OutputMetadataWriter;
-    // Replay trusts each item's saved kind, identity and bytes once their
-    // digest matches; acceptance judged them, and the rows below the
-    // admission boundary are immutable.
     const Incompatibility = enum { none, model };
     for ([_]struct { fault: ?[:0]const u8 = null, incompatible: Incompatibility = .none, tied_owners: bool = false, failure: ?anyerror = error.CorruptStore }{
         .{ .tied_owners = true, .fault = "DELETE FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_output_item)" },
@@ -5317,7 +4911,6 @@ test "historical accepted assistant output completeness and provenance fence rea
         .{ .fault = "UPDATE model_output_item SET session_ref='f0re1g'" },
         .{ .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE private=1" },
         .{ .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT extras_content_id FROM model_output_item WHERE item_ordinal=1)" },
-        // Opaque state of another model is not read; visible suffix still is.
         .{ .incompatible = .model, .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT extras_content_id FROM model_output_item WHERE item_ordinal=0)", .failure = null },
         .{ .fault = "UPDATE model_operation SET resolution_code='failed' WHERE output_item_count IS NOT NULL" },
         .{ .fault = "UPDATE model_operation SET resolution_code='future' WHERE output_item_count IS NOT NULL" },
@@ -5386,19 +4979,18 @@ test "historical accepted assistant output completeness and provenance fence rea
         try sqlite.exec(database.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
         if (case.tied_owners) try store.testing.sqlite_only.exec(&database, "UPDATE model_operation SET admission_position=" ++
             "(SELECT min(admission_position) FROM model_operation WHERE output_item_count IS NOT NULL) WHERE output_item_count IS NOT NULL", .{});
-        // Deliberately bypass the message-certificate CHECK too: these cases
-        // exercise read-time detection of damaged persisted item kinds.
         try sqlite.exec(database.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON");
         if (case.fault) |fault| try sqlite.exec(database.sqliteDatabase(), fault);
         try sqlite.exec(database.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF");
         try sqlite.exec(database.sqliteDatabase(), "PRAGMA foreign_keys=ON");
         var preparation: Preparation = undefined;
-        database.openHistoricalView(binding, &preparation.view);
+        preparation.page.open(binding);
         try preparation.init(std.testing.io, root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         while (true) {
-            const progress = preparation.advance(7, 2);
+            const progress = advanceTesting(&preparation, &database, 7, 2);
             switch (progress) {
+                .read => unreachable,
                 .pending => {},
                 .failed => |err| {
                     try std.testing.expectEqual(case.failure orelse return err, err);
@@ -5413,7 +5005,7 @@ test "historical accepted assistant output completeness and provenance fence rea
         }
         try std.testing.expectEqual(if (case.failure) |failure| failure == error.CorruptStore else false, database.isFenced());
         if (preparation.state.active) preparation.cancel();
-        try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+        try std.testing.expectEqual(@as(usize, 0), preparation.page.outstandingReaders());
     }
 }
 
@@ -5425,8 +5017,6 @@ test "historical preparation fences a served call that does not match its certif
     const TestingCall = store.TestingCall;
     const settleCallsForTesting = store.settleCallsForTesting;
     const sqlite = store.testingSqlite;
-    // A call binds its Tool Results through its admission certificate; replay
-    // reads each call's bytes against their digest.
     for ([_][:0]const u8{
         "UPDATE content SET payload=zeroblob(byte_length) WHERE private=1",
         "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT extras_content_id FROM model_output_item WHERE item_ordinal=1)",
@@ -5455,12 +5045,13 @@ test "historical preparation fences a served call that does not match its certif
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        database.openHistoricalView(binding, &preparation.view);
+        preparation.page.open(binding);
         try preparation.init(std.testing.io, root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         while (true) {
-            const progress = preparation.advance(1, 1);
+            const progress = advanceTesting(&preparation, &database, 1, 1);
             switch (progress) {
+                .read => unreachable,
                 .pending => {},
                 .failed => |err| {
                     try std.testing.expectEqual(error.CorruptStore, err);
@@ -5474,7 +5065,7 @@ test "historical preparation fences a served call that does not match its certif
         }
         try std.testing.expect(database.isFenced());
         preparation.cancel();
-        try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+        try std.testing.expectEqual(@as(usize, 0), preparation.page.outstandingReaders());
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
         try std.testing.expect(retained == null);
     }
@@ -5527,7 +5118,6 @@ test "MCP projected offers preserve request prefixes and memo rebuilds" {
         previous = try std.testing.allocator.dupe(u8, request.bytes[0..input_end]);
         try std.testing.expectEqual(@as(usize, if (round == 0) 1 else if (round < 3) 2 else 3), std.mem.count(u8, request.bytes, "additional_tools"));
         try std.testing.expectEqual(round > 0, std.mem.indexOf(u8, request.bytes, "reworded page") != null);
-        // The original declaration stays byte-for-byte even after removal.
         try std.testing.expect(std.mem.indexOf(u8, request.bytes, "original page") != null);
         try testing.settleItemsForTesting(&setup.storage, &setup.tmp, binding, &.{"{\"type\":\"message\",\"id\":\"done\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}"}, "done");
     }
@@ -5544,14 +5134,40 @@ fn openRawImagePreparationWithDigestRecheck(
     used: *std.atomic.Value(u64),
     limit: u64,
 ) !store.HistoricalContent {
-    setup.storage.openHistoricalView(binding, &preparation.view);
+    preparation.page.open(binding);
     var retained: ?named_scratch.Owner = null;
     try preparation.init(std.testing.io, setup.root, .{ .used = used, .limit = limit }, protocol.routesAll(.endpoint), null, .{}, &retained);
     errdefer preparation.cancel();
     try std.testing.expect(retained == null);
-    try preparation.view.settings(&preparation.settings);
+    while (true) {
+        preparation.page.settings(&preparation.settings) catch |err| {
+            if (err != error.PageRead) return err;
+            try setup.storage.readRequestPage(&preparation.page);
+            continue;
+        };
+        break;
+    }
+    while (true) {
+        const validated = preparation.page.validateOutputsStep() catch |err| {
+            if (err != error.PageRead) return err;
+            try setup.storage.readRequestPage(&preparation.page);
+            continue;
+        };
+        if (validated) break;
+    }
     var position: u64 = 0;
-    while (try preparation.view.nextEntry(position)) |entry| {
+    while (true) {
+        var bytes: usize = preparation_byte_allowance;
+        var items: usize = preparation_item_allowance;
+        const progress = preparation.page.nextEntryStep(position, &bytes, &items) catch |err| {
+            if (err != error.PageRead) return err;
+            try setup.storage.readRequestPage(&preparation.page);
+            continue;
+        };
+        const entry = switch (progress) {
+            .pending => continue,
+            .ready => |entry| entry orelse break,
+        };
         position = entry.position;
         if (entry.kind != .user) continue;
         var content = entry.content.?;
@@ -5571,14 +5187,19 @@ fn loadRawImageItem(preparation: *Preparation, item: codec_abi.Item, handles: []
     try preparation.encodeItem();
 }
 
-fn drainRawImageItem(preparation: *Preparation, allowance: usize) !void {
+fn drainRawImageItem(preparation: *Preparation, storage: *store.Store, allowance: usize) !void {
     var steps: usize = 0;
     while (true) {
         var left = allowance;
         var items: usize = 64;
         while (left != 0) {
             if (preparation.state.emission != .none) {
-                if (!try preparation.advanceEmission(&left, &items)) break;
+                const emitted = preparation.advanceEmission(&left, &items) catch |err| {
+                    if (err != error.PageRead) return err;
+                    try storage.readRequestPage(&preparation.page);
+                    continue;
+                };
+                if (!emitted) break;
             } else if (!try preparation.nextPiece()) {
                 try preparation.writer.flush();
                 return;
@@ -5629,12 +5250,12 @@ test "raw image preparation streams canonical PNG into user and tool arrays" {
                 .{ .item = .tool_result, .handles = &.{ .{ .text = "text-only" }, .{ .text = "still a string" } } },
             }) |item| {
                 try loadRawImageItem(&preparation, item.item, item.handles);
-                try drainRawImageItem(&preparation, allowance);
-                try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+                try drainRawImageItem(&preparation, &setup.storage, allowance);
+                try std.testing.expectEqual(@as(usize, 0), preparation.page.outstandingReaders());
             }
             try preparation.writer.write("]");
             preparation.state.stage = .end;
-            const request = try drainLivePreparation(&preparation, allowance, 1, 64);
+            const request = try drainLivePreparation(&preparation, &setup.storage, allowance, 1, 64);
             defer request.deinit(std.testing.io, preparation.writer.budget);
             var bytes: [expected.len]u8 = undefined;
             try std.testing.expectEqual(bytes.len, try request.file.readPositionalAll(std.testing.io, &bytes, 0));
@@ -5663,7 +5284,8 @@ test "raw image preparation cancels every read and base64 output boundary" {
         try loadRawImageItem(&preparation, .{ .input_image = .png }, &.{.{ .content = content }});
         preparation.state.stage = .end;
         for (0..cut) |_| {
-            switch (preparation.advance(1, 64)) {
+            switch (advanceTesting(&preparation, &setup.storage, 1, 64)) {
+                .read => unreachable,
                 .pending => {},
                 .failed => |err| return err,
                 .prepared => |request| {
@@ -5676,8 +5298,8 @@ test "raw image preparation cancels every read and base64 output boundary" {
             try std.testing.expect(stats.work_items <= 64);
         }
         preparation.cancel();
-        try std.testing.expect(!preparation.view.isActive());
-        try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+        try std.testing.expect(!preparation.page.isActive());
+        try std.testing.expectEqual(@as(usize, 0), preparation.page.outstandingReaders());
         try std.testing.expectEqual(@as(u64, 0), used.load(.monotonic));
     }
 }
@@ -5701,14 +5323,14 @@ test "raw image preparation releases capacity and write failures without sealing
         preparation.state.stage = .end;
         if (fault == .write) {
             const prefix = "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,";
-            try stepPreparationToOffset(&preparation, prefix.len + 1, 4096);
+            try stepPreparationToOffset(&preparation, &setup.storage, prefix.len + 1, 4096);
             try std.testing.expect(preparation.state.emission == .base64);
-            try std.testing.expectEqual(@as(usize, 1), preparation.view.outstandingReaders());
+            try std.testing.expectEqual(@as(usize, 1), preparation.page.outstandingReaders());
             preparation.writer.fail_write = true;
         }
-        try std.testing.expectError(if (fault == .capacity) error.RequestScratchExhausted else error.InjectedRequestWriteFailure, drainLivePreparation(&preparation, 1, 1, 4096));
+        try std.testing.expectError(if (fault == .capacity) error.RequestScratchExhausted else error.InjectedRequestWriteFailure, drainLivePreparation(&preparation, &setup.storage, 1, 1, 4096));
         preparation.cancel();
-        try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+        try std.testing.expectEqual(@as(usize, 0), preparation.page.outstandingReaders());
         try std.testing.expectEqual(@as(u64, 0), used.load(.monotonic));
     }
 }
@@ -5730,9 +5352,9 @@ test "raw image preparation rejects a wrong canonical digest before sealing" {
     preparation.encoder = codecs.resumeFrom(preparation.carry);
     try loadRawImageItem(&preparation, .{ .input_image = .png }, &.{.{ .content = content }});
     preparation.state.stage = .end;
-    try std.testing.expectError(error.CorruptStore, drainLivePreparation(&preparation, 1, 1, 4096));
+    try std.testing.expectError(error.CorruptStore, drainLivePreparation(&preparation, &setup.storage, 1, 1, 4096));
     preparation.cancel();
-    try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+    try std.testing.expectEqual(@as(usize, 0), preparation.page.outstandingReaders());
     try std.testing.expectEqual(@as(u64, 0), used.load(.monotonic));
 }
 
@@ -5773,10 +5395,10 @@ test "request preparation streams exact built-in instructions across provider ro
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var prep: Preparation = undefined;
-        setup.storage.openHistoricalView(binding, &prep.view);
+        prep.page.open(binding);
         try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (prep.state.active) prep.cancel();
-        const result = try drainPreparation(&prep, 7, 1, 1024 * 1024);
+        const result = try drainPreparation(&prep, &setup.storage, 7, 1, 1024 * 1024);
         defer std.testing.allocator.free(result.bytes);
         const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
         defer parsed.deinit();
@@ -5793,4 +5415,114 @@ test "request preparation streams exact built-in instructions across provider ro
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
         try std.testing.expect(retained == null);
     };
+}
+
+fn pinnedRequest(storage: *store.Store, tmp: *std.testing.TmpDir, binding: store.AttemptBinding, session: []const u8, workspace: []const u8, byte_allowance: usize, item_allowance: usize) ![]u8 {
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    preparation.page.open(binding);
+    try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+    errdefer if (preparation.state.active) preparation.cancel();
+    const request = try drainPreparation(&preparation, storage, byte_allowance, item_allowance, 1 << 24);
+    defer std.testing.allocator.free(request.bytes);
+    const quoted = try std.json.Stringify.valueAlloc(std.testing.allocator, workspace, .{});
+    defer std.testing.allocator.free(quoted);
+    const named = try std.mem.replaceOwned(u8, std.testing.allocator, request.bytes, quoted[1 .. quoted.len - 1], "WORKSPACE");
+    defer std.testing.allocator.free(named);
+    return std.mem.replaceOwned(u8, std.testing.allocator, named, session, "SESSION");
+}
+
+test "a prepared request's bytes stay as pinned over pages, tool results and page bounds" {
+    const Scenario = enum { pages, tool_results, bounds };
+    const Pinned = struct {
+        const digests = std.EnumArray(Scenario, *const [64]u8).init(.{
+            .pages = "f8ee1d1f3cc1713b73030cc47695cefd58a1d6c142b8c4dbd4bf06bcd09a630d",
+            .tool_results = "947f4e1b9af86a718b1a479de7b0164ac10d96df90d6169ebd0dc01bb6eee1d0",
+            .bounds = "e5f899f1ae9d8f293479af1cb79f68fb6f63acefaa7a58fcd3cc7dcdd0d753bf",
+        });
+    };
+    const testing = store.testing;
+    inline for (comptime std.enums.values(Scenario)) |scenario| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: store.Store = undefined;
+        try testing.testingSqliteStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+        const workspace = try testing.canonicalCwd(std.testing.io, &workspace_buffer);
+        const session = try testing.configureTestSession(&storage, "pinned-config");
+        switch (scenario) {
+            .pages => inline for (0..9) |turn| {
+                const answer = std.fmt.comptimePrint("answer {d}", .{turn});
+                try testing.answerTestTurn(&storage, &tmp, session.slice(), std.fmt.comptimePrint("pinned-turn-{d}", .{turn}), &.{.{ .encoded = answer, .decoded = answer }});
+            },
+            .tool_results => {
+                try testing.submitTestMessage(&storage, &tmp, "pinned-tools-input", "pinned-tools-key", session.slice(), "run the tools");
+                const calling = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const call_count = 17;
+                var item_buffers: [call_count][256]u8 = undefined;
+                var items: [1 + call_count][]const u8 = undefined;
+                items[0] = "{\"type\":\"reasoning\",\"id\":\"pinned-reasoning\",\"summary\":[],\"encrypted_content\":\"opaque\"}";
+                for (items[1..], &item_buffers, 0..) |*item, *buffer, index| item.* = try std.fmt.bufPrint(buffer, "{{\"type\":\"function_call\",\"id\":\"pinned-item-{d}\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"pinned-call-{d}\",\"arguments\":\"{{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}}\"}}", .{ index, index });
+                try testing.settleItemsForTesting(&storage, &tmp, calling, &items, "");
+                const inline_bound = &@as([16 * 1024]u8, @splat('i'));
+                const past_bound = &@as([16 * 1024 + 1]u8, @splat('p'));
+                for (0..call_count) |index| {
+                    const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+                    var result_buffer: [32]u8 = undefined;
+                    const result: []const u8 = switch (index) {
+                        3 => inline_bound,
+                        11 => past_bound,
+                        else => try std.fmt.bufPrint(&result_buffer, "result {d}", .{index}),
+                    };
+                    _ = try storage.settleActionAttempt(action, .succeeded, result, .{});
+                }
+            },
+            .bounds => {
+                try testing.submitTestMessage(&storage, &tmp, "pinned-inline-input", "pinned-inline-key", session.slice(), &@as([16 * 1024]u8, @splat('m')));
+                const answering = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                var item_buffer: [4096]u8 = undefined;
+                var item = std.Io.Writer.fixed(&item_buffer);
+                var answer_buffer: [1024]u8 = undefined;
+                var answer = std.Io.Writer.fixed(&answer_buffer);
+                try item.writeAll("{\"type\":\"message\",\"id\":\"pinned-parts\",\"role\":\"assistant\",\"content\":[");
+                for (0..33) |index| {
+                    if (index != 0) try item.writeByte(',');
+                    try item.print("{{\"type\":\"output_text\",\"text\":\"part {d};\"}}", .{index});
+                    try answer.print("part {d};", .{index});
+                }
+                try item.writeAll("]}");
+                try testing.settleItemsForTesting(&storage, &tmp, answering, &.{item.buffered()}, answer.buffered());
+            },
+        }
+        try testing.submitTestMessage(&storage, &tmp, "pinned-last-input", "pinned-last-key", session.slice(), if (scenario == .bounds) &@as([16 * 1024 + 1]u8, @splat('n')) else "the last input");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        for ([_][2]usize{ .{ preparation_byte_allowance, preparation_item_allowance }, .{ 7, 3 } }) |allowance| {
+            const bytes = try pinnedRequest(&storage, &tmp, binding, session.slice(), workspace, allowance[0], allowance[1]);
+            defer std.testing.allocator.free(bytes);
+            switch (scenario) {
+                .pages => try std.testing.expectEqual(@as(usize, 9), std.mem.count(u8, bytes, "\"output_text\",\"text\":\"answer ")),
+                .tool_results => {
+                    try std.testing.expectEqual(@as(usize, 17), std.mem.count(u8, bytes, "\"type\":\"function_call_output\""));
+                    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, "\"" ++ @as([16 * 1024]u8, @splat('i')) ++ "\""));
+                    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, "\"" ++ @as([16 * 1024 + 1]u8, @splat('p')) ++ "\""));
+                },
+                .bounds => {
+                    try std.testing.expectEqual(@as(usize, 33), std.mem.count(u8, bytes, "\"output_text\",\"text\":\"part "));
+                    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, "\"" ++ @as([16 * 1024]u8, @splat('m')) ++ "\""));
+                    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, "\"" ++ @as([16 * 1024 + 1]u8, @splat('n')) ++ "\""));
+                },
+            }
+            var raw: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(bytes, &raw, .{});
+            const digest = std.fmt.bytesToHex(raw, .lower);
+            std.testing.expectEqualStrings(Pinned.digests.get(scenario), &digest) catch |err| {
+                std.debug.print("{s} on sqlite with allowance {d}/{d}\n", .{ @tagName(scenario), allowance[0], allowance[1] });
+                return err;
+            };
+        }
+    }
 }

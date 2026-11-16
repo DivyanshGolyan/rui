@@ -4,8 +4,6 @@ const gwidth = @import("terminal_width");
 const display_text = @import("display_text.zig");
 const Renderer = @This();
 
-// A complete bounded fenced block may hide its delimiters. Unclosed or
-// oversized blocks fall back to literal output without buffering an answer.
 const prefix_limit = 128;
 const span_limit = 256;
 const fence_limit = 4096;
@@ -18,29 +16,20 @@ const Style = packed struct {
 };
 const InlineKind = enum { none, emphasis, strong, code };
 const InlineRetention = enum { candidate, literal };
-/// A link waiting for its last byte. `[text](address)` shows its text and
-/// a bare web address or local path shows itself, each as an OSC 8 link.
-/// A candidate never crosses a line, so it shares `held` with fences, which
-/// begin and end only at line starts.
 const Link = enum { none, text, text_closed, target, bare, local, local_literal };
 const Boundary = enum { word, prose, other };
 
-/// Only the viewport consumes private presentation markers. A real terminal
-/// must keep its own background, regardless of foreground colour support.
 pub const Destination = display_text.Target;
 
 out: *std.Io.Writer,
 destination: Destination = .terminal,
 colour: bool = true,
-/// Borrowed process HOME; only a valid absolute path enables `~/` links.
 home: []const u8 = "",
 prefix: [prefix_limit]u8 = undefined,
 prefix_len: usize = 0,
 span: [span_limit]u8 = undefined,
 span_len: usize = 0,
 inline_count: u3 = 0,
-// These bounded annotations are produced by the same bytewise recognizer that
-// finds the outer closer. Formatting consumes them; it does not parse again.
 code_bytes: [span_limit / 8]u8 = @splat(0),
 syntax_bytes: [span_limit / 8]u8 = @splat(0),
 inline_kind: InlineKind = .none,
@@ -54,8 +43,6 @@ escape_next: bool = false,
 literal_run: ?u8 = null,
 fence_pending: bool = false,
 fence_literal: bool = false,
-/// A pending fence, link or pipe-run. These never overlap; table formatting
-/// borrows a stack copy so cells can reuse the link recognizer whole.
 held: [fence_limit]u8 = undefined,
 table_len: usize = 0,
 table_literal: bool = false,
@@ -65,7 +52,6 @@ link_len: usize = 0,
 link_depth: u16 = 0,
 link_text_end: usize = 0,
 link_escape: bool = false,
-/// The link text is being shown: no link starts inside it.
 in_link: bool = false,
 boundary: Boundary = .prose,
 fence_len: usize = 0,
@@ -90,8 +76,6 @@ pub fn feed(self: *Renderer, bytes: []const u8) !void {
                 self.table_len += 1;
                 continue;
             } else {
-                // Never interpret a suffix of an over-bound table as new
-                // markup. Flush all held bytes, then stream the pipe-run.
                 try self.literalBlock(self.held[0..self.table_len]);
                 self.table_len = 0;
                 self.table_literal = true;
@@ -123,8 +107,6 @@ fn markdownByte(self: *Renderer, byte: u8) !void {
         if (byte != '\n' and self.prefix_len < prefix_limit) {
             self.prefix[self.prefix_len] = byte;
             self.prefix_len += 1;
-            // The longest accepted ordered marker needs three spaces,
-            // five digits, a dot and its following space.
             if (self.prefix_len < 10 or (self.prefix_len < prefix_limit and fenceCandidate(self.prefix[0..self.prefix_len]))) return;
             if (self.prefix_len == prefix_limit and fenceCandidate(self.prefix[0..self.prefix_len])) self.literal_line = true;
             try self.flushPrefix();
@@ -156,7 +138,6 @@ fn markdownByte(self: *Renderer, byte: u8) !void {
 pub fn finish(self: *Renderer) !void {
     if (self.table_len != 0) try self.flushTable();
     if (self.line_start and self.prefix_len != 0) {
-        // A delimiter without its line ending is not a complete block marker.
         if (fenceCandidate(self.prefix[0..self.prefix_len])) self.literal_line = true;
         try self.flushPrefix();
     }
@@ -214,7 +195,6 @@ fn flushPrefix(self: *Renderer) !void {
         try self.proseSlice(prefix[end + 1 ..]);
         return;
     }
-    // Unsupported block syntax has no special interpretation.
     try self.proseSlice(prefix);
 }
 
@@ -243,12 +223,9 @@ fn closingFence(line: []const u8) bool {
     return std.mem.eql(u8, line[indent..], "```");
 }
 
-/// Finds an answer's last complete fenced code block as its bytes pass,
-/// by the fence lines that make the renderer show a block as code.
 pub const LastCode = struct {
     pub const Range = struct { start: u64, length: u64 };
 
-    // A line this long is never a fence line, as in the renderer.
     line: [prefix_limit]u8 = undefined,
     line_len: usize = 0,
     offset: u64 = 0,
@@ -272,9 +249,6 @@ pub const LastCode = struct {
         }
     }
 
-    /// The last block's content without its final line ending, or null.
-    /// A closing fence may end the answer without one; an opening fence
-    /// needs its line ending.
     pub fn finish(self: *LastCode) ?Range {
         self.endLine(false);
         return self.last;
@@ -293,8 +267,6 @@ pub const LastCode = struct {
 
 fn fencedByte(self: *Renderer, byte: u8) !void {
     if (!self.fence_literal and self.fence_len == fence_limit) {
-        // We cannot promise that a closing fence exists. Emit all retained
-        // syntax and keep subsequent bytes literal until this block ends.
         try self.literalBlock(self.held[0..self.fence_len]);
         self.fence_literal = true;
         self.fence_closer_possible = true;
@@ -338,9 +310,6 @@ fn fenceCloserByte(self: *Renderer, byte: u8) void {
     } else self.fence_closer_possible = false;
 }
 
-/// The pending pipe-run shares `held` with fences and links. Borrow one
-/// bounded stack copy while formatting so the existing link parser can use
-/// its own buffer; neither the parser nor the document gains a payload bank.
 fn flushTable(self: *Renderer) !void {
     var storage: [fence_limit]u8 = undefined;
     const length = self.table_len;
@@ -352,8 +321,6 @@ fn flushTable(self: *Renderer) !void {
     const separator = lines.next() orelse return self.replayProse(bytes);
     if (!tableSeparator(header, separator)) return self.replayProse(bytes);
 
-    // At most one cell begins per input byte. Widths live only during this
-    // bounded flush, not once per retained line or per document byte.
     var widths: [fence_limit]u16 = @splat(0);
     lines.reset();
     var row: usize = 0;
@@ -396,8 +363,6 @@ fn replayProse(self: *Renderer, bytes: []const u8) !void {
     for (bytes) |byte| try self.markdownByte(byte);
 }
 
-/// Splits only structural pipes: escaped pipes and pipes inside code stay
-/// in their cell. A final pipe closes the last cell, not another empty one.
 const Cells = struct {
     line: []const u8,
     at: usize = 1,
@@ -451,10 +416,6 @@ fn tableSeparator(header: []const u8, separator: []const u8) bool {
     return heads.next() == null;
 }
 
-/// Format each cell through the one inline owner, with fresh line-local
-/// state. The first pass measures; the second also forwards its SGR/OSC 8.
-/// Collect visible UTF-8 before measuring, never sum widths per write: a
-/// write may split a scalar, combining sequence or ZWJ cluster anywhere.
 fn tableCell(self: *Renderer, bytes: []const u8, forward: bool) !u16 {
     var measured: CellWidth = undefined;
     const output = self.out;
@@ -470,8 +431,6 @@ fn tableCell(self: *Renderer, bytes: []const u8, forward: bool) !u16 {
     self.escape_next = false;
     self.literal_run = null;
     self.boundary = .prose;
-    // Bordering padding is grapheme context on both sides: combining and
-    // prepend characters can join it. Padding itself contributes four cells.
     @memcpy(measured.bytes[measured.length..][0..2], "  ");
     return display_text.width(measured.bytes[0 .. measured.length + 2], self.destination) - 4;
 }
@@ -479,24 +438,18 @@ fn tableCell(self: *Renderer, bytes: []const u8, forward: bool) !u16 {
 const CellWidth = struct {
     writer: std.Io.Writer,
     output: ?*std.Io.Writer,
-    // A cell cannot exceed the held run. TerminalText expands at most four
-    // bytes per source byte; presentation controls and addresses are omitted.
     bytes: [4 + fence_limit * TerminalText.max_bytes_per_byte]u8 = undefined,
     length: usize = 0,
     control: enum { text, escape, sgr, osc, osc_escape } = .text,
 
     fn init(self: *CellWidth, output: ?*std.Io.Writer) void {
         self.* = .{ .writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} }, .output = output };
-        // Every cell follows at least two padding spaces. Include that
-        // grapheme context: an initial combining mark can attach to a space.
         @memcpy(self.bytes[0..2], "  ");
         self.length = 2;
     }
 
     fn consume(self: *CellWidth, bytes: []const u8) std.Io.Writer.Error!void {
         if (self.output) |output| {
-            // A table tab is one separator space in both destinations, not
-            // a position-dependent terminal tab stop (or eight Vaxis cells).
             var parts = std.mem.splitScalar(u8, bytes, '\t');
             try output.writeAll(parts.next().?);
             while (parts.next()) |part| {
@@ -538,10 +491,6 @@ const CellWidth = struct {
     }
 };
 
-/// The viewport-only marker stays on the newline, whose existing style
-/// byte identifies even a completely blank code row. Terminal output uses
-/// indentation instead: SGR 40 would paint an unreadable black background
-/// with dark default text on a light theme.
 fn codeBlock(self: *Renderer, bytes: []const u8) !void {
     const band = self.destination == .viewport and self.colour;
     var start: usize = 0;
@@ -577,7 +526,6 @@ fn proseWithLocal(self: *Renderer, byte: u8, local: bool) (std.Io.Writer.Error |
     self.boundary = boundaryAfter(byte);
     if (self.code_closer and byte != '`') try self.renderInline();
     if (self.star_run != 0 and byte != '*') {
-        // Lookahead belongs to the following recognizer, not the closer.
         if (self.star_run == self.starWidth()) try self.renderInline() else self.star_run = 0;
     }
     if (self.literal_run) |marker| {
@@ -614,23 +562,17 @@ fn proseWithLocal(self: *Renderer, byte: u8, local: bool) (std.Io.Writer.Error |
 }
 
 fn inlineByte(self: *Renderer, byte: u8) !void {
-    // Outer delimiters wait for the complete tick run. Nested ticks retain their
-    // context-sensitive empty-pair and close/reopen behavior below.
     if (self.inline_kind == .code and (self.inline_count == 1 or self.code_closer) and byte == '`') {
         try self.flushLiteralSpan();
         self.literal_run = '`';
         return self.safe(byte);
     }
-    // Only outer emphasis/strong syntax uses escapes; all code backslashes
-    // are content, including those immediately before a closing tick.
     const syntax_escapes = (self.inline_kind == .emphasis or self.inline_kind == .strong) and !self.code_open;
     const escaped = syntax_escapes and self.escape_next;
     self.escape_next = false;
     if (!escaped and syntax_escapes and byte == '\\') self.escape_next = true;
     if (escaped) self.star_run = 0;
 
-    // The second initial star upgrades emphasis to strong. A third initial
-    // star makes the whole unsupported run literal.
     if (self.inline_retention == .candidate and self.inline_kind == .emphasis and self.inline_count == 1 and byte == '*') {
         try self.retainInline(byte);
         self.inline_kind = .strong;
@@ -654,15 +596,12 @@ fn inlineByte(self: *Renderer, byte: u8) !void {
                 } else if (self.code_has_content) {
                     self.code_open = false;
                 } else {
-                    // Empty nested code is literal, including both ticks.
                     if (self.inline_retention == .candidate) setBit(&self.syntax_bytes, self.code_opener, false);
                     self.code_open = false;
                 }
             } else if (self.code_open) {
                 self.code_has_content = true;
             } else if (byte == '*') {
-                // Delay a supported closer until the complete run is known.
-                // A lone star inside strong remains ordinary retained content.
                 if (self.star_run < 3) self.star_run += 1;
                 if (self.star_run > self.starWidth()) {
                     try self.flushLiteralSpan();
@@ -683,8 +622,6 @@ fn inlineByte(self: *Renderer, byte: u8) !void {
 }
 
 fn retainInline(self: *Renderer, byte: u8) !void {
-    // Only opener and closer thresholds need the count; an unfinished literal
-    // candidate can span an arbitrarily long answer.
     if (self.inline_count < 4) self.inline_count += 1;
     if (self.inline_retention == .literal) {
         try self.safe(byte);
@@ -725,13 +662,10 @@ fn renderInline(self: *Renderer) !void {
     self.resetInline();
 }
 
-/// The style of plain text here: a heading's bold, a link's underline.
 fn base(self: *const Renderer) Style {
     return .{ .bold = self.line_style, .underline = self.in_link, .quiet = self.table_header };
 }
 
-/// Takes one byte into the pending link: it completes the link, stays
-/// pending, or shows the held bytes as ordinary prose.
 fn linkByte(self: *Renderer, byte: u8) !void {
     switch (self.link) {
         .none => unreachable,
@@ -742,7 +676,6 @@ fn linkByte(self: *Renderer, byte: u8) !void {
             } else if (self.link_len < scheme.len) {
                 if (std.ascii.toLower(byte) != scheme[self.link_len]) return self.dropLink(byte);
             } else if (self.link_len == scheme.len and (byte == '/' or addressEnds(byte))) {
-                // No host: what the scheme held was never an address.
                 return self.dropLink(byte);
             } else if (addressEnds(byte)) {
                 try self.showBare();
@@ -788,7 +721,6 @@ fn linkByte(self: *Renderer, byte: u8) !void {
         .target => switch (byte) {
             '(' => self.link_depth += 1,
             ')' => if (self.link_depth == 0) {
-                // The closing `)` completes the link without being held.
                 if (!TerminalText.linkTarget(self.held[self.link_text_end + 2 .. self.link_len])) return self.dropLink(byte);
                 return self.showText();
             } else {
@@ -802,10 +734,7 @@ fn linkByte(self: *Renderer, byte: u8) !void {
     self.link_len += 1;
 }
 
-/// A line or the answer ends: a bare address ends with it, other links
-/// are left incomplete.
 fn endLink(self: *Renderer) !void {
-    // Dropped text can hold a bare address, which ends here too.
     while (self.link != .none) {
         switch (self.link) {
             .bare => try self.showBare(),
@@ -821,10 +750,6 @@ fn dropLink(self: *Renderer, byte: u8) !void {
     try self.prose(byte);
 }
 
-/// Shows the held bytes as prose that was never a link. Only the first byte
-/// started the candidate: a text candidate holds no other `[`, so prose
-/// rereading the rest starts at most a bare candidate, whose held bytes
-/// are written behind this read.
 fn dropHeld(self: *Renderer) !void {
     const length = self.link_len;
     self.link = .none;
@@ -837,8 +762,6 @@ fn dropHeld(self: *Renderer) !void {
     }
 }
 
-/// A bare address ends before trailing punctuation, which reads as the
-/// sentence's, and before a `)` it did not open.
 fn showBare(self: *Renderer) !void {
     const end = trimmedEnd(self.held[0..self.link_len], "http://".len, ".,:;!?'\"*_~]");
     const address = self.held[0..end];
@@ -854,7 +777,6 @@ fn showBare(self: *Renderer) !void {
 
 fn trimmedEnd(bytes: []const u8, minimum: usize, punctuation: []const u8) usize {
     var end = bytes.len;
-    // Unopened `)`s: a trimmed `)` closes one fewer, a trimmed `(` one more.
     var unopened = @as(isize, @intCast(std.mem.count(u8, bytes, ")"))) - @as(isize, @intCast(std.mem.count(u8, bytes, "(")));
     while (end > minimum) : (end -= 1) {
         const last = bytes[end - 1];
@@ -943,7 +865,6 @@ fn localEnds(byte: u8) bool {
     return byte == ' ' or byte == '\t' or std.mem.indexOfScalar(u8, "<>\"`[", byte) != null;
 }
 
-/// Shows `[text](address)`'s text, with its own markup, as the link.
 fn showText(self: *Renderer) !void {
     const text_end = self.link_text_end;
     const length = self.link_len;
@@ -974,16 +895,12 @@ fn closeLink(self: *Renderer) !void {
     self.boundary = .word;
 }
 
-/// Where a bare address ends: at a space, a control, non-ASCII text or
-/// a byte that delimits an address in prose.
 fn addressEnds(byte: u8) bool {
     return byte <= ' ' or byte >= 0x7f or std.mem.indexOfScalar(u8, "<>\"`[", byte) != null;
 }
 
 fn transition(self: *Renderer, requested: Style) !void {
     if (std.meta.eql(self.active_style, requested)) return;
-    // Syntax boundaries still finish partial UTF-8 when colour is off;
-    // only their visual foreground, not their parsing boundary, disappears.
     try self.terminal_text.finish(self.out);
     var previous = self.active_style;
     var next = requested;
@@ -1043,8 +960,6 @@ fn safeSlice(self: *Renderer, bytes: []const u8) !void {
     for (bytes) |byte| try self.safe(byte);
 }
 
-// Escape controls at the final output boundary, including sequences split
-// across read windows. Stored answer bytes are never rewritten.
 fn safe(self: *Renderer, byte: u8) !void {
     try self.terminal_text.feed(self.out, &.{byte});
 }
@@ -1215,7 +1130,6 @@ test "long unsupported delimiter runs stream literally and recover locally" {
         var output = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer output.deinit();
         var renderer: Renderer = .{ .out = &output.writer };
-        // Keep the tick run away from the independent line-prefix fence owner.
         try renderer.feed("text ");
         for (0..100_000) |_| try renderer.feed(&.{marker});
         try renderer.feed(" then **ok**");
@@ -1411,8 +1325,6 @@ test "nested code composes with strong and heading without exposing delimiters" 
 }
 
 test "unsupported asterisk runs preserve bytes and later supported markup" {
-    // CommonMark 0.31.2 example 439 keeps the five stars literal; Rui also
-    // deliberately keeps triple emphasis literal rather than nesting it.
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
     var renderer: Renderer = .{ .out = &output.writer };
@@ -1699,7 +1611,6 @@ test "the last code block is the last complete fenced block" {
         .{ long_opener[0 .. prefix_limit - 1] ++ "\nx\n```\n", "x" },
     };
     for (cases) |case| {
-        // Whole, and a byte at a time: where a window ends never matters.
         for ([_]bool{ false, true }) |bytewise| {
             var code: LastCode = .{};
             if (bytewise) {
@@ -1731,9 +1642,6 @@ fn expectRenderedHome(input: []const u8, expected: []const u8, home: []const u8)
     }
 }
 
-/// Every split for short inputs. Rendering is quadratic in the split count,
-/// so long inputs split near their ends and near each change of byte, where
-/// state changes, and every 61st byte inside long runs of one byte.
 fn windowEdge(input: []const u8, split: usize) bool {
     const near = 8;
     if (input.len <= 512 or split % 61 == 0) return true;
@@ -1750,7 +1658,6 @@ fn linked(comptime address: []const u8, comptime text: []const u8) []const u8 {
 
 test "a Markdown link shows its text as an OSC 8 link and hides its address" {
     try expectRendered("See [github.com](https://github.com/a/b).", "See " ++ comptime linked("https://github.com/a/b", "github.com") ++ ".");
-    // How answers cite sources: the parentheses around the link stay.
     try expectRendered("Zig 0.17 ([ziglang.org](https://ziglang.org/download/))\n", "Zig 0.17 (" ++ comptime linked("https://ziglang.org/download/", "ziglang.org") ++ ")\n");
     try expectRendered("[`main.zig`](https://x.dev/m) and [*a* b](http://y.dev/(1))", TerminalText.link_open ++ "https://x.dev/m" ++ TerminalText.link_end ++ "\x1b[4m\x1b[0m\x1b[4m\x1b[94mmain.zig\x1b[0m\x1b[4m\x1b[0m" ++ TerminalText.link_close ++ " and " ++
         TerminalText.link_open ++ "http://y.dev/(1)" ++ TerminalText.link_end ++ "\x1b[4m\x1b[0m\x1b[3m\x1b[4ma\x1b[0m\x1b[4m b\x1b[0m" ++ TerminalText.link_close);
@@ -1763,7 +1670,6 @@ test "a bare address is its own OSC 8 link without the sentence's punctuation" {
     try expectRendered("- HTTP://A.dev\nhttp://b.dev", "\x1b[1m-\x1b[0m " ++ comptime linked("HTTP://A.dev", "HTTP://A.dev") ++ "\n" ++ linked("http://b.dev", "http://b.dev"));
 }
 
-/// The text a terminal shows for rendered output: without SGR and OSC 8.
 fn visible(output: []const u8, shown: *std.Io.Writer) !void {
     var index: usize = 0;
     while (index < output.len) {
@@ -1796,26 +1702,20 @@ test "text that is not a complete web link shows every byte as written" {
         defer shown.deinit();
         try visible(output.written(), &shown.writer);
         try std.testing.expectEqualStrings(case[0], shown.written());
-        // A web address left in broken link syntax is still a bare link.
         try std.testing.expectEqual(case[1], std.mem.indexOf(u8, output.written(), TerminalText.link_open) != null);
     }
     try expectRendered("[a](./b) [c](https://d.dev)", "[a](./b) " ++ comptime linked("https://d.dev", "c"));
-    // A control ends an address and stays visible.
     try expectRendered("[a](https://x\x1b)", "[a](" ++ comptime linked("https://x", "https://x") ++ "\\x1b)");
-    // Code is never a link.
     try expectRendered("`https://x.dev` ok", "\x1b[94mhttps://x.dev\x1b[0m ok");
-    // A bare address ends with its line.
     try expectRendered("[a](https://x\nnext", "[a](" ++ comptime linked("https://x", "https://x") ++ "\nnext");
 }
 
 test "a bare address longer than a link may carry stays plain text" {
     const long = "https://" ++ @as([TerminalText.max_link_bytes]u8, @splat('a'));
     try expectRendered(long ++ " ok", long ++ " ok");
-    // A link whose `)` arrives with the held bytes full still completes.
     const text = @as([fence_limit - "[](https://x)".len + 1]u8, @splat('a'));
     try expectRendered("[" ++ text ++ "](https://x)", comptime linked("https://x", &text));
     try expectRendered("[" ++ text ++ "a](https://x)", "[" ++ text ++ "a](" ++ comptime linked("https://x", "https://x") ++ ")");
-    // Each `)` past the host is trimmed in constant time.
     const closers = "https://a" ++ @as([2000]u8, @splat(')'));
     try expectRendered(closers ++ " ", comptime linked("https://a", "https://a") ++ @as([2000]u8, @splat(')')) ++ " ");
 }
@@ -1933,8 +1833,6 @@ test "tables at answer end align CJK and complete graphemes and isolate malforme
         .{ "| A | B |\n| --- | --- |\n| *open | **closed** | extra |\n| [bad | `ok` |", "  A      B\n  *open  closed  extra\n  [bad   ok" },
         .{ "| **A** | *B* |\n| --- | --- |", "  A  B\n" },
         .{ "| A | B |\n| --- | --- |\n| `open | **ok** |", "  A      B\n  `open  ok" },
-        // A complete separator, not a matching prefix; non-tables retain
-        // their existing inline prose behavior and all structural bytes.
         .{ "| a | b |\n| --- nope | --- |\n", "| a | b |\n| --- nope | --- |\n" },
         .{ "| a | b |\n| --- |\n", "| a | b |\n| --- |\n" },
         .{ "| **a** |\n", "| a |\n" },
@@ -1964,8 +1862,6 @@ test "table overflow replays every byte and stays literal until the first non-pi
         var input = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer input.deinit();
         try input.writer.writeAll(head);
-        // Exercise both a bound crossing inside a cell and the next pipe
-        // after a table run that exactly fills the existing held buffer.
         const payload = fence_limit - head.len - (if (line_boundary) @as(usize, 1) else 0);
         try input.writer.splatByteAll('x', payload);
         if (line_boundary) try input.writer.writeAll("\n| next ");
@@ -2065,15 +1961,11 @@ test "plain fenced code never emits a background with or without colour at every
         for (0..case[0].len + 1) |split| {
             var output = std.Io.Writer.Allocating.init(std.testing.allocator);
             defer output.deinit();
-            // This is the CLI's construction: terminal-safe by default,
-            // even when foreground colours are enabled on a light theme.
             var renderer: Renderer = .{ .out = &output.writer, .colour = colour };
             try renderer.feed(case[0][0..split]);
             try renderer.feed(case[0][split..]);
             try renderer.finish();
             try std.testing.expectEqualStrings(case[1], output.written());
-            // Stronger than checking just SGR 40: no background escape of
-            // any kind (or other presentation control) may reach this sink.
             try std.testing.expectEqual(@as(?usize, null), std.mem.indexOfScalar(u8, output.written(), 0x1b));
         }
     };

@@ -1,4 +1,3 @@
-//! Chat info's drawn focus order. Facts-only rows are not keyboard stops.
 const std = @import("std");
 
 pub const Focus = enum(usize) { effort = 0, permissions = 1, tools = 2, model = 4, rename = 6, archive = 7, copy = 8 };

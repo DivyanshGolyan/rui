@@ -55,8 +55,6 @@ type endpoint struct {
 	responseEnd time.Time
 	release     chan struct{}
 	releaseOnce sync.Once
-	// The automatic continuation waits here so classification is observed
-	// while its Turn is still active.
 	continuation     chan struct{}
 	continuationOnce sync.Once
 }
@@ -1105,8 +1103,6 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 	if err != nil {
 		return result, err
 	}
-	// Only proposals without a valid call continue at once; the continuation
-	// stays held at the endpoint.
 	requests, responseEnd := endpoint.facts()
 	if (requests != 1 && (value.Valid != 0 || requests != 2)) || responseEnd.IsZero() {
 		return result, fmt.Errorf("provider requests=%d response_end=%v", requests, responseEnd)
@@ -1126,9 +1122,6 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 	}
 	result["inspection_ms"] = float64(time.Since(inspectStarted).Microseconds()) / 1000
 	recordPortableSample(result, "classified_sample", host)
-	// The classifying Attempt releases its custody after its Store commit.
-	// Proposed Actions wait for permission without custody; without a valid
-	// call, only the held continuation owns custody.
 	occupied, wantRequests := "0", 1
 	if value.Valid == 0 {
 		occupied, wantRequests = "1", 2

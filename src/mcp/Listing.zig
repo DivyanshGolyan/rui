@@ -1,16 +1,3 @@
-//! One MCP server's tool list, fetched page by page at Host start (D110).
-//! The owner polls `fd()` for `events()` and calls `advance()`, as with
-//! `Request`; nothing here blocks or runs on its own.
-//!
-//! Each tool is copied, with `rui_call_description` added to its schema
-//! (D105), into the caller's storage before the next page overwrites the
-//! answer buffer. A tool the server lists badly is left out and counted.
-//! Two tools of one name, or one whose schema already has the description
-//! property, fail the listing (D142); `collision` names the tool.
-//!
-//! Lifetime: a Listing holds a Request, so it has one address; its owner
-//! initializes it in place. Everything it was given is borrowed until
-//! `deinit`; the entries point into the caller's `arena`.
 const std = @import("std");
 const http1 = @import("../http1/request.zig");
 const Request = @import("Request.zig");
@@ -21,48 +8,33 @@ const document = @import("document.zig");
 
 const Listing = @This();
 
-/// More than this many pages is a server that never stops.
 pub const max_pages = 16;
-/// The longest tool name OpenAI accepts as a function name.
 pub const max_name_bytes = 64;
 
 pub const Entry = struct {
     name: []const u8,
     description: ?[]const u8,
-    /// The server's `inputSchema` with `rui_call_description` added.
     input_schema: []const u8,
     read_only: bool,
 };
 
-/// Caller-provided room for one listing.
 pub const Storage = struct {
     entries: []Entry,
-    /// Names, descriptions and shaped schemas are copied here.
     arena: []u8,
-    /// Each `tools/list` answer is read here, one page at a time.
     answer: []u8,
-    /// Each request is written here.
     request: []u8,
 };
 
 pub const Error = Request.Error || post.Error || error{
-    /// More tools than `Storage.entries` holds, or more pages than `max_pages`.
     TooMany,
-    /// The tools outgrew `Storage.arena`, or a request outgrew its buffer.
     NoRoom,
-    /// Two tools share a name, or a schema already names
-    /// `rui_call_description`; `collision` says which tool.
     ToolNameCollision,
-    /// The answer is not a tool list.
     BadSchema,
 };
 
 pub const Outcome = union(enum) {
     waiting,
-    /// Every page is in.
     listed,
-    /// The server answered, but not with a tool list: a JSON-RPC error or
-    /// an HTTP status. The caller keeps its saved copies (D147).
     unavailable,
 };
 
@@ -72,7 +44,6 @@ storage: Storage,
 current: Request,
 page_open: bool,
 pages: usize,
-/// The cursor the next page asks for, held in `cursor_bytes`.
 cursor_len: ?usize,
 cursor_bytes: [256]u8,
 count: usize,
@@ -111,13 +82,10 @@ pub fn events(self: *const Listing) i16 {
     return self.current.events();
 }
 
-/// The tools collected so far.
 pub fn entries(self: *const Listing) []const Entry {
     return self.storage.entries[0..self.count];
 }
 
-/// How many listed tools were left out for a malformed definition, an
-/// invalid `x-mcp-header` (D206) or a name no function can carry.
 pub fn leftOut(self: *const Listing) usize {
     return self.left_out;
 }
@@ -156,7 +124,6 @@ pub fn advance(self: *Listing) Error!Outcome {
     }
 }
 
-/// Collects one page; true when the server has another.
 fn take(self: *Listing, result: []const u8) Error!bool {
     const list = reply.readList(result) catch return error.BadSchema;
     var tools = reply.Tools.init(list);
@@ -195,7 +162,6 @@ fn add(self: *Listing, tool: reply.Tool) Error!void {
             return error.ToolNameCollision;
         },
         error.Malformed => {
-            // Only this tool is unusable; its copies are dropped.
             self.arena_used = mark;
             self.left_out += 1;
             return;
@@ -215,8 +181,6 @@ fn copy(self: *Listing, bytes: []const u8) Error![]const u8 {
     return room[0..bytes.len];
 }
 
-/// Whether `name` is a function name: 1 to 64 letters, digits, hyphens and
-/// underscores. An escaped name is not one, so names compare byte for byte.
 fn functionName(name: []const u8) bool {
     if (name.len == 0 or name.len > max_name_bytes) return false;
     for (name) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return false;
@@ -229,7 +193,6 @@ fn target(script: *const Script, buffer: []u8) !http1.Target {
     return http1.parseTarget(try std.fmt.bufPrint(buffer, "http://127.0.0.1:{d}/mcp", .{script.port}));
 }
 
-/// Lists `script`'s tools into `storage` and drives the listing to its end.
 fn run(script: *Script, storage: Storage, listing: *Listing) !Outcome {
     try script.start();
     defer script.stop();
@@ -282,7 +245,6 @@ test "a listing collects tools across pages and shapes their schemas" {
     try std.testing.expectEqualStrings("write", found[1].name);
     try std.testing.expect(found[1].description == null);
     try std.testing.expect(!found[1].read_only);
-    // The second request carried the first page's cursor.
     try std.testing.expect(std.mem.indexOf(u8, script.seen[0..script.seen_len], "\"cursor\":\"p2\"") != null);
 }
 
@@ -305,7 +267,6 @@ test "a tool whose schema is malformed is left out and its siblings are kept" {
     try std.testing.expectEqual(@as(usize, 1), listing.entries().len);
     try std.testing.expectEqualStrings("write", listing.entries()[0].name);
     try std.testing.expectEqual(@as(usize, 2), listing.leftOut());
-    // The dropped tools' copies were not kept.
     try std.testing.expectEqual(listing.entries()[0].name.ptr, @as([*]const u8, &room.arena));
 }
 

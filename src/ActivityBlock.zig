@@ -1,11 +1,3 @@
-//! Work under way, at the transcript's tail: the running calls, each
-//! running Bash call with its own clock; `+N more running · info` when
-//! more run than fit; the work line (`⠹ Thinking · 12s`, `⠹ Rate limited ·
-//! retry 2 in 18s`, `Stopping…`) when no shown call carries it; and the
-//! newest Message waiting its turn, `◌ also update docs …`. One row each, in
-//! that order, so a retry or the next call replaces a row in place rather
-//! than stacking. The screen shows it only at the latest view. This block
-//! alone decides which rows a short screen keeps.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -32,10 +24,6 @@ work: ?work_line.Line = null,
 queued: ?queued_line.Waiting = null,
 method: vaxis.gwidth.Method = .unicode,
 styles: Styles = .{},
-/// `+N more running · info`; clicking it opens chat info. It lives as
-/// long as the block, so the press that starts a click survives the redraw
-/// before its release; its label is written into `more_label` while
-/// drawing, never into a frame's arena.
 more: Chip,
 more_label: [more_bytes]u8 = undefined,
 
@@ -43,7 +31,6 @@ pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .drawFn = draw };
 }
 
-/// The index of the shown call that carries the work line's clock, if any.
 fn clockCall(self: *const Self) ?usize {
     const call = (self.work orelse return null).call orelse return null;
     for (self.live.entries[0..self.live.count], 0..) |shown, index| {
@@ -52,14 +39,9 @@ fn clockCall(self: *const Self) ?usize {
     return null;
 }
 
-/// Which rows a tail `height` rows tall keeps: the one decision `rows` and
-/// `draw` both read.
 const Plan = struct {
-    /// Calls drawn, the oldest retained first.
     shown: usize,
-    /// Whether `+N more` shows, counting every call not drawn.
     more: bool,
-    /// Whether the work line takes a row of its own.
     work_row: bool,
     queued: bool,
 
@@ -68,11 +50,6 @@ const Plan = struct {
     }
 };
 
-/// The work line and the waiting row keep their rows; the calls take what
-/// is left, oldest first as they are retained, with `+N more` counting
-/// every call not drawn. When the call that carries the work line's clock
-/// is not drawn, the work line takes a row of its own, so the clock always
-/// shows. A screen too short even for those keeps the last rows.
 fn plan(self: *const Self, height: usize) Plan {
     const clock_call = self.clockCall();
     const beyond = self.live.total > self.live.count;
@@ -88,7 +65,6 @@ fn plan(self: *const Self, height: usize) Plan {
     return result;
 }
 
-/// Rows the block takes at full height.
 pub fn rows(self: *const Self) u16 {
     return @intCast(self.plan(std.math.maxInt(u16)).rows());
 }
@@ -127,7 +103,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         defer index += 1;
         if (index >= skip) {
             const omitted = self.live.total - shown;
-            // Indented under the calls' words, as the mocks set it.
             const indent: u16 = @min(2, width - 1);
             const full = std.fmt.bufPrint(&self.more_label, "+{d} more running · info", .{omitted}) catch unreachable;
             self.more.label = if (vaxis.gwidth.gwidth(full, self.method) <= width - indent) full else std.fmt.bufPrint(&self.more_label, "+{d} · info", .{omitted}) catch unreachable;
@@ -169,16 +144,12 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
 
 const Fitted = struct { words: []const u8, cut: bool, clock: []const u8 };
 
-/// Prints a fitted row from `column`: its words, the ellipsis when they were
-/// cut, then its clock in the quiet style.
 fn printFitted(self: *const Self, surface: vxfw.Surface, row: u16, column: u16, fitted: anytype, words: vaxis.Style, width: u16) void {
     var at = Chip.print(surface, self.method, column, row, fitted.words, words, width);
     if (fitted.cut) at = Chip.print(surface, self.method, at, row, session_line.ellipsis, words, width);
     _ = Chip.print(surface, self.method, at, row, fitted.clock, self.styles.quiet, width);
 }
 
-/// A call row within `width`: its words cut with an ellipsis so the clock
-/// stays; a row too narrow for the clock and a few words drops the clock.
 fn fitWords(words: []const u8, clock: []const u8, width: u16, method: vaxis.gwidth.Method) Fitted {
     const words_cells = session_line.cells(words, method);
     const clock_cells = session_line.cells(clock, method);
@@ -256,7 +227,6 @@ test "the activity tail puts the clock on the running call's own row, and the wo
     try std.testing.expectEqualStrings("✓ Read src/overview_view.zig", try rowText(drawn, 0));
     try std.testing.expectEqualStrings("⠹ Run zig build test · 42s", try rowText(drawn, 1));
     try std.testing.expectEqualStrings("⠹ Run zig build test-store", try rowText(drawn, 2));
-    // Finished calls are quiet; active calls use ink and their clocks stay quiet.
     try std.testing.expectEqual(vaxis.Color{ .index = 8 }, drawn.readCell(2, 0).style.fg);
     for ([_]u16{ 1, 2 }) |row| {
         try std.testing.expectEqual(vaxis.Color{ .index = 4 }, drawn.readCell(0, row).style.fg);
@@ -270,7 +240,6 @@ test "the activity tail puts the clock on the running call's own row, and the wo
     try std.testing.expectEqualStrings("+2 more running · info", block.more.label);
     try std.testing.expect(drawn.children[0].surface.widget.eql(block.more.widget()));
 
-    // NO_COLOR clears both heading colours without changing the rows or clock.
     const widget_style = @import("widget_style.zig");
     block.styles = .{
         .normal = widget_style.of(.{ .depth = .none }, .{ .colour = .normal }),
@@ -288,7 +257,6 @@ test "the activity tail puts the clock on the running call's own row, and the wo
     }
     block.styles = coloured;
 
-    // The model works with no call shown: one dim work row, never stacked.
     block.live = .{};
     block.work = .{ .mark = "⠹", .tone = .normal, .words = "Thinking", .clock = .{ .elapsed = 12 } };
     block.queued = .{ .line = "also update docs/using-rui.md", .count = 1 };
@@ -298,13 +266,11 @@ test "the activity tail puts the clock on the running call's own row, and the wo
     try std.testing.expectEqualStrings("◌ also update docs/using-rui.md", try rowText(waiting, 1));
     try std.testing.expectEqual(@as(usize, 0), waiting.children.len);
 
-    // A retry replaces the row in place.
     block.work = .{ .mark = "⠹", .tone = .attention, .words = "Rate limited", .clock = .{ .retry = .{ .attempt = 2, .seconds = 18 } } };
     const retry = try block.widget().draw(ctx);
     try std.testing.expectEqual(@as(u16, 2), retry.size.height);
     try std.testing.expectEqualStrings("⠹ Rate limited · retry 2 in 18s", try rowText(retry, 0));
 
-    // Idle: nothing.
     block.work = null;
     block.queued = null;
     try std.testing.expectEqual(@as(u16, 0), (try block.widget().draw(ctx)).size.height);
@@ -327,24 +293,16 @@ test "a narrow or short activity tail keeps the clock and the oldest calls" {
     try std.testing.expectEqualStrings("◌ 3 · and then summarize", try rowText(narrow, 3));
     _ = try block.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 21, .height = 20 }, .cell_size = .{} });
     try std.testing.expectEqualStrings("+28 · info", block.more.label);
-    // Two rows of room: the call carrying the clock is clipped, so the work
-    // line keeps the clock above the waiting row.
     const short = try block.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 2 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(u16, 2), short.size.height);
     try std.testing.expectEqualStrings("⠹ Run the whole store… · 1m 1s", try rowText(short, 0));
     try std.testing.expectEqualStrings("◌ 3 · and then summarize", try rowText(short, 1));
-    // Three rows: the oldest call would leave the clock's call clipped, so
-    // the work line takes the row and the overflow counts all 30.
     const three = try block.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 3 }, .cell_size = .{} });
     try std.testing.expectEqualStrings("+30 more running · info", block.more.label);
     try std.testing.expectEqualStrings("⠹ Run the whole store… · 1m 1s", try rowText(three, 1));
     try std.testing.expectEqualStrings("◌ 3 · and then summarize", try rowText(three, 2));
-    // Every running call retained, but not every one fits: the clipped ones
-    // still get an overflow row.
     const work = block.work;
     block.work = null;
-    // With no clock to keep, a short tail keeps the oldest call, as the
-    // three retained are the oldest, and counts the other 29.
     const oldest = try block.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 3 }, .cell_size = .{} });
     try std.testing.expectEqualStrings("✓ Read src/overview_view.zig", try rowText(oldest, 0));
     try std.testing.expectEqualStrings("+29 more running · info", block.more.label);

@@ -1,5 +1,3 @@
-//! Closed ordered input identities and fixed-size spool index records.
-//! Producer authority and byte custody remain with their owners.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const media = @import("input_media.zig");
@@ -17,11 +15,7 @@ pub const Identity = struct {
     kind: Kind,
 };
 
-/// A compound's identity includes boundaries even between adjacent Text
-/// parts. A single Text producer uses its existing legacy identity instead.
 pub const Digest = struct {
-    // Keep the stored state compatible with existing Store scratch alignment;
-    // SHA-256 works on an aligned local copy, not an under-aligned pointer.
     hash: std.crypto.hash.sha2.Sha256 align(@alignOf(u64)),
     count: u32 = 0,
 
@@ -79,8 +73,6 @@ pub fn displayName(bytes: []const u8) error{InvalidImageName}!Name {
     return name;
 }
 
-/// One spool index record. Its fixed size is charged on disk, not multiplied
-/// into the request's stack or heap. It is private scratch, not a Store ABI.
 pub const Record = struct {
     offset: u64,
     identity: Identity,
@@ -175,8 +167,6 @@ test "ordered input digest preserves independent identities at eight-byte but no
     const image: Identity = .{ .length = 1, .digest = text.digest, .kind = .{ .image = .{ .media = .{ .format = .png, .width = 1, .height = 2 } } } };
     var named = image;
     named.kind.image.name = try displayName("a\"b.png");
-    // Independent Python hashlib/struct encoding of the existing domains,
-    // tags, big-endian numbers, raw Content digest and sequence boundaries.
     const cases = [_]struct { values: [2]Identity, hex: []const u8 }{
         .{ .values = .{ text, image }, .hex = "7ffd3d1468a23bdb5f42390451224e4f08988376a5675e773c181ce28a6fc8ca" },
         .{ .values = .{ image, text }, .hex = "4f3e959b006b41fbe27259e32778ee280aadad79a18e63a0af745bf3ceac03a2" },
@@ -189,7 +179,6 @@ test "ordered input digest preserves independent identities at eight-byte but no
         var expected: [32]u8 = undefined;
         _ = try std.fmt.hexToBytes(&expected, case.hex);
         try std.testing.expectEqual(expected, try placed.digest.finish());
-        // Finishing is observational: later reads retain the same identity.
         try std.testing.expectEqual(expected, try placed.digest.finish());
     }
 }

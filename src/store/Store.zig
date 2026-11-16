@@ -1,7 +1,3 @@
-//! The Store type and its public entry points, then what the domain files share
-//! and nothing outside src/store/ reaches: the Store's queue and fencing, statement execution,
-//! identities and traces. The facade re-exports only the Store type and its value types.
-
 const std = @import("std");
 const stderr = @import("../stderr.zig");
 const command_reply = @import("../command_reply.zig");
@@ -26,6 +22,7 @@ const command_input = @import("../command_input.zig");
 const retry_policy = @import("../retry_policy.zig");
 const change_ring = @import("../change_ring.zig");
 const action_domain = @import("domain/action.zig");
+const action_control_domain = @import("domain/action_control.zig");
 const command_domain = @import("domain/command.zig");
 const configuration_domain = @import("domain/configuration.zig");
 const skills_domain = @import("domain/skills.zig");
@@ -71,7 +68,7 @@ const Found = @import("access.zig").Found;
 const ContentLocation = content_domain.ContentLocation;
 const ContentReference = content_domain.ContentReference;
 const CurrentConfiguration = configuration_domain.CurrentConfiguration;
-const HistoricalView = historical_domain.HistoricalView;
+const RequestPage = historical_domain.RequestPage;
 const MessageReply = command_domain.MessageReply;
 const ModelAdmissionKind = model_admission_domain.ModelAdmissionKind;
 const DispatchWork = model_admission_domain.DispatchWork;
@@ -94,64 +91,28 @@ pub const Observed = command_reply.Observed;
 
 pub const Store = struct {
     io: std.Io,
-    /// The connection, its prepared statements and an Entry's content
-    /// read handle.
     engine: Engine,
     selector: Bounded(store_path.max_bytes),
     fenced: std.atomic.Value(bool) = .init(false),
-    /// Advances before `release` of any entry point that changed rows, so
-    /// after every successful COMMIT. An unchanged value proves no canonical
-    /// fact changed since it was read; a rolled-back change also advances it.
     commit_generation: std.atomic.Value(u64) = .init(0),
-    /// The Sessions the current entry point changed. Every writer touches
-    /// each Session whose rows it changes, and `release` records them under
-    /// the generation the commit advances to.
     touched: change_ring.Touched = .{},
-    /// Which Sessions changed at recent generations: Session listing's
-    /// `since` hint, touched only by the Store's holder. Owned: `openTarget` maps it
-    /// and `close` unmaps it.
     changes: *change_ring.Ring,
-    /// This opening's identity: a `since` token from any other opening
-    /// names generations this one never counted.
     instance: [16]u8 = undefined,
-    /// The Host hands out every id and sequence value, and each
-    /// transaction's second; see `HostValues`. Out of line beside the
-    /// change ring, so a new identity does not grow the Store.
-    /// The labels of the providers whose Sessions get model Attempts, each
-    /// between commas, fixed at open.
     served: provider_route.Routes = provider_route.all(.unserved),
-    /// Which use holds the out-of-line scratch in this entry point.
     scratch_use: ScratchUse = .none,
-    /// The batch of writes the holder is running (`Queue.Batch`). `.ready`
-    /// until a write opens the transaction; `.first` while that write runs,
-    /// with no savepoint, so a lone write costs BEGIN and COMMIT as before;
-    /// `.open` once it commits, each later write in a savepoint; `.lost`
-    /// once a rollback failed, so the batch never commits. A write outside
-    /// a batch (a test's own Entry) opens and commits its own.
     batch: enum(u8) { none, ready, first, open, saved, lost } = .none,
-    /// Whether the current write's savepoint is open in the batch.
     savepoint: bool = false,
-    /// Release a bulk writer's cache after the queue's outer commit, not
-    /// merely after the writer's savepoint. Fits existing Store padding.
     release_bulk_memory: bool = false,
-    // Source-level proof only: no counters/storage in the production Store.
     testing_content_work: if (@import("builtin").is_test) TestingContentWork else void = if (@import("builtin").is_test) .{} else {},
 
-    /// Borrowed live observations, installed before Host workers start and
-    /// cleared after their joins. Stored beside the existing change ring.
     pub fn modelTimingSource(self: *Store) *@import("../model_timing.zig").Source {
         return &@as(*OutOfLine, @fieldParentPtr("ring", self.changes)).model_timings;
     }
 
-    /// The identity allocator already lives beside the change ring. Derive
-    /// its address instead of retaining a redundant pointer in the Store;
-    /// these eight bytes pay for the engine union's tag on both engines.
     pub inline fn identities(self: *const Store) *HostValues {
         return &@as(*OutOfLine, @fieldParentPtr("ring", self.changes)).ids;
     }
 
-    /// Whether nothing changed since `since` on this opening: atomics only,
-    /// no lock. Never while fenced, so a read reports the failure.
     pub fn notModified(self: *const Store, since: change_ring.Token) bool {
         return !self.isFenced() and std.mem.eql(u8, &since.instance, &self.instance) and
             since.generation == self.commit_generation.load(.acquire);
@@ -167,7 +128,6 @@ pub const Store = struct {
         return observation;
     }
 
-    /// Reads the seal applicable to this frozen Operation's model.
     pub fn prefixSealForTesting(self: *Store, binding: AttemptBinding) !?PrefixSeal {
         return self.queue().run(prefixSealForTestingHeld, .{ self, binding });
     }
@@ -181,8 +141,6 @@ pub const Store = struct {
         return entry.finish(Ordinary.none, historical_domain.prefixSealOf(&access, binding));
     }
 
-    /// Records `seal` for the current `binding` through the production
-    /// write (`recordPrefixSeal`), whatever the seal holds.
     pub fn setPrefixSealForTesting(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
         if (!@import("builtin").is_test) @compileError("test-only Store fixture");
         return self.recordPrefixSeal(binding, seal);
@@ -196,17 +154,11 @@ pub const Store = struct {
         try self.engine.sqlite.setHistoricalModelForTesting(binding.operation_id, model);
     }
 
-    /// Flips the first byte of the provider bag of the `binding` Operation's
-    /// first output item, keeping its recorded length and digest, as on-disk
-    /// damage would.
     pub fn damageOutputBagForTesting(self: *Store, binding: AttemptBinding) !void {
         if (!@import("builtin").is_test) @compileError("test-only Store fixture");
         try self.engine.sqlite.damageOutputBagForTesting(binding.operation_id);
     }
 
-    /// Opens in final storage. Admission borrows `target` and `selector` only
-    /// for this call; the Store owns its public selector and served routes.
-    /// Startup scratch must not live on the resident Host frame.
     pub noinline fn openTarget(
         self: *Store,
         io: std.Io,
@@ -219,8 +171,6 @@ pub const Store = struct {
             .sqlite => |path| .{ .sqlite = try Sqlite.open(io, path, selector, options) },
             .mysql => |connection| .{ .mysql = try Mysql.open(io, connection, selector, options) },
         };
-        // Preserve the admission error. Closing here only releases the partly
-        // opened connection and prepared statements; there is no caller to retry.
         var opening: *Engine = &opened;
         errdefer opening.close() catch {};
 
@@ -231,13 +181,9 @@ pub const Store = struct {
         const ids: *HostValues = &@as(*OutOfLine, @fieldParentPtr("ring", changes)).ids;
         ids.* = .{ .next = undefined };
         self.* = .{ .io = io, .engine = opened, .selector = stored_selector, .changes = changes, .served = options.served };
-        // Cleanup follows the final engine too: its statement cache is populated
-        // below, after the admitted value has moved to its only stable address.
         opening = &self.engine;
         self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch, .closed = batchClosed, .arm = armRerun, .recover = recoverRerun });
         try self.engine.serve(&self.served);
-        // This opening's since tokens grant nothing; Session IDs alone use
-        // secure draws. Draw before identity and tool set initialization.
         io.random(&self.instance);
         try self.engine.prepareRollback();
         try loadIdentities(self, .full);
@@ -248,31 +194,22 @@ pub const Store = struct {
         }
     }
 
-    /// Compatibility convenience; all initialization belongs to openTarget.
     pub fn openWithOptions(self: *Store, io: std.Io, database_path: []const u8, selector: []const u8, options: OpenOptions) !void {
         return self.openTarget(io, .{ .sqlite = database_path }, selector, options);
     }
 
-    /// Atomically replaces the saved models.dev generation. Access flushes
-    /// bounded statement batches inside this one transaction: with model_id
-    /// as the key, intermediate commits would destroy the previous copy.
     pub fn saveModelFacts(self: *Store, entries: []const model_catalog.Entry, etag: ?[]const u8) !void {
         if (etag) |value| if (value.len > 512) return error.InvalidCatalogEtag;
         return self.queue().write(saveModelFactsHeld, .{ self, entries, etag });
     }
 
     fn saveModelFactsHeld(self: *Store, entries: []const model_catalog.Entry, etag: ?[]const u8) !void {
-        // The runner has reset its statements and committed or rolled back.
-        // Keep the maintenance hint inside this serialized queue entry.
         defer if (self.batch == .none) self.engine.releaseUnusedMemory(model_facts_domain.save_statements) else {
             self.release_bulk_memory = true;
         };
         return transition.apply(self, model_facts_domain.Save, .{ .entries = entries, .etag = etag }, .{});
     }
 
-    /// The selected generation for one operation. Saved entries/IDs belong to
-    /// the caller's arena; without a source this borrows the shipped snapshot.
-    /// Store failures propagate through the normal read/fencing boundary.
     pub fn readModelCatalog(self: *Store, arena: std.mem.Allocator) ![]const model_catalog.Entry {
         return self.queue().run(readModelCatalogHeld, .{ self, arena });
     }
@@ -316,7 +253,6 @@ pub const Store = struct {
         return result;
     }
 
-    /// Caller owns the returned IDs and slice; free each ID and the slice.
     pub fn readOpenAiModelIds(self: *Store, allocator: std.mem.Allocator) ![][]const u8 {
         return self.queue().run(readOpenAiModelIdsHeld, .{ self, allocator });
     }
@@ -341,27 +277,19 @@ pub const Store = struct {
         return std.meta.activeTag(self.engine);
     }
 
-    /// Borrowed until close: canonical path on SQLite, admitted opaque id on
-    /// MySQL. SQLite's persisted random id is not its protocol selector.
     pub fn storeId(self: *const Store) []const u8 {
         return self.selector.slice();
     }
 
-    /// Immutable admission facts only: safe on the nonblocking host-info path.
     pub fn admissionDiagnostic(self: *const Store) AdmissionDiagnostic {
         return .{ .doublewrite = self.engine.admissionDoublewrite() };
     }
 
-    /// The tools the Host offers, and the id of their saved set.
     pub fn hostTools(self: *Store) *const HostTools {
         const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
         return &owned.tools;
     }
 
-    /// Saves `offered` as the Host tool set, if no set holds it yet: its
-    /// records a few to a transaction, then the set in one more. It becomes
-    /// the tool set `readHostToolSet` reads back. Once per open, before any
-    /// request.
     pub fn saveHostToolSet(self: *Store, offered: *const tool_record.HostToolSet) !void {
         if (!offered.valid()) return error.InvalidHostToolSet;
         for (std.enums.values(tool_record.Tool)) |tool| {
@@ -381,17 +309,10 @@ pub const Store = struct {
         owned.tools.set_id = (try self.queue().write(saveHostToolSetHeld, .{ self, offered, &digest, offered.records.len })).?;
     }
 
-    /// One transaction of `saveHostToolSet`: with `start` null, the saved set's
-    /// id, or null when none holds `offered`; below the record count, the
-    /// records from `start`; at it, the set, whose id it returns.
     fn saveHostToolSetHeld(self: *Store, offered: *const tool_record.HostToolSet, digest: *const [32]u8, start: ?usize) !?u64 {
         return transition.apply(self, tool_set_domain.SaveHostToolSet, .{ .offered = offered, .digest = digest, .start = start }, .{});
     }
 
-    /// The Host tool set the last `saveHostToolSet` saved, read back with every
-    /// text, in `allocator`'s memory; null before the first. A Host reads
-    /// it at start to keep the tools of a server it cannot reach. A saved
-    /// tool set that fails its checks fences the Store.
     pub fn readHostToolSet(self: *Store, allocator: std.mem.Allocator) !?SavedHostToolSet {
         return self.readHostToolSetChecked(allocator) catch |err| switch (err) {
             error.CorruptStore => fence(self, error.CorruptStore),
@@ -450,13 +371,10 @@ pub const Store = struct {
         return texts[used.*..][0..length];
     }
 
-    /// The Host's Host tool set and its record count, in one round.
     pub fn readHostToolSetSet(self: *Store) !tool_set_domain.SavedHostToolSet {
         return self.queue().run(readHostToolSetSetHeld, .{self});
     }
 
-    /// One round: the Host tool set's records from `ordinal`, at most one
-    /// batch and `rows.len`; how many it read.
     pub fn readHostToolSetRecords(self: *Store, set: u64, ordinal: usize, rows: []tool_set_domain.host_tool_records.Row) !usize {
         return self.queue().run(readHostToolSetRecordsHeld, .{ self, set, ordinal, rows });
     }
@@ -477,7 +395,6 @@ pub const Store = struct {
         return entry.finish(Ordinary.none, tool_set_domain.hostToolRecordsOf(&access, set, ordinal, rows));
     }
 
-    /// `destination` from the content row `content_id`, a window at a time.
     pub fn readHostToolSetText(self: *Store, content_id: u64, destination: []u8) !void {
         var start: usize = 0;
         while (start < destination.len) {
@@ -503,46 +420,31 @@ pub const Store = struct {
         return self.engine.diagnostic();
     }
 
-    /// The SQLite connection, for SQLite-only tests and fixtures.
     pub fn sqliteDatabase(self: *const Store) Sqlite.Database {
         return self.engine.sqlite.database;
     }
 
     pub fn close(self: *Store) !void {
-        // Every caller has its answer, so the queue is empty.
         self.queue().closing();
         const closed = self.engine.close();
-        // Freed even when the engine keeps its connection: nothing retries a close.
         destroyRing(self.changes);
         try closed;
         self.* = undefined;
     }
 
-    /// Model settlement's batch table, in the Store's scratch beside its
-    /// change ring (`OutOfLine`), so no frame on the engine thread holds
-    /// it. Only `SettleSuccess` uses it.
     pub fn settlementBatch(self: *Store) *model_settlement_domain.Batch {
         return @ptrCast(self.scratch(.settlement));
     }
 
-    /// What a configure reads, over 4.6 KB, in the Store's scratch beside
-    /// its change ring (`OutOfLine`), so no Host stack frame holds it. A
-    /// configure or a creating Message uses it.
     pub fn configurationReads(self: *Store) *configuration_domain.ConfigurationReads {
         return @ptrCast(self.scratch(.configuration));
     }
 
-    /// Transient large state, such as a report's tool names or a model-call
-    /// row, in entry-owned scratch so no Host stack frame holds it. The
-    /// caller consumes each value before the next decode overwrites it.
     pub fn reportScratch(self: *Store, comptime T: type) *T {
         comptime std.debug.assert(@sizeOf(T) <= scratch_bytes and @alignOf(T) <= scratch_align);
         return @ptrCast(@alignCast(self.scratch(.report)));
     }
 
-    /// The one thread that touches `engine`, the scratch and `ids`,
-    /// beside the change ring (`OutOfLine`).
-    /// The event set after each commit, null while no dispatch loop waits.
     pub fn commitWake(self: *Store) *std.atomic.Value(?*std.Io.Event) {
         const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
         return &owned.commit_wake;
@@ -553,9 +455,6 @@ pub const Store = struct {
         return &owned.queue;
     }
 
-    /// The scratch for `use`. Safe builds check that the caller owns the
-    /// connection (`Queue.owner`), and that no other use took the scratch in this entry point:
-    /// the two share its bytes. `Entry.release` frees it.
     fn scratch(self: *Store, use: ScratchUse) *align(scratch_align) [scratch_bytes]u8 {
         std.debug.assert(self.queue().owned());
         std.debug.assert(self.scratch_use == .none or self.scratch_use == use);
@@ -568,8 +467,6 @@ pub const Store = struct {
         try retry_policy.validateWaits(waits_ms, try readUnixMilliseconds(self.io));
     }
 
-    /// Admission preparation uses this only as a replay hint. The writer always
-    /// checks the original key and digest again before applying captured effects.
     pub fn commandExists(self: *Store, key: []const u8) !bool {
         return self.queue().run(commandExistsHeld, .{ self, key, null, null });
     }
@@ -595,7 +492,6 @@ pub const Store = struct {
         return saved != null;
     }
 
-    /// Replay hint plus the inherited Workspace in the same preflight round.
     pub fn creationHint(self: *Store, key: []const u8, parent: []const u8, workspace: *Bounded(workspace_path.max_bytes)) !bool {
         return self.queue().run(commandExistsHeld, .{ self, key, parent, workspace });
     }
@@ -611,8 +507,6 @@ pub const Store = struct {
         catalog: @import("../skills.zig").Catalog = .{ .entries = &.{} },
     };
 
-    /// The immutable workspace and current metadata are copied before filesystem
-    /// effects. No Store lock remains held while a skill is read or scanned.
     pub fn readSkills(self: *Store, allocator: std.mem.Allocator, session: []const u8) !*SkillsState {
         const out = try allocator.create(SkillsState);
         out.* = .{ .workspace = .{ .len = 0 } };
@@ -623,8 +517,6 @@ pub const Store = struct {
     fn readSkillsHeld(self: *Store, allocator: std.mem.Allocator, session: []const u8, out: *SkillsState) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        // Decoding the catalog allocates from the caller's memory; running
-        // out of it is the caller's to answer, not canonical corruption.
         var access: Access(.read, error{ SessionNotFound, OutOfMemory }) = .open(&entry);
         defer access.deinit();
         return entry.finish(error{ SessionNotFound, OutOfMemory }, readSkillsOn(&access, allocator, session, out));
@@ -639,8 +531,6 @@ pub const Store = struct {
         out.catalog = try skills_domain.read(a, allocator, session);
     }
 
-    /// A configuration that requires a model is rejected when the Host does
-    /// not serve its Session's provider.
     pub fn configure(
         self: *Store,
         command: *const content_custody.ConfigureCommand,
@@ -649,9 +539,6 @@ pub const Store = struct {
         return self.configureWithInitialSkills(command, null, null, faults);
     }
 
-    /// A Host-resolved preset or its refusal uses the same key lookup,
-    /// rejection persistence and transaction as every other configure.
-    /// Borrows `preset` until the synchronous queued write returns.
     pub fn configureWithPreset(
         self: *Store,
         command: *const content_custody.ConfigureCommand,
@@ -669,8 +556,6 @@ pub const Store = struct {
         return self.configureWithCreationCommitted(command, preset, initial_skills, reload_capture, allocator, null, faults);
     }
 
-    /// Configure's creation callback follows the same real COMMIT boundary as
-    /// MessageCommitted, including batch rollback/recovery and exact replay.
     pub const CreationCommitted = struct {
         context: *anyopaque,
         call: *const fn (context: *anyopaque, session: []const u8) void,
@@ -714,27 +599,17 @@ pub const Store = struct {
         return reply;
     }
 
-    /// A fresh Message admission, as `MessageCommitted` receives it.
     pub const MessageAdmission = struct {
-        /// The admitted Session, borrowed for the call.
         session: []const u8,
-        /// Store-wide, increasing with each admission.
         admission_id: u64,
-        /// The sender was another Session's Action, not a person.
         from_peer: bool,
     };
 
-    /// Called, on whichever thread holds the Store, once a fresh Message
-    /// admission's write succeeds and before the Store runs another request, so whatever reads the Store next also sees its effect.
-    /// In a batch it runs once the batch's COMMIT succeeds, before any of its writers hears an answer, so a batch that fails or runs again calls nothing for the attempt that saved nothing.
-    /// A replayed or rejected Message calls nothing. It cannot fail.
     pub const MessageCommitted = struct {
         context: *anyopaque,
         call: *const fn (context: *anyopaque, admission: MessageAdmission) void,
     };
 
-    /// A Message's `require_model` condition checks that the Host serves its
-    /// Session's provider before creating anything.
     pub fn submitMessageWithModel(
         self: *Store,
         command: *const content_custody.MessageCommand,
@@ -815,7 +690,6 @@ pub const Store = struct {
         return self.noteControl(transition.apply(self, command_domain.ArchiveSession, .{ .command = command }, faults) catch .infrastructure_failure);
     }
 
-    /// The stop an attached child owes (D38), as `nextCoreWork` names it.
     pub fn stopOwedSession(self: *Store, command: *const command_input.SessionStopCommand, faults: Faults) SessionStopReply {
         return self.queue().write(stopOwedSessionHeld, .{ self, command, faults });
     }
@@ -858,13 +732,25 @@ pub const Store = struct {
         return self.noteControl(transition.apply(self, command_domain.DecidePermission, .{ .command = command }, faults) catch .infrastructure_failure);
     }
 
-    /// Tier 1: atomics only, with no holder or connection access.
+    pub fn backgroundAction(self: *Store, command: *const command_input.ActionBackgroundCommand, capacity: action_control_domain.CapacityView, faults: Faults) @import("../action_control.zig").Reply {
+        EntryTrace.fromControl(faults.control_trace).mark(.requested);
+        return self.queue().write(backgroundActionHeld, .{ self, command, capacity, faults });
+    }
+
+    fn backgroundActionHeld(self: *Store, command: *const command_input.ActionBackgroundCommand, capacity: action_control_domain.CapacityView, faults: Faults) @import("../action_control.zig").Reply {
+        const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
+        defer entry.release();
+        const Control = action_control_domain.Control;
+        var control: Control = .{ .input = .{ .command = command, .capacity = capacity, .scratch = self.reportScratch(Control.Scratch) } };
+        const result = entry.finishTransaction(Control.Ordinary, faults, transition.run(&entry, Control, &control, faults)) catch @import("../action_control.zig").Reply.infrastructure_failure;
+        return self.noteControl(result);
+    }
+
     fn unchangedSession(self: *const Store, since: ?change_ring.SessionToken) ?change_ring.SessionToken {
         const token = since orelse return null;
         return if (self.notModified(.{ .instance = token.instance, .generation = token.generation })) token else null;
     }
 
-    /// Tier 2: called only under the holder, before opening read access.
     fn unchangedSessionHeld(self: *const Store, since: ?change_ring.SessionToken, generation: u64) ?change_ring.SessionToken {
         const token = since orelse return null;
         if (std.mem.eql(u8, &token.instance, &self.instance) and token.generation <= generation and
@@ -877,8 +763,6 @@ pub const Store = struct {
         return if (std.mem.eql(u8, session, &token.session)) token else null;
     }
 
-    /// Tokens cover follow polling after the unpinned forward page is drained,
-    /// not another slice of a bounded, backward or intra-position traversal.
     fn activitySince(request: *const activity_read.ActivityPage) ?change_ring.SessionToken {
         if (request.direction != .forward or request.end != null or request.ordinal != null) return null;
         return sessionSince(request.session.slice(), request.since);
@@ -895,8 +779,6 @@ pub const Store = struct {
     fn observeCommandHeld(self: *Store, key: []const u8, since: ?change_ring.SessionToken, out: *Observed) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        // Capture before any reads, just as for a Session listing. The ring
-        // belongs to this holder; a sibling's commit needs no database read.
         const generation = self.commitGeneration();
         if (self.unchangedSessionHeld(since, generation)) |token| {
             out.* = .{ .not_modified = token };
@@ -936,10 +818,6 @@ pub const Store = struct {
         return entry.finish(Ordinary.none, reads_domain.inspectSession(&access, session_ref, out));
     }
 
-    // Reverse chronological, with call order breaking ties at a completed
-    // group's final acceptance position. No transaction survives this call.
-    // The fixed end is the last committed position at the first read, not a
-    // count of visible rows; a private-only append cannot become public later.
     pub fn publicConversationPage(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage) !void {
         return self.queue().run(publicConversationPageHeld, .{ self, request, out });
     }
@@ -952,8 +830,6 @@ pub const Store = struct {
         return entry.finish(Ordinary.page, reads_domain.publicConversationPage(&access, request, out));
     }
 
-    // Resolve the public identity again, rather than accepting a global digest:
-    // another Session's content or private provider material is not authority.
     pub fn openPublicConversationContent(self: *Store, request: *const conversation_read.ConversationContent) !ContentLocation {
         return self.queue().run(openPublicConversationContentHeld, .{ self, request });
     }
@@ -989,10 +865,6 @@ pub const Store = struct {
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
         try entry.finish(Ordinary.page, reads_domain.activityPage(&access, request, out));
-        // Retry deadlines change the footer without a commit. Pending may be
-        // an elapsed retry and become retrying again after a wall-clock step.
-        // Exclude both states rather than retain another copy of retry facts.
-        // Only a drained, unpinned forward page grants a follow token.
         if (request.direction == .forward and request.end == null and !out.more and
             out.work.work.state != .retrying and out.work.work.state != .pending) out.token = .{
             .instance = self.instance,
@@ -1040,8 +912,6 @@ pub const Store = struct {
         return entry.finish(Ordinary.content, reads_domain.activityTool(&access, request));
     }
 
-    /// Authenticates the Session/Operation/Attempt before reading optional
-    /// diagnostics. Diagnostic faults never fence canonical state.
     pub fn failedResponseBinding(self: *Store, session_ref: []const u8, operation: u64, attempt_ordinal: u64) !AttemptBinding {
         return self.queue().run(failedResponseBindingHeld, .{ self, session_ref, operation, attempt_ordinal });
     }
@@ -1054,10 +924,6 @@ pub const Store = struct {
         return entry.finish(Ordinary.content, report_domain.failedResponseBinding(&access, session_ref, operation, attempt_ordinal));
     }
 
-    /// Reads the report of `session_ref` under one Entry and hands it to
-    /// `visitor` (`session_report_read.readSessionReport`). An error the
-    /// visitor returns, or its capture's while the Store writes the Full
-    /// profile into it, is its own and does not fence the Store.
     pub fn readSessionReport(self: *Store, session_ref: []const u8, profile: cli_value.ReportProfile, visitor: anytype) !void {
         var watched: session_report_read.Watched(@TypeOf(visitor)) = .{ .visitor = visitor };
         try self.queue().run(SessionReportHeld(@TypeOf(visitor)).readSessionReportHeld, .{ self, session_ref, profile, &watched });
@@ -1076,9 +942,6 @@ pub const Store = struct {
         };
     }
 
-    /// Reads one list page under one Entry and hands it to `visitor`
-    /// (`session_list_read.readSessionList`). An error the visitor returns
-    /// is its own and does not fence the Store.
     pub fn readSessionList(self: *Store, request: *const session_list.ListSessions, visitor: anytype) !void {
         try request.validate();
         var watched: session_list_read.Watched(@TypeOf(visitor)) = .{ .visitor = visitor };
@@ -1137,16 +1000,10 @@ pub const Store = struct {
             self.admitModelAttempt(.tool_continuation, faults);
     }
 
-    /// Admission's rows over 1 KiB stay off the engine thread's stack, in
-    /// the Store's scratch (`AdmitModel.Scratch`).
     pub fn admitModelAttempt(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
         return self.admitModelAttemptInto(admission_kind, faults, null);
     }
 
-    /// `admitModelAttempt`, which also starts the admitted Attempt's
-    /// request in `start`: its view opens there and its settings round
-    /// rides the admission's commit. `request_started` says whether it did;
-    /// when not, `start` is as it was and the caller opens the view.
     pub fn admitModelAttemptInto(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults, start: ?historical_domain.Start) !?AttemptAdmission {
         return self.queue().write(admitModelAttemptHeld, .{ self, admission_kind, faults, start });
     }
@@ -1154,21 +1011,13 @@ pub const Store = struct {
     noinline fn admitModelAttemptHeld(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults, start: ?historical_domain.Start) !?AttemptAdmission {
         const entry = try enter(self, .none);
         defer entry.release();
-        // Only a network engine's commit carries the request's reads.
-        const starting: ?model_admission_domain.AdmitModel.Starting = if (start) |into| if (self.engine.batches()) .{ .start = into, .store = self } else null else null;
-        // An admission whose purpose rests on its context's size writes as
-        // an assistant response under a guard on that size, and so reads no
-        // size. Only the guard's failure, rolled back, admits again as the
-        // compaction it showed is due.
+        const starting: ?model_admission_domain.AdmitModel.Starting = if (start) |into| if (self.engine.batches()) .{ .start = into, .selector = &self.selector } else null else null;
         const first = admitModelAttemptOnce(&entry, admission_kind, .weighed, faults, starting);
         const due = if (first) |_| false else |err| err == error.CompactionDue;
         const outcome = if (due) admitModelAttemptOnce(&entry, admission_kind, .over, faults, starting) else first;
         return entry.finishTransaction(Ordinary.none, faults, idleUnlessAdmitted(&entry, outcome));
     }
 
-    /// `outcome`, but an admission that selected nothing first checks the
-    /// Store is idle (`CheckIdle`). Never inlined: the checks' rounds run
-    /// beside an admission's, not under it.
     noinline fn idleUnlessAdmitted(entry: *const Entry, outcome: anytype) !?AttemptAdmission {
         if (try outcome) |selected| return selected;
         var checks: model_admission_domain.CheckIdle = .{};
@@ -1176,7 +1025,6 @@ pub const Store = struct {
         return null;
     }
 
-    /// Never inlined: the second admission reuses the first's frame.
     noinline fn admitModelAttemptOnce(entry: *const Entry, admission_kind: ModelAdmissionKind, pressure: model_admission_domain.Pressure, faults: Faults, starting: ?model_admission_domain.AdmitModel.Starting) !?AttemptAdmission {
         const Admit = model_admission_domain.AdmitModel;
         var admission: Admit = .{ .input = .{
@@ -1191,24 +1039,23 @@ pub const Store = struct {
 
     pub fn admitNextActionAttempt(
         self: *Store,
+        capacity: action_domain.Capacity,
         timeout_ms: u64,
         faults: Faults,
     ) !?ActionAttemptAdmission {
-        return self.queue().write(admitNextActionAttemptHeld, .{ self, timeout_ms, faults });
+        return self.queue().write(admitNextActionAttemptHeld, .{ self, capacity, timeout_ms, faults });
     }
 
     fn admitNextActionAttemptHeld(
         self: *Store,
+        capacity: action_domain.Capacity,
         timeout_ms: u64,
         faults: Faults,
     ) !?ActionAttemptAdmission {
         if (timeout_ms == 0 or timeout_ms > std.math.maxInt(i64)) return error.InvalidActionTimeout;
-        return transition.apply(self, action_domain.AdmitNextAttempt, .{ .io = self.io, .timeout_ms = timeout_ms }, faults);
+        return transition.apply(self, action_domain.AdmitNextAttempt, .{ .io = self.io, .timeout_ms = timeout_ms, .capacity = capacity }, faults);
     }
 
-    /// Admit a selected Rui-run Action; selection is rechecked under the writer.
-    /// Bash's slot owner uses `admitNextActionAttempt` to fuse selection and
-    /// admission at its existing one-read, one-write cost.
     pub fn admitActionAttempt(self: *Store, selected: ReadyAction, timeout_ms: u64, faults: Faults) !?ActionAttemptAdmission {
         return self.queue().write(admitActionAttemptHeld, .{ self, selected, timeout_ms, faults });
     }
@@ -1216,8 +1063,6 @@ pub const Store = struct {
         if (timeout_ms == 0 or timeout_ms > std.math.maxInt(i64)) return error.InvalidActionTimeout;
         return transition.apply(self, action_domain.AdmitSelected, .{ .io = self.io, .selected = selected, .timeout_ms = timeout_ms }, faults);
     }
-    /// `out` is decoded in place and valid only on success. The compile-time
-    /// runner selects the adapter's existing read plan, not persisted state.
     pub fn readActionExecutionInput(self: *Store, comptime runner: tool_record.Runner, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
         return switch (runner) {
             .bash => self.queue().run(readBashExecutionInputHeld, .{ self, binding, out }),
@@ -1270,10 +1115,6 @@ pub const Store = struct {
     ) !void {
         try self.queue().callHeld(withActionDispatchHandoffHeld, .{ self, binding });
         defer self.queue().release();
-        // Launch failures are effect outcomes, not canonical faults; the
-        // caller settles or fences them. The handoff runs on the caller's
-        // thread while it still holds the Store, so no request runs between the
-        // check and the launch.
         try handoff(context);
     }
 
@@ -1306,13 +1147,10 @@ pub const Store = struct {
         return transition.apply(self, action_domain.SettleAttempt, .{ .binding = binding, .code = code, .result = result }, faults);
     }
 
-    /// Delivers the owed child ending (D39) `nextCoreWork` names, or only
-    /// settles one its parent's stop caused (D139).
     pub fn deliverChildEnding(self: *Store, turn_id: u64, faults: Faults) !bool {
         return self.deliverChildEndingBound(turn_id, null, faults);
     }
 
-    /// `captured` is what the Host's binding of the ending's text found.
     pub fn deliverChildEndingBound(self: *Store, turn_id: u64, captured: ?*const skills_domain.MessageCapture, faults: Faults) !bool {
         return self.queue().write(deliverChildEndingHeld, .{ self, turn_id, captured, faults });
     }
@@ -1322,7 +1160,6 @@ pub const Store = struct {
         return transition.apply(self, command_domain.DeliverChildEnding, .{ .turn_id = turn_id, .captured = captured, .ending = &ending }, faults);
     }
 
-    /// Positions one ancestor feed row and durably queues its next hop.
     pub fn deliverSessionForward(self: *Store, forward_id: u64, faults: Faults) !bool {
         return self.queue().write(deliverSessionForwardHeld, .{ self, forward_id, faults });
     }
@@ -1331,52 +1168,41 @@ pub const Store = struct {
         return transition.apply(self, forward_domain.Deliver, .{ .forward_id = forward_id }, faults);
     }
 
-    /// Owed stops, ending Messages and ancestor feed hops precede calls.
-    pub fn nextCoreWork(self: *Store) !?CoreWork {
-        return self.nextCoreWorkForHost(true);
+    pub fn dispatchWork(self: *Store, paused: bool, capacity: action_domain.Capacity) !DispatchWork {
+        return self.queue().run(dispatchWorkHeld, .{ self, paused, capacity });
     }
 
-    /// Which of the dispatch loop's commit-driven scans would find work,
-    /// in one round; `paused` is whether new Turns are held.
-    pub fn dispatchWork(self: *Store, paused: bool, include_mcp: bool) !DispatchWork {
-        return self.queue().run(dispatchWorkHeld, .{ self, paused, include_mcp });
-    }
-
-    fn dispatchWorkHeld(self: *Store, paused: bool, include_mcp: bool) !DispatchWork {
+    fn dispatchWorkHeld(self: *Store, paused: bool, capacity: action_domain.Capacity) !DispatchWork {
         const survey = self.identities().survey;
         const asked: @FieldType(Survey, "asked") = if (paused) .paused else .running;
         self.identities().survey.kept = .none;
         self.identities().survey.asked = asked;
-        self.identities().survey.include_mcp = include_mcp;
-        // Nothing committed since the survey ran, right after its COMMIT.
-        if (survey.kept == .ready and survey.asked == asked and survey.include_mcp == include_mcp and !self.isFenced())
+        self.identities().survey.capacity = capacity;
+        if (survey.kept == .ready and survey.asked == asked and std.meta.eql(survey.capacity.workInput(), capacity.workInput()) and !self.isFenced())
             return .{ .core = survey.core, .mcp = survey.mcp, .bash = survey.bash, .message = survey.message, .tool_continuation = survey.tool_continuation, .retry = survey.retry };
         const entry = try enter(self, .none);
         defer entry.release();
         var access: store_access.Access(.survey, error{}) = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.none, model_admission_domain.dispatchWork(&access, paused, include_mcp));
+        return entry.finish(Ordinary.none, model_admission_domain.dispatchWork(&access, paused, capacity));
     }
 
-    pub fn nextCoreWorkForHost(self: *Store, include_mcp: bool) !?CoreWork {
-        return self.queue().run(nextCoreWorkHeld, .{ self, include_mcp });
+    pub fn nextCoreWork(self: *Store, capacity: action_domain.Capacity) !?CoreWork {
+        return self.queue().run(nextCoreWorkHeld, .{ self, capacity });
     }
 
-    fn nextCoreWorkHeld(self: *Store, include_mcp: bool) !?CoreWork {
+    fn nextCoreWorkHeld(self: *Store, capacity: action_domain.Capacity) !?CoreWork {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.none, action_domain.nextCoreWork(&access, include_mcp));
+        return entry.finish(Ordinary.none, action_domain.nextCoreWork(&access, capacity));
     }
 
-    /// Runs the `message_agent` call `binding` names with its checked
-    /// arguments, in one transaction.
     pub fn deliverAgentMessage(self: *Store, binding: ActionAttemptBinding, target: []const u8, text: []const u8, faults: Faults) !AgentDelivery {
         return self.deliverAgentMessageBound(binding, target, text, null, faults);
     }
 
-    /// `captured` is what the Host's binding of `text` found.
     pub fn deliverAgentMessageBound(self: *Store, binding: ActionAttemptBinding, target: []const u8, text: []const u8, captured: ?*const skills_domain.MessageCapture, faults: Faults) !AgentDelivery {
         return self.queue().write(deliverAgentMessageHeld, .{ self, binding, target, text, captured, faults });
     }
@@ -1385,21 +1211,15 @@ pub const Store = struct {
         return transition.apply(self, command_domain.DeliverAgentMessage, .{ .binding = binding, .target = target, .text = text, .captured = captured }, faults);
     }
 
-    /// Runs the `start_agent` call `binding` names with its checked
-    /// arguments, in one transaction; `configuration` is the agent's spec,
-    /// which this completes. `committed` runs once the task is admitted.
     pub fn startAgent(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *content_custody.Configuration, committed: ?MessageCommitted, faults: Faults) !AgentStart {
         return self.startAgentWithInitialSkills(binding, caller, task, attached, configuration, committed, null, null, faults);
     }
 
-    /// `captured` is what the Host's binding of `task` against
-    /// `initial_skills`' catalog found.
     pub fn startAgentWithInitialSkills(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *content_custody.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured: ?*const skills_domain.MessageCapture, faults: Faults) !AgentStart {
         return self.queue().write(startAgentHeld, .{ self, binding, caller, task, attached, configuration, committed, initial_skills, captured, faults });
     }
 
     fn startAgentHeld(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *content_custody.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured: ?*const skills_domain.MessageCapture, faults: Faults) !AgentStart {
-        // The call's result text, which its content write reads in place.
         var result_buffer: [tool_record.HostToolSet.max_refusal_message_bytes]u8 = undefined;
         return transition.apply(self, command_domain.StartAgent, .{
             .io = self.io,
@@ -1417,7 +1237,6 @@ pub const Store = struct {
         }, faults);
     }
 
-    /// Loads matching saved tools and resolves the call in one transaction.
     pub fn findTools(self: *Store, binding: ActionAttemptBinding, arena: std.mem.Allocator, words: *const @import("../find_tools_words.zig").FindTools, refusal: ?[]const u8, faults: Faults) !bool {
         return self.queue().write(findToolsHeld, .{ self, binding, arena, words, refusal, faults });
     }
@@ -1434,13 +1253,10 @@ pub const Store = struct {
         return transition.apply(self, skills_domain.SettleTool, .{ .binding = binding, .allocator = allocator, .captured = captured }, faults);
     }
 
-    /// Fails the core tool call `binding` names with `result`, in one
-    /// transaction; false when a stop selected its Turn first.
     pub fn failCoreCall(self: *Store, binding: ActionAttemptBinding, result: []const u8, faults: Faults) !bool {
         return self.queue().write(resolveCoreCallHeld, .{ self, binding, ActionResolutionCode.failed, result, faults });
     }
 
-    /// Succeeds a core tool call; false when a stop selected its Turn first.
     pub fn succeedCoreCall(self: *Store, binding: ActionAttemptBinding, result: []const u8, faults: Faults) !bool {
         return self.queue().write(resolveCoreCallHeld, .{ self, binding, ActionResolutionCode.succeeded, result, faults });
     }
@@ -1449,18 +1265,18 @@ pub const Store = struct {
         return transition.apply(self, command_domain.ResolveCoreCall, .{ .binding = binding, .code = code, .result = result }, faults);
     }
 
-    pub fn nextAction(self: *Store, comptime runner: tool_record.Runner) !?ReadyAction {
+    pub fn nextAction(self: *Store, comptime runner: tool_record.Runner, capacity: action_domain.Capacity) !?ReadyAction {
         if (runner != .bash and runner != .mcp) @compileError("only Action runners can select Actions");
-        return self.queue().run(nextActionHeld, .{ self, runner });
+        return self.queue().run(nextActionHeld, .{ self, runner, capacity });
     }
-    fn nextActionHeld(self: *Store, runner: tool_record.Runner) !?ReadyAction {
+    fn nextActionHeld(self: *Store, runner: tool_record.Runner, capacity: action_domain.Capacity) !?ReadyAction {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.none, switch (runner) {
-            .bash => action_domain.nextAction(&access, .bash),
-            .mcp => action_domain.nextAction(&access, .mcp),
+            .bash => action_domain.nextAction(&access, .bash, capacity),
+            .mcp => action_domain.nextAction(&access, .mcp, capacity),
             .core, .provider => unreachable,
         });
     }
@@ -1480,10 +1296,6 @@ pub const Store = struct {
         return transition.apply(self, action_domain.RecoverUncertain, .{ .active = active }, .{});
     }
 
-    /// Admits the oldest due retry no slot in `active` holds. `scheduled`,
-    /// when given, is set in the same round to the Unix millisecond the
-    /// earliest scheduled retry not yet due falls due, or null when none
-    /// is scheduled: when the caller next needs to ask, absent a commit.
     pub fn tryAdmitNextModelRetry(
         self: *Store,
         active: ActiveOperationFilter,
@@ -1502,11 +1314,8 @@ pub const Store = struct {
         return transition.apply(self, model_admission_domain.AdmitRetry, .{ .io = self.io, .active = active, .scheduled = scheduled }, faults);
     }
 
-    /// Opens the view in `out`, where it stays until it closes: a view
-    /// borrows its own buffers, so it never moves. Opening reads nothing:
-    /// the view's `settings` round checks that the binding is current.
-    pub fn openHistoricalView(self: *Store, binding: AttemptBinding, out: *HistoricalView) void {
-        out.* = .{ .store = self, .binding = binding };
+    pub fn readRequestPage(self: *Store, page: *RequestPage) !void {
+        return historical_domain.readPage(self, page);
     }
 
     pub fn modelOperationKind(self: *Store, binding: AttemptBinding) !ModelOperationKind {
@@ -1517,17 +1326,14 @@ pub const Store = struct {
         return self.fenced.load(.acquire);
     }
 
-    /// Read before the canonical reads it may let a caller skip.
     pub fn commitGeneration(self: *const Store) u64 {
         return self.commit_generation.load(.acquire);
     }
 
-    /// Read before the control reads it may let the dispatch loop skip.
     pub fn controlGeneration(self: *const Store) u64 {
         return @as(*OutOfLine, @fieldParentPtr("ring", self.changes)).control_generation.load(.acquire);
     }
 
-    /// Advances `OutOfLine.control_generation` after an accepted control's commit.
     fn noteControl(self: *Store, reply: anytype) @TypeOf(reply) {
         if (reply == .accepted) _ = @as(*OutOfLine, @fieldParentPtr("ring", self.changes)).control_generation.fetchAdd(1, .release);
         return reply;
@@ -1553,7 +1359,6 @@ pub const Store = struct {
     ) !void {
         try self.queue().callHeld(withDispatchHandoffHeld, .{ self, binding });
         defer self.queue().release();
-        // As for Actions, dispatch failures belong to the caller.
         try handoff(context);
     }
 
@@ -1563,11 +1368,6 @@ pub const Store = struct {
         _ = try entry.finish(Ordinary.attempt_binding, model_settlement_domain.readAttemptKind(&entry, binding));
     }
 
-    /// Durably claims this Operation's one forced credential refresh before
-    /// any refresh exchange. The Attempt stays uncertain, so a crash before
-    /// settlement falls back to ordinary uncertain recovery while the claim
-    /// prevents a second refresh. Returns false when the Operation already
-    /// claimed, or when no replacement allowance would remain.
     pub fn claimModelAuthRefresh(self: *Store, binding: AttemptBinding) !bool {
         return self.queue().write(claimModelAuthRefreshHeld, .{ self, binding });
     }
@@ -1619,9 +1419,6 @@ pub const Store = struct {
         return transition.apply(self, model_settlement_domain.RecoverExhausted, .{ .active = active }, .{});
     }
 
-    /// Records `seal` as the prefix seal of the Session of the Attempt
-    /// `binding` names, while the binding is current
-    /// (`historical.RecordSeal`).
     pub fn recordPrefixSeal(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
         return self.queue().write(recordPrefixSealHeld, .{ self, binding, seal });
     }
@@ -1657,8 +1454,6 @@ pub const Store = struct {
         return content_domain.openContentIdentity(self, reference, false);
     }
 
-    /// Reads a core call's whole arguments into `bytes`, which holds exactly
-    /// their length, one content window at a time.
     pub fn readCoreArguments(self: *Store, input: *const CoreActionInput, bytes: []u8) !void {
         var reader: content_domain.ContentReader = undefined;
         reader.open(try self.openContent(input.arguments));
@@ -1716,18 +1511,12 @@ pub const SettlementTrace = struct {
 pub const AttemptBinding = attempt.AttemptBinding;
 
 pub const OpenOptions = struct {
-    /// The providers whose Sessions get model Attempts.
     served: provider_route.Routes = provider_route.all(.endpoint),
     cache_spill: bool = true,
     cache_kib: u32 = 1024,
     found_schema_version: ?*u32 = null,
-    /// Caller-owned evidence retained after a failed open destroys the Store.
     identity_mismatch: ?*store_schema.IdentityMismatch = null,
-    /// Told when a SQLite Store's startup migration begins and commits.
     migration_notice: ?store_schema.MigrationNotice = null,
-    /// The tools the Host offers, which it keeps for the Store's life.
-    /// Null saves none: the Host reads the last one back (`readHostToolSet`)
-    /// and saves its own (`saveHostToolSet`) before it serves.
     host_tool_set: ?*const tool_record.HostToolSet = &tool_record.built_in_tool_set,
 };
 
@@ -1755,13 +1544,6 @@ pub const SqliteDiagnostic = struct {
     journal_mode: ?Bounded(16) = null,
 };
 
-/// Test builds' counters on a Store. `read` and `blob` count content bytes
-/// read through readers and through `Access.readRaw`, and `closes` counts
-/// reader closes. `rounds` counts `Access.run` and `commit`, and
-/// `content_rounds` counts `readRaw` windows, for the round budgets.
-/// `closes` is a u32 and the round counts u16 so the counters stay 24
-/// bytes: no test closes 4 billion readers or runs 65,535 rounds on one
-/// Store, and a round count past that traps in test builds.
 const TestingContentWork = struct {
     read: std.atomic.Value(u64) = .init(0),
     blob: std.atomic.Value(u64) = .init(0),
@@ -1770,57 +1552,31 @@ const TestingContentWork = struct {
     content_rounds: u16 = 0,
 };
 
-// The frame that holds a Store keeps every byte of it resident, so a fixed
-// buffer belongs in memory of its own, like the change ring's. The production
-// Store remains 688 bytes: its engine tag replaces the redundant ids pointer.
-// Test builds add 24 bytes of counters and sit exactly at
-// 712, so a new field must come out of existing padding, or out of the Store.
 comptime {
     if (@sizeOf(TestingContentWork) != 24) @compileError("TestingContentWork grew past 24 bytes; the test-build Store has no room");
     if (@sizeOf(Store) > 712) @compileError(std.fmt.comptimePrint("Store is {d} bytes; keep large state out of line", .{@sizeOf(Store)}));
 }
 
-/// The Store's state too large for the frame that holds it.
 const OutOfLine = struct {
     model_timings: @import("../model_timing.zig").Source,
     ring: change_ring.Ring,
     queue: Queue,
     ids: HostValues,
     tools: HostTools,
-    /// Advances after each accepted control (a stop, archive, model
-    /// interruption, permission decision or owed stop), before its entry
-    /// point releases the Store. The dispatch loop reads controls again
-    /// only when it moved, so a lost control hint delays nothing.
     control_generation: std.atomic.Value(u64),
-    /// Set after each advance of `commit_generation`, when given: the
-    /// dispatch loop waits on it, so a commit from any thread ends that
-    /// wait at once. Its owner outlives every entry point.
     commit_wake: std.atomic.Value(?*std.Io.Event),
     scratch: Scratch align(scratch_align),
 };
 
 const ScratchUse = enum(u8) { none, configuration, settlement, report };
 
-/// One entry point's large state: a configure's reads, a settlement's
-/// batch or a report's rows, which no entry point holds at once (`Store.scratch` checks that
-/// in safe builds). Bytes, not a union, so it is no bigger than the larger
-/// use and needs no tag of its own: `Store.scratch_use` is its tag.
 const Scratch = [scratch_bytes]u8;
 const scratch_bytes = @max(@sizeOf(configuration_domain.ConfigurationReads), @sizeOf(model_settlement_domain.Batch));
 const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @alignOf(model_settlement_domain.Batch));
 
-/// The resident bytes the owner accepted for a settlement batch of 64
-/// items and 64 call-name lookups, beyond the configure reads' 4888.
 const accepted_settlement_growth = 14352;
 
 comptime {
-    // The settlement batch keeps the request's offered names and borrows
-    // existing content identities for withdrawn names. Binding transient
-    // history arguments avoids retaining a second copy of every call name.
-    // Its 19032 bytes are below the previous 19240-byte resident ceiling;
-    // configuration reads reuse saved_tools for parent names and use 15624,
-    // with what validation and application keep between their rounds.
-    // Exact, so a change to either size is a decision.
     if (@sizeOf(configuration_domain.ConfigurationReads) != 15624 or scratch_bytes != 19032)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
@@ -1841,8 +1597,6 @@ fn createRing() error{OutOfMemory}!*change_ring.Ring {
     owned.control_generation = .init(0);
     owned.commit_wake = .init(null);
     const ring: *change_ring.Ring = &owned.ring;
-    // Every scalar takes Ring's own default; the columns stay unwritten, since
-    // only entries below `len` are read.
     const info = @typeInfo(change_ring.Ring).@"struct";
     inline for (info.field_names, info.field_types, info.field_attrs) |name, Field, attrs| {
         if (@typeInfo(Field) == .array) continue;
@@ -1856,10 +1610,6 @@ fn destroyRing(ring: *change_ring.Ring) void {
     std.heap.page_allocator.rawFree(@as([*]u8, @ptrCast(owned))[0..@sizeOf(OutOfLine)], .of(OutOfLine), @returnAddress());
 }
 
-/// Expected outcomes of entry points. A canonical read or save
-/// fault fences the Host (docs/contracts/execution.md, "Commit boundaries and crash
-/// recovery"), so every other error from an entry point has fenced the
-/// Store before the caller sees it.
 pub const Ordinary = struct {
     pub const none = error{};
     const page = error{ SessionNotFound, InvalidCursor };
@@ -1873,11 +1623,8 @@ pub const Ordinary = struct {
     pub const model_success = attempt_binding || error{InvalidProviderEnvelope};
     pub const action_attempt = error{StaleActionAttemptBinding};
     const action_dispatch = action_attempt || error{SupersededByControl};
-    /// A creation updates no Session, but shares configure's error set.
     pub const agent_start = action_attempt || error{SessionUpdateFailed};
 
-    /// Rejects a declared ordinary name the body cannot return, so a
-    /// stale or misspelled name fails to compile instead of fencing.
     fn produced(comptime Set: type, comptime Result: type) void {
         const returned = @typeInfo(@typeInfo(Result).error_union.error_set).error_set.error_names orelse return;
         outer: inline for (@typeInfo(Set).error_set.error_names.?) |name| {
@@ -1926,17 +1673,12 @@ const EntryTrace = union(enum) {
     }
 };
 
-/// Exclusive canonical access for one entry point, from `enter` through
-/// `release`. Errors leave through `finish` or `finishTransaction`, which
-/// return the entry point's declared ordinary errors and fence the rest.
-/// Runs while its thread holds the Store, which runs no other request meanwhile.
 pub const Entry = struct {
     const max_result_bytes = 1024;
 
     store: *Store,
     trace: EntryTrace,
     changes: i64,
-    /// A test's own Entry, which holds the Store until `release`.
     borrowed: if (@import("builtin").is_test) bool else void,
 
     pub fn finish(self: Entry, comptime Expected: type, result: anytype) @TypeOf(result) {
@@ -1948,8 +1690,6 @@ pub const Entry = struct {
         };
     }
 
-    /// Rolls back any open transaction first; a failed rollback fences
-    /// and replaces the original error, including an ordinary one.
     pub fn finishTransaction(self: Entry, comptime Expected: type, faults: Faults, result: anytype) Transaction(@TypeOf(result)) {
         comptime Ordinary.produced(Expected, @TypeOf(result));
         comptime assertSmallResult(@TypeOf(result));
@@ -1960,8 +1700,6 @@ pub const Entry = struct {
         };
     }
 
-    /// A capture's own failure, such as exhausted scratch, is `ordinary`
-    /// and does not fence the Store.
     fn finishCapture(self: Entry, ordinary: bool, result: anytype) @TypeOf(result) {
         comptime assertSmallResult(@TypeOf(result));
         return result catch |err| {
@@ -1974,10 +1712,6 @@ pub const Entry = struct {
         const store = self.store;
         store.engine.releaseEntry();
         store.scratch_use = .none;
-        // Counts autocommit and explicit-transaction writes alike. A
-        // rolled-back change touched everything: never a missed change.
-        // An attempt that lost its connection with nothing saved, and runs
-        // again, changed nothing yet: its second run records the change.
         const reruns = store.engine == .mysql and store.engine.mysql.defersFence();
         if (store.engine.totalChanges() != self.changes and !reruns) {
             if (@import("builtin").is_test) if (untouchedForTesting(store)) |id|
@@ -1991,10 +1725,6 @@ pub const Entry = struct {
         if (@import("builtin").is_test) if (self.borrowed) store.queue().giveBack();
     }
 
-    /// Rejects an entry point result over `max_result_bytes`. A Host
-    /// thread keeps its deepest stack pages for life, and a result
-    /// returned by value takes a slot in each frame it passes through;
-    /// a big result is filled through the caller's `out: *T` instead.
     fn assertSmallResult(comptime Result: type) void {
         const Payload = @typeInfo(Result).error_union.payload;
         const Value = switch (@typeInfo(Payload)) {
@@ -2013,12 +1743,7 @@ pub const Entry = struct {
     }
 };
 
-/// While its thread holds the Store: the public entry point marked
-/// `.requested` before it queued. A test may open an Entry without an entry
-/// point, which holds the Store until `release`.
 pub fn enter(self: *Store, trace: EntryTrace) error{StoreFenced}!Entry {
-    // A batch that lost its connection runs nothing more: either it runs
-    // again whole on a new one, or the Store fences.
     if (self.isFenced() or self.batch == .lost) return error.StoreFenced;
     const borrowed = if (@import("builtin").is_test) borrowed: {
         const off = !self.queue().owned();
@@ -2026,7 +1751,6 @@ pub fn enter(self: *Store, trace: EntryTrace) error{StoreFenced}!Entry {
         break :borrowed off;
     } else std.debug.assert(self.queue().owned());
     self.touched = .{};
-    // Rows a test changed outside any entry point belong to none.
     if (@import("builtin").is_test) clearTouchOracleForTesting(self);
     const entry: Entry = .{ .store = self, .trace = trace, .changes = self.engine.totalChanges(), .borrowed = borrowed };
     trace.mark(.acquired);
@@ -2037,9 +1761,6 @@ pub fn enter(self: *Store, trace: EntryTrace) error{StoreFenced}!Entry {
     return entry;
 }
 
-/// Opens an entry point's write transaction. Every entry point begins
-/// here; only opening the Store, in `schema.bootstrap`, issues a BEGIN of
-/// its own, before any entry point can run.
 pub fn begin(self: *Store) !void {
     switch (self.batch) {
         .none => {
@@ -2054,7 +1775,6 @@ pub fn begin(self: *Store) !void {
             return;
         },
         .open => {},
-        // The Queue ends a saved batch before its next write.
         .first, .saved, .lost => unreachable,
     }
     std.debug.assert(!self.savepoint);
@@ -2062,13 +1782,9 @@ pub fn begin(self: *Store) !void {
     self.savepoint = true;
 }
 
-/// Commits the open transaction; the identities it took stay taken. In a
-/// batch, releases the write's savepoint: the batch commits at its end,
-/// with one second and one set of taken identities for all its writes.
 pub fn commit(self: *Store) !void {
     switch (self.batch) {
         .first => {
-            // Its COMMIT rode its last writes (`commitsWithWrites`).
             self.batch = if (self.engine.inTransaction()) .open else .saved;
             return;
         },
@@ -2085,29 +1801,10 @@ pub fn commit(self: *Store) !void {
     self.identities().second = 0;
 }
 
-/// Whether a write Access that commits now sends COMMIT with its last
-/// writes: on a network engine, when it is its batch's first write and no
-/// other write waits to share the batch's COMMIT. The batch is then saved
-/// and takes no more (`batchClosed`). A batch that runs again
-/// (`recoverRerun`) is no longer armed and holds every write it held, so
-/// it commits at its end.
 pub fn commitsWithWrites(self: *Store) bool {
     return self.engine.commitArmed() and self.batch == .first and !self.queue().writeWaiting();
 }
 
-/// Sends `writer`'s last writes and COMMIT, which it bound, with the
-/// dispatch survey's reads after them: the Host asks for that survey
-/// after every commit (`dispatchWork`), and here it costs no round trip
-/// of its own. The reads follow COMMIT, so they run in autocommit and see
-/// what it saved. The writer sends the message; the survey is in it whole
-/// or not at all, so one whose reads do not fit after COMMIT is dropped
-/// before the send, as is one the Host has not asked for yet. Its answer
-/// is kept only beside a writer that did not fail, and only when that one
-/// round gave it: checks that need more rounds are left to the Host's own
-/// `dispatchWork`. A read that fails after COMMIT fences, as it does when
-/// the Host asks, and the commit stands. `follow`'s reads, when the
-/// writer has any (`Access.commitFollowed`), ride ahead of the survey's
-/// on the same terms.
 pub noinline fn commitWithSurvey(self: *Store, writer: anytype, follow: anytype) void {
     const kept = &self.identities().survey;
     const surveyed = kept.asked != .never;
@@ -2117,7 +1814,7 @@ pub noinline fn commitWithSurvey(self: *Store, writer: anytype, follow: anytype)
     defer reads.deinit();
     if (follow) |after| after.queue(&reads);
     var survey: model_admission_domain.DispatchSurvey = .{};
-    if (surveyed) survey.queue(&reads, kept.asked == .paused, kept.include_mcp);
+    if (surveyed) survey.queue(&reads, kept.asked == .paused, kept.capacity);
     if (reads.failure != null) {
         self.engine.dropTail();
         return writer.passCommit(null);
@@ -2143,7 +1840,6 @@ pub noinline fn commitWithSurvey(self: *Store, writer: anytype, follow: anytype)
     kept.kept = .fresh;
 }
 
-/// `Queue.Batch.closed`: the batch's COMMIT already ran.
 fn batchClosed(context: *anyopaque) bool {
     const self: *Store = @ptrCast(@alignCast(context));
     return self.batch == .saved;
@@ -2155,11 +1851,6 @@ fn startBatch(context: *anyopaque) void {
     self.batch = .ready;
 }
 
-/// Commits the batch's transaction, if a write opened one, and answers
-/// whether its writes are durable. A failed COMMIT, or a rollback that
-/// failed inside the batch, fences the Store, and the batch's writers all
-/// hear it; closing rolls back what was left open, as it does for a lone
-/// write whose rollback failed.
 fn finishBatch(context: *anyopaque) bool {
     const self: *Store = @ptrCast(@alignCast(context));
     std.debug.assert(!self.savepoint);
@@ -2182,9 +1873,6 @@ fn finishBatch(context: *anyopaque) bool {
     return true;
 }
 
-/// Tells `callback` of a fresh admission its write saved: at once after a
-/// lone write's COMMIT, or in a batch once the batch's COMMIT succeeds, so
-/// a batch that runs again, or fails, tells nothing twice or wrongly.
 pub fn admitted(self: *Store, callback: Store.MessageCommitted, admission: Store.MessageAdmission) void {
     if (self.batch == .none) return callback.call(callback.context, admission);
     const values = self.identities();
@@ -2197,8 +1885,6 @@ pub fn admitted(self: *Store, callback: Store.MessageCommitted, admission: Store
     values.admitted_len += 1;
 }
 
-/// A fresh native creation has no Message admission, but its Host effect
-/// still belongs to the batch's successful COMMIT, never a savepoint.
 pub fn created(self: *Store, callback: Store.CreationCommitted, session: []const u8) void {
     if (self.batch == .none) return callback.call(callback.context, session);
     const values = self.identities();
@@ -2211,14 +1897,11 @@ pub fn created(self: *Store, callback: Store.CreationCommitted, session: []const
     values.admitted_len += 1;
 }
 
-/// What a transition's commit tells the Host (`transition`'s
-/// `announced`): a fresh Message admission, or a native creation.
 pub const Announcement = union(enum) {
     message: struct { callback: Store.MessageCommitted, admission: Store.MessageAdmission },
     creation: struct { callback: Store.CreationCommitted, session: []const u8 },
 };
 
-/// `admitted` or `created`, as `announcement` names.
 pub fn announce(self: *Store, announcement: Announcement) void {
     switch (announcement) {
         .message => |message| admitted(self, message.callback, message.admission),
@@ -2231,16 +1914,11 @@ fn armRerun(context: *anyopaque, on: bool) void {
     if (self.engine == .mysql) self.engine.mysql.state.armed = on;
 }
 
-/// `Queue.Batch.recover`: after a batch, whether it lost its connection
-/// with nothing saved and runs again on a new one. A loss that cannot be
-/// recovered fences now.
 fn recoverRerun(context: *anyopaque) bool {
     const self: *Store = @ptrCast(@alignCast(context));
     if (self.engine != .mysql) return false;
     const mysql = &self.engine.mysql;
     if (mysql.recover()) {
-        // As after a rollback, the lost attempt gives back the ids it took.
-        // A finished batch has already forgotten which, so all are reread.
         self.savepoint = false;
         self.identities().second = 0;
         loadIdentities(self, .full) catch |err| {
@@ -2264,10 +1942,6 @@ fn commitBatch(self: *Store) !void {
     }
 }
 
-/// The open transaction's second, bound to every `@now` in it: read from
-/// the clock at its first use, and held until commit or rollback, so every
-/// round of a write Access dates its rows with one second. Outside a
-/// transaction (a read Access), each use reads the clock.
 pub fn transactionSecond(self: *Store) error{ClockReadFailed}!i64 {
     if (self.identities().second != 0) return self.identities().second;
     const second = std.math.cast(u32, @divFloor(try readUnixMilliseconds(self.io), 1000)) orelse return error.ClockReadFailed;
@@ -2276,18 +1950,12 @@ pub fn transactionSecond(self: *Store) error{ClockReadFailed}!i64 {
     return second;
 }
 
-/// A Workspace's identity in the Store: SHA-256 of its canonical text.
-/// Reads compare it, then the text, so a collision never merges two.
 pub fn workspaceDigest(workspace: []const u8) [32]u8 {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(workspace, &digest, .{});
     return digest;
 }
 
-/// Test builds: a Session whose rows this entry point changed but did
-/// not touch. The oracle is a temporary trigger on each table that
-/// carries a Session, so a writer that skips its touch fails whichever
-/// test drives it.
 pub fn untouchedForTesting(self: *Store) ?change_ring.Id {
     if (!@import("builtin").is_test) @compileError("test-only check");
     if (self.touched.everything) return null;
@@ -2305,17 +1973,12 @@ fn clearTouchOracleForTesting(self: *Store) void {
     }
 }
 
-/// The only fence setter. Returns `err` so callers can propagate it. A
-/// connection lost in an attempt the Queue can still run again fences only
-/// if `recoverRerun` cannot replace it.
 pub fn fence(self: *Store, err: anytype) @TypeOf(err) {
     if (self.engine == .mysql and self.engine.mysql.defersFence()) return err;
     self.fenced.store(true, .release);
     return err;
 }
 
-/// The saved Session, as `configuration.readSaved` reads it, in a read
-/// Access of its own, then checked by `configuration.checkSaved`.
 pub fn readSessionForTesting(self: *Store, session_ref: []const u8) !?CurrentConfiguration {
     const entry = try enter(self, .none);
     defer entry.release();
@@ -2342,15 +2005,11 @@ pub fn publicConversationPageForTesting(self: *Store, request: conversation_read
     return page;
 }
 
-/// A column whose values the Host hands out: a row's id, or its place in
-/// a Store-wide order.
 pub const Identity = enum { turn_id, operation_id, action_id, content_id, created_seq, command_seq, admission_id, tool_record_id, tool_set_id, forward_id };
 
-/// A tool set `readHostToolSet` read back, in its caller's memory.
 pub const SavedHostToolSet = struct {
     records: []tool_record.Record,
     digests: [][32]u8,
-    /// Every name, server and text the records point into.
     texts: []u8,
 
     pub fn toolSet(self: *const SavedHostToolSet) tool_record.HostToolSet {
@@ -2365,37 +2024,17 @@ pub const SavedHostToolSet = struct {
     }
 };
 
-/// The tools the Host offers and the id of their saved set, which
-/// configure resolves a Session's tool names against.
 pub const HostTools = struct {
     host_tool_set: *const tool_record.HostToolSet,
     set_id: u64,
 };
 
-/// What the Host hands to transactions. The next value of each `Identity`
-/// is the Store's maximum plus one, read at open and again for each column
-/// a rolled-back transaction took from. Correct because one Host owns the
-/// Store; the primary or unique key still refuses a duplicate, and a
-/// refused write fences.
 const HostValues = struct {
     next: std.EnumArray(Identity, u64),
-    /// The columns that handed out a value since `begin`.
     taken: std.EnumSet(Identity) = .empty,
-    /// The open transaction's Unix second for `@now`, or 0 before its first
-    /// use. A u32 holds seconds until 2106 and fits the padding after
-    /// `taken`, so the Store does not grow.
     second: u32 = 0,
-    /// The batch's fresh admissions, told once its COMMIT succeeds
-    /// (`Store.admitted`): one per write at most.
     admitted: [Queue.drain_limit + 1]Admitted = undefined,
     admitted_len: u8 = 0,
-    /// How the Host last asked `dispatchWork`, with new Turns held or not;
-    /// until it asks, no commit carries the survey. With it, the dispatch
-    /// survey a commit's message carried
-    /// (`commitWithSurvey`), for the `dispatchWork` that asks before
-    /// anything else commits: `fresh` until its writer's entry point ends
-    /// and advances the generation, then `ready` until the next advance.
-    /// It fits the padding after `admitted_len`.
     survey: Survey = .{},
 };
 
@@ -2408,8 +2047,8 @@ const Survey = packed struct(u16) {
     message: bool = false,
     tool_continuation: bool = false,
     retry: bool = false,
-    include_mcp: bool = true,
-    _: u5 = 0,
+    capacity: action_domain.Capacity = .{ .free_credit = .none, .mcp_open = false },
+    _: u3 = 0,
 };
 
 const Admitted = struct {
@@ -2426,10 +2065,7 @@ const Admitted = struct {
     }
 };
 
-/// The next value of `column`, inside the open transaction. The one place
-/// an identity is allocated, so a per-Host range can replace the counter.
 pub fn takeIdentity(self: *Store, comptime column: Identity) error{ IdentityExhausted, IdentityOutsideTransaction }!u64 {
-    // Rollback is what gives an id back; outside a transaction nothing would.
     if (!self.engine.inTransaction()) return error.IdentityOutsideTransaction;
     const value = self.identities().next.get(column);
     if (value > std.math.maxInt(i64)) return error.IdentityExhausted;
@@ -2438,18 +2074,10 @@ pub fn takeIdentity(self: *Store, comptime column: Identity) error{ IdentityExha
     return value;
 }
 
-/// Re-reads every id after a test wrote rows past the Host, as reopening
-/// would.
 pub fn reloadIdentitiesForTesting(self: *Store) !void {
     try loadIdentities(self, .full);
 }
 
-/// Reads `columns`' next values from the committed rows: at open, and after
-/// a rollback, which gives back every value its transaction took. Re-reading
-/// max() rather than restoring a snapshot taken at BEGIN stays correct when
-/// a COMMIT's outcome is unknown, because only committed rows count: a
-/// value whose row committed is never handed out twice, and one whose row
-/// did not is handed out again.
 fn IdentityCeiling(comptime column: Identity) type {
     const table = switch (column) {
         .turn_id => "turn",
@@ -2495,7 +2123,6 @@ fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
 }
 
 pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
-    // SQLite may already have rolled back what the entry point touched.
     self.touched.everything = true;
     switch (self.batch) {
         .open => {
@@ -2514,8 +2141,6 @@ pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
             loadIdentities(self, self.identities().taken) catch return error.CanonicalRollbackFailed;
             return;
         },
-        // The batch's first write rolls back as a lone write does, and the
-        // batch is ready again for the next.
         .first => {
             errdefer self.batch = .lost;
             try rollbackTransaction(self, faults);
@@ -2523,7 +2148,6 @@ pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
             return;
         },
         .none, .ready, .saved => return rollbackTransaction(self, faults),
-        // A rollback that failed once fails again: nothing undid the write.
         .lost => return error.CanonicalRollbackFailed,
     }
 }

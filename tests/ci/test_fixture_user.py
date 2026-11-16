@@ -1,4 +1,3 @@
-"""The fixture user's names, provisioning, environment and reuse, without creating a user."""
 from contextlib import redirect_stderr, redirect_stdout
 import io
 import os
@@ -15,12 +14,6 @@ from fixture_user import Install, VENV
 
 
 def lane_reads(path, gid):
-    """Whether a user who owns nothing here and whose only group is `gid` can read `path`.
-
-    Independent of fixture_user: every directory down to it must be searchable,
-    and it readable, through its group bits when its group is `gid` and through
-    its other bits otherwise.
-    """
     def allowed(part, bits):
         status = os.stat(part)
         return status.st_mode & (bits << 3 if status.st_gid == gid else bits) == (bits << 3 if status.st_gid == gid
@@ -35,6 +28,24 @@ class FixtureUserTest(unittest.TestCase):
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
         self.root = Path(scratch.name)
+
+    def test_export_disables_automatic_maintenance_on_every_fetch(self):
+        inputs = fixture_user.Inputs("0" * 40, self.root / "source", "origin", {}, {})
+        commands = []
+
+        def run(argv, **kwargs):
+            commands.append(argv)
+            return subprocess.CompletedProcess(argv, 0)
+
+        with patch.object(fixture_user.subprocess, "run", side_effect=run), \
+                patch.object(fixture_user, "share"):
+            fixture_user.export(inputs, self.root / "source.git", os.getgid())
+        fetches = [command for command in commands if "fetch" in command]
+        self.assertEqual(len(fetches), len(fixture_user.EXPORTED) + 2)
+        for command in fetches:
+            with self.subTest(command=command):
+                self.assertIn("maintenance.auto=false", command[:command.index("fetch")])
+                self.assertIn("gc.auto=0", command[:command.index("fetch")])
 
     def test_each_lane_gets_its_own_user_and_malformed_lanes_are_refused(self):
         self.assertEqual(fixture_user.user_for("pr4"), "rui-pr4")
@@ -74,7 +85,6 @@ class FixtureUserTest(unittest.TestCase):
                 fixture_user.environment("rui-a", home, "/p", trust, caller, (name,))
 
     def test_no_value_the_lane_is_given_appears_on_any_command_line(self):
-        """Other lanes can read every command line while it runs, so values travel only in the environment."""
         secrets = {"HTTPS_PROXY": "http://user:proxy-secret@127.0.0.1:1", "RUI_TOKEN": "kept-secret"}
         checkout = self.root / "home/rui-a/rui"
         for requirement in fixture_user.REQUIREMENTS:
@@ -100,7 +110,6 @@ class FixtureUserTest(unittest.TestCase):
                 redirect_stderr(io.StringIO()):
             self.assertEqual(fixture_user.run("a", "HEAD", ("RUI_TOKEN",), ["python3", "case.py"]), 0)
 
-        # The checkout, the environment's interpreter and pip, the stamp, then COMMAND: every one as the lane.
         self.assertGreaterEqual(len(started), 6)
         for argv, options in started:
             self.assertEqual(options.get("user"), "rui-a", argv)
@@ -133,8 +142,6 @@ class FixtureUserTest(unittest.TestCase):
             return ":".join(map(str, paths))
 
         cases = {
-            # The caller's trust variables: the run's trust, each variable and the paths it keeps in order,
-            # and the variables a notice names.
             "only SSL_CERT_FILE; unset tool variables stay unset": ({"SSL_CERT_FILE": bundle},
                                                                     {"SSL_CERT_FILE": (bundle,)}, ()),
             "only SSL_CERT_DIR": ({"SSL_CERT_DIR": directory}, {"SSL_CERT_DIR": (directory,)}, ()),
@@ -204,11 +211,6 @@ class FixtureUserTest(unittest.TestCase):
         self.assertEqual(fixture_user.venv_home(venv), Path("/var/lib/rui-fixture/tools/python-1/bin"))
 
     def interpreter(self, directory, *, builds_venv=True, mode=0o755, reports=None):
-        """A python3.12 in `directory` (made with `mode`) that can or cannot import venv.
-
-        It reports running `reports`, or itself, as a shim reports the interpreter it runs, and
-        that interpreter's prefix as its sys.base_prefix.
-        """
         directory.mkdir(parents=True, exist_ok=True)
         os.chmod(directory, mode)
         python = directory / fixture_user.PYTHON
@@ -226,7 +228,6 @@ class FixtureUserTest(unittest.TestCase):
         shim = self.interpreter(self.root / "private/.pyenv/shims", reports=private)
         broken = self.interpreter(self.root / "broken/bin", builds_venv=False)
         cases = {
-            # The search path: the installation the lane's environment comes from, or None.
             "public": ((public.parent,), Install(public.resolve(), (public.resolve().parents[1],))),
             "root-private": ((private.parent,), Install(private.resolve(), (private.resolve().parents[1],))),
             "a shim names what it runs": ((shim.parent,),
@@ -245,7 +246,6 @@ class FixtureUserTest(unittest.TestCase):
                 self.assertEqual(fixture_user.main(["--python"]), status)
 
     def test_a_lane_reads_only_what_root_placed_wherever_root_keeps_its_inputs(self):
-        """Provisioning over each input at a public and a private path, a linked worktree's common dir among them."""
         os.chmod(self.root, 0o755)
         if not lane_reads(self.root, gid=None):
             self.skipTest(f"{self.root}'s parents are closed to other users, so nothing under it is public")
@@ -261,7 +261,6 @@ class FixtureUserTest(unittest.TestCase):
         release = self.git("-C", str(origin), "rev-parse", "v1.0")
 
         def checkout(path):
-            """A repository whose origin/main and v0.9 are its first commit."""
             self.git("init", "--quiet", str(path))
             first = self.commit(path, "one")
             self.git("-C", str(path), "update-ref", "refs/remotes/origin/main", first)
@@ -274,12 +273,6 @@ class FixtureUserTest(unittest.TestCase):
                  str(public / "linked"), "HEAD")
 
         def install(parent, tool, binary, data, report, beside=()):
-            """A toolchain that, asked with arguments, answers `report` (its trees, as the real tool reports them).
-
-            With no arguments it prints itself, then a file of its installation found from its own place,
-            as a toolchain finds its lib. `beside` are files in its prefix that it reports no tree for.
-            Every directory and file takes the umask's modes, as an install root builds does.
-            """
             home = parent / tool
             program = home / binary
             program.parent.mkdir(parents=True)
@@ -296,7 +289,6 @@ class FixtureUserTest(unittest.TestCase):
             return program
 
         def installs(parent, zig):
-            """The toolchains in `parent`, with a shim for Zig and Go, as asdf or mise installs, in parent/shims."""
             tools = parent / "tools"
             found = {fixture_user.PYTHON: install(tools, fixture_user.PYTHON, "bin/python3.12", "lib/python3.12/os.py",
                                                   lambda program, home: f"{program}\n{home}"),
@@ -309,18 +301,15 @@ class FixtureUserTest(unittest.TestCase):
             return found
 
         def release_zig(tools):
-            """Zig's release archive: the binary beside lib/, reported in ZON as `zig env` does."""
             return install(tools, "zig", "zig", "lib/std/std.zig",
                            lambda program, home: f'.{{\n    .zig_exe = "{program}",\n    .lib_dir = "{home}/lib",\n}}')
 
         def prefix_zig(tools):
-            """Zig installed into a prefix (Nix, Homebrew, cmake): bin/zig and lib/zig/, beside unrelated files."""
             return install(tools, "zig", "bin/zig", "lib/zig/std/std.zig",
                            lambda program, home: f'{{\n "zig_exe": "{program}",\n "lib_dir": "{home}/lib/zig"\n}}',
                            beside=("lib/unrelated.so", "share/unrelated/README"))
 
         tools = {public: installs(public, release_zig)}
-        # Root-private installs built under umask 077: bin/ and lib/ are 0700 and every file 0600 or 0700.
         umask = os.umask(0o077)
         try:
             tools[private] = installs(private, prefix_zig)
@@ -332,22 +321,18 @@ class FixtureUserTest(unittest.TestCase):
         for parent in (public, private):
             (parent / "ca.crt").write_text(f"{parent.name} certificate\n")
             (parent / "corp.crt").write_text(f"{parent.name} corporate certificate\n")
-            # A hashed directory, as /etc/ssl/certs: mostly links into another directory.
             (parent / "certs").mkdir()
             (parent / "certs/abcd1234.0").write_text(f"{parent.name} hashed certificate\n")
             (parent / "certs/efgh5678.0").symlink_to(private / "share/linked.pem")
-            # A second directory in the list, whose hashed name collides with the first's.
             (parent / "more-certs").mkdir()
             (parent / "more-certs/abcd1234.0").write_text(f"{parent.name} more hashed certificate\n")
         every = {"SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "PIP_CERT",
                  "NODE_EXTRA_CA_CERTS"}
         cases = {
-            # The checkout root reads, the directory that holds its trust and installs, and its trust variables.
             "public checkout": (public / "checkout", public, ("SSL_CERT_FILE", "SSL_CERT_DIR", "PIP_CERT")),
             "private checkout": (private / "checkout", private, ("SSL_CERT_DIR",)),
             "linked worktree": (public / "linked", private, ("SSL_CERT_FILE", "PIP_CERT")),
         }
-        # SSL_CERT_DIR is a list: a missing entry, then two directories.
         trust_files = {"SSL_CERT_FILE": ("ca.crt",), "SSL_CERT_DIR": ("missing-certs", "certs", "more-certs"),
                        "PIP_CERT": ("corp.crt",)}
         trust_contents = {
@@ -361,7 +346,6 @@ class FixtureUserTest(unittest.TestCase):
         gid = os.getgid()
 
         def provision(source, inputs_at, trust, lane_dir):
-            # The shims come first, as an asdf or mise PATH has them.
             caller_path = os.pathsep.join([str(inputs_at / "shims"),
                                            *(str(program.parent) for program in tools[inputs_at].values())])
             environ = {variable: ":".join(str(inputs_at / entry) for entry in trust_files[variable])
@@ -376,7 +360,6 @@ class FixtureUserTest(unittest.TestCase):
                 head = self.commit(source, f"work {index}")
                 inputs, placed = provision(source, inputs_at, trust, lane_dir)
 
-                # Every path the lane reads, and everything under it, is readable through other or the lane's group.
                 copied_roots = [placed.binaries[tool].parents[len(program.relative_to(inputs_at / "tools").parts) - 2]
                                 for tool, program in tools[inputs_at].items()]
                 read = [placed.source, *(copy for copies in placed.trust.values() for copy in copies),
@@ -388,8 +371,6 @@ class FixtureUserTest(unittest.TestCase):
                         self.assertTrue(lane_reads(item, gid), f"the lane cannot read {item}")
                         self.assertNotIn("unrelated", item.name, f"{item} is in no tree its tool reports")
 
-                # Each trust variable the caller set names its copy in the lane's directory; the run sets
-                # exactly those, and PIP_CERT keeps its own corporate bundle.
                 expected = set(trust)
                 self.assertEqual(set(placed.trust), expected)
                 env = fixture_user.environment("rui-x", Path("/home/rui-x"), "/p", placed.trust, {})
@@ -409,7 +390,6 @@ class FixtureUserTest(unittest.TestCase):
                     self.assertEqual(output.splitlines(), [str(binary), f"{tool} data"],
                                      "the binary runs with its whole installation")
 
-                # The export holds REF, origin/main and both release tags, and no path back to the source.
                 refs = self.git("--git-dir", str(placed.source), "for-each-ref", "--format=%(refname) %(objectname)")
                 self.assertEqual(dict(line.split() for line in refs.splitlines()),
                                  {"refs/heads/fixture": head, "refs/remotes/origin/main": firsts[name],
@@ -422,7 +402,6 @@ class FixtureUserTest(unittest.TestCase):
                 self.git("-C", str(lane), "checkout", "--quiet", "--detach", inputs.sha)
                 self.assertEqual((lane / "work.txt").read_text(), f"work {index}\n")
 
-                # Reuse: a new commit arrives in the same export, and no install is copied again.
                 copies = sorted(tools_dir.iterdir())
                 later = self.commit(source, f"more {index}")
                 self.assertEqual(provision(source, inputs_at, trust, lane_dir)[1], placed)
@@ -430,15 +409,9 @@ class FixtureUserTest(unittest.TestCase):
                 self.assertEqual(self.git("--git-dir", str(placed.source), "rev-parse", "refs/heads/fixture"), later)
 
     def test_an_install_whose_binary_is_in_the_systems_own_places_is_used_in_place(self):
-        """Every user already runs these, and root never copies them, whatever trees they report.
-
-        The system Python's prefix is all of /usr; a packaged Zig in /usr/local/bin keeps its lib in
-        /usr/local/lib/zig.
-        """
         tools_dir = self.root / "tools"
         tools_dir.mkdir()
         cases = {
-            # The resolved binary and the tree the tool reports.
             "system Python": ("/usr/bin/python3.12", "/usr"),
             "Python in /usr/local": ("/usr/local/bin/python3.12", "/usr/local"),
             "Python in /bin": ("/bin/python3.12", "/usr"),
@@ -455,11 +428,6 @@ class FixtureUserTest(unittest.TestCase):
         self.assertEqual(list(tools_dir.iterdir()), [])
 
     def test_a_toolchain_is_the_binary_and_the_trees_it_reports(self):
-        """The binary and tree come from the tool's own answer, so a shim on PATH names the toolchain it runs.
-
-        Zig reports zig_exe and lib_dir in ZON or JSON; Go reports GOROOT, whose bin/go is its binary. A
-        tool that reports no binary or no tree is refused.
-        """
         def program(path, text):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"#!/bin/sh\n{text}\n")
@@ -477,7 +445,6 @@ class FixtureUserTest(unittest.TestCase):
         json = answers(base / "json/bin/zig", f'{{\n "zig_exe": "{base}/json/bin/zig",\n "lib_dir": "{base}/json/lib/zig"\n}}')
         go = answers(base / "go/bin/go", f"{base}/go")
         cases = {
-            # The program on PATH that answers, and the Install its answer names, or None when refused.
             "zig in ZON": (zon, Install(zon, (base / "zon/lib",))),
             "zig in JSON from a prefix": (json, Install(json, (base / "json/lib/zig",))),
             "zig behind a shim": (shim("zig-shim", "zig", json), Install(json, (base / "json/lib/zig",))),
@@ -499,13 +466,11 @@ class FixtureUserTest(unittest.TestCase):
         self.assertEqual(Install(go, (base / "go",)).parts, (base / "go",))
 
     def git(self, *args):
-        """Run git with a fixed identity and return its output, stripped."""
         return subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                                "-c", "init.defaultBranch=main", *args],
                               capture_output=True, text=True, check=True).stdout.strip()
 
     def commit(self, checkout, text):
-        """Commit `text` as work.txt in `checkout`; its commit."""
         (checkout / "work.txt").write_text(text + "\n")
         self.git("-C", str(checkout), "add", "work.txt")
         self.git("-C", str(checkout), "commit", "--quiet", "-m", text)

@@ -1,5 +1,3 @@
-//! Open SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const std = @import("std");
 const platform = @import("../../store_path.zig");
@@ -23,8 +21,6 @@ test "Store open failures return typed errors without unwinding panics" {
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
-    // A database path below a missing directory cannot be created; the open
-    // must fail as a typed error rather than unwrapping a null handle.
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/missing-dir/store.sqlite3", .{root});
     var refused: Store = undefined;
     try std.testing.expectError(error.StoreOpenFailed, refused.open(std.testing.io, database, root));
@@ -51,8 +47,6 @@ test "Store target owns SQLite identity routes and neutral diagnostics" {
     try std.testing.expect(diagnostic == .sqlite);
     try std.testing.expectEqualStrings("wal", diagnostic.sqlite.journal_mode.?.slice());
     try std.testing.expect(storage.hostTools().set_id != 0);
-    // The SQL callback must borrow final Store storage, not the opening's
-    // temporary options or the admitted engine value.
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(storage.sqliteDatabase(), "SELECT rui_served('openai')"));
     storage.served.openai = .unserved;
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(storage.sqliteDatabase(), "SELECT rui_served('openai')"));
@@ -65,8 +59,6 @@ test "Store target SQLite tail failure closes statements and releases the heap l
     var refused: Store = undefined;
     try std.testing.expectError(error.InvalidHostToolSet, testingStoreToolSet(&refused, &tmp, std.testing.io, &empty_tool_set));
     try std.testing.expectEqual(@as(i64, 0), c.sqlite3_hard_heap_limit64(-1));
-    // Reopening the same file proves statement finalization and connection
-    // cleanup, not merely that the error made it to the caller.
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
@@ -99,7 +91,6 @@ test "an outside SQLite writer cannot take the open Store's lock" {
     defer if (blocker_open) {
         _ = c.sqlite3_close(blocker);
     };
-    // The Store's exclusive lock refuses the outside writer, never the Host.
     try std.testing.expectEqual(
         @as(c_int, c.SQLITE_BUSY),
         c.sqlite3_exec(blocker, "BEGIN IMMEDIATE", null, null, null),
@@ -165,15 +156,11 @@ test "production Store applies finite durable SQLite settings" {
     try std.testing.expect(diagnostic.process_memory_highwater_bytes != null);
     try std.testing.expect(diagnostic.cache_used_bytes != null);
     try std.testing.expect(diagnostic.cache_spills != null);
-    // Readback alone would only prove configuration. A single SQLite-owned
-    // allocation larger than the process-global hard ceiling must be denied
-    // by the pinned library while this Store owns the configured limit.
     const over_limit = c.sqlite3_malloc64(sqlite_heap_bytes + 1);
     defer c.sqlite3_free(over_limit);
     try std.testing.expect(over_limit == null);
 }
 
-/// Rows in a raw copy's content table, or null when the copy lacks the table.
 fn rawContentCount(path: []const u8) !?u64 {
     var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
     var raw: ?*c.sqlite3 = null;
@@ -217,7 +204,6 @@ test "Store WAL lifecycle at the maximum path: sidecars, lock ownership, crash c
     try std.testing.expectError(error.FileNotFound, cwd.statFile(io, shm, .{}));
     try std.testing.expectError(error.FileNotFound, cwd.statFile(io, journal, .{}));
 
-    // The open Host excludes every other reader and a second owner.
     {
         var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
         var raw: ?*c.sqlite3 = null;
@@ -230,16 +216,12 @@ test "Store WAL lifecycle at the maximum path: sidecars, lock ownership, crash c
     }
     var refused: Store = undefined;
     if (refused.open(io, database, store_path)) |_| return error.TestUnexpectedResult else |_| {}
-    // The failed open released the process-wide heap limit; restore it.
     _ = c.sqlite3_hard_heap_limit64(sqlite_heap_bytes);
 
-    // A process crash leaves exactly these files; the WAL holds the commits.
     try cwd.copyFile(database, tmp.dir, "crash/rui.sqlite3", io, .{});
     try cwd.copyFile(wal, tmp.dir, "crash/rui.sqlite3-wal", io, .{});
     try cwd.copyFile(database, tmp.dir, "database-only/rui.sqlite3", io, .{});
 
-    // A payload past the auto-checkpoint size moves into the database file,
-    // and the next commit truncates the reset WAL to the size limit.
     try store_testing.sqlite_only.exec(&storage, "INSERT INTO content(digest,byte_length,private,payload) VALUES(randomblob(32),6291456,0,zeroblob(6291456))", .{});
     try store_testing.sqlite_only.exec(&storage, "INSERT INTO content(digest,byte_length,private,payload) VALUES(randomblob(32),0,0,zeroblob(0))", .{});
     try std.testing.expect((try cwd.statFile(io, database, .{})).size > 6291456);
@@ -249,8 +231,6 @@ test "Store WAL lifecycle at the maximum path: sidecars, lock ownership, crash c
     try std.testing.expectError(error.FileNotFound, cwd.statFile(io, wal, .{}));
     try std.testing.expectError(error.FileNotFound, cwd.statFile(io, shm, .{}));
 
-    // Restoring the complete crash copy at the original path recovers its
-    // commits; the database file alone does not.
     try tmp.dir.copyFile("crash/rui.sqlite3", cwd, database, io, .{});
     try tmp.dir.copyFile("crash/rui.sqlite3-wal", cwd, wal, io, .{});
     try storage.open(io, database, store_path);

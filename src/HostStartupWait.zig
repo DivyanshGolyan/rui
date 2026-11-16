@@ -1,8 +1,3 @@
-//! How long a launcher waits for the Host it started to report ready. A
-//! Host announces a Store migration on its startup channel before it backs
-//! the Store up, and announces the migration's end; the backup is as large
-//! as the Store, so no deadline runs between the two. Readiness otherwise
-//! gets ten seconds from launch, or from the migration's end.
 const std = @import("std");
 
 pub const migrating_tag = "[store_migrating]\n";
@@ -21,15 +16,12 @@ pub fn init(launched: i96) Self {
     return .{ .phase = .{ .starting = launched + readiness_ns } };
 }
 
-/// Takes all startup output read so far and the time it was read.
 pub fn observe(self: *Self, output: []const u8, now: i96) void {
     if (std.mem.indexOf(u8, output, migrated_tag) != null) {
         if (self.phase != .migrated) self.phase = .{ .migrated = now + readiness_ns };
     } else if (std.mem.indexOf(u8, output, migrating_tag) != null) self.phase = .migrating;
 }
 
-/// The deadline for a readiness probe begun at `now`; while the Host
-/// migrates, one ordinary probe's worth past `now`.
 pub fn until(self: Self, now: i96) i96 {
     return switch (self.phase) {
         .starting, .migrated => |deadline| deadline,
@@ -41,8 +33,6 @@ pub fn expired(self: Self, now: i96) bool {
     return now >= self.until(now);
 }
 
-/// How much of the startup output to show while the Host still starts: through
-/// the migration announcement, so the wait it explains is not silent.
 pub fn shownWhileStarting(output: []const u8) usize {
     const at = std.mem.indexOf(u8, output, migrating_tag) orelse return 0;
     return at + migrating_tag.len;
@@ -63,7 +53,6 @@ test "no deadline runs while the Host migrates, and ten seconds follow its end" 
     const late: i96 = 60 * readiness_ns;
     try std.testing.expect(!wait.expired(late));
     try std.testing.expectEqual(late + readiness_ns, wait.until(late));
-    // Rereading the same output, or the end arriving later, keeps the first end time.
     wait.observe(announced, late);
     try std.testing.expect(!wait.expired(late + 1));
     wait.observe(announced ++ "rui: migrated " ++ migrated_tag, late);

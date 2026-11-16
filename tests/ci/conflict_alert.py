@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""Comment on each open PR that a move of main left conflicting.
-
-GitHub runs no checks on a PR that conflicts with its base, and no event says
-so: the PR just sits without CI (#780 waited about 45 minutes). After every
-PR merge, it asks GitHub for each open PR's merge state and comments on each
-conflicting PR once per PR head, naming the main commit. The comment is the
-event that reaches whoever watches the PR.
-"""
 import json
 import os
 import subprocess
@@ -28,11 +20,6 @@ def github(method, path, fields=()):
 
 
 def pages(api, path, key=None):
-    """Every row of a paged list: `gh api --paginate` fails through the cloud sessions' proxy.
-
-    key names the list inside an object envelope, such as Actions' `workflow_runs`.
-    Rows arrive lazily, so a caller that stops early requests no further page.
-    """
     page = 1
     while True:
         batch = api("GET", f"{path}&per_page=100&page={page}")
@@ -45,12 +32,6 @@ def pages(api, path, key=None):
 
 
 def judged(api, repo, number, main_sha):
-    """The PR if GitHub has judged it against main_sha, else None.
-
-    GitHub recomputes mergeability in the background after main moves, so an
-    early read can still return the old answer: a clean answer counts only
-    when its test merge sits on main_sha.
-    """
     pr = api("GET", f"repos/{repo}/pulls/{number}")
     if pr["state"] != "open" or pr["mergeable"] is False:
         return pr
@@ -62,14 +43,6 @@ def judged(api, repo, number, main_sha):
 
 
 def alert(api, repo, main_sha, attempts=10, delay=6, sleep=time.sleep):
-    """Comment on every open PR into main that conflicts with main_sha.
-
-    Returns the PRs commented on, the PRs GitHub had not judged in time, and
-    the PRs whose reads failed; one PR's failure does not stop the others.
-    Every round reads all PRs still unjudged, so the wait is one deadline for
-    the whole move of main, not one per PR: GitHub often leaves a clean PR's
-    test merge on an older main, and each such PR used to cost a full wait.
-    """
     waiting = [pr["number"] for pr in pages(api, f"repos/{repo}/pulls?state=open&base=main")]
     alerted, failed = [], []
     for attempt in range(attempts):
@@ -105,8 +78,6 @@ def alert(api, repo, main_sha, attempts=10, delay=6, sleep=time.sleep):
 def main():
     alerted, _late, failed = alert(github, os.environ["GITHUB_REPOSITORY"], os.environ["MAIN_SHA"])
     print("commented on:", " ".join(f"#{number}" for number in alerted) or "none")
-    # A late answer is GitHub being slow, not a fault here: its warning is the report,
-    # and the next move of main checks that PR again. Only a failed read fails the job.
     sys.exit(1 if failed else 0)
 
 

@@ -1,4 +1,3 @@
-"""Candidate relational model checks; not the production evaluator or crash harness."""
 import json, sqlite3, tempfile
 from pathlib import Path
 
@@ -98,7 +97,6 @@ with tempfile.TemporaryDirectory(prefix='rui-generation-model-') as root:
     g4=admit();assert 'F' in visible(g4);publish(g4,[]);assert not eligible()
     checks.append('publication catches concurrently finished dependencies; considered results do not retrigger')
     checks.append('successful null, stable failure and missing result are distinct')
-    # Simulate an interrupted generation with only unresolved work and no new result.
     db.execute('UPDATE run SET published=NULL');db.commit()
     g5=admit();owner('waiting');bind('W','message','waiting','waiting')
     db.close();views.clear();db=sqlite3.connect(path);db.execute('PRAGMA foreign_keys=ON')

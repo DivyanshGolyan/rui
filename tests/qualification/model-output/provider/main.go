@@ -94,12 +94,8 @@ type Config struct {
 	Rounds          int
 	TLS             bool
 	HistoryAware    bool
-	// Hold accepts requests but sends no response bytes until 120 seconds
-	// after StartOffer. Readiness means request acceptance, not headers sent.
 	Hold      bool
 	Workspace string
-	// Store is the canonical Store selector the controller configured for
-	// every history-aware Session.
 	Store string
 }
 
@@ -635,7 +631,6 @@ func waitForSlot(timer *time.Timer, delay time.Duration, done <-chan struct{}) b
 	}
 }
 
-// Collection is bounded independently of per-event timing diagnostics.
 func collectionDeadline(start time.Time, duration time.Duration) time.Time {
 	return start.Add(2 * duration)
 }
@@ -1157,8 +1152,6 @@ func (s *Server) Reset() error {
 	return nil
 }
 
-// BindSessions takes identities from the controller's configuration replies,
-// before requests arrive; the request under test cannot nominate its own ID.
 func (s *Server) BindSessions(sessions []string) error {
 	f := s.currentFixture()
 	f.mu.Lock()

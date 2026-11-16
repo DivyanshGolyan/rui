@@ -1,10 +1,3 @@
-//! An HTTP/2 server for the client's own tests: nghttp2's server session on
-//! a loopback listener, h2c by prior knowledge or TLS. Single-threaded and
-//! nonblocking: a test pumps it between client drives, so every exchange is
-//! deterministic and nothing races.
-//!
-//! A TLS peer generates its own CA and leaf certificate (P-256) at start,
-//! and writes the CA to `caPath()` for the client's `.ca_file` trust.
 const std = @import("std");
 const test_poll = @import("test_poll");
 const builtin = @import("builtin");
@@ -20,42 +13,28 @@ port: u16,
 callbacks: *c.nghttp2_session_callbacks,
 session_options: *c.nghttp2_option,
 connections: std.ArrayList(*Connection),
-/// Every request stream in arrival order.
 streams: std.ArrayList(*Stream),
 seen: Seen,
 url_buffer: [96]u8,
 url_len: usize,
-/// For a TLS peer.
 ssl_ctx: ?*openssl.SSL_CTX,
 bio_method: ?*openssl.BIO_METHOD,
 tmp: ?std.testing.TmpDir,
 ca_path_buffer: [96]u8,
 ca_path_len: usize,
-/// Close each connection as it is accepted, as a restarting server does.
-/// A test may flip it between pumps.
 refuse_connections: bool = false,
 
 pub const Options = struct {
     tls: enum { none, h2, no_alpn } = .none,
-    /// The leaf certificate's subjectAltName.
     leaf_names: [:0]const u8 = "IP:127.0.0.1,DNS:localhost",
-    /// Sign the leaf with a CA other than the one written to `caPath()`.
     untrusted_issuer: bool = false,
-    /// The host in `url()`.
     url_host: []const u8 = "127.0.0.1",
     max_concurrent_streams: u32 = 100,
-    /// Answer the preface as an HTTP/1.1 server would.
     speak_http11: bool = false,
-    /// Leave PINGs unanswered.
     ignore_ping: bool = false,
-    /// Largest DATA payload the peer sends; 0 for nghttp2's default.
     data_chunk_bytes: usize = 0,
-    /// Interleave responses frame by frame (RFC 9218 incremental), instead
-    /// of finishing one stream before the next.
     interleave: bool = false,
-    /// Sent as the response's `content-encoding`.
     content_encoding: ?[]const u8 = null,
-    /// Runs when a request has fully arrived; null answers 200 "ok".
     on_request: ?*const fn (*Peer, *Stream) void = null,
     context: ?*anyopaque = null,
 };
@@ -64,9 +43,7 @@ pub const Seen = struct {
     connections: u32 = 0,
     rst_received: u32 = 0,
     pings_received: u32 = 0,
-    /// The largest credit the client ever had open to the peer on one stream.
     max_stream_window: i32 = 0,
-    /// The largest credit the client ever had open to the peer on one connection.
     max_connection_window: i32 = 0,
 };
 
@@ -88,7 +65,6 @@ pub const Stream = struct {
     content_length: std.ArrayList(u8),
     authorization: std.ArrayList(u8),
     accept_encoding: std.ArrayList(u8),
-    /// The request's `x-test-id`, which names it across resends.
     test_id: std.ArrayList(u8),
     body: std.ArrayList(u8),
     complete: bool,
@@ -97,7 +73,6 @@ pub const Stream = struct {
     response: []const u8,
     response_offset: usize,
     trailers: bool,
-    /// The response head went out; its body never will.
     withhold_body: bool,
 };
 
@@ -163,8 +138,6 @@ pub fn caDirectory(self: *const Peer, buffer: []u8) ![:0]const u8 {
     return std.fmt.bufPrintSentinel(buffer, "{s}/certs", .{std.fs.path.dirname(self.caPath()).?}, 0);
 }
 
-// --------------------------------------------------------------------- TLS
-
 fn writeCertificate(path: [:0]const u8, cert: *openssl.X509) !void {
     const file = openssl.BIO_new_file(path.ptr, "w") orelse return error.TlsSetupFailed;
     defer _ = openssl.BIO_free(file);
@@ -176,7 +149,6 @@ fn setUpTls(self: *Peer) !void {
     defer openssl.EVP_PKEY_free(ca_key);
     const ca = try certificate(ca_key, null, ca_key, "h2 test CA", &ca_extensions);
     defer openssl.X509_free(ca);
-    // An untrusted leaf has an issuer of the same name but another key.
     const issuer_key = if (self.options.untrusted_issuer) try generateKey() else ca_key;
     defer if (issuer_key != ca_key) openssl.EVP_PKEY_free(issuer_key);
     const issuer = if (self.options.untrusted_issuer) try certificate(issuer_key, null, issuer_key, "h2 test CA", &ca_extensions) else ca;
@@ -197,7 +169,6 @@ fn setUpTls(self: *Peer) !void {
     self.ca_path_len = (try std.fmt.bufPrint(&self.ca_path_buffer, ".zig-cache/tmp/{s}/ca.pem", .{tmp.sub_path})).len;
     var path_z: [std.posix.PATH_MAX]u8 = undefined;
     try writeCertificate(try std.fmt.bufPrintSentinel(&path_z, "{s}", .{self.caPath()}, 0), ca);
-    // The same CA in an OpenSSL hashed directory, named by subject hash.
     try tmp.dir.createDir(std.testing.io, "certs", .default_dir);
     var directory_z: [std.posix.PATH_MAX]u8 = undefined;
     const directory = try self.caDirectory(&directory_z);
@@ -230,7 +201,6 @@ fn generateKey() !*openssl.EVP_PKEY {
 
 var next_serial: i64 = 1;
 
-/// Self-signed when `issuer` is null.
 fn certificate(key: *openssl.EVP_PKEY, issuer: ?*openssl.X509, issuer_key: *openssl.EVP_PKEY, common_name: [:0]const u8, extensions: []const Extension) !*openssl.X509 {
     const x509 = openssl.X509_new() orelse return error.TlsSetupFailed;
     errdefer openssl.X509_free(x509);
@@ -294,7 +264,6 @@ pub fn stop(self: *Peer) void {
     self.allocator.destroy(self);
 }
 
-/// Accepts, reads, decodes and writes everything ready, without blocking.
 pub fn pump(self: *Peer) !void {
     while (true) {
         const fd = std.c.accept(self.listener, null, null);
@@ -305,7 +274,6 @@ pub fn pump(self: *Peer) !void {
         }
         try nonblocking(fd);
         if (builtin.os.tag.isDarwin()) {
-            // A client that went away must not SIGPIPE the test process.
             const one: c_int = 1;
             _ = std.c.setsockopt(fd, std.c.SOL.SOCKET, std.c.SO.NOSIGPIPE, &one, @sizeOf(c_int));
         }
@@ -343,7 +311,6 @@ pub fn pump(self: *Peer) !void {
                 },
             };
             if (connection.session == null) {
-                // An HTTP/1.1 server's answer to the HTTP/2 preface.
                 const answer = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n";
                 _ = std.c.send(connection.socket, answer, answer.len, 0);
                 self.closeConnection(connection);
@@ -368,9 +335,6 @@ pub fn awaitDelivery(self: *Peer) !void {
     }
 }
 
-/// Waits until the other end of `socket` acknowledged every byte sent on
-/// it, so they wait in its receive buffer. Either end's socket works,
-/// such as the client's, so a pump then reads all the client sent.
 pub fn awaitSocketDelivery(socket: std.posix.fd_t) !void {
     // SIOCOUTQ and Darwin's SO_NWRITE: bytes sent but not yet acknowledged.
     const siocoutq = 0x5411;
@@ -392,7 +356,6 @@ pub fn awaitSocketDelivery(socket: std.posix.fd_t) !void {
 
 const Transfer = union(enum) { bytes: usize, again, closed };
 
-/// Over TLS the first reads also run the server handshake.
 fn receiveSome(connection: *Connection, buffer: []u8) Transfer {
     if (connection.ssl) |ssl| return switch (tls.read(ssl, buffer)) {
         .bytes => |count| .{ .bytes = count },
@@ -418,7 +381,6 @@ fn sendSome(connection: *Connection, bytes: []const u8) Transfer {
 }
 
 fn flush(self: *Peer, connection: *Connection) void {
-    // Frames wait for the handshake, which the reads drive.
     if (connection.ssl) |ssl| if (openssl.SSL_is_init_finished(ssl) != 1) return;
     // nghttp2 hands out one frame at a time. Batched into one send, frames
     // flushed together reach the client in one read: Darwin delivers
@@ -450,8 +412,6 @@ fn flush(self: *Peer, connection: *Connection) void {
     }
 }
 
-/// Loopback with small test payloads: a blocking-free full write. False
-/// when the connection closed.
 fn sendAll(self: *Peer, connection: *Connection, bytes: []const u8) bool {
     var sent: usize = 0;
     while (sent < bytes.len) {
@@ -481,13 +441,10 @@ pub fn closeConnection(self: *Peer, connection: *Connection) void {
     _ = std.c.close(connection.socket);
 }
 
-// ------------------------------------------------------------------ actions
-
 pub fn respond(self: *Peer, stream: *Stream, status: u16, body: []const u8) void {
     self.respondWith(stream, status, body, false);
 }
 
-/// Responds, then sends a trailer block after the body.
 pub fn respondWith(self: *Peer, stream: *Stream, status: u16, body: []const u8, trailers: bool) void {
     var status_text: [3]u8 = undefined;
     _ = std.fmt.bufPrint(&status_text, "{d}", .{status}) catch unreachable;
@@ -510,7 +467,6 @@ pub fn respondWith(self: *Peer, stream: *Stream, status: u16, body: []const u8, 
     }
 }
 
-/// Sends the response head and then nothing more on the stream.
 pub fn respondHeadOnly(self: *Peer, stream: *Stream, status: u16) void {
     stream.withhold_body = true;
     self.respondWith(stream, status, "", true);
@@ -535,8 +491,6 @@ fn nonblocking(fd: std.posix.fd_t) !void {
     const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
     if (flags < 0 or std.c.fcntl(fd, std.c.F.SETFL, flags | nonblock) < 0) return error.SystemResources;
 }
-
-// ------------------------------------------------------------------ callbacks
 
 fn connectionOf(user_data: ?*anyopaque) *Connection {
     return @ptrCast(@alignCast(user_data.?));

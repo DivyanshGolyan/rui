@@ -1,5 +1,3 @@
-//! Configuration Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -60,8 +58,6 @@ test "a configure whose instructions and output schema are the same new bytes im
             try std.testing.expectEqual(after_update.instructions_id.?, after_update.output_schema_id.?);
             try std.testing.expect(after_update.instructions_id.? != after_create.instructions_id.?);
 
-            // The schema's file claims the instructions' identity but holds other
-            // bytes of the same length: sharing the row still verifies its file.
             const claimed = "{\"title\":\"same-claim\"}";
             var forged = try completeConfiguration("same-forged", session.slice(), workspace, "model-a");
             forged.configuration.instructions = try testingBytesContent(&tmp, "same-forged-instructions", claimed);
@@ -229,7 +225,6 @@ test "Store configuration requires model, Bash workspace and, on a Host serving 
                 if (mask & 2 == 0) command.configuration.provider.state = .omitted;
                 if (mask & 4 == 0) command.configuration.model.state = .omitted;
                 const reply = try storage.configure(&command, .{});
-                // The test Store serves every provider, so none is the default (D221).
                 if (mask == 7) {
                     try std.testing.expect(reply == .accepted);
                 } else {
@@ -347,7 +342,6 @@ test "creation requires every agent setting and accepts an unused Workspace" {
                 try std.testing.expect(reply == .rejected);
                 try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, reply.rejected.code);
             }
-            // A supplied Workspace is checked even when no tool uses it.
             var missing = try completeConfiguration("unused-missing", "", "/does-not-exist/rui-unused-workspace", "model-a");
             missing.configuration.tools = try .of(&.{});
             const refused = try storage.configure(&missing, .{});
@@ -413,7 +407,6 @@ test "an omitted provider is refused on a Host serving several" {
             var storage: Store = undefined;
             try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = routes });
             defer storage.close() catch unreachable;
-            // D221: no provider is preferred, so the creation must name one.
             var command = try completeConfiguration("several-providers", "", "/", "model-a");
             command.configuration.provider.state = .omitted;
             command.configuration.workspace.state = .omitted;
@@ -510,7 +503,6 @@ test "model revisions validate retained effort and compactAt against the new cat
             const effort = try storage.configure(&patch, .{});
             try std.testing.expect(effort == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, effort.rejected.code);
-            // D229/D137: an unlisted model carries the same effort through.
             try patch.key.set("switch-catalog-unlisted");
             try patch.configuration.model.value.set("model-b");
             try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
@@ -581,8 +573,6 @@ test "loaded tools select saved records even after the Host tool set changes or 
             try update.key.set("loaded-records-removed");
             update.session = second;
             try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
-            // Both configurations select the original records and intern
-            // the very same loaded set despite today's tool set contents.
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(DISTINCT loaded_tool_set_id) FROM session WHERE session_ref=?1 OR session_ref=?2", .{ first.slice(), second.slice() }));
             try std.testing.expect(!storage.isFenced());
         }
@@ -757,9 +747,6 @@ test "historical model immutability rejections replay while fresh model switches
             message.text = try testingBytesContent(&tmp, "historical-model-body", "a previously refused Message");
             defer message.removeTemporaryContent(std.testing.io) catch unreachable;
 
-            // Seed the original answers, not current admission decisions. These
-            // literal codes and production digests model an older Store whose
-            // commands must remain replayable after its policy changes.
             const sequence = try store_testing.queryU64(&storage, "SELECT coalesce(max(command_seq),0)+1 FROM core_command", .{});
             const configure_digest = update.semanticDigest();
             const message_digest = message.semanticDigest();
@@ -775,7 +762,6 @@ test "historical model immutability rejections replay while fresh model switches
             try std.testing.expectEqual(initial.revision, unchanged.revision);
             try std.testing.expectEqualStrings(initial.model.slice(), unchanged.model.slice());
 
-            // The same requested model under a fresh key uses today's policy.
             var fresh = update;
             try fresh.key.set("fresh-model-configure");
             const accepted = try storage.configure(&fresh, .{});
@@ -1016,7 +1002,6 @@ test "a Label is configured, replayed, cleared and validated like any setting" {
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
 
-            // Set at creation.
             var create = try completeConfiguration("label-create", "", workspace, "model-a");
             create.configuration.label.state = .value;
             try create.configuration.label.value.set("Review PR 412");
@@ -1028,15 +1013,11 @@ test "a Label is configured, replayed, cleared and validated like any setting" {
                 defer std.testing.allocator.free(label);
                 try std.testing.expectEqualStrings("Review PR 412", label);
             }
-            // An exact replay answers the saved admission; a changed Label under the
-            // same key conflicts.
             try std.testing.expect((try storage.configure(&create, .{})).accepted.replayed);
             var changed = create;
             try changed.configuration.label.value.set("Review PR 413");
             try std.testing.expect(try storage.configure(&changed, .{}) == .conflict);
 
-            // A Label-only revision relabels without touching the Conversation, and
-            // omission preserves the Label.
             var relabel: wire_request.ConfigureCommand = .{};
             try relabel.key.set("label-relabel");
             try relabel.session.set(session.slice());
@@ -1057,7 +1038,6 @@ test "a Label is configured, replayed, cleared and validated like any setting" {
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry", .{}));
             try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE label IS NOT NULL", .{}));
 
-            // Explicit null clears it.
             var clear: wire_request.ConfigureCommand = .{};
             try clear.key.set("label-clear");
             try clear.session.set(session.slice());
@@ -1065,8 +1045,6 @@ test "a Label is configured, replayed, cleared and validated like any setting" {
             try std.testing.expect(try storage.configure(&clear, .{}) == .accepted);
             try std.testing.expect((try testingLabel(&storage, &tmp, session.slice())) == null);
 
-            // A Label obeys the saved description rule: blank and multi-line text
-            // is refused and saved as such.
             for ([_][]const u8{ " ", "two\nlines", "tab\u{2028}separated" }, 0..) |text, index| {
                 var refused: wire_request.ConfigureCommand = .{};
                 var key_buffer: [32]u8 = undefined;

@@ -7,7 +7,6 @@ import unittest
 from stack_frames import PAGE, POLICY, ROOT, allowance_growth, check, parse
 
 
-# objdump -d --no-show-raw-insn -C of a Host whose main thread spawns one worker.
 DISASSEMBLY = """
 Disassembly of section .text:
 
@@ -51,9 +50,7 @@ Disassembly of section .text:
 WORKER_ENTRY = "Thread.PosixThreadImpl.spawn.Instance.entryFn (worker)"
 
 
-# Each over-budget frame's page ceiling; server.Intake.run measures 0x2800.
 SEEDED = {"server.serve": 0x3000, "server.Intake.run": 0x3000, "worker.receive": 0x5000}
-# Each thread's deepest chain, 22784 and 31048 bytes, rounded up to a page.
 CEILINGS = {"main thread": 0x6000, "worker": 0x8000}
 
 
@@ -78,7 +75,6 @@ class StackFramesTest(unittest.TestCase):
         self.assertEqual(sorted(failure.split(":")[0] for failure in failures), sorted(SEEDED))
         self.assertIn("worker.receive: frame 20480 bytes exceeds the 8192-byte budget "
                       f"(via {WORKER_ENTRY} > worker.receive)", "\n".join(failures))
-        # Panic paths, the probe helper and code no Host stack calls are not Host frames.
         self.assertNotIn("debug.panic", "\n".join(failures))
         self.assertNotIn("client.only", "\n".join(failures))
 
@@ -112,7 +108,6 @@ class StackFramesTest(unittest.TestCase):
             "worker.receive: frame shrank to 20480 bytes; lower its frame_bytes from 24576 to 20480 in stack_frames.json",
             "server.Intake.run: frame shrank to 10240 bytes; lower its frame_bytes from 16384 to 12288 in stack_frames.json",
         ])
-        # Less than a page is CPU-model noise, not a page the thread gave back.
         _, failures = gate({**SEEDED, "worker.receive": 0x5fff})
         self.assertEqual(failures, [])
 
@@ -139,7 +134,6 @@ class StackFramesTest(unittest.TestCase):
         _, failures = gate(SEEDED, ceilings={"worker": 0xa000})
         self.assertEqual(failures, ["worker: deepest chain shrank to 31048 bytes; lower its chain_ceiling "
                                     "from 40960 to 32768 in stack_frames.json"])
-        # Less than a page under the ceiling is noise, not a page given back.
         _, failures = gate(SEEDED, ceilings={"main thread": 22784 + PAGE - 1})
         self.assertEqual(failures, [])
 
@@ -166,7 +160,6 @@ class StackFramesTest(unittest.TestCase):
 0000000000001400 <big.leaf>:
     1400:\tsub    $0x1800,%rsp
 """)
-        # Walk x before z, so y is first reached while x is on the chain.
         functions["server.serve"]["calls"] = ["cycle.x", "cycle.z"]
         report, failures = check(functions, policy({}, threads={}, ceilings={"main thread": 0x4000}))
         self.assertEqual(failures, [])
@@ -175,7 +168,6 @@ class StackFramesTest(unittest.TestCase):
                                   "        16 cycle.x", "      6144 big.leaf"])
 
     def test_host_module_functions_are_walked_without_a_direct_caller(self):
-        # A callback reached only through a function pointer.
         callback = DISASSEMBLY + """
 0000000000001700 <server_host.onWake__func_4>:
     1700:\tsub    $0x3000,%rsp
@@ -214,8 +206,6 @@ class StackFramesTest(unittest.TestCase):
         self.assertEqual([failure.split(":")[0] for failure in failures], ["debug.print"])
 
     def test_a_dispatcher_counts_what_it_runs_through_a_pointer(self):
-        # store.Store.capture runs client.only through a pointer: 0x40000
-        # more on every chain through it.
         rules = policy({**SEEDED, "client.only": 0x40000}, ceilings={"main thread": 0x46000, "worker": 0x48000})
         rules["dispatches"] = [{"caller": "store.Store.capture", "callees": "client.", "cause": "fixture"}]
         report, failures = check(parse(DISASSEMBLY), rules)
@@ -249,15 +239,12 @@ class StackFramesTest(unittest.TestCase):
             self.assertGreater(entry["frame_bytes"], rules["budget_bytes"], entry["function"])
             self.assertEqual(entry["frame_bytes"] % PAGE, 0, entry["function"])
             self.assertTrue(entry["cause"].strip(), entry["function"])
-            # A cause stands on its own; no table outside the repository explains it.
             self.assertNotRegex(entry["cause"], r"\brows? \d", entry["function"])
         for label, spec in rules["threads"].items():
             self.assertGreater(spec["chain_ceiling"], 0, label)
             self.assertEqual(spec["chain_ceiling"] % PAGE, 0, label)
         modules = rules["host_modules"]
         self.assertEqual(len(modules), len(set(modules)))
-        # Each names a source file by its Zig namespace; the h2 and tls_client
-        # packages' files are named from their own roots.
         for module in modules:
             path = module.replace(".", "/") + ".zig"
             self.assertTrue(any((ROOT / root / path).exists() for root in ("src", "src/h2", "src/tls_client")), module)
@@ -280,17 +267,14 @@ class StackFramesTest(unittest.TestCase):
             commit("before the gate")
             subprocess.run(git + ["update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
             path.write_text(json.dumps(policy({"a.big": 0x4000})))
-            # First introduction: the reviewed seed is the allowance.
             self.assertEqual(allowance_growth(root, path), [])
             commit("seed")
             subprocess.run(git + ["update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
             path.write_text(json.dumps(policy({"a.big": 0x3000})))
             self.assertEqual(allowance_growth(root, path), [])
-            # A thread new to the Host seeds its own ceiling, like the file's first introduction.
             path.write_text(json.dumps(policy({"a.big": 0x4000}, ceilings={"engine": 0x2000},
                                               threads={"worker": "worker.receive", "engine": "engine.run"})))
             self.assertEqual(allowance_growth(root, path), [])
-            # Relabelling an existing thread's anchor is not a new thread.
             path.write_text(json.dumps(policy({"a.big": 0x5000, "b.new": 0x3000},
                                               ceilings={"main thread": 0x7000, "renamed": 0x7000},
                                               threads={"renamed": "worker.receive"})))

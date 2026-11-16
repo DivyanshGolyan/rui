@@ -1,5 +1,3 @@
-"""Host launch helpers the human CLI fixture shares: run a start command and clean
-up after a forced crash."""
 import os
 import pathlib
 import shlex
@@ -39,9 +37,7 @@ def dispose_provider_case(process, store):
 
 
 def matching_processes(store, *, descendants=False):
-    """Test-cleanup discovery only; PIDs are never treated as Host authority."""
     expected = str(pathlib.Path(store).resolve())
-    # A Host is owned when it executes this RUI; its argv only says which Store it serves.
     owned = os_semantics.processes_executing(RUI)
     matches = []
     candidates = []
@@ -76,8 +72,6 @@ def matching_processes(store, *, descendants=False):
 
 
 def forced_crash_cleanup(store, *, descendants=False):
-    # #329 is intentionally not part of this fixture. SIGKILL is a forced
-    # crash used only to avoid leaking detached test processes.
     for pid in matching_processes(store, descendants=descendants):
         try:
             os.kill(pid, signal.SIGKILL)

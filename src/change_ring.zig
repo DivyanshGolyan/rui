@@ -1,34 +1,16 @@
-//! Which Sessions may have changed since a commit generation: the fixed,
-//! in-memory hint behind Session listing's `since`.
-//!
-//! Every entry point that changes rows records the Sessions it touched under
-//! the generation its commit advanced to, each with its Workspace's key. A
-//! reader asks for the Sessions changed in (since, through], in one Workspace
-//! or any, in one pass over memory. The ring may name a Session that did not
-//! change, but while it covers `since` it never omits one that did; once an
-//! entry it needs is overwritten, `covers` says so and the reader traverses
-//! everything instead. Nothing here is stored or survives the Host.
 const std = @import("std");
 
-/// Entries kept: the most recent (Session, generation) pairs.
 pub const capacity = 4096;
 pub const id_bytes = 6;
 pub const Id = [id_bytes]u8;
 
-/// The Sessions one entry point changed, each with its Workspace's key. A
-/// Message to a peer touches two.
 pub const Touched = struct {
     pub const max = 4;
 
     entries: [max]Entry = undefined,
-    /// At most `max`; a byte keeps the Store within its size bound.
     count: u8 = 0,
-    /// Too many, an ID that is not a Session's, or a change that rolled
-    /// back: every Session may have changed.
     everything: bool = false,
 
-    /// Whether touching `id` needs a new entry: false when it has one, or
-    /// when it touches everything (a fifth Session, or not a Session ID).
     pub fn needsEntry(self: *Touched, id: []const u8) bool {
         if (self.everything or self.contains(id)) return false;
         if (id.len != id_bytes or self.count == max) {
@@ -38,7 +20,6 @@ pub const Touched = struct {
         return true;
     }
 
-    /// Adds the entry `needsEntry` asked for.
     pub fn add(self: *Touched, entry: Entry) void {
         std.debug.assert(self.count < max and !self.contains(&entry.session));
         self.entries[self.count] = entry;
@@ -51,22 +32,16 @@ pub const Touched = struct {
     }
 };
 
-/// One changed Session. `workspace` is the key the Store gives its
-/// Workspace, so a scoped reader skips other Workspaces without reading them.
 pub const Entry = struct { session: Id, workspace: u64 };
 
 pub const Ring = struct {
-    // One column per field: an Entry array would pad each to 16 bytes.
     generations: [capacity]u64 = @splat(0),
     sessions: [capacity]Id = undefined,
     workspaces: [capacity]u64 = undefined,
-    /// The slot the next entry takes.
     next: usize = 0,
     len: usize = 0,
-    /// A change at or below this generation may have been overwritten.
     forgotten_through: u64 = 0,
 
-    /// Records the Sessions one commit changed, under its generation.
     pub fn record(self: *Ring, generation: u64, touched: *const Touched) void {
         if (touched.everything) return self.forget(generation);
         for (touched.entries[0..touched.count]) |entry| self.push(generation, entry);
@@ -82,18 +57,14 @@ pub const Ring = struct {
         self.next = (self.next + 1) % capacity;
     }
 
-    /// Records that any Session may have changed at `generation`.
     pub fn forget(self: *Ring, generation: u64) void {
         self.forgotten_through = @max(self.forgotten_through, generation);
     }
 
-    /// Whether every change after `since` is still recorded.
     pub fn covers(self: *const Ring, since: u64) bool {
         return since >= self.forgotten_through;
     }
 
-    /// Whether this Session may have changed in (since, through]. Walk only
-    /// entries newer than `since`, newest first; uncovered history is unknown.
     pub fn mayHaveChanged(self: *const Ring, session: *const Id, since: u64, through: u64) bool {
         if (!self.covers(since)) return true;
         var index = self.next;
@@ -106,16 +77,12 @@ pub const Ring = struct {
         return false;
     }
 
-    /// The first `out.len` distinct Sessions after `after`, in ID order,
-    /// changed in (since, through] in `workspace`, or in any Workspace when
-    /// null. Fewer means there are no more.
     pub fn changed(self: *const Ring, since: u64, through: u64, workspace: ?u64, after: ?*const Id, out: []Id) []Id {
         var count: usize = 0;
         for (self.generations[0..self.len], self.sessions[0..self.len], self.workspaces[0..self.len]) |generation, *id, entry_workspace| {
             if (generation <= since or generation > through) continue;
             if (workspace) |key| if (entry_workspace != key) continue;
             if (after) |previous| if (std.mem.order(u8, id, previous) != .gt) continue;
-            // Insert into the sorted prefix, keeping the smallest IDs.
             if (count == out.len and std.mem.order(u8, id, &out[count - 1]) != .lt) continue;
             var index: usize = 0;
             while (index < count and std.mem.order(u8, &out[index], id) == .lt) index += 1;
@@ -130,8 +97,6 @@ pub const Ring = struct {
     }
 };
 
-/// Opaque on the wire: "<32 hex instance>.<generation>". Not ordered across
-/// instances, never stored, and not a revision any read can be asked for.
 pub const Token = struct {
     instance: [16]u8,
     generation: u64,
@@ -159,8 +124,6 @@ pub const Token = struct {
     }
 };
 
-/// Opaque per-Session observation hint: "<32 hex instance>.<generation>.<session>".
-/// Like Token, it is neither stored nor meaningful across Host openings.
 pub const SessionToken = struct {
     instance: [16]u8,
     generation: u64,
@@ -184,7 +147,6 @@ pub const SessionToken = struct {
         return .{ .instance = token.instance, .generation = token.generation, .session = text[separator + 1 ..][0..id_bytes].* };
     }
 
-    /// Advances a scope whose unchanged state the caller has proved.
     pub fn at(self: SessionToken, generation: u64) SessionToken {
         return .{ .instance = self.instance, .generation = generation, .session = self.session };
     }
@@ -212,25 +174,21 @@ test "a ring names each Session changed since a generation once, in ID order" {
     try std.testing.expectEqualStrings("a00000", &all[0]);
     try std.testing.expectEqualStrings("k7m2qx", &all[1]);
     try std.testing.expectEqualStrings("zzzzzz", &all[2]);
-    // Only changes in (since, through] count.
     const middle = ring.changed(1, 2, null, null, &out);
     try std.testing.expectEqual(@as(usize, 2), middle.len);
     try std.testing.expectEqualStrings("a00000", &middle[0]);
     try std.testing.expectEqual(@as(usize, 0), ring.changed(3, 3, null, null, &out).len);
-    // Only the asked Workspace's changes count.
     const scoped = ring.changed(0, 3, 1, null, &out);
     try std.testing.expectEqual(@as(usize, 2), scoped.len);
     try std.testing.expectEqualStrings("k7m2qx", &scoped[0]);
     try std.testing.expectEqualStrings("a00000", &ring.changed(0, 3, 2, null, &out)[0]);
     try std.testing.expectEqual(@as(usize, 0), ring.changed(0, 3, 3, null, &out).len);
-    // A continuation resumes after the last ID and pages by `out.len`.
     var two: [2]Id = undefined;
     const first = ring.changed(0, 3, null, null, &two);
     try std.testing.expectEqualStrings("k7m2qx", &first[1]);
     const rest = ring.changed(0, 3, null, &first[1], &two);
     try std.testing.expectEqual(@as(usize, 1), rest.len);
     try std.testing.expectEqualStrings("zzzzzz", &rest[0]);
-    // A smaller ID recorded after a page fills still displaces the largest.
     var late: Ring = .{};
     recordAll(&late, 1, 1, &.{ "zzzzzz", "yyyyyy", "a00000" });
     const smallest = late.changed(0, 1, null, null, &two);
@@ -250,7 +208,6 @@ test "an overwritten change stops the ring covering earlier generations" {
     try std.testing.expect(!ring.covers(0));
     try std.testing.expect(ring.covers(1));
     var out: [16]Id = undefined;
-    // Everything after a covered generation is still named.
     const named = ring.changed(capacity - 1, capacity + 1, null, null, &out);
     try std.testing.expectEqual(@as(usize, 2), named.len);
 }
@@ -260,9 +217,7 @@ test "touching too many Sessions, or a non-Session, touches everything" {
     for ([_][]const u8{ "000001", "000002", "000003", "000004", "000005" }) |id| if (many.needsEntry(id)) many.add(.{ .session = id[0..id_bytes].*, .workspace = 1 });
     try std.testing.expect(many.everything);
     try std.testing.expect(touchedOf(1, &.{"short"}).everything);
-    // The same Session twice is one touch.
     try std.testing.expectEqual(@as(u8, 1), touchedOf(1, &.{ "k7m2qx", "k7m2qx" }).count);
-    // Recording everything stops covering the generations before it.
     var ring: Ring = .{};
     recordAll(&ring, 1, 1, &.{"k7m2qx"});
     ring.record(5, &many);

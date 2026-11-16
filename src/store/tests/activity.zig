@@ -1,5 +1,3 @@
-//! Activity Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -9,8 +7,8 @@ const historical_domain = @import("../domain/historical.zig");
 const reads_domain = @import("../domain/reads.zig");
 const store_testing = @import("../testing.zig");
 const HistoricalEntryKind = historical_domain.HistoricalEntryKind;
-const HistoricalReader = historical_domain.HistoricalReader;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingReader = store_testing.TestingReader;
+const TestingPage = store_testing.TestingPage;
 const TestingAnswerPart = store_testing.TestingAnswerPart;
 const answerTestTurn = store_testing.answerTestTurn;
 const canonicalCwd = store_testing.canonicalCwd;
@@ -78,7 +76,6 @@ test "a page's rows share their rounds, so a full page takes as many as one row"
             const session = try configureTestSession(&storage, "rounds-config");
             try submitTestMessage(&storage, &tmp, "rounds-input", "message", session.slice(), "run tools");
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            // Seventeen calls in one group: every page below is full.
             var calls: [17]TestingCall = undefined;
             var names: [17][16]u8 = undefined;
             for (&calls, &names, 0..) |*call, *name, index| {
@@ -93,8 +90,6 @@ test "a page's rows share their rounds, so a full page takes as many as one row"
             const full = try pageRounds(&storage, &conversation, &activity);
             try std.testing.expectEqual(@as(usize, 16), full.conversation);
             try std.testing.expectEqual(@as(usize, 16), full.activity);
-            // Smaller pages of the same kinds: the first Tool Result and the User
-            // entry before it; the rows through the first call.
             conversation = .{ .session = conversation.session, .end = full.end, .before_position = full.results, .before_ordinal = 2 };
             activity.end = try store_testing.queryU64(&storage, "SELECT min(session_position) FROM model_output_item WHERE item_kind=3", .{});
             const small = try pageRounds(&storage, &conversation, &activity);
@@ -107,8 +102,6 @@ test "a page's rows share their rounds, so a full page takes as many as one row"
 
 const PageRounds = struct { rounds: [2]u32, conversation: usize, activity: usize, results: u64, end: u64 };
 
-/// The rounds each page read takes, with its row counts and the positions
-/// its caller bounds smaller pages with.
 fn pageRounds(storage: *Store, conversation: *const protocol.ConversationPage, activity: *const protocol.ActivityPage) !PageRounds {
     var result: PageRounds = undefined;
     var public_page: reads_domain.PublicConversationPage = undefined;
@@ -156,15 +149,12 @@ test "an activity page reports the queued Messages at its end, until applied or 
             const first = waiting.items[0];
             const second = waiting.items[1];
             try std.testing.expectEqual(@as(protocol.Queued, .{ .count = 2, .oldest_position = first.position, .newest_admission = second.value.admission.admission, .newest_position = second.position }), waiting.queued);
-            // Taken at an input boundary: none waits at the latest end, both still
-            // do at the earlier one.
             var admitted = (try storage.admitNextModelAttempt(.{})).?;
             _ = try admitted.permit.consume();
             try std.testing.expectEqual(@as(u64, 0), (try store_core.activityPageForTesting(&storage, request)).queued.count);
             var frozen = request;
             frozen.end = waiting.end;
             try std.testing.expectEqual(waiting.queued, (try store_core.activityPageForTesting(&storage, frozen)).queued);
-            // One sent behind the work waits until a stop excludes it.
             try submitTestMessage(&storage, &tmp, "queued-c", "c", session.slice(), "third");
             const behind = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(u64, 1), behind.queued.count);
@@ -195,9 +185,6 @@ test "every activity row is dated by the fact that owns it" {
             try settleTwoActionsForTesting(&storage, &tmp, binding, "dated-calls");
             var stop = try completeSessionStop("dated-stop", session.slice());
             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-            // Distinct times name the owning fact of each row. Tool Result entries
-            // are recorded too, but a result row is dated by its group's last
-            // acceptance.
             try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=101;" ++
                 "UPDATE conversation_entry SET recorded_at=CASE entry_kind WHEN 1 THEN 102 WHEN 3 THEN 103 ELSE 109 END;" ++
                 "UPDATE model_operation SET resolved_at=104;" ++
@@ -217,7 +204,6 @@ test "every activity row is dated by the fact that owns it" {
                     .tool_result => 106,
                     .turn_ended => 107,
                     .stop => 108,
-                    // Asked when its call was made.
                     .approval_requested => 104,
                     .hosted_call, .sent, .send_failed, .received, .session_changed, .compacted => unreachable,
                 };
@@ -252,7 +238,6 @@ test "a call made while the Session asks follows with its approval request, and 
                     .call => calls += 1,
                     .approval_requested => |approval| {
                         approvals += 1;
-                        // It sits right after its call, at the call's position.
                         const call = page.items[index - 1];
                         try std.testing.expectEqual(call.position, item.position);
                         try std.testing.expectEqual(@as(u64, 1), item.ordinal);
@@ -264,11 +249,9 @@ test "a call made while the Session asks follows with its approval request, and 
                 };
                 try std.testing.expectEqual(@as(usize, 2), calls);
                 try std.testing.expectEqual(@as(usize, if (std.mem.eql(u8, mode, "ask")) 2 else 0), approvals);
-                // A page of approval requests alone names each by its own row.
                 request.kinds = .initOne(.approval_requested);
                 const only = try store_core.activityPageForTesting(&storage, request);
                 try std.testing.expectEqual(approvals, only.count);
-                // Backward, from the end, the same rows come in reverse.
                 request.kinds = .full;
                 request.direction = .backward;
                 const backward = try store_core.activityPageForTesting(&storage, request);
@@ -293,8 +276,6 @@ test "a Tool Result is dated by its group's last acceptance, even when the clock
             try settleTwoActionsForTesting(&storage, &tmp, binding, "stepped-calls");
             var stop = try completeSessionStop("stepped-stop", session.slice());
             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-            // The clock stepped back between the two acceptances: the later one,
-            // at the greater position, carries the earlier time.
             try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(DISTINCT acceptance_position) FROM action_operation", .{}));
             const latest_acceptance = try store_testing.queryU64(&storage, "SELECT max(acceptance_position) FROM action_operation", .{});
             try store_testing.exec(&storage, "UPDATE action_operation SET resolved_at=" ++
@@ -324,8 +305,6 @@ test "queued input is pending from the newer of its admission and the latest out
                 defer storage.close() catch unreachable;
                 const session = try configureTestSession(&storage, "stepped-queue-config");
                 switch (case) {
-                    // Queued behind the active Turn, which then fails: pending from
-                    // the outcome, though the clock read earlier than at admission.
                     .behind_the_turn => {
                         try submitTestMessage(&storage, &tmp, "stepped-queue-first", "stepped-queue-first", session.slice(), "first");
                         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -335,8 +314,6 @@ test "queued input is pending from the newer of its admission and the latest out
                         try storage.settleModelAttemptFailure(binding, .{ .rejected = .{ .code = quota.failureCode(), .diagnostic = quota.format(&diagnostic), .request_id = .{}, .report = "" } }, .ordinary, .{});
                         try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=200 WHERE command_key='stepped-queue-input';UPDATE turn SET outcome_at=100", .{});
                     },
-                    // Admitted after the outcome: pending from the admission, though
-                    // the clock read earlier than at the outcome.
                     .after_the_outcome => {
                         const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
                         try answerTestTurn(&storage, &tmp, session.slice(), "stepped-queue-answer", &answer);
@@ -367,8 +344,6 @@ test "tool label observation trusts admission over damaged call field bytes" {
                 var request: protocol.ActivityPage = .{};
                 try request.session.set(session.slice());
                 const before = try store_core.activityPageForTesting(&storage, request);
-                // Damage only the call fields' bytes, not the accepted references or
-                // their metadata. Lightweight observations do not read those bytes.
                 try store_testing.zeroContent(&storage, "SELECT arguments_content_id FROM model_tool_call");
                 const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
                 defer std.testing.allocator.free(report);
@@ -379,7 +354,6 @@ test "tool label observation trusts admission over damaged call field bytes" {
                     try std.testing.expectEqualStrings(original.presentation.description.?.slice(), observed.presentation.description.?.slice());
                     try std.testing.expectEqual(original.presentation.code, observed.presentation.code);
                 }
-                // Model replay, not label observation, authenticates field bytes.
                 try std.testing.expect(!storage.isFenced());
             }
         }
@@ -417,17 +391,15 @@ test "completed tool labels trust admission while model replay authenticates pay
             try std.testing.expectEqual(@as(usize, 2), results);
             try submitTestMessage(&storage, &tmp, "replay-next", "replay-next", session.slice(), "continue");
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(next, &view);
+            var view: TestingPage = undefined;
+            view.open(&storage, next);
             defer view.close();
-            // Discovery trusts the labels; the first call's name fences when it is
-            // read for replay.
             const first = (try nextTestingItem(&view, 0)).?;
             try std.testing.expectEqual(HistoricalEntryKind.user, first.kind);
             const call = (try nextTestingItem(&view, first.position)).?;
             try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT min(session_position) FROM model_output_item WHERE item_kind=3", .{}), call.position);
             const name = (try view.openOutput(call.position)).call.?[0];
-            var reader: HistoricalReader = undefined;
+            var reader: TestingReader = undefined;
             try view.openContent(name, &reader);
             defer reader.close();
             var buffer: [4096]u8 = undefined;
@@ -488,7 +460,6 @@ test "live tool activity survives completed Turns and split result pages" {
             request.direction = .backward;
             try std.testing.expectEqual(@as(u64, 0), (try store_core.activityPageForTesting(&storage, request)).call_activity.total);
 
-            // Fixed history boundaries cannot suppress newer live calls.
             try submitTestMessage(&storage, &tmp, "live-new", "new", session.slice(), "propose again");
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, next, "live-new-calls");
@@ -512,8 +483,6 @@ test "live tool activity counts calls past the sixteenth Operation" {
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "ops-config");
             try submitTestMessage(&storage, &tmp, "ops-input", "input", session.slice(), "propose");
-            // One call per Operation, so the count spans more Operations than a
-            // read bounded by the page's 16 rows would reach.
             var first: u64 = 0;
             for (0..32) |index| {
                 const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -529,8 +498,6 @@ test "live tool activity counts calls past the sixteenth Operation" {
             var request: protocol.ActivityPage = .{};
             try request.session.set(session.slice());
             const page = try store_core.activityPageForTesting(&storage, request);
-            // The page shows the first Operations' items; activity counts the
-            // calls whose groups are published after its last item.
             const after = try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE acceptance_position>?1", .{page.items[page.count - 1].position});
             try std.testing.expect(after > 16);
             try std.testing.expectEqual(after, page.call_activity.total);
@@ -567,7 +534,7 @@ test "the Current report's resolved and rejected calls carry their group's publi
             try allow.key.set("publication-allow");
             try allow.session.set(session.slice());
             try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-            const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+            const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
             _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{});
             const group = try store_testing.queryU64(&storage, "SELECT max(acceptance_position) FROM action_operation", .{});
             try std.testing.expect(group > try store_testing.queryU64(&storage, "SELECT acceptance_position FROM model_tool_call WHERE rejection_code IS NOT NULL", .{}));
@@ -618,7 +585,6 @@ test "a web search call shows as its line, in the conversation and the activity,
             var request: protocol.ConversationPage = .{};
             try request.session.set(session.slice());
             const page = try store_core.publicConversationPageForTesting(&storage, request);
-            // Newest first: the answer, the three calls in reverse, the Message.
             try std.testing.expectEqual(@as(usize, 5), page.count);
             try std.testing.expect(page.items[0].kind == .assistant);
             for (page.items[1..4], expected, 0..) |item, want, index| {
@@ -630,13 +596,11 @@ test "a web search call shows as its line, in the conversation and the activity,
                 try std.testing.expectEqual(item.position, item.presentation.?.publication_position.?);
             }
             try std.testing.expect(page.items[4].kind == .user);
-            // A cursor may stop at a call, and the page goes on from there.
             request.end = page.end;
             request.before_position = page.items[2].position;
             const older = try store_core.publicConversationPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 2), older.count);
             try std.testing.expectEqualStrings(expected[2][0], older.items[0].presentation.?.description.?.slice());
-            // A call has no content to read.
             try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = request.session, .position = page.items[1].position, .ordinal = 0 }));
 
             const activity = try store_core.activityPageForTesting(&storage, .{ .session = request.session, .direction = .backward });
@@ -654,8 +618,6 @@ test "a web search call shows as its line, in the conversation and the activity,
     }.run);
 }
 
-/// The WITH of a fixture INSERT over `value` 1 through `?1`. It goes after
-/// the INSERT's column list, the one place MySQL and SQLite both take it.
 const sequence_to_first_argument = "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<?1) ";
 
 test "an Activity page costs the same steps after 10 or 10,000 earlier rows, in rounds" {
@@ -666,10 +628,6 @@ test "an Activity page costs the same steps after 10 or 10,000 earlier rows, in 
             try std.testing.expectEqual(rounds[0], rounds[1]);
         }
 
-        /// `history` earlier units, a Message, its call item, the call's
-        /// rejection and its Turn's outcome, then the same tail: a Message,
-        /// twenty rejected calls and a stop. The rounds of the opening's
-        /// page and of a forward page from the tail's first row.
         fn measure(engine: *store_testing.Case, history: usize) ![2]u16 {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
@@ -679,8 +637,6 @@ test "an Activity page costs the same steps after 10 or 10,000 earlier rows, in 
             const session = try configureTestSession(&storage, "cost-config");
             const start = try store_testing.queryU64(&storage, "SELECT next_position FROM session", .{});
             const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session", .{});
-            // Foreign keys are off: each history Message names its Turn
-            // before the Turn row exists.
             try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
                 sequence_to_first_argument ++
                 "SELECT value,?2,value+1000000,?4,?3+4*(value-1),value,1 FROM sequence", .{ history, session.slice(), start, content });
@@ -697,7 +653,6 @@ test "an Activity page costs the same steps after 10 or 10,000 earlier rows, in 
                 sequence_to_first_argument ++
                 "SELECT value,?2,value,value,value,'completed',?3+4*(value-1)+3,1 FROM sequence", .{ history, session.slice(), start });
             try store_testing.exec(&storage, "UPDATE session SET next_position=next_position+4*?1", .{history});
-            // The history rows bypass the Host's ids.
             try store_core.reloadIdentitiesForTesting(&storage);
             const tail = (try store_core.readSessionForTesting(&storage, session.slice())).?.next_position;
             try submitTestMessage(&storage, &tmp, "cost-input", "input", session.slice(), "propose");
@@ -782,8 +737,6 @@ test "a forward one-row page of a person's Messages costs the same steps past 10
             const first = try store_testing.queryU64(&storage, "SELECT min(admission_position) FROM message_admission", .{});
             const start = try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{session.slice()});
             const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session WHERE session_ref=?1", .{session.slice()});
-            // Each tool group names its Turn before the Turn row exists. A
-            // cancelled Turn needs no answer content.
             try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window) " ++
                 sequence_to_first_argument ++
                 "SELECT 1000+value,1000+value,?2,1,1000+value,?3+3*(value-1),0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?2),?4 FROM sequence", .{ history, session.slice(), start, @import("../../product_defaults.zig").unlisted_context_window });
@@ -826,7 +779,6 @@ test "a one-row page of a person's Messages costs the same steps past 100 or 10,
             const session = try configureTestSession(&storage, "waiting-config");
             const start = try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{session.slice()});
             const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session WHERE session_ref=?1", .{session.slice()});
-            // The waiting Messages have no commands.
             try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) " ++
                 sequence_to_first_argument ++
                 "SELECT 1000+value,?2,value+1000000,?4,?3+value-1,1 FROM sequence", .{ history, session.slice(), start, content });
@@ -859,17 +811,14 @@ test "each setting a revision changes is one session_changed row at the position
             const session = (try storage.configure(&create, .{})).accepted.session;
             var request: protocol.ActivityPage = .{ .kinds = .initOne(.session_changed) };
             try request.session.set(session.slice());
-            // A creation is no change.
             try std.testing.expectEqual(@as(usize, 0), (try store_core.activityPageForTesting(&storage, request)).count);
             try submitTestMessage(&storage, &tmp, "change-before", "change-before", session.slice(), "before");
             var change = try completeConfiguration("change-mode-label", session.slice(), workspace, "model-a");
             change.configuration.permission_mode.state = .value;
-            // The default is bypass.
             try change.configuration.permission_mode.value.set("ask");
             change.configuration.label.state = .value;
             try change.configuration.label.value.set("renamed");
             try std.testing.expect(try storage.configure(&change, .{}) == .accepted);
-            // A revision that changes nothing writes no row.
             var same = try completeConfiguration("change-same", session.slice(), workspace, "model-a");
             try std.testing.expect(try storage.configure(&same, .{}) == .accepted);
             try submitTestMessage(&storage, &tmp, "change-after", "change-after", session.slice(), "after");
@@ -882,7 +831,6 @@ test "each setting a revision changes is one session_changed row at the position
                 try std.testing.expectEqual(@as(u64, 2), item.value.session_changed.revision);
                 try std.testing.expectEqual(field, item.value.session_changed.field);
             }
-            // The rows sit between the Messages admitted before and after.
             var all: protocol.ActivityPage = .{};
             try all.session.set(session.slice());
             const every = try store_core.activityPageForTesting(&storage, all);
@@ -894,7 +842,6 @@ test "each setting a revision changes is one session_changed row at the position
             };
             try std.testing.expectEqual(@as(usize, 2), seen);
             try std.testing.expect(admissions[0] < page.items[0].position and page.items[0].position < admissions[1]);
-            // Backward from the end, the same rows come in reverse.
             request.direction = .backward;
             const backward = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 2), backward.count);
@@ -940,7 +887,6 @@ test "call and forwarded approval rows expose saved identity description and ori
                 }
                 if (mcp) try std.testing.expectEqualStrings("docs", call.server.?.slice()) else try std.testing.expect(call.server == null);
                 try expectActivityArguments(&storage, child, own.items[0], arguments);
-                // Core built-ins need no Permission Decision; Bash and MCP do.
                 try std.testing.expectEqual(@as(usize, if (mcp or bash) 2 else 1), own.count);
                 if (mcp or bash) {
                     const approval = own.items[1].value.approval_requested;
@@ -948,7 +894,7 @@ test "call and forwarded approval rows expose saved identity description and ori
                     try std.testing.expectEqualDeep(call.tool, approval.tool);
                     try std.testing.expectEqualDeep(call.server, approval.server);
                     try expectActivityArguments(&storage, child, own.items[1], arguments);
-                    try std.testing.expect(try storage.deliverSessionForward((try storage.nextCoreWork()).?.forward, .{}));
+                    try std.testing.expect(try storage.deliverSessionForward((try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.forward, .{}));
                     const forwarded = try store_core.activityPageForTesting(&storage, .{ .session = parent, .kinds = .initOne(.approval_requested) });
                     try std.testing.expectEqual(@as(usize, 1), forwarded.count);
                     try std.testing.expectEqualDeep(approval, forwarded.items[0].value.approval_requested);
@@ -1001,8 +947,6 @@ test "Activity full page keeps call approval and model decoder scratch disjoint"
             try std.testing.expectEqual(@as(usize, protocol.ActivityPage.items), full.count);
             try std.testing.expect(!full.more);
             for (full.items[0..full.count]) |item| try check(&storage, session, item, &calls, &descriptions);
-            // Two distinct model rows decode beside retained call/approval state.
-            // Repeat in reverse to exercise reused slots and optional text fields.
             request.kinds.insert(.model_call);
             inline for (.{ .forward, .backward }) |direction| {
                 request.direction = direction;

@@ -20,8 +20,6 @@ func pinnedSQLite(t *testing.T) string {
 	}
 	sqliteBinary := *sqliteTestBinary
 	if !filepath.IsAbs(sqliteBinary) {
-		// go test runs this package from model-queue/, while Zig renders the
-		// artifact relative to the tests/qualification command directory.
 		sqliteBinary = filepath.Join("..", sqliteBinary)
 	}
 	return sqliteBinary
@@ -264,10 +262,6 @@ func TestProvenanceFailuresExitNonzeroAfterPublication(t *testing.T) {
 	}
 }
 
-// Query-level evidence for the synthetic history writer: set identities come
-// from the initialized Session, including an explicit loaded subset, not a
-// fixed ID or a nullable fallback for the new frozen-offer column. The failed
-// history also freezes the writer's explicit zero context capacity.
 func TestPopulateFreezesSessionOffer(t *testing.T) {
 	sqliteBinary := pinnedSQLite(t)
 	for _, test := range []struct{ name, loaded, want string }{

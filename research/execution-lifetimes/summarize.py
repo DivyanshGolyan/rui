@@ -48,8 +48,6 @@ def audit(matrix, checks):
             before, after = s['sealed_waiting'], s['delayed_validation']
             require(0 <= after['curl_live'] < before['curl_live'],
                     'Early model must demonstrate libcurl release before validation')
-            # These counts follow this fixture's one request and one capture file
-            # per execution, not libcurl's platform-dependent internal allocations.
             require(before['owned_fds'] == 2 * case['count'] and
                     after['owned_fds'] == case['count'],
                     'Early model must retain only capture descriptors')
@@ -104,7 +102,6 @@ def main():
     if args.output:
         protected = {p.resolve() for p in HERE.iterdir() if p.is_file()}
         require(args.output.resolve() not in protected, 'Audit output must not overwrite an existing artifact')
-        # Execution environment belongs to the recorded run, never this audit process.
         result = dict(revision=matrix['revision'], matrix_closed_cells=len(derived), derived=derived,
                       recorded_matrix_machine=matrix['machine'], raw_hashes=raw_hashes,
                       sources_at_audit={p.name: digest(p) for p in HERE.iterdir()

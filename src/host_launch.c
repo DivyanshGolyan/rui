@@ -96,8 +96,6 @@ __attribute__((constructor(101))) static void early_launch_helper(void) {
     char **args = *_NSGetArgv();
     int exact = strcmp(args[1], "--launch-exact-helper") == 0;
     if (!exact && strcmp(args[1], "--launch-helper") != 0) return;
-    /* OS-provided terminated argv is in final storage before the helper fork
-     * and before ordinary Zig initialization. */
     _exit(launch_helper(&args[2], exact));
 }
 #endif
@@ -135,11 +133,6 @@ int rui_write_readiness(int fd, const unsigned char *data, size_t length) {
     return failure != 0 ? failure : result;
 }
 
-/* Returns zero after exec, or an errno-style failure. The grandchild has no
- * terminal/session or inherited descriptor; its lifetime is independent of
- * this caller. Readiness and ownership are established separately by Rui.
- * Borrow the caller's bounded, terminated argv through exec/error handoff;
- * argv[0] is executable and argc excludes the NULL terminator. */
 static int launch_detached(const char *helper_executable, const char *executable,
                            const char *const *argv, size_t argc,
                            const char *const *envp, int startup_write, int output_write, int *launched_pid,
@@ -147,8 +140,6 @@ static int launch_detached(const char *helper_executable, const char *executable
     int exact = launched_pid != NULL;
 #if defined(__APPLE__)
     (void)executable;
-    /* Transport framing only; application policy belongs to the caller.
-     * Prepare before spawn, not in the post-fork grandchild. */
     const char *helper[argc + 3];
     helper[0] = helper_executable;
     helper[1] = exact ? "--launch-exact-helper" : "--launch-helper";
@@ -354,10 +345,6 @@ int rui_launch_detached_observed(const char *executable, const char *const *argv
     return launch_observed(executable, executable, argv, argc, (const char *const *)environ, startup_read, NULL, NULL);
 }
 
-/* The current executable supplies the Darwin bootstrap even for historical
- * target executables without a launch-helper constructor. envp is borrowed only
- * through the exec handoff, never stored or printed. launched_pid is evidence,
- * not a signal/stop handle; the caller still checks the actual socket peer. */
 int rui_launch_pinned(const char *helper_executable, const char *executable,
                       const char *const *argv, size_t argc, const char *const *envp,
                       int *startup_read, int *launched_pid, unsigned long long *launched_started) {
@@ -373,8 +360,6 @@ int rui_launch_pinned(const char *helper_executable, const char *executable,
     return result;
 }
 
-/* Two independently bounded byte channels. The application decides whether any
- * stdout line is a startup refusal; this transport knows no application grammar. */
 int rui_launch_detached_reported(const char *executable, const char *const *argv,
                                  size_t argc, int *startup_read, int *output_read,
                                  int *launched_pid, unsigned long long *launched_started) {
