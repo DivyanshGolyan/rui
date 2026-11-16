@@ -2258,10 +2258,14 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
             break :blk preferences.load(home) catch |err| return preferenceFailure(err);
         } else .{} };
         saved_effort = if (reads.saved_effort) snapshot.defaults.reasoning_effort else null;
-        if (reads.binding) binding = try snapshot.resolveUnprompted();
+        if (reads.binding) {
+            binding = try snapshot.resolveUnprompted();
+            input.model = .{ .present = true, .value = binding.model.slice() };
+            if (!input.parent.present) input.provider = .{ .present = true, .value = binding.provider.slice() };
+        }
         input.completeCreation(
             if (reads.binding) std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).? else null,
-            if (reads.binding) binding.model.slice() else input.model.value,
+            input.model.value,
             saved_effort,
             snapshot.defaults.permission_mode,
             &compaction_buffer,

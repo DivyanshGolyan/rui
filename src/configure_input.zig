@@ -50,8 +50,6 @@ pub const ConfigureInput = struct {
     }
 
     pub fn completeCreation(self: *ConfigureInput, provider: ?Provider, model: []const u8, saved_effort: ?ReasoningEffort, saved_permission: ?PermissionMode, compaction: *[20]u8) void {
-        self.model = .{ .present = true, .value = model };
-        if (!self.parent.present) self.provider = .{ .present = true, .value = @tagName(provider.?) };
         self.reasoning_effort = creationEffort(model, self.reasoning_effort, saved_effort);
         if (!self.compaction_trigger.present or self.compaction_trigger.value == null) self.compaction_trigger = .{ .present = true, .value = compactionTrigger(provider.?, model, compaction) };
         if (self.tools == null) self.tools = product_defaults.tools;
@@ -185,6 +183,7 @@ test "parent creation completes required defaults and preserves only explicit in
             .parent = .{ .present = true, .value = "k7m2qx" },
             .provider = if (overrides) .{ .present = true, .value = "codex" } else .{},
             .workspace = if (overrides) .{ .present = true, .value = "/parent" } else .{},
+            .model = .{ .present = true, .value = "gpt-6.1-sol" },
         };
         input.completeCreation(.openai, "gpt-6.1-sol", .high, .ask, &compaction);
         try std.testing.expectEqualStrings("k7m2qx", input.parent.value);
@@ -246,5 +245,35 @@ test "parent fully explicit creation needs neither binding nor preferences and p
         input.compaction_trigger = policy("1000");
         input.model = .{};
         try std.testing.expect(input.creationReads().binding and input.creationReads().preferences);
+    }
+}
+
+test "creation default completion preserves Overview omitted binding and require_model" {
+    for ([_]bool{ false, true }) |bound| {
+        var input: ConfigureInput = .{
+            .store = "/store",
+            .session = .create,
+            .require_model = true,
+            .workspace = .{ .present = true, .value = "/workspace" },
+            .provider = if (bound) .{ .present = true, .value = "codex" } else .{},
+            .model = if (bound) .{ .present = true, .value = "selected-model" } else .{},
+        };
+        var compaction: [20]u8 = undefined;
+        input.completeCreation(.openai, "unlisted-model", .high, .ask, &compaction);
+        try std.testing.expect(input.require_model);
+        try std.testing.expectEqual(bound, input.provider.present);
+        try std.testing.expectEqual(bound, input.model.present);
+        if (bound) {
+            try std.testing.expectEqualStrings("codex", input.provider.value);
+            try std.testing.expectEqualStrings("selected-model", input.model.value);
+        } else {
+            try std.testing.expectEqualStrings("", input.provider.value);
+            try std.testing.expectEqualStrings("", input.model.value);
+        }
+        try std.testing.expectEqualStrings("/workspace", input.workspace.value);
+        try std.testing.expectEqualStrings(product_defaults.tools, input.tools.?);
+        try std.testing.expectEqualStrings("ask", input.permission_mode.value);
+        try std.testing.expectEqualStrings("high", input.reasoning_effort.value.?);
+        try std.testing.expectEqualStrings("115200", input.compaction_trigger.value.?);
     }
 }
