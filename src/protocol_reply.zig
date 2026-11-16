@@ -1664,71 +1664,75 @@ pub const CommandObservation = struct {
     }
 
     fn parseReply(reply: CommandReply, key: []const u8) !ObservationReply {
+        @setEvalBranchQuota(2_000_000);
         try checkCanonicalFailure(reply);
         if (reply.status != 200) return error.ObservationFailed;
         if (reply.body.len > protocol.command_observation_reply.max_bytes) return error.ResponseTooLarge;
-        const Ref = struct { type: JsonEnum(enum { text }), bytes: JsonString(20), sha256: JsonString(64) };
-        const Outcome = struct { action: JsonString(20), operation: JsonString(20), call: JsonString(20), description: ?JsonString(protocol.max_tool_description_bytes), at: JsonString(20) };
-        const Outcomes = JsonArray(Outcome, protocol.message_recovery_limit);
-        const Facts = struct {
-            status: JsonEnum(@FieldType(CommandObservation, "status")),
-            kind: OmittableJson(JsonEnum(protocol.CommandKind)) = .{},
-            target: OmittableJson(JsonString(protocol.max_session_bytes)) = .{},
-            code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{},
-            revision: OmittableJson(JsonString(20)) = .{},
-            created: OmittableJson(bool) = .{},
-            input: OmittableJson(Ref) = .{},
-            state: OmittableJson(JsonEnum(protocol.MessageRequestState)) = .{},
-            queue: OmittableJson(struct { admission: JsonString(20), admitted_at: JsonString(20) }) = .{},
-            binding: OmittableJson(struct { turn: JsonString(20), operation: JsonString(20), attempt: JsonString(20) }) = .{},
-            result: OmittableJson(struct { status: JsonEnum(@FieldType(@typeInfo(@FieldType(CommandObservation, "result")).optional.child, "status")), code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{}, text: OmittableJson(Ref) = .{} }) = .{},
-            work: OmittableJson(struct { state: JsonWorkState, first_action: ?JsonString(20) }) = .{},
-            recovery: OmittableJson(struct { unknown_outcomes: Outcomes, more: bool }) = .{},
-            archived: OmittableJson(bool) = .{},
-            pinned: OmittableJson(bool) = .{},
-            selection: OmittableJson(struct { turn: ?JsonString(20), admission_cutoff: JsonString(20) }) = .{},
-            completion: OmittableJson(struct { status: JsonEnum(@typeInfo(@FieldType(CommandObservation, "completion")).optional.child) }) = .{},
-            interruption_target: OmittableJson(struct { session: JsonString(protocol.max_session_bytes), turn: JsonString(20), operation: JsonString(20) }) = .{},
-            permission_target: OmittableJson(struct { action: JsonString(20), decision: JsonEnum(protocol.PermissionDecision) }) = .{},
-            action_target: OmittableJson(struct { action: JsonString(20) }) = .{},
-            action_selection: OmittableJson(struct { kind: JsonEnum(@FieldType(@import("action_control.zig").Selection, "kind")), position: JsonString(20) }) = .{},
-        };
-        const Since = struct {
-            value: ?JsonString(SessionToken.max_bytes),
-            pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
-                return .{ .value = try std.json.innerParse(?JsonString(SessionToken.max_bytes), allocator, source, options) };
+        const shapes = comptime command_spec.observationDecoderShapes(protocol).values;
+        // Session pin supplies the existing answer envelope without owning the
+        // unrelated input, queue or execution extensions of other mutations.
+        const universe = comptime shapes ++ .{ protocol.error_reply, protocol.session_pin_reply.accepted };
+        const JsonTypes = struct {
+            pub fn Type(comptime T: type) type {
+                if (T == protocol.WorkStateJson) return JsonWorkState;
+                if (T == protocol.MessageRecoveryJson) return JsonMessageRecovery;
+                return T;
             }
         };
-        const Wire = struct { version: JsonString(8), type: JsonString(32), key: JsonString(protocol.max_key_bytes), delta: JsonEnum(enum { full, not_modified }), since: Since, observation: OmittableJson(Facts) = .{}, code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{}, answer: OmittableJson(struct {}) = .{} };
         const capacity = comptime std.ArrayList(u8).growCapacity((protocol.command_observation_reply.max_bytes + 7) / 8) + std.ArrayList(u8).growCapacity(protocol.command_observation_reply.max_bytes);
         var storage: [capacity]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
-        var scanner = std.json.Scanner.initCompleteInput(fixed.allocator(), reply.body);
-        defer scanner.deinit();
-        scanner.ensureTotalStackCapacity(protocol.command_observation_reply.max_bytes) catch unreachable;
-        const wire = std.json.parseFromTokenSourceLeaky(Wire, fixed.allocator(), &scanner, .{ .ignore_unknown_fields = true }) catch return error.InvalidObservation;
-        if (!wire.version.eql(protocol.wire_version) or !wire.type.eql("command_observation") or wire.code.value != null or wire.answer.value != null) return error.InvalidObservation;
-        if (!wire.key.eql(key)) return error.RequestBindingMismatch;
-        const since = if (wire.since.value) |text| SessionToken.parse(text.slice()) catch return error.InvalidObservation else null;
-        if (wire.delta.value == .not_modified) {
-            if (wire.observation.isPresent()) return error.InvalidObservation;
-            return .{ .not_modified = since orelse return error.InvalidObservation };
+        inline for (shapes) |shape| {
+            candidate: {
+                fixed.reset();
+                const Decoder = @import("command_reply.zig").DecoderWithJson(shape, universe, JsonTypes);
+                const wire = Decoder.parse(fixed.allocator(), reply.body) catch break :candidate;
+                return decodeObservation(wire, key);
+            }
         }
-        const facts = wire.observation.value orelse return error.InvalidObservation;
-        var observed: CommandObservation = .{ .key = wire.key.value, .status = facts.status.value, .kind = if (facts.kind.value) |kind| kind.value else null, .created = facts.created.value, .archived = facts.archived.value, .pinned = facts.pinned.value };
-        inline for (.{ "target", "code" }) |name| if (@field(facts, name).value) |value| {
-            @field(observed, name) = value.value;
+        return error.InvalidObservation;
+    }
+
+    const JsonMessageRecovery = struct {
+        const Outcome = struct { action: JsonString(20), operation: JsonString(20), call: JsonString(20), description: ?JsonString(protocol.max_tool_description_bytes), at: JsonString(20) };
+        unknown_outcomes: JsonArray(Outcome, protocol.message_recovery_limit),
+        more: bool,
+    };
+
+    fn decodeObservation(wire: anytype, key: []const u8) !ObservationReply {
+        if (!wire.key.eql(key)) return error.RequestBindingMismatch;
+        const since: ?SessionToken = blk: {
+            if (comptime @TypeOf(wire.since) == ?void) break :blk null;
+            if (comptime @typeInfo(@TypeOf(wire.since)) == .optional) {
+                break :blk if (wire.since) |text| SessionToken.parse(text.slice()) catch return error.InvalidObservation else null;
+            }
+            break :blk SessionToken.parse(wire.since.slice()) catch return error.InvalidObservation;
         };
-        if (facts.revision.value) |value| observed.revision = try decimalId(value, false);
-        if (facts.input.value) |value| observed.input = try decodeReference(value);
-        if (facts.state.value) |value| observed.state = value.value;
-        if (facts.queue.value) |value| observed.queue = .{ .admission = try decimalId(value.admission, false), .admitted_at = try decimalId(value.admitted_at, false) };
-        if (facts.binding.value) |value| observed.binding = .{ .turn = try decimalId(value.turn, false), .operation = try decimalId(value.operation, false), .attempt = try decimalId(value.attempt, true) };
-        if (facts.result.value) |value| observed.result = .{ .status = value.status.value, .code = if (value.code.value) |code| code.value else null, .text = if (value.text.value) |text| try decodeReference(text) else null };
-        if (facts.work.value) |value| observed.work = .{ .state = value.state.value, .first_action = if (value.first_action) |action| try decimalId(action, false) else null };
-        if (facts.recovery.value) |value| {
-            var recovery: Recovery = .{ .more = value.more };
-            for (value.unknown_outcomes.slice()) |row| {
+        if (comptime !@hasField(@TypeOf(wire), "observation")) return .{ .not_modified = since orelse return error.InvalidObservation };
+        const facts = wire.observation;
+        const Facts = @TypeOf(facts);
+        var observed: CommandObservation = .{ .key = wire.key.value, .status = std.meta.stringToEnum(@FieldType(CommandObservation, "status"), facts.status.slice()) orelse return error.InvalidObservation };
+        if (comptime @hasField(Facts, "kind")) observed.kind = std.meta.stringToEnum(protocol.CommandKind, facts.kind.slice()) orelse return error.InvalidObservation;
+        inline for (.{ "target", "code" }) |name| if (comptime @hasField(Facts, name)) {
+            @field(observed, name) = @field(facts, name).value;
+        };
+        inline for (.{ "created", "archived", "pinned" }) |name| if (comptime @hasField(Facts, name)) {
+            @field(observed, name) = @field(facts, name);
+        };
+        if (comptime @hasField(Facts, "revision")) observed.revision = try decimalId(facts.revision, false);
+        if (comptime @hasField(Facts, "input")) observed.input = try decodeReference(facts.input);
+        if (comptime @hasField(Facts, "state")) observed.state = std.meta.stringToEnum(protocol.MessageRequestState, facts.state.slice()) orelse return error.InvalidObservation;
+        if (comptime @hasField(Facts, "queue")) observed.queue = .{ .admission = try decimalId(facts.queue.admission, false), .admitted_at = try decimalId(facts.queue.admitted_at, false) };
+        if (comptime @hasField(Facts, "binding")) observed.binding = .{ .turn = try decimalId(facts.binding.turn, false), .operation = try decimalId(facts.binding.operation, false), .attempt = try decimalId(facts.binding.attempt, true) };
+        if (comptime @hasField(Facts, "result")) observed.result = .{
+            .status = std.meta.stringToEnum(@FieldType(@typeInfo(@FieldType(CommandObservation, "result")).optional.child, "status"), facts.result.status.slice()) orelse return error.InvalidObservation,
+            .code = if (@hasField(@TypeOf(facts.result), "code")) facts.result.code.value else null,
+            .text = if (@hasField(@TypeOf(facts.result), "text")) try decodeReference(facts.result.text) else null,
+        };
+        if (comptime @hasField(Facts, "work")) observed.work = .{ .state = facts.work.state.value, .first_action = if (facts.work.first_action) |action| try decimalId(action, false) else null };
+        if (comptime @hasField(Facts, "recovery")) {
+            var recovery: Recovery = .{ .more = facts.recovery.more };
+            for (facts.recovery.unknown_outcomes.slice()) |row| {
                 if (row.description) |description| if (!protocol.ToolPresentation.validDescription(description.slice())) return error.InvalidObservation;
                 recovery.unknown_outcomes[recovery.count] = .{
                     .action_id = try decimalId(row.action, false),
@@ -1741,12 +1745,12 @@ pub const CommandObservation = struct {
             }
             observed.recovery = recovery;
         }
-        if (facts.selection.value) |value| observed.selection = .{ .turn = if (value.turn) |turn| try decimalId(turn, false) else null, .admission_cutoff = try decimalId(value.admission_cutoff, true) };
-        if (facts.completion.value) |value| observed.completion = value.status.value;
-        if (facts.interruption_target.value) |value| observed.interruption_target = .{ .session = value.session.value, .turn = try decimalId(value.turn, true), .operation = try decimalId(value.operation, true) };
-        if (facts.permission_target.value) |value| observed.permission_target = .{ .action = try decimalId(value.action, true), .decision = value.decision.value };
-        if (facts.action_target.value) |value| observed.action_target = try decimalId(value.action, true);
-        if (facts.action_selection.value) |value| observed.action_selection = .{ .kind = value.kind.value, .position = try decimalId(value.position, false) };
+        if (comptime @hasField(Facts, "selection")) observed.selection = .{ .turn = if (facts.selection.turn) |turn| try decimalId(turn, false) else null, .admission_cutoff = try decimalId(facts.selection.admission_cutoff, true) };
+        if (comptime @hasField(Facts, "completion")) observed.completion = std.meta.stringToEnum(protocol.SessionStopCompletion, facts.completion.status.slice()) orelse return error.InvalidObservation;
+        if (comptime @hasField(Facts, "interruption_target")) observed.interruption_target = .{ .session = facts.interruption_target.session.value, .turn = try decimalId(facts.interruption_target.turn, true), .operation = try decimalId(facts.interruption_target.operation, true) };
+        if (comptime @hasField(Facts, "permission_target")) observed.permission_target = .{ .action = try decimalId(facts.permission_target.action, true), .decision = std.meta.stringToEnum(protocol.PermissionDecision, facts.permission_target.decision.slice()) orelse return error.InvalidObservation };
+        if (comptime @hasField(Facts, "action_target")) observed.action_target = try decimalId(facts.action_target.action, true);
+        if (comptime @hasField(Facts, "action_selection")) observed.action_selection = .{ .kind = std.meta.stringToEnum(@FieldType(@import("action_control.zig").Selection, "kind"), facts.action_selection.kind.slice()) orelse return error.InvalidObservation, .position = try decimalId(facts.action_selection.position, false) };
         try observed.validate();
         if (since) |token| {
             const target = observed.target orelse return error.InvalidObservation;
@@ -1762,29 +1766,9 @@ pub const CommandObservation = struct {
         return result;
     }
 
-    fn validateFieldPresence(self: *const CommandObservation, comptime kind: protocol.CommandKind, comptime message_fields: bool) !void {
-        @setEvalBranchQuota(10_000);
-        const fields = comptime command_spec.spec(kind).observation_fields;
-        const message = comptime command_spec.spec(.message).observation_fields;
-        inline for (comptime std.meta.tags(command_spec.ObservationField)) |field| {
-            const belongs_to_message = comptime command_spec.ObservationFields.contains(message.always, field) or
-                command_spec.ObservationFields.contains(message.accepted, field) or command_spec.ObservationFields.contains(message.conditional, field);
-            if (comptime belongs_to_message != message_fields) continue;
-            const required = comptime command_spec.ObservationFields.contains(fields.always, field);
-            const on_acceptance = comptime command_spec.ObservationFields.contains(fields.accepted, field);
-            const conditional = comptime command_spec.ObservationFields.contains(fields.conditional, field);
-            const present = @field(self, @tagName(field)) != null;
-            const needed = required or (self.status == .accepted and on_acceptance);
-            if ((needed and !present) or (present and !needed and !conditional)) return error.InvalidObservation;
-        }
-    }
-
     fn validate(self: *const CommandObservation) !void {
         @setEvalBranchQuota(10_000);
-        if (self.status == .absent) {
-            inline for (.{ "kind", "target", "code", "revision", "created", "input", "state", "queue", "binding", "result", "work", "recovery", "selection", "archived", "pinned", "completion", "interruption_target", "permission_target", "action_target", "action_selection" }) |name| if (@field(self, name) != null) return error.InvalidObservation;
-            return;
-        }
+        if (self.status == .absent) return;
         const kind = self.kind orelse return error.InvalidObservation;
         if (self.target == null or (self.target.?.len == 0 and
             (self.status != .rejected or (kind != .configure and kind != .message)))) return error.InvalidObservation;
@@ -1792,13 +1776,7 @@ pub const CommandObservation = struct {
         if (self.code) |code| if (code.len == 0) return error.InvalidObservation;
         const accepted = self.status == .accepted;
         if (accepted and !protocol.validSessionId(self.target.?.slice())) return error.InvalidObservation;
-        switch (kind) {
-            inline else => |command_kind| {
-                try self.validateFieldPresence(command_kind, false);
-                if (self.interruption_target) |target| if (!target.session.eql(self.target.?.slice())) return error.RequestBindingMismatch;
-                try self.validateFieldPresence(command_kind, true);
-            },
-        }
+        if (self.interruption_target) |target| if (!target.session.eql(self.target.?.slice())) return error.RequestBindingMismatch;
         if (kind != .message) return;
         const state = self.state orelse return error.InvalidObservation;
         if (!accepted) {
@@ -2447,11 +2425,7 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
     const capacity = comptime std.ArrayList(u8).growCapacity((protocol.max_response_bytes + 7) / 8) + std.ArrayList(u8).growCapacity(protocol.max_response_bytes);
     var storage: [capacity]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&storage);
-    var scanner = std.json.Scanner.initCompleteInput(fixed.allocator(), reply.body);
-    defer scanner.deinit();
-    scanner.ensureTotalStackCapacity(protocol.max_response_bytes) catch unreachable;
-    const wire = std.json.parseFromTokenSourceLeaky(mutation_answer.Wire, fixed.allocator(), &scanner, .{ .ignore_unknown_fields = true }) catch return error.InvalidResponse;
-    return mutation_answer.decide(protocol.wire_version, wire, reply.status, session, target, diagnostic, resolved_session);
+    return mutation_answer.decode(fixed.allocator(), reply.body, reply.status, session, target, diagnostic, resolved_session);
 }
 
 test "mutation decoder bounds reply bytes and rejects trailing input" {
@@ -3148,55 +3122,46 @@ fn observationFieldSample() !CommandObservation {
     return sample;
 }
 
-// Each base fixture below has one valid minimal shape. Toggling any payload
-// field invalidates it, except that a rejected Message may also retain its input.
-// This expectation comes from the pre-table validator, not command_spec's sets.
+// These independently specified minimal fixtures exercise structural ownership
+// through the public parser, including required fields and foreign payloads.
 fn expectObservationFieldPresence(original: *const CommandObservation) !void {
+    var original_bytes: [protocol.command_observation_reply.max_bytes]u8 = undefined;
+    var original_writer = std.Io.Writer.fixed(&original_bytes);
+    try original.writeJson(&original_writer);
     const sample = try observationFieldSample();
+    var sample_bytes: [protocol.command_observation_reply.max_bytes]u8 = undefined;
+    var sample_writer = std.Io.Writer.fixed(&sample_bytes);
+    try sample.writeJson(&sample_writer);
+    // The sample carries both stop and archive payloads, whose renderer each
+    // emits completion. Only its independent field values are used below.
+    const sample_facts = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, sample_writer.buffered(), .{ .duplicate_field_behavior = .use_last });
+    defer sample_facts.deinit();
     inline for (comptime std.meta.fieldNames(CommandObservation)) |name| {
         if (comptime !std.mem.eql(u8, name, "key") and !std.mem.eql(u8, name, "status") and
             !std.mem.eql(u8, name, "kind") and !std.mem.eql(u8, name, "target") and !std.mem.eql(u8, name, "code"))
         {
-            var changed = original.*;
-            @field(changed, name) = if (@field(original, name) != null) null else @field(sample, name).?;
-            const retained_input = comptime std.mem.eql(u8, name, "input");
-            if (retained_input and original.kind == .message and original.status == .rejected) {
-                try changed.validate();
-            } else try std.testing.expectError(error.InvalidObservation, changed.validate());
+            var facts = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, original_writer.buffered(), .{});
+            defer facts.deinit();
+            if (!facts.value.object.swapRemove(name)) try facts.value.object.put(facts.arena.allocator(), name, sample_facts.value.object.get(name).?);
+            var bytes: [protocol.command_observation_reply.max_bytes]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&bytes);
+            try writer.writeAll(testing_observation_prefix);
+            try std.json.Stringify.value(facts.value, .{}, &writer);
+            try writer.writeByte('}');
+            const parsed = CommandObservation.parse(.{ .status = 200, .body = writer.buffered() }, "k");
+            if (std.mem.eql(u8, name, "input") and original.kind == .message and original.status == .rejected) {
+                _ = try parsed;
+            } else try std.testing.expectError(error.InvalidObservation, parsed);
         }
     }
 }
 
-test "keyed observation preserves binding error precedence beside foreign fields" {
-    const body = testing_observation_prefix ++ "{\"status\":\"accepted\",\"kind\":\"model_interruption\",\"target\":\"k7m2qx\",\"interruption_target\":{\"session\":\"09azvw\",\"turn\":\"3\",\"operation\":\"7\"}}}";
-    var mismatch: CommandObservation = .{
-        .key = try protocol.Bounded(protocol.max_key_bytes).from("k"),
-        .kind = .model_interruption,
-        .status = .accepted,
-        .target = try protocol.Bounded(protocol.max_session_bytes).from("k7m2qx"),
-        .interruption_target = .{ .session = try protocol.Bounded(protocol.max_session_bytes).from("09azvw"), .turn = 3, .operation = 7 },
-    };
-    try std.testing.expectError(error.RequestBindingMismatch, CommandObservation.parse(.{ .status = 200, .body = body }, "k"));
-    const sample = try observationFieldSample();
+test "keyed observation validates interruption binding for both saved outcomes" {
     inline for (.{ .accepted, .rejected }) |status| {
-        mismatch.status = status;
-        mismatch.code = if (status == .rejected) try protocol.Bounded(protocol.max_code_bytes).from("unknown_operation") else null;
-        inline for (.{ "input", "state", "queue", "binding", "result", "work", "recovery" }) |name| {
-            var changed = mismatch;
-            @field(changed, name) = @field(sample, name);
-            try std.testing.expectError(error.RequestBindingMismatch, changed.validate());
-            changed.interruption_target.?.session = changed.target.?;
-            try std.testing.expectError(error.InvalidObservation, changed.validate());
-        }
-        inline for (.{ "revision", "created", "selection", "archived", "pinned", "completion", "permission_target", "action_target", "action_selection" }) |name| {
-            var changed = mismatch;
-            @field(changed, name) = @field(sample, name);
-            try std.testing.expectError(error.InvalidObservation, changed.validate());
-        }
+        const code = comptime if (status == .rejected) ",\"code\":\"unknown_operation\"" else "";
+        const body = testing_observation_prefix ++ "{\"status\":\"" ++ @tagName(status) ++ "\",\"kind\":\"model_interruption\",\"target\":\"k7m2qx\",\"interruption_target\":{\"session\":\"09azvw\",\"turn\":\"3\",\"operation\":\"7\"}" ++ code ++ "}}";
+        try std.testing.expectError(error.RequestBindingMismatch, CommandObservation.parse(.{ .status = 200, .body = body }, "k"));
     }
-    mismatch.interruption_target = null;
-    mismatch.input = sample.input;
-    try std.testing.expectError(error.InvalidObservation, mismatch.validate());
 }
 
 test "keyed observation validates every operation shape and binding" {
@@ -3272,6 +3237,25 @@ test "keyed observation distinguishes named statuses and omitted fields from num
     const absent = testing_observation_prefix ++ "{\"status\":\"absent\"";
     inline for (.{ "kind", "target", "code", "revision", "created", "input", "state", "queue", "binding", "result", "work", "recovery", "selection", "completion", "interruption_target", "permission_target" }) |field|
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = absent ++ ",\"" ++ field ++ "\":null}}" }, "k"));
+}
+
+test "keyed observation ignores unrelated root extensions and rejects diagnostic envelopes" {
+    inline for (.{
+        testing_observation_prefix ++ "{\"status\":\"absent\"}",
+        testing_observation_prefix ++ "{\"status\":\"accepted\",\"kind\":\"configure\",\"target\":\"k7m2qx\",\"revision\":\"31\",\"created\":true}",
+        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.42.k7m2qx\"",
+    }) |prefix| {
+        inline for (.{ "input", "queue", "execution", "completion", "extension" }) |field| {
+            inline for (.{ "null", "{\"nested\":[true,{},null]}" }) |value| {
+                _ = try CommandObservation.parseReply(.{ .status = 200, .body = prefix ++ ",\"" ++ field ++ "\":" ++ value ++ "}" }, "k");
+            }
+        }
+        inline for (.{ "code", "answer" }) |field| {
+            inline for (.{ "null", "{}" }) |value| {
+                try std.testing.expectError(error.InvalidObservation, CommandObservation.parseReply(.{ .status = 200, .body = prefix ++ ",\"" ++ field ++ "\":" ++ value ++ "}" }, "k"));
+            }
+        }
+    }
 }
 
 test "keyed observation rejects malformed consequential fields before outcome interpretation" {
@@ -4046,34 +4030,26 @@ test "Session pin list ranks round trip as positive decimal strings" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"pin_order\":\"9223372036854775807\"") != null);
 }
 
-test "command_spec observation fields match CommandObservation" {
-    const Observation = CommandObservation;
-    inline for (comptime std.meta.fieldNames(Observation)) |name| {
-        if (comptime !std.mem.eql(u8, name, "key") and !std.mem.eql(u8, name, "status") and
-            !std.mem.eql(u8, name, "kind") and !std.mem.eql(u8, name, "target") and !std.mem.eql(u8, name, "code"))
-        {
-            try std.testing.expect(std.meta.stringToEnum(command_spec.ObservationField, name) != null);
+test "derived observation payloads cover caller fields" {
+    @setEvalBranchQuota(2_000_000);
+    const JsonTypes = struct {
+        pub fn Type(comptime T: type) type {
+            if (T == protocol.WorkStateJson) return JsonWorkState;
+            if (T == protocol.MessageRecoveryJson) return CommandObservation.JsonMessageRecovery;
+            return T;
         }
-    }
-    inline for (comptime std.meta.tags(command_spec.ObservationField)) |field| {
-        try std.testing.expect(@hasField(Observation, @tagName(field)));
-        var owned = false;
-        inline for (comptime std.meta.tags(protocol.CommandKind)) |kind| {
-            const fields = comptime command_spec.spec(kind).observation_fields;
-            owned = owned or command_spec.ObservationFields.contains(fields.always, field) or
-                command_spec.ObservationFields.contains(fields.accepted, field) or command_spec.ObservationFields.contains(fields.conditional, field);
-        }
-        try std.testing.expect(owned);
-    }
-    inline for (comptime std.meta.tags(protocol.CommandKind)) |kind| {
-        const fields = comptime command_spec.spec(kind).observation_fields;
-        inline for (.{ fields.always, fields.accepted, fields.conditional }, 0..) |set, index| {
-            for (set, 0..) |field, at| {
-                try std.testing.expect(!command_spec.ObservationFields.contains(set[0..at], field));
-                inline for (.{ fields.always, fields.accepted, fields.conditional }, 0..) |other, other_index| {
-                    if (index != other_index) try std.testing.expect(!command_spec.ObservationFields.contains(other, field));
+    };
+    const shapes = comptime command_spec.observationDecoderShapes(protocol).values;
+    inline for (comptime std.meta.fieldNames(CommandObservation)) |name| {
+        if (comptime !std.mem.eql(u8, name, "key")) {
+            const owned = comptime blk: {
+                for (shapes) |shape| {
+                    const Value = @import("command_reply.zig").DecoderWithJson(shape, shapes, JsonTypes).Value;
+                    if (@hasField(Value, "observation") and @hasField(@FieldType(Value, "observation"), name)) break :blk true;
                 }
-            }
+                break :blk false;
+            };
+            try std.testing.expect(owned);
         }
     }
 }

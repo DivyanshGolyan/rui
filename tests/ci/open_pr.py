@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Open a ready PR so selected CI and Codex review start together.
+"""Open a PR and request Codex review; ready by default, draft with --draft.
 
 Merge still requires current-candidate admission and the Codex evidence in
-CODING_STANDARDS.md. `ready` converts older drafts without another push.
+CODING_STANDARDS.md. `ready` converts drafts without another push.
 
-  open_pr.py open --title TITLE --body-file FILE [--base main]
+  open_pr.py open --title TITLE --body-file FILE [--base main] [--draft]
   open_pr.py ready
 """
 import argparse
@@ -19,9 +19,9 @@ from pr_overlap import branch_changes, origin_repo, overlaps, report
 from pr_shape import refusal as shape_refusal
 
 
-def create_args(repo, title, body, base, branch):
+def create_args(repo, title, body, base, branch, draft=False):
     return ["api", "-X", "POST", f"repos/{repo}/pulls", "-f", f"title={title}", "-f", f"head={branch}",
-            "-f", f"base={base}", "-F", "draft=false", "-f", f"body={body}"]
+            "-f", f"base={base}", "-F", f"draft={str(draft).lower()}", "-f", f"body={body}"]
 
 
 def open_refusal(local_head, pushed_head, dirty=False):
@@ -56,11 +56,12 @@ def git(*args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
-    opening = commands.add_parser("open", help="check overlap with open PRs, then open a ready PR")
+    opening = commands.add_parser("open", help="check overlap with open PRs, then open a PR (ready by default)")
     opening.add_argument("--title", required=True)
     opening.add_argument("--body-file", required=True)
     opening.add_argument("--base", default="main")
-    commands.add_parser("ready", help="mark this branch's older draft ready to run CI beside review")
+    opening.add_argument("--draft", action="store_true", help="open as a draft and request Codex review")
+    commands.add_parser("ready", help="mark this branch's draft ready to run its full selected suite")
     args = parser.parse_args()
     branch, head = git("branch", "--show-current"), git("rev-parse", "HEAD")
     try:
@@ -79,11 +80,15 @@ def main():
                 print(refusal, file=sys.stderr)
                 return 1
             report(overlaps(github, repo, branch, paths, removed))
-            pr = json.loads(gh(*create_args(repo, args.title, body, args.base, branch)))
+            pr = json.loads(gh(*create_args(repo, args.title, body, args.base, branch, draft=args.draft)))
             print(pr["html_url"])
             github("POST", f"repos/{repo}/issues/{pr['number']}/comments", [("body", "@codex review")])
-            print("Opened ready and requested Codex review. Selected CI runs beside review. "
-                  "Merge requires current-candidate admission and clean Codex evidence; "
+            if args.draft:
+                print("Opened draft and requested Codex review. "
+                      "Run `open_pr.py ready` after Codex review is clean to start the full selected suite.")
+            else:
+                print("Opened ready and requested Codex review. Selected CI runs beside review.")
+            print("Merge requires current-candidate admission and clean Codex evidence; "
                   "request review again when a semantic change invalidates it.")
             return 0
         owner = repo.split("/")[0]

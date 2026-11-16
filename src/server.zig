@@ -4780,9 +4780,9 @@ test "a stop signal handler racing detach never writes to the closed or a reused
     }
 }
 
-// Captured against 8de679d8 before the answer-path refactor. The oracle includes
-// exact producer bytes and decoder outcomes; it deliberately preserves decoder
-// quirks for slice 3 rather than deriving expectations from command_spec.
+// Captured against 5472ccf5 before the decoder refactor. This oracle checks
+// exact producer bytes and complete typed outcomes for matching/mismatched
+// bindings. ReplyDomainWitness independently freezes individual field edits.
 const MutationWitness = struct {
     const reply = @import("protocol_reply.zig");
     const session = "k7m2qx";
@@ -4899,36 +4899,6 @@ const MutationWitness = struct {
         .{ .path = &.{ "answer", "action_selection", "kind" }, .value = "\"final\"" },
         .{ .path = &.{ "answer", "action_selection", "position" }, .value = "\"29\"" },
     };
-
-    fn fieldEdits(hash: *Hash, body: []const u8, status: u16, binding: reply.MutationTarget) !void {
-        for (fields) |field| {
-            for (0..3) |edit| { // well-typed insertion/replacement, omission, explicit null
-                var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
-                defer parsed.deinit();
-                const allocator = parsed.arena.allocator();
-                var object = &parsed.value;
-                for (field.path[0 .. field.path.len - 1]) |part| {
-                    if (object.object.getPtr(part) == null) try object.object.put(allocator, part, .{ .object = .empty });
-                    object = object.object.getPtr(part).?;
-                }
-                const name = field.path[field.path.len - 1];
-                switch (edit) {
-                    0 => {
-                        const value = try std.json.parseFromSlice(std.json.Value, allocator, field.value, .{ .allocate = .alloc_always });
-                        // Both parse trees belong to this iteration's arena.
-                        try object.object.put(allocator, name, value.value);
-                    },
-                    1 => {
-                        _ = object.object.orderedRemove(name);
-                    },
-                    2 => try object.object.put(allocator, name, .null),
-                    else => unreachable,
-                }
-                const encoded = try std.json.Stringify.valueAlloc(allocator, parsed.value, .{});
-                try observe(hash, encoded, status, session, binding);
-            }
-        }
-    }
 };
 
 test "mutation decoder preserves base bytes and the entire command domain" {
@@ -4965,7 +4935,6 @@ test "mutation decoder preserves base bytes and the entire command domain" {
                         try MutationWitness.observe(&hash, response.slice(), status, if (wrong_session) "p9q8rs" else MutationWitness.session, MutationWitness.target(kind, wrong_target));
                     }
                 }
-                try MutationWitness.fieldEdits(&hash, response.slice(), status, MutationWitness.target(kind, false));
             }
         }
         // Other renderer branches: skills reload, idle stop, restored/unpinned
@@ -4989,7 +4958,6 @@ test "mutation decoder preserves base bytes and the entire command domain" {
         if (kind == .session_archive) binding.session_archive.archived = false;
         if (kind == .session_pin) binding.session_pin.pinned = true;
         try MutationWitness.observe(&hash, response.slice(), 200, MutationWitness.session, binding);
-        try MutationWitness.fieldEdits(&hash, response.slice(), 200, binding);
         if (kind == .configure or kind == .message) {
             var initial = accepted;
             if (kind == .configure) initial.accepted.created = true;
@@ -5000,14 +4968,14 @@ test "mutation decoder preserves base bytes and the entire command domain" {
             try MutationWitness.observe(&hash, response.slice(), 200, "", binding);
         }
         const expected = switch (kind) {
-            .configure => "f62ea80918db530c511f7f786218d5ab870e92ed70634e3ca96eb6ca613179f1",
-            .message => "34b26025c8b6daee6e9093cb8138717706434db8944492bed0f172a99deee1c8",
-            .session_stop => "e165b8a39834414a8e6ffaf2c461daaa528676edab1ada9333b93b7d81a844b1",
-            .session_archive => "2ac7c6d76067b3c6a836dc2cf7c589109bcf8db7ae8562a331c3f08aa1dd1f29",
-            .model_interruption => "4840955b2efb17b48bf59f6d4baa1ad889f8fcbbdc76dc5128d7ba8558aa2595",
-            .permission_decision => "b07cea38b11de2b48a6ee7563b7e1afebcbff75ef59ef108a33c1c200f286e59",
-            .session_pin => "45f781e2392618f227ead113ab6ec9024f4b1fb3efb9188d2ffa3145581d4ade",
-            .action_background => "09fa2c5d4ef75b9f2b493c538c7d46a2101fed3f699dc33e8745a613c68d7010",
+            .configure => "adca102951c1f18dc2ce00f9b558a24b2beaaec0c3e2e863316f44a6efb03321",
+            .message => "3be943056ed34a9f484210e35c3aed5397a28a4fd2f52536d9bab4333101b562",
+            .session_stop => "a98107ee7efe29d5c2480097568daa514649c76e9c7c1cc740ed5fbc697cbc90",
+            .session_archive => "91da63974ced68e1596b479409b543ae90ec8161c1612840b3e26a0eca02acb3",
+            .model_interruption => "54ed6236f058bb77a9b8039bb9a2bc144a5066bf742084c9ceb7ff7e73f890e1",
+            .permission_decision => "f66bb4623f2b0d67ae3ddafb8ead166b83daf53877ab965918108eceac49a3e8",
+            .session_pin => "aa74b927c4314f8576e070e3c2cff253fa4c6aeb1de6a93410f535fd255d1230",
+            .action_background => "36da16c3d5ecd7bb88bdb3612c921f3dfc3eb2114fa974f9274e957356061b7f",
         };
         const actual = std.fmt.bytesToHex(hash.finalResult(), .lower);
         std.testing.expectEqualStrings(expected, &actual) catch |err| {
@@ -5110,4 +5078,267 @@ test "every accepted control publishes exactly one hint before reply handling" {
         }
     }
     try std.testing.expectEqual(@as(u16, 0xfc), covered);
+}
+
+// Each symbol below is captured by the old decoders at 5472ccf5, independently
+// of command_spec's field tables. Keep the baseline artifact frozen; accepted
+// behavior changes are explicit exceptions in the comparison below.
+// Rows: label, then unedited outcome and set/remove/null for each listed field.
+// a/A = accepted, r/R = rejected (uppercase = replayed), c = conflict,
+// f = CanonicalStoreFailure, h = HostInvocationFailed, i = InvalidResponse,
+// o = InvalidObservation, b = RequestBindingMismatch, x = absent.
+// Captured with: zb zig build -j1 test -Dtest-filter="reply decoder frozen field domain"
+// in an isolated git archive of 5472ccf5; 102 rows cover 11,856 outcomes.
+const ReplyDomainWitness = struct {
+    const reply = @import("protocol_reply.zig");
+    const fixture = @embedFile("fixtures/command-reply-domain.txt");
+    const Field = MutationWitness.Field;
+    const observation_fields = [_]Field{
+        .{ .path = &.{"version"}, .value = "\"" ++ protocol.wire_version ++ "\"" },
+        .{ .path = &.{"type"}, .value = "\"command_observation\"" },
+        .{ .path = &.{"key"}, .value = "\"k\"" },
+        .{ .path = &.{"delta"}, .value = "\"full\"" },
+        .{ .path = &.{"since"}, .value = "null" },
+        .{ .path = &.{"observation"}, .value = "{\"status\":\"absent\"}" },
+        .{ .path = &.{ "observation", "status" }, .value = "\"accepted\"" },
+        .{ .path = &.{ "observation", "kind" }, .value = "\"configure\"" },
+        .{ .path = &.{ "observation", "target" }, .value = "\"k7m2qx\"" },
+        .{ .path = &.{ "observation", "code" }, .value = "\"unknown_session\"" },
+        .{ .path = &.{ "observation", "revision" }, .value = "\"31\"" },
+        .{ .path = &.{ "observation", "created" }, .value = "true" },
+        .{ .path = &.{ "observation", "input" }, .value = "{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}" },
+        .{ .path = &.{ "observation", "state" }, .value = "\"queued\"" },
+        .{ .path = &.{ "observation", "queue" }, .value = "{\"admission\":\"23\",\"admitted_at\":\"1762329000\"}" },
+        .{ .path = &.{ "observation", "binding" }, .value = "{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"}" },
+        .{ .path = &.{ "observation", "result" }, .value = "{\"status\":\"cancelled\",\"code\":\"cancelled\"}" },
+        .{ .path = &.{ "observation", "work" }, .value = "{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null}" },
+        .{ .path = &.{ "observation", "recovery" }, .value = "{\"unknown_outcomes\":[],\"more\":false}" },
+        .{ .path = &.{ "observation", "selection" }, .value = "{\"turn\":null,\"admission_cutoff\":\"0\"}" },
+        .{ .path = &.{ "observation", "archived" }, .value = "false" },
+        .{ .path = &.{ "observation", "pinned" }, .value = "false" },
+        .{ .path = &.{ "observation", "completion" }, .value = "{\"status\":\"completed\"}" },
+        .{ .path = &.{ "observation", "interruption_target" }, .value = "{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"7\"}" },
+        .{ .path = &.{ "observation", "permission_target" }, .value = "{\"action\":\"29\",\"decision\":\"allow_once\"}" },
+        .{ .path = &.{ "observation", "action_target" }, .value = "{\"action\":\"29\"}" },
+        .{ .path = &.{ "observation", "action_selection" }, .value = "{\"kind\":\"background\",\"position\":\"31\"}" },
+    };
+
+    const message_fields = observation_fields ++ [_]Field{
+        .{ .path = &.{ "observation", "work", "state" }, .value = "{\"kind\":\"approval\",\"since\":\"1762329010\"}" },
+        .{ .path = &.{ "observation", "work", "state", "kind" }, .value = "\"approval\"" },
+        .{ .path = &.{ "observation", "work", "state", "since" }, .value = "\"1762329010\"" },
+        .{ .path = &.{ "observation", "work", "state", "call" }, .value = "\"0\"" },
+        .{ .path = &.{ "observation", "work", "state", "description" }, .value = "\"Run tests\"" },
+        .{ .path = &.{ "observation", "work", "state", "running" }, .value = "\"1\"" },
+        .{ .path = &.{ "observation", "work", "state", "approvals" }, .value = "\"1\"" },
+        .{ .path = &.{ "observation", "work", "state", "future" }, .value = "{\"items\":[true,null,17]}" },
+        .{ .path = &.{ "observation", "work", "first_action" }, .value = "\"57\"" },
+        .{ .path = &.{ "observation", "work", "future" }, .value = "{\"items\":[true,null,17]}" },
+        .{ .path = &.{ "observation", "recovery", "unknown_outcomes" }, .value = "[{\"action\":\"57\",\"operation\":\"39\",\"call\":\"0\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"}]" },
+        .{ .path = &.{ "observation", "recovery", "more" }, .value = "true" },
+        .{ .path = &.{ "observation", "binding", "turn" }, .value = "\"37\"" },
+        .{ .path = &.{ "observation", "binding", "operation" }, .value = "\"41\"" },
+        .{ .path = &.{ "observation", "binding", "attempt" }, .value = "\"0\"" },
+        .{ .path = &.{ "observation", "result", "status" }, .value = "\"cancelled\"" },
+        .{ .path = &.{ "observation", "result", "code" }, .value = "\"cancelled\"" },
+        .{ .path = &.{ "observation", "result", "text" }, .value = "{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}" },
+    };
+    const message_edges = [_]struct { name: []const u8, fields: []const u8 }{
+        .{ .name = "waiting-bound", .fields = ",\"state\":\"waiting_for_permission\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
+        .{ .name = "waiting-unbound", .fields = ",\"state\":\"waiting_for_permission\",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
+        .{ .name = "waiting-wrong-work", .fields = ",\"state\":\"waiting_for_permission\",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
+        .{ .name = "waiting-no-action", .fields = ",\"state\":\"waiting_for_permission\",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":null}" },
+        .{ .name = "queued-approval", .fields = ",\"state\":\"queued\",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
+        .{ .name = "processing-approval", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
+        .{ .name = "processing-bash", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1762329010\",\"call\":\"0\",\"description\":\"Run tests\",\"running\":\"1\",\"approvals\":\"1\"},\"first_action\":\"57\"}" },
+        .{ .name = "queued-bash", .fields = ",\"state\":\"queued\",\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1762329010\",\"call\":\"0\",\"description\":\"Run tests\",\"running\":\"1\",\"approvals\":\"0\"},\"first_action\":null}" },
+        .{ .name = "processing-working", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null}" },
+        .{ .name = "queued-pending", .fields = ",\"state\":\"queued\",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1762329010\"},\"first_action\":null}" },
+        .{ .name = "processing-unknown-state-field", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\",\"future\":{\"numbers\":[true,null,17]}},\"first_action\":null}" },
+        .{ .name = "processing-unknown-work-field", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null,\"future\":{\"values\":[1,null,false]}}" },
+        .{ .name = "processing-bad-bash", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1762329010\",\"call\":\"0\",\"description\":\"Run tests\",\"running\":\"0\",\"approvals\":\"1\"},\"first_action\":null}" },
+        .{ .name = "processing-recovery", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null},\"recovery\":{\"unknown_outcomes\":[{\"action\":\"57\",\"operation\":\"39\",\"call\":\"0\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"}],\"more\":false}" },
+        .{ .name = "completed-recovery", .fields = ",\"state\":\"completed\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}},\"recovery\":{\"unknown_outcomes\":[{\"action\":\"57\",\"operation\":\"39\",\"call\":\"0\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"}],\"more\":false}" },
+        .{ .name = "failed", .fields = ",\"state\":\"failed\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\"}" },
+        .{ .name = "cancelled-unbound", .fields = ",\"state\":\"cancelled\",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}" },
+        .{ .name = "empty-recovery", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null},\"recovery\":{\"unknown_outcomes\":[],\"more\":false}" },
+        .{ .name = "short-more-recovery", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null},\"recovery\":{\"unknown_outcomes\":[{\"action\":\"57\",\"operation\":\"39\",\"call\":\"0\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"}],\"more\":true}" },
+        .{ .name = "duplicate-recovery", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null},\"recovery\":{\"unknown_outcomes\":[{\"action\":\"57\",\"operation\":\"39\",\"call\":\"0\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"},{\"action\":\"57\",\"operation\":\"39\",\"call\":\"0\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"}],\"more\":false}" },
+        .{ .name = "unbound-recovery", .fields = ",\"state\":\"queued\",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null},\"recovery\":{\"unknown_outcomes\":[{\"action\":\"57\",\"operation\":\"39\",\"call\":\"0\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"}],\"more\":false}" },
+        .{ .name = "full-recovery", .fields = ",\"state\":\"processing\",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null},\"recovery\":{\"unknown_outcomes\":[{\"action\":\"57\",\"operation\":\"39\",\"call\":\"0\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"},{\"action\":\"56\",\"operation\":\"39\",\"call\":\"1\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"},{\"action\":\"55\",\"operation\":\"39\",\"call\":\"2\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"},{\"action\":\"54\",\"operation\":\"39\",\"call\":\"3\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"}],\"more\":true}" },
+    };
+
+    fn failure(err: anyerror) u8 {
+        return switch (err) {
+            error.InvalidResponse => 'i',
+            error.InvalidObservation => 'o',
+            error.RequestBindingMismatch => 'b',
+            error.CanonicalStoreFailure => 'f',
+            error.HostInvocationFailed => 'h',
+            else => std.debug.panic("unrecorded domain error: {s}", .{@errorName(err)}),
+        };
+    }
+
+    fn mutation(body: []const u8, status: u16, binding: reply.MutationTarget) u8 {
+        const decoded = reply.decodeMutationReply(.{ .status = status, .body = body }, MutationWitness.session, binding);
+        const answer = decoded.answer catch |err| return failure(err);
+        return switch (answer.result) {
+            .accepted => if (answer.replayed) 'A' else 'a',
+            .rejected => if (answer.replayed) 'R' else 'r',
+            .conflict => 'c',
+        };
+    }
+
+    fn observation(body: []const u8) u8 {
+        const observed = reply.CommandObservation.parse(.{ .status = 200, .body = body }, "k") catch |err| return failure(err);
+        return switch (observed.status) {
+            .accepted => 'a',
+            .rejected => 'r',
+            .absent => 'x',
+        };
+    }
+
+    fn editField(parsed: *std.json.Parsed(std.json.Value), field: Field, edit: usize) ![]const u8 {
+        const allocator = parsed.arena.allocator();
+        var object = &parsed.value;
+        for (field.path[0 .. field.path.len - 1]) |part| {
+            if (object.object.getPtr(part) == null) try object.object.put(allocator, part, .{ .object = .empty });
+            object = object.object.getPtr(part).?;
+            if (object.* != .object) object.* = .{ .object = .empty };
+        }
+        const name = field.path[field.path.len - 1];
+        switch (edit) {
+            0 => {
+                const value = try std.json.parseFromSlice(std.json.Value, allocator, field.value, .{ .allocate = .alloc_always });
+                try object.object.put(allocator, name, value.value);
+            },
+            1 => _ = object.object.orderedRemove(name),
+            2 => try object.object.put(allocator, name, .null),
+            else => unreachable,
+        }
+        return std.json.Stringify.valueAlloc(allocator, parsed.value, .{});
+    }
+
+    fn check(lines: *std.mem.SplitIterator(u8, .scalar), label: []const u8, actual: []const u8, fields: []const Field, tighten_pinned: bool) !void {
+        const line = lines.next() orelse return error.MissingDomainBaseline;
+        const split = std.mem.indexOfScalar(u8, line, ' ') orelse return error.InvalidDomainBaseline;
+        try std.testing.expectEqualStrings(label, line[0..split]);
+        const expected = line[split + 1 ..];
+        try std.testing.expectEqual(expected.len, actual.len);
+        for (expected, actual, 0..) |base, got, index| {
+            const field = if (index == 0) null else fields[(index - 1) / 3];
+            const edit = if (index == 0) 0 else (index - 1) % 3;
+            // Slice 3 intentionally closes the old session_pin rejection/conflict
+            // hole: a present pinned value is accepted-only, even for its owner.
+            const want: u8 = if (tighten_pinned and field != null and edit == 0 and
+                std.mem.eql(u8, field.?.path[field.?.path.len - 1], "pinned")) 'i' else base;
+            if (want != got) {
+                std.debug.print("domain {s}: field {any}, edit {s}: base={c}, expected={c}, actual={c}\n", .{
+                    label, if (field) |value| value.path else @as([]const []const u8, &.{"<unedited>"}),
+                    @as([]const u8, switch (edit) {
+                        0 => "set",
+                        1 => "remove",
+                        2 => "null",
+                        else => unreachable,
+                    }),
+                    base,  want,
+                    got,
+                });
+                return error.ReplyDomainChanged;
+            }
+        }
+    }
+
+    fn run() !void {
+        @setEvalBranchQuota(20_000);
+        var lines = std.mem.splitScalar(u8, fixture, '\n');
+        inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
+            const render = host_reply.renderMutationReply(kind);
+            const Result = @typeInfo(@TypeOf(render)).@"fn".param_types[2].?;
+            const rejected: Result = if (kind == .message)
+                .{ .rejected = .{ .replayed = false, .code = .unknown_session, .content = MutationWitness.content } }
+            else
+                .{ .rejected = .{ .replayed = false, .code = .invalid_session_reference } };
+            for ([_]Result{ MutationWitness.accepted(kind), rejected, .conflict, .infrastructure_failure }) |initial| {
+                for ([_]bool{ false, true }) |replayed| {
+                    var result = initial;
+                    switch (result) {
+                        .accepted => |*value| value.replayed = replayed,
+                        .rejected => |*value| value.replayed = replayed,
+                        else => {},
+                    }
+                    var response: protocol.ResponseBuffer = .{};
+                    try response.render(render, .{ MutationWitness.subject(kind), result });
+                    const status: u16 = switch (result) {
+                        .accepted, .rejected => 200,
+                        .conflict => 409,
+                        .infrastructure_failure => 500,
+                    };
+                    var actual: [1 + MutationWitness.fields.len * 3]u8 = undefined;
+                    actual[0] = mutation(response.slice(), status, MutationWitness.target(kind, false));
+                    for (MutationWitness.fields, 0..) |field, index| {
+                        for (0..3) |edit| {
+                            var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, response.slice(), .{});
+                            defer parsed.deinit();
+                            actual[1 + index * 3 + edit] = mutation(try editField(&parsed, field, edit), status, MutationWitness.target(kind, false));
+                        }
+                    }
+                    var label_buffer: [128]u8 = undefined;
+                    const label = try std.fmt.bufPrint(&label_buffer, "mutation/{s}/{s}/{d}", .{ @tagName(kind), @tagName(result), @intFromBool(replayed) });
+                    try check(&lines, label, &actual, &MutationWitness.fields, kind == .session_pin and (result == .rejected or result == .conflict));
+                }
+            }
+            inline for (.{ false, true }) |accepted| {
+                const fields = if (accepted) switch (kind) {
+                    .configure => ",\"revision\":\"31\",\"created\":true",
+                    .message => ",\"state\":\"queued\",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"queue\":{\"admission\":\"23\",\"admitted_at\":\"1762329000\"},\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null}",
+                    .session_stop => ",\"selection\":{\"turn\":null,\"admission_cutoff\":\"0\"},\"completion\":{\"status\":\"completed\"}",
+                    .session_archive => ",\"archived\":false,\"completion\":{\"status\":\"completed\"}",
+                    .session_pin => ",\"pinned\":false",
+                    .model_interruption => ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"7\"}",
+                    .permission_decision => ",\"permission_target\":{\"action\":\"29\",\"decision\":\"allow_once\"}",
+                    .action_background => ",\"action_target\":{\"action\":\"29\"},\"action_selection\":{\"kind\":\"background\",\"position\":\"31\"}",
+                } else switch (kind) {
+                    .message => ",\"state\":\"rejected\"",
+                    .model_interruption => ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"0\",\"operation\":\"0\"}",
+                    .permission_decision => ",\"permission_target\":{\"action\":\"0\",\"decision\":\"deny\"}",
+                    .action_background => ",\"action_target\":{\"action\":\"29\"}",
+                    else => "",
+                };
+                const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{\"kind\":\"" ++ @tagName(kind) ++ "\",\"target\":\"k7m2qx\",\"status\":\"" ++ (if (accepted) "accepted\"" else "rejected\",\"code\":\"unknown_session\"") ++ fields ++ "}}";
+                var actual: [1 + observation_fields.len * 3]u8 = undefined;
+                actual[0] = observation(body);
+                for (observation_fields, 0..) |field, index| {
+                    for (0..3) |edit| {
+                        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+                        defer parsed.deinit();
+                        actual[1 + index * 3 + edit] = observation(try editField(&parsed, field, edit));
+                    }
+                }
+                try check(&lines, "observation/" ++ @tagName(kind) ++ "/" ++ (if (accepted) "accepted" else "rejected"), &actual, &observation_fields, false);
+            }
+        }
+        for (message_edges) |edge| {
+            const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"k7m2qx\",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"queue\":{\"admission\":\"23\",\"admitted_at\":\"1762329000\"}";
+            const body = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, edge.fields, "}}" });
+            defer std.testing.allocator.free(body);
+            var actual: [1 + message_fields.len * 3]u8 = undefined;
+            actual[0] = observation(body);
+            for (message_fields, 0..) |field, index| {
+                for (0..3) |edit| {
+                    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+                    defer parsed.deinit();
+                    actual[1 + index * 3 + edit] = observation(try editField(&parsed, field, edit));
+                }
+            }
+            const label = try std.mem.concat(std.testing.allocator, u8, &.{ "message/", edge.name });
+            defer std.testing.allocator.free(label);
+            try check(&lines, label, &actual, &message_fields, false);
+        }
+        try std.testing.expectEqualStrings("", lines.rest());
+    }
+};
+
+test "reply decoder frozen field domain from 5472ccf5" {
+    try ReplyDomainWitness.run();
 }
