@@ -4278,6 +4278,8 @@
           "keys": [
             "Left",
             "Home",
+            "Down",
+            "Down",
             "Down"
           ]
         },
@@ -4322,6 +4324,7 @@
           "keys": [
             "Left",
             "Home",
+            "Down",
             "Down",
             "Down"
           ]
