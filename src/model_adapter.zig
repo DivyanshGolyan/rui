@@ -4719,6 +4719,65 @@ test "find_tools declares a found tool on the next request without losing the me
     try @import("read_transcript.zig").run(&setup.storage, arena.allocator(), &read, .{});
 }
 
+test "read_action uses the frozen configured offer and returns one provider tool output" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("read-action-codec");
+    var configure: wire_request.ConfigureCommand = .{};
+    configure.session = session;
+    try configure.key.set("read-action-offer");
+    configure.configuration.tools = try .of(&.{"read_action"});
+    try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
+    try setup.submit("read-action-input", "read-action-input", session.slice(), "read your Action");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    const first = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(first.bytes);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const request = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), first.bytes, .{});
+    const declaration = request.object.get("input").?.array.items[1].object;
+    try std.testing.expectEqualStrings("additional_tools", declaration.get("type").?.string);
+    const definitions = declaration.get("tools").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), definitions.len);
+    try std.testing.expectEqualStrings("read_action", definitions[0].object.get("name").?.string);
+    try std.testing.expectEqual(@as(usize, 0), request.object.get("tools").?.array.items.len);
+    try configure.key.set("withdraw-read-action");
+    configure.configuration.tools = try .of(&.{});
+    try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
+    try settleItemsForTesting(&setup, binding, "read-action-call", &.{
+        "{\"type\":\"function_call\",\"id\":\"read-item\",\"call_id\":\"read-call\",\"name\":\"read_action\",\"arguments\":\"{\\\"action\\\":\\\"1\\\"}\"}",
+    });
+    const read = (try setup.storage.nextCoreWork(.{ .free_credit = .none, .mcp_open = false })).?.action;
+    try std.testing.expect(read.tool == .read_action);
+    try @import("read_action_tool.zig").run(&setup.storage, arena.allocator(), &read, .{});
+    admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    binding = try admitted.permit.consume();
+    const next = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(next.bytes);
+    const successor = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), next.bytes, .{});
+    try std.testing.expectEqual(@as(usize, 0), successor.object.get("tools").?.array.items.len);
+    var outputs: usize = 0;
+    for (successor.object.get("input").?.array.items) |item| {
+        const kind = item.object.get("type") orelse continue;
+        if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
+        try std.testing.expectEqualStrings("read-call", item.object.get("call_id").?.string);
+        const output = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), item.object.get("output").?.string, .{});
+        try std.testing.expectEqualStrings(session.slice(), output.object.get("session").?.string);
+        try std.testing.expectEqualStrings("1", output.object.get("action").?.string);
+        try std.testing.expectEqualStrings("queued", output.object.get("state").?.string);
+        try std.testing.expect(output.object.get("final").? == .null);
+        outputs += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), outputs);
+    try settleItemsForTesting(&setup, binding, "read-action-unoffered", &.{
+        "{\"type\":\"function_call\",\"id\":\"excluded-item\",\"call_id\":\"excluded-call\",\"name\":\"read_action\",\"arguments\":\"{}\"}",
+    });
+    try std.testing.expect(try setup.storage.nextCoreWork(.{ .free_credit = .none, .mcp_open = false }) == null);
+    try std.testing.expectEqual(@as(u64, 1), try store.testing.sqlite_only.queryU64(&setup.storage, "SELECT count(*) FROM model_tool_call WHERE operation_id=?1 AND rejection_code='unknown_tool'", .{binding.operation_id}));
+}
+
 test "a full rebuild must begin with the Session's prefix seal" {
     var setup: PreparationTestSetup = undefined;
     try setup.init();

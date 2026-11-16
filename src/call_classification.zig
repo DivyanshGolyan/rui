@@ -27,6 +27,7 @@ pub const Call = union(Tool) {
     /// The core checks its arguments when it runs the call.
     find_tools,
     message_agent: *const core_tools.MessageAgentArguments,
+    read_action,
     read_transcript: ?Bounded(session_id.bytes),
     skill,
     start_agent,
@@ -60,6 +61,11 @@ pub fn describe(call: Call) Description {
         .find_tools => blk: {
             var out: Description = .{};
             out.set("Find tools") catch unreachable;
+            break :blk out;
+        },
+        .read_action => blk: {
+            var out: Description = .{};
+            out.set("Read an Action") catch unreachable;
             break :blk out;
         },
         .read_transcript => |id| blk: {
@@ -246,7 +252,10 @@ pub const CallFacts = struct {
         if (self.find_tools) return describe(.find_tools);
         if (self.skill) return describe(.skill);
         if (self.read_transcript) return describe(.{ .read_transcript = self.transcript_id });
-        if (self.tool) |*selected| if (selected.runner() == .core and std.mem.eql(u8, selected.name, start_agent_record.name)) return describe(.start_agent);
+        if (self.tool) |*selected| if (selected.runner() == .core) {
+            if (std.mem.eql(u8, selected.name, "read_action")) return describe(.read_action);
+            if (std.mem.eql(u8, selected.name, start_agent_record.name)) return describe(.start_agent);
+        };
         return null;
     }
 };
