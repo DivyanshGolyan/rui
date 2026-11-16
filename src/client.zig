@@ -5620,7 +5620,9 @@ test "capture routing round trips six placements without conflating selector and
             future = try io.concurrent(Peer.serve, .{ &listener.?, paths.store_identity.slice() });
         }
         defer if (listener) |*server| server.deinit(io);
-        defer if (future) |*pending| _ = pending.cancel(io) catch {};
+        defer if (future) |*pending| {
+            _ = pending.cancel(io) catch {};
+        };
         var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
         var key_buffer: [36]u8 = undefined;
         const location = try (CaptureTarget{ .generated = root }).resolve(io, &path_buffer, &key_buffer);
