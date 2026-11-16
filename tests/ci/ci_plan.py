@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from docs_only import ChangeKind
 from qualification import shards, split_build
-from select_tests import CHECK_COVERS, live_mysql_suites
+from select_tests import live_mysql_suites, normalize
 
 
 @dataclass(frozen=True)
@@ -48,9 +48,9 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
         quarantine = 'off'
     elif promotion:
         core = {'check-full', 'test-logic', 'admission-debug-integration'}
-        p['targets'] = sorted((set(p['targets']) - CHECK_COVERS - {'check'}) | core | {'stack-frames'})
+        p['targets'] = sorted(normalize(set(p['targets']) | core) | {'stack-frames'})
         p['targets'] = sorted(set(p['targets']) | live_mysql_suites(p['targets'], p['mysql_suites']))
-        p['native_targets'] = sorted((set(p['native_targets']) - CHECK_COVERS - {'check'}) | core)
+        p['native_targets'] = sorted(normalize(set(p['native_targets']) | core))
         p['retry'] = False
     elif ready_pr:
         p['native_targets'] = (p['native_targets'] or ['check']) if p['mac_required'] else []
