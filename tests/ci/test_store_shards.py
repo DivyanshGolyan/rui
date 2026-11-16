@@ -216,6 +216,20 @@ class LauncherTest(unittest.TestCase):
                         self.assertIn("test-store", rerun.command)
                         self.assertIn(f"-Dtest-filter={test}", rerun.command)
 
+    def test_every_recorded_store_name_survives_each_failure_envelope(self):
+        import report_issue
+        names = json.loads((ROOT / "tests/ci/store_test_times.json").read_text())
+        for name in names:
+            for how in ("failed (TestUnexpectedResult)", "terminated with signal SIGABRT",
+                        "failed (ProcessTimeout)", "failed (TestTimeout)"):
+                with self.subTest(name=name, how=how):
+                    result = shards.Result("Store shard 1/4", 1, 0, [], "diagnostic",
+                                           ["/tmp/unit-store-tests"], [(name, how)])
+                    [cause] = report_issue.failure_causes(self.failure_log(result), {})
+                    self.assertEqual(cause.zig_test, name)
+                    self.assertEqual(cause.zig_binary, "unit-store-tests")
+                    self.assertEqual(cause.signature, f"zig test '{name}' {how}")
+
     def test_completed_failures_and_active_crash_keep_separate_binary_envelopes(self):
         import report_issue
         first = "store.tests.activity.test.first failure"
