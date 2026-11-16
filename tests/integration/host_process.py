@@ -98,7 +98,7 @@ OBSERVATION_LIMITS = {"list": 2 * (102 + 42), "status": 3 * (12 + 40 + 20) + 2 +
                       "bash_cleanup": 6 * 3 + 3 * 321 + 601 + 201 + 6,
                       "bash_pipes": 1 + 2,
                       "request_wait": 64}
-OBSERVATION_STATE_BYTES = 5 * 8  
+OBSERVATION_STATE_BYTES = 5 * 8
 OBSERVATION_SEALED = 1 << 63
 OBSERVATION_FIELDS = {
     0: "rui_test_phase",
@@ -206,7 +206,7 @@ class _Observations:
         pending = bytearray()
         try:
             while chunk := os.read(self.reader, 512):
-                pending.extend(chunk)  
+                pending.extend(chunk)
                 while len(pending) >= 2:
                     length = struct.unpack_from("<H", pending)[0]
                     assert 28 <= length <= 512, "invalid observation frame length"
@@ -336,7 +336,7 @@ class _Observations:
             destination = getattr(self.process, "rui_failure_destination", None)
             if destination is None:
                 destination = _failure_destination(os.environ.get("RUI_FAILURE_ARTIFACTS"))
-            copy_failure_diagnostics(root, destination)  
+            copy_failure_diagnostics(root, destination)
             print(f"bounded fixture failure destination: {destination}", file=sys.stderr, flush=True)
         except Exception as error:
             try:
@@ -347,7 +347,7 @@ class _Observations:
             try:
                 print(f"retained native observation failure state: {root}", file=sys.stderr, flush=True)
             except Exception:
-                pass  
+                pass
 
 
 def preserve_failure_metadata(path, collect):
@@ -363,7 +363,7 @@ def preserve_failure_metadata(path, collect):
             print(f"Fixture failure metadata unavailable: {type(error).__name__}", file=sys.stderr, flush=True)
         except Exception:
             pass
-        return False  
+        return False
 
 
 def _owned(path, pattern, name):
@@ -439,7 +439,7 @@ def copy_failure_diagnostics(state, destination):
             if target is None:
                 target = _reserve_slot(destination)
                 if target is None:
-                    return  
+                    return
             output = target / source.relative_to(state)
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_bytes(data)
@@ -816,7 +816,7 @@ class HostDiagnostics:
         self._read_error = None
         self.thread = threading.Thread(target=self._read, daemon=True)
         self.thread.start()
-        process.rui_diagnostics = self  
+        process.rui_diagnostics = self
 
     @property
     def read_error(self):
@@ -828,7 +828,7 @@ class HostDiagnostics:
                 while chunk := self.process.stderr.read1(4096):
                     with self.condition:
                         _tail(self.stderr_tail, chunk, STDERR_TAIL_LIMIT)
-                return  
+                return
             for raw_line in self.process.stderr:
                 with self.condition:
                     _tail(self.stderr_tail, raw_line, STDERR_TAIL_LIMIT)
@@ -942,7 +942,7 @@ class HostDiagnostics:
             try:
                 print(f"Fixture boundary snapshot unavailable: {type(error).__name__}", file=sys.stderr, flush=True)
             except Exception:
-                pass  
+                pass
 
     def dispose_interrupt(self, collect, *, controls=()):
         incoming_error = sys.exc_info()[1]
@@ -1127,7 +1127,7 @@ def dispose_all(*disposals):
             try:
                 primary.add_note(f"Fixture disposal {index} failed: {cleanup_failure(error)}")
             except BaseException:
-                pass  
+                pass
         if incoming_error is None:
             raise primary
 
@@ -1148,12 +1148,12 @@ def stop_process(process, timeout=10, *, seal_observations=True):
         try:
             observations.dispose(deadline - min(1, timeout / 2))
         except BaseException as error:
-            errors.append(error)  
+            errors.append(error)
     if observations is not None:
         try:
             snapshot = getattr(process, "rui_failure_snapshot", None) or observations.snapshot()
         except Exception:
-            pass  
+            pass
     try:
         if process.poll() is None:
             process.kill()
@@ -1181,7 +1181,7 @@ def stop_process(process, timeout=10, *, seal_observations=True):
             try:
                 incoming_error.add_note("Host cleanup failed: " + ", ".join(cleanup_failure(error) for error in errors))
             except BaseException:
-                pass  
+                pass
     finally:
         if (incoming_error is not None or errors) and observations is not None:
             observations.preserve_failure(snapshot)
@@ -1234,7 +1234,7 @@ def start_ready_process(args, *, timeout=10, required_fields=None, env=None, std
     try:
         if observations is not None:
             assert observations in OBSERVATION_LIMITS
-            _observation_atomics()  
+            _observation_atomics()
             reader, writer = os.pipe()
             os.set_blocking(writer, False)
             assert os.fpathconf(writer, "PC_PIPE_BUF") >= 512
@@ -1258,8 +1258,8 @@ def start_ready_process(args, *, timeout=10, required_fields=None, env=None, std
         if observations is not None:
             process.rui_failure_destination = destination
             process.rui_observations = _Observations(process, reader, observations, state)
-            reader = None  
-            state = None  
+            reader = None
+            state = None
     finally:
         if state_file is not None:
             state_file.close()

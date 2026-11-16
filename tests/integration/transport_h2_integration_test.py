@@ -132,7 +132,7 @@ class ShapedWorkTests(unittest.TestCase):
 
         def request(socket_path, store, kind, **fields):
             calls.append(kind)
-            reports.append(kind)  
+            reports.append(kind)
             if kind == "message" and calls.count(kind) == 2:
                 raise RuntimeError("wave 2 failed")
             if kind == "read_result":
@@ -692,7 +692,7 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
 
         def model_list(socket, *args):
             if endpoint.models_release.is_set():
-                requests.append(get.copy())  
+                requests.append(get.copy())
                 if catalog_available:
                     requests.append({b":method": b"GET", b":path": b"/api.json",
                                      b"if-none-match": b'"catalog-v1"', b"accept-encoding": b"identity"})
@@ -788,7 +788,7 @@ class ObservationDeadlineTests(unittest.TestCase):
             for late in (None, *phases):
                 for boundary in (0, 0.1) if late else (0,):
                     with self.subTest(caller=name, late=late, boundary=boundary), tempfile.TemporaryDirectory() as temporary:
-                        clock = [100.0]  
+                        clock = [100.0]
                         observations = [0]
                         released = [name != "isolated_terminal_stream"]
                         start = 100.0
@@ -868,7 +868,7 @@ class ObservationDeadlineTests(unittest.TestCase):
 
                         def drain(inspect, deadline):
                             real_drain(inspect, deadline)
-                            raise Released()  
+                            raise Released()
 
                         diagnostics = SimpleNamespace(observations=SimpleNamespace(plan="transport"),
                             wait=lambda *args, **kwargs: [{}],

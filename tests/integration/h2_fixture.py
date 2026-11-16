@@ -51,8 +51,8 @@ class Endpoint(socketserver.ThreadingTCPServer):
         self.offered_bytes = 0
         self.release = threading.Event() if held else None
         self.held_bytes = 0
-        self.held_prefix_bytes = 0  
-        self.held_prefixes = {}  
+        self.held_prefix_bytes = 0
+        self.held_prefixes = {}
         self.held = threading.Event()
         self.flow_probe = flow_probe
         self.flow_release = threading.Event()
@@ -171,7 +171,7 @@ class StreamHandler(socketserver.BaseRequestHandler):
             except TimeoutError:
                 if not held_bodies and not held_models and not flow_bodies and not isolation_bodies:
                     return
-                data = None  
+                data = None
             except OSError:
                 return
             if data == b"":
@@ -215,7 +215,7 @@ class StreamHandler(socketserver.BaseRequestHandler):
                         release = listing_release(event.stream_id)
                         if release is not None and not release.is_set():
                             held_models.append(event.stream_id)
-                            sock.settimeout(0.05)  
+                            sock.settimeout(0.05)
                         else:
                             answer_models(event.stream_id)
                         continue
@@ -311,7 +311,7 @@ class StreamHandler(socketserver.BaseRequestHandler):
                                 ])
                                 if self.server.flow_probe and text == "flow":
                                     flow_bodies[stream] = payload
-                                    sock.settimeout(0.05)  
+                                    sock.settimeout(0.05)
                                     continue
                                 if self.server.release is not None and not self.server.release.is_set():
                                     sent = min(self.server.held_bytes, len(payload) - 1)
@@ -348,7 +348,7 @@ class StreamHandler(socketserver.BaseRequestHandler):
                             "sibling", "reasoning-sibling", "message-sibling", "unaffected sibling",
                         )
                         isolation_bodies[self.server.stream_ids["isolation-sibling"]] = payload
-                        sock.settimeout(0.05)  
+                        sock.settimeout(0.05)
             for stream, body in list(outgoing_bodies.items()):
                 while body:
                     credit = min(conn.local_flow_control_window(stream), conn.max_outbound_frame_size, len(body))

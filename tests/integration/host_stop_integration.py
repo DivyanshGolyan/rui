@@ -258,7 +258,7 @@ def main():
             assert b"host_instance_required" in finish(missing, body)
             assert instance(store) == target
             detached, _ = request(sock, store, target)
-            detached.close()  
+            detached.close()
             assert instance(store) == target
 
             session = bash_fixture.configure(state, store, "stop-config")
@@ -353,7 +353,7 @@ def main():
             output, errors = inspector.communicate(timeout=5)
             assert inspector.returncode == 0 and json.loads(output)["session"]["reference"] == session, (output, errors)
             inspector = None
-            assert host.wait(timeout=10) != 0  
+            assert host.wait(timeout=10) != 0
             stop_process(host)
             diagnostics = None
             host = None

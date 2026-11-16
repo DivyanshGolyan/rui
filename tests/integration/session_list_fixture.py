@@ -55,7 +55,7 @@ def released_resources(pid, diagnostics, invocation):
                 phase = record["rui_test_phase"]
                 assert isinstance(phase, str), record
                 if phase in ("release_probe_held", "release_probe_leaked"):
-                    continue  
+                    continue
                 assert record.get("process") == str(pid) and record.get("clock") == "awake_ns", record
                 assert isinstance(record.get("trace_lost"), bool), record
                 assert not loss_seen or record["trace_lost"], ("trace loss is not sticky", record)
@@ -71,7 +71,7 @@ def released_resources(pid, diagnostics, invocation):
                 trace_u64(record, "subject")
                 subject = record["subject"]
                 if phase == "connection_resources_released":
-                    trace_u64(record, "scratch_used_bytes")  
+                    trace_u64(record, "scratch_used_bytes")
                 namespace = (record["process"], record["run"], record["subject_kind"], subject)
                 target = releases if phase == "connection_resources_released" else starts
                 assert namespace not in target, ("duplicate exchange milestone", record)
@@ -98,7 +98,7 @@ def released_resources(pid, diagnostics, invocation):
                     assert last_release["scratch_used_bytes"] == "0", ("retained scratch charge", last_release)
                     assert time.monotonic() <= deadline, "release exceeded original command budget"
                     if not os_semantics.PROC_FS:
-                        return None  
+                        return None
                     census = linux_resources(pid)
                     assert census is not None, "Host vanished before resource census"
                     return census

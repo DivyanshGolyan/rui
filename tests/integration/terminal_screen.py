@@ -178,17 +178,17 @@ class ScreenCapture:
         self.grapheme = ctypes.create_string_buffer(64)
         self.columns, self.lines = columns, rows
         self.cells_by_row = [()] * rows
-        self.view = None  
+        self.view = None
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.pending = b""
-        self.text = ""  
+        self.text = ""
         self.completed = ""
         self.completed_cells = []
         self.frame = None
         self.synchronized = False
         self.generation = 0
         self.listener = None
-        self.received_bytes = 0  
+        self.received_bytes = 0
         self.alternate = False
         self.plain = ""
         self.plain_total = 0
@@ -230,7 +230,7 @@ class ScreenCapture:
         def resolved(option):
             rgb = Rgb()
             result = get(self.row_cells, option, ctypes.byref(rgb))
-            assert result in (0, -4), result  
+            assert result in (0, -4), result
             return bytes(rgb).hex() if result == 0 else None
 
         while lib.ghostty_render_state_row_cells_next(self.row_cells):

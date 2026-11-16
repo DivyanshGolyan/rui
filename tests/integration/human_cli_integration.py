@@ -673,7 +673,7 @@ def scroll_until(master, key, marker, *, presses=40):
 
 
 def raw_export(master, screen):
-    columns = terminal_capture(master).screen.columns - 1  
+    columns = terminal_capture(master).screen.columns - 1
     lines = [chat_content_row(line) for line in screen.split("\n")]
     start = next(index for index, line in enumerate(lines) if line.lstrip(" ").startswith("Raw export: "))
     command = lines[start].lstrip(" ").removeprefix("Raw export: ")
@@ -855,7 +855,7 @@ def terminal_bulk(master, command, marker="› ", *, submit=True, draft=None, ca
     fixture.wait_for(lambda: not termios.tcgetattr(master)[3] & termios.ICANON,
         "noncanonical terminal input")
     def send():
-        payload = (command + ("\r" if submit else "")).encode()  
+        payload = (command + ("\r" if submit else "")).encode()
         for offset in range(0, len(payload), 1024):
             os.write(master, payload[offset:offset + 1024])
 
@@ -2956,11 +2956,11 @@ def main(selected="all"):
                     observed = terminal_step(master, "Z", f"edited {index}")
                 elif index == 1:
                     os.write(master, typed.encode())
-                    read_terminal(master, "› A中\u00e9")  
+                    read_terminal(master, "› A中\u00e9")
                     observed = terminal_step(master, "", f"edited {index}")
                 elif typed == "abc\x1b[D\x1b[DZ":
                     os.write(master, b"abc\x1b[")
-                    time.sleep(0.2)  
+                    time.sleep(0.2)
                     observed = terminal_step(master, "D\x1b[DZ", f"edited {index}")
                 else:
                     observed = terminal_step(master, typed, f"edited {index}")
@@ -2990,7 +2990,7 @@ def main(selected="all"):
             read_terminal(master, "a" * 100)
             for _ in range(100):
                 os.write(master, b"\x7f")
-                time.sleep(0.025)  
+                time.sleep(0.025)
             observed = terminal_step(master, "Z", "paced edited")
             assert "\n› Z" in conversation_text(observed), observed
             body = json.loads(endpoint.requests[-1])
@@ -3090,7 +3090,7 @@ def main(selected="all"):
             def hold_observation(response):
                 observation_held.set()
                 assert observation_continue.wait(15), "accepted observation gate was not released"
-                return b""  
+                return b""
 
             def after_admission(response):
                 assert json.loads(response.split(b"\r\n\r\n", 1)[1])["answer"]["status"] == "accepted"

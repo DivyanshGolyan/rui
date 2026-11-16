@@ -779,7 +779,7 @@ time.sleep(30)
 def prove_observation_startup_credit():
     import errno
     import host_process
-    host_process._observation_atomics()  
+    host_process._observation_atomics()
     required = 10 * 3 * 512
     pipe, write, read = os.pipe, os.write, os.read
     for case in ("ready", "write-error", "short-write", "read-error", "short-read", "wrong-bytes", "disabled"):
@@ -944,7 +944,7 @@ def prove_final_observation_state():
                 state = observation_state(process.pid + 1, 2)
             observations = _Observations(process, reader, plan, state)
             os.write(writer, observation_frame(1))
-            os.close(writer)  
+            os.close(writer)
             try:
                 observations.close()
             except AssertionError as error:
@@ -955,7 +955,7 @@ def prove_final_observation_state():
                 assert expected and expected in str(error), (plan, case, error)
             else:
                 assert case == "normal", (plan, case, "terminal channel loss accepted")
-                observations.close()  
+                observations.close()
     print("Host final observation helper: every plan rejects final loss, encoding loss, missing tail, interrupted publication and missing/foreign state with kill status; normal prefix accepted")
 
 
@@ -1079,7 +1079,7 @@ def prove_intentional_crash_retirement():
                     if case.startswith("kill-"):
                         clock[0] += .25
                         raise primary
-                    return  
+                    return
                 if case in ("future-writer", "kill-future-writer"):
                     active = struct.unpack_from("<Q", state, 32)[0]
                     struct.pack_into("<Q", state, 32, active + 1)
@@ -1139,7 +1139,7 @@ def prove_retention_does_not_own_teardown():
             process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)",
                 "--store", str(root / "store")], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 pass_fds=(writer,))
-            os.close(writer)  
+            os.close(writer)
             state = observation_state(process.pid, 0)
             observations = _Observations(process, reader, "status", state)
             process.rui_observations = observations
@@ -1152,7 +1152,7 @@ def prove_retention_does_not_own_teardown():
             original_kill = process.kill
             def kill():
                 if case == "late-loss":
-                    state[24] = 1  
+                    state[24] = 1
                 original_kill()
             original_open = pathlib.Path.open
             def open_path(path, *args, **kwargs):
@@ -1291,7 +1291,7 @@ def prove_bash_cleanup_population():
         if case == "missing":
             values.pop(2)
         elif case == "duplicate":
-            values.append(dict(values[1]))  
+            values.append(dict(values[1]))
         elif case == "wrong-owner":
             values[2]["operation"] = "12"
         elif case == "extra-phase":
@@ -1314,7 +1314,7 @@ def prove_capacity_refusal_oracle(probe):
     module = sys.modules[probe.__module__]
     class ConnectedSocket(socket.socket):
         def connect(self, _path):
-            pass  
+            pass
 
     connection_body = b'{"version":"' + host_process.WIRE_VERSION.encode() + b'","type":"busy","code":"connection_capacity_exhausted"}'
     ordinary_body = b'{"version":"' + host_process.WIRE_VERSION.encode() + b'","type":"busy","code":"ordinary_capacity_exhausted"}'
@@ -1362,7 +1362,7 @@ def prove_capacity_refusal_oracle(probe):
             thread = threading.Thread(target=respond)
             thread.start()
         else:
-            respond()  
+            respond()
         try:
             with patch.object(module.socket, "socket", return_value=client):
                 probe("unused", b"ordinary_capacity_exhausted" if case == "ordinary-complete"

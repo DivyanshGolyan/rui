@@ -226,7 +226,7 @@ def protected_saturation(root):
                     raise
         host.wait(timeout=5)
         stop_process(host)
-        assert host.returncode != 0, diagnostics.tail()  
+        assert host.returncode != 0, diagnostics.tail()
         release = diagnostics.matching("connection_resources_released", subject=pending["subject"])
         assert len(release) == 1 and release[0]["scratch_used_bytes"] == "0", release
         assert release[0]["run"] == pending["run"] and int(release[0]["sequence"]) > int(pending["sequence"]), release

@@ -325,7 +325,7 @@ def main():
             else:
                 subprocess.run([binary, *dialect.pause, "--store", store], check=True, timeout=10)
                 assert seed.wait(timeout=10) != 0
-                stop_detached(dialect, binary, store)  
+                stop_detached(dialect, binary, store)
                 stop_process(seed)
                 seed = None
                 with contextlib.closing(sqlite3.connect((store / "rui.sqlite3").as_uri() + "?mode=ro&immutable=1", uri=True)) as database:
@@ -342,7 +342,7 @@ def main():
             if args.running_host:
                 assert_running_upgrade(dialect, binary, store, seed, ready, previous_status,
                                        release_version(publisher), installer_output)
-                commands = ()  
+                commands = ()
             else:
                 commands = ((("host", "start"),) if supported
                             else (("host", "start"), candidate_cli.serve()))

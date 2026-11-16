@@ -209,7 +209,7 @@ def assert_configure_defaults(root, store, env):
     home = root / "configure-defaults-home"
     home.mkdir(mode=0o700)
     home = home.resolve(strict=True)
-    env = {**env, "HOME": str(home)}  
+    env = {**env, "HOME": str(home)}
 
     def configure(*arguments):
         result = subprocess.run([RUI, "session", "configure", "--store", store, *arguments],
@@ -227,7 +227,7 @@ def assert_configure_defaults(root, store, env):
         return current["model"], current["tools"], current["permission_mode"]
 
     module = (DEFAULTS.recommended_model, DEFAULTS.tools.split(","), DEFAULTS.permission_mode)
-    assert settings(configure()) == module  
+    assert settings(configure()) == module
     addressed = configure("--workspace", root, "--provider", "codex", "--model", "gpt-6-sol")
     assert settings(addressed) == ("gpt-6-sol", *module[1:])
     configure("--session", addressed, "--tools", "none", "--permission-mode", "ask")
@@ -266,7 +266,7 @@ def startup_limits(root, env):
     required = managed_descriptor_rejection(root / "hard-256", env, 256)
     minimum = required - 5 * (INTAKE - 10)
     observed = managed_descriptor_rejection(root / "hard-below-minimum", env, minimum - 1)
-    if observed != required:  
+    if observed != required:
         required, minimum = observed, observed - 5 * (INTAKE - 10)
         assert managed_descriptor_rejection(root / "hard-below-minimum-again", env, minimum - 1) == required
     print(f"default capacity refused below {minimum} descriptors (default intake needs {required})", flush=True)
@@ -707,7 +707,7 @@ def saved_settings(root, env):
     assert shown.returncode == 0, shown
     effective = json.loads(shown.stdout)
     assert effective["tools"]["bash"]["timeoutMs"] == 1234 and effective["execution"]["paused"] is True, effective
-    assert "codex" in effective["providers"], effective  
+    assert "codex" in effective["providers"], effective
     check = host_command(env, "settings", "--store", store, "--check")
     assert check.returncode == 0 and not check.stdout, check
     try:

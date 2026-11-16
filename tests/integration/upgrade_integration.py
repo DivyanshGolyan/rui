@@ -686,7 +686,7 @@ class TerminalScreen:
         self.send("\x1b")
         self.until(lambda: "Copy last answer" not in self.capture.completed,
                    "chat info closed before clearing the proven unsent draft")
-        self.send("\x05\x15")  
+        self.send("\x05\x15")
         self.draft("", 2)
         self.send("\x1b")
         return self.empty_overview(case, session)
@@ -1383,7 +1383,7 @@ def cancel_selected_version_check(root, binary, releases, artifacts):
                     if observed.returncode == 1 and not observed.stdout and not observed.stderr:
                         return True
                     assert observed.returncode == 0 and observed.stdout.strip(), observed
-                    return False  
+                    return False
 
                 wait_for(reaped, "cancelled exact selected --version child reap")
                 assert releases.requests[start:] == [], "cancelled check reached latest discovery"

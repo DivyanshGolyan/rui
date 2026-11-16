@@ -74,7 +74,7 @@ def terminal_capture(master, *, fresh=False, silent=False):
     try:
         rows, columns = struct.unpack("HHHH", fcntl.ioctl(master, termios.TIOCGWINSZ, b"\0" * 8))[:2]
     except OSError:
-        rows, columns = 24, 80  
+        rows, columns = 24, 80
     rows, columns = rows or 24, columns or 80
     capture = None if fresh else _captures.get(master)
     if capture is None:
@@ -363,7 +363,7 @@ def app_model_open(master, query=b"", *, catalog=None):
 
 
 def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False, redraw=False, initial=b"", fresh=False):
-    del preserve_colour, redraw  
+    del preserve_colour, redraw
     capture = terminal_capture(master)
     limit = 1024 * 1024
     assert len(marker.encode()) < limit, "terminal marker exceeds retained output bound"
@@ -474,7 +474,7 @@ def terminal_gate(caller, master, reached, context, timeout=10):
             if data:
                 streams[fd].extend(data)
                 if fd == master:
-                    capture.feed(data)  
+                    capture.feed(data)
                 assert sum(map(len, streams.values())) < 1024 * 1024, "unexpected unbounded startup output"
             else:
                 pending.remove(fd)

@@ -98,7 +98,7 @@ def stop_receipt_case(state, library):
                 except subprocess.TimeoutExpired:
                     inspector.kill()
                     inspector.communicate(timeout=3)
-                    raise  
+                    raise
 
         errors = []
         for dispose in (release.touch, retire_inspector,
@@ -120,7 +120,7 @@ def stop_receipt_case(state, library):
             try:
                 incoming_error.add_note("Stop cleanup failed: " + ", ".join(cleanup_failure(error) for error in errors))
             except BaseException:
-                pass  
+                pass
 
 
 def preserve_renderer_comparison(state, before, after, screen_start, events, omitted_events):

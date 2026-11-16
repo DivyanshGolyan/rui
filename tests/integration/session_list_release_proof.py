@@ -160,12 +160,12 @@ def case(binary, client, probe, mode):
                 receipt, held = retained_report(process, diagnostics, store, 0, "held", invocation)
                 assert not diagnostics.matching("connection_resources_released", subject="0")
                 if mode == "premature":
-                    baseline = held  
+                    baseline = held
                 else:
                     waiting = threading.Event()
                     original_wait = diagnostics.condition.wait
                     def wait(timeout=None):
-                        waiting.set()  
+                        waiting.set()
                         return original_wait(timeout)
                     def census():
                         try:

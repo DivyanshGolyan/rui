@@ -117,7 +117,7 @@ def native_release_target():
 
 def socket_peer_pid(connection):
     if _module.DARWIN:
-        return connection.getsockopt(0, 2)  
+        return connection.getsockopt(0, 2)
     credentials = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
     pid, uid, _ = struct.unpack("3i", credentials)
     assert uid == os.geteuid(), "Unix peer belongs to a different user"

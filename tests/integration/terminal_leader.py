@@ -154,7 +154,7 @@ def become(request, sources, error_write):
         try:
             signal.signal(number, signal.SIG_IGN if number in ignored else signal.SIG_DFL)
         except (OSError, ValueError):
-            pass  
+            pass
     step("setpgid", os.setpgid, 0, 0)
     terminal = step("open /dev/tty", os.open, "/dev/tty", os.O_RDWR)
     step("tcsetpgrp", os.tcsetpgrp, terminal, os.getpid())
@@ -176,7 +176,7 @@ def become(request, sources, error_write):
             try:
                 os.close(int(name))
             except OSError:
-                pass  
+                pass
     for number, limit in request["limits"]:
         resource.setrlimit(number, tuple(limit))
     args, env = request["args"], request["env"]

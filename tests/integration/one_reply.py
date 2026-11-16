@@ -30,7 +30,7 @@ def one_reply(path, response, *, timeout=10):
         sockets.append(listener)
         cancel, wake = socket.socketpair()
         sockets.extend((cancel, wake))
-        path.unlink(missing_ok=True)  
+        path.unlink(missing_ok=True)
         listener.bind(str(path))
         bound = True
         listener.listen(1)

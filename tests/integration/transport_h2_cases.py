@@ -121,7 +121,7 @@ def assert_round_trip_history(streams, capacity, rounds, answers):
             _, reasoning, message = dispatch.sse_answer(
                 f"response-{stream}", f"reasoning-{stream}", f"message-{stream}", answers[text].decode(),
             )
-            del reasoning["created_by"]  
+            del reasoning["created_by"]
             expected.extend((reasoning, message))
 
 
@@ -280,7 +280,7 @@ def stop_held_case(host, endpoint, thread):
             try:
                 print(f"Held endpoint cleanup failed: {type(error).__name__}: {error}", file=sys.stderr)
             except BaseException:
-                pass  
+                pass
         if incoming_error is None:
             raise errors[0]
 
@@ -804,14 +804,14 @@ def retain_connection_failure(store, host, diagnostics, endpoint, observed, sess
 def _retain_connection_failure(store, host, diagnostics, endpoint, observed, sessions):
     execution = {}
     if host.poll() is None:
-        for index, session in enumerate(sessions):  
+        for index, session in enumerate(sessions):
             try:
                 execution[index] = dispatch.command(
                     "session", "inspect", "--store", store, "--session", session, timeout=2,
                 )["execution"]
             except Exception as error:
                 execution[index] = type(error).__name__
-    dispatch.stop_host(host)  
+    dispatch.stop_host(host)
 
     def collect():
         with endpoint.lock:

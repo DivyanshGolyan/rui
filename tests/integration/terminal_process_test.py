@@ -191,7 +191,7 @@ class TerminalProcessTest(unittest.TestCase):
                      b"\x1b[0;48;2;4;5;6m\x1b[K\x1b[?25l\x1b[?2026l")
         frame = capture.frame
         cell = frame.cells[0][0]
-        self.assertEqual(cell.fg, 1)  
+        self.assertEqual(cell.fg, 1)
         self.assertEqual((cell.fg_rgb, cell.bg), ("123456", "010203"))
         self.assertEqual(frame.colors(cell), ("010203", "123456"))
         self.assertTrue(all((cell.bold, cell.reverse, cell.italic, cell.faint, cell.strike, cell.overline)))
@@ -200,7 +200,7 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertFalse(frame.visible)
         self.assertEqual((frame.cursor.x, frame.cursor.y), (1, 0))
         capture.feed(b"\x1b[?2026h\x1b[0mY\x1b[?25h\x1b[?2026l")
-        self.assertEqual(frame.cells[0][1].data, " ")  
+        self.assertEqual(frame.cells[0][1].data, " ")
         self.assertTrue(capture.frame.visible)
         self.assertEqual(capture.frame.cells[0][1].data, "Y")
 

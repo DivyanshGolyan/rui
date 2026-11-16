@@ -34,7 +34,7 @@ def hold_reply(sock, store, route, kind, **fields):
                      f"X-Rui-Wire-Version: {host_process.WIRE_VERSION}\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
         header = bytearray()
         while not header.endswith(b"\r\n\r\n"):
-            byte = peer.recv(1)  
+            byte = peer.recv(1)
             assert byte, header
             header.extend(byte)
             assert len(header) <= 512
@@ -51,7 +51,7 @@ def hold_reply(sock, store, route, kind, **fields):
 def resources(pid):
     root = pathlib.Path(f"/proc/{pid}")
     if not root.exists():
-        return None  
+        return None
     status = (root / "status").read_text()
     rss = int(next(line.split()[1] for line in status.splitlines() if line.startswith("VmRSS:")))
     return {"rss_kib": rss, "fds": len(os.listdir(root / "fd"))}
@@ -197,7 +197,7 @@ def main():
             assert peers.call("session_stop", lambda: control.stop_session(
                 state, store, "reply-stop", session))["answer"]["status"] == "accepted"
             deadline = time.monotonic() + 8
-            held.pop(0)[0].close()  
+            held.pop(0)[0].close()
             peers.release(held_requests.pop(0), deadline)
             head, body = read("/v1/read-result", "read_result", key="reply-message")
             assert head.startswith(b"HTTP/1.1 200 ") and body == expected

@@ -1813,7 +1813,7 @@ def host_diagnostic_cases(state, library):
                 try:
                     incoming_error.add_note("Fixture diagnostic cleanup failed: " + ", ".join(cleanup_failure(error) for error in cleanup_errors))
                 except BaseException:
-                    pass  
+                    pass
 
 
 def app_terminal_cases():

@@ -51,7 +51,7 @@ def drain_ready(master, feed):
             return False
         if not chunk:
             return False
-        feed(chunk)  
+        feed(chunk)
     return True
 
 
