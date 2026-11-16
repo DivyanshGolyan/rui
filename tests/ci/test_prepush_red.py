@@ -394,24 +394,50 @@ AssertionError
                 zig_test=Path(root["source"]).stem + ".test." + root.get("filter", "registry case"), zig_binary=binary)
             for owner in root["owners"]:
                 for packed in (False, True):
-                    owners = [owner, "test-h2"] if packed else [owner]
+                    owners = [owner, ("test-h2", "all")] if packed else [owner]
                     with self.subTest(binary=binary, owners=owners):
                         self.assertEqual(prepush.unit_target(owners, cause, graph), root["target"])
                         unknown = report_issue.Cause("unregistered root", cause.paths,
                             zig_test=cause.zig_test, zig_binary="unregistered-binary")
                         self.assertIsNone(prepush.unit_target(owners, unknown, graph),
                                           "a known source or single matrix target cannot certify an unknown binary")
-            self.assertIsNone(prepush.unit_target(["full-callers"], cause, graph))
+            self.assertIsNone(prepush.unit_target([("check-full", "callers")], cause, graph))
+
+    def test_primary_and_auxiliary_membership_matches_the_build_contract(self):
+        # Independent expected membership: deriving the expected side from the
+        # registry would miss a composition that stopped matching execution.
+        units = {
+            "unit-native-tests": ("test-native", {"test-native", "test", "check", "check-full", "full-execution"}),
+            "unit-store-tests": ("test-store", {"test-store", "test", "check", "check-full", "full-execution"}),
+            "test-tests": ("test", {"test-native", "test-store", "test", "check", "check-full", "full-execution"}),
+            "deadline-witness-tests": ("test-full", {"test-full"}),
+            "test-logic_tests": ("test-logic-only", {"test-logic", "test-logic-only"}),
+            "parser-fuzz-parser_fuzz_tests": ("fuzz-parsers", {"test-logic"}),
+            "parser-fuzz-llvm-parser_fuzz_tests": ("fuzz-parsers", {"fuzz-parsers"}),
+            "test-h2": ("test-h2", {"test-h2", "check", "check-full", "full-execution"}),
+            "test-pg": ("test-pg", {"test-pg", "check", "check-full", "full-execution"}),
+            "rui-mysql-wire-test-mysql_wire_test": ("mysql-wire-integration", {"mysql-wire-integration"}),
+        }
+        graph = prepush.tree_graph()
+        gates = sorted({gate for _, owners in units.values() for gate in owners} | {"full-callers", "unknown"})
+        for binary, (target, owners) in units.items():
+            cause = report_issue.Cause("membership", zig_test="test.registry case", zig_binary=binary)
+            for gate in gates:
+                for packed in (False, True):
+                    selected = [gate, "test-logic"] if packed else [gate]
+                    with self.subTest(binary=binary, selected=selected):
+                        expected = target if owners.intersection(selected) else None
+                        self.assertEqual(prepush.unit_target(prepush.matrix_targets("+".join(selected)), cause, graph), expected)
 
     def test_registered_source_identity_can_reproduce_numbered_historical_store_tests(self):
         graph = prepush.tree_graph()
         cause = report_issue.Cause("historical Store failure", ["src/store/tests/activity.zig"],
                                    zig_test="store.tests.activity.test.queued input")
         for owners in (["check"], ["test-native", "test-store"], ["test-store"]):
-            self.assertEqual(prepush.unit_target(owners, cause, graph), "test-store")
+            self.assertEqual(prepush.unit_target([(owner, "all") for owner in owners], cause, graph), "test-store")
         # A matrix target alone carries no authority about a failed root.
         cause = report_issue.Cause("unknown", zig_test="unregistered.test.named test")
-        self.assertIsNone(prepush.unit_target(["test-logic"], cause, graph))
+        self.assertIsNone(prepush.unit_target([("test-logic", "all")], cause, graph))
 
     def test_live_and_upgrade_checks_are_skipped(self):
         for name in ("linux suites (test-pg)", "previous_release_upgrade"):

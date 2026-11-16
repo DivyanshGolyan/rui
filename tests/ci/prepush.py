@@ -32,6 +32,7 @@ from urllib.parse import quote
 
 import failure_cause
 import report_issue
+from qualification import matrix_targets
 from pr_overlap import repo_from_remote
 from select_tests import FIXTURES
 
@@ -222,13 +223,11 @@ def red_command(job, cause, available, *, compile_targets=(), graph=None):
         return [*zig, "ci-build", "-Dci-targets=" + ",".join(compile_targets), "-Dci-part=all", "--summary", "line"]
     if name == "linux_codegen":
         return STACK_FRAMES
-    # Matrix names are the selected target names joined by '+'. Composed
-    # check/full parts contain the native aggregate, not a new unit target.
-    part = name.partition("(")[2].removesuffix(")")
-    targets = part.split("+") if part else []
+    selected = matrix_targets(name.partition("(")[2].removesuffix(")"))
+    targets = [target for target, _ in selected]
     if cause.zig_test:
         graph = graph or tree_graph()
-        target = unit_target(targets, cause, graph)
+        target = unit_target(selected, cause, graph)
         if target is None:
             return Skipped("unit root is not uniquely registered for the failed binary/source and selected targets")
         if target not in available:
@@ -261,7 +260,7 @@ def red_command(job, cause, available, *, compile_targets=(), graph=None):
     if len(selected) == 1:
         candidates = selected
     # A composed check runs ordinary fixtures. Debug twins are separate gates.
-    elif any(target in ("check", "check-full", "full-execution", "full-callers") for target in targets):
+    elif any(target in ("check", "check-full") for target in targets):
         candidates = {target for target in candidates if "-debug-" not in target}
     if len(candidates) != 1:
         return Skipped("cause unexplained or fixture target ambiguous in this checkout")
@@ -276,7 +275,7 @@ def red_command(job, cause, available, *, compile_targets=(), graph=None):
 def red_revision():
     """All source inputs owning derived commands; shared caches never outlive them."""
     digest = hashlib.sha256()
-    for path in ("prepush.py", "report_issue.py", "failure_cause.py", "select_tests.py", "build_files.py"):
+    for path in ("prepush.py", "report_issue.py", "failure_cause.py", "select_tests.py", "build_files.py", "qualification.py"):
         digest.update((Path(__file__).parent / path).read_bytes())
     digest.update(build_files.source(ROOT).encode())
     digest.update((ROOT / "src/unit_test_partition.zig").read_bytes())

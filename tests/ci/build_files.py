@@ -27,23 +27,103 @@ def steps(root=ROOT):
     for path in files(root):
         for name in STEP.findall(path.read_text()):
             defined[name] = path.relative_to(root).as_posix()
-    for entry in unit_roots(root):
+    for entry in unit_root_rows(root):
         defined.setdefault(entry["target"], "build/unit.zig")
     return defined
 
 
-def unit_roots(root=ROOT):
-    """Read the literal test-root registry used by the Zig build constructors.
+def _registry_rows(text, name, kind, path):
+    match = re.search(r"pub const " + name + r" = \[_\]" + kind + r"\{(.*?)\n\};", text, re.S)
+    if match is None:
+        raise ValueError(f"{path}: missing {name} registry")
+    return [line.strip() for line in match[1].splitlines()
+            if line.strip() and not line.lstrip().startswith("//")]
 
-    Names are compile names; ci.zig appends the source stem for installed test
-    binaries. Owners include the execution partition of check-full, never its
-    callers partition. Unknown row syntax is an error, not partial coverage.
+
+def _registry_ids(text, path):
+    if not re.fullmatch(r"\s*\.[a-z0-9_]+(?:\s*,\s*\.[a-z0-9_]+)*\s*", text):
+        raise ValueError(f"{path}: unsupported registry item list: {text}")
+    result = re.findall(r"\.([a-z0-9_]+)", text)
+    if len(result) != len(set(result)):
+        raise ValueError(f"{path}: repeated registry item: {text}")
+    return result
+
+
+def unit_root_rows(root=ROOT):
+    """Build test identities with membership derived from operational composition.
+
+    Only build/unit.zig is needed for target/source discovery. The same groups
+    drive native compilation/serial execution and the build's shell arguments;
+    compositions attach those groups and ordinary roots to actual gate parts.
     """
     path = root / "build/unit.zig"
     text = path.read_text()
-    match = re.search(r"pub const roots = \[_\]UnitRoot\{(.*?)\n\};", text, re.S)
-    if match is None:
-        raise ValueError(f"{path}: missing unit-root registry")
+    rows = {}
+    for line in _registry_rows(text, "roots", "UnitRoot", path):
+        row = re.fullmatch(r'\.\{ \.id = \.([a-z0-9_]+), \.name = ("(?:[^"\\]|\\.)*"), '
+                           r'\.source = ("(?:[^"\\]|\\.)*"), \.target = ("[a-z0-9-]+")'
+                           r'(?:, \.partition = ("[a-z]+"))?'
+                           r'(?:, \.filter = ("(?:[^"\\]|\\.)*"))?'
+                           r'(?:, \.filtered_only = (true|false))? \},', line)
+        if row is None:
+            raise ValueError(f"{path}: unsupported unit-root row: {line}")
+        identifier, name, source, target, partition, test_filter, filtered_only = row.groups()
+        if identifier in rows:
+            raise ValueError(f"{path}: duplicate unit-root id {identifier}")
+        entry = dict(name=json.loads(name), source=json.loads(source), target=json.loads(target), owners=[])
+        if partition:
+            entry["partition"] = json.loads(partition)
+        if test_filter:
+            entry["filter"] = json.loads(test_filter)
+        if filtered_only:
+            entry["filtered_only"] = json.loads(filtered_only)
+        rows[identifier] = entry
+    if not rows:
+        raise ValueError(f"{path}: empty unit-root registry")
+    groups = {}
+    for line in _registry_rows(text, "groups", "UnitGroup", path):
+        group = re.fullmatch(r'\.\{ \.id = \.([a-z0-9_]+), \.roots = &\.\{([^{}]+)\}, \.filtered = \.([a-z0-9_]+) \},', line)
+        if group is None:
+            raise ValueError(f"{path}: unsupported unit group: {line}")
+        identifier, items, filtered = group.groups()
+        if identifier in rows or identifier in groups:
+            raise ValueError(f"{path}: duplicate unit group {identifier}")
+        items = _registry_ids(items, path)
+        if any(item not in rows or rows[item].get("filtered_only") for item in items):
+            raise ValueError(f"{path}: unit group has unknown or filtered ordinary root")
+        if filtered not in rows or not rows[filtered].get("filtered_only"):
+            raise ValueError(f"{path}: unit group lacks a filtered aggregate")
+        groups[identifier] = [*items, filtered]
+    gates = set()
+    for line in _registry_rows(text, "compositions", "Composition", path):
+        composition = re.fullmatch(r'\.\{ \.gate = ("[a-z0-9-]+"), \.items = &\.\{([^{}]+)\}'
+                                   r', \.parts = &\.\{([^{}]+)\} \},', line)
+        if composition is None:
+            raise ValueError(f"{path}: unsupported unit composition: {line}")
+        gate, items, parts = composition.groups()
+        gate = json.loads(gate)
+        if gate in gates:
+            raise ValueError(f"{path}: duplicate unit gate {gate}")
+        gates.add(gate)
+        parts = _registry_ids(parts, path)
+        if not set(parts) <= {"all", "execution", "callers"}:
+            raise ValueError(f"{path}: unknown unit composition part")
+        for item in _registry_ids(items, path):
+            members = groups.get(item, [item])
+            for member in members:
+                if member not in rows:
+                    raise ValueError(f"{path}: unknown unit composition item {item}")
+                rows[member]["owners"].extend((gate, part) for part in parts)
+    return list(rows.values())
+
+
+def unit_roots(root=ROOT):
+    """Enrich build identities with the test runner's namespace partition rule.
+
+    Mapping needs both owners: an absent or changed runner must fail closed.
+    Target/source discovery uses unit_root_rows instead and needs no runner.
+    """
+    rows = unit_root_rows(root)
     partition_path = root / "src/unit_test_partition.zig"
     partition_source = partition_path.read_text()
     owner = re.search(r'pub fn owner\(name: \[\]const u8\) Root \{\s*'
@@ -52,39 +132,12 @@ def unit_roots(root=ROOT):
     if owner is None or owner[2] == owner[3]:
         raise ValueError(f"{partition_path}: unsupported unit partition owner")
     prefix = json.loads(owner[1])
-    rows = []
-    identities = set()
-    for line in match[1].splitlines():
-        line = line.strip()
-        if not line or line.startswith("//"):
-            continue
-        row = re.fullmatch(r'\.\{ \.id = \.([a-z0-9_]+), \.name = ("(?:[^"\\]|\\.)*"), '
-                           r'\.source = ("(?:[^"\\]|\\.)*"), \.target = ("[a-z0-9-]+"), '
-                           r'\.owners = &\.\{\s*([^{}]+?)\s*\}'
-                           r'(?:, \.partition = ("[a-z]+"))?'
-                           r'(?:, \.filter = ("(?:[^"\\]|\\.)*"))?'
-                           r'(?:, \.filtered_only = (true|false))? \},', line)
-        if row is None:
-            raise ValueError(f"{path}: unsupported unit-root row: {line}")
-        identifier, name, source, target, owners, partition, test_filter, filtered_only = row.groups()
-        entry = dict(name=json.loads(name), source=json.loads(source), target=json.loads(target),
-                     owners=json.loads("[" + owners + "]"))
-        if identifier in identities:
-            raise ValueError(f"{path}: duplicate unit-root id {identifier}")
-        identities.add(identifier)
-        if partition:
-            entry["partition"] = json.loads(partition)
+    for entry in rows:
+        if "partition" in entry:
             if entry["partition"] == owner[2]:
                 entry["prefix"] = prefix
             elif entry["partition"] == owner[3]:
                 entry["exclude_prefix"] = prefix
             else:
-                raise ValueError(f"{path}: partition has no runner owner: {entry['partition']}")
-        if test_filter:
-            entry["filter"] = json.loads(test_filter)
-        if filtered_only:
-            entry["filtered_only"] = json.loads(filtered_only)
-        rows.append(entry)
-    if not rows:
-        raise ValueError(f"{path}: empty unit-root registry")
+                raise ValueError(f"{root / 'build/unit.zig'}: partition has no runner owner: {entry['partition']}")
     return rows

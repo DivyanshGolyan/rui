@@ -25,11 +25,16 @@ class ImportArchitectureTest(unittest.TestCase):
     def test_registry_sources_count_and_removed_roots_still_fail(self):
         root = Path(__file__).resolve().parents[2]
         import build_files
-        rows = build_files.unit_roots(root)
+        rows = build_files.unit_root_rows(root)
         tests_reached(root)
-        with patch("build_files.unit_roots", return_value=[row for row in rows if row["source"] != "src/parser_fuzz_tests.zig"]):
+        with patch("build_files.unit_root_rows", return_value=[row for row in rows if row["source"] != "src/parser_fuzz_tests.zig"]):
             with self.assertRaisesRegex(ValueError, r"no longer builds test roots \['src/parser_fuzz_tests.zig'\]"):
                 tests_reached(root)
+
+    def test_registry_source_discovery_does_not_enrich_runner_namespaces(self):
+        root = Path(__file__).resolve().parents[2]
+        with patch("build_files.unit_roots", side_effect=FileNotFoundError("runner namespace is unavailable")):
+            tests_reached(root)
 
     def test_repository_widgets_are_independent(self):
         widgets_boundary(Path(__file__).resolve().parents[2])

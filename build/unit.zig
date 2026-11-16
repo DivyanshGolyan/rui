@@ -11,37 +11,117 @@ pub const UnitRoot = struct {
     name: []const u8,
     source: []const u8,
     target: []const u8,
-    owners: []const []const u8,
     partition: ?[]const u8 = null,
     filter: ?[]const u8 = null,
     filtered_only: bool = false,
 
-    pub const Id = enum { native, store, filtered, deadline, logic, parser_seed, parser_llvm, h2, pg, mysql };
+    pub const Id = enum { native, store, filtered, deadline, logic, parser_seed, parser_llvm, h2, pg, mysql, native_pair };
 };
 
 pub const roots = [_]UnitRoot{
-    .{ .id = .native, .name = "unit-native", .source = "src/tests.zig", .target = "test-native", .owners = &.{ "test-native", "test", "check", "check-full", "full-execution" }, .partition = "native" },
-    .{ .id = .store, .name = "unit-store", .source = "src/tests.zig", .target = "test-store", .owners = &.{ "test-store", "test", "check", "check-full", "full-execution" }, .partition = "store" },
-    .{ .id = .filtered, .name = "test", .source = "src/tests.zig", .target = "test", .owners = &.{ "test", "test-native", "test-store", "check", "check-full", "full-execution" }, .filtered_only = true },
-    .{ .id = .deadline, .name = "deadline-witness", .source = "src/tests.zig", .target = "test-full", .owners = &.{"test-full"}, .filter = "Host processing wait does not consume response transfer inactivity" },
-    .{ .id = .logic, .name = "test", .source = "src/logic_tests.zig", .target = "test-logic-only", .owners = &.{ "test-logic", "test-logic-only" } },
-    .{ .id = .parser_seed, .name = "parser-fuzz", .source = "src/parser_fuzz_tests.zig", .target = "fuzz-parsers", .owners = &.{"test-logic"} },
-    .{ .id = .parser_llvm, .name = "parser-fuzz-llvm", .source = "src/parser_fuzz_tests.zig", .target = "fuzz-parsers", .owners = &.{"fuzz-parsers"} },
-    .{ .id = .h2, .name = "test", .source = "src/h2/h2.zig", .target = "test-h2", .owners = &.{ "test-h2", "check", "check-full", "full-execution" } },
-    .{ .id = .pg, .name = "test", .source = "src/store/wire/pg.zig", .target = "test-pg", .owners = &.{ "test-pg", "check", "check-full", "full-execution" } },
-    .{ .id = .mysql, .name = "rui-mysql-wire-test", .source = "tests/integration/mysql_wire_test.zig", .target = "mysql-wire-integration", .owners = &.{"mysql-wire-integration"} },
+    .{ .id = .native, .name = "unit-native", .source = "src/tests.zig", .target = "test-native", .partition = "native" },
+    .{ .id = .store, .name = "unit-store", .source = "src/tests.zig", .target = "test-store", .partition = "store" },
+    .{ .id = .filtered, .name = "test", .source = "src/tests.zig", .target = "test", .filtered_only = true },
+    .{ .id = .deadline, .name = "deadline-witness", .source = "src/tests.zig", .target = "test-full", .filter = "Host processing wait does not consume response transfer inactivity" },
+    .{ .id = .logic, .name = "test", .source = "src/logic_tests.zig", .target = "test-logic-only" },
+    .{ .id = .parser_seed, .name = "parser-fuzz", .source = "src/parser_fuzz_tests.zig", .target = "fuzz-parsers" },
+    .{ .id = .parser_llvm, .name = "parser-fuzz-llvm", .source = "src/parser_fuzz_tests.zig", .target = "fuzz-parsers" },
+    .{ .id = .h2, .name = "test", .source = "src/h2/h2.zig", .target = "test-h2" },
+    .{ .id = .pg, .name = "test", .source = "src/store/wire/pg.zig", .target = "test-pg" },
+    .{ .id = .mysql, .name = "rui-mysql-wire-test", .source = "tests/integration/mysql_wire_test.zig", .target = "mysql-wire-integration" },
 };
 
-pub fn root(comptime id: UnitRoot.Id) UnitRoot {
-    inline for (roots) |entry| {
-        if (entry.id == id) return entry;
+/// A group owns its serial chain and its shell binary order as one item.
+pub const UnitGroup = struct { id: UnitRoot.Id, roots: []const UnitRoot.Id, filtered: UnitRoot.Id };
+pub const groups = [_]UnitGroup{
+    .{ .id = .native_pair, .roots = &.{ .native, .store }, .filtered = .filtered },
+};
+
+pub const Part = enum { all, execution, callers };
+pub const Composition = struct { gate: []const u8, items: []const UnitRoot.Id, parts: []const Part };
+pub const compositions = [_]Composition{
+    .{ .gate = "test-native", .items = &.{ .native, .filtered }, .parts = &.{.all} },
+    .{ .gate = "test-store", .items = &.{ .store, .filtered }, .parts = &.{.all} },
+    .{ .gate = "test", .items = &.{.native_pair}, .parts = &.{.all} },
+    .{ .gate = "test-full", .items = &.{.deadline}, .parts = &.{.all} },
+    .{ .gate = "test-logic", .items = &.{ .logic, .parser_seed }, .parts = &.{.all} },
+    .{ .gate = "test-logic-only", .items = &.{.logic}, .parts = &.{.all} },
+    .{ .gate = "fuzz-parsers", .items = &.{.parser_llvm}, .parts = &.{.all} },
+    .{ .gate = "test-h2", .items = &.{.h2}, .parts = &.{.all} },
+    .{ .gate = "test-pg", .items = &.{.pg}, .parts = &.{.all} },
+    .{ .gate = "mysql-wire-integration", .items = &.{.mysql}, .parts = &.{.all} },
+    .{ .gate = "check", .items = &.{ .native_pair, .h2, .pg }, .parts = &.{.all} },
+    .{ .gate = "check-full", .items = &.{ .native_pair, .h2, .pg }, .parts = &.{ .all, .execution } },
+};
+
+pub fn root(id: UnitRoot.Id) UnitRoot {
+    for (roots) |entry| if (entry.id == id) return entry;
+    @panic("Unregistered unit root");
+}
+
+fn partitionRoot(partition: unit_partition.Root) UnitRoot {
+    for (roots) |entry| {
+        if (entry.partition) |name| if (std.mem.eql(u8, name, @tagName(partition))) return entry;
     }
-    @compileError("Unregistered unit root");
+    @panic("Unregistered unit partition");
+}
+
+pub fn group(id: UnitRoot.Id) UnitGroup {
+    for (groups) |entry| if (entry.id == id) return entry;
+    @panic("Unregistered unit group");
+}
+
+pub fn members(gate: []const u8, part: Part) []const UnitRoot.Id {
+    for (compositions) |entry| {
+        if (!std.mem.eql(u8, entry.gate, gate)) continue;
+        for (entry.parts) |allowed| if (part == allowed) return entry.items;
+        return &.{};
+    }
+    @panic("Unregistered unit composition");
+}
+
+pub fn includes(gate: []const u8, part: Part, id: UnitRoot.Id) bool {
+    return std.mem.indexOfScalar(UnitRoot.Id, members(gate, part), id) != null;
+}
+
+pub const Runs = std.EnumArray(UnitRoot.Id, ?*std.Build.Step);
+pub const Placement = enum { runs, shell };
+
+/// Shell placement hands the grouped native binaries to check.sh instead of
+/// launching their Run steps again. All other dependencies use the same table.
+pub fn attach(gate: []const u8, part: Part, destination: *std.Build.Step, runs: *const Runs, placement: Placement) void {
+    for (members(gate, part)) |id| {
+        if (placement == .shell and id == .native_pair) continue;
+        if (runs.get(id)) |step| destination.dependOn(step);
+    }
+}
+
+pub const NativeGroup = struct { binaries: []*std.Build.Step.Compile, final: *std.Build.Step.Run };
+
+/// Standalone roots never inherit siblings. The group's declaration alone
+/// determines its serial dependencies and the binary order handed to the shell.
+pub fn nativeGroup(b: *std.Build, ci: CiArtifacts, identities: []const UnitRoot.Id, tests: []const *std.Build.Step.Compile, filtered: bool) NativeGroup {
+    const definition = group(.native_pair);
+    const grouped = if (!filtered) definition.roots else &.{definition.filtered};
+    if (grouped.len == 0) @panic("Native group must contain a unit root");
+    const binaries = b.allocator.alloc(*std.Build.Step.Compile, grouped.len) catch @panic("OOM");
+    var previous: ?*std.Build.Step.Run = null;
+    for (grouped, binaries) |identity, *binary| {
+        const index = std.mem.indexOfScalar(UnitRoot.Id, identities, identity) orelse @panic("Uncompiled native group member");
+        binary.* = tests[index];
+        const run = ci.run(tests[index]);
+        run.has_side_effects = true;
+        run.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
+        if (previous) |prior| run.step.dependOn(&prior.step);
+        previous = run;
+    }
+    return .{ .binaries = binaries, .final = previous.? };
 }
 
 pub const Units = struct {
     tests: []*std.Build.Step.Compile,
-    run_tests: *std.Build.Step.Run,
+    native_binaries: []*std.Build.Step.Compile,
+    runs: Runs,
     run_renderer_allocation: *std.Build.Step.Run,
     signal_stack_probe: *std.Build.Step.Run,
 };
@@ -49,7 +129,12 @@ pub const Units = struct {
 pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pinned_transport: ?product.PinnedTransport, test_filters: []const []const u8) Units {
     // Filtered developer/mutation runs retain the single aggregate binary and
     // its filter/global conventions. Unfiltered CI compiles independent roots.
-    const tests = b.allocator.alloc(*std.Build.Step.Compile, if (test_filters.len == 0) unit_partition.roots.len else 1) catch @panic("OOM");
+    const native_group = group(.native_pair);
+    if (native_group.roots.len == 0) @panic("Native group must contain a unit root");
+    const identities = b.allocator.alloc(UnitRoot.Id, if (test_filters.len == 0) unit_partition.roots.len else 1) catch @panic("OOM");
+    for (identities, 0..) |*identity, index| identity.* = if (test_filters.len == 0) partitionRoot(unit_partition.roots[index]).id else native_group.filtered;
+    const tests = b.allocator.alloc(*std.Build.Step.Compile, identities.len) catch @panic("OOM");
+    var runs: Runs = .initFill(null);
     const unit_filters = if (test_filters.len == 0) unitFilters(b) else undefined;
     const unit_runner: ?std.Build.LazyPath = if (test_filters.len == 0) runner: {
         const generate = b.addSystemCommand(&.{ "python3", "-B" });
@@ -67,15 +152,9 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
     } else null;
     const native_step = b.step(root(.native).target, "Run non-Store unit tests");
     const store_step = b.step(root(.store).target, "Run Store unit tests");
-    var run_tests: *std.Build.Step.Run = undefined;
-    for (tests, 0..) |*entry, index| {
-        const partition = unit_partition.roots[index];
-        const definition = if (test_filters.len != 0) root(.filtered) else switch (partition) {
-            .native => root(.native),
-            .store => root(.store),
-        };
-        if (!definition.filtered_only and !std.mem.eql(u8, definition.partition.?, @tagName(partition)))
-            @panic("Unit registry partition disagrees with the runner");
+    for (tests, identities) |*entry, identity| {
+        const definition = root(identity);
+        const partition = if (definition.filtered_only) unit_partition.roots[0] else std.meta.stringToEnum(unit_partition.Root, definition.partition.?) orelse @panic("Unknown unit registry partition");
         const compile = b.addTest(.{
             .name = definition.name,
             .max_rss = darwin.unitMaxRss(test_filters.len, target),
@@ -86,13 +165,13 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
                 .optimize = .ReleaseSafe,
                 .strip = darwin.unitStrip(test_filters.len, target),
             }),
-            .filters = if (definition.filtered_only) test_filters else unit_filters[index],
+            .filters = if (definition.filtered_only) test_filters else unit_filters[@backingInt(partition)],
             .test_runner = if (unit_runner) |path| .{ .path = path, .mode = .server } else filtered_runner,
         });
         entry.* = compile;
         if (unit_runner != null) {
             const options = b.addOptions();
-            options.addOption(usize, "root", index);
+            options.addOption(usize, "root", @backingInt(partition));
             compile.root_module.addOptions("unit_test_options", options);
             compile.root_module.addImport("unit_test_partition", b.createModule(.{
                 .root_source_file = b.path("src/unit_test_partition.zig"),
@@ -101,27 +180,17 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
             }));
         }
         product.configureUnitRoot(b, compile, target, pinned_transport);
-        const run = ci.run(compile);
-        run.has_side_effects = true;
-        run.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
-        if (definition.filtered_only) {
-            native_step.dependOn(&run.step);
-            store_step.dependOn(&run.step);
-        } else {
+        if (!definition.filtered_only) {
             const standalone = ci.run(compile);
             standalone.has_side_effects = true;
             standalone.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
-            (if (partition == .native) native_step else store_step).dependOn(&standalone.step);
+            runs.set(identity, &standalone.step);
         }
-        // Compile in parallel, execute serially: the MySQL dialect fixture owns
-        // fixed database names. Store runs last and owns the acceptance record
-        // (including migrations/conformance); never mask an earlier failure.
-        if (index != 0) run.step.dependOn(&run_tests.step);
-        run_tests = run;
     }
-
+    const native = nativeGroup(b, ci, identities, tests, test_filters.len != 0);
+    runs.set(.native_pair, &native.final.step);
+    if (test_filters.len != 0) runs.set(native_group.filtered, &native.final.step);
     const test_step = b.step(root(.filtered).target, "Run unit, Store, and protocol tests");
-    test_step.dependOn(&run_tests.step);
     // Selection pairs test-full with check or check-full, which already run every
     // other native test, so this binary contains only the real-time witness.
     // Like normal units, the x86_64 witness uses the self-hosted backend;
@@ -142,7 +211,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
     run_full_tests.has_side_effects = true;
     run_full_tests.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "1");
     const full_test_step = b.step(root(.deadline).target, "Run the real 60-second client deadline witness");
-    full_test_step.dependOn(&run_full_tests.step);
+    runs.set(.deadline, &run_full_tests.step);
 
     const logic_tests = b.addTest(.{
         .name = root(.logic).name,
@@ -163,9 +232,8 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         "test-logic",
         "Run the shared execution turn and portable owner tests without Host, Bash, or transport fixtures",
     );
-    logic_test_step.dependOn(&run_logic_tests.step);
+    runs.set(.logic, &run_logic_tests.step);
     const logic_only_step = b.step(root(.logic).target, "Run the logic test binary without auxiliary executables");
-    logic_only_step.dependOn(&run_logic_tests.step);
 
     // The fuzz tests of the parsers that read peer bytes. test-logic runs
     // their seeds, with Zig's runner so a filter for another root's test
@@ -177,11 +245,11 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         root(.parser_llvm).target,
         "Run the peer-byte parser fuzz tests with LLVM coverage; add --fuzz for a live campaign",
     );
-    for ([_]struct { UnitRoot, *std.Build.Step, ?bool, ?std.Build.Step.Compile.TestRunner }{
-        .{ root(.parser_seed), logic_test_step, if (target.result.cpu.arch == .x86_64) false else null, null },
-        .{ root(.parser_llvm), parser_fuzz_step, true, filtered_runner },
+    for ([_]struct { UnitRoot, ?bool, ?std.Build.Step.Compile.TestRunner }{
+        .{ root(.parser_seed), if (target.result.cpu.arch == .x86_64) false else null, null },
+        .{ root(.parser_llvm), true, filtered_runner },
     }) |entry| {
-        const definition, const step, const use_llvm, const runner = entry;
+        const definition, const use_llvm, const runner = entry;
         const parser_fuzz = b.addTest(.{
             .name = definition.name,
             .use_llvm = use_llvm,
@@ -196,7 +264,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         parser_fuzz.root_module.addImport("url", product.addUrl(b));
         const run = ci.run(parser_fuzz);
         run.has_side_effects = true;
-        step.dependOn(&run.step);
+        runs.set(definition.id, &run.step);
     }
 
     const test_actor_llvm: ?bool = if (target.result.cpu.arch == .x86_64) false else null;
@@ -235,7 +303,16 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
     test_step.dependOn(&signal_stack_probe.step);
     native_step.dependOn(&signal_stack_probe.step);
 
-    return .{ .tests = tests, .run_tests = run_tests, .run_renderer_allocation = run_renderer_allocation, .signal_stack_probe = signal_stack_probe };
+    for ([_]struct { []const u8, *std.Build.Step }{
+        .{ root(.native).target, native_step },
+        .{ root(.store).target, store_step },
+        .{ root(.filtered).target, test_step },
+        .{ root(.deadline).target, full_test_step },
+        .{ "test-logic", logic_test_step },
+        .{ root(.logic).target, logic_only_step },
+        .{ root(.parser_llvm).target, parser_fuzz_step },
+    }) |entry| attach(entry[0], .all, entry[1], &runs, .runs);
+    return .{ .tests = tests, .native_binaries = native.binaries, .runs = runs, .run_renderer_allocation = run_renderer_allocation, .signal_stack_probe = signal_stack_probe };
 }
 
 // Compiler filters are a superset of exact runner ownership. Module-only
