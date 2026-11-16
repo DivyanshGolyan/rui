@@ -908,3 +908,44 @@ test "upgrade replay keeps the provider set a previous release's Host served" {
         try std.testing.expectEqual(case.served, Served{ .codex = entries.codex != null, .openai = entries.openai != null, .chatgpt = entries.chatgpt != null });
     }
 }
+
+test "upgrade running source copies wipe on success and every allocation failure" {
+    const Probe = struct {
+        const assignment = "providers.openai.key=env:PRIVATE_SOURCE_WIPE_1234567890";
+        backing: std.mem.Allocator,
+        allocated: usize = 0,
+        freed: usize = 0,
+        dirty: bool = false,
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap, .free = free } };
+        }
+        fn alloc(raw: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const memory = self.backing.rawAlloc(len, alignment, ret) orelse return null;
+            if (len == assignment.len) self.allocated += 1;
+            return memory;
+        }
+        fn free(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (memory.len == assignment.len) {
+                self.freed += 1;
+                if (!std.mem.allEqual(u8, memory, 0)) self.dirty = true;
+            }
+            self.backing.rawFree(memory, alignment, ret);
+        }
+        fn expectWiped(self: *const @This()) !void {
+            try std.testing.expectEqual(false, self.dirty);
+            try std.testing.expectEqual(self.allocated, self.freed);
+        }
+        fn exercise(gpa: std.mem.Allocator) !void {
+            var probe: @This() = .{ .backing = gpa };
+            var launch = deriveLaunch(probe.allocator(), &.{ "rui", "host", "serve", "--set", assignment }) catch |err| {
+                try probe.expectWiped();
+                return err;
+            };
+            launch.deinit(probe.allocator());
+            try probe.expectWiped();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.exercise, .{});
+}
