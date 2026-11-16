@@ -431,7 +431,7 @@ def host_child_violations(root=ROOT):
             if unquote(token.text) != "serve":
                 continue
             pair = i >= 2 and unquote(names[i - 2]) == "host" and names[i - 1] == ","
-            slot = i >= 1 and names[i - 1] == "="
+            slot = i >= 2 and names[i - 2:i] == ["]", "="]
             if not (pair or slot):
                 continue
             owner = next((name for start, end, name in functions if start < i < end), None)

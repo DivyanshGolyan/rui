@@ -211,7 +211,7 @@ class Case:
         provider = [] if any(str(value).startswith("providers.") or str(value).startswith("providers=") for value in extra) else ["--set", 'providers={"codex":{}}']
         defaults = [] if sources_only else ["--set", 'execution.activeCapacity=2', *provider]
         process, ready = start_ready_process(
-            [build / "bin/rui", "host", "serve", *destination, *defaults, *extra], env=self.env)
+            [build / "bin/rui", "host", "serve", *destination, *defaults, *extra], env=self.env, isolate_providers=not sources_only)
         self.hosts.append(process)
         self.ready = ready
         status = self.status()

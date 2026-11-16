@@ -656,7 +656,18 @@ pub const HostControlObservation = struct {
 
 pub fn observeHostForUpgrade(io: std.Io, store_path: []const u8, deadline: ?i128) !HostControlObservation {
     const paths = try resolveClientPaths(io, store_path);
-    return observeHostForUpgradeAt(io, &paths, deadline);
+    return withUpgradeDirectory(try observeHostForUpgradeAt(io, &paths, deadline), store_path);
+}
+
+// A local directory selector is not the answering Store's wire identity.
+// Legacy opaque-id callers have no directory to attach; directory callers do.
+fn withUpgradeDirectory(observed: HostControlObservation, selector: []const u8) !HostControlObservation {
+    var result = observed;
+    switch (platform.resolveClientSelection(selector)) {
+        .sqlite => try result.host_directory.set(selector),
+        .mysql => {},
+    }
+    return result;
 }
 
 fn observeHostForUpgradeAt(io: std.Io, paths: *const platform.Paths, deadline: ?i128) !HostControlObservation {
@@ -915,7 +926,7 @@ fn hostObservationDeadline(io: std.Io, deadline: ?i128) i128 {
 /// Reobserves exactly one read-only profile; never falls back to a different peer protocol.
 pub fn observeHostForUpgradeProfile(io: std.Io, store_path: []const u8, profile: protocol_reply.HostInfoProfile, deadline: ?i128) !HostControlObservation {
     return switch (try readHostControlProfile(io, store_path, profile, deadline, .strict)) {
-        .compatible => |observed| observed,
+        .compatible => |observed| withUpgradeDirectory(observed, store_path),
         .incompatible => error.WrongWireVersion,
     };
 }
