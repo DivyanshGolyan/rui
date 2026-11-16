@@ -4945,3 +4945,263 @@ test "a stop signal handler racing detach never writes to the closed or a reused
         for (reused) |fd| try std.testing.expect(std.c.read(fd, &bytes, bytes.len) < 0);
     }
 }
+
+// Captured against 8de679d8 before the answer-path refactor. The oracle includes
+// exact producer bytes and decoder outcomes; it deliberately preserves decoder
+// quirks for slice 3 rather than deriving expectations from command_spec.
+fn mutationWitnessRenderer(comptime kind: command_spec.CommandKind) @TypeOf(switch (kind) {
+    .configure => host_reply.renderConfigureReply,
+    .message => host_reply.renderMessageReply,
+    .session_stop => host_reply.renderSessionStopReply,
+    .session_archive => host_reply.renderSessionArchiveReply,
+    .session_pin => host_reply.renderSessionPinReply,
+    .model_interruption => host_reply.renderModelInterruptionReply,
+    .permission_decision => host_reply.renderPermissionDecisionReply,
+    .action_background => host_reply.renderActionBackgroundReply,
+}) {
+    return switch (kind) {
+        .configure => host_reply.renderConfigureReply,
+        .message => host_reply.renderMessageReply,
+        .session_stop => host_reply.renderSessionStopReply,
+        .session_archive => host_reply.renderSessionArchiveReply,
+        .session_pin => host_reply.renderSessionPinReply,
+        .model_interruption => host_reply.renderModelInterruptionReply,
+        .permission_decision => host_reply.renderPermissionDecisionReply,
+        .action_background => host_reply.renderActionBackgroundReply,
+    };
+}
+
+const MutationWitness = struct {
+    const reply = @import("protocol_reply.zig");
+    const session = "k7m2qx";
+    const content: store_module.ContentReference = .{ .length = 9, .digest = .{ 0xc8, 0x84, 0x92, 0x9e, 0xdd, 0xc9, 0x45, 0x02, 0xb8, 0x37, 0x7e, 0x33, 0x3d, 0xcd, 0x72, 0x80, 0x64, 0xdc, 0xb2, 0xc4, 0x57, 0xe1, 0x0c, 0x4a, 0x3c, 0xc9, 0x82, 0xde, 0xde, 0xfd, 0xcb, 0xcd } };
+    const Hash = std.crypto.hash.sha2.Sha256;
+
+    fn named() protocol.Bounded(protocol.max_session_bytes) {
+        var value: protocol.Bounded(protocol.max_session_bytes) = .{};
+        value.set(session) catch unreachable;
+        return value;
+    }
+
+    fn subject(comptime kind: command_spec.CommandKind) @typeInfo(@TypeOf(mutationWitnessRenderer(kind))).@"fn".param_types[1].? {
+        return switch (kind) {
+            .model_interruption => .{ .session = named(), .turn_id = 3, .operation_id = 11 },
+            .permission_decision => .{ .session = named(), .action_id = 7, .decision = .deny },
+            .action_background => .{ .session = named(), .action_id = 7 },
+            else => session,
+        };
+    }
+
+    fn target(comptime kind: command_spec.CommandKind, wrong: bool) reply.MutationTarget {
+        return switch (kind) {
+            .configure => if (wrong) .session_stop else .configure,
+            .message => .{ .message = .{ .bytes = content.length + @intFromBool(wrong), .digest = content.digest } },
+            .session_stop => if (wrong) .configure else .session_stop,
+            .session_archive => .{ .session_archive = .{ .archived = !wrong } },
+            .session_pin => .{ .session_pin = .{ .pinned = wrong } },
+            .model_interruption => .{ .model_interruption = .{ .turn = 3, .operation = if (wrong) 12 else 11 } },
+            .permission_decision => .{ .permission_decision = .{ .action = 7, .decision = if (wrong) .allow_once else .deny } },
+            .action_background => .{ .action_background = if (wrong) 8 else 7 },
+        };
+    }
+
+    fn accepted(comptime kind: command_spec.CommandKind) @typeInfo(@TypeOf(mutationWitnessRenderer(kind))).@"fn".param_types[2].? {
+        return .{ .accepted = switch (kind) {
+            .configure => .{ .replayed = false, .revision = 13, .created = false, .session = named() },
+            .message => .{ .replayed = false, .admission_id = 17, .content = content, .session = named() },
+            .session_stop => .{ .replayed = false, .selection = .{ .selected_turn_id = 19, .admission_cutoff = 23 }, .completion = .pending },
+            .session_archive => .{ .replayed = false, .archived = true, .completion = .pending },
+            .session_pin => .{ .replayed = false, .pinned = false },
+            .model_interruption, .permission_decision => .{ .replayed = false },
+            .action_background => .{ .replayed = false, .action_id = 7, .selection = .{ .kind = .background, .position = 29 } },
+        } };
+    }
+
+    fn observe(hash: *Hash, body: []const u8, status: u16, supplied_session: []const u8, binding: reply.MutationTarget) !void {
+        const decoded = reply.decodeMutationReply(.{ .status = status, .body = body }, supplied_session, binding);
+        if (decoded.answer) |answer| {
+            hash.update(@tagName(answer.result));
+            hash.update(&.{@intFromBool(answer.replayed)});
+            switch (answer.result) {
+                .accepted => |value| {
+                    const bytes = try std.json.Stringify.valueAlloc(std.testing.allocator, value, .{});
+                    defer std.testing.allocator.free(bytes);
+                    hash.update(bytes);
+                },
+                .rejected => |code| hash.update(code.slice()),
+                .conflict => {},
+            }
+            const input = try std.json.Stringify.valueAlloc(std.testing.allocator, answer.input, .{});
+            defer std.testing.allocator.free(input);
+            hash.update(input);
+        } else |err| hash.update(@errorName(err));
+        hash.update("\x00");
+        hash.update(decoded.context.session.slice());
+        hash.update("\x00");
+        if (decoded.diagnostic) |diagnostic| {
+            hash.update(diagnostic.type.slice());
+            hash.update(diagnostic.code.slice());
+        }
+        hash.update("\x00");
+    }
+
+    const Field = struct { path: []const []const u8, value: []const u8 };
+    const fields = [_]Field{
+        .{ .path = &.{"version"}, .value = "\"" ++ protocol.wire_version ++ "\"" },
+        .{ .path = &.{"type"}, .value = "\"session_pin_reply\"" },
+        .{ .path = &.{"code"}, .value = "\"canonical_store_failure\"" },
+        .{ .path = &.{"answer"}, .value = "{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\"}" },
+        .{ .path = &.{"input"}, .value = "{\"type\":\"text\",\"bytes\":\"9\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}" },
+        .{ .path = &.{"queue"}, .value = "{\"status\":\"queued\",\"admission\":\"17\"}" },
+        .{ .path = &.{"execution"}, .value = "{\"status\":\"queued\"}" },
+        .{ .path = &.{"completion"}, .value = "{\"status\":\"pending\"}" },
+        .{ .path = &.{ "answer", "status" }, .value = "\"accepted\"" },
+        .{ .path = &.{ "answer", "replayed" }, .value = "true" },
+        .{ .path = &.{ "answer", "session" }, .value = "\"k7m2qx\"" },
+        .{ .path = &.{ "answer", "code" }, .value = "\"unknown_session\"" },
+        .{ .path = &.{ "answer", "message" }, .value = "\"detail\"" },
+        .{ .path = &.{ "answer", "revision" }, .value = "\"13\"" },
+        .{ .path = &.{ "answer", "created" }, .value = "false" },
+        .{ .path = &.{ "answer", "skills" }, .value = "\"unchanged\"" },
+        .{ .path = &.{ "answer", "admission" }, .value = "\"17\"" },
+        .{ .path = &.{ "answer", "archived" }, .value = "true" },
+        .{ .path = &.{ "answer", "pinned" }, .value = "false" },
+        .{ .path = &.{ "answer", "action" }, .value = "\"7\"" },
+        .{ .path = &.{ "answer", "decision" }, .value = "\"deny\"" },
+        .{ .path = &.{ "answer", "selection" }, .value = "{\"turn\":\"19\",\"admission_cutoff\":\"23\"}" },
+        .{ .path = &.{ "answer", "action_selection" }, .value = "{\"kind\":\"background\",\"position\":\"29\"}" },
+        .{ .path = &.{ "answer", "target" }, .value = "{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"11\"}" },
+        .{ .path = &.{ "input", "type" }, .value = "\"text\"" },
+        .{ .path = &.{ "input", "bytes" }, .value = "\"9\"" },
+        .{ .path = &.{ "input", "sha256" }, .value = "\"0000000000000000000000000000000000000000000000000000000000000000\"" },
+        .{ .path = &.{ "queue", "status" }, .value = "\"queued\"" },
+        .{ .path = &.{ "queue", "admission" }, .value = "\"17\"" },
+        .{ .path = &.{ "execution", "status" }, .value = "\"unavailable\"" },
+        .{ .path = &.{ "execution", "reason" }, .value = "\"direct_reply_does_not_wait_for_model_processing\"" },
+        .{ .path = &.{ "completion", "status" }, .value = "\"completed\"" },
+        .{ .path = &.{ "answer", "selection", "turn" }, .value = "null" },
+        .{ .path = &.{ "answer", "selection", "admission_cutoff" }, .value = "\"23\"" },
+        .{ .path = &.{ "answer", "target", "session" }, .value = "\"k7m2qx\"" },
+        .{ .path = &.{ "answer", "target", "turn" }, .value = "\"3\"" },
+        .{ .path = &.{ "answer", "target", "operation" }, .value = "\"11\"" },
+        .{ .path = &.{ "answer", "action_selection", "kind" }, .value = "\"final\"" },
+        .{ .path = &.{ "answer", "action_selection", "position" }, .value = "\"29\"" },
+    };
+
+    fn fieldEdits(hash: *Hash, body: []const u8, status: u16, binding: reply.MutationTarget) !void {
+        for (fields) |field| {
+            for (0..3) |edit| { // well-typed insertion/replacement, omission, explicit null
+                var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+                defer parsed.deinit();
+                const allocator = parsed.arena.allocator();
+                var object = &parsed.value;
+                for (field.path[0 .. field.path.len - 1]) |part| {
+                    if (object.object.getPtr(part) == null) try object.object.put(allocator, part, .{ .object = .empty });
+                    object = object.object.getPtr(part).?;
+                }
+                const name = field.path[field.path.len - 1];
+                switch (edit) {
+                    0 => {
+                        const value = try std.json.parseFromSlice(std.json.Value, allocator, field.value, .{ .allocate = .alloc_always });
+                        // Both parse trees belong to this iteration's arena.
+                        try object.object.put(allocator, name, value.value);
+                    },
+                    1 => {
+                        _ = object.object.orderedRemove(name);
+                    },
+                    2 => try object.object.put(allocator, name, .null),
+                    else => unreachable,
+                }
+                const encoded = try std.json.Stringify.valueAlloc(allocator, parsed.value, .{});
+                try observe(hash, encoded, status, session, binding);
+            }
+        }
+    }
+};
+
+test "mutation decoder preserves base bytes and the entire command domain" {
+    var covered: u16 = 0;
+    inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
+        covered |= @as(u16, 1) << @backingInt(kind);
+        const render = mutationWitnessRenderer(kind);
+        const Result = @typeInfo(@TypeOf(render)).@"fn".param_types[2].?;
+        const accepted = MutationWitness.accepted(kind);
+        const rejected: Result = if (kind == .message)
+            .{ .rejected = .{ .replayed = false, .code = .unknown_session, .content = MutationWitness.content } }
+        else
+            .{ .rejected = .{ .replayed = false, .code = .invalid_session_reference } };
+        var hash = MutationWitness.Hash.init(.{});
+        for ([_]Result{ accepted, rejected, .conflict, .infrastructure_failure }) |initial| {
+            for ([_]bool{ false, true }) |replayed| {
+                var result = initial;
+                switch (result) {
+                    .accepted => |*value| value.replayed = replayed,
+                    .rejected => |*value| value.replayed = replayed,
+                    else => {},
+                }
+                var response: protocol.ResponseBuffer = .{};
+                try response.render(render, .{ MutationWitness.subject(kind), result });
+                const status: u16 = switch (result) {
+                    .accepted, .rejected => 200,
+                    .conflict => 409,
+                    .infrastructure_failure => 500,
+                };
+                hash.update(response.slice());
+                hash.update("\x00");
+                for ([_]bool{ false, true }) |wrong_session| {
+                    for ([_]bool{ false, true }) |wrong_target| {
+                        try MutationWitness.observe(&hash, response.slice(), status, if (wrong_session) "p9q8rs" else MutationWitness.session, MutationWitness.target(kind, wrong_target));
+                    }
+                }
+                try MutationWitness.fieldEdits(&hash, response.slice(), status, MutationWitness.target(kind, false));
+            }
+        }
+        // Other renderer branches: skills reload, idle stop, restored/unpinned
+        // intent, final Action selection, and initial Session allocation.
+        var alternate = accepted;
+        switch (kind) {
+            .configure => alternate.accepted.skills = .unchanged,
+            .session_stop => {
+                alternate.accepted.selection.selected_turn_id = null;
+                alternate.accepted.completion = .completed;
+            },
+            .session_archive => alternate.accepted.archived = false,
+            .session_pin => alternate.accepted.pinned = true,
+            .action_background => alternate.accepted.selection.kind = .final,
+            else => {},
+        }
+        var response: protocol.ResponseBuffer = .{};
+        try response.render(render, .{ MutationWitness.subject(kind), alternate });
+        hash.update(response.slice());
+        var binding = MutationWitness.target(kind, false);
+        if (kind == .session_archive) binding.session_archive.archived = false;
+        if (kind == .session_pin) binding.session_pin.pinned = true;
+        try MutationWitness.observe(&hash, response.slice(), 200, MutationWitness.session, binding);
+        try MutationWitness.fieldEdits(&hash, response.slice(), 200, binding);
+        if (kind == .configure or kind == .message) {
+            var initial = accepted;
+            if (kind == .configure) initial.accepted.created = true;
+            if (kind == .message) binding.message.creates_session = true;
+            response = .{};
+            try response.render(render, .{ @as([]const u8, ""), initial });
+            hash.update(response.slice());
+            try MutationWitness.observe(&hash, response.slice(), 200, "", binding);
+        }
+        const expected = switch (kind) {
+            .configure => "f62ea80918db530c511f7f786218d5ab870e92ed70634e3ca96eb6ca613179f1",
+            .message => "34b26025c8b6daee6e9093cb8138717706434db8944492bed0f172a99deee1c8",
+            .session_stop => "e165b8a39834414a8e6ffaf2c461daaa528676edab1ada9333b93b7d81a844b1",
+            .session_archive => "2ac7c6d76067b3c6a836dc2cf7c589109bcf8db7ae8562a331c3f08aa1dd1f29",
+            .model_interruption => "4840955b2efb17b48bf59f6d4baa1ad889f8fcbbdc76dc5128d7ba8558aa2595",
+            .permission_decision => "b07cea38b11de2b48a6ee7563b7e1afebcbff75ef59ef108a33c1c200f286e59",
+            .session_pin => "45f781e2392618f227ead113ab6ec9024f4b1fb3efb9188d2ffa3145581d4ade",
+            .action_background => "09fa2c5d4ef75b9f2b493c538c7d46a2101fed3f699dc33e8745a613c68d7010",
+        };
+        const actual = std.fmt.bytesToHex(hash.finalResult(), .lower);
+        std.testing.expectEqualStrings(expected, &actual) catch |err| {
+            std.debug.print("base mutation witness changed for {s}\n", .{@tagName(kind)});
+            return err;
+        };
+    }
+    try std.testing.expectEqual(@as(u16, 0xff), covered);
+}
