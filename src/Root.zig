@@ -1,5 +1,3 @@
-//! Screen selection and the one recurring application tick. Screens own their
-//! workers and apply completed results when they receive that tick.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -12,14 +10,11 @@ const Self = @This();
 pub const list_width = 40;
 pub const split_at = 100;
 
-/// A pane core's key owner: Root hands it each key and
-/// paste mark `app_input.step` routes to that pane, with its delivery.
 pub const Keys = struct {
     context: *anyopaque,
     take: *const fn (*anyopaque, *vxfw.EventContext, vxfw.Event, app_input.Effects.Delivery) anyerror!void,
 };
 
-/// The composed main screen ends its presentation when Root changes panes.
 pub const MainPresentation = struct {
     context: *anyopaque,
     close: *const fn (*anyopaque) void,
@@ -27,23 +22,13 @@ pub const MainPresentation = struct {
 main_presentation: ?MainPresentation = null,
 
 overview: vxfw.Widget,
-/// The overview's key owner: Root hands it each key and
-/// paste mark `app_input.step` routes to the overview, with what it
-/// arrived under. A Root with no overview core (UI-only tests and native
-/// probes) hands those events to the `overview` widget instead.
 overview_keys: ?Keys = null,
 list: vxfw.Widget,
 divider: Split.Divider = .{},
 session: ?vxfw.Widget = null,
-/// The open Session's key owner, which `openSession` and `closeSession`
-/// set with `session`. A Session with none (UI-only tests) has its widget
-/// handed those events instead.
 session_keys: ?Keys = null,
 settings_page: AppSettings = .{},
-/// The sign-in page its owner supplies; Root only routes to and draws it.
 sign_in: ?vxfw.Widget = null,
-/// The layer over the main pane and the paste in progress; `app_input.step`
-/// alone changes it.
 input: app_input.State = .{},
 frames: u64 = 0,
 size: vxfw.Size = .{},
@@ -52,8 +37,6 @@ pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .captureHandler = capture, .eventHandler = event, .drawFn = draw };
 }
 
-/// Visibility follows the current viewport and screen selection, not the last
-/// time the list happened to draw. Opening a Session can hide it before drawing.
 pub fn listVisible(self: *const Self) bool {
     const layout = self.chooseLayout();
     return self.size.width > 0 and self.size.height > 0 and (layout.split or layout.pane == .overview);
@@ -64,7 +47,6 @@ const Layout = struct {
     pane: app_input.Pane,
 };
 
-/// One derived pane decision drives drawing, visibility and return focus.
 fn chooseLayout(self: *const Self) Layout {
     std.debug.assert(!self.input.layer.signInOpen() or self.sign_in != null);
     const wide = self.size.width >= split_at;
@@ -85,28 +67,20 @@ pub fn openSession(self: *Self, ctx: *vxfw.EventContext, session: vxfw.Widget, k
     ctx.redraw = true;
 }
 
-/// Show the main pane: the open Session, else the overview. Navigation
-/// selects it before it is attempted, since a Session departure may stay
-/// here with a notice, and Esc from settings returns to it.
 pub fn showMain(self: *Self, ctx: *vxfw.EventContext) !void {
     try self.navigate(ctx, .show_main);
 }
 
-/// List activation resumes the open chat as a chat-pane click does: focus
-/// moves, and nothing the chat presents closes.
 pub fn focusChat(self: *Self, ctx: *vxfw.EventContext) !void {
     try self.navigate(ctx, .focus_chat);
 }
 
-/// Settings takes the place of the main pane; it is no content of a feed.
-/// The page reloads first, so a failed reload leaves the layer as it was.
 pub fn openSettings(self: *Self, ctx: *vxfw.EventContext) !void {
     try self.settings_page.refresh();
     self.closeMainPresentation();
     try self.navigate(ctx, .open_settings);
 }
 
-/// The sign-in page covers the main pane or settings until it closes back.
 pub fn openSignIn(self: *Self, ctx: *vxfw.EventContext) !void {
     self.closeMainPresentation();
     self.settings_page.cancelChoice();
@@ -117,7 +91,6 @@ pub fn closeSignIn(self: *Self, ctx: *vxfw.EventContext) !void {
     try self.navigate(ctx, .close_sign_in);
 }
 
-/// Signing in closes the page and any settings under it, showing main.
 pub fn signedIn(self: *Self, ctx: *vxfw.EventContext) !void {
     try self.navigate(ctx, .signed_in);
 }
@@ -128,8 +101,6 @@ fn navigate(self: *Self, ctx: *vxfw.EventContext, request: app_input.Input) !voi
     try self.apply(ctx, effects, null);
 }
 
-/// Whether a Session is open and, only while the settings page is open,
-/// the page's answers for this event, read by value.
 fn facts(self: *const Self, key: ?vaxis.Key) app_input.Facts {
     const session_open = self.session != null;
     if (!self.input.layer.settingsOpen()) return .{ .session_open = session_open, .wide = self.size.width >= split_at };
@@ -143,8 +114,6 @@ fn facts(self: *const Self, key: ?vaxis.Key) app_input.Facts {
     } };
 }
 
-/// Applies what `app_input.step` decided, in its field order. `routed` is
-/// the terminal event, null for a navigation request.
 fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, routed: ?vxfw.Event) !void {
     switch (effects.page) {
         .keep => {},
@@ -158,8 +127,6 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, route
     }
     if (effects.focus) |focus| try ctx.requestFocus(switch (focus) {
         .main => self.session orelse self.overview,
-        // List keys are routed by Root, not by a focusable list editor.
-        // Root remains drawn when a wide sidebar becomes a narrow overview.
         .list => self.widget(),
         .settings => self.settings_page.widget(),
         .sign_in => self.sign_in.?,
@@ -187,16 +154,12 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, route
     if (effects.redraw) ctx.redraw = true;
 }
 
-/// Left on an empty chat draft asks whether a visible sidebar can take
-/// focus without retiring the chat. With none (narrow), the chat leaves.
 pub fn focusList(self: *Self, ctx: *vxfw.EventContext) !bool {
     const effect = app_input.step(&self.input, self.facts(null), .back_to_list);
     try self.apply(ctx, effect, null);
     return effect.focus == .list;
 }
 
-/// The Session has settled its borrowers before calling this. No terminal
-/// leaves raw mode and no input stream is transferred between screens.
 pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
     self.closeMainPresentation();
     self.session = null;
@@ -206,7 +169,6 @@ pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
     ctx.redraw = true;
 }
 
-/// Every routed event goes through `app_input.step`; Root only applies it.
 fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const input: app_input.Input = switch (routed) {
@@ -242,16 +204,10 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             }
             const first_command = ctx.cmds.items.len;
             try self.overview.handleEvent(ctx, .tick);
-            // Leaving is terminal for this dispatch: a child must not start
-            // old-client reobservation after Upgrade has requested departure.
             if (ctx.quit) return;
             if (self.session) |session| try session.handleEvent(ctx, .tick);
             if (ctx.quit) return;
             if (self.input.layer != .main or self.input.list_focused) {
-                // Hidden screens still settle their workers and consent state,
-                // but their presentation targets aren't in this focus tree.
-                // Retain every other command; a real openSession transition
-                // reveals the Session and keeps its own focus request.
                 var kept = first_command;
                 for (ctx.cmds.items[first_command..]) |command| {
                     if (command == .request_focus) continue;
@@ -292,7 +248,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             .left = self.list,
             .right = pane,
             .left_width = list_width,
-            // Root already chose the layout; Split only places the panes.
             .min_width = 0,
             .narrow = .right,
             .divider = self.divider,
@@ -455,7 +410,6 @@ test "App root opens settings in both layouts and Escape closes the choice, then
         }
     };
     const Pane = struct {
-        /// Gives each pane an address of its own, so widgets compare apart.
         id: u8 = 0,
         fn widget(self: *@This()) vxfw.Widget {
             return .{ .userdata = self, .drawFn = @This().draw };
@@ -495,10 +449,8 @@ test "App root opens settings in both layouts and Escape closes the choice, then
         try std.testing.expect(page.widget.eql(root.settings_page.widget()));
         try std.testing.expectEqual(@as(u16, if (width >= split_at) 99 else 46), page.size.width);
         if (width >= split_at) try std.testing.expect(layout.children[0].surface.widget.eql(list.widget()));
-        // The page takes the pane's place: nothing is drawn under it.
         try std.testing.expect(!containsWidget(opened, whole.widget()));
 
-        // Root captures Escape ahead of the focused page.
         const escape: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.escape } };
         root.settings_page.select(.keys);
         try root.settings_page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
@@ -520,14 +472,12 @@ test "App root opens settings in both layouts and Escape closes the choice, then
         try root.widget().captureEvent(&ctx, escape);
         try std.testing.expect(!root.input.layer.settingsOpen());
         try std.testing.expect(ctx.consume_event);
-        // Focus returns where it was before the page opened.
         try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(whole.widget()));
         const closed = try root.widget().draw(draw_context);
         const closed_layout = closed.children[0].surface;
         try std.testing.expect(closed_layout.widget.eql(whole.widget()));
         try std.testing.expectEqual(width, closed_layout.size.width);
         try std.testing.expect(root.listVisible());
-        // With no page open, Escape is the focused screen's.
         ctx.consume_event = false;
         try root.widget().captureEvent(&ctx, escape);
         try std.testing.expect(ctx.consume_event and !root.input.layer.settingsOpen());
@@ -536,8 +486,6 @@ test "App root opens settings in both layouts and Escape closes the choice, then
         try root.openSession(&ctx, session.widget(), null);
         try std.testing.expect(!root.input.layer.settingsOpen());
         try std.testing.expect(root.session.?.eql(session.widget()));
-        // Escape from settings shows the retained Session again at both
-        // widths and focuses it, without changing custody.
         try root.openSettings(&ctx);
         root.settings_page.select(.keys);
         try root.settings_page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
@@ -638,7 +586,6 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
             try std.testing.expect(root.input.layer.settingsOpen());
             try std.testing.expectEqual(@as(usize, 0), fixture.escapes);
         }
-        // The run's own rule, not this table, says which phases take Escape.
         const cancels = if (run) |value| value.takesEscape() else false;
         ctx.consume_event = false;
         try root.widget().captureEvent(&ctx, escape);
@@ -646,8 +593,6 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
         try std.testing.expectEqual(@as(usize, @intFromBool(cancels)), fixture.escapes);
         try std.testing.expectEqual(cancels, root.input.layer.settingsOpen());
         if (!cancels) continue;
-        // The page's own keys stay with it; every other key is the app's,
-        // whose owner decides what it does under the page.
         for ([_]vaxis.Key{ .{ .codepoint = vaxis.Key.up }, .{ .codepoint = vaxis.Key.down }, .{ .codepoint = vaxis.Key.enter } }) |key| {
             ctx.consume_event = false;
             try root.widget().captureEvent(&ctx, .{ .key_press = key });
@@ -662,7 +607,6 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
             try std.testing.expect(root.input.layer.settingsOpen());
         }
     };
-    // Without a text editor, no pasted key reaches the page or closes it.
     var pasted: Fixture = .{};
     var page: Self = .{ .overview = pasted.widget(), .list = pasted.widget() };
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
@@ -679,14 +623,11 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
     try page.widget().captureEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
     try std.testing.expect(!events.consume_event);
     try page.openSettings(&events);
-    // Ctrl-G closes as Escape does.
     try page.widget().captureEvent(&events, .{ .key_press = .{ .codepoint = 'g', .mods = .{ .ctrl = true } } });
     try std.testing.expect(!page.input.layer.settingsOpen());
     try page.openSettings(&events);
     try page.widget().captureEvent(&events, escape);
     try std.testing.expect(!page.input.layer.settingsOpen());
-    // With settings closed Escape is the main pane's to decide: Root hands
-    // it to the overview, or to the open Session, once and stops it.
     var fixture: Fixture = .{ .run = .checking };
     var root: Self = .{ .overview = fixture.widget(), .list = fixture.widget() };
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
@@ -741,7 +682,6 @@ test "App root keeps settings focus while a hidden Session ticks and retains oth
     try std.testing.expect(!root.input.layer.settingsOpen());
     try std.testing.expect(root.session.?.eql(hidden.widget()));
     try std.testing.expect(ctx.cmds.items[3].request_focus.eql(hidden.widget()));
-    // Closing settings returns presentation ownership to the retained Session.
     ctx.cmds.clearRetainingCapacity();
     try root.widget().handleEvent(&ctx, .tick);
     try std.testing.expect(ctx.cmds.items[0].request_focus.eql(hidden.widget()));
@@ -872,7 +812,6 @@ test "App root routes typed and pasted settings text only to the Model filter wi
         try std.testing.expectEqual(row, page.panel.selected);
         try std.testing.expect(!root.input.pasting and !page.model_choice.pasting);
         try std.testing.expectEqual(@as(usize, 0), fixture.saves);
-        // A pasted line break is never the Enter that chooses or acts.
         const overview_keys = fixture.overview_keys;
         const selected = if (page.panel.choice) |open| open.selected else null;
         try app_events.send(&ctx, "\x1b[200~\r\x1b[201~", root.widget(), page.widget());
@@ -881,7 +820,6 @@ test "App root routes typed and pasted settings text only to the Model filter wi
         try std.testing.expectEqual(choice != .none, page.hasChoice());
         try std.testing.expectEqual(selected, if (page.panel.choice) |open| open.selected else null);
         try std.testing.expect(root.input.layer.settingsOpen() and !ctx.quit and !root.input.pasting);
-        // A real Enter after the paste still changes the selected field.
         try app_events.send(&ctx, "\r", root.widget(), page.widget());
         try std.testing.expectEqual(@as(usize, 1), fixture.saves);
         switch (choice) {
@@ -980,7 +918,6 @@ test "Root navigation closes the composed main presentation before focusing anot
     try std.testing.expect(!owner.settings_when_closed);
     try root.showMain(&ctx);
     try std.testing.expectEqual(@as(usize, 2), owner.closes);
-    // The reducer commits the main layer before its reset effect closes scope.
     try std.testing.expect(!owner.settings_when_closed);
     try root.openSession(&ctx, empty.widget(), null);
     try std.testing.expectEqual(@as(usize, 3), owner.closes);
@@ -988,8 +925,6 @@ test "Root navigation closes the composed main presentation before focusing anot
     try std.testing.expectEqual(@as(usize, 4), owner.closes);
     try std.testing.expect(owner.session_when_closed);
     try std.testing.expect(root.session == null);
-    // An unseen Session may leave while ordinary Settings remains active.
-    // Its main presentation ends without cancelling the Settings field edit.
     try root.openSession(&ctx, empty.widget(), null);
     try root.openSettings(&ctx);
     root.settings_page.panel.fields = &.{.{ .label = "Effort", .value = "high" }};
@@ -1061,8 +996,6 @@ test "App root hands list activation unchanged to its one core" {
     }
     try std.testing.expectEqual(@as(usize, 2), selection.calls);
     _ = try root.focusList(&ctx);
-    // Only a left press transfers pane focus; hover, drag releases and
-    // context clicks retain the current key owner.
     for ([_]vaxis.Mouse{
         .{ .col = 50, .row = 10, .button = .left, .type = .motion, .mods = .{} },
         .{ .col = 50, .row = 10, .button = .left, .type = .release, .mods = .{} },

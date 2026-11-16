@@ -1,4 +1,3 @@
-// Presets against the real Host, with Turns paused so no provider is called.
 import assert from "node:assert/strict";
 import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -65,8 +64,6 @@ test("connect presets seed creation, overrides win and edited presets replay by 
 			(error: unknown) => error instanceof RuiRequestError && error.code === "preset_on_update");
 		await rui.close();
 		rui = await Rui.connect({ ...options, presets: { review: { ...spec, model: "gpt-6-sol" }, missing: spec } }, { binary: binary ?? "rui" });
-		// Defining a formerly unknown preset must not turn its saved refusal
-		// into creation when the caller retries the same key and fields.
 		await assert.rejects(rui.sessions.create({ preset: "missing" }, { idempotencyKey: "preset:missing" }),
 			(error: unknown) => error instanceof RuiRequestError && error.code === "unknown_preset");
 		await assert.rejects(rui.getSession(base.id).update({ preset: "review" } as never, { idempotencyKey: "preset:update" }),
@@ -86,7 +83,6 @@ test("an invalid connect preset is a RuiStartError naming the preset and field",
 	await assert.rejects(Rui.connect({
 		store: { sqlite: { dir: join(root, "store") } },
 		providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: "sk-ts-presets" } },
-		// @ts-expect-error Deliberately bypass the complete spec type to exercise Host refusal.
 		presets: { review: { model: "m", tools: [], compactAt: 1000, permissionMode: "ask" } },
 	}, { binary: binary ?? "rui" }), (error: unknown) => error instanceof RuiStartError && error.code === "settings_invalid" && /review.*effort/.test(error.message));
 });
@@ -96,7 +92,6 @@ test("a connect preset without tools is refused by the Host", { skip }, async ()
 	await assert.rejects(Rui.connect({
 		store: { sqlite: { dir: join(root, "store") } },
 		providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: "sk-ts-presets" } },
-		// @ts-expect-error Deliberately omit tools to exercise Host refusal.
 		presets: { review: { model: "m", effort: "low", compactAt: 1000, permissionMode: "ask" } },
 	}, { binary: binary ?? "rui" }), (error: unknown) => error instanceof RuiStartError && error.code === "settings_invalid" && /review.*tools/.test(error.message));
 });
@@ -107,7 +102,6 @@ for (const outputSchema of ["[]", "false", "not JSON"]) {
 		await assert.rejects(Rui.connect({
 			store: { sqlite: { dir: join(root, "store") } },
 			providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: "sk-ts-presets" } },
-			// @ts-expect-error Deliberately exercise runtime refusal of non-object schemas.
 			presets: { review: { model: "m", effort: "low", compactAt: 1000, tools: [], permissionMode: "ask", outputSchema } },
 		}, { binary: binary ?? "rui" }), (error: unknown) => error instanceof RuiStartError && error.code === "settings_invalid" && /review.*outputSchema/.test(error.message));
 	});

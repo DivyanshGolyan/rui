@@ -1,19 +1,11 @@
 name: Main build
-# Compile main after every merge: each gate, every unit root, ReleaseSmall and
-# the macOS type-check, through Selected checks' own producers, with no test
-# run. PRs need no up-to-date base, so two green alone can break main together
-# (#1410). A red build keeps one ci-red issue naming the PRs merged since the
-# last green build; the next green build closes it. Only a build of main HEAD
-# reports: a rerun of an older run changes nothing. Never a required check.
 on:
   push:
     branches: [main]
-  # Rebuild main by hand.
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  # The newest main supersedes an older build.
   group: main-build
   cancel-in-progress: true
 jobs:
@@ -26,13 +18,11 @@ jobs:
       checks: read
     uses: ./.github/workflows/check.yml
     with:
-      # Selection only names the push's range; a compile-only plan builds everything.
       base: ${{ github.event.before || 'HEAD^1' }}
       promotion: false
       compile_only: true
   report:
     needs: build
-    # A superseded build says nothing about main.
     if: ${{ !cancelled() && contains(fromJSON('["success", "failure"]'), needs.build.result) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -41,10 +31,9 @@ jobs:
       actions: read
       issues: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.sha }}
-          # The crossing PRs are the first-parent range since the last green build.
           fetch-depth: 0
           persist-credentials: false
       - name: Open, update or close the one main-build issue

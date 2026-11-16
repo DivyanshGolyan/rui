@@ -29,8 +29,6 @@ permissions:
   contents: read
   actions: read
 
-# Requested refs execute their own setup/build code, but must not publish
-# caches into the dispatching workflow's trusted ref. Tokens enforce this cap.
 cache-mode: read
 
 concurrency:
@@ -48,7 +46,7 @@ jobs:
       platform: ${{ steps.plan.outputs.platform }}
       targets: ${{ steps.plan.outputs.targets }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
@@ -73,13 +71,11 @@ jobs:
   compile:
     needs: plan
     runs-on: ${{ needs.plan.outputs.platform == 'linux' && 'ubuntu-24.04' || 'macos-15' }}
-    # A cold macos-15 compile of the native suite overran 15 minutes (run
-    # 42817865735); match check.yml's macos_build budget there.
     timeout-minutes: ${{ needs.plan.outputs.platform == 'linux' && 15 || 60 }}
     outputs:
       artifact: ${{ steps.publish.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
@@ -92,7 +88,7 @@ jobs:
         env:
           TARGETS: ${{ needs.plan.outputs.targets }}
         run: python3 -B tests/ci/build_artifact.py build "$TARGETS"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         id: publish
         with:
           name: compiled-${{ needs.plan.outputs.platform }}-${{ github.run_attempt }}
@@ -106,7 +102,6 @@ jobs:
     runs-on: ${{ needs.plan.outputs.platform == 'linux' && 'ubuntu-24.04' || 'macos-15' }}
     timeout-minutes: 30
     strategy:
-      # Separate VMs avoid measuring concurrent qualification workloads on one Mac.
       fail-fast: false
       max-parallel: ${{ needs.plan.outputs.platform == 'linux' && 10 || 3 }}
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
@@ -115,7 +110,7 @@ jobs:
         run: |
           echo "EVIDENCE=$RUNNER_TEMP/qualification-evidence" >> "$GITHUB_ENV"
           echo "RUI_FAILURE_ARTIFACTS=$RUNNER_TEMP/qualification-evidence/failures" >> "$GITHUB_ENV"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
@@ -183,8 +178,6 @@ jobs:
           if [ "$RESOURCE" = true ]; then
             target=$(python3 -c 'import json,os; print(json.loads(os.environ["TARGETS"])[0])')
             trap 'cat "$EVIDENCE/build.log" >&2' EXIT
-            # This existing runner publishes a summary plus compressed evidence
-            # to files instead of stdout; keep both under the upload directory.
             if [ "$target" = measure-execution-service ]; then
               zig build "$target" -Dci-artifacts=.zig-cache/o/ci-compiled -j2 --summary all -- --output "$EVIDENCE/result.json" 2> "$EVIDENCE/build.log" | tee "$EVIDENCE/runner.log"
             else
@@ -253,7 +246,7 @@ jobs:
       - name: Upload evidence even after a failed qualification
         id: evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: ${{ needs.plan.outputs.platform }}-${{ matrix.name }}-${{ needs.plan.outputs.sha }}-${{ github.run_attempt }}
           path: ${{ env.EVIDENCE }}

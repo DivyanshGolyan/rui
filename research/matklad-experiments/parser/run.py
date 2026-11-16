@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Native post-seal feasibility probe. Real transcript content stays in temp files."""
 import argparse, hashlib, json, pathlib, random, sqlite3, subprocess, tempfile, time, platform, re, tarfile
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -104,7 +103,6 @@ def main():
             run(label,data,window=7,expected=False)
         run('unknown-item-evidence-only',b'[{"type":"future_effect","opaque":{"x":1}}]',supported=False)
         run('import-rollback',base,mode='stream-fail',expected=False)
-        # Syntactic DOM parser is intentionally an invalid semantic oracle.
         r=run('negative-control-dom-accepts-missing-type',bads['missing-type'],mode='dom')
         assert r['valid']
 
@@ -114,8 +112,6 @@ def main():
         random.Random(419).shuffle(jobs)
         for n, mode, i in jobs:
             run(f'synthetic-{n}-repeat-{i}',encoded(synthetic(n)),mode=mode,sample=True)
-        # The historical production Capture is fed its real SSE grammar. It is
-        # intentionally not compared as a semantic equivalent of the new prototype.
         for n in ([1024] if opts.smoke else [1024,8192,32768,65536]):
             data=b'data: '+encoded({'type':'response.output_item.done','item':message('x'*n)})+b'\n\ndata: {"type":"response.completed"}\n\n'
             run(f'production-text-{n}',data,mode='production',expected=n <= 20*1024-24,sample=True)
@@ -139,14 +135,10 @@ def main():
                 else:
                     value=payload.get('output','')
                     if not isinstance(value,str): value=json.dumps(value,ensure_ascii=False)
-                    # A tool result is not model output; this wrapper checks
-                    # realistic string content only, not provider semantics.
                     items=[message(value)]
                 label='local-'+meta['selection']
                 for mode in ['stream','dom']: run(label,encoded(items),mode=mode,sample=True)
                 transcript_metadata.append({'selection':meta['selection'],'source_id':meta['source_id'],'line':meta['line'],'payload_sha256':meta['payload_sha256'],'source_type':payload['type'],'fixture_bytes':len(encoded(items))})
-        # Sequential post-seal burst, shared process parser workspace within each
-        # array; output item population grows without retaining a resident item index.
         for count in ([10] if opts.smoke else [10,100,1000]):
             run(f'many-items-{count}',encoded([message('bounded') for _ in range(count)]),sample=True)
     report={'platform':platform.platform(),'zig':subprocess.check_output(['zig','version'],text=True).strip(),

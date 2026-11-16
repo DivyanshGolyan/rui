@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Run serially under the lock shared by the four memory experiments."""
 import argparse, re, shutil, fcntl, hashlib, json, os, pathlib, platform, resource, signal, socket, subprocess, time
 HERE=pathlib.Path(__file__).resolve().parent
 p=argparse.ArgumentParser();p.add_argument('--build',type=pathlib.Path,default=pathlib.Path('/tmp/rui-transport-memory-build'));p.add_argument('--quick',action='store_true');p.add_argument('--match',default='');p.add_argument('--sanitize',action='store_true');p.add_argument('--repeat',type=int,default=1);p.add_argument('--output',type=pathlib.Path,default=HERE/'results');args=p.parse_args();b=args.build.resolve();out=args.output.resolve()
@@ -18,7 +17,6 @@ meta={'recorded_at_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'binar
 (out/'sources').mkdir(exist_ok=True)
 for source in ['probe.c','server.py','run.py','build.py']:shutil.copy2(HERE/source,out/'sources'/source)
 (out/'metadata.json').write_text(json.dumps(meta,indent=2)+'\n')
-# name, concurrency, request bytes, response bytes, items, sink mode, idle cache, buffer bytes, HTTP version
 cases=[]
 for proto in [1,2]:
  for n in [1,100,1000]:cases.append((f'h{proto}-n{n}',n,1024,65536,1,0,-1,16384,proto))

@@ -1,53 +1,31 @@
-//! The environment a Bash child starts with, as a value.
-
 const std = @import("std");
 
-/// What the Host reads once at start.
 pub const HostFacts = struct {
-    /// The running `rui`'s directory, or null when it is unknown.
     executable_dir: ?[]const u8,
-    /// The OS system PATH (`os/system_path.zig`).
     system_path: []const u8,
-    /// The Host's HOME, only when it is absolute.
     home: ?[]const u8,
 };
 
-/// Rui's own variables for one Bash call. They always win.
 pub const Identity = struct {
     address: []const u8,
     store: []const u8,
-    /// Empty when the Action has no handle; the variable is then left out.
     sender_handle: []const u8,
-    /// Non-secret socket routing for an opaque MySQL Store id.
     runtime_dir: ?[]const u8 = null,
 };
 
-/// A client environment: `"NAME=VALUE\0"` entries in client order, no name
-/// repeated and none starting with `RUI_`.
 pub const Value = []const u8;
 
 pub const Block = [:null]?[*:0]const u8;
 
-/// Whether a client passes on the variable NAME=VALUE: a NAME that is not
-/// empty, holds no `=` or NUL and does not start with `RUI_`, because Rui's
-/// overlay owns that prefix, and a VALUE without NUL. `RUIX`, `rui_x` and
-/// `XRUI_` are ordinary names. The client sends only these and the Host
-/// keeps only these.
 pub fn forwards(name: []const u8, value: []const u8) bool {
     return name.len != 0 and !std.mem.startsWith(u8, name, "RUI_") and
         std.mem.indexOfAny(u8, name, "=\x00") == null and std.mem.indexOfScalar(u8, value, 0) == null;
 }
 
-/// The bytes the entry `NAME=VALUE\0` takes in a Value.
 pub fn entryBytes(name: []const u8, value: []const u8) usize {
     return name.len + 1 + value.len + 1;
 }
 
-/// A client environment as the Host received it, checked and cleaned in
-/// place: each entry is `NAME=VALUE\0` with a non-empty NAME, and no NAME
-/// appears twice. Entries `forwards` refuses, those whose NAME starts with
-/// `RUI_`, are removed. `scratch` is borrowed for the duplicate check and freed before
-/// return. The result is a prefix of `bytes`.
 pub fn received(scratch: std.mem.Allocator, bytes: []u8) error{ OutOfMemory, InvalidEnvironment }!Value {
     if (bytes.len != 0 and bytes[bytes.len - 1] != 0) return error.InvalidEnvironment;
     var kept: usize = 0;
@@ -67,7 +45,6 @@ pub fn received(scratch: std.mem.Allocator, bytes: []u8) error{ OutOfMemory, Inv
         start = end + 1;
     }
     const value = bytes[0..kept];
-    // Sorted names put a repeat beside its first copy.
     const starts = try scratch.alloc(u32, count);
     defer scratch.free(starts);
     var next: usize = 0;
@@ -90,10 +67,6 @@ fn nameLessThan(value: []const u8, left: u32, right: u32) bool {
     return std.mem.lessThan(u8, entryName(value, left), entryName(value, right));
 }
 
-/// Which Message an environment came with, to choose between two for one
-/// Session. A person's outranks a peer Session's; between equal origins the
-/// later Store admission wins. Admission positions are unique in a Store, so
-/// two different Messages never tie.
 pub const Rank = struct {
     origin: Origin,
     admission: u64,
@@ -106,14 +79,8 @@ pub const Rank = struct {
     }
 };
 
-/// The child's `envp`. PATH comes first: the base's PATH, or the system PATH
-/// when there is no base or the base has none, led by this `rui`'s
-/// directory. Then the base's other entries, or, with no base, the Host's
-/// HOME. Then RUI_ADDRESS, RUI_STORE and RUI_SENDER_HANDLE. Entries from
-/// `base` are shared, not copied; the rest are allocated in `arena`.
 pub fn childBlock(arena: std.mem.Allocator, base: ?Value, facts: HostFacts, identity: Identity) error{OutOfMemory}!Block {
     const inherited = if (base) |value| std.mem.count(u8, value, "\x00") else 0;
-    // PATH, HOME and the three identity variables are the most added.
     const block = try arena.allocSentinel(?[*:0]const u8, inherited + 5 + @intFromBool(identity.runtime_dir != null), null);
     var length: usize = 1;
     var path = facts.system_path;
@@ -151,11 +118,6 @@ pub fn childBlock(arena: std.mem.Allocator, base: ?Value, facts: HostFacts, iden
     return block[0..length :null];
 }
 
-/// `PATH=` and `path` with `directory` as its first entry and no other
-/// copy of it, so a bare `rui` is this build. `path` is unchanged when the
-/// directory is unknown or contains ':' (it cannot be one entry). An empty
-/// `path` becomes the directory alone, since a trailing ':' would search the
-/// working directory.
 pub fn leadPath(arena: std.mem.Allocator, directory: ?[]const u8, path: []const u8) error{OutOfMemory}![:0]const u8 {
     const prefix = "PATH=";
     const lead = directory orelse return variable(arena, "PATH", path);
@@ -192,7 +154,6 @@ test "childBlock over every base, directory, HOME and sender handle" {
         "PATH=/bin:/opt/rui::/opt/rui/\x00",
     };
     const directories = [_]?[]const u8{ null, "/opt/a:b", "/opt/rui" };
-    // PATH for each base (rows) and directory (columns), written out by hand.
     const paths = [bases.len][directories.len][]const u8{
         .{ system, system, "/opt/rui:" ++ system },
         .{ system, system, "/opt/rui:" ++ system },
@@ -201,7 +162,6 @@ test "childBlock over every base, directory, HOME and sender handle" {
         .{ "/opt/rui:/client/bin", "/opt/rui:/client/bin", "/opt/rui:/client/bin" },
         .{ "/bin:/opt/rui::/opt/rui/", "/bin:/opt/rui::/opt/rui/", "/opt/rui:/bin::/opt/rui/" },
     };
-    // The base's entries other than PATH, in order.
     const others = [bases.len][]const []const u8{
         &.{},
         &.{"LANG=C"},
@@ -225,7 +185,6 @@ test "childBlock over every base, directory, HOME and sender handle" {
                 expected[count] = entry;
                 count += 1;
             }
-            // Only the fallback brings the Host's HOME; a client's own HOME is its entry.
             if (base == null) if (home) |value| {
                 expected[count] = try std.fmt.allocPrint(arena, "HOME={s}", .{value});
                 count += 1;
@@ -244,8 +203,6 @@ test "childBlock over every base, directory, HOME and sender handle" {
 }
 
 test "childBlock with no base matches the Host map it replaces" {
-    // The block the base commit's `bash.toolEnvironment` built over
-    // `bash.environment("/home/peer")`, as `createPosixBlock` ordered it.
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const block = try childBlock(arena_state.allocator(), null, .{
@@ -274,9 +231,7 @@ test "leadPath puts the directory first once and is idempotent" {
             try std.testing.expectEqualStrings(once, (try leadPath(arena, directory, once))["PATH=".len..]);
         }
     }
-    // A system PATH that already holds the directory keeps one copy, first.
     try std.testing.expectEqualStrings("PATH=/usr/local/bin:/usr/bin:/bin", try leadPath(arena, "/usr/local/bin", "/usr/bin:/usr/local/bin:/bin"));
-    // A longer name that starts with the directory is another entry.
     try std.testing.expectEqualStrings("PATH=/opt/rui:/opt/ruin:/bin", try leadPath(arena, "/opt/rui", "/opt/ruin:/bin"));
     try std.testing.expectEqualStrings("PATH=/opt/rui", try leadPath(arena, "/opt/rui", ""));
 }
@@ -291,7 +246,6 @@ test "received keeps well-formed entries in order and strips only RUI_ names" {
         .{ "RUI_=1\x00", "" },
         .{ "B=2\x00RUI_STORE=/s\x00A=1\x00RUI_ADDRESS=k\x00", "B=2\x00A=1\x00" },
         .{ "RUIX=1\x00rui_x=2\x00XRUI_=3\x00RUI=4\x00Rui_X=5\x00", "RUIX=1\x00rui_x=2\x00XRUI_=3\x00RUI=4\x00Rui_X=5\x00" },
-        // A repeat of a stripped name is no repeat: neither copy is kept.
         .{ "RUI_X=1\x00RUI_X=2\x00A=1\x00", "A=1\x00" },
         .{ "PATH=/bin\x00path=/usr/bin\x00", "PATH=/bin\x00path=/usr/bin\x00" },
         .{ "AB=1\x00A=1\x00B=1\x00", "AB=1\x00A=1\x00B=1\x00" },
@@ -330,9 +284,7 @@ test "Rank.outranks is a strict total order: a person first, then the later admi
         try std.testing.expect(!a.outranks(a));
         for (ranks) |b| {
             const same = a.origin == b.origin and a.admission == b.admission;
-            // Total and antisymmetric: exactly one of two different ranks outranks the other.
             if (!same) try std.testing.expect(a.outranks(b) != b.outranks(a));
-            // The rule, read independently of `outranks`.
             const expected = if (a.origin != b.origin) a.origin == .person else a.admission > b.admission;
             try std.testing.expectEqual(expected, a.outranks(b));
             for (ranks) |c| if (a.outranks(b) and b.outranks(c)) try std.testing.expect(a.outranks(c));

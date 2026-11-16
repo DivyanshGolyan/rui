@@ -89,7 +89,6 @@ test("interface defaults are chosen only after canonical byte projection", () =>
 test("schema-derived codecs cover every secret and OS-byte leaf", () => {
 	const schema = JSON.parse(readFileSync(new URL("../../../openapi.json", import.meta.url), "utf8"));
 	const leaves: { path: string[]; kind: string }[] = [];
-	// Walk the source schema independently of the generated runtime descriptor.
 	function walk(node: any, path: string[]) {
 		if (!node || typeof node !== "object") return;
 		if (node.$ref) return;
@@ -396,7 +395,6 @@ test("malformed environment sources are never looked up or forwarded", () => {
 	const environment = process.env;
 	const lookups: string[] = [];
 	let observing = false;
-	// This catches Node's aliasing getter BEFORE the child environment is constructed.
 	process.env = new Proxy(environment, {
 		get(target, name) {
 			if (observing && typeof name === "string") lookups.push(name);
@@ -414,7 +412,6 @@ test("malformed environment sources are never looked up or forwarded", () => {
 				observing = true;
 				let launch: ReturnType<typeof launchFor>;
 				try {
-					// Leave invalid key bytes for the Host's settings_invalid refusal, without aliasing them.
 					launch = launchFor(settings as HostSettings, "/r", { binary: "/fixture/rui" });
 				} finally {
 					observing = false;
@@ -451,7 +448,6 @@ test("presets preserve creation fields and use the existing spec writer", () => 
 	const spec = { model: "custom", effort: null, compactAt: 1000, tools: ["bash"] as const, permissionMode: "ask" as const, provider: "openai" as const, workspace: "/w", outputSchema: { type: "object" } };
 	assert.deepEqual(documentFor({ presets: { review: spec } }).presets, { review: spec });
 	for (const text of ["[]", "false", "not JSON"]) {
-		// @ts-expect-error The runtime Host also refuses non-object schemas.
 		const invalid = documentFor({ presets: { review: { ...spec, outputSchema: text } } });
 		assert.equal(invalid.presets.review.outputSchema, text);
 	}
@@ -588,13 +584,9 @@ test("a followed feed resumes from the end of an exhausted page", async () => {
 	assert.match(bodies[1] as string, /"position":"9","ordinal":null/);
 });
 
-// These checks are compiled by `npm run check`, but never execute invalid input.
 function launchTypeChecks() {
-	// @ts-expect-error The owner accepts only the two lifetime choices, not null.
 	launchFor({ interface: { lifetime: null } }, "/r");
-	// @ts-expect-error Store Adapters are objects, not the old URL/path field.
 	encodeSettings({ store: "/s" });
-	// @ts-expect-error Provider CA trust is a PEM filename, never a verification toggle.
 	launchFor({ network: { caFile: false } }, "/r");
 	new RuiStartError("store_fenced", "refused");
 	new RuiStartError("mysql_version", "refused");
@@ -605,7 +597,6 @@ function launchTypeChecks() {
 	new RuiStartError("binlog_statement", "refused");
 	new RuiStartError("mysql_unreachable", "refused");
 	new RuiStartError("mysql_login", "refused");
-	// @ts-expect-error Unknown codes are not launch refusals in the Host enum.
 	new RuiStartError("not_a_start_error", "refused");
 }
 

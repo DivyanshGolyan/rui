@@ -1,13 +1,9 @@
-//! CLI protocol adapter: shared saved tags have one catalog identity.
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const caller_error = @import("caller_error.zig");
 const Code = caller_error.Code;
 const names = caller_error.names;
 
-/// Every wire rejection vocabulary the CLI can decode. Recovery uses these
-/// same reply enums; it has no separate rejection spelling. Proposal tags are
-/// saved conversation facts, not re-rendered CLI errors, but share coverage.
 const rejection_enums = .{
     protocol.ConfigurationRejection,     protocol.MessageRejection,
     protocol.SessionStopRejection,       protocol.SessionArchiveRejection,

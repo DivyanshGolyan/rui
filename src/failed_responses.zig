@@ -1,12 +1,3 @@
-//! Bounded private retention of the raw response bytes of failed model
-//! Attempts. Before settlement, the execution owner copies the same response
-//! capture it classified into `diagnostics/failed-responses/` under the Store:
-//! one exact body file and one JSON metadata file per record, named by
-//! retention sequence, Operation and Attempt. Records are optional local
-//! diagnostics. They never determine recovery or continuation, and a
-//! retention fault never changes the saved failure. Only this owner writes
-//! the directory while the Host holds the Store lease, and it deletes only
-//! canonically named record files there.
 const std = @import("std");
 const attempt = @import("attempt.zig");
 const HostDiagnostics = @import("HostDiagnostics.zig");
@@ -18,21 +9,16 @@ pub const directory = "diagnostics/failed-responses";
 pub const capture_cap_bytes: u64 = 16 * 1024 * 1024;
 pub const total_cap_bytes: u64 = 64 * 1024 * 1024;
 pub const max_records = 256;
-/// Reserved disk room for one metadata file; the encoder cannot exceed it.
 const max_metadata_bytes = 8192;
 const copy_window_bytes = 64 * 1024;
 
-/// One export's scratch. Exports are rare and need over 100 KiB, so each
-/// maps fresh pages for the call and unmaps them at return.
 const ExportScratch = struct {
     listing: Listing,
     metadata: [max_metadata_bytes]u8,
-    /// Backs the metadata parse.
     parse_arena: [max_metadata_bytes * 4]u8,
     window: [copy_window_bytes]u8,
 };
 
-/// One retention's scratch, mapped for the call like `ExportScratch`.
 const RetainScratch = struct {
     listing: Listing,
     records: [max_records + 1]Record,
@@ -46,17 +32,12 @@ pub const Limits = struct {
     records: usize = max_records,
 };
 
-/// How the transport ended the capture being retained.
 pub const Transfer = enum {
-    /// A complete HTTP response, sealed before interpretation.
     complete,
-    /// The transfer failed after the provider sent these bytes.
     interrupted,
-    /// Local capture failed; these are the bytes written before the failure.
     capture_failed,
 };
 
-/// Borrowed through `retain`; read positionally, never modified.
 pub const Source = struct {
     file: std.Io.File,
     length: u64,
@@ -66,19 +47,16 @@ pub const Source = struct {
 pub const Failure = struct {
     binding: attempt.AttemptBinding,
     code: []const u8,
-    /// The exact bounded diagnostic text saved with the Attempt's failure.
     diagnostic: ?[]const u8 = null,
     http_status: ?u16 = null,
     request_id: []const u8 = "",
 };
 
-/// `complete` only when every captured byte of a complete transfer is kept.
 pub const Status = enum { complete, partial, omitted };
 
 pub const Retained = struct {
     sequence: u64,
     status: Status,
-    /// Why the body is absent from an `omitted` record.
     omission: ?anyerror = null,
 };
 
@@ -92,9 +70,6 @@ pub fn open(io: std.Io, store_dir: std.Io.Dir) !std.Io.Dir {
     return dir;
 }
 
-/// Copies one already-retained stream into the caller's charged report capture.
-/// No retention/open-for-write path is used. Each source window closes before
-/// the next read, so eviction can proceed; a lost record fails the capture.
 pub fn exportRecord(io: std.Io, store_dir: std.Io.Dir, binding: attempt.AttemptBinding, part: protocol.FailedResponsePart, sink: anytype) !void {
     var diagnostics = store_dir.openDir(io, "diagnostics", .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return error.FailedResponseNotFound,
@@ -151,7 +126,6 @@ pub fn exportRecord(io: std.Io, store_dir: std.Io.Dir, binding: attempt.AttemptB
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     const window = &scratch.window;
     var offset: u64 = 0;
-    // Even an empty retained body must exist and be a regular file.
     while (true) {
         const count = try readWindow(io, dir, body_name, offset, window, length, capture_cap_bytes);
         hash.update(window[0..count]);
@@ -164,14 +138,10 @@ pub fn exportRecord(io: std.Io, store_dir: std.Io.Dir, binding: attempt.AttemptB
     if (!std.mem.eql(u8, &expected, &digest)) return error.InvalidFailedResponseRecord;
 }
 
-/// A directory listing that lives in its scratch. `Dir.iterate` returns its
-/// 2 KiB buffer by value as an undefined literal, which ReleaseSafe fills on
-/// the stack before copying it; `Dir.Reader` borrows a buffer instead.
 const Listing = struct {
     reader: std.Io.Dir.Reader,
     buffer: [std.Io.Dir.Iterator.reader_buffer_len]u8 align(@alignOf(usize)),
 
-    /// Starts listing `dir` from its first entry.
     fn start(self: *Listing, dir: std.Io.Dir) *std.Io.Dir.Reader {
         self.reader = .init(dir, &self.buffer);
         return &self.reader;
@@ -192,9 +162,6 @@ fn readWindow(io: std.Io, dir: std.Io.Dir, name: []const u8, offset: u64, bytes:
     return wanted;
 }
 
-/// Evicts oldest records first, then writes the new one. A failed body copy
-/// still records `omitted` metadata. An error means no new record was made;
-/// the caller reports it and leaves the Attempt's outcome unchanged.
 pub fn retain(io: std.Io, dir: std.Io.Dir, limits: Limits, source: Source, failure: Failure) !Retained {
     std.debug.assert(limits.records != 0 and limits.records <= max_records);
     std.debug.assert(limits.capture_bytes + max_metadata_bytes <= limits.total_bytes);
@@ -225,7 +192,6 @@ pub fn retain(io: std.Io, dir: std.Io.Dir, limits: Limits, source: Source, failu
         .time_ns = std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds,
     }) catch unreachable;
     writeRecordFile(io, dir, sequence, failure.binding, .metadata, writer.buffered()) catch |err| {
-        // An orphan body stays named and counted, so the next prune evicts it.
         if (omission == null) dir.deleteFile(io, body) catch {};
         return err;
     };
@@ -247,8 +213,6 @@ fn nameFor(buffer: *NameBuffer, sequence: u64, binding: attempt.AttemptBinding, 
 fn parse(name: []const u8) ?Name {
     const prefix = "response-";
     if (!std.mem.startsWith(u8, name, prefix)) return null;
-    // Longer `.tmp` suffixes first: `.body` is a suffix of none, but order
-    // keeps the match exact.
     const part: Part = for ([_]Part{ .body_tmp, .metadata_tmp, .body, .metadata }) |candidate| {
         if (std.mem.endsWith(u8, name, suffixes[@backingInt(candidate)])) break candidate;
     } else return null;
@@ -268,8 +232,6 @@ fn parse(name: []const u8) ?Name {
 
 const Record = struct { sequence: u64, binding: attempt.AttemptBinding, bytes: u64 };
 
-/// Oldest-first count of existing records to delete before one more record
-/// of `incoming` bytes fits both the byte and the record bounds.
 fn evictionCount(records: []const Record, limits: Limits, incoming: u64) usize {
     var total: u64 = 0;
     for (records) |record| total +|= record.bytes;
@@ -280,9 +242,6 @@ fn evictionCount(records: []const Record, limits: Limits, incoming: u64) usize {
     return evicted;
 }
 
-/// Returns the next sequence after deleting interrupted writes and evicting
-/// enough records for `incoming` bytes. A failed deletion never counts as
-/// reclaimed space: it fails this retention instead.
 fn prune(io: std.Io, dir: std.Io.Dir, limits: Limits, incoming: u64, scratch: *RetainScratch) !u64 {
     const records = &scratch.records;
     while (true) {
@@ -316,14 +275,12 @@ fn prune(io: std.Io, dir: std.Io.Dir, limits: Limits, incoming: u64, scratch: *R
         record.bytes +|= stat.size;
         next = @max(next, std.math.add(u64, name.sequence, 1) catch return error.FailedResponseSequenceExhausted);
     }
-    // Heap sort keeps no range stack of its own.
     std.sort.heap(Record, records[0..count], {}, struct {
         fn lessThan(_: void, left: Record, right: Record) bool {
             return left.sequence < right.sequence;
         }
     }.lessThan);
     for (records[0..evictionCount(records[0..count], limits, incoming)]) |record| {
-        // Metadata first: a remaining body without metadata is still evicted next time.
         for ([_]Part{ .metadata, .body }) |part| {
             var name: NameBuffer = undefined;
             dir.deleteFile(io, nameFor(&name, record.sequence, record.binding, part)) catch |err| switch (err) {
@@ -351,7 +308,6 @@ fn copyBody(
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     copy(io, source, file, kept, &hash, window) catch |err| {
         file.close(io);
-        // A remaining temporary file stops the next prune before any growth.
         dir.deleteFile(io, temporary_name) catch {};
         return err;
     };
@@ -415,7 +371,6 @@ fn encodeMetadata(writer: *std.Io.Writer, metadata: Metadata) !void {
     try writer.writeAll(",\"http_status\":");
     try std.json.Stringify.value(failure.http_status, .{}, writer);
     try writer.writeAll(",\"request_id\":");
-    // Header bytes need not be UTF-8; an unencodable correlation is omitted.
     const request_id: ?[]const u8 = if (failure.request_id.len != 0 and std.unicode.utf8ValidateSlice(failure.request_id))
         failure.request_id
     else
@@ -485,7 +440,6 @@ test "failed response records keep exact bytes, signal partial and omitted captu
     defer dir.close(io);
     try expectMode(tmp.dir, directory, 0o700);
 
-    // Every byte value, so encoding or text handling cannot pass unnoticed.
     var raw: [1024]u8 = undefined;
     for (&raw, 0..) |*byte, index| byte.* = @truncate(index *% 7 +% 3);
     const source = try testCapture(tmp.dir, "capture", &raw);
@@ -526,8 +480,6 @@ test "failed response records keep exact bytes, signal partial and omitted captu
     try testing.expectEqualStrings(&expected_hex, object.get("retained_sha256").?.string);
     try testing.expectEqualStrings("response-1-22-3.body", object.get("body").?.string);
 
-    // Truncation of a complete transfer is partial, never complete, and the
-    // digest covers exactly the retained prefix.
     const truncated = try retain(io, dir, .{ .capture_bytes = 100 }, .{ .file = source, .length = raw.len, .transfer = .complete }, .{ .binding = binding, .code = "provider_http_400" });
     try testing.expectEqual(Status.partial, truncated.status);
     const prefix = try readAlloc(dir, "response-2-22-3.body");
@@ -542,11 +494,9 @@ test "failed response records keep exact bytes, signal partial and omitted captu
     try testing.expect(std.mem.indexOf(u8, truncated_metadata, "\"captured_bytes\":\"1024\",\"retained_bytes\":\"100\",\"truncated\":true") != null);
     try testing.expect(std.mem.indexOf(u8, truncated_metadata, &prefix_hex) != null);
 
-    // An interrupted transfer is partial even when every byte fits.
     const interrupted = try retain(io, dir, .{}, .{ .file = source, .length = 10, .transfer = .interrupted }, .{ .binding = binding, .code = "provider_transport_failure" });
     try testing.expectEqual(Status.partial, interrupted.status);
 
-    // A capture that cannot be read leaves no body and says why.
     const omitted = try retain(io, dir, .{}, .{ .file = source, .length = raw.len + 1, .transfer = .complete }, .{ .binding = binding, .code = "response_read_failed" });
     try testing.expectEqual(Status.omitted, omitted.status);
     try testing.expectError(error.FileNotFound, dir.statFile(io, "response-4-22-3.body", .{}));
@@ -566,14 +516,12 @@ test "failed response retention evicts oldest records only and fails closed on u
     const bytes = @as([4096]u8, @splat('r'));
     const source = try testCapture(tmp.dir, "capture", &bytes);
     defer source.close(io);
-    // Lookalikes and unrelated files are preserved and uncounted.
     for ([_][]const u8{ "notes.txt", "response-01-1-1.body", "response-1-1.body", "response-0-1-1.json", "host-1.jsonl" }) |name| {
         const file = try dir.createFile(io, name, .{});
         file.close(io);
     }
     const startup = try tmp.dir.createFile(io, "diagnostics/host-1.jsonl", .{});
     startup.close(io);
-    // A stale interrupted write is removed before growth.
     const stale = try dir.createFile(io, "response-9-1-1.body.tmp", .{});
     stale.close(io);
     const limits: Limits = .{ .capture_bytes = 4096, .total_bytes = 3 * 4096 + 3 * max_metadata_bytes, .records = 3 };
@@ -600,7 +548,6 @@ test "failed response retention evicts oldest records only and fails closed on u
         _ = try dir.statFile(io, name, .{});
     _ = try tmp.dir.statFile(io, "diagnostics/host-1.jsonl", .{});
 
-    // Byte pressure alone evicts oldest first, well under the record count.
     _ = try retain(io, dir, .{ .capture_bytes = 4096, .total_bytes = 2 * 4096 + 2 * max_metadata_bytes, .records = 10 }, .{ .file = source, .length = bytes.len, .transfer = .complete }, .{
         .binding = .{ .turn_id = 1, .operation_id = 6, .attempt_ordinal = 1 },
         .code = "provider_http_400",
@@ -609,8 +556,6 @@ test "failed response retention evicts oldest records only and fails closed on u
     _ = try dir.statFile(io, "response-4-4-1.body", .{});
     _ = try dir.statFile(io, "response-6-6-1.body", .{});
 
-    // A non-file in the record namespace cannot be reclaimed, so retention
-    // fails without growth rather than claim the space.
     try dir.createDir(io, "response-7-7-1.json.tmp", .fromMode(0o700));
     if (retain(io, dir, limits, .{ .file = source, .length = bytes.len, .transfer = .complete }, .{
         .binding = .{ .turn_id = 1, .operation_id = 8, .attempt_ordinal = 1 },

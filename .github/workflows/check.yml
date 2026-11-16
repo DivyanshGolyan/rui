@@ -2,16 +2,12 @@ name: Selected checks
 run-name: ${{ github.event_name == 'workflow_dispatch' && format('Selected checks from base {0}', inputs.base) || '' }}
 on:
   pull_request:
-    # Edits and draft conversion never cancel a running candidate. A
-    # retargeted PR runs again on its next push, or when reopened.
     types: [opened, synchronize, reopened, ready_for_review]
-  # Diagnose a ref against a chosen base without publishing it.
   workflow_dispatch:
     inputs:
       base:
         description: Base commit; selection covers base..ref
         required: true
-  # Promotion qualifies main HEAD against the batch since stable (promote.yml).
   workflow_call:
     inputs:
       base:
@@ -22,7 +18,6 @@ on:
         description: Run the full suite on Linux and macOS and bisect a failing job over the batch
         required: true
         type: boolean
-      # main-build.yml after each merge: never a test, never a promotion.
       compile_only:
         description: Compile every gate and unit root and type-check macOS; run no tests
         required: false
@@ -33,18 +28,12 @@ permissions:
   contents: read
   pull-requests: read
   actions: read
-  # Aggregates read GitHub's annotations to name a lost or never-acquired runner.
   checks: read
 
 concurrency:
   group: selected-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}${{ inputs.promotion && '-promotion' || '' }}${{ inputs.compile_only && '-compile' || '' }}
   cancel-in-progress: true
 
-# Cache timeout accounting, not a setup deadline:
-# setup-allowance-minutes: 25
-# save-reserve-minutes: 3
-# Selected 43832831879: setup 213 s; allow four further (200 s retry + 90 s request) windows.
-# Leave setup uncapped: cold fetch outliers still have the original job budget.
 
 jobs:
   plan:
@@ -73,7 +62,7 @@ jobs:
       policy_skips: ${{ steps.select.outputs.policy_skips }}
       compile_only: ${{ steps.select.outputs.compile_only }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -81,7 +70,6 @@ jobs:
         id: select
         env:
           CANDIDATE_REF: ${{ github.sha }}
-          # A PR's base.sha can trail the main its merge commit was built on.
           BRANCH_HEAD: ${{ github.event.pull_request.head.sha }}
           BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || inputs.base }}
           DRAFT: ${{ github.event.pull_request.draft || false }}
@@ -127,10 +115,9 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.sha }}
-          # Import-cycle and caller-error allowances only shrink from trusted main history.
           fetch-depth: 0
       - name: Install the pinned packages tests/ci imports
         run: python3 -m pip install --disable-pip-version-check -r tests/integration/requirements.txt -r tests/ci/requirements.txt
@@ -142,8 +129,6 @@ jobs:
       - uses: ./.github/actions/setup
         if: ${{ steps.caller-bootstrap.outputs.needed == 'true' }}
         with:
-          # Install only the existing pinned compiler: no build/package caches,
-          # selected fixture dependencies or native compilation in policy.
           targets: '[]'
           compiled: 'true'
           cold: 'true'
@@ -168,9 +153,8 @@ jobs:
           sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())
           PY
       - name: Reject undefined fixture names before native builds
-        # ruff is pinned in tests/ci/requirements.txt, which the pre-push hook installs too.
         run: python3 -m ruff check --select F821 tests
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: '22'
       - name: Check the TypeScript client's generated wire types and type-check it
@@ -179,9 +163,7 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           npm run check
           npm test
-      # Cache maintenance publishes this tarball on main, so a GitHub release
-      # outage does not fail policy.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ runner.temp }}/actionlint
           key: rui-actionlint-1.7.7-linux-amd64
@@ -198,7 +180,6 @@ jobs:
           set -euo pipefail
           for workflow in .github/workflows/*.yml; do
             if [ "$workflow" = .github/workflows/qualify-macos.yml ] || [ "$workflow" = .github/workflows/previous-release-upgrade.yml ] || [ "$workflow" = .github/workflows/release.yml ]; then
-              # 1.7.7 predates GitHub's server-enforced cache policy key.
               actionlint -shellcheck= -ignore '^unexpected key "cache-mode" for "workflow" section\.' "$workflow"
             else
               actionlint -shellcheck= "$workflow"
@@ -208,13 +189,11 @@ jobs:
     needs: plan
     if: ${{ needs.plan.outputs.linux_compile_targets != '' && needs.plan.outputs.linux_compile_targets != '[]' }}
     runs-on: ubuntu-24.04
-    # Match the cold Release producer budget: a dependency repin misses the compiled cache,
-    # with a bounded compile step leaving time to save partial work.
     timeout-minutes: 60
     outputs:
       artifact: ${{ steps.publish.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
@@ -224,8 +203,6 @@ jobs:
           check-part: compiled
       - name: Compile selected gates once, never test acceptance
         id: compile
-        # Cache timing: green 851 s, run 43732653500; minimum margin 120 s.
-        # Limit = job budget - cold setup allowance - save reserve.
         timeout-minutes: 32
         env:
           TARGETS: ${{ needs.plan.outputs.linux_compile_targets }}
@@ -238,7 +215,7 @@ jobs:
           save-only: 'true'
           setup-outcome: ${{ steps.setup.outcome }}
           work-outcome: ${{ steps.compile.outcome }}
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         id: publish
         with:
           name: compiled-linux-${{ github.run_attempt }}
@@ -247,7 +224,6 @@ jobs:
           if-no-files-found: error
           retention-days: 1
   linux_build_unit:
-    # Unit roots compile in parallel without queueing behind other gates.
     needs: plan
     if: ${{ needs.plan.outputs.linux_split == 'true' }}
     runs-on: ubuntu-24.04
@@ -255,7 +231,7 @@ jobs:
     outputs:
       artifact: ${{ steps.publish.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
@@ -264,8 +240,6 @@ jobs:
           check-part: compiled-unit
       - name: Compile the unit test roots once, never test acceptance
         id: compile
-        # Cache timing: green 480 s, run 43819213128; minimum margin 120 s.
-        # No measured save window fits; keep the existing job deadline only.
         env:
           TARGETS: ${{ needs.plan.outputs.linux_compile_targets }}
         run: python3 -B tests/ci/build_artifact.py build "$TARGETS" --part unit
@@ -276,7 +250,7 @@ jobs:
           save-only: 'true'
           setup-outcome: ${{ steps.setup.outcome }}
           work-outcome: ${{ steps.compile.outcome }}
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         id: publish
         with:
           name: compiled-linux-unit-${{ github.run_attempt }}
@@ -285,15 +259,12 @@ jobs:
           if-no-files-found: error
           retention-days: 1
   macos_typecheck:
-    # Linux predicts Mac only while Mac compiles. Type-check the product and
-    # unit tests for Apple Silicon on Linux: no SDK, link or run. Only a
-    # change to what it compiles can change its result (TYPECHECK_INPUTS).
     needs: plan
     if: ${{ needs.plan.outputs.typecheck_macos == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
@@ -302,8 +273,6 @@ jobs:
           check-part: typecheck-macos
       - run: zig build typecheck-macos --summary failures
         id: compile
-        # Cache timing: green 449 s, run 43819213128; minimum margin 120 s.
-        # No measured save window fits; keep the existing job deadline only.
       - name: Save reusable caches even after failure
         if: ${{ always() }}
         uses: ./.github/actions/setup/caches
@@ -315,12 +284,11 @@ jobs:
     needs: plan
     if: ${{ needs.plan.outputs.native == 'true' }}
     runs-on: macos-15
-    # Match the cold Release producer budget without extending acceptance deadlines.
     timeout-minutes: 60
     outputs:
       artifact: ${{ steps.publish.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
@@ -330,8 +298,6 @@ jobs:
           check-part: compiled
       - name: Compile selected gates once, never test acceptance
         id: compile
-        # Cache timing: green 1117 s, run 43720387127; minimum margin 120 s.
-        # Limit = job budget - cold setup allowance - save reserve.
         timeout-minutes: 32
         env:
           TARGETS: ${{ needs.plan.outputs.native_targets }}
@@ -344,7 +310,7 @@ jobs:
           save-only: 'true'
           setup-outcome: ${{ steps.setup.outcome }}
           work-outcome: ${{ steps.compile.outcome }}
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         id: publish
         with:
           name: compiled-macos-${{ github.run_attempt }}
@@ -353,17 +319,14 @@ jobs:
           if-no-files-found: error
           retention-days: 1
   macos_build_unit:
-    # Keep the parallel unit roots off the cores building the other gates.
-    # One extra Mac briefly; suites still use at most three of the five Macs.
     needs: plan
     if: ${{ needs.plan.outputs.macos_split == 'true' }}
     runs-on: macos-15
-    # A cold cache compiles the unit roots from scratch; match the cold producer budget.
     timeout-minutes: 60
     outputs:
       artifact: ${{ steps.publish.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
@@ -372,8 +335,6 @@ jobs:
           check-part: compiled-unit
       - name: Compile the unit test roots once, never test acceptance
         id: compile
-        # Cache timing: green 760 s, run 43720387127; minimum margin 120 s.
-        # Limit = job budget - cold setup allowance - save reserve.
         timeout-minutes: 32
         env:
           TARGETS: ${{ needs.plan.outputs.native_targets }}
@@ -385,7 +346,7 @@ jobs:
           save-only: 'true'
           setup-outcome: ${{ steps.setup.outcome }}
           work-outcome: ${{ steps.compile.outcome }}
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         id: publish
         with:
           name: compiled-macos-unit-${{ github.run_attempt }}
@@ -394,8 +355,6 @@ jobs:
           if-no-files-found: error
           retention-days: 1
   cache_execution:
-    # Admission requires Linux when cache policy changes; promotion adds macOS.
-    # Run alongside compilation rather than delaying its producers.
     name: cache execution (${{ matrix.runner }})
     needs: plan
     if: ${{ needs.plan.outputs.cache_execution == 'true' }}
@@ -406,7 +365,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
@@ -416,8 +375,6 @@ jobs:
           check-part: cache-execution
       - name: Prove warm compilation does not cache test acceptance
         id: compile
-        # Cache timing: green 351 s, run 42755585733; minimum margin 120 s.
-        # No measured save window fits; keep the existing job deadline only.
         run: python3 -B tests/ci/cache_execution.py
       - name: Save reusable caches even after failure
         if: ${{ always() }}
@@ -427,13 +384,12 @@ jobs:
           setup-outcome: ${{ steps.setup.outcome }}
           work-outcome: ${{ steps.compile.outcome }}
   linux_codegen:
-    # LLVM's production frame oracle is still required, but never delays PR suites.
     needs: plan
     if: ${{ needs.plan.outputs.linux_codegen == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
@@ -443,8 +399,6 @@ jobs:
           check-part: codegen
       - name: Check unchanged LLVM production stack frames
         id: compile
-        # Cache timing: green 593 s, run 43762678033; minimum margin 120 s.
-        # No measured save window fits; keep the existing job deadline only.
         run: zig build stack-frames -Dcpu=baseline --summary all
       - name: Save reusable caches even after failure
         if: ${{ always() }}
@@ -456,24 +410,17 @@ jobs:
   linux_suites:
     name: linux suites (${{ matrix.name }})
     needs: [plan, linux_build, linux_build_unit]
-    # The unit producer is skipped when no selected target compiles it. A
-    # compile-only build stops at its producers.
     if: ${{ !cancelled() && needs.plan.outputs.compile_only == 'false' && needs.plan.outputs.targets != '' && needs.plan.outputs.targets != '[]' && needs.linux_build.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.linux_build_unit.result) }}
     runs-on: ubuntu-24.04
-    # Ordinary shards take under ten minutes; a local rebuild after a rejected
-    # handoff compiles without the producer's cache. A failed promotion shard
-    # also bisects its batch.
     timeout-minutes: ${{ inputs.promotion && 300 || 35 }}
     strategy:
-      # qualification.py packs Selected suites into at most ten shards, so
-      # every shard starts at once; beside a long gate the short suites share three.
       fail-fast: false
       max-parallel: 10
       matrix: ${{ fromJSON(needs.plan.outputs.linux_matrix) }}
     env:
       LIVE_MYSQL: ${{ matrix.live_mysql }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
@@ -483,8 +430,6 @@ jobs:
           compiled: 'true'
       - name: Start MySQL 8.4 for the live dialect and settings-document checks
         if: ${{ env.LIVE_MYSQL == 'true' }}
-        # In the background, so the pull and initialisation overlap the
-        # restore; "Wait for MySQL 8.4" collects the outcome.
         run: |
           set -euo pipefail
           socket_dir="$RUNNER_TEMP/mysql"
@@ -497,7 +442,6 @@ jobs:
             "$socket_dir/mysqld.sock" "$password" "$RUNNER_TEMP/mysql-dialect-check-record"
       - name: Use the verified producer artifact or compile locally
         id: restore
-        # Local fallback rebuild must retain the whole job budget (including promotion).
         env:
           TARGETS: ${{ needs.plan.outputs.linux_compile_targets }}
           ARTIFACT_ID: ${{ needs.linux_build.outputs.artifact }}
@@ -506,7 +450,6 @@ jobs:
         run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID" --artifact-id "$UNIT_ARTIFACT_ID"
       - name: Configure the build runner before acceptance
         id: compile
-        # Restore/rebuild can consume the job budget; do not cap this follow-up either.
         run: zig build --fetch=all
       - name: Save reusable caches even after failure
         if: ${{ always() }}
@@ -523,7 +466,6 @@ jobs:
           mkdir -p "$certs"
           openssl req -new -x509 -days 1 -nodes -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 \
             -keyout "$certs/server.key" -out "$certs/server.crt" 2>/dev/null
-          # The image's postgres user (uid 999) must own a 0600 key.
           sudo chown 999:999 "$certs/server.key" && sudo chmod 600 "$certs/server.key"
           password=$(openssl rand -hex 16)
           docker run -d --name rui-pg -p 127.0.0.1:5432:5432 -v "$certs:/certs:ro" \
@@ -536,9 +478,6 @@ jobs:
           docker exec rui-pg pg_isready -h 127.0.0.1 -U postgres
           python3 -B tests/ci/live_engine_step.py export postgres 5432 "$password" "$certs/server.crt"
       - name: Give tests macOS's temporary directory shape
-        # macOS's TMPDIR is /var/folders/XX/<30>/T/ through a symlink to
-        # /private/var. Linux's short real /tmp hid that class three times
-        # (#579, #724, #755); here it fails on Linux first.
         run: |
           set -euo pipefail
           real=/private/var/folders/rq/rui0linux0shaped0like0darwin00/T
@@ -568,16 +507,13 @@ jobs:
           zig fmt --check --ast-check build.zig build src
           python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled --quarantine "$QUARANTINE" $RETRY
       - name: Require that the live MySQL dialect check ran
-        # Fails when the unit binary left no record or PREPAREd nothing, so
-        # any path that keeps the check from running (selection, launcher
-        # environment, caching) turns this shard red.
         if: ${{ !cancelled() && matrix.mysql_dialect }}
         run: |
           set -euo pipefail
           python3 -B tests/ci/live_engine_step.py verify mysql | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Retain bounded failed-fixture diagnostics
         if: ${{ failure() }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: failure-linux-${{ matrix.name }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/rui-failure-artifacts
@@ -592,7 +528,7 @@ jobs:
         run: python3 -B tests/ci/promotion.py --base "$BASE" --head "$HEAD_SHA" --logs "$RUNNER_TEMP/promotion-bisect"
       - name: Retain the bisect's verdict and replay logs
         if: ${{ failure() && inputs.promotion }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: promotion-bisect-linux-${{ matrix.name }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/promotion-bisect
@@ -630,7 +566,6 @@ jobs:
           COMPILE_ONLY: ${{ needs.plan.outputs.compile_only }}
         run: |
           test "$PLAN_RESULT" = success
-          # A compile-only build runs neither policy nor suites.
           case "$COMPILE_ONLY" in
             true) RAN=skipped ;;
             false) RAN=success ;;
@@ -670,7 +605,7 @@ jobs:
           else
             test "$NATIVE_RESULT" = skipped
           fi
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: ${{ failure() }}
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
@@ -684,17 +619,15 @@ jobs:
   macos_suites:
     name: macos suites (${{ matrix.name }})
     needs: [plan, macos_build, macos_build_unit]
-    # A skipped unit producer is expected only for an unsplit selection.
     if: ${{ !cancelled() && needs.plan.outputs.native == 'true' && needs.macos_build.result == 'success' && needs.macos_build_unit.result == (needs.plan.outputs.macos_split == 'true' && 'success' || 'skipped') }}
     runs-on: macos-15
     timeout-minutes: ${{ inputs.promotion && 300 || 35 }}
     strategy:
-      # Start alongside Linux; bound Mac occupancy while keeping suites isolated.
       fail-fast: false
       max-parallel: 3
       matrix: ${{ fromJSON(needs.plan.outputs.macos_matrix) }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
@@ -704,7 +637,6 @@ jobs:
           compiled: 'true'
       - name: Use the verified producer artifact or compile locally
         id: restore
-        # Local fallback rebuild must retain the whole job budget (including promotion).
         env:
           TARGETS: ${{ needs.plan.outputs.native_targets }}
           ARTIFACT_ID: ${{ needs.macos_build.outputs.artifact }}
@@ -713,7 +645,6 @@ jobs:
         run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID" --artifact-id "$UNIT_ARTIFACT_ID"
       - name: Configure the build runner before acceptance
         id: compile
-        # Restore/rebuild can consume the job budget; do not cap this follow-up either.
         run: zig build --fetch=all
       - name: Save reusable caches even after failure
         if: ${{ always() }}
@@ -737,7 +668,7 @@ jobs:
           python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled --quarantine "$QUARANTINE" $RETRY
       - name: Retain bounded failed-fixture diagnostics
         if: ${{ failure() }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: failure-macos-${{ matrix.name }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/rui-failure-artifacts
@@ -752,15 +683,13 @@ jobs:
         run: python3 -B tests/ci/promotion.py --base "$BASE" --head "$HEAD_SHA" --logs "$RUNNER_TEMP/promotion-bisect"
       - name: Retain the bisect's verdict and replay logs
         if: ${{ failure() && inputs.promotion }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: promotion-bisect-macos-${{ matrix.name }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/promotion-bisect
           retention-days: 14
           if-no-files-found: ignore
   macos:
-    # Keep the existing required status. A failed/cancelled matrix member must
-    # fail this aggregate, even when its sibling completes successfully.
     needs: [plan, macos_build, macos_build_unit, macos_suites]
     if: ${{ always() && (needs.plan.outputs.native == 'true' || needs.plan.result == 'failure') }}
     runs-on: ubuntu-24.04
@@ -778,7 +707,7 @@ jobs:
           if [ "$SPLIT" = true ]; then test "$UNIT_RESULT" = success; else test "$UNIT_RESULT" = skipped; fi
           test "$BUILD_RESULT" = success
           test "$NATIVE_RESULT" = success
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: ${{ failure() }}
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
@@ -791,15 +720,12 @@ jobs:
         run: python3 -B tests/ci/failure_cause.py explain
   previous_release_upgrade:
     needs: plan
-    # Upgrade, installer and Store-format paths only; promotion runs it on both systems for every batch.
     if: ${{ github.event_name == 'pull_request' && needs.plan.outputs.upgrade == 'true' }}
     uses: ./.github/workflows/previous-release-upgrade.yml
     with:
       candidate-ref: ${{ needs.plan.outputs.candidate_ref }}
-      # Linux on PRs; promotion runs the upgrade on both systems.
       systems: '["ubuntu-24.04"]'
   admission:
-    # This is the sole PR admission status. Reduced draft feedback cannot pass it.
     needs: [plan, policy, linux, macos, previous_release_upgrade, cache_execution]
     if: ${{ always() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
@@ -849,7 +775,6 @@ jobs:
               test "$LINUX_MEMORY" = false ;;
             normal)
               test "$POLICY_RESULT" = success
-              # Mac and the upgrade run for their own paths; promotion runs both.
               case "$NATIVE" in
                 true) test "$MACOS_RESULT" = success ;;
                 false) test "$MACOS_RESULT" = skipped ;;
@@ -867,7 +792,7 @@ jobs:
             false) test "$CACHE_RESULT" = skipped ;;
             *) echo 'Missing or invalid cache selection' >&2; exit 1 ;;
           esac
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: ${{ failure() }}
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}

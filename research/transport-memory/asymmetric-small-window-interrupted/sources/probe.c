@@ -21,8 +21,6 @@ typedef union {
     int k;
   } x;
 } H;
-// These hooks count requested bytes; malloc metadata and retained pages stay in
-// OS metrics.
 static _Atomic size_t live[2], peak[2], blocks[2], largest[2], biglive[2],
     bigpeak[2];
 static void size_observation(size_t n, size_t old, int k) {
@@ -203,7 +201,6 @@ static size_t wr(char *p, size_t a, size_t b, void *v) {
   T *t = v;
   size_t n = a * b;
   callbacks++;
-  // PAUSE accepts no bytes. Unpause can reenter this callback synchronously.
   if ((mode == 1 && t->id % 2 == 0 && !t->once &&
        t->got >= (response_bytes < 524288 ? 0 : 131072)) ||
       (mode == 2 && !t->once)) {

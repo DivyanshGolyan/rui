@@ -1,5 +1,3 @@
-//! Continuous, bottom-aligned feed. Text stays in Window, reading position in
-//! Feed; the activity Widget participates in the same layout even offscreen.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -20,7 +18,6 @@ tail: ?vxfw.Widget = null,
 latest_ending: ?resident.LatestEnding = null,
 retry_actionable: bool = false,
 style: vaxis.Style = .{},
-/// The pointer's tool or Message row, quieter than the selection background an open row keeps.
 hover_style: vaxis.Style = .{ .ul_style = .single },
 hover: Hover = .{},
 colours: viewport.Colours = .{},
@@ -29,7 +26,6 @@ colour: bool = true,
 size: vxfw.Size = .{},
 handler: ?Handler = null,
 selection: ?Selection = null,
-/// A retry press is not a text selection; a drag cancels it outright.
 retry_press: ?struct { cell: Cell, ending: resident.Key } = null,
 drawn: Drawn = .{},
 
@@ -47,8 +43,6 @@ pub const Handler = struct {
 };
 pub const Openable = union(enum) { message: View.Collapsed, session: [6]u8, tool: resident.Key };
 const Cell = struct { row: i32, col: i32 };
-// Both bounds of both clusters are keyed. No saved offset counts from the
-// window's start/end; a prepend or removal of another row cannot move them.
 const Spot = struct { start: resident.Point, end: resident.Point };
 const QuoteFrame = struct {
     revision: u64 = 0,
@@ -135,8 +129,6 @@ pub fn toolAt(self: *const Self, point: resident.Point) ?resident.Key {
     return self.window.toolAt(point);
 }
 
-/// Lowest actually painted mark/link, not an ordinal counted from the end.
-/// Looking at source cells also excludes links on hidden wrapped rows.
 pub fn openable(self: *Self, gpa: std.mem.Allocator) !?Openable {
     if (self.drawn.width == 0 or self.drawn.height == 0) return null;
     const cells = try gpa.alloc(vaxis.Cell, self.drawn.width);
@@ -159,8 +151,6 @@ pub fn openable(self: *Self, gpa: std.mem.Allocator) !?Openable {
                 if (peer.len == 6) return .{ .session = peer[0..6].* };
             }
             const mark = self.window.document.collapsed(offset, offset + cells[column].char.grapheme.len).last orelse continue;
-            // A final aggregate is a deliberate, unkeyed summary. Do not
-            // fall through to an earlier Message when that is the lowest mark.
             const target = self.window.messageAt(self.window.pointAt(mark) orelse continue) orelse return null;
             return .{ .message = target };
         }
@@ -176,8 +166,6 @@ fn keyed(self: *const Self, spot: selecting.Spot) ?Spot {
     return .{ .start = self.window.pointAt(@intCast(spot.start)) orelse return null, .end = self.window.pointAt(@intCast(spot.end)) orelse return null };
 }
 
-/// Remap the frame's first line by key after edits, before handling a pointer
-/// over that frame. The line can be shortened, but never aliases a new row.
 fn laidVisible(self: *const Self) Feed.Visible {
     const first = self.drawn.first orelse return .{ .first = self.window.count };
     if (first.key.order(resident.tail_key) == .eq) return .{ .first = self.window.count, .row = self.drawn.row, .pad = self.drawn.pad };
@@ -200,7 +188,6 @@ fn rowPosition(self: *const Self, row: u16) ?viewport.Position {
     return self.window.positionAtWith(self.laidVisible(), row, self.layout(), self.presentation());
 }
 
-/// Every row `rowPosition` answers, in order, laying the frame out once.
 fn laidRows(self: *const Self) resident.Window.Rows {
     return self.window.rowsWith(self.laidVisible(), self.layout(), self.presentation());
 }
@@ -217,7 +204,6 @@ fn spotAt(self: *const Self, gpa: std.mem.Allocator, at: Cell) !?Spot {
     const last: i32 = self.drawn.height - 1;
     var row: u16 = @intCast(std.math.clamp(at.row, 0, last));
     var col: i32 = if (at.row < 0) 0 else if (at.row > last) self.drawn.width else at.col;
-    // A gap/pad/tail is a text boundary, not selectable activity text.
     var position = self.rowPosition(row);
     if (position == null) {
         var next = row;
@@ -242,8 +228,6 @@ fn spotAt(self: *const Self, gpa: std.mem.Allocator, at: Cell) !?Spot {
     return self.keyed((Row{ .document = &self.window.document, .cells = cells, .line = line.offset }).spot(col));
 }
 
-/// Hit-test only a cell inside the feed pane. No clamping to text boundaries:
-/// blank space beside/below an ending must never become its retry link.
 fn retryAt(self: *const Self, gpa: std.mem.Allocator, at: Cell) !?resident.RetryHit {
     if (!self.retry_actionable or at.row < 0 or at.col < 0 or at.row >= self.drawn.height or at.col >= self.drawn.width) return null;
     const position = self.rowPosition(@intCast(at.row)) orelse return null;
@@ -300,7 +284,6 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
         .release => {
             self.retry_press = null;
             ctx.consumeEvent();
-            // X10 releases name no button; custody comes from the left press.
             if ((value.button != .left and value.button != .none) or !std.meta.eql(at, pressed.cell)) return;
             const hit = try self.retryAt(ctx.alloc, at) orelse return;
             if (hit != .link or hit.link.order(pressed.ending) != .eq) return;
@@ -330,8 +313,6 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
                 purpose = .{ .quote = .{ .target = target, .frame = self.drawn.quote } };
             }
             if (purpose == .copy and handler.on_retry != null) if (try self.retryAt(ctx.alloc, at)) |hit| {
-                // Synthetic-only wrap padding is not a resident text position.
-                // Leave the existing selection path to original body cells.
                 if (hit == .link) self.retry_press = .{ .cell = at, .ending = hit.link };
                 ctx.consumeEvent();
                 return;
@@ -399,8 +380,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     if (self.selection) |held| if (!self.current(held.purpose)) {
         _ = self.cancelSelection();
     };
-    // Measure with the same full pane regardless of the anchor. A scrolled
-    // frame must not remove the tail and change its own scroll geometry.
     const tail = if (self.tail) |child| try child.draw(ctx.withConstraints(.{}, ctx.max)) else null;
     self.window.tail_rows = if (tail) |child| child.size.height else 0;
     const entries = self.window.layoutEntriesWith(self.layout(), self.presentation());
@@ -472,9 +451,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     return surface;
 }
 
-/// Build hover from the same clipped rows and retry decorator as hit testing.
-/// Tool rows take the hover look unless open, where the selection background wins;
-/// retry chips keep underline.
 fn drawHover(self: *Self, ctx: vxfw.DrawContext, surface: vxfw.Surface) !void {
     const arena = ctx.arena;
     self.hover.targets = &.{};
@@ -557,7 +533,6 @@ test "FeedView bottom alignment and scroll round trip include the activity tail 
     try std.testing.expectEqualDeep(initial.buffer, restored.buffer);
     try std.testing.expectEqual(initial.children[0].origin, restored.children[0].origin);
     try std.testing.expectEqualDeep(initial.children[0].surface.buffer, restored.children[0].surface.buffer);
-    // A short feed is aligned against input, tail included.
     window.trim(0, 1);
     try window.append(&.{.{ .key = .{ .position = 20 }, .text = .{ .bytes = "short\n" } }});
     const short = try testFrame(&view, arena.allocator(), 12, 5);
@@ -584,7 +559,6 @@ test "FeedView selection endpoints survive prepends and edits but not eviction" 
     try std.testing.expectEqualStrings("beta\ngamma", first_copy.text.bytes);
     _ = try testFrame(&view, arena.allocator(), 16, 2);
     try std.testing.expect(view.dragging());
-    // Replacing a retained entry remaps/clamps each keyed endpoint.
     try window.replace(.{ .position = 20 }, .{ .bytes = "a\n" });
     _ = try testFrame(&view, arena.allocator(), 16, 2);
     try std.testing.expect(view.dragging());
@@ -614,7 +588,6 @@ test "FeedView multiple collapsed targets and lowest visible peer use keyed byte
     try std.testing.expectEqual(@as(u64, 12), (try view.openable(arena.allocator())).?.message.position);
     try std.testing.expectEqual(@as(u64, 11), view.messageAt(.{ .key = .{ .position = 20 }, .offset = first }).?.position);
     try std.testing.expect(view.messageAt(.{ .key = .{ .position = 20 }, .offset = 0 }) == null);
-    // Trimming/reloading the same key cannot leave a stale Message target.
     window.trim(1, 0);
     try window.append(&.{.{ .key = .{ .position = 20 }, .text = resident.Text.fromDocument(&prepared), .messages = &.{.{ .offset = first, .target = b }} }});
     try std.testing.expectEqual(@as(u64, 12), view.messageAt(.{ .key = .{ .position = 20 }, .offset = first }).?.position);
@@ -644,8 +617,6 @@ test "FeedView retry tail is frame-local, latest-key-only and gated by cause and
     const original = try std.testing.allocator.dupe(u8, window.document.text());
     defer std.testing.allocator.free(original);
     const marks = @import("marks.zig");
-    // All cause policies are covered by marks' independent exhaustive domain;
-    // cross keyed/unkeyed, every entry identity (including ordinal) and bool.
     for ([_]?resident.LatestEnding{
         null,
         .{ .key = .{ .position = 10 }, .cause = marks.cause("provider_http_500", null) },
@@ -658,8 +629,6 @@ test "FeedView retry tail is frame-local, latest-key-only and gated by cause and
         view.retry_actionable = actionable;
         for (1..141) |width| {
             const surface = try testFrame(&view, arena.allocator(), @intCast(width), 180);
-            // Compare each stored entry against an independently prepared line.
-            // The explicit expectation doesn't call the production decorator.
             for (window.entries[0..window.count], 0..) |entry, index| {
                 const expected_hint = actionable and latest != null and latest.?.cause.key != null and std.meta.eql(entry.key, latest.?.key);
                 var expected: viewport.Sized(128, true) = .{};
@@ -680,7 +649,6 @@ test "FeedView retry tail is frame-local, latest-key-only and gated by cause and
                 for (cells, drawn) |want, got| try std.testing.expectEqualStrings(want.char.grapheme, got.char.grapheme);
             }
             try std.testing.expectEqualStrings(original, window.document.text());
-            // Bound test scratch independently of the exhaustive width domain.
             _ = arena.reset(.retain_capacity);
         }
     };
@@ -710,7 +678,6 @@ test "FeedView retry click hits only painted suffix cells including wrapped tail
     const window = try testWindow();
     defer gpa.destroy(window);
     const words = "× Model reply unreadable\n";
-    // A lookalike in retained text must not become a link.
     const older = "ctrl+r retries elsewhere\n";
     try window.append(&.{
         .{ .key = .{ .position = 10 }, .text = .{ .bytes = older }, .tight = true },
@@ -723,8 +690,6 @@ test "FeedView retry click hits only painted suffix cells including wrapped tail
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = gpa, .cmds = .empty };
     defer ctx.cmds.deinit(gpa);
-    // Independent literal and Document layout, not the production decorator or
-    // hit-query: every body, separator, indent, margin and link cell is checked.
     const shown = older ++ "× Model reply unreadable · ctrl+r retries\n";
     const start = std.mem.lastIndexOf(u8, shown, "ctrl+r retries").?;
     var expected: viewport.Sized(256, true) = .{ .sidenotes = true, .quotes = true };
@@ -774,7 +739,6 @@ test "FeedView retry click cancels drag departure and lost eligibility or ending
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = gpa, .cmds = .empty };
     defer ctx.cmds.deinit(gpa);
     _ = try testFrame(&view, arena.allocator(), 80, 4);
-    // Literal line: 24 ending columns, 3 separator columns, then the key.
     const at: Cell = .{ .row = 3, .col = 27 };
     const Cases = enum { drag_same, drag_away_back, release_elsewhere, leave, held, unkeyed, other_ending, hidden_press, disabled, no_press };
     for (std.enums.values(Cases)) |case| {
@@ -841,7 +805,6 @@ test "FeedView terminal aggregate blocks Ctrl-O and clicks without opening earli
     try std.testing.expect((try view.openable(arena.allocator())) == null);
     try std.testing.expect(view.messageAt(.{ .key = .{ .position = 50 }, .offset = aggregate }) == null);
     try std.testing.expectEqualDeep(target, view.messageAt(.{ .key = .{ .position = 50 }, .offset = 0 }).?);
-    // The same rule holds if only the aggregate fits in the painted frame.
     _ = try testFrame(&view, arena.allocator(), 30, 1);
     try std.testing.expect((try view.openable(arena.allocator())) == null);
     window.trim(1, 0);
@@ -1041,8 +1004,6 @@ test "FeedView hover and drag highlight measure each visible line a bounded numb
         try std.testing.expect(frame.buffer[0].style.reverse);
         count.* = viewport.measured_lines;
     }
-    // Every line is one row, so a linear frame costs at most 32 times as
-    // much for 32 times the rows; the quadratic walk cost about 1000 times.
     try std.testing.expect(measured[1] <= 32 * measured[0]);
 }
 
@@ -1103,14 +1064,12 @@ test "FeedView quote gesture latches decoded Alt and never copies or submits" {
         _ = try testFrame(&view, arena.allocator(), 16, 3);
         try quoteReport(&view, &ctx, if (backwards) "\x1b[<8;4;3M" else "\x1b[<8;1;1M");
         try std.testing.expect(view.selection.?.purpose == .quote);
-        // Releasing Alt mid-drag does not turn the release into a copy.
         try quoteReport(&view, &ctx, if (backwards) "\x1b[<32;1;1M" else "\x1b[<32;4;3M");
         _ = try testFrame(&view, arena.allocator(), 16, 3);
         try quoteReport(&view, &ctx, if (backwards) "\x1b[<0;1;1m" else "\x1b[<0;4;3m");
         try std.testing.expectEqualStrings("left\n> 雪e\u{301}\n>\n> last\nRIGHT", input.composition().bytes);
         try std.testing.expectEqual(null, input.submitted);
         try std.testing.expectEqual(@as(usize, 0), clipboardCommands(&ctx));
-        // A duplicate release cannot edit a second time.
         const revision = input.revision;
         try quoteReport(&view, &ctx, "\x1b[<0;4;3m");
         try std.testing.expectEqual(revision, input.revision);

@@ -103,9 +103,6 @@ run_case churn_3x_capacity_100 100 lane no 19704 3
 run_case patch_on_storage_owner_100 100 owner no 19703
 run_case missing_terminal 1 lane yes 19701
 
-# Attempt admission succeeds, then post-commit scratch preparation fails. The
-# server is ready but receives no connection; the admitted Attempt must still
-# settle as bounded evidence.
 case_root="$output_root/postcommit_preparation_failure"
 mkdir -p "$case_root"
 python3 "$artifact_dir/tls_sse_load.py" \

@@ -23,5 +23,4 @@ jobs:
     with:
       platform: linux
       ref: ${{ inputs.ref }}
-      # Linux cannot qualify macOS footprint. Never mask a resource gate's exit.
       suite: ${{ inputs.suite }}

@@ -1,27 +1,14 @@
-//! A JSON reader a codec runs over a whole document. It checks the document
-//! against RFC 8259 byte by byte, taking each string's contents at once and
-//! holding only its open containers and the token it is in, so a body of
-//! any size reads in the same few hundred bytes. A handler hears where each
-//! key and value begins and ends; a string's decoded start stays in the
-//! reader for comparing with names and codes, and its range names the rest.
-//! A document is one object; whitespace is space, tab, CR and LF.
 const std = @import("std");
 const codec_abi = @import("../codec_abi.zig");
 
 const Range = codec_abi.Range;
 
-/// The deepest value a document may hold: the top object's members are at
-/// depth 1.
 pub const max_depth = 64;
 
-/// How much of a string's decoded start the reader keeps.
 pub const max_text_bytes = 64;
 
 pub const Kind = enum { object, array, string, number, literal };
 
-/// Why bytes are not one JSON object, named as the Host's validation of
-/// provider output has always named it, so a rejection's saved detail does
-/// not depend on which reader found it.
 pub const Error = error{
     UnexpectedJsonEnd,
     TrailingJson,
@@ -37,20 +24,10 @@ pub const Error = error{
     InvalidJsonUtf8,
 };
 
-/// How a number differs from a plain nonnegative integer that fits a u64,
-/// as a reader of its digits meets it: a sign first, then too many digits,
-/// then a fraction or exponent.
 pub const Digits = enum { plain, negative, overflow, fractional };
 
 pub const Literal = enum { true_value, false_value, null_value };
 
-/// Decodes JSON string contents from `bytes[start..]` up to the first
-/// unescaped quote or the end of `bytes`, checking every escape and UTF-8
-/// sequence, and gives each scalar to `sink.append(bytes, scalar)` and each
-/// run of plain ASCII whole with a null scalar. Returns where it stopped:
-/// the quote's index, or `bytes.len`. The reader runs it over each string
-/// it reads and the shell over each range a codec names, so both decode
-/// alike.
 pub fn decodeString(bytes: []const u8, start: usize, sink: anytype) Error!usize {
     var at = start;
     while (at < bytes.len) {
@@ -70,7 +47,6 @@ pub fn decodeString(bytes: []const u8, start: usize, sink: anytype) Error!usize 
     return at;
 }
 
-/// The escape whose backslash is just before `at`; returns where it ends.
 fn escape(bytes: []const u8, at: usize, sink: anytype) Error!usize {
     if (at == bytes.len) return error.UnexpectedJsonEnd;
     const value: u8 = switch (bytes[at]) {
@@ -87,8 +63,6 @@ fn escape(bytes: []const u8, at: usize, sink: anytype) Error!usize {
     return at + 1;
 }
 
-/// A `\u` escape whose hex digits start at `at`, with its low surrogate
-/// when it is a high one.
 fn unicodeEscape(bytes: []const u8, at: usize, sink: anytype) Error!usize {
     const value = try hex(bytes, at);
     var end = at + 4;
@@ -121,8 +95,6 @@ fn hex(bytes: []const u8, at: usize) Error!u21 {
     return value;
 }
 
-/// The UTF-8 sequence that starts at `at`; std's decoder judges it once
-/// whole.
 fn sequence(bytes: []const u8, at: usize, sink: anytype) Error!usize {
     const length = std.unicode.utf8ByteSequenceLength(bytes[at]) catch return error.InvalidJsonUtf8;
     for (at + 1..at + length) |index| {
@@ -138,43 +110,25 @@ fn sequence(bytes: []const u8, at: usize, sink: anytype) Error!usize {
     return at + length;
 }
 
-/// How many leading bytes are string contents that need no check: no quote,
-/// backslash, control or UTF-8.
 fn plainLength(bytes: []const u8) usize {
     return for (bytes, 0..) |byte, count| {
         if (byte == '"' or byte == '\\' or byte < 0x20 or byte >= 0x80) break count;
     } else bytes.len;
 }
 
-/// Calls, on a handler `h` passed to `read`:
-///   h.key(reader, depth): a key of the object whose members are at `depth`;
-///   h.begin(reader, kind, depth), h.end(reader, kind, depth): a value at
-///   `depth` begins or ends.
-/// In `key` and in `end` of a string, `text` and `string` describe it; in
-/// `end` of a number, `integer` and `digits`; in `end` of a literal,
-/// `literalValue`.
 pub const Reader = struct {
-    /// The offset in the document of the byte being read.
     offset: u64,
     state: State,
-    /// How many containers are open.
     depth: u8,
-    /// Bit `i` is set when open container `i` is an array.
     arrays: std.bit_set.IntegerBitSet(max_depth + 1),
     in_key: bool,
     string_start: u64,
     decoded: u64,
-    /// The first `max_text_bytes` decoded bytes of the current string.
     text_bytes: [max_text_bytes]u8 = undefined,
-    /// Where the rest of the literal being read starts in `literal_tails`.
     literal: u4,
-    /// The number being read, while it is a plain nonnegative integer that
-    /// fits.
     integer: ?u64,
-    /// How the number being read differs from such an integer.
     digits: Digits,
 
-    /// Each literal after its first byte, ended by a 0.
     const literal_tails = "rue\x00alse\x00ull\x00";
 
     const State = enum {
@@ -198,9 +152,6 @@ pub const Reader = struct {
         done,
     };
 
-    /// Reads `bytes` as one whole document, telling `handler` what it finds.
-    /// A document that is invalid or ends early fails for the first reason
-    /// its bytes give.
     pub fn read(self: *Reader, bytes: []const u8, handler: anytype) Error!void {
         self.init();
         while (self.offset < bytes.len) : (self.offset += 1) {
@@ -216,14 +167,10 @@ pub const Reader = struct {
             } else self.endValue(.string, handler);
         }
         if (self.state == .done) return;
-        // A value deeper than any document may hold was due, or more bytes
-        // were.
         const value_due = self.state == .value or self.state == .value_or_close;
         return if (value_due and self.depth > max_depth) error.JsonTooDeep else error.UnexpectedJsonEnd;
     }
 
-    /// Reads one object from a decoded byte source without retaining its text.
-    /// String scalars use the same decoder as the contiguous reader.
     pub fn readSource(self: *Reader, source: anytype, handler: anytype) !void {
         self.init();
         while (try source.peek()) |byte| {
@@ -250,8 +197,6 @@ pub const Reader = struct {
                 1;
             while (length < needed) {
                 scalar[length] = (try source.peek()) orelse {
-                    // Ended inside the scalar: an earlier byte may already
-                    // be invalid, and its reason comes first, as in `read`.
                     _ = try decodeString(scalar[0..length], 0, self);
                     return error.UnexpectedJsonEnd;
                 };
@@ -269,8 +214,6 @@ pub const Reader = struct {
         if (self.state != .done) return error.UnexpectedJsonEnd;
     }
 
-    /// The state before a document's first byte. The decoded text is written
-    /// before it is read, so it is left.
     fn init(self: *Reader) void {
         self.* = .{
             .offset = 0,
@@ -286,14 +229,11 @@ pub const Reader = struct {
         };
     }
 
-    /// The decoded string, when no longer than `max_text_bytes`.
     pub fn text(self: *const Reader) ?[]const u8 {
         return if (self.decoded <= max_text_bytes) self.text_bytes[0..@intCast(self.decoded)] else null;
     }
 
-    /// The literal just read, in `end` of a literal.
     pub fn literalValue(self: *const Reader) Literal {
-        // `literal` stops at the terminator after the literal's tail.
         return switch (self.literal) {
             3 => .true_value,
             8 => .false_value,
@@ -302,7 +242,6 @@ pub const Reader = struct {
         };
     }
 
-    /// The contents of the string just read, without its quotes.
     pub fn string(self: *const Reader) Range {
         return .{ .start = self.string_start, .length = self.offset - self.string_start };
     }
@@ -432,8 +371,6 @@ pub const Reader = struct {
         }
     }
 
-    /// A byte that is not a digit after an integer part: a fraction, an
-    /// exponent, or the end of the number.
     fn numberTail(self: *Reader, byte: u8, handler: anytype) Error!void {
         switch (byte) {
             '.' => {
@@ -458,7 +395,6 @@ pub const Reader = struct {
         if (self.digits == .plain) self.digits = .overflow;
     }
 
-    /// The number ended just before `byte`, which follows it.
     fn endNumber(self: *Reader, byte: u8, handler: anytype) Error!void {
         self.endValue(.number, handler);
         try self.afterValue(byte, handler);
@@ -476,7 +412,6 @@ pub const Reader = struct {
         self.state = .string;
     }
 
-    /// The string decoder's sink: keep the decoded start and count the rest.
     fn append(self: *Reader, bytes: []const u8, scalar: ?u21) void {
         _ = scalar;
         if (self.decoded < max_text_bytes) {
@@ -487,12 +422,10 @@ pub const Reader = struct {
     }
 };
 
-/// A string's decoded start and decoded length, as the reader keeps them.
 pub const Text = struct {
     bytes: [max_text_bytes]u8 = undefined,
     length: u64,
 
-    /// The decoded string, when no longer than `max_text_bytes`.
     pub fn slice(self: *const Text) ?[]const u8 {
         return if (self.length <= max_text_bytes) self.bytes[0..@intCast(self.length)] else null;
     }
@@ -507,11 +440,6 @@ pub const Text = struct {
     }
 };
 
-// A document `Reader.read` accepted is walked again by these, which trust
-// its syntax.
-
-/// The contents of the string whose opening quote is at `start`, and where
-/// it ends, one past its closing quote.
 pub fn stringAt(document: []const u8, start: usize) struct { contents: Range, end: usize } {
     std.debug.assert(document[start] == '"');
     var at = start + 1;
@@ -522,8 +450,6 @@ pub fn stringAt(document: []const u8, start: usize) struct { contents: Range, en
     }
 }
 
-/// A value the reader accepted: one past its last byte, and a string's
-/// contents.
 pub const Value = struct { end: usize, string: ?Range };
 
 pub fn valueAt(document: []const u8, start: usize) Value {
@@ -532,7 +458,6 @@ pub fn valueAt(document: []const u8, start: usize) Value {
     return .{ .end = found.end, .string = found.contents };
 }
 
-/// Where the value that starts at `start` ends, one past its last byte.
 pub fn valueEnd(document: []const u8, start: usize) usize {
     var at = start;
     var depth: usize = 0;
@@ -552,8 +477,6 @@ pub fn valueEnd(document: []const u8, start: usize) usize {
                     at += 1;
                     continue;
                 }
-                // A number or literal ends at the first byte that is not
-                // its own.
                 while (at < document.len and std.mem.indexOfScalar(u8, ",}] \t\r\n", document[at]) == null) at += 1;
                 return at;
             },
@@ -562,27 +485,21 @@ pub fn valueEnd(document: []const u8, start: usize) usize {
     }
 }
 
-/// The first byte at or after `at` that is not whitespace.
 pub fn skipSpace(document: []const u8, at: usize) usize {
     var index = at;
     while (space(document[index])) index += 1;
     return index;
 }
 
-/// Decodes `contents`, which the reader accepted as a string's, giving
-/// each scalar to `sink` as `decodeString` does.
 pub fn decodeContents(contents: []const u8, sink: anytype) void {
     std.debug.assert((decodeString(contents, 0, sink) catch unreachable) == contents.len);
 }
 
-/// Decodes `contents`, which the reader accepted as a string's, into `out`.
 pub fn decode(contents: []const u8, out: *Text) void {
     out.length = 0;
     decodeContents(contents, out);
 }
 
-/// The tag of `E` that `contents`, a string's the reader accepted, decode
-/// to: compared as they stand unless they hold an escape.
 pub fn decodedTag(comptime E: type, contents: []const u8) ?E {
     if (std.mem.indexOfScalar(u8, contents, '\\') == null) return std.meta.stringToEnum(E, contents);
     var text: Text = .{ .length = 0 };
@@ -597,7 +514,6 @@ fn space(byte: u8) bool {
     };
 }
 
-/// Records what a reader reports.
 const Recorder = struct {
     buffer: [4096]u8 = undefined,
     length: usize = 0,
@@ -672,8 +588,6 @@ test "the reader accepts exactly the objects std.json accepts" {
 }
 
 test "the reader accepts exactly the numbers std.json accepts" {
-    // Every spelling of up to five number bytes, as a member and in an
-    // array.
     const alphabet = "01-+.eE";
     var spelling: [5]u8 = undefined;
     var buffer: [16]u8 = undefined;
@@ -691,7 +605,6 @@ test "the reader accepts exactly the numbers std.json accepts" {
     }
 }
 
-/// The reader accepts `document` exactly when std.json does.
 fn expectReadAsStd(document: []const u8) !void {
     const expected = document.len != 0 and std.mem.trimStart(u8, document, " \t\r\n")[0] == '{' and
         try std.json.validate(std.testing.allocator, document);
@@ -747,7 +660,6 @@ test "the reader reports keys and values with their depths, ranges and decoded s
         "O0 k1[2,9]code S1 s1[14,3]x\n k1[20,1]n A1 N2 n2=7 N2 n2=null N2 n2=null a1 k1[35,1]t L1 l1 o0 ",
         recorder.events(),
     );
-    // A string past the kept start keeps its range; its text is unknown.
     const long = comptime "{\"" ++ repeat("k", max_text_bytes + 1) ++ "\":\"" ++ repeat("v", max_text_bytes) ++ "\"}";
     recorder.length = 0;
     try std.testing.expect(readForTesting(long, &recorder));
@@ -760,7 +672,6 @@ test "the reader reports keys and values with their depths, ranges and decoded s
 test "a value nests at most max_depth deep" {
     var buffer: [2 * max_depth + 8]u8 = undefined;
     for ([_]usize{ max_depth - 1, max_depth }) |arrays| {
-        // The top object's member is at depth 1 and each array adds one.
         var writer: std.Io.Writer = .fixed(&buffer);
         try writer.writeAll("{\"a\":");
         for (0..arrays) |_| try writer.writeByte('[');

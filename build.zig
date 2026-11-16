@@ -8,14 +8,10 @@ const cross_module = @import("build/cross.zig");
 const fixtures_module = @import("build/fixtures.zig");
 
 pub fn build(b: *std.Build) void {
-    // PR fixtures need ReleaseSafe checks, not shipped LLVM code generation.
-    // Qualification/release and ordinary local builds keep the production backend.
     const pr_ci = b.option(bool, "pr-ci", "Use the Linux x86_64 PR-only integration artifact") orelse false;
     const ci_targets = b.option([]const u8, "ci-targets", "Comma-separated CI targets to compile");
     const ci_part = b.option(ci_module.CiPart, "ci-part", "Which selected CI compiles this producer emits") orelse .all;
     const ci: ci_module.CiArtifacts = .{ .b = b, .directory = b.option([]const u8, "ci-artifacts", "Verified native CI executables") };
-    // Hosted workers can have different CPUs. Transfer only the platform's
-    // baseline instruction set; ordinary local builds still target their host.
     const ci_mode = ci_targets != null or ci.directory != null;
     const ci_query: std.Target.Query = .{ .cpu_model = .baseline };
     const target = b.standardTargetOptions(.{ .default_target = if (ci_mode) ci_query else .{} });
@@ -73,7 +69,6 @@ pub fn build(b: *std.Build) void {
     });
     const emit_catalog = b.addRunArtifact(catalog_emitter);
     const snapshot = emit_catalog.addOutputFileArg("model_catalog_snapshot.zig");
-    // Passthrough arguments disable caching: reread even an unchanged path.
     emit_catalog.addPassthruArgs();
     const update_catalog = b.addUpdateSourceFiles();
     update_catalog.addCopyFileToSource(snapshot, "src/model_catalog_snapshot.zig");
@@ -100,11 +95,6 @@ pub fn build(b: *std.Build) void {
         unit_module.attach(pg_root.target, .all, pg_test_step, &unit_runs, .runs);
     }
 
-    // Test actors are never shipped and run briefly. On x86_64, Zig's own
-    // backend builds each in about a second, where LLVM pays a ~28 CPU-second
-    // ReleaseSafe floor; safety checks stay on. Its aarch64-macos build of these
-    // actors exhausts memory, so Apple Silicon keeps LLVM. Product binaries and
-    // codegen witnesses such as the signal-stack probe always use LLVM.
     const test_actor_llvm: ?bool = if (target.result.cpu.arch == .x86_64) false else null;
     const terminal_notice = b.addExecutable(.{
         .name = "rui-terminal-notice-test",
@@ -121,10 +111,6 @@ pub fn build(b: *std.Build) void {
     const release_safe = if (pr_ci) product.addRui(b, target, .ReleaseSafe, "rui-pr-check", pinned_transport) else production_safe;
     if (pr_ci) release_safe.use_llvm = false;
     const debug = product.addRui(b, target, .Debug, "rui-debug-check", pinned_transport);
-    // The PTY screen observer (tests/integration/terminal_screen.py) loads
-    // libghostty-vt through ctypes. Its test-only package in screen-emulator
-    // keeps it out of this manifest, which installs fetch whole; only steps
-    // that run the observer build it, and no product artifact links it.
     const screen_emulator = screen_module.addScreenEmulator(b, ci, ci_mode);
     const screen = screen_emulator.library;
     const screen_emulator_step = b.step("screen-emulator", "Install the PTY screen observer's libghostty-vt, for harnesses outside build steps");
@@ -138,9 +124,6 @@ pub fn build(b: *std.Build) void {
     const terminal_restoration_step = b.step("terminal-restoration-integration", "Run native terminal restoration with build-owned bindings");
     terminal_restoration_step.dependOn(&terminal_restoration.step);
 
-    // Nonblocking renderer contracts. No gate root imports these sources, and
-    // check, check-full, test and test-logic never depend on these steps.
-    // Each Python harness requires a fresh evidence directory: -- --output DIR.
     const renderer_selftests = b.step(
         "renderer-contracts-selftest",
         "Run the direct-PTY and mutation harness self-tests (nonblocking)",
@@ -291,7 +274,6 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSafe,
         .link_libc = true,
     });
-    // TLS: the connection's tls.zig is on tls_client's OpenSSL.
     if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport, product.addUrl(b))) |tls_client| mysql_connection.addImport("tls_client", tls_client);
     mysql_wire_tests.root_module.addImport("mysql_connection", mysql_connection);
     const mysql_wire_integration = b.addSystemCommand(&.{"python3"});
@@ -360,7 +342,6 @@ pub fn build(b: *std.Build) void {
     settings_step.dependOn(&settings_integration.step);
     settings_step.dependOn(&mysql_settings_integration.step);
 
-    // The TypeScript client against the Rui this build makes; Node strips the types.
     const ts_client = b.addSystemCommand(&.{"python3"});
     ts_client.addFileArg(b.path("tests/integration/host_process.py"));
     ts_client.addArgs(&.{ "exec", "env" });
@@ -447,12 +428,10 @@ pub fn build(b: *std.Build) void {
         for (units.native_binaries[1..]) |compile| fast_integrations.addFileArg(ci.path(compile));
     }
     fast_integrations.step.dependOn(&format.step);
-    // Release compilation coverage stays in qualification, not PR fixture startup.
     if (!pr_ci) fast_integrations.addFileInput(ci.path(release_small));
     fast_integrations.step.dependOn(&units.run_renderer_allocation.step);
     fast_integrations.step.dependOn(&units.signal_stack_probe.step);
     check_step.dependOn(&fast_integrations.step);
-    // The gate reads x86-64 prologues; other targets have no frame reader.
     const stack_frames_step = b.step(
         "stack-frames",
         "Fail when a Host thread reaches a ReleaseSafe stack frame over budget (x86-64 Linux only)",
@@ -460,13 +439,10 @@ pub fn build(b: *std.Build) void {
     if (target.result.cpu.arch == .x86_64 and target.result.os.tag == .linux) {
         const stack_frames = b.addSystemCommand(&.{ "python3", "-B" });
         stack_frames.addFileArg(b.path("tests/ci/stack_frames.py"));
-        // This is a production-codegen oracle, never a gate on the PR backend.
         stack_frames.addFileArg(ci.path(production_safe));
         stack_frames.addFileArg(b.path("tests/ci/stack_frames.json"));
         stack_frames_step.dependOn(&stack_frames.step);
     }
-    // Selected PRs run this unchanged LLVM oracle in a separate required job,
-    // so its compile cannot hold every integration shard behind it.
     if (!pr_ci) check_step.dependOn(stack_frames_step);
 
     const full_check_step = b.step(
@@ -488,9 +464,6 @@ pub fn build(b: *std.Build) void {
     process_integrations.addFileArg(ci.path(terminal_notice));
     process_integrations.addFileArg(ci.path(mysql_launch_admin));
     process_integrations.step.dependOn(&format.step);
-    // The execution partition overlaps native tests with its serial process
-    // fixtures, just as check already does. Keep the unsplit gate serial and
-    // the callers partition isolated on its own runner. Both peers must pass.
     const native_gate = if (check_part == .execution) full_check_step else &process_integrations.step;
     unit_module.attach("check-full", check_part, native_gate, &unit_runs, .runs);
     if (unit_module.includes("check-full", check_part, .native_pair)) {
@@ -503,8 +476,6 @@ pub fn build(b: *std.Build) void {
     cross_module.add(b, target, pinned_transport);
     measurement_module.add(b, ci, release_safe, sqlite_shell, model_queue_output);
 
-    // Compile the selected gates once, without executing their fixture Run
-    // steps. Workers still execute the original gates and their assertions.
     const ci_build = b.step("ci-build", "Compile selected CI gates without running tests");
     if (ci_targets) |selected| {
         if (ci_part != .unit) {
@@ -518,8 +489,6 @@ pub fn build(b: *std.Build) void {
             if (&root.step == ci_build) @panic("ci-build cannot select itself");
             collection.collect(&root.step);
         }
-        // The plan splits by target name (qualification.UNIT_TARGETS); a split
-        // that disagrees with this graph would idle a producer or drop a binary.
         if (ci_part != .all and !collection.reached_unit)
             @panic("Split CI producers selected without the unit test compile; update UNIT_TARGETS");
     }

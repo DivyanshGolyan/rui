@@ -69,7 +69,6 @@ fn run(case: *store.testing.Case, comptime scenario: Scenario) !void {
             request.limit = protocol.ActivityPage.items;
             const page = try std.testing.allocator.create(protocol.ActivityFacts);
             defer std.testing.allocator.destroy(page);
-            // Drain the Session forward so the last page grants a follow token.
             while (true) {
                 try storage.activityPage(&request, page);
                 if (!page.more) break;
@@ -125,8 +124,6 @@ fn expectSearch(storage: *store.Store, request: *const protocol.ActivitySearch, 
     try std.testing.expectEqualStrings(expected, out.written());
 }
 
-/// Wall-clock seconds: each row's `at`, a Message's `admitted_at` and the
-/// work state's `since`.
 fn normalizeTimes(bytes: *[]u8, value: std.json.Value) !void {
     switch (value) {
         .object => |object| {

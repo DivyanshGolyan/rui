@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Run the bounded design checks, including expected counterexamples. No LLM calls."""
 import argparse
 import hashlib
 import json
@@ -35,8 +34,6 @@ def main():
     summary = {'jar_sha256': JAR_SHA256, 'model_sha256': hashlib.sha256((ROOT / 'SessionReplay.tla').read_bytes()).hexdigest(), 'cases': {}}
     for name, expected in CASES.items():
         with tempfile.TemporaryDirectory(prefix='rui-session-tlc-') as tmp:
-            # TLC may generate trace modules on failure. Run on temporary copies
-            # so the model folder contains only authored sources and saved logs.
             work = Path(tmp)
             for filename in ['SessionReplay.tla', name + '.cfg']:
                 (work / filename).write_bytes((ROOT / filename).read_bytes())

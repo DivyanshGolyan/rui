@@ -12,8 +12,6 @@ import type { components } from "../src/wire.ts";
 
 type Schemas = components["schemas"];
 
-// Compiled by npm run check, including the negative assertions: no index signature
-// or widened kind can satisfy these assignments and the exhaustive switch.
 function narrowed(entry: FeedEntry): void {
 	switch (entry.kind) {
 		case "admission": case "user": case "received": {
@@ -36,23 +34,19 @@ function narrowed(entry: FeedEntry): void {
 			const server: string | null = entry.server;
 			void [description, tool, server];
 			const fields: [Schemas["ActivityItemContent"], Schemas["ActivityItemContent"], Schemas["ActivityItemContent"]] = entry.fields;
-			// @ts-expect-error Only top-level camelCase keys are exposed.
 			void entry.call_ordinal;
-			// @ts-expect-error Calls do not have the text-bearing row's extras.
 			void entry.text;
 			void [ordinal, fields];
 			break;
 		}
 		case "tool_result": case "hosted_call": {
 			const position: string | null = entry.presentation.publication_position;
-			// @ts-expect-error Nested keys keep their generated wire spelling.
 			void entry.presentation.publicationPosition;
 			void position;
 			break;
 		}
 		case "turn_ended": {
 			const sessionId: string = entry.sessionId;
-			// @ts-expect-error The wire session field is exposed as sessionId.
 			void entry.session;
 			const ending: "done" | "context_full" | "provider_refused" | "provider_unavailable" | "stopped" | "interrupted" | "failed" = entry.ending;
 			const content: Schemas["ActivityItemContent"] | null = entry.content;
@@ -71,10 +65,8 @@ function narrowed(entry: FeedEntry): void {
 		}
 		case "send_failed": {
 			const target: Schemas["NamedPeer"] | null = entry.target;
-			// @ts-expect-error A refused Message need not name a canonical peer.
 			const nonnull: Schemas["NamedPeer"] = entry.target;
 			const { target: omitted, ...withoutTarget } = entry;
-			// @ts-expect-error The target field is required even when its value is null.
 			const missing: typeof entry = withoutTarget;
 			if (entry.target !== null) {
 				const session: string = entry.target.session;
@@ -85,7 +77,6 @@ function narrowed(entry: FeedEntry): void {
 		}
 		case "approval_requested": {
 			const sessionId: string = entry.sessionId;
-			// @ts-expect-error The wire session field is exposed as sessionId.
 			void entry.session;
 			const action: string = entry.action;
 			const ordinal: string = entry.callOrdinal;
@@ -93,7 +84,6 @@ function narrowed(entry: FeedEntry): void {
 			const tool: string | null = entry.tool;
 			const server: string | null = entry.server;
 			void [description, tool, server];
-			// @ts-expect-error Other kinds' fields must not be accepted.
 			void entry.final;
 			void [sessionId, action, ordinal];
 			break;
@@ -119,7 +109,6 @@ function narrowed(entry: FeedEntry): void {
 			const first: string | null = entry.firstEventMs;
 			const status: string = entry.status;
 			const attempts: string = entry.attempts;
-			// @ts-expect-error Model calls do not expose message text.
 			void entry.text;
 			void [model, served, input, output, cached, latency, first, status, attempts];
 			break;
@@ -240,7 +229,6 @@ for (const state of ["idle", "finished", "failed", "stopped"] as const) {
 		t.mock.timers.tick(60_000);
 		await turn();
 		assert.equal(fake.pages(), 1, "idle must have no polling timer");
-		// A different Session and a different client must not wake this follower.
 		fake.link.activity?.notify("other");
 		new SessionNotifications().notify("s");
 		await turn();
@@ -402,7 +390,7 @@ test("releasing a failed watch again does not unregister a new follower after re
 	const old = notifications.watch("s");
 	notifications.fail(new RuiUnavailableError("the Rui Host could not restart"));
 	const fresh = notifications.watch("s");
-	old.close(); // The failed iterator's finally may run after a new follower starts.
+	old.close();
 	const controller = new AbortController();
 	const pending = fresh.wait(fresh.revision, controller.signal);
 	try {

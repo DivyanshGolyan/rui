@@ -29,8 +29,6 @@ pub const Intent = enum { released_upgrade, released_install, intentional_source
 pub const Receipt = struct {
     operation_build: []const u8,
     selected_after: []const u8,
-    /// Identity of selected_after, captured under the publication lock.
-    /// Intentional source builds need not have a released version.
     selected_version: ?releases.Version = null,
 };
 pub const InstallationOutcome = union(enum) {
@@ -54,7 +52,6 @@ pub const InstallationOutcome = union(enum) {
 pub const CleanupFailure = struct {
     primary: ?anyerror,
     secondary: anyerror,
-    /// Borrowed only until the synchronous reporter returns.
     retained_path: []const u8,
 };
 

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Measure actual process CPU for empty-table condition-wait scheduling."""
 import hashlib
 import json
 from pathlib import Path
@@ -23,7 +22,6 @@ def main():
         subprocess.run(["cc", *flags, str(ROOT / "idle.c"), "-o", binary], check=True)
         for repeat in range(3):
             for capacity in [100, 1000]:
-                # Alternate order to avoid always assigning one mode the first run.
                 for polling in ([0, 1] if repeat % 2 == 0 else [1, 0]):
                     row = json.loads(run(binary, str(capacity), str(polling)))
                     row.update(repeat=repeat, mode="timed_wait_5ms" if polling else "external_wake_only",

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Joint retention, responsiveness and reuse experiment; serial OS advisory lock."""
 import argparse,fcntl,hashlib,json,pathlib,platform,re,resource,signal,socket,subprocess,tempfile,time
 HERE=pathlib.Path(__file__).resolve().parent
 p=argparse.ArgumentParser();p.add_argument('--build',type=pathlib.Path,default=pathlib.Path('/tmp/rui-transport-memory-build'));p.add_argument('--output',type=pathlib.Path,required=True);p.add_argument('--match',default='');p.add_argument('--quick',action='store_true');p.add_argument('--sanitize',action='store_true');a=p.parse_args()
@@ -17,7 +16,6 @@ sourcefiles=['capture.c','probe.c','capture_run.py','capture_server.py','capture
 for name in sourcefiles:(out/'sources'/name).write_bytes((HERE/name).read_bytes())
 metadata={'utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'revision':read(['git','rev-parse','HEAD']),'machine':platform.uname()._asdict(),'cpu':read(['sysctl','-n','machdep.cpu.brand_string']),'memory':read(['sysctl','-n','hw.memsize']),'compiler':read(['cc','--version']),'command':command,'linked':read(['otool','-L',str(binary)]),'openssl':read([str(ssl/'bin/openssl'),'version','-a']),'python_dependencies':read([str(b/'venv/bin/pip'),'freeze']),'sources_sha256':{f:hashlib.sha256((HERE/f).read_bytes()).hexdigest() for f in sourcefiles},'binaries_sha256':{str(f):hashlib.sha256(f.read_bytes()).hexdigest() for f in [binary,b/'curl-8.22.0/lib/.libs/libcurl.a',b/'ng/lib/libnghttp2.a',ssl/'lib/libssl.3.dylib',ssl/'lib/libcrypto.3.dylib']}}
 (out/'metadata.json').write_text(json.dumps(metadata,indent=2)+'\n')
-# name, concurrency, protocol, bursts, bytes per capture, strategy, delay us, stall ms, slots, idle cache, fail one sink
 cases=[]
 for protocol in [1,2]:
  for strategy,label in [(0,'callback'),(1,'between'),(2,'worker')]:
@@ -54,7 +52,6 @@ with open('/tmp/rui-memory-experiments.lock','a') as lock:
      else:raise TimeoutError('server readiness')
      argv=[str(binary),str(n),str(protocol),str(bursts),str(payload),str(strategy),str(delay),str(stall),str(slots),str(cache),f'https://localhost:{port}',tmp,str(fail),str(warm)]
      client=subprocess.Popen(argv,stdout=subprocess.PIPE,stderr=cerr,text=True,bufsize=1)
-     # Independent watchdog bounds the entire process, including missing stdout.
      import threading
      watchdog=threading.Timer(180,client.kill);watchdog.start()
      rows=[]

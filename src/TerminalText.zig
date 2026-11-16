@@ -1,17 +1,10 @@
 const std = @import("std");
 const Self = @This();
 
-/// `line` shows an exact value inline, so it also quotes `"` and `\`;
-/// `label` is one line of prose, such as a tool call's description, which
-/// shows `"` as written since no escape it makes contains one; `multiline`
-/// keeps line breaks and tabs.
 pub const Mode = enum { line, label, multiline };
 
-/// The most bytes one input byte becomes: an escaped byte is `\xNN`.
 pub const max_bytes_per_byte = "\\x00".len;
 
-/// A code point that must never reach a terminal raw: C0, DEL and C1
-/// controls act on it, and bidi controls reorder the text the user reads.
 pub fn isControl(scalar: u21) bool {
     return scalar < 0x20 or scalar >= 0x7f and scalar <= 0x9f or
         scalar == 0x061c or scalar == 0x200e or scalar == 0x200f or
@@ -19,20 +12,12 @@ pub fn isControl(scalar: u21) bool {
         scalar >= 0x2066 and scalar <= 0x2069;
 }
 
-/// A link the answer renderer shows by its text: OSC 8 carries its address,
-/// so a terminal opens it on click and the address is not laid out.
 pub const link_open = "\x1b]8;;";
 pub const link_end = "\x1b\\";
 pub const link_close = link_open ++ link_end;
-/// The longest address a link carries; a longer one stays literal text.
 pub const max_link_bytes = 2048;
-/// A peer's name in the conversation view's own stream links to its Session
-/// with this address and the Session ID after it. The view opens it on
-/// click and never sends it to the terminal as a hyperlink.
 pub const session_link = "rui-session:";
 
-/// Trusted renderer-only provenance in the retained conversation stream.
-/// Plain terminal sinks receive only the displayed bytes.
 pub const body_on = "\x1b[200m";
 pub const body_off = "\x1b[201m";
 pub fn writeBody(sink: anytype, bytes: []const u8) !void {
@@ -41,16 +26,10 @@ pub fn writeBody(sink: anytype, bytes: []const u8) !void {
     } else try sink.feed(bytes);
 }
 
-/// The most bytes Rui sets the clipboard to (OSC 52): hterm's osc52.sh
-/// sends at most 100,000 base64 bytes, the smallest limit a terminal's own
-/// tooling documents.
 pub const clipboard_limit = 100_000 / 4 * 3;
 
-/// What a copy past that limit says, whichever gesture asked for it.
 pub const clipboard_too_large = "Too large for the clipboard · /copy file";
 
-/// An address a terminal may open: http or https with a host, every byte
-/// printable ASCII, so it cannot end or extend the OSC 8 sequence it rides in.
 pub fn linkTarget(uri: []const u8) bool {
     if (uri.len > max_link_bytes) return false;
     const rest = if (std.ascii.startsWithIgnoreCase(uri, "https://"))
@@ -77,8 +56,6 @@ utf8: [4]u8 = undefined,
 utf8_len: usize = 0,
 utf8_need: usize = 0,
 
-/// Write untrusted text without terminal controls. A line also quotes bytes
-/// that would make an exact command or field ambiguous when displayed inline.
 pub fn feed(self: *Self, out: *std.Io.Writer, bytes: []const u8) !void {
     for (bytes) |byte| try self.feedByte(out, byte);
 }
@@ -88,7 +65,6 @@ pub fn finish(self: *Self, out: *std.Io.Writer) !void {
     self.utf8_len = 0;
 }
 
-/// Bash ANSI-C quoting preserves NUL-free argv values without terminal controls.
 pub fn writeShellWord(out: *std.Io.Writer, value: []const u8) !void {
     try out.writeAll("$'");
     for (value) |byte| switch (byte) {
@@ -100,7 +76,6 @@ pub fn writeShellWord(out: *std.Io.Writer, value: []const u8) !void {
     try out.writeByte('\'');
 }
 
-/// Canonical Session IDs contain only six lowercase Crockford characters.
 pub fn writeShellSession(out: *std.Io.Writer, value: []const u8, comptime positional: bool) !void {
     try out.writeAll(if (positional) " " else " --session ");
     try out.writeAll(value);

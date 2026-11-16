@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Streaming materialization evidence; synthetic wire and system SQLite only."""
 import hashlib
 import json
 import platform
@@ -44,7 +43,6 @@ def build_large(core,size):
             blob.write(chunk)
             digest.update(chunk)
         put(prefix)
-        # Fixture creation is also incremental, independently of measured reads.
         for _ in range(count): put(piece)
         put(suffix)
         blob.close()
@@ -82,8 +80,6 @@ def run():
             assert json.load(file)==expected_input([user]+fixture['expected_replay']+[call2,tool,tool2,{'type':'compaction_trigger'}])
         passed.append('compaction request appends trigger after complete input')
 
-        # Escaped property spelling and >window key size do not bypass omission
-        # or cause whole-key allocation. Nested created_by must survive.
         raw = b'{"creat\\u0065d_by":1,"'+b'k'*5000+b'":{"created_by":2},"type":"message"}'
         special = core.admit()
         core.accept(special,[raw])
@@ -107,7 +103,6 @@ def run():
         passed.append('complete request compaction slice includes trailing object and later suffix')
         passed.append('message arriving during compaction follows base using admission cutoff')
 
-        # All failures must close scratch and return no dispatchable file.
         files = []
         def factory(**kwargs):
             file = tempfile.TemporaryFile(**kwargs)
@@ -141,7 +136,6 @@ def run():
             view.chunks = faulty
             rejected(lambda: prepare(view,file_factory=factory),OSError)
             assert files[-1].closed and not view._reading
-            # Failure after the entire payload has been copied must also stop dispatch.
             core.db.execute("UPDATE payload SET digest='wrong' WHERE length(body)>100000")
             core.db.commit()
             rejected(lambda: prepare(core.view(target),file_factory=factory),Unavailable)

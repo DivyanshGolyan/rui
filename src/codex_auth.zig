@@ -16,7 +16,6 @@ pub const fixture_account_id = policy.fixture_account_id;
 pub const response_limit = wire.response_limit;
 pub const loginRecord = wire.loginRecord;
 pub const LocalStatus = policy.LocalStatus;
-/// Owns all credential bytes. Callers must keep this value out of diagnostics.
 pub const Tokens = wire.Tokens;
 
 pub const failureCode = policy.failureCode;
@@ -25,27 +24,17 @@ pub fn nowSeconds(io: std.Io) i64 {
     return @intCast(@divFloor(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_s));
 }
 
-/// Storage for reading and checking one credential: the file, the record a
-/// status check or login reads, and the token claims. Its owner keeps it off
-/// the stack: the Host's AuthWorker for every acquisition, or a CLI command.
 pub const Work = struct {
     credentials: credentials.Scratch = undefined,
     claims: policy.ClaimScratch = undefined,
 };
 
-/// Storage for one `rui auth login`: the snapshot and installation it reads
-/// and writes through, the tokens its exchange returns, and the record it
-/// builds from them. The command maps it for the call (`pages.Mapped`), as a
-/// refresh maps its own, instead of holding it on its stack.
 pub const Login = struct {
     work: Work = undefined,
     tokens: Tokens = undefined,
     record: credentials.Record = undefined,
 };
 
-/// The token wire a sign-in refreshes through: a Codex device login's, or a
-/// ChatGPT plan sign-in's. Each builds its own request and reads its own
-/// answer; this is the one place that chooses between them.
 pub const Wire = enum {
     codex_device,
     chatgpt_plan,
@@ -65,53 +54,38 @@ pub const Wire = enum {
     }
 };
 
-/// A sign-in the Host serves: its credential file, the wire its refresh
-/// speaks, and where that refresh goes. Custody, selection and the refresh
-/// claim are the same for every source; only the wire differs.
 pub const Source = struct {
     path: []const u8,
     wire: Wire,
     refresh: RefreshTarget = .issuer,
 
     pub const RefreshTarget = union(enum) {
-        /// The wire's own issuer.
         issuer,
-        /// Test only: the synthetic Codex credential, which cannot reach an
-        /// issuer, so its refresh republishes the same tokens.
         synthetic,
-        /// Test only: a loopback token endpoint that answers as the issuer.
         fixture_endpoint: []const u8,
     };
 
-    /// Whether this is a test fixture, which goes only to loopback.
     pub fn fixture(self: Source) bool {
         return self.refresh != .issuer;
     }
 
-    /// Whether selection must accept only the synthetic credential.
     fn synthetic(self: Source) bool {
         return self.refresh == .synthetic;
     }
 };
 
-/// Reads a snapshot without a refresh lock and applies the runtime's routing
-/// and expiry checks to it.
 pub fn localStatus(path: []const u8, now_seconds: i64) !LocalStatus {
     var shown: Shown = undefined;
     try localSignIn(path, now_seconds, &shown);
     return shown.status;
 }
 
-/// What `rui auth status` shows of a sign-in: its local status and, while it
-/// is usable, the email its ID token names (empty when none) and when its
-/// access token expires (0 for an opaque one).
 pub const Shown = struct {
     status: LocalStatus,
     email: policy.Email = .{},
     expires_at: i64 = 0,
 };
 
-/// `localStatus`, with what a person reads to recognize the sign-in.
 pub fn localSignIn(path: []const u8, now_seconds: i64, shown: *Shown) !void {
     shown.* = .{ .status = .missing };
     const mapped = try pages.Mapped(Work).map();
@@ -123,13 +97,9 @@ pub fn localSignIn(path: []const u8, now_seconds: i64, shown: *Shown) !void {
     shown.status = try policy.localStatus(record, now_seconds, &work.claims);
     if (!shown.status.usable()) return;
     shown.expires_at = record.expires_at;
-    // The email only labels the account; a token that names none is still
-    // the sign-in the status reports.
     policy.emailOf(record.id_token.slice(), &work.claims, &shown.email) catch {};
 }
 
-/// Selects on the lease it holds; a due refresh releases it, exchanges, and
-/// leases the replacement.
 pub fn acquireInto(io: std.Io, source: Source, work: *Work, destination: *credentials.Lease) !void {
     try credentials.leaseInto(source.path, destination, &work.credentials);
     const selection = select(source, &destination.record, nowSeconds(io), &work.claims) catch |err| {
@@ -146,23 +116,15 @@ pub fn acquireInto(io: std.Io, source: Source, work: *Work, destination: *creden
     try policy.launchCheck(&destination.record, source.synthetic(), nowSeconds(io), &work.claims);
 }
 
-/// The policy's selection, after the fixture endpoint's own canary.
 fn select(source: Source, record: *const credentials.Record, now_seconds: i64, claims: *policy.ClaimScratch) !policy.Selection {
     if (source.refresh == .fixture_endpoint) try policy.requireFixtureClient(record);
     return policy.select(record, source.synthetic(), now_seconds, claims);
 }
 
-/// After a model 401, refreshes once if the committed credential generation
-/// still equals the rejected lease's. Returns false when another Host or a
-/// login already advanced the generation; the caller then fails as before.
 pub fn forceRefresh(io: std.Io, source: Source, expected_generation: u64) !bool {
     return exchangeAt(io, source, expected_generation);
 }
 
-/// Storage for one refresh: the records it claims and builds, the request,
-/// the response and what parsing it needs. A refresh or a login runs a few
-/// times an hour at most, so its storage lives in pages mapped for the call
-/// and leaves nothing resident or on a stack once the call returns.
 const Refresh = struct {
     credentials: credentials.Scratch = undefined,
     replacement: credentials.Record = undefined,
@@ -171,10 +133,6 @@ const Refresh = struct {
     body: [32 * 1024]u8 = undefined,
 };
 
-/// One refresh claim at `expected_generation` under the exclusive credential
-/// lock. The synthetic fixture credential cannot reach the real issuer, so
-/// its exchange republishes the same tokens; generation, claim and
-/// replacement admission still follow the production owner.
 fn exchangeAt(io: std.Io, source: Source, expected_generation: u64) !bool {
     const mapped = try pages.Mapped(Refresh).map();
     defer mapped.unmap();
@@ -221,20 +179,16 @@ test "a forced refresh runs only for the rejected lease's unchanged generation" 
     try credentials.loadInto(path, committed, &scratch);
     try std.testing.expectEqual(@as(u64, 1), committed.generation);
 
-    // Unchanged generation: one exchange advances it and leaves it ready.
     const source: Source = .{ .path = path, .wire = .codex_device, .refresh = .synthetic };
     try std.testing.expect(try forceRefresh(io, source, 1));
     try credentials.loadInto(path, committed, &scratch);
     try std.testing.expectEqual(@as(u64, 2), committed.generation);
     try std.testing.expectEqual(policy.State.ready, committed.state);
     try std.testing.expectEqualStrings(fixture_account_id, committed.account_id.slice());
-    // A second Host holding the same stale lease sees the advanced
-    // generation and performs no exchange.
     try std.testing.expect(!try forceRefresh(io, source, 1));
     try credentials.loadInto(path, committed, &scratch);
     try std.testing.expectEqual(@as(u64, 2), committed.generation);
 
-    // A pending record requires login and is not exchanged again.
     record.generation = 2;
     record.state = .refresh_pending;
     var pending_file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
@@ -245,16 +199,12 @@ test "a forced refresh runs only for the rejected lease's unchanged generation" 
     try std.testing.expectEqualStrings("provider_sign_in_required", failureCode(error.RefreshRequiresLogin));
 }
 
-/// One issuer answer, and whether the request provably never left.
 pub const Response = struct {
     bytes: [response_limit]u8 = undefined,
     len: usize = 0,
     request_not_sent: bool = true,
 };
 
-/// Posts one form to the token issuer, over system trust, and returns the
-/// answer's status with its body in `response`. Every sign-in exchange,
-/// refresh and revocation goes through here.
 pub fn post(io: std.Io, request: wire.Request, response: *Response, cancelled: ?*const fn () bool) !u16 {
     response.* = .{};
     if (cancelled) |check| if (check()) return error.LoginInterrupted;
@@ -264,22 +214,16 @@ pub fn post(io: std.Io, request: wire.Request, response: *Response, cancelled: ?
         .fields = &fields,
         .body = request.body,
         .response = &response.bytes,
-        // The issuer is verified by the system's trust; network.caFile
-        // is the model provider's alone.
         .trust = .system,
         .proxy = h2.proxyFromEnvironment(),
         .connect_timeout_ns = 15 * std.time.ns_per_s,
         .total_timeout_ns = 60 * std.time.ns_per_s,
         .cancelled = cancelled,
     }) catch |err| switch (err) {
-        // Before the request was launched: nothing can have been sent.
         error.InvalidUrl, error.CleartextNotLoopback => return error.TransportFailed,
-        // A login reports these by name, for the setting to fix.
         error.HttpsProxyInvalid, error.HttpsProxySchemeUnsupported => |proxy| return proxy,
         error.OutOfMemory, error.SystemResources, error.TooManyEndpoints, error.TrustUnavailable, error.InvalidCaFile, error.InvalidRequest => return error.TransportInitializationFailed,
-        // Named for the variable to fix: SSL_CERT_FILE or SSL_CERT_DIR.
         error.InvalidSslCertFile, error.InvalidSslCertDir => |trust| return trust,
-        // While it was in flight: no evidence either way.
         error.Interrupted => {
             response.request_not_sent = false;
             return error.LoginInterrupted;
@@ -293,7 +237,6 @@ pub fn post(io: std.Io, request: wire.Request, response: *Response, cancelled: ?
         .answered => |answer| {
             response.request_not_sent = false;
             response.len = answer.body.len;
-            // A login cancelled while its answer arrived still stops here.
             if (cancelled) |check| if (check()) return error.LoginInterrupted;
             return answer.status;
         },
@@ -329,11 +272,6 @@ test "refresh transport requires positive evidence that no request was sent" {
     try std.testing.expect(answer.request_not_sent);
 }
 
-/// A raw TCP peer: it writes `greeting`, reads the client's bytes until
-/// `until` appears, and closes. A `reply` is written only then, so a client
-/// that fails on it has already been seen, and the peer reads on until the
-/// client closes: closing first on unread bytes could reset the connection
-/// before the client reads the reply.
 const RawPeer = struct {
     fn run(server: *std.Io.net.Server, greeting: []const u8, until: []const u8, reply: []const u8) bool {
         const io = std.testing.io;
@@ -349,7 +287,6 @@ const RawPeer = struct {
             if (count == 0) return false;
             used += count;
             if (std.mem.indexOf(u8, received[0..used], until) != null) {
-                // `until` was seen; a client gone before the reply changes nothing.
                 if (reply.len == 0) return true;
                 writer.interface.writeAll(reply) catch return true;
                 while (true) {
@@ -362,9 +299,6 @@ const RawPeer = struct {
         return false;
     }
 
-    /// Posts against a RawPeer and reports whether the peer saw `until`.
-    /// The peer is cancelled after the post, so a post that never connects
-    /// fails the test instead of leaving `accept` blocked.
     fn exchangeWith(greeting: []const u8, until: []const u8, reply: []const u8, answer: *Response) !struct { anyerror!u16, bool } {
         const io = std.testing.io;
         var listener = try (try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0")).listen(io, .{});
@@ -379,12 +313,10 @@ const RawPeer = struct {
 };
 
 const preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-/// An empty SETTINGS frame, which makes the client's connection ready.
 const empty_settings = [_]u8{ 0, 0, 0, 4, 0, 0, 0, 0, 0 };
 
 test "refresh transport keeps not-sent evidence when the peer goes before it is ready" {
     var answer: Response = .{};
-    // The peer closes after the client's preface, without its own SETTINGS.
     const outcome, const saw = try RawPeer.exchangeWith("", preface, "", &answer);
     try std.testing.expect(saw);
     try std.testing.expectError(error.TransportFailed, outcome);
@@ -401,7 +333,6 @@ test "refresh transport keeps not-sent evidence when the peer does not speak HTT
 
 test "refresh transport retains sent evidence when the peer loses its reply" {
     var answer: Response = .{};
-    // DATA payloads are plain bytes on h2c, so the body shows on the wire.
     const outcome, const saw = try RawPeer.exchangeWith(&empty_settings, "synthetic", "", &answer);
     try std.testing.expect(saw);
     try std.testing.expectError(error.TransportFailed, outcome);
@@ -420,8 +351,6 @@ test "device login cancellation rejects before a provider request" {
     }.display, cancelled, &tokens));
 }
 
-/// Storage for a device login's exchanges: the one response it reads at a
-/// time, the device code, the exchange form and the parse arena.
 const Device = struct {
     response: Response = undefined,
     start: wire.DeviceStart = undefined,
@@ -429,7 +358,6 @@ const Device = struct {
     arena: [wire.wire_arena_bytes]u8 = undefined,
 };
 
-/// Runs a device login and fills `tokens` from its authorization exchange.
 pub fn login(io: std.Io, callback: anytype, cancelled: *const fn () bool, tokens: *Tokens) !void {
     const mapped = try pages.Mapped(Device).map();
     defer mapped.unmap();
@@ -469,14 +397,11 @@ pub fn login(io: std.Io, callback: anytype, cancelled: *const fn () bool, tokens
         }
         defer std.crypto.secureZero(u8, &room.form);
         const exchange = try wire.grantExchangeRequest(answer.bytes[0..answer.len], &room.form, &room.arena);
-        // The grant is consumed; the exchange's answer replaces it.
         const exchange_status = try post(io, exchange, answer, cancelled);
         return wire.parseTokenResponse(exchange_status, answer.bytes[0..answer.len], &room.arena, tokens);
     }
 }
 
-/// Exchanges the claimed record's refresh token over its source's wire and
-/// builds its replacement.
 fn refresh(io: std.Io, source: Source, current: *const credentials.Record, replacement: *credentials.Record, room: *Refresh) !void {
     defer std.crypto.secureZero(u8, &room.body);
     const answer = &room.response;
@@ -484,8 +409,6 @@ fn refresh(io: std.Io, source: Source, current: *const credentials.Record, repla
     var request = source.wire.refreshRequest(current, &room.body) catch return error.RefreshRequestNotSent;
     switch (source.refresh) {
         .issuer => {},
-        // Only a record issued to the fixture client goes to a fixture's
-        // token endpoint, so a real refresh token never does.
         .fixture_endpoint => |url| {
             policy.requireFixtureClient(current) catch return error.RefreshRequestNotSent;
             request.url = url;

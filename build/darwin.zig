@@ -5,7 +5,6 @@ pub fn screenLibraryName(host: std.Target.Os.Tag) []const u8 {
     return if (host.isDarwin()) "libghostty-vt.dylib" else "libghostty-vt.so";
 }
 
-// Unfiltered Mac unit roots omit costly DWARF and leave headroom on 7 GiB workers.
 pub fn unitMaxRss(filter_count: usize, target: std.Build.ResolvedTarget) usize {
     return if (filter_count == 0 and target.result.os.tag == .macos) 3 * 1024 * 1024 * 1024 else 0;
 }

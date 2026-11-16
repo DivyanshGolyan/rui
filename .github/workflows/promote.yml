@@ -1,7 +1,4 @@
 name: Promote
-# Manual only. Qualify main HEAD with the expensive tier over the batch since
-# stable, the last promoted release, then publish and advance stable on green.
-# A failing job bisects the batch with its own command; the run never merges.
 on:
   workflow_dispatch:
 
@@ -9,7 +6,6 @@ permissions:
   contents: read
 
 concurrency:
-  # One promotion at a time; a second dispatch waits for the first to finish.
   group: promote
   cancel-in-progress: false
 
@@ -23,7 +19,7 @@ jobs:
       head: ${{ steps.batch.outputs.head }}
       size: ${{ steps.batch.outputs.size }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -46,8 +42,6 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY"
           if [ "$size" = 0 ]; then echo 'stable already holds main HEAD; nothing to promote' | tee -a "$GITHUB_STEP_SUMMARY"; fi
   selected:
-    # Full check-full, frame gate and Debug recovery on Linux and macOS, plus
-    # the targets the batch's paths select.
     needs: batch
     if: ${{ needs.batch.outputs.size != '0' }}
     permissions:
@@ -74,7 +68,6 @@ jobs:
       ref: ${{ needs.batch.outputs.head }}
       batch-base: ${{ needs.batch.outputs.base }}
   qualified:
-    # The sole promotion verdict. Only success of every tier qualifies the batch.
     needs: [batch, selected, upgrade, renderer]
     if: ${{ always() && needs.batch.outputs.size != '0' }}
     runs-on: ubuntu-24.04
@@ -92,7 +85,6 @@ jobs:
             test "$result" = success
           done
   release:
-    # Cold builds, publication and the stable fast-forward of the qualified SHA.
     needs: [batch, qualified]
     permissions:
       contents: write
@@ -103,7 +95,6 @@ jobs:
     with:
       sha: ${{ needs.batch.outputs.head }}
   report:
-    # One issue per failure signature, with the bisect's verdict on it.
     needs: [batch, selected, upgrade, renderer]
     if: ${{ failure() && needs.batch.outputs.size != '0' }}
     runs-on: ubuntu-24.04
@@ -113,7 +104,7 @@ jobs:
       actions: read
       issues: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false

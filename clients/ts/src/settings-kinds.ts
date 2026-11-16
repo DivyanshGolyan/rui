@@ -1,4 +1,3 @@
-// Generated from openapi.json by scripts/generate-settings.mjs. Do not edit.
 export const SETTINGS_KINDS = {
 	"fields": {
 		"store": {

@@ -145,12 +145,9 @@ test("model updates serialize without changing omitted settings", async () => {
 	assert.equal(calls, 1);
 });
 
-// Compile-time API contract checks; these declarations never send requests.
 function sessionTypeContract(spec: SessionSpec): void {
 	const { effort: _effort, ...withoutEffort } = spec;
-	// @ts-expect-error creation must specify reasoning, even when explicitly null
 	const missingEffort: SessionSpec = withoutEffort;
-	// @ts-expect-error compaction is never nullable
 	const nullCompaction: SessionUpdate = { compactAt: null };
 	const sparse: SessionUpdate = {};
 	void [missingEffort, nullCompaction, sparse];
@@ -174,13 +171,9 @@ test("creation can name a preset without inventing missing fields", async () => 
 
 function presetTypeContract(sessions: Sessions): void {
 	void sessions.create({ preset: "review" }, { idempotencyKey: "preset" });
-	// @ts-expect-error neither a full spec nor a preset
 	void sessions.create({}, { idempotencyKey: "empty" });
-	// @ts-expect-error a partial spec needs a preset
 	void sessions.create({ instructions: "Do this" }, { idempotencyKey: "partial" });
-	// @ts-expect-error a preset name is never null
 	void sessions.create({ preset: null }, { idempotencyKey: "null" });
-	// @ts-expect-error presets only seed creation
 	const update: SessionUpdate = { preset: "review" };
 	void update;
 }
@@ -213,7 +206,6 @@ test("create parent is a create-only relation in the shared wire spec", async ()
     const sessions = new Sessions(link);
     await sessions.create({ parent: "p4rent", model: "model-a", tools: ["bash"], permissionMode: "ask", effort: null, compactAt: 1000 }, { idempotencyKey: "child" });
     assert.deepEqual(requests[0]?.configuration, { parent: "p4rent", model: "model-a", tools: ["bash"], permissionMode: "ask", effort: null, compactAt: 1000 });
-    // @ts-expect-error parent cannot change on an existing Session
     const invalid: SessionUpdate = { parent: "p4rent" };
     void invalid;
 });

@@ -1,9 +1,6 @@
-// The publication order comes from the tarballs' manifests, never from a list
-// of package names, so a new platform or a renamed tarball needs no change here.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-// @ts-expect-error: a plain JavaScript release script with no type declarations.
 import { publicationOrder } from "../scripts/publish.mjs";
 
 const client = (platforms: string[]) => ({
