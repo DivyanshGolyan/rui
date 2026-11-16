@@ -599,6 +599,15 @@ pub fn observeHostProcess(io: std.Io, store_path: []const u8, deadline: ?i128) !
     return .{ .ready = observed.facts, .pid = observed.pid };
 }
 
+pub fn observeHostProcessAt(io: std.Io, paths: *const platform.Paths, deadline: ?i128) !ObservedHost {
+    var identified = paths.*;
+    if (identified.kind == .mysql and identified.store.len == 0) try resolveMysqlIdentity(io, &identified);
+    return switch (try readHostControlAt(io, &identified, .current, deadline, .strict)) {
+        .compatible => |observed| .{ .ready = observed.facts, .pid = observed.pid },
+        .incompatible => error.WrongWireVersion,
+    };
+}
+
 /// A wire mismatch is not readiness. Only Upgrade's pinned-process owner may
 /// use its same-connection peer PID to replace an obsolete terminal client.
 pub const HostProcessReading = union(enum) {
@@ -691,7 +700,10 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
     if (!std.fs.path.isAbsolute(supplied)) return error.HostServeStoreRelative;
     const paths = try platform.resolveClientPaths(io, supplied);
     if (!std.mem.eql(u8, paths.socket.slice(), socket_path)) return error.HostSocketStoreMismatch;
-    const observed = try observeHostForUpgrade(io, paths.store.slice(), until);
+    const observed = switch (try readHostControlAt(io, &paths, .current, until, .strict)) {
+        .compatible => |observed| observed,
+        .incompatible => return error.WrongWireVersion,
+    };
     if (observed.pid != pid) return error.HostPeerPidMismatch;
     return observed;
 }
@@ -717,8 +729,12 @@ const HostControlReading = union(enum) { compatible: HostControlObservation, inc
 const HostObservationMode = enum { strict, upgrade };
 
 fn readHostControlProfile(io: std.Io, store_path: []const u8, profile: protocol_reply.HostInfoProfile, deadline: ?i128, mode: HostObservationMode) !HostControlReading {
-    const until = hostObservationDeadline(io, deadline);
     const paths = try platform.resolveClientPaths(io, store_path);
+    return readHostControlAt(io, &paths, profile, deadline, mode);
+}
+
+fn readHostControlAt(io: std.Io, paths: *const platform.Paths, profile: protocol_reply.HostInfoProfile, deadline: ?i128, mode: HostObservationMode) !HostControlReading {
+    const until = hostObservationDeadline(io, deadline);
     const requests: Requests = .{ .io = io };
     const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
     const fd = try connectRequest(requests, address, until);
@@ -1967,7 +1983,7 @@ fn writeMessageRequest(capture: *Capture, store: []const u8, key: []const u8, in
 }
 
 fn writeSessionStopCapture(io: std.Io, paths: *const platform.Paths, input: SessionStopInput, location: CaptureTarget.Location) !CapturedRecord {
-    return runCapture(io, &paths, &location, input.session, .session_stop, null, Capture.writeRequest, .{ protocol.session_stop_request, .{ paths.store.slice(), location.key, input.session } });
+    return runCapture(io, paths, &location, input.session, .session_stop, null, Capture.writeRequest, .{ protocol.session_stop_request, .{ paths.store.slice(), location.key, input.session } });
 }
 
 fn writeModelInterruptionCapture(
@@ -1976,7 +1992,7 @@ fn writeModelInterruptionCapture(
     input: ModelInterruptionInput,
     location: CaptureTarget.Location,
 ) !CapturedRecord {
-    return runCapture(io, &paths, &location, input.session, .model_interruption, null, Capture.writeRequest, .{ protocol.model_interruption_request, .{ paths.store.slice(), location.key, input.session, input.turn_id, input.operation_id } });
+    return runCapture(io, paths, &location, input.session, .model_interruption, null, Capture.writeRequest, .{ protocol.model_interruption_request, .{ paths.store.slice(), location.key, input.session, input.turn_id, input.operation_id } });
 }
 
 pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, target: CaptureTarget) !CapturedRecord {

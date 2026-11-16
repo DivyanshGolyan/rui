@@ -60,24 +60,21 @@ pub const StoreLease = struct {
     /// Read-only observation, not lease acquisition or readiness. Returns
     /// owned canonical paths by value; every probe descriptor closes here.
     pub fn observe(io: std.Io, supplied_path: []const u8) Observation {
-        const selected = resolveClientSelection(supplied_path);
-        const runtime: ?[]const u8 = switch (selected) {
-            .sqlite => null,
-            .mysql => |value| value.runtime,
-        };
-        var store_dir = std.Io.Dir.cwd().openDir(io, runtime orelse supplied_path, .{}) catch |err| return switch (err) {
+        const selection = resolveClientSelection(supplied_path);
+        const paths = (switch (selection) {
+            .mysql => selection.paths(io),
+            .sqlite => @import("host_start.zig").savedPlacement(io, supplied_path),
+        }) catch return .access_failure;
+        const mysql = paths.kind == .mysql;
+        var store_dir = std.Io.Dir.cwd().openDir(io, if (mysql) paths.runtimeHint().? else paths.store.slice(), .{}) catch |err| return switch (err) {
             error.FileNotFound => .unowned,
             else => .access_failure,
         };
         defer store_dir.close(io);
         validatePrivateDirectory(store_dir, io) catch return .access_failure;
-        const paths = if (runtime) |directory|
-            mysqlClientPaths(io, supplied_path, directory) catch return .access_failure
-        else
-            pathsFromOpenStore(store_dir, io) catch return .access_failure;
         // A hostile FIFO must not wait for a writer; never follow or create
         // a replacement lock node during observation.
-        const fd = std.posix.openat(store_dir.handle, if (runtime != null) "rui.lock" else "host.lock", .{
+        const fd = std.posix.openat(store_dir.handle, if (mysql) "rui.lock" else "host.lock", .{
             .ACCMODE = .RDONLY,
             .NONBLOCK = true,
             .NOFOLLOW = true,
@@ -251,10 +248,12 @@ pub const StoreLease = struct {
     /// Only meaningful while the lease is free. The record's presence is
     /// its whole content; nothing else reads it.
     pub fn lastStop(io: std.Io, supplied_path: []const u8) LastStop {
-        const directory = switch (resolveClientSelection(supplied_path)) {
-            .sqlite => |path| path,
-            .mysql => |value| value.runtime,
-        };
+        const selected = resolveClientSelection(supplied_path);
+        const paths = (switch (selected) {
+            .mysql => selected.paths(io),
+            .sqlite => @import("host_start.zig").savedPlacement(io, supplied_path),
+        }) catch return .unknown;
+        const directory = if (paths.kind == .mysql) paths.runtimeHint().? else paths.store.slice();
         var dir = std.Io.Dir.cwd().openDir(io, directory, .{}) catch return .unknown;
         defer dir.close(io);
         const stat = dir.statFile(io, stop_record_name, .{ .follow_symlinks = false }) catch |err| return switch (err) {

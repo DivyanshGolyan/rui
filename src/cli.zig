@@ -1269,11 +1269,11 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
     var notice_bytes: [4 * protocol.max_store_bytes + 256]u8 = undefined;
     var notice = std.Io.Writer.fixed(&notice_bytes);
     try notice.writeAll("rui: pause interrupts all work in this Store until a Host starts again. Retry only this exact target: rui host pause --store ");
-    try TerminalText.writeShellWord(&notice, paths.store.slice());
+    try TerminalText.writeShellWord(&notice, selected);
     try notice.print(" --instance {s}\n", .{&hex});
     try std.Io.File.stderr().writeStreamingAll(io, notice.buffered());
     var reply: client.ReplyBuffer = .{};
-    const outcome = client.stopHost(io, .{ .store = paths.store.slice(), .instance = target }, &reply) catch |err| {
+    const outcome = client.stopHost(io, .{ .store = selected, .instance = target }, &reply) catch |err| {
         stderr.diagnostic("rui: pause reply unconfirmed ({s}); inspect this Store and retry only the same --instance target. Do not target a replacement implicitly.\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
         return err;
     };
@@ -1283,7 +1283,7 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
             const writer = output.init(io, .stdout);
             try writer.print("{{\"version\":\"{s}\",\"type\":\"host_pause\",\"status\":\"acknowledged\",\"store\":", .{protocol.wire_version});
             try std.json.Stringify.value(paths.store.slice(), .{}, writer);
-            const retired = try @import("HostLifecycle.zig").awaitRetirement(io, paths.store.slice());
+            const retired = try @import("HostLifecycle.zig").awaitRetirement(io, selected);
             try writer.print(",\"instance\":\"{s}\",\"retirement\":\"{s}\"}}\n", .{ &hex, if (retired) "confirmed" else "unconfirmed" });
             try output.finish();
             if (!retired) stderr.diagnostic("rui: the Host acknowledged the pause but still holds this Store after {d} seconds, usually because cleanup is still running. A new Host can start once rui host status reports unavailable.\n", .{product_defaults.host_shutdown_seconds});
@@ -2109,7 +2109,12 @@ fn prepareOverviewUsing(init: std.process.Init, options: NewSessionOptions, entr
         defer memory.deinit();
         const assignments: []const []const u8 = if (connection) |value| &.{try host_start.connectionAssignment(init, memory.allocator(), value)} else &.{};
         startSelectedOverviewHost(init, destination.path, binding, &readiness, assignments, ops, &entry.launch.?);
-        if (entry.launch.?.outcome == .ready) entry.store = entry.launch.?.outcome.ready.facts.store;
+        // Keep the Host directory selector: Store identity alone loses saved placement.
+        if (entry.launch.?.outcome == .ready) {
+            var canonical: [protocol.max_store_bytes]u8 = undefined;
+            const selection = platform.resolveClientSelection(destination.path);
+            try entry.store.set(if (selection == .mysql) destination.path else try platform.canonicalStoreDestination(init.io, destination.path, &canonical));
+        }
     }
 }
 
@@ -2802,8 +2807,8 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const reference = parsed.positional orelse parsed.get("session").?;
     try requireInteractiveTerminal(init, "to resume a Session");
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const paths = try platform.resolveClientPaths(init.io, try selectedStore(init, parsed.get("store"), &fallback));
-    const destination = paths.store.slice();
+    const destination = try selectedStore(init, parsed.get("store"), &fallback);
+    _ = try platform.resolveClientPaths(init.io, destination);
     return openExistingOverview(init, destination, reference[0..protocol.session_id_bytes].*, .{ .store = parsed.get("store") }, null);
 }
 

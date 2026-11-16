@@ -1464,7 +1464,7 @@ pub const Ops = struct {
     }
     fn nativeVerify(_: ?*anyopaque, io: std.Io, paths: *const platform.Paths, pid: c_int, started: u64, executable: []const u8, until: ?i128, facts: *@import("protocol_reply.zig").HostInfoFacts) bool {
         if (pid <= 0 or started == 0) return false;
-        const observed = @import("client.zig").observeHostProcess(io, paths.store.slice(), until) catch return false;
+        const observed = @import("client.zig").observeHostProcessAt(io, paths, until) catch return false;
         if (observed.pid != pid) return false;
         const identity = @import("host_identity.zig");
         var snapshot = identity.snapshot(std.heap.c_allocator, observed.pid) catch return false;
