@@ -831,11 +831,12 @@ def prove_native_background(state, *, deadline=None):
         ]
         endpoint = fixture.SuccessEndpoint(responses)
         thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
-        host = session = pid = None
+        host = session = pid = diagnostics = None
         evidence = {"case": name, "capacity": capacity}
         try:
             thread.start()
             host = fixture.start_host(case / "store", f"http://127.0.0.1:{endpoint.server_port}/responses", active_capacity=capacity)
+            diagnostics = HostDiagnostics(host)
             store = case / "store"
             session = configure(case, store, "configure", workspace=workspace)
             fixture.message(case, store, "message", session, "run ordinary Bash")
@@ -946,6 +947,9 @@ def prove_native_background(state, *, deadline=None):
                 lambda: fixture.wait_for(lambda: not process_exists(pid), "owned producer disposal", timeout=5) if pid is not None else None,
                 lambda: dispose_owner_case(host, endpoint, thread),
                 lambda: (case / "witness.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n"),
+                lambda: (case / "host.stderr").write_bytes(diagnostics.tail()) if failed and diagnostics is not None else None,
+                lambda: print("Native background Host diagnostics: " + diagnostics.tail()[-4096:].decode(errors="replace"), file=sys.stderr) if failed and diagnostics is not None else None,
+                lambda: retain_failure_state("native Bash background failure state", case) if failed else None,
             )
     return outcomes
 

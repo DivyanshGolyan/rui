@@ -274,9 +274,9 @@ def main():
                         if fault == "retired": entry["presentation"].update(code="succeeded", publication_position="1")
                     wire["call_activity"]["entries"] = entries
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
-            # Page work is closed: an operation belongs to its Turn, an Action to an active one.
+            # An Operation belongs to its Turn; a background Action may outlive both.
             for work, ok in (({"turn": "1", "operation": "2", "first_action": "3", "state": {"kind": "approval", "since": "1"}}, True),
-                             ({"turn": "1"}, False), ({"operation": "2"}, False), ({"first_action": "3"}, False),
+                             ({"turn": "1"}, False), ({"operation": "2"}, False), ({"first_action": "3"}, True),
                              ({"revision": "0"}, False), ({"state": {"kind": "settled", "since": "1"}}, False), (None, False),
                              ({"state": {"kind": "idle", "since": "0"}}, False), ({"state": {"kind": "idle", "since": "1", "cause": "stop"}}, False),
                              ({"state": {"kind": "failed", "since": "1", "code": "provider_http_403", "resets_at": "5"}}, False),
