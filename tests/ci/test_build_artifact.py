@@ -15,6 +15,7 @@ from unittest.mock import patch
 import zipfile
 
 import build_artifact
+import build_files
 import run_selected
 
 
@@ -451,23 +452,22 @@ else:
 
 class PrModeTest(unittest.TestCase):
     def test_integration_products_share_the_pr_backend_owner(self):
-        root = Path(__file__).resolve().parents[2]
-        build = (root / "build.zig").read_text()
-        product = (root / "build/product.zig").read_text()
-        integration = product.split("pub fn addIntegrationRui(", 1)[1]
+        build = build_files.source()
+        integration = build.split("pub fn addIntegrationRui(", 1)[1]
         integration = integration.split("\n}", 1)[0]
         self.assertIn("addRuiWithIdentity(b, target, .ReleaseSafe, name, pinned_transport, identity)", integration)
         self.assertIn("if (pr_ci) executable.use_llvm = false;", integration)
-        self.assertEqual(product.count("use_llvm"), 1)
+        self.assertEqual(build.count("use_llvm = false;"), 1)
         self.assertNotIn("release_safe.use_llvm", build)
-        self.assertNotIn("pub fn addRuiWithIdentity", product)
+        self.assertNotIn("pub fn addRuiWithIdentity", build)
         for name in ("rui-pr-check", "rui-upgrade-release-fixture"):
             with self.subTest(product=name):
                 self.assertIn(f'product.addIntegrationRui(b, target, "{name}", pinned_transport, pr_ci,', build)
         self.assertIn('product.addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport)', build)
-        ordinary = product.split("pub fn addRui(", 1)[1].split("\n}", 1)[0]
+        ordinary = build.split("pub fn addRui(", 1)[1].split("\n}", 1)[0]
         self.assertIn("addRuiWithIdentity(b, target, optimize, name, pinned_transport, buildIdentity(b))", ordinary)
-        self.assertNotIn("use_llvm", product.split("fn addRuiWithIdentity(", 1)[1])
+        identity = build.split("fn addRuiWithIdentity(", 1)[1].split("\n}", 1)[0]
+        self.assertNotIn("use_llvm", identity)
 
     def test_only_linux_x64_pull_requests_use_the_fast_artifact(self):
         for event, system, machine, fast in (
