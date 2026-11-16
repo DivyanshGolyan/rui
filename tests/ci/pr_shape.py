@@ -51,16 +51,30 @@ def revision_ui_paths(revision):
 
 def visible_lines(body):
     """Return lines outside HTML comments and fenced code blocks."""
-    visible = re.sub(r"<!--.*?(?:-->|\Z)", "", body, flags=re.S)
-    lines, fence = [], None
-    for line in visible.splitlines():
+    lines, fence, comment = [], None, False
+    for line in body.splitlines():
         if fence:
             if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + r"{%d,}[ \t]*" % len(fence), line):
                 fence = None
-        elif opened := re.match(r"^ {0,3}(`{3,}|~{3,})", line):
-            fence = opened[1]
-        else:
-            lines.append(line)
+            continue
+        visible, pos = "", 0
+        while pos < len(line):
+            if comment:
+                close = line.find("-->", pos)
+                if close < 0:
+                    break
+                comment, pos = False, close + 3
+            elif len(visible) <= 3 and visible == " " * len(visible) and (
+                    opened := re.match(r"(`{3,}|~{3,})", line[pos:])):
+                fence = opened[1]
+                break
+            elif line.startswith("<!--", pos):
+                comment, pos = True, pos + 4
+            else:
+                visible += line[pos]
+                pos += 1
+        if not fence:
+            lines.append(visible)
     return lines
 
 

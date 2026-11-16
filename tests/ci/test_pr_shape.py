@@ -46,6 +46,37 @@ class GoalTest(unittest.TestCase):
                         self.assertIn("re-run the failed jobs", reason)
 
 
+class VisibleTextTest(unittest.TestCase):
+    def test_comment_and_fence_states_for_both_consumers(self):
+        cases = (
+            ("<!--\n{evidence}\n-->", False),
+            ("<!--\n{evidence}", False),
+            ("```text\n<!--\n```\n{evidence}", True),
+            ("```text <!--\n```\n{evidence}", True),
+            ("```text\n<!--\n{evidence}", False),
+            ("<!--\n```\n-->\n{evidence}", True),
+            ("<!-- hidden -->{evidence}<!-- hidden -->", True),
+            ("<!-- first --><!-- second -->{evidence}", True),
+            ("<!-- first -->{evidence}<!-- second -->", True),
+            ("<!-- hidden -->```text <!--\n```\n{evidence}", True),
+        )
+        consumers = (
+            (pr_shape.goal_present, "Goal: #12 Support the workstream goal"),
+            (pr_shape.screen_evidence, "No screen change: visible reason"),
+            (pr_shape.screen_evidence, "![screen](https://github.com/user-attachments/assets/123)"),
+        )
+        for template, expected in cases:
+            for consumer, evidence in consumers:
+                with self.subTest(template=template, evidence=evidence):
+                    self.assertEqual(consumer(template.format(evidence=evidence)), expected)
+
+    def test_text_around_multiple_comments_remains_visible(self):
+        self.assertEqual(pr_shape.visible_lines("before<!-- one -->middle<!-- two -->after"),
+                         ["beforemiddleafter"])
+        self.assertEqual(pr_shape.visible_lines("before<!-- open\nclose -->after"),
+                         ["before", "after"])
+
+
 class PrShapeTest(unittest.TestCase):
     def assertRefused(self, paths, body):
         reason = refusal(paths, body)
