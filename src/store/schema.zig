@@ -3092,7 +3092,24 @@ test "MySQL sessions read literals as rsql copies them, and strictly" {
 test "schema 75 migration creates canonical pin objects on SQLite and MySQL" {
     const step = migrations[74 - migration_baseline];
     inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
-        const expected = comptime objects(dialect);
+        const expected = comptime blk: {
+            var result: [objects(dialect).len]Object = undefined;
+            @memcpy(&result, objects(dialect));
+            if (dialect == .sqlite) {
+                // Format 75 rebuilt the eleven-column Command before ordered
+                // input appended its count and reference certificate.
+                var predecessor = for (tables) |table| {
+                    if (std.mem.eql(u8, table.name, "core_command")) break table;
+                } else unreachable;
+                predecessor.columns = predecessor.columns[0..11];
+                predecessor.uniques = predecessor.uniques[0..1];
+                predecessor.checks = &.{};
+                for (&result) |*object| {
+                    if (std.mem.eql(u8, object.name, "core_command")) object.sql = createTable(predecessor);
+                }
+            }
+            break :blk result;
+        };
         const statements = if (dialect == .sqlite) step.sqlite else step.mysql;
         var matched: usize = 0;
         for (statements) |statement| {
@@ -3107,6 +3124,12 @@ test "schema 75 migration creates canonical pin objects on SQLite and MySQL" {
         try std.testing.expectEqual(@as(usize, if (dialect == .sqlite) 4 else 2), matched);
     }
 }
+
+// Historical Command rows keep every field. Accepted Message payloads moved
+// to their one backfilled Text association; compare that same original ID.
+const migrated_command_rows = "SELECT command_key,kind,target,input_digest,CASE WHEN kind=2 AND accepted=1 THEN " ++
+    "(SELECT content_id FROM input_part WHERE command_key=core_command.command_key AND ordinal=0 AND part_kind=1) ELSE primary_content_id END," ++
+    "secondary_content_id,accepted,code,revision,created,command_seq FROM core_command";
 
 test "schema 75 preserves Commands and references while adding empty pin organization" {
     var tmp = std.testing.tmpDir(.{});
@@ -3136,8 +3159,8 @@ test "schema 75 preserves Commands and references while adding empty pin organiz
     try sqlite.expectDone(meta);
     try openExisting(std.testing.io, database, root, null, null);
     try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
-    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_commands EXCEPT SELECT * FROM core_command)"));
-    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM core_command EXCEPT SELECT * FROM original_commands)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_commands EXCEPT " ++ migrated_command_rows ++ ")"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (" ++ migrated_command_rows ++ " EXCEPT SELECT * FROM original_commands)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_stops EXCEPT SELECT * FROM session_stop)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_pin"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_pin_command"));
@@ -3334,8 +3357,8 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
     try std.testing.expect(try metaEquals(database, "format", format_text));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'"));
-    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_commands EXCEPT SELECT * FROM core_command)"));
-    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM core_command EXCEPT SELECT * FROM original_commands)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_commands EXCEPT " ++ migrated_command_rows ++ ")"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (" ++ migrated_command_rows ++ " EXCEPT SELECT * FROM original_commands)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_stops EXCEPT SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at FROM session_stop)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at FROM session_stop EXCEPT SELECT * FROM original_stops)"));
     for (legacy_stops) |each| {
@@ -3449,9 +3472,15 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
     try std.testing.expect(try metaEquals(database, "format", format_text));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'"));
     inline for (.{ "model_output_item", "model_tool_call", "model_output_part", "action_operation", "conversation_entry" }) |name| {
-        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_" ++ name ++ " EXCEPT SELECT * FROM " ++ name ++ ")"));
-        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM " ++ name ++ " EXCEPT SELECT * FROM original_" ++ name ++ ")"));
+        const migrated_rows = if (comptime std.mem.eql(u8, name, "conversation_entry"))
+            "SELECT session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_catalog_position,source_skill_admission_id,source_skill_position,source_operation_id,source_item_ordinal," ++
+                "CASE WHEN entry_kind=1 THEN (SELECT p.content_id FROM message_admission m JOIN input_part p ON p.command_key=m.command_key WHERE m.admission_id=conversation_entry.source_admission_id AND p.ordinal=0 AND p.part_kind=1) ELSE content_id END,recorded_at FROM conversation_entry"
+        else
+            "SELECT * FROM " ++ name;
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_" ++ name ++ " EXCEPT " ++ migrated_rows ++ ")"));
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (" ++ migrated_rows ++ " EXCEPT SELECT * FROM original_" ++ name ++ ")"));
     }
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM conversation_entry WHERE entry_kind=1 AND content_id IS NOT NULL"));
     inline for (updates) |sql| {
         // Both ASCII and multibyte UTF-8 use byte, not character, bounds.
         for ([_][]const u8{ &ascii_line, &utf8_line }) |line| {

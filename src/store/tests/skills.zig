@@ -10,6 +10,7 @@ const Store = store_core.Store;
 const action_domain = @import("../domain/action.zig");
 const configuration_domain = @import("../domain/configuration.zig");
 const content_domain = @import("../domain/content.zig");
+const input_domain = @import("../domain/input.zig");
 const historical_domain = @import("../domain/historical.zig");
 const store_testing = @import("../testing.zig");
 const AttemptBinding = store_core.AttemptBinding;
@@ -831,7 +832,7 @@ test "inline skills keep the typed text once and project each bound skill as its
             const first = try store_testing.queryU64(&storage, "SELECT min(session_position) FROM conversation_entry WHERE session_ref=?1 AND entry_kind IN (1,4)", .{session.slice()});
             for (expected) |entry| {
                 const offset = entry.skill;
-                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry e JOIN content c ON c.content_id=e.content_id " ++
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry e LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id LEFT JOIN core_command authored ON authored.command_key=m.command_key JOIN content c ON c.content_id=CASE WHEN e.entry_kind=1 THEN " ++ input_domain.messageTextIdSql("authored") ++ " ELSE e.content_id END " ++
                     "LEFT JOIN message_skill k ON k.admission_id=e.source_skill_admission_id AND k.position=e.source_skill_position " ++
                     "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind=?3 AND coalesce(e.source_skill_position,0)=?4 AND coalesce(k.name,'')=?5 AND c.digest=?6", .{ session.slice(), first + offset, entry.kind, entry.skill, entry.name, store_testing.Blob{ .bytes = &protocol.contentDigest(entry.bytes) } }));
             }
@@ -879,7 +880,8 @@ test "inline skills initial failure preserves all ordinary configuration refusal
                 try std.testing.expectEqual(test_case.code, reply.rejected.code);
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission", .{}));
-                try std.testing.expectEqual(baseline, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+                try std.testing.expectEqual(baseline + 1, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM input_part p JOIN content c ON c.content_id=p.content_id WHERE p.command_key=?1 AND p.ordinal=0 AND p.part_kind=1 AND c.byte_length=8 AND c.digest=?2", .{ command.key.slice(), store_testing.Blob{ .bytes = &command.text.digest } }));
             }
         }
     }.run);

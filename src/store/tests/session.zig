@@ -136,7 +136,8 @@ test "Store distinguishes noncanonical Session references from canonical unknown
                 try std.testing.expect(!storage.isFenced());
             }
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
-            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE content_id NOT IN (SELECT description_content_id FROM tool_record) AND content_id NOT IN (SELECT input_schema_content_id FROM tool_record)", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE content_id NOT IN (SELECT description_content_id FROM tool_record) AND content_id NOT IN (SELECT input_schema_content_id FROM tool_record)", .{}));
+            try std.testing.expectEqual(@as(u64, references.len), try store_testing.queryU64(&storage, "SELECT count(*) FROM input_part p JOIN core_command c ON c.command_key=p.command_key JOIN content bytes ON bytes.content_id=p.content_id WHERE c.accepted=0 AND p.ordinal=0 AND p.part_kind=1 AND bytes.digest=?1", .{store_testing.Blob{ .bytes = &content.digest }}));
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission", .{}));
         }
     }.run);

@@ -99,7 +99,7 @@ test "skills schema 56 wire 9 upgrades populated rows to the current Store" {
 
 test "skills schema 58 wire 10 upgrades populated archive and refusal rows to the current Store" {
     const Extra = struct {
-        fn seed(raw: *c.sqlite3, archive: *const protocol.SessionArchiveCommand, refused: *const wire_request.MessageCommand) !void {
+        fn seed(raw: *c.sqlite3, archive: *const protocol.SessionArchiveCommand, refused: *const wire_request.MessageCommand, comptime current: bool) !void {
             const archive_digest = archive.semanticDigest();
             const refusal_digest = refused.semanticDigest();
             try store_testing.sqliteExec(raw, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES(?1,6,'rhvzwc',?2,1,'',0,0,1000)", .{ archive.key.slice(), store_testing.Blob{ .bytes = &archive_digest } });
@@ -107,7 +107,13 @@ test "skills schema 58 wire 10 upgrades populated archive and refusal rows to th
             try store_testing.sqliteExec(raw, "INSERT INTO session_archive(session_ref,command_key) VALUES('rhvzwc',?1)", .{archive.key.slice()});
             try store_testing.sqliteExec(raw, "INSERT INTO session_archive_command(command_key,archived) VALUES(?1,1)", .{archive.key.slice()});
             try sqlite.exec(raw, "UPDATE session SET next_position=3 WHERE session_ref='rhvzwc'");
-            try store_testing.sqliteExec(raw, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES(?1,2,'absent',?2,0,'unknown_session',0,0,1001)", .{ refused.key.slice(), store_testing.Blob{ .bytes = &refusal_digest } });
+            // The fresh mirror represents the same historical refusal whose
+            // authored bytes were unavailable, not a new Message writer.
+            if (current) {
+                try store_testing.sqliteExec(raw, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq,input_part_count) VALUES(?1,2,'absent',?2,0,'unknown_session',0,0,1001,0)", .{ refused.key.slice(), store_testing.Blob{ .bytes = &refusal_digest } });
+            } else {
+                try store_testing.sqliteExec(raw, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES(?1,2,'absent',?2,0,'unknown_session',0,0,1001)", .{ refused.key.slice(), store_testing.Blob{ .bytes = &refusal_digest } });
+            }
             try store_testing.sqliteExec(raw, "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,'brhkcj',6,1793781801)", .{refused.key.slice()});
             try sqlite.exec(raw, "UPDATE session SET next_position=7 WHERE session_ref='brhkcj'");
         }
@@ -156,7 +162,7 @@ test "skills schema 58 wire 10 upgrades populated archive and refusal rows to th
         defer _ = c.sqlite3_finalize(meta);
         try sqlite.bindText(meta, 1, root);
         try sqlite.expectDone(meta);
-        try Extra.seed(raw, &archive, &refused);
+        try Extra.seed(raw, &archive, &refused, false);
         try Extra.expectSaved(raw, &archive, &refused);
         try std.testing.expectEqual(@as(u32, 58), try sqlite.pragmaInt(raw, "PRAGMA user_version"));
         try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value='10'", .{}));
@@ -201,7 +207,7 @@ test "skills schema 58 wire 10 upgrades populated archive and refusal rows to th
     {
         const raw = try openRaw(fresh);
         defer _ = c.sqlite3_close(raw);
-        try Extra.seed(raw, &archive, &refused);
+        try Extra.seed(raw, &archive, &refused, true);
     }
     var migrated_rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer migrated_rows.deinit();

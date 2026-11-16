@@ -1224,7 +1224,6 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
         try load(migrated_database, "CREATE TEMPORARY TABLE original_pin_stops AS SELECT * FROM session_stop", false);
         defer restore("DROP TEMPORARY TABLE " ++ migrated_database ++ ".original_pin_stops");
         try load(migrated_database, schema.mysqlMigration(74), false);
-        try expectCatalog(migrated_database);
         try expectSameResults(&.{
             "SELECT * FROM core_command ORDER BY command_seq",
             "SELECT * FROM session_stop ORDER BY command_key",
@@ -1241,6 +1240,10 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
             "SELECT count(*) FROM session_pin WHERE command_key IS NULL",
             "SELECT pinned FROM session_pin_command WHERE command_key='pin-upgrade'",
         }, &.{ "SELECT 1", "SELECT 1" });
+        // The historical branch is still at format 75 after the pin test.
+        // Bring it to the current format before comparing the full catalog.
+        if (historical) try load(migrated_database, schema.mysqlMigration(75), false);
+        try expectCatalog(migrated_database);
         done.migrations += 1;
         writeRecord();
     }

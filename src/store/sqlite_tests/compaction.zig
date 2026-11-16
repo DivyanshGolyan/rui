@@ -150,6 +150,20 @@ test "a compaction's floor read costs the same however long its Session's histor
         /// first Message moves past them, as the walk keeps it either way.
         fn addOlder(store: *Store, ref: []const u8, comptime first: u64) !void {
             const sequence = std.fmt.comptimePrint("WITH RECURSIVE sequence(value) AS (VALUES({d}) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) ", .{ first, first + 999 });
+            // Duplicate the authenticated Message source too: a User entry
+            // alone has no bytes after scalar Content references are retired.
+            try store_testing.sqlite_only.withoutForeignKeys(store, sequence ++
+                "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq,input_part_count,input_reference_length,input_reference_digest) " ++
+                "SELECT c.command_key||'-floor-copy-'||value,c.kind,c.target,c.input_digest,NULL,c.secondary_content_id,c.accepted,c.code,c.revision,c.created,c.command_seq+value*10,c.input_part_count,c.input_reference_length,c.input_reference_digest " ++
+                "FROM conversation_entry e JOIN message_admission m ON m.admission_id=e.source_admission_id JOIN core_command c ON c.command_key=m.command_key CROSS JOIN sequence WHERE e.session_ref=?1 AND e.entry_ordinal=2", .{ref});
+            try store_testing.sqlite_only.withoutForeignKeys(store, sequence ++
+                "INSERT INTO input_part(input_part_id,command_key,command_kind,part_count,ordinal,content_id,part_kind,image_format,image_width,image_height,display_name) " ++
+                "SELECT p.input_part_id+value*10,p.command_key||'-floor-copy-'||value,p.command_kind,p.part_count,p.ordinal,p.content_id,p.part_kind,p.image_format,p.image_width,p.image_height,p.display_name " ++
+                "FROM conversation_entry e JOIN message_admission m ON m.admission_id=e.source_admission_id JOIN input_part p ON p.command_key=m.command_key CROSS JOIN sequence WHERE e.session_ref=?1 AND e.entry_ordinal=2", .{ref});
+            try store_testing.sqlite_only.withoutForeignKeys(store, sequence ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position) " ++
+                "SELECT m.admission_id+value*10,m.session_ref,m.command_key||'-floor-copy-'||value,NULL,m.admission_position-value-1,m.turn_id,m.admitted_at,NULL,NULL " ++
+                "FROM conversation_entry e JOIN message_admission m ON m.admission_id=e.source_admission_id CROSS JOIN sequence WHERE e.session_ref=?1 AND e.entry_ordinal=2", .{ref});
             try store_testing.sqlite_only.withoutForeignKeys(store, sequence ++
                 "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id,recorded_at) " ++
                 "SELECT session_ref,entry_ordinal+value*10,session_position-value-1,entry_kind,turn_id,source_admission_id+value*10,NULL,NULL,content_id,recorded_at " ++
@@ -157,6 +171,7 @@ test "a compaction's floor read costs the same however long its Session's histor
         }
     };
     try store_testing.sqlite_only.withoutForeignKeys(&storage, "UPDATE conversation_entry SET session_position=session_position+3000 WHERE session_ref=?1", .{session.slice()});
+    try store_testing.sqlite_only.withoutForeignKeys(&storage, "UPDATE message_admission SET admission_position=admission_position+3000 WHERE session_ref=?1", .{session.slice()});
     try store_testing.sqlite_only.withoutForeignKeys(&storage, "UPDATE model_operation SET admission_position=admission_position+3000 WHERE session_ref=?1", .{session.slice()});
     try store_testing.sqlite_only.withoutForeignKeys(&storage, "UPDATE session SET next_position=next_position+3000 WHERE session_ref=?1", .{session.slice()});
     try Walk.addOlder(&storage, session.slice(), 1);

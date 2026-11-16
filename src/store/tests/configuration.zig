@@ -1083,7 +1083,7 @@ test "a Label is configured, replayed, cleared and validated like any setting" {
     }.run);
 }
 
-test "definite rejections retain decisions without retaining payloads" {
+test "definite rejections retain Message originals without retaining configuration payloads" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -1126,7 +1126,8 @@ test "definite rejections retain decisions without retaining payloads" {
             try std.testing.expect(exhausted_reply == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.revision_exhausted, exhausted_reply.rejected.code);
 
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, store_testing.content_beside_tools, .{}));
+            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, store_testing.content_beside_tools, .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM input_part p JOIN content c ON c.content_id=p.content_id WHERE p.command_key=?1 AND p.ordinal=0 AND p.part_kind=1 AND c.byte_length=?2 AND c.digest=?3", .{ unknown_message.key.slice(), unknown_message.text.length, store_testing.Blob{ .bytes = &unknown_message.text.digest } }));
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE accepted=0 AND (primary_content_id IS NOT NULL OR secondary_content_id IS NOT NULL)", .{}));
 
             try storage.close();
@@ -1146,7 +1147,7 @@ test "definite rejections retain decisions without retaining payloads" {
             try changed_kind.session.set("absent");
             changed_kind.text = unknown_message.text;
             try std.testing.expect(storage.submitMessageWithModel(&changed_kind, null, .{}) == .conflict);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, store_testing.content_beside_tools, .{}));
+            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, store_testing.content_beside_tools, .{}));
         }
     }.run);
 }
