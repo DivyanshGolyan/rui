@@ -199,7 +199,7 @@ AssertionError
         self.assertIsInstance(checks[-1][1], prepush.Skipped)
 
     def test_packed_unit_jobs_rerun_the_named_test(self):
-        for matrix, target in (("test-native+test-store", "test"), ("test-store+test-logic", "test-store")):
+        for matrix, target in (("test-native+test-store", "test-store"), ("test-store+test-logic", "test-store")):
             with self.subTest(matrix=matrix):
                 cause = report_issue.Cause("store failed", paths=["src/store.zig"], zig_test="store.tests.test.foo")
                 command = prepush.red_command(job(f"linux suites ({matrix})"), cause, AVAILABLE)
@@ -209,9 +209,8 @@ AssertionError
 
     def test_ambiguous_live_root_cannot_be_replaced_by_local_subset(self):
         cause = report_issue.Cause("TLS failed", paths=["src/tls_client/tls_client.zig"], zig_test="tls.test.foo")
-        graph = type("Graph", (), {"reached": {"test-native": set(cause.paths), "test-pg": set(cause.paths)}})()
         for matrix in ("test-native+test-pg", "test-pg+test-native"):
-            self.assertIsInstance(prepush.red_command(job(f"linux suites ({matrix})"), cause, AVAILABLE, graph=graph), prepush.Skipped)
+            self.assertIsInstance(prepush.red_command(job(f"linux suites ({matrix})"), cause, AVAILABLE), prepush.Skipped)
 
     def test_cancelled_test_step_is_classified_and_rerun(self):
         cancelled = job()
@@ -321,7 +320,7 @@ AssertionError
         mixed = report_issue.Cause("mixed", ["src/store/tests/activity.zig"], zig_test="store.tests.activity.test.queued input")
         mysql_only = report_issue.Cause("mysql only", ["src/store/mysql_dialect_check.zig"], zig_test="store.mysql_dialect_check.test.migration")
         sqlite_only = report_issue.Cause("sqlite only", ["src/store/sqlite_tests/report.zig"], zig_test="store.sqlite_tests.report.test.read")
-        for target in ("test", "test-native", "test-store"):
+        for target in ("test", "test-store"):
             for cause in (mixed, mysql_only):
                 with self.subTest(target=target, cause=cause.signature):
                     planned = prepush.red_command(job(f"linux suites ({target})"), cause, AVAILABLE)
@@ -354,10 +353,10 @@ AssertionError
 
     def test_native_conformance_and_unknown_source_cannot_omit_live_obligations(self):
         graph = type("Graph", (), {"live_conformance": {"src/session_view_store_tests.zig"}, "reached": {}})()
-        cause = report_issue.Cause("native mixed", ["src/session_view_store_tests.zig"], zig_test="session_view_store_tests.test.view")
+        cause = report_issue.Cause("native mixed", ["src/session_view_store_tests.zig"], zig_test="session_view_store_tests.test.view", zig_binary="unit-native-tests")
         command = prepush.red_command(job("linux suites (test-native)"), cause, AVAILABLE, graph=graph)
         self.assertIsInstance(command, prepush.NeedsMySQL)
-        unknown = report_issue.Cause("unknown source", zig_test="ambiguous.test.view")
+        unknown = report_issue.Cause("unknown source", zig_test="ambiguous.test.view", zig_binary="unit-native-tests")
         self.assertIsInstance(prepush.red_command(job("linux suites (test-native)"), unknown, AVAILABLE, graph=graph), prepush.Skipped)
 
     def test_cached_commands_resolve_live_availability_again(self):
@@ -382,6 +381,37 @@ AssertionError
         self.assertEqual(results[0]["exit"], 0)
         self.assertNotIn("exit", results[1])
         self.assertIn("MySQL rounds", results[1]["name"])
+
+    def test_every_registered_root_uses_its_filtered_owner_standalone_and_packed(self):
+        registry = build_files.unit_roots()
+        graph = prepush.tree_graph()
+        self.assertTrue(registry)
+        # The build registry is the oracle. The mapper must cover its whole
+        # domain, including auxiliary roots whose filtered owner differs.
+        for root in registry:
+            binary = root["name"] + "-" + Path(root["source"]).stem
+            cause = report_issue.Cause("registered root", [root["source"]],
+                zig_test=Path(root["source"]).stem + ".test." + root.get("filter", "registry case"), zig_binary=binary)
+            for owner in root["owners"]:
+                for packed in (False, True):
+                    owners = [owner, "test-h2"] if packed else [owner]
+                    with self.subTest(binary=binary, owners=owners):
+                        self.assertEqual(prepush.unit_target(owners, cause, graph), root["target"])
+                        unknown = report_issue.Cause("unregistered root", cause.paths,
+                            zig_test=cause.zig_test, zig_binary="unregistered-binary")
+                        self.assertIsNone(prepush.unit_target(owners, unknown, graph),
+                                          "a known source or single matrix target cannot certify an unknown binary")
+            self.assertIsNone(prepush.unit_target(["full-callers"], cause, graph))
+
+    def test_registered_source_identity_can_reproduce_numbered_historical_store_tests(self):
+        graph = prepush.tree_graph()
+        cause = report_issue.Cause("historical Store failure", ["src/store/tests/activity.zig"],
+                                   zig_test="store.tests.activity.test.queued input")
+        for owners in (["check"], ["test-native", "test-store"], ["test-store"]):
+            self.assertEqual(prepush.unit_target(owners, cause, graph), "test-store")
+        # A matrix target alone carries no authority about a failed root.
+        cause = report_issue.Cause("unknown", zig_test="unregistered.test.named test")
+        self.assertIsNone(prepush.unit_target(["test-logic"], cause, graph))
 
     def test_live_and_upgrade_checks_are_skipped(self):
         for name in ("linux suites (test-pg)", "previous_release_upgrade"):

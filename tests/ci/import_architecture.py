@@ -132,7 +132,10 @@ def tests_reached(root, test_only=TEST_ONLY_ROOTS, modules=MODULE_TEST_ROOTS):
     """Every Zig file under src/ and tests/ that declares tests is named by a
     test reached from a test root, so its tests cannot silently stop running."""
     build = build_files.source(root)
-    if stale := [name for name in (*test_only, *modules) if f'b.path("{name}")' not in build]:
+    registered = ({row["source"] for row in build_files.unit_roots(root)}
+                  if (root / "build/unit.zig").is_file() else set())
+    if stale := [name for name in (*test_only, *modules)
+                 if name not in registered and f'b.path("{name}")' not in build]:
         raise ValueError(f"The build no longer builds test roots {stale}; update TEST_ONLY_ROOTS/MODULE_TEST_ROOTS")
     scanned = {path.resolve(): scoped_imports(path.read_text())
                for directory in ("src", "tests") for path in (root / directory).rglob("*.zig")}

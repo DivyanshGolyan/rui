@@ -33,7 +33,7 @@ from urllib.parse import quote
 import failure_cause
 import report_issue
 from pr_overlap import repo_from_remote
-from select_tests import CHECK_COVERS, FIXTURES, UNIT_ROOTS
+from select_tests import FIXTURES
 
 import build_files
 from caller_errors import inventory_path
@@ -184,37 +184,24 @@ def local_red_checks(planned, mysql):
             yield name + " (MySQL rounds)", Skipped("MySQL rounds not evaluated: no reachable configured local MySQL server")
 
 
-def unit_target(targets, cause, graph):
-    """Resolve the failed root inside standalone, packed and composed targets."""
+def unit_target(targets, cause, graph, registry=None):
+    """Resolve only identities registered by the build, never a matrix fallback."""
+    registry = build_files.unit_roots() if registry is None else registry
     selected = set(targets)
-    if selected.intersection({"check", "check-full", "full-execution"}):
-        selected |= CHECK_COVERS
-    units = selected.intersection({*UNIT_ROOTS, "test", "test-full"})
-    binary = cause.zig_binary
-    # build/ci.zig appends the root source stem to default test names; native
-    # partition binaries are named unit-{partition}-tests by build/unit.zig.
-    if binary in units:
-        return binary
-    if binary.startswith("unit-") and binary.endswith("-tests"):
-        partition = "test-" + binary.removeprefix("unit-").removesuffix("-tests")
-        if partition in units or "test" in units:
-            return partition
-    if binary:
-        candidates = [target for target in units if target in UNIT_ROOTS
-                      and binary == "test-" + Path(UNIT_ROOTS[target][0]).stem]
-        if len(candidates) == 1:
-            return candidates[0]
-    if len(units) == 1:
-        return next(iter(units))
-    reached = {target for target in units if any(path in graph.reached.get(target, ()) for path in cause.paths)}
-    if not reached:
-        return None
-    # A shared imported module cannot prove that a live round was a local one.
-    if reached.intersection({"test-pg", "mysql-wire-integration"}):
-        return None
-    if reached <= {"test-native", "test-store", "test"}:
-        return "test" if "test" in units or len(reached) > 1 else next(iter(reached))
-    return next(iter(reached)) if len(reached) == 1 else None
+    candidates = [root for root in registry if selected.intersection(root["owners"])]
+    if cause.zig_binary:
+        candidates = [root for root in candidates if cause.zig_binary in
+                      (root["name"], root["name"] + "-" + Path(root["source"]).stem)]
+    else:
+        candidates = [root for root in candidates if not root.get("filtered_only")
+                      and (not root.get("prefix") or cause.zig_test.startswith(root["prefix"]))
+                      and (not root.get("exclude_prefix") or not cause.zig_test.startswith(root["exclude_prefix"]))
+                      and (not root.get("filter") or root["filter"] in cause.zig_test)]
+        exact = [root for root in candidates if root["source"] in cause.paths]
+        candidates = exact or [root for root in candidates if any(
+            path in graph.closure(graph.every, [root["source"]]) for path in cause.paths)]
+    mapped = {root["target"] for root in candidates}
+    return next(iter(mapped)) if len(mapped) == 1 else None
 
 
 def red_command(job, cause, available, *, compile_targets=(), graph=None):
@@ -243,7 +230,9 @@ def red_command(job, cause, available, *, compile_targets=(), graph=None):
         graph = graph or tree_graph()
         target = unit_target(targets, cause, graph)
         if target is None:
-            return Skipped("cannot identify the failing unit root from the log and selected targets")
+            return Skipped("unit root is not uniquely registered for the failed binary/source and selected targets")
+        if target not in available:
+            return Skipped("the registered filtered target is unavailable in this checkout")
         if target == "test-pg":
             return Skipped("test-pg requires CI's live TLS Postgres server")
         if target == "mysql-wire-integration":
@@ -290,12 +279,14 @@ def red_revision():
     for path in ("prepush.py", "report_issue.py", "failure_cause.py", "select_tests.py", "build_files.py"):
         digest.update((Path(__file__).parent / path).read_bytes())
     digest.update(build_files.source(ROOT).encode())
+    digest.update((ROOT / "src/unit_test_partition.zig").read_bytes())
     for path in sorted((ROOT / "tests/integration").glob("*.py")):
         digest.update(path.name.encode())
         digest.update(path.read_bytes())
     digest.update((ROOT / "tests/integration/check.sh").read_bytes())
     graph = tree_graph()
     digest.update(json.dumps({target: sorted(reached) for target, reached in graph.reached.items()}, sort_keys=True).encode())
+    digest.update(json.dumps({path: sorted(imports) for path, imports in graph.every.items()}, sort_keys=True).encode())
     digest.update(json.dumps(sorted(graph.live_mysql)).encode())
     digest.update(json.dumps(sorted(graph.live_conformance)).encode())
     digest.update(str((ROOT, sys.executable, sys.platform)).encode())

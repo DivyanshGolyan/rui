@@ -135,9 +135,15 @@ class BuildWiringTest(unittest.TestCase):
     def test_filtered_runs_keep_single_stock_aggregate(self):
         build = build_files.source()
         self.assertIn("if (test_filters.len == 0) unit_partition.roots.len else 1", build)
-        self.assertIn('if (test_filters.len != 0) "test"', build)
-        self.assertIn('.root_source_file = b.path("src/tests.zig")', build)
-        self.assertIn(".filters = if (test_filters.len != 0) test_filters else unit_filters[index]", build)
+        registry = build_files.unit_roots()
+        aggregate = [row for row in registry if row.get("filtered_only")]
+        self.assertEqual(len(aggregate), 1)
+        self.assertEqual((aggregate[0]["name"], aggregate[0]["source"], aggregate[0]["target"]),
+                         ("test", "src/tests.zig", "test"))
+        self.assertIn("if (test_filters.len != 0) root(.filtered) else switch (partition)", build)
+        self.assertIn(".name = definition.name", build)
+        self.assertIn(".root_source_file = b.path(definition.source)", build)
+        self.assertIn(".filters = if (definition.filtered_only) test_filters else unit_filters[index]", build)
         self.assertIn(".mode = .server } else filtered_runner", build)
         # test, test-full and test-logic refuse a filter that leaves no named test.
         self.assertEqual(build.count(".test_runner = filtered_runner"), 2)
@@ -145,9 +151,12 @@ class BuildWiringTest(unittest.TestCase):
 
     def test_standalone_roots_do_not_inherit_the_serial_chain(self):
         build = build_files.source()
-        self.assertIn('b.step("test-native",', build)
-        self.assertIn('b.step("test-store",', build)
-        self.assertIn('(if (root == .native) native_step else store_step).dependOn(&standalone.step)', build)
+        partitions = {row["partition"]: row for row in build_files.unit_roots() if "partition" in row}
+        self.assertEqual({key: row["target"] for key, row in partitions.items()},
+                         {"native": "test-native", "store": "test-store"})
+        self.assertIn('b.step(root(.native).target,', build)
+        self.assertIn('b.step(root(.store).target,', build)
+        self.assertIn('(if (partition == .native) native_step else store_step).dependOn(&standalone.step)', build)
         self.assertIn('native_step.dependOn(&run.step)', build)
         self.assertIn('store_step.dependOn(&run.step)', build)
         for dependency in ('run_renderer_allocation', 'signal_stack_probe'):

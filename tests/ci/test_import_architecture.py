@@ -22,6 +22,15 @@ class ImportArchitectureTest(unittest.TestCase):
     def test_repository_tests_are_all_named_by_a_test(self):
         tests_reached(Path(__file__).resolve().parents[2])
 
+    def test_registry_sources_count_and_removed_roots_still_fail(self):
+        root = Path(__file__).resolve().parents[2]
+        import build_files
+        rows = build_files.unit_roots(root)
+        tests_reached(root)
+        with patch("build_files.unit_roots", return_value=[row for row in rows if row["source"] != "src/parser_fuzz_tests.zig"]):
+            with self.assertRaisesRegex(ValueError, r"no longer builds test roots \['src/parser_fuzz_tests.zig'\]"):
+                tests_reached(root)
+
     def test_repository_widgets_are_independent(self):
         widgets_boundary(Path(__file__).resolve().parents[2])
 

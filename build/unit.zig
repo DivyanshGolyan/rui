@@ -4,6 +4,41 @@ const darwin = @import("darwin.zig");
 const product = @import("product.zig");
 const CiArtifacts = @import("ci.zig").CiArtifacts;
 
+/// Test executable identities and their filtered runnable owners. Both the build
+/// and tests/ci/build_files.py consume these literal rows; keep each row whole.
+pub const UnitRoot = struct {
+    id: Id,
+    name: []const u8,
+    source: []const u8,
+    target: []const u8,
+    owners: []const []const u8,
+    partition: ?[]const u8 = null,
+    filter: ?[]const u8 = null,
+    filtered_only: bool = false,
+
+    pub const Id = enum { native, store, filtered, deadline, logic, parser_seed, parser_llvm, h2, pg, mysql };
+};
+
+pub const roots = [_]UnitRoot{
+    .{ .id = .native, .name = "unit-native", .source = "src/tests.zig", .target = "test-native", .owners = &.{ "test-native", "test", "check", "check-full", "full-execution" }, .partition = "native" },
+    .{ .id = .store, .name = "unit-store", .source = "src/tests.zig", .target = "test-store", .owners = &.{ "test-store", "test", "check", "check-full", "full-execution" }, .partition = "store" },
+    .{ .id = .filtered, .name = "test", .source = "src/tests.zig", .target = "test", .owners = &.{ "test", "test-native", "test-store", "check", "check-full", "full-execution" }, .filtered_only = true },
+    .{ .id = .deadline, .name = "deadline-witness", .source = "src/tests.zig", .target = "test-full", .owners = &.{"test-full"}, .filter = "Host processing wait does not consume response transfer inactivity" },
+    .{ .id = .logic, .name = "test", .source = "src/logic_tests.zig", .target = "test-logic-only", .owners = &.{ "test-logic", "test-logic-only" } },
+    .{ .id = .parser_seed, .name = "parser-fuzz", .source = "src/parser_fuzz_tests.zig", .target = "fuzz-parsers", .owners = &.{"test-logic"} },
+    .{ .id = .parser_llvm, .name = "parser-fuzz-llvm", .source = "src/parser_fuzz_tests.zig", .target = "fuzz-parsers", .owners = &.{"fuzz-parsers"} },
+    .{ .id = .h2, .name = "test", .source = "src/h2/h2.zig", .target = "test-h2", .owners = &.{ "test-h2", "check", "check-full", "full-execution" } },
+    .{ .id = .pg, .name = "test", .source = "src/store/wire/pg.zig", .target = "test-pg", .owners = &.{ "test-pg", "check", "check-full", "full-execution" } },
+    .{ .id = .mysql, .name = "rui-mysql-wire-test", .source = "tests/integration/mysql_wire_test.zig", .target = "mysql-wire-integration", .owners = &.{"mysql-wire-integration"} },
+};
+
+pub fn root(comptime id: UnitRoot.Id) UnitRoot {
+    inline for (roots) |entry| {
+        if (entry.id == id) return entry;
+    }
+    @compileError("Unregistered unit root");
+}
+
 pub const Units = struct {
     tests: []*std.Build.Step.Compile,
     run_tests: *std.Build.Step.Run,
@@ -30,22 +65,28 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         generate.addFileArg(std.Build.LazyPath.zig_lib.path(b, "compiler/test_runner.zig"));
         break :runner .{ .path = generate.addOutputFileArg("filtered_test_runner.zig"), .mode = .server };
     } else null;
-    const native_step = b.step("test-native", "Run non-Store unit tests");
-    const store_step = b.step("test-store", "Run Store unit tests");
+    const native_step = b.step(root(.native).target, "Run non-Store unit tests");
+    const store_step = b.step(root(.store).target, "Run Store unit tests");
     var run_tests: *std.Build.Step.Run = undefined;
     for (tests, 0..) |*entry, index| {
-        const root = unit_partition.roots[index];
+        const partition = unit_partition.roots[index];
+        const definition = if (test_filters.len != 0) root(.filtered) else switch (partition) {
+            .native => root(.native),
+            .store => root(.store),
+        };
+        if (!definition.filtered_only and !std.mem.eql(u8, definition.partition.?, @tagName(partition)))
+            @panic("Unit registry partition disagrees with the runner");
         const compile = b.addTest(.{
-            .name = if (test_filters.len != 0) "test" else b.fmt("unit-{s}", .{@tagName(root)}),
+            .name = definition.name,
             .max_rss = darwin.unitMaxRss(test_filters.len, target),
             .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/tests.zig"),
+                .root_source_file = b.path(definition.source),
                 .target = target,
                 .optimize = .ReleaseSafe,
                 .strip = darwin.unitStrip(test_filters.len, target),
             }),
-            .filters = if (test_filters.len != 0) test_filters else unit_filters[index],
+            .filters = if (definition.filtered_only) test_filters else unit_filters[index],
             .test_runner = if (unit_runner) |path| .{ .path = path, .mode = .server } else filtered_runner,
         });
         entry.* = compile;
@@ -63,14 +104,14 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         const run = ci.run(compile);
         run.has_side_effects = true;
         run.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
-        if (test_filters.len != 0) {
+        if (definition.filtered_only) {
             native_step.dependOn(&run.step);
             store_step.dependOn(&run.step);
         } else {
             const standalone = ci.run(compile);
             standalone.has_side_effects = true;
             standalone.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
-            (if (root == .native) native_step else store_step).dependOn(&standalone.step);
+            (if (partition == .native) native_step else store_step).dependOn(&standalone.step);
         }
         // Compile in parallel, execute serially: the MySQL dialect fixture owns
         // fixed database names. Store runs last and owns the acceptance record
@@ -79,7 +120,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         run_tests = run;
     }
 
-    const test_step = b.step("test", "Run unit, Store, and protocol tests");
+    const test_step = b.step(root(.filtered).target, "Run unit, Store, and protocol tests");
     test_step.dependOn(&run_tests.step);
     // Selection pairs test-full with check or check-full, which already run every
     // other native test, so this binary contains only the real-time witness.
@@ -87,26 +128,27 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
     // other targets retain LLVM. ReleaseSafe checks stay enabled.
     const deadline_witness = b.addTest(.{
         .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
-        .name = "deadline-witness",
+        .name = root(.deadline).name,
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tests.zig"),
+            .root_source_file = b.path(root(.deadline).source),
             .target = target,
             .optimize = .ReleaseSafe,
         }),
-        .filters = if (test_filters.len != 0) test_filters else &.{"Host processing wait does not consume response transfer inactivity"},
+        .filters = if (test_filters.len != 0) test_filters else &.{root(.deadline).filter.?},
         .test_runner = filtered_runner,
     });
     product.configureUnitRoot(b, deadline_witness, target, pinned_transport);
     const run_full_tests = ci.run(deadline_witness);
     run_full_tests.has_side_effects = true;
     run_full_tests.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "1");
-    const full_test_step = b.step("test-full", "Run the real 60-second client deadline witness");
+    const full_test_step = b.step(root(.deadline).target, "Run the real 60-second client deadline witness");
     full_test_step.dependOn(&run_full_tests.step);
 
     const logic_tests = b.addTest(.{
+        .name = root(.logic).name,
         .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/logic_tests.zig"),
+            .root_source_file = b.path(root(.logic).source),
             .target = target,
             .optimize = .ReleaseSafe,
         }),
@@ -122,7 +164,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         "Run the shared execution turn and portable owner tests without Host, Bash, or transport fixtures",
     );
     logic_test_step.dependOn(&run_logic_tests.step);
-    const logic_only_step = b.step("test-logic-only", "Run the logic test binary without auxiliary executables");
+    const logic_only_step = b.step(root(.logic).target, "Run the logic test binary without auxiliary executables");
     logic_only_step.dependOn(&run_logic_tests.step);
 
     // The fuzz tests of the parsers that read peer bytes. test-logic runs
@@ -132,19 +174,19 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
     // Their root links no C: --fuzz instruments every object it links, and
     // the stock compiler gives C objects no `__sanitizer_cov_trace_*` hooks.
     const parser_fuzz_step = b.step(
-        "fuzz-parsers",
+        root(.parser_llvm).target,
         "Run the peer-byte parser fuzz tests with LLVM coverage; add --fuzz for a live campaign",
     );
-    for ([_]struct { []const u8, *std.Build.Step, ?bool, ?std.Build.Step.Compile.TestRunner }{
-        .{ "parser-fuzz", logic_test_step, if (target.result.cpu.arch == .x86_64) false else null, null },
-        .{ "parser-fuzz-llvm", parser_fuzz_step, true, filtered_runner },
+    for ([_]struct { UnitRoot, *std.Build.Step, ?bool, ?std.Build.Step.Compile.TestRunner }{
+        .{ root(.parser_seed), logic_test_step, if (target.result.cpu.arch == .x86_64) false else null, null },
+        .{ root(.parser_llvm), parser_fuzz_step, true, filtered_runner },
     }) |entry| {
-        const name, const step, const use_llvm, const runner = entry;
+        const definition, const step, const use_llvm, const runner = entry;
         const parser_fuzz = b.addTest(.{
-            .name = name,
+            .name = definition.name,
             .use_llvm = use_llvm,
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/parser_fuzz_tests.zig"),
+                .root_source_file = b.path(definition.source),
                 .target = target,
                 .optimize = .ReleaseSafe,
             }),

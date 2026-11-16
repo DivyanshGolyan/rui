@@ -78,15 +78,20 @@ pub fn build(b: *std.Build) void {
     update_catalog.addCopyFileToSource(snapshot, "src/model_catalog_snapshot.zig");
     b.step("model-catalog", "Write the shipped catalog from a models.dev api.json snapshot").dependOn(&update_catalog.step);
 
-    const h2_test_step = b.step("test-h2", "Run the HTTP/2 client's own tests");
-    const pg_test_step = b.step("test-pg", "Run the Postgres wire client's tests (live ones against RUI_TEST_PG_PORT)");
+    const h2_root = unit_module.root(.h2);
+    const pg_root = unit_module.root(.pg);
+    const h2_test_step = b.step(h2_root.target, "Run the HTTP/2 client's own tests");
+    const pg_test_step = b.step(pg_root.target, "Run the Postgres wire client's tests (live ones against RUI_TEST_PG_PORT)");
     if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport, product.addUrl(b))) |tls_client| {
         const h2 = product.addH2(b, target, .ReleaseSafe, pinned_transport, product.addTestPoll(b), tls_client);
-        const h2_tests = b.addTest(.{ .root_module = h2, .filters = test_filters });
+        h2.root_source_file = b.path(h2_root.source);
+        const h2_tests = b.addTest(.{ .name = h2_root.name, .root_module = h2, .filters = test_filters });
         const run_h2_tests = ci.run(h2_tests);
         run_h2_tests.has_side_effects = true;
         h2_test_step.dependOn(&run_h2_tests.step);
-        const pg_tests = b.addTest(.{ .root_module = product.addPg(b, target, .ReleaseSafe, tls_client), .filters = test_filters });
+        const pg = product.addPg(b, target, .ReleaseSafe, tls_client);
+        pg.root_source_file = b.path(pg_root.source);
+        const pg_tests = b.addTest(.{ .name = pg_root.name, .root_module = pg, .filters = test_filters });
         const run_pg_tests = ci.run(pg_tests);
         run_pg_tests.has_side_effects = true;
         pg_test_step.dependOn(&run_pg_tests.step);
@@ -267,11 +272,12 @@ pub fn build(b: *std.Build) void {
     const preference_policy_step = b.step("preference-policy-integration", "Run native preference publication and privacy cases");
     preference_policy_step.dependOn(&preference_policy_integration.step);
 
+    const mysql_root = unit_module.root(.mysql);
     const mysql_wire_tests = b.addTest(.{
-        .name = "rui-mysql-wire-test",
+        .name = mysql_root.name,
         .use_llvm = test_actor_llvm,
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/integration/mysql_wire_test.zig"),
+            .root_source_file = b.path(mysql_root.source),
             .target = target,
             .optimize = .ReleaseSafe,
         }),
@@ -289,7 +295,7 @@ pub fn build(b: *std.Build) void {
     mysql_wire_integration.addFileArg(b.path("tests/integration/mysql_wire_integration.py"));
     mysql_wire_integration.addFileArg(ci.path(mysql_wire_tests));
     const mysql_wire_integration_step = b.step(
-        "mysql-wire-integration",
+        mysql_root.target,
         "Run the MySQL wire client against a real MySQL 8.4 server in Docker",
     );
     mysql_wire_integration_step.dependOn(&mysql_wire_integration.step);
