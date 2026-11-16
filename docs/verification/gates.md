@@ -207,6 +207,7 @@ That safety argument is source inspection, not a claim of native interrupted-bui
 
 Linux x86_64 pull requests use `-Dpr-ci=true`: both `rui-pr-check` and the synthetic-release `rui-upgrade-release-fixture` are ReleaseSafe integration products built without LLVM through `product.addIntegrationRui`.
 The upgrade fixture uses the same production sources with a synthetic release identity; its archive size and checksum are derived from the supplied binary.
+In PR mode only, that fixture also strips debug data, matching shipped Linux archive packaging and avoiding unnecessary checksum and extraction work in native publication tests.
 Promotion, release and default local builds retain Zig's default backend, as does the production binary used by `stack-frames`.
 
 Each platform builds its target closure once with `ci-build -Dci-targets=...`.

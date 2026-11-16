@@ -321,6 +321,8 @@ pub fn build(b: *std.Build) void {
         .version = b.fmt("0.{d}.10000", .{@import("src/store/schema.zig").schema_version}),
         .revision = product.buildIdentity(b).revision,
     });
+    // Keep PR archive work representative of stripped Linux release payloads.
+    if (pr_ci) upgrade_release.root_module.strip = true;
     const upgrade_fixture_step = b.step("upgrade-fixture", "Build the same-source native actor with synthetic release identity for upgrade evidence");
     upgrade_fixture_step.dependOn(&b.addInstallArtifact(upgrade_release, .{}).step);
     const upgrade_integration = screen_module.screenCommand(b, screen, &.{"python3"});

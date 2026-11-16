@@ -469,6 +469,15 @@ class PrModeTest(unittest.TestCase):
         identity = build.split("fn addRuiWithIdentity(", 1)[1].split("\n}", 1)[0]
         self.assertNotIn("use_llvm", identity)
 
+    def test_only_the_pr_upgrade_fixture_strips_its_debug_payload(self):
+        build = build_files.source()
+        fixture = build.split("    const upgrade_release =", 1)[1].split("    const upgrade_integration =", 1)[0]
+        self.assertIn("if (pr_ci) upgrade_release.root_module.strip = true;", fixture)
+        integration = build.split("pub fn addIntegrationRui(", 1)[1].split("\n}", 1)[0]
+        ordinary = build.split("fn addRuiWithIdentity(", 1)[1].split("\n}", 1)[0]
+        for constructor in (integration, ordinary):
+            self.assertNotIn(".strip", constructor)
+
     def test_only_linux_x64_pull_requests_use_the_fast_artifact(self):
         for event, system, machine, fast in (
                 ("pull_request", "Linux", "x86_64", True),
