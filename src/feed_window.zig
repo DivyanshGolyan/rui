@@ -1265,11 +1265,12 @@ test "quote body extraction consumes tool output provenance and keeps linked ans
     try window.append(&.{.{ .key = .{ .position = 1 }, .text = Text.fromDocument(&document) }});
     const result = try @import("transcript_selection.zig").copyBody(gpa, window, .{ .from = 0, .to = window.document.length });
     defer gpa.free(result.text.bytes);
-    try std.testing.expect(std.mem.startsWith(u8, result.text.bytes, "    actual indent\n\nliteral ┄ authored\n"));
-    try std.testing.expect(std.mem.indexOf(u8, result.text.bytes, "more lines") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result.text.bytes, "succeeded") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result.text.bytes, "private-hidden-address") == null);
-    try std.testing.expect(std.mem.endsWith(u8, result.text.bytes, "shown label\n"));
+    var expected: std.Io.Writer.Allocating = .init(gpa);
+    defer expected.deinit();
+    try expected.writer.writeAll("    actual indent\n\nliteral ┄ authored\n");
+    for (0..fold.max_lines - 3) |_| try expected.writer.writeAll("tail\n");
+    try expected.writer.writeAll("shown label\n\n");
+    try std.testing.expectEqualStrings(expected.written(), result.text.bytes);
 }
 
 test "quote body extraction keeps actual UserBody preview prefixes beside inline ellipses" {

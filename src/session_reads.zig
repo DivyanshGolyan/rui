@@ -2462,23 +2462,25 @@ test "quote body extraction follows rendered person and peer provenance through 
                 .peer => .{ .received = received },
                 else => FakeHost.message(1),
             }, .excluded_at = if (case == .stopped) 3 else null },
-            .{ .value = .{ .admission = received }, .excluded_at = 3 },
+            .{ .value = .{ .received = received } },
             .{ .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 2, .completion = .completed } } },
         };
         var host: FakeHost = .{ .history = 0, .tail = tail[0..if (case == .stopped) 3 else 1], .end = if (case == .stopped) 3 else 1 };
         var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = host.end } };
         try host.read(&job);
-        try std.testing.expectEqual(@as(usize, 1), job.result.row_count);
-        const row = &job.result.rows[0];
+        try std.testing.expectEqual(@as(usize, if (case == .stopped) 2 else 1), job.result.row_count);
         const document = try gpa.create(Viewport.Sized(feed_window.row_capacity, true));
         defer gpa.destroy(document);
         document.* = .{};
-        try document.append(host.shown);
-        try document.prepare();
         const window = try gpa.create(feed_window.Window);
         defer gpa.destroy(window);
         window.* = .{};
-        try window.append(&.{.{ .key = row.key, .text = feed_window.Text.fromDocument(document) }});
+        for (job.result.rows[0..job.result.row_count]) |row| {
+            document.clear();
+            try document.append(host.shown[@intCast(row.offset)..][0..@intCast(row.length)]);
+            try document.prepare();
+            try window.append(&.{.{ .key = row.key, .text = feed_window.Text.fromDocument(document) }});
+        }
         const result = try @import("transcript_selection.zig").copyBody(gpa, window, .{ .from = 0, .to = window.document.length });
         if (case == .peer) {
             try std.testing.expect(result == .nothing);
