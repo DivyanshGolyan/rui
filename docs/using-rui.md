@@ -91,7 +91,9 @@ A command that arrives while you are writing a message leaves your draft in plac
 You can edit and paste multiline text at the prompt.
 On an empty prompt, Ctrl-P brings back the last message you sent, for editing, and Ctrl-P again goes further back; Ctrl-N goes forward, and past your newest message the prompt is empty again.
 Messages from other Sessions never come back this way.
-There is no completion.
+When a command or skill row is highlighted above a nonempty draft, Tab accepts that drawn row through the same path as Enter.
+A complete command can run immediately; a command that needs an argument fills its name and a space.
+Otherwise Tab moves focus through the footer.
 For input longer than 64 KiB, redirect a file into `rui session send --to ID < FILE`.
 If a submission is uncertain, Ctrl-R retries that same request instead of creating a new one.
 
