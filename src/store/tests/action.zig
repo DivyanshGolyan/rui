@@ -737,6 +737,57 @@ const NativePromotion = struct {
     }
 };
 
+test "historical fixture rewinds refuse retained pin background and stop-cutoff facts before DDL" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Evidence = enum { pin, refused_control, background, stop_cutoff };
+            inline for (std.enums.values(Evidence)) |evidence| {
+                inline for (.{ false, true }) |ending| {
+                    var tmp = std.testing.tmpDir(.{});
+                    defer tmp.cleanup();
+                    var storage: Store = undefined;
+                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                    defer storage.close() catch unreachable;
+                    const session = try shared_fixtures.configureTestSessionWithMode(&storage, "rewind-config", "bypass");
+                    const free: usize = 2;
+                    switch (evidence) {
+                        .pin => {
+                            var command: protocol.SessionPinCommand = .{ .pinned = false, .session = session };
+                            try command.key.set("rewind-unpin");
+                            try std.testing.expect(storage.pinSession(&command, .{}) == .accepted);
+                        },
+                        .refused_control => {
+                            var command = try NativePromotion.command(session.slice(), "rewind-refused-control", 0);
+                            try std.testing.expect(storage.backgroundAction(&command, NativePromotion.capacity(2, &free), .{}) == .rejected);
+                        },
+                        .background => _ = try NativePromotion.promoted(&storage, &tmp, session.slice()),
+                        .stop_cutoff => {
+                            _ = try NativePromotion.propose(&storage, &tmp, session.slice());
+                            var stop = try completeSessionStop("rewind-stop", session.slice());
+                            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_stop WHERE action_cutoff>0", .{}));
+                        },
+                    }
+                    const pins = try store_testing.queryU64(&storage, "SELECT count(*) FROM session_pin", .{});
+                    const controls = try store_testing.queryU64(&storage, "SELECT count(*) FROM action_control_command", .{});
+                    const stops = try store_testing.queryU64(&storage, "SELECT count(*) FROM session_stop WHERE action_cutoff>0", .{});
+                    if (ending) {
+                        try std.testing.expectError(error.TestExpectedEqual, store_testing.stageEndingMessageUpgrade(&storage, false));
+                    } else {
+                        try std.testing.expectError(error.TestExpectedEqual, store_testing.stageObligationUpgrade(&storage));
+                    }
+                    try std.testing.expectEqual(pins, try store_testing.queryU64(&storage, "SELECT count(*) FROM session_pin", .{}));
+                    try std.testing.expectEqual(controls, try store_testing.queryU64(&storage, "SELECT count(*) FROM action_control_command", .{}));
+                    try std.testing.expectEqual(stops, try store_testing.queryU64(&storage, "SELECT count(*) FROM session_stop WHERE action_cutoff>0", .{}));
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='format' AND meta_value=?1", .{comptime std.fmt.comptimePrint("{d}", .{@import("../schema.zig").schema_version})}));
+                    try std.testing.expect(!storage.isFenced());
+                    _ = try store_testing.configureTestSession(&storage, "rewind-still-usable");
+                }
+            }
+        }
+    }.run);
+}
+
 test "native promotion keeps one attempted invocation and its immutable receipt while final polling stays explicit" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
