@@ -4273,14 +4273,6 @@ test "an encode failure settles unanswered and releases request scratch" {
         var observed: store_module.Observed = undefined;
         if (ordered_limit) {
             try std.testing.expectError(error.InputPartsNotSupported, storage.observeCommand("encode-failure-key", null, &observed));
-            const sqlite = @import("store/sqlite.zig");
-            const saved_code = try sqlite.prepare(storage.sqliteDatabase(), "SELECT resolution_code FROM model_operation WHERE operation_id=?1");
-            defer _ = sqlite.c.sqlite3_finalize(saved_code);
-            try sqlite.bindU64(saved_code, 1, binding.operation_id);
-            try std.testing.expectEqual(sqlite.c.SQLITE_ROW, sqlite.c.sqlite3_step(saved_code));
-            var code: protocol.Bounded(96) = .{};
-            try sqlite.readText(saved_code, 0, &code);
-            try std.testing.expectEqualStrings(@import("failure_class.zig").ordered_input_limit, code.slice());
             try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(
                 &storage,
                 "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND session_ref=?2 AND attempt_ordinal=?3 AND turn_id=?4 AND resolution_code=?5 AND resolved_at IS NOT NULL AND retry_due_at_ms IS NULL AND attempt_at IS NULL",
