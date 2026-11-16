@@ -845,7 +845,7 @@ pub fn discoverUpgradeHosts(allocator: std.mem.Allocator, io: std.Io, cancellati
             var peer = observeUpgradePeer(allocator, io, directory, null) catch |err| break :result .{ .failed = err };
             defer peer.deinit(allocator);
             if (peer.pid != pid or peer.started != snapshot.started) break :result .{ .failed = error.HostPeerPidMismatch };
-            var observed = observeHostForUpgrade(io, directory, null) catch |err| break :result .{ .failed = err };
+            const observed = observeHostForUpgrade(io, directory, null) catch |err| break :result .{ .failed = err };
             if (observed.pid != pid or (identity.generation(pid) catch 0) != snapshot.started) break :result .{ .failed = error.HostPeerPidMismatch };
             break :result .{ .observed = observed };
         };
