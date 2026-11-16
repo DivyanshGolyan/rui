@@ -81,24 +81,25 @@ test "a statement that fails after an entry point touched its Session fails and 
 }
 
 fn takeEveryIdentityForTesting(storage: *Store) ![std.enums.values(store_core.Identity).len]u64 {
-    const maxima = [_][:0]const u8{
-        "SELECT max(turn_id) FROM turn",
-        "SELECT max(operation_id) FROM model_operation",
-        "SELECT max(action_id) FROM action_operation",
-        "SELECT max(content_id) FROM content",
-        "SELECT max(created_seq) FROM session",
-        "SELECT max(command_seq) FROM core_command",
-        "SELECT max(admission_id) FROM message_admission",
-        "SELECT max(tool_record_id) FROM tool_record",
-        "SELECT max(tool_set_id) FROM tool_set",
-        "SELECT max(forward_id) FROM session_forward",
-    };
-    var taken: [maxima.len]u64 = undefined;
+    const maxima: std.EnumArray(store_core.Identity, [:0]const u8) = .init(.{
+        .turn_id = "SELECT max(turn_id) FROM turn",
+        .operation_id = "SELECT max(operation_id) FROM model_operation",
+        .action_id = "SELECT max(action_id) FROM action_operation",
+        .content_id = "SELECT max(content_id) FROM content",
+        .created_seq = "SELECT max(created_seq) FROM session",
+        .command_seq = "SELECT max(command_seq) FROM core_command",
+        .admission_id = "SELECT max(admission_id) FROM message_admission",
+        .tool_record_id = "SELECT max(tool_record_id) FROM tool_record",
+        .tool_set_id = "SELECT max(tool_set_id) FROM tool_set",
+        .forward_id = "SELECT max(forward_id) FROM session_forward",
+        .group_id = "SELECT max(group_id) FROM session_group",
+    });
+    var taken: [std.enums.values(store_core.Identity).len]u64 = undefined;
     const entry = try store_core.enter(storage, .none);
     defer entry.release();
     try store_core.begin(storage);
-    inline for (comptime std.enums.values(store_core.Identity), maxima, &taken) |column, maximum, *value| {
-        const committed = try store_testing.sqliteQueryU64(storage.sqliteDatabase(), maximum, .{});
+    inline for (comptime std.enums.values(store_core.Identity), &taken) |column, *value| {
+        const committed = try store_testing.sqliteQueryU64(storage.sqliteDatabase(), maxima.get(column), .{});
         try std.testing.expect(committed > 0);
         value.* = try store_core.takeIdentity(storage, column);
         try std.testing.expectEqual(committed + 1, value.*);
@@ -115,6 +116,12 @@ test "a rolled-back transaction's identities are handed out again, a committed o
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const parent = try configureTestSession(&storage, "identity-parent");
+        var first_group: @import("../../command_input.zig").SessionGroupCommand = .{
+            .action = .{ .assign = try @import("../../session_group.zig").Name.from("First identity group") },
+        };
+        try first_group.key.set("identity-first-group");
+        first_group.session = parent;
+        try std.testing.expect(storage.groupSession(&first_group, .{}) == .accepted);
         const first_session = try configureTestSessionAsk(&storage, "identity-config");
         try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), first_session.slice() });
         try submitTestMessage(&storage, &tmp, "identity-message", "identity-message", first_session.slice(), "propose");
@@ -136,6 +143,12 @@ test "a rolled-back transaction's identities are handed out again, a committed o
     tools.session = second_session;
     tools.configuration.tools = try .of(&.{ "bash", "test_tool" });
     try std.testing.expect(try storage.configure(&tools, .{}) == .accepted);
+    var later_group: @import("../../command_input.zig").SessionGroupCommand = .{
+        .action = .{ .assign = try @import("../../session_group.zig").Name.from("Later identity group") },
+    };
+    try later_group.key.set("identity-later-group");
+    later_group.session = second_session;
+    try std.testing.expect(storage.groupSession(&later_group, .{}) == .accepted);
     const after = try takeEveryIdentityForTesting(&storage);
     for (before.identities, after) |given_back, next| try std.testing.expect(next > given_back);
 }

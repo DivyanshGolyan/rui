@@ -978,6 +978,7 @@ fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *Con
 fn drawReference(a: anytype, io: std.Io, reads: *ConfigurationReads) !Applying {
     try newReference(io, &reads.reference);
     readCreation(a, reads);
+    reads.grouping.prepareCreation(a);
     return .{ .round = .creation };
 }
 

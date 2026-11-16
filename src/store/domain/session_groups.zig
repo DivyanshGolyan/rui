@@ -99,10 +99,17 @@ pub const Automatic = struct {
         a.read(creator, .{ .session = reference }, &self.parent);
     }
 
+    pub fn prepareCreation(self: *Automatic, a: anytype) void {
+        if (self.phase != .done) return;
+        const parent = self.parent orelse return;
+        if (group.automatic(.{}, false, placement(parent.group_id, parent.manual)) != .family) return;
+        self.familyGroup(a, parent);
+    }
+
     pub fn placeCreated(self: *Automatic, a: anytype, session: rsql.SessionHead, workspace: *Bounded(workspace_path.max_bytes), label: ?group.Name) !bool {
         self.row = .{ .session = session, .workspace = workspace, .label = label, .group_id = null, .manual = false, .creator_ref = null, .evaluated = false };
         if (self.parent != null) {
-            self.phase = .creator;
+            if (self.phase == .done) self.phase = .creator;
             return self.advance(a);
         }
         return self.topicGroup(a);
@@ -138,16 +145,8 @@ pub const Automatic = struct {
                         return self.done();
                     },
                     .family => {
-                        self.family = true;
-                        var hash = std.crypto.hash.sha2.Sha256.init(.{});
-                        hash.update("rui/session-group/family/1\x00");
-                        hash.update(&parent.session.ref);
-                        self.anchor = hash.finalResult();
-                        self.name = try group.Name.from(&parent.session.ref);
-                        if (parent.label) |name| if (group.validName(name.slice())) {
-                            self.name = name;
-                        };
-                        return self.lookup(a);
+                        self.familyGroup(a, parent);
+                        return false;
                     },
                     .topic, .keep => unreachable,
                 }
@@ -165,6 +164,19 @@ pub const Automatic = struct {
                 return self.create(a);
             },
         }
+    }
+
+    fn familyGroup(self: *Automatic, a: anytype, parent: creator.Row) void {
+        self.family = true;
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hash.update("rui/session-group/family/1\x00");
+        hash.update(&parent.session.ref);
+        self.anchor = hash.finalResult();
+        self.name = group.Name.from(&parent.session.ref) catch unreachable;
+        if (parent.label) |name| if (group.validName(name.slice())) {
+            self.name = name;
+        };
+        _ = self.lookup(a);
     }
 
     fn topicGroup(self: *Automatic, a: anytype) !bool {
