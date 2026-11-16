@@ -57,6 +57,7 @@ pub const ControlTracePhase = store_core.ControlTracePhase;
 pub const DispatchPermit = model_admission_domain.DispatchPermit;
 pub const Faults = store_core.Faults;
 pub const HistoricalContent = historical_domain.HistoricalContent;
+pub const HistoricalInputReader = historical_domain.HistoricalInputReader;
 pub const HistoricalReader = historical_domain.HistoricalReader;
 pub const HistoricalSettings = historical_domain.HistoricalSettings;
 pub const HistoricalStart = historical_domain.Start;

@@ -4158,93 +4158,151 @@ test "Host fences dispose admitted preparation without touching canonical state"
 }
 
 test "an encode failure settles unanswered and releases request scratch" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
-    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
-    var storage: store_module.Store = undefined;
-    try storage.open(std.testing.io, database, root);
-    defer storage.close() catch unreachable;
-    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-    var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
-    defer directory.close(std.testing.io);
-    const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
-    var command: wire_request.ConfigureCommand = .{};
-    try command.key.set("encode-failure-config");
-    command.configuration.workspace.state = .value;
-    try command.configuration.workspace.value.set(workspace);
-    command.configuration.provider.state = .value;
-    try command.configuration.provider.value.set("codex");
-    command.configuration.model.state = .value;
-    try command.configuration.model.value.set("model-a");
-    command.configuration.tools = try .of(&.{ "bash", "web_search" });
-    command.configuration.permission_mode.state = .value;
-    try command.configuration.permission_mode.value.set("bypass");
-    command.configuration.compaction_trigger.state = .value;
-    try command.configuration.compaction_trigger.value.set("115200");
-    command.configuration.reasoning_effort.state = .explicit_null;
-    const configured = try storage.configure(&command, .{});
-    try std.testing.expect(configured == .accepted);
-    const file = try tmp.dir.createFile(std.testing.io, "encode-failure-message", .{ .read = true });
-    try file.writeStreamingAll(std.testing.io, "hello");
-    try file.sync(std.testing.io);
-    var message: wire_request.MessageCommand = .{};
-    try message.key.set("encode-failure-key");
-    message.session = configured.accepted.session;
-    message.text = .{
-        .state = .value,
-        .file = file,
-        .length = 5,
-        .digest = protocol.contentDigest("hello"),
-    };
-    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
-    var admitted = (try storage.admitNextModelAttempt(.{})).?;
+    for ([_]bool{ false, true }) |ordered_limit| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+        const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+        var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+        const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+        var storage: store_module.Store = undefined;
+        try storage.open(std.testing.io, database, root);
+        defer storage.close() catch unreachable;
+        var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+        var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
+        defer directory.close(std.testing.io);
+        const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
+        var command: wire_request.ConfigureCommand = .{};
+        try command.key.set("encode-failure-config");
+        command.configuration.workspace.state = .value;
+        try command.configuration.workspace.value.set(workspace);
+        command.configuration.provider.state = .value;
+        try command.configuration.provider.value.set("codex");
+        command.configuration.model.state = .value;
+        try command.configuration.model.value.set("model-a");
+        command.configuration.tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("bypass");
+        command.configuration.compaction_trigger.state = .value;
+        try command.configuration.compaction_trigger.value.set("115200");
+        command.configuration.reasoning_effort.state = .explicit_null;
+        const configured = try storage.configure(&command, .{});
+        try std.testing.expect(configured == .accepted);
+        const file = try tmp.dir.createFile(std.testing.io, "encode-failure-message", .{ .read = true });
+        try file.writeStreamingAll(std.testing.io, "hello");
+        try file.sync(std.testing.io);
+        var message: wire_request.MessageCommand = .{};
+        try message.key.set("encode-failure-key");
+        message.session = configured.accepted.session;
+        message.text = .{
+            .state = .value,
+            .file = file,
+            .length = 5,
+            .digest = protocol.contentDigest("hello"),
+        };
+        defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+        if (ordered_limit) {
+            const Capture = @import("InputCapture.zig");
+            const image = @embedFile("testing/fixtures/input-baseline.jpg");
+            const spool = try tmp.dir.createFile(std.testing.io, "limit-spool", .{ .read = true });
+            const index = tmp.dir.createFile(std.testing.io, "limit-index", .{ .read = true }) catch |err| {
+                spool.close(std.testing.io);
+                return err;
+            };
+            var capture_used: std.atomic.Value(u64) = .init(0);
+            var capture: Capture = undefined;
+            capture.init(std.testing.io, spool, index, .{ .used = &capture_used, .limit = 2 * 1024 * 1024 });
+            defer capture.close();
+            try tmp.dir.deleteFile(std.testing.io, "limit-spool");
+            try tmp.dir.deleteFile(std.testing.io, "limit-index");
+            for (0..1501) |_| {
+                try capture.begin(.{ .image = .{ .assertion = .jpeg } }, image.len);
+                var allowance: usize = image.len;
+                try std.testing.expectEqual(image.len, try capture.append(image, &allowance, false));
+                try capture.end();
+            }
+            const loan = try capture.seal();
+            var ordered_message = message;
+            ordered_message.text = .{};
+            try std.testing.expect(storage.submitMessageInput(&ordered_message, .{ .parts = loan }, null, null, null, .{}) == .accepted);
+            capture.close();
+            try std.testing.expectEqual(@as(u64, 0), capture_used.load(.acquire));
+        } else try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
+        const maybe_admitted = try storage.admitNextModelAttempt(.{});
+        try std.testing.expect(maybe_admitted != null);
+        var admitted = maybe_admitted.?;
 
-    var records: [1]execution.CustodyRecord = @splat(.{});
-    var host = Host{
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
-        .lease = undefined,
-        .store = &storage,
-        .custody = execution.CustodyPool.initialize(&records),
-    };
-    const token = host.custody.reserve().?;
-    const binding = try host.custody.attach(token, &admitted.permit);
-    var slots = [_]ExecutionSlot{.{ .model_preparing = .{ .token = token, .binding = binding } }};
-    var preparation: model_adapter.Preparation = undefined;
-    var retained: ?named_scratch.Owner = null;
-    storage.openHistoricalView(binding, &preparation.view);
-    try preparation.init(
-        std.testing.io,
-        root,
-        .{ .used = &host.scratch_used, .limit = 1024 * 1024 },
-        protocol.routesAll(.endpoint),
-        null,
-        // The codec declines at request_end: every earlier item has already
-        // written request scratch.
-        .{ .codec_declines = .request_end },
-        &retained,
-    );
-    defer if (preparation.state.active) preparation.cancel();
-    var listings: std.EnumArray(provider.ListingKind, ListingWork) = .initFill(.{ .fetch = undefined, .credential = null, .response = null });
-    var advances: usize = 0;
-    while (slots[0] != .free) : (advances += 1) {
-        try std.testing.expect(advances < 4096);
-        try std.testing.expect(advanceModelPreparation(&host, null, &slots, &preparation, &listings, 64, 4));
+        var records: [1]execution.CustodyRecord = @splat(.{});
+        var host = Host{
+            .io = std.testing.io,
+            .allocator = std.testing.allocator,
+            .lease = undefined,
+            .store = &storage,
+            .custody = execution.CustodyPool.initialize(&records),
+        };
+        const token = host.custody.reserve().?;
+        const binding = try host.custody.attach(token, &admitted.permit);
+        var slots = [_]ExecutionSlot{.{ .model_preparing = .{ .token = token, .binding = binding } }};
+        var preparation: model_adapter.Preparation = undefined;
+        var retained: ?named_scratch.Owner = null;
+        storage.openHistoricalView(binding, &preparation.view);
+        try preparation.init(
+            std.testing.io,
+            root,
+            .{ .used = &host.scratch_used, .limit = if (ordered_limit) 2 * 1024 * 1024 else 1024 * 1024 },
+            protocol.routesAll(.endpoint),
+            null,
+            // The codec declines at request_end: every earlier item has already
+            // written request scratch.
+            if (ordered_limit) .{} else .{ .codec_declines = .request_end },
+            &retained,
+        );
+        defer if (preparation.state.active) preparation.cancel();
+        var listings: std.EnumArray(provider.ListingKind, ListingWork) = .initFill(.{ .fetch = undefined, .credential = null, .response = null });
+        try std.testing.expectEqual(if (ordered_limit) @as(@TypeOf(preparation.state.faults.codec_declines), null) else .request_end, preparation.state.faults.codec_declines);
+        var advances: usize = 0;
+        while (slots[0] != .free) : (advances += 1) {
+            try std.testing.expect(advances < if (ordered_limit) @as(usize, 65536) else 4096);
+            try std.testing.expect(advanceModelPreparation(&host, null, &slots, &preparation, &listings, 64, 4));
+        }
+        try std.testing.expect(advances > 1);
+        try std.testing.expect(!preparation.state.active and !preparation.view.active);
+        try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+        try std.testing.expect(!storage.isFenced() and host.launchAllowed());
+        var observed: store_module.Observed = undefined;
+        if (ordered_limit) {
+            try std.testing.expectError(error.InputPartsNotSupported, storage.observeCommand("encode-failure-key", null, &observed));
+            const sqlite = @import("store/sqlite.zig");
+            const saved_code = try sqlite.prepare(storage.sqliteDatabase(), "SELECT resolution_code FROM model_operation WHERE operation_id=?1");
+            defer _ = sqlite.c.sqlite3_finalize(saved_code);
+            try sqlite.bindU64(saved_code, 1, binding.operation_id);
+            try std.testing.expectEqual(sqlite.c.SQLITE_ROW, sqlite.c.sqlite3_step(saved_code));
+            var code: protocol.Bounded(96) = .{};
+            try sqlite.readText(saved_code, 0, &code);
+            try std.testing.expectEqualStrings(@import("failure_class.zig").ordered_input_limit, code.slice());
+            try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(
+                &storage,
+                "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND session_ref=?2 AND attempt_ordinal=?3 AND turn_id=?4 AND resolution_code=?5 AND resolved_at IS NOT NULL AND retry_due_at_ms IS NULL AND attempt_at IS NULL",
+                .{ binding.operation_id, configured.accepted.session.slice(), binding.attempt_ordinal, binding.turn_id, @import("failure_class.zig").ordered_input_limit },
+            ));
+            try std.testing.expect(@import("marks.zig").cause(@import("failure_class.zig").ordered_input_limit, null).key == null);
+            try std.testing.expect(!storage.isFenced());
+            continue;
+        }
+        try storage.observeCommand("encode-failure-key", null, &observed);
+        try std.testing.expectEqual(.full, std.meta.activeTag(observed));
+        const observation = &observed.full.observation;
+        try std.testing.expectEqual(.message, std.meta.activeTag(observation.kind));
+        try std.testing.expect(observation.kind.message != null);
+        const message_state = &observation.kind.message.?;
+        try std.testing.expect(message_state.queue != null);
+        try std.testing.expectEqual(.failed, std.meta.activeTag(message_state.queue.?.state));
+        const failed = message_state.queue.?.state.failed;
+        try std.testing.expectEqualStrings(if (ordered_limit) @import("failure_class.zig").ordered_input_limit else "provider_codec_failed", failed.code.slice());
+        if (ordered_limit) try std.testing.expect(@import("marks.zig").cause(failed.code.slice(), null).key == null);
+        try std.testing.expectEqual(binding.attempt_ordinal, failed.binding.attempt_ordinal);
     }
-    try std.testing.expect(advances > 1);
-    try std.testing.expect(!preparation.state.active and !preparation.view.active);
-    try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
-    try std.testing.expect(!storage.isFenced() and host.launchAllowed());
-    var observed: store_module.Observed = undefined;
-    try storage.observeCommand("encode-failure-key", null, &observed);
-    const failed = observed.full.observation.kind.message.?.queue.?.state.failed;
-    try std.testing.expectEqualStrings("provider_codec_failed", failed.code.slice());
-    try std.testing.expectEqual(binding.attempt_ordinal, failed.binding.attempt_ordinal);
 }
 
 test "Host fences dispose a sealed request before native transfer construction" {

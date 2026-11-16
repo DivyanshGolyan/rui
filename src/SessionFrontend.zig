@@ -10283,3 +10283,25 @@ test "conversation slash pin and unpin share organization admission without mode
         try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "rui request recover saved-pin-handle") != null);
     };
 }
+
+test "local ordered input limits cannot schedule a failed reply retry" {
+    const failure = @import("failure_class.zig");
+    for ([_][]const u8{ failure.ordered_input_limit, failure.ordered_input_not_supported, "provider_http_400" }) |code| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try seedFeed(held.screen, "× Request failed\n");
+        self.failedRetryForTest();
+        self.live.latest_ending.?.key = held.screen.feed.high.?;
+        self.live.latest_ending.?.cause = @import("marks.zig").cause(code, null);
+        const retry = std.mem.eql(u8, code, "provider_http_400");
+        try std.testing.expectEqual(retry, self.retryable() != null);
+        _ = try held.draw();
+        try std.testing.expectEqual(retry, self.app_content.retry_actionable);
+        if (!retry) {
+            try held.keys("\x12");
+            try std.testing.expect(self.retry_fence == null and self.submission.intent == null);
+            try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+        }
+    }
+}

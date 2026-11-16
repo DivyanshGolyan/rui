@@ -111,10 +111,41 @@ pub const HistoricalTool = struct {
 /// `skill` is a skill a Message's `/name` word bound, right after it.
 pub const HistoricalEntryKind = enum { user, instruction, provider_output, tool_results, operation, skill };
 
+/// A canonical Message selected by this frozen view, never a raw Content ID.
+pub const HistoricalInput = struct {
+    view: *HistoricalView,
+    producer: input_domain.Producer,
+
+    pub fn open(self: HistoricalInput, reader: *HistoricalInputReader) !void {
+        std.debug.assert(self.view.active);
+        reader.view = self.view;
+        const certificate = try self.view.store.openInput(self.producer, &reader.cursor);
+        if (certificate != .retained) return store_core.fence(self.view.store, error.CorruptStore);
+    }
+};
+
+/// Metadata advances through the canonical owner; byte handles borrow this view.
+pub const HistoricalInputReader = struct {
+    view: *HistoricalView,
+    cursor: input_domain.Cursor,
+
+    pub fn next(self: *HistoricalInputReader) !?struct { kind: @import("../../input_parts.zig").Kind, content: HistoricalContent } {
+        std.debug.assert(self.view.active);
+        const part = try self.view.store.readInputPart(&self.cursor) orelse return null;
+        return .{ .kind = part.kind, .content = .{
+            .view = self.view,
+            .content_id = @intCast(part.content_id),
+            .length = part.reference.length,
+            .digest = part.reference.digest,
+        } };
+    }
+};
+
 pub const HistoricalEntry = struct {
     position: u64,
     kind: HistoricalEntryKind,
     content: ?HistoricalContent = null,
+    input: ?HistoricalInput = null,
     requested_model: ?Bounded(model_capability.max_model_bytes) = null,
     // A User entry's peer sender, in this view's Store.
     sender: ?Bounded(session_id.max_reference_bytes) = null,
@@ -1480,7 +1511,7 @@ fn entryAfter(a: *ReadAccess, view: *HistoricalView, after_position: u64) !?*con
 const historical_entries = rsql.Read(.{
     .sql = "SELECT e.session_position,CASE WHEN e.entry_kind=4 THEN 5 ELSE e.entry_kind END AS entry_kind,CASE WHEN e.entry_kind=1 THEN " ++ input_domain.messageTextIdSql("authored") ++ " ELSE e.content_id END AS content_id," ++ historical_content_columns_sql ++ ",NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,(e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ") AND (e.entry_kind<>1 OR (e.content_id IS NULL AND source.session_ref=e.session_ref AND source.turn_id=e.turn_id AND " ++ sourced_input.consistentSql("source", "authored") ++ ")) AS consistent," ++
         "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS sender,NULL AS effort," ++
-        "NULL AS tool_set_id,NULL AS declares," ++ pageBytesSql("content", "bytes") ++ " " ++
+        "NULL AS tool_set_id,NULL AS declares," ++ pageBytesSql("content", "bytes") ++ ",source.command_key AS message_key " ++
         "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
         "LEFT JOIN message_admission source ON source.admission_id=e.source_admission_id LEFT JOIN core_command authored ON authored.command_key=source.command_key " ++
         "LEFT JOIN content ON content.content_id=CASE WHEN e.entry_kind=1 THEN " ++ input_domain.messageTextIdSql("authored") ++ " ELSE e.content_id END " ++
@@ -1493,7 +1524,7 @@ const historical_entries = rsql.Read(.{
         "AND owner.attempt_ordinal=item.attempt_ordinal AND owner.admission_position<item.session_position " ++
         "AND owner.admission_position<current.admission_position AND " ++
         "(item.item_kind!=3 OR " ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ") AND " ++
-        "((" ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call tool_call WHERE tool_call.operation_id=owner.operation_id)),NULL,NULL,NULL,NULL,NULL " ++
+        "((" ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call tool_call WHERE tool_call.operation_id=owner.operation_id)),NULL,NULL,NULL,NULL,NULL,NULL " ++
         "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
         "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
         "LEFT JOIN turn owner_turn ON owner_turn.turn_id=owner.turn_id " ++
@@ -1504,7 +1535,7 @@ const historical_entries = rsql.Read(.{
         // its outcome: its request carried its own boundary, so later ones do too.
         // With each, its tool set and whether it declares any tool.
         "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL," ++ operation_effort.effectiveSql("earlier") ++ ",earlier.tool_set_id," ++
-        "EXISTS(SELECT 1 FROM " ++ declared_members_from ++ " WHERE " ++ declared_members_where("earlier.tool_set_id", "earlier.admission_position", "?6") ++ "),NULL " ++
+        "EXISTS(SELECT 1 FROM " ++ declared_members_from ++ " WHERE " ++ declared_members_where("earlier.tool_set_id", "earlier.admission_position", "?6") ++ "),NULL,NULL " ++
         "FROM model_operation current JOIN model_operation earlier ON earlier.session_ref=current.session_ref " ++
         "JOIN session_revision revision ON revision.session_ref=earlier.session_ref AND revision.revision=earlier.settings_revision " ++
         "WHERE current.operation_id=?1 AND earlier.admission_position>?2 AND earlier.admission_position<current.admission_position " ++
@@ -1528,6 +1559,7 @@ const historical_entries = rsql.Read(.{
         tool_set_id: ?rsql.Positive,
         declares: ?bool,
         bytes: ?Page.Bytes,
+        message_key: ?Bounded(128),
     },
     .cardinality = .each,
     .compound = true,
@@ -2201,7 +2233,12 @@ fn historicalEntry(view: *HistoricalView, row: *const historical_entries.Row) er
         requested_model = model;
     } else {
         if (row.consistent != true) return error.CorruptStore;
-        if (kind == .user and row.content_id == null) return .{ .position = row.session_position.get(), .kind = .user, .sender = row.sender, .content = null };
+        if (kind == .user and row.content_id == null) return .{
+            .position = row.session_position.get(),
+            .kind = .user,
+            .sender = row.sender,
+            .input = .{ .view = view, .producer = .{ .message = row.message_key orelse return error.CorruptStore } },
+        };
         const content_id = row.content_id orelse return error.CorruptStore;
         // A missing content row leaves its columns NULL.
         content = .{

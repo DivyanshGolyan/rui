@@ -33,6 +33,7 @@ pub const Cause = struct {
 /// Settings otherwise. No other cause depends on it.
 pub fn cause(code: []const u8, provider: ?Provider) Cause {
     if (std.mem.eql(u8, code, failure_class.ordered_input_not_supported)) return .{ .words = "This Host cannot send this input yet; no provider request was sent" };
+    if (std.mem.eql(u8, code, failure_class.ordered_input_limit)) return .{ .words = "Input exceeds this Host's request limit; no provider request was sent" };
     if (std.mem.eql(u8, code, "malformed_provider_output")) return .{ .words = "Model reply unreadable", .key = "ctrl+r retries" };
     return switch (failure_class.of(code)) {
         .policy => .{ .words = "Refused by the provider" },
@@ -146,4 +147,12 @@ test "unsupported ordered input is local and has no retry advice" {
     try std.testing.expectEqualStrings("Provider refused the request", cause("provider_http_400", null).words);
     try std.testing.expect(cause("provider_http_400", null).key != null);
     try std.testing.expectEqualStrings("Something went wrong", cause("CorruptStore", null).words);
+}
+
+test "ordered input limits are local and distinct from unsupported input" {
+    const local = cause(failure_class.ordered_input_limit, null);
+    try std.testing.expectEqualStrings("Input exceeds this Host's request limit; no provider request was sent", local.words);
+    try std.testing.expect(local.key == null and local.place == null);
+    try std.testing.expect(!std.mem.eql(u8, local.words, cause(failure_class.ordered_input_not_supported, null).words));
+    try std.testing.expect(cause("provider_http_400", null).key != null);
 }

@@ -4,6 +4,7 @@ const std = @import("std");
 const transport_policy = @import("transport_policy.zig");
 
 pub const ordered_input_not_supported = "local_ordered_input_not_supported";
+pub const ordered_input_limit = "local_ordered_input_limit";
 
 pub const Class = enum {
     /// The provider refused the content; resending it will be refused again.
@@ -78,6 +79,7 @@ test "saved failure codes name what the person can do" {
         .{ "provider_plan", Class.plan },
         .{ "provider_model_unavailable", Class.model },
         .{ "provider_usage_limit_reached", Class.other },
+        .{ ordered_input_limit, Class.other },
         .{ "provider_http_401", Class.sign_in },
         .{ "provider_sign_in_required", Class.sign_in },
         .{ "provider_sign_in_refresh_token_expired", Class.sign_in },
