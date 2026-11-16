@@ -475,9 +475,14 @@ test "a recall step lands only on the draft it began from, one at a time" {
 
 test "Tab puts in the list's first word at the draft's end and adds a tab anywhere else" {
     const List = struct {
-        fn add(_: *const anyopaque, draft: []const u8, _: usize) ?Editor.Replacement {
-            const list = slash_commands.suggest(draft, .{}) orelse return null;
-            return .append(draft, if (list.count == 0) "" else list.completion(0));
+        fn add(_: *const anyopaque, draft: []const u8, caret: usize) ?Editor.Replacement {
+            const completion = @import("skill_completion.zig");
+            var reads: completion.Reads = .{};
+            var rows: completion.Rows = .{};
+            const shown = reads.shown(&rows, draft, caret, 1, .{}, null) orelse
+                return if (slash_commands.suggest(draft, .{}) != null) .append(draft, "") else null;
+            const change = completion.edit(draft, caret, &shown);
+            return .{ .start = change.start, .end = change.end, .text = change.text };
         }
     };
     const cases = [_]struct { typed: []const u8, shown: []const u8 }{

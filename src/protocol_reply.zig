@@ -38,6 +38,7 @@ pub const ConversationPage = struct {
         presentation: ?protocol.ToolPresentation = null,
         admitted_at: ?u64 = null,
         sender: ?protocol.NamedPeer = null,
+        source_action: ?u64 = null,
     };
     end: u64,
     items: [protocol.public_conversation_page_items]Item = undefined,
@@ -58,6 +59,7 @@ pub const ConversationPage = struct {
             presentation: ?JsonToolPresentation = null,
             admitted_at: ?JsonString(20) = null,
             sender: ?JsonNamedPeer = null,
+            source_action: ?JsonString(20) = null,
         };
         const Rows = JsonArray(Row, protocol.public_conversation_page_items);
         const Wire = struct {
@@ -85,8 +87,10 @@ pub const ConversationPage = struct {
             item.presentation = if (row.presentation) |p| p.value else null;
             item.admitted_at = if (row.admitted_at) |second| try decimalId(second, false) else null;
             item.sender = if (row.sender) |sender| sender.peer() catch return error.InvalidConversationPage else null;
+            item.source_action = if (row.source_action) |action| try decimalId(action, false) else null;
             if ((item.kind == .tool_result or hosted) != (item.presentation != null) or (item.kind == .user) != (item.admitted_at != null) or
-                (item.kind != .user and item.sender != null) or
+                (item.kind != .user and (item.sender != null or item.source_action != null)) or
+                (item.sender != null and item.source_action != null) or
                 (item.admitted_at orelse 0) > std.math.maxInt(i64)) return error.InvalidConversationPage;
             if (item.presentation) |p| if (p.publication_position != item.position or (hosted and p.description == null)) return error.InvalidConversationPage;
             if (row.content) |reference| {
@@ -138,7 +142,7 @@ pub const ActivityPage = struct {
         if (bytes.len > activity_reply.max_page_bytes) return error.InvalidActivityPage;
         const Ref = struct { bytes: JsonString(20), sha256: JsonString(64) };
         const Fact = protocol.ActivityItem;
-        const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonNamedPeer, content: Ref };
+        const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonNamedPeer, source_action: ?JsonString(20) = null, content: Ref };
         const Sent = struct { admission: JsonString(20), admitted_at: JsonString(20), target: JsonNamedPeer, content: Ref };
         const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: ?JsonNamedPeer, code: JsonString(protocol.max_code_bytes) };
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref, description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
@@ -190,9 +194,9 @@ pub const ActivityPage = struct {
                 }) or !cursor.kinds.contains(std.meta.stringToEnum(protocol.ActivityItem.Kind, @tagName(item.value)).?)) return error.InvalidActivityPage;
             switch (item.value) {
                 inline .admission, .user, .received => |message, kind| {
-                    const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = try content(message.content), .admitted_at = try id(message.admitted_at, false), .sender = if (message.sender) |sender| try sender.peer() else null };
+                    const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = try content(message.content), .admitted_at = try id(message.admitted_at, false), .sender = if (message.sender) |sender| try sender.peer() else null, .source_action = if (message.source_action) |action| try id(action, false) else null };
                     if ((value.state == .applied) != (value.turn != null) or (kind == .user and value.state != .applied)) return error.InvalidActivityPage;
-                    if (kind != .user and (fact.at != value.admitted_at or (kind == .received) != (value.sender != null))) return error.InvalidActivityPage;
+                    if ((value.sender != null and value.source_action != null) or (kind != .user and (fact.at != value.admitted_at or (kind == .received) != (value.sender != null or value.source_action != null)))) return error.InvalidActivityPage;
                     fact.value = @unionInit(Fact.Value, @tagName(kind), value);
                 },
                 .sent => |sent| {

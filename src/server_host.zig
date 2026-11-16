@@ -368,6 +368,7 @@ pub const Host = struct {
     bash_facts: environment.HostFacts = bash.default_facts,
     environments: ?*SessionEnvironments = null,
     bash_timeout_ms: u64 = default_bash_timeout_ms,
+    background_after_ms: u64 = @import("host_settings.zig").default_background_after_ms,
     mcp_servers: @import("mcp/servers.zig").Servers = .{},
     retention: *output_retention.Queue = undefined,
     failed_response_store: ?std.Io.Dir = null,
@@ -389,15 +390,6 @@ pub const Host = struct {
     trace_lost: std.atomic.Value(bool) = .init(false),
     test_observation: ?*TestObservation = null,
     last_unprocessed_completions: ?u64 = null,
-
-    pub fn dispatchCapacity(host: *const Host) store_module.ActionCapacityView {
-        return .{ .total = host.custody.records.len, .context = &host.custody, .freeFn = struct {
-            fn free(context: *const anyopaque) usize {
-                const pool: *const execution.CustodyPool = @ptrCast(@alignCast(context));
-                return pool.records.len - pool.occupied();
-            }
-        }.free };
-    }
 
     pub fn launchAllowed(self: *const Host) bool {
         return self.phase.load(.acquire) == .open;

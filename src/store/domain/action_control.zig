@@ -12,16 +12,6 @@ const action_domain = @import("action.zig");
 const content_domain = @import("content.zig");
 const turn_domain = @import("turn.zig");
 
-pub const CapacityView = struct {
-    total: usize,
-    context: *const anyopaque,
-    freeFn: *const fn (*const anyopaque) usize,
-
-    fn snapshot(view: CapacityView) control.Capacity {
-        return .{ .total = view.total, .free = view.freeFn(view.context) };
-    }
-};
-
 const target = rsql.Read(.{
     .sql = "SELECT session_ref,workspace_key,next_position FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
@@ -30,25 +20,25 @@ const target = rsql.Read(.{
 });
 const facts = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,action.parent_operation_id,operation.turn_id," ++
-        "action.background_position,action.acceptance_position,action.attempt_ordinal=1 AS attempted," ++
-        action_domain.actionStopPositionSql("action", "operation") ++ " AS stop_position " ++
+        "action.background_position,action.acceptance_position," ++ action_domain.coreCallSql(2) ++ " AS core_tool," ++
+        action_domain.actionStoppedSql("action", "operation") ++ " AS stopped " ++
         "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN session s ON s.session_ref=action.session_ref WHERE action.action_id=?1",
-    .Args = struct { action_id: u64 },
+    .Args = action_domain.CoreNames.Args(struct { action_id: u64 }),
     .Row = struct {
         session: rsql.SessionHead,
         parent_operation_id: rsql.Positive,
         turn_id: rsql.Positive,
         background_position: ?rsql.Positive,
         acceptance_position: ?rsql.Positive,
-        attempted: bool,
-        stop_position: ?rsql.Positive,
+        core_tool: bool,
+        stopped: bool,
 
         fn selected(row: @This()) control.Facts {
             return .{
+                .core_tool = row.core_tool,
                 .background = if (row.background_position) |position| position.get() else null,
                 .final = if (row.acceptance_position) |position| position.get() else null,
-                .stopped = if (row.stop_position) |position| position.get() else null,
-                .attempted = row.attempted,
+                .stopped = row.stopped,
             };
         }
     },
@@ -95,8 +85,9 @@ pub const Control = struct {
     pub const round_budget = 2;
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = .facts;
-    pub const Scratch = struct { receipt: action_receipt.Bytes };
-    pub const Input = struct { command: *const command_input.ActionBackgroundCommand, capacity: CapacityView, scratch: *Scratch };
+    pub const Scratch = struct { receipt: action_receipt.Bytes, automatic: command_input.ActionBackgroundCommand };
+    pub const Source = union(enum) { command: *const command_input.ActionBackgroundCommand, live_action: u64 };
+    pub const Input = struct { source: Source, scratch: *Scratch };
     pub const Result = control.Reply;
     pub const Ordinary = store_core.Ordinary.none;
     pub const Guards = error{ActionSelectionChanged};
@@ -114,14 +105,26 @@ pub const Control = struct {
     answer: command_domain.StoredAnswer = undefined,
     reply: Result = undefined,
 
+    fn requestValue(t: *Control) *const command_input.ActionBackgroundCommand {
+        return switch (t.input.source) {
+            .command => |command| command,
+            .live_action => &t.input.scratch.automatic,
+        };
+    }
+
     pub fn step(t: *Control, r: *transition.Round(Control), ran: ?rounds.At) !transition.Next(Control) {
-        const request = t.input.command;
+        if (ran == null) if (t.input.source == .live_action) {
+            const automatic = &t.input.scratch.automatic;
+            automatic.* = .{ .action_id = t.input.source.live_action };
+            const key = try std.fmt.bufPrint(&automatic.key.bytes, "rui.core/action-threshold/{d}", .{automatic.action_id});
+            automatic.key.len = key.len;
+        };
+        const request = t.requestValue();
         const at = ran orelse {
-            t.digest = request.semanticDigest();
             command_domain.lookupCommand(r, request.key.slice(), &t.saved);
             if (session_id.valid(request.session.slice())) r.read(target, .{ .session = request.session.slice() }, &t.receiver);
             if (validId(request.action_id)) {
-                r.read(facts, .{ .action_id = request.action_id }, &t.action);
+                r.read(facts, action_domain.CoreNames.of().args(.{ .action_id = request.action_id }), &t.action);
                 t.text = action_receipt.format(request.action_id, &t.input.scratch.receipt);
                 t.content = .ofBytes(t.text, false);
                 content_domain.lookup(r, &t.content);
@@ -132,6 +135,12 @@ pub const Control = struct {
             const old = try observation(t.replay);
             return .{ .done = .{ .accepted = .{ .replayed = true, .action_id = old.action_id, .selection = old.selection orelse return error.CorruptStore } } };
         }
+        if (t.input.source == .live_action) {
+            const found = t.action orelse return error.ActionSelectionChanged;
+            try t.input.scratch.automatic.session.set(&found.session.ref);
+            t.receiver = .{ .session = found.session };
+        }
+        t.digest = request.semanticDigest();
         switch (try command_domain.classify(control.Rejection, &t.saved, .action_background, request.session.slice(), &t.digest)) {
             .fresh => {},
             .conflict => return .{ .done = .conflict },
@@ -144,7 +153,7 @@ pub const Control = struct {
         const rejection: ?control.Rejection = if (!session_id.valid(request.session.slice())) .invalid_session_reference else if (!validId(request.action_id)) .invalid_target else if (t.receiver == null) .unknown_session else if (t.action == null) .unknown_action else if (!std.mem.eql(u8, &t.action.?.session.ref, request.session.slice())) .target_mismatch else null;
         if (rejection) |code| return t.refuse(r, code);
         const found = t.action.?;
-        const choice = control.choose(found.selected(), t.input.capacity.snapshot());
+        const choice = control.choose(found.selected());
         if (choice == .refused) return t.refuse(r, choice.refused);
         t.answer = .{ .accepted = true };
         try command_domain.queueCommand(r, request.key.slice(), .action_background, request.session.slice(), &t.digest, null, null, &t.answer);
@@ -166,13 +175,13 @@ pub const Control = struct {
     }
 
     fn save(t: *Control, r: *transition.Round(Control), selection: ?control.Selection) void {
-        const request = t.input.command;
+        const request = t.requestValue();
         const action_id = std.fmt.bufPrint(&t.action_text, "{d}", .{request.action_id}) catch unreachable;
         r.write(save_selection, .{ .key = request.key.slice(), .action_id = action_id, .selected_action_id = if (selection != null) request.action_id else null, .selection = if (selection) |selected| selected.kind else null, .position = if (selection) |selected| selected.position else null });
     }
 
     fn refuse(t: *Control, r: *transition.Round(Control), code: control.Rejection) !transition.Next(Control) {
-        const request = t.input.command;
+        const request = t.requestValue();
         t.answer = .{ .accepted = false };
         try t.answer.code.set(@tagName(code));
         try command_domain.queueCommand(r, request.key.slice(), .action_background, request.session.slice(), &t.digest, null, null, &t.answer);

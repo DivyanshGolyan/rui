@@ -67,7 +67,7 @@ pub const Calls = struct {
             break;
         };
         const entry = place orelse return .retry_later;
-        const token = (if (call.background) host.custody.reserveLeaving(1) else host.custody.reserve()) orelse return .retry_later;
+        const token = host.custody.reserve() orelse return .retry_later;
         const active = host.allocator.create(Active) catch {
             host.custody.releaseUnused(token) catch unreachable;
             return .retry_later;
@@ -203,7 +203,7 @@ noinline fn prepare(host: *Host, active: *Active) !void {
     const arguments = try readContent(host, arena, input.arguments);
     var turn: std.Io.Writer.Allocating = .init(arena);
     try protocol.writeShape(&turn.writer, .{protocol.Hole.decimal}, .{active.binding.turn_id});
-    try host.custody.consumeLaunchAuthority(active.token, .{ .action = active.binding });
+    try host.custody.consumeLaunchAuthority(active.token, .{ .action = active.binding }, std.Io.Clock.Timestamp.now(host.io, .awake));
     try active.running.start(host.allocator, .{
         .server = .{ .target = config.target, .bearer_token = config.token },
         .client = offered.client,
@@ -438,7 +438,7 @@ test "MCP ordinary custody covers preparation failure init failure stop shutdown
                 const active = calls.entries[0].?;
                 try std.testing.expectEqual(@as(usize, 1), host.custody.occupied());
                 try std.testing.expectEqual(@as(std.posix.fd_t, -1), active.running.fd());
-                try std.testing.expectError(error.DispatchPermitConsumed, host.custody.consumeLaunchAuthority(active.token, .{ .action = active.binding }));
+                try std.testing.expectError(error.DispatchPermitConsumed, host.custody.consumeLaunchAuthority(active.token, .{ .action = active.binding }, std.Io.Clock.Timestamp.now(host.io, .awake)));
                 if (case == .shutdown) {
                     _ = host.advance(.stopping);
                     calls.shutdown(&host);

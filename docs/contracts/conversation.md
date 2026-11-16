@@ -16,6 +16,10 @@ An admitted User Message and its Conversation entry are distinct: **projection**
 Admission can precede projection, as the pending-message rules below specify.
 
 Messages are immutable admissions ordered within their Session.
+A background Action’s final input uses this same queue, with Host-recorded Action provenance and a reference to its sole Resolution.
+Session stop wins over its selected background Actions: their final stopped Resolutions remain recorded exactly once, but are not admitted as input and start no Turn. A final input admitted before the stop remains admitted; ordinary stop exclusion governs any unselected input.
+An unsettled owed stop from an attached parent already has stop authority, before the child’s `session_stop` row is recorded. The same stopped predicate governs Action eligibility, final input admission, pending input selection and binding, and Tool Call continuation. It excludes person, peer and Action input at that boundary without changing an in-flight request.
+Host death ends an unresolved background Action with an ordinary final Resolution, delivered exactly once through this queue unless a saved stop suppresses its source. Execution is never resumed or retried.
 An admission waiting for processing has no result-producing Turn binding.
 When no Turn is active, core takes the queued admission-order prefix to begin a Turn; admission of new input may perform that transition in the same transaction.
 The oldest selected message initiates the Turn.
@@ -175,6 +179,8 @@ The Turn that takes the Message projects each skill as its own Conversation entr
 A bound skill that cannot be read refuses a client's or peer's Message (`skill_file_unavailable`, `skill_file_too_large`, `skill_text_invalid`; together a Message's skills hold at most 1 MiB of raw files), fails a `message_agent` or `start_agent` call with nothing sent or started, and leaves an owed child ending, which cannot be refused, delivered with no skills.
 Skill entries are host inputs: compaction keeps them verbatim like the Message, a history floor (D217) drops each with its Message's drop unit and counts its bytes there, and their frozen bytes keep later requests' prefixes stable.
 Catalog suggestions (`skill_suggestions`) are bounded metadata-only reads with copied query scope, not a frontend filesystem reader or persistent active-skill registry.
+They use the shared `skill_completion.match` rule: ASCII-case-insensitive name exact, name prefix, name substring, then description substring; `skill_completion.order` orders by that rank and then bytewise lexical skill name, independent of catalog traversal or whether the frontend reuses a complete page for a longer query.
+The bounded page retains the best matches across the entire catalog; its total counts all matches and its catalog revision is independent of the query.
 Invocation reads the selected advertised absolute path anew, returning the complete raw UTF-8 `SKILL.md`, including frontmatter and trailing bytes, with its absolute path.
 The result is ordinary immutable conversation content, with no added authority, tools or permissions.
 Sibling resources remain accessible through the Session's existing tools and permission rules.

@@ -44,7 +44,7 @@ class DocumentationTest(unittest.TestCase):
         for path in ('README.md', 'ARCHITECTURE.md', 'CODING_STANDARDS.md', 'VERIFICATION.md',
                      'THIRD_PARTY_NOTICES.md', 'docs/guide.md', 'docs/nested/guide.md',
                      'docs/assets/diagram.svg', 'docs/images/screen.png', 'docs/images/map.svg',
-                     'docs/spaces and ünicode.md', 'docs/new\nline.md', 'AGENTS.md', 'CLAUDE.md',
+                     'docs/spaces and ünicode.md', 'docs/new\nline.md', 'AGENTS.md', 'CLAUDE.md', 'DESIGN.md',
                      '.claude/skills/example/SKILL.md', 'research/notes.md',
                      'research/probe/prototype.zig', 'research/probe/run.jsonl'):
             with self.subTest(path=path):

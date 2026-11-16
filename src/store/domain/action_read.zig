@@ -32,19 +32,18 @@ pub fn actionRead(a: anytype, request: *const read.Request, out: *read.Read) !vo
         .action_id = request.action_id,
         .status = .{ .pending = if (row.attempt_ordinal != 0) .attempted else if (row.authorized) .queued else .waiting_approval },
     };
-    const position = row.acceptance_position orelse {
-        if (row.resolution_code != null or row.resolution_content_id != null or row.length != null or row.digest != null) return error.CorruptStore;
+    const final = try resolution(a, row) orelse {
         if (request.offset != 0) return error.InvalidCursor;
         return;
     };
-    const reference: content.ContentReference = .{ .length = row.length orelse return error.CorruptStore, .digest = row.digest orelse return error.CorruptStore };
+    const reference = final.location.reference;
     if (request.offset > reference.length) return error.InvalidCursor;
     out.status = .{ .resolved = .{
-        .resolution = .{ .position = position.get(), .code = row.resolution_code orelse return error.CorruptStore, .content = .{ .length = reference.length, .digest = reference.digest } },
+        .resolution = final.resolution,
         .window = .{ .offset = request.offset, .next = request.offset, .more = false, .text = .{ .len = 0 } },
     } };
     var reader: content.ContentReader = undefined;
-    reader.open(.{ .store = a.store, .content_id = @intCast((row.resolution_content_id orelse return error.CorruptStore).get()), .reference = reference });
+    reader.open(final.location);
     defer reader.close();
     const window = &out.status.resolved.window;
     const count = try reader.readWithAccess(a, request.offset, &window.text.bytes);
@@ -55,4 +54,30 @@ pub fn actionRead(a: anytype, request: *const read.Request, out: *read.Read) !vo
     window.text.len = kept.len;
     window.next = request.offset + kept.len;
     window.more = window.next < reference.length;
+}
+
+/// The sole immutable Resolution, shared by native/model read_action and
+/// background final input rendering. Both stream its existing content.
+pub const SavedResolution = struct {
+    resolution: read.Resolution,
+    location: content.ContentLocation,
+};
+
+pub fn readResolution(a: anytype, session: []const u8, action_id: u64) !SavedResolution {
+    var selected: metadata.Result = null;
+    a.read(metadata, .{ .session = session, .action_id = action_id }, &selected);
+    try a.run();
+    return try resolution(a, selected orelse return error.CorruptStore) orelse error.CorruptStore;
+}
+
+fn resolution(a: anytype, row: metadata.Row) !?SavedResolution {
+    const position = row.acceptance_position orelse {
+        if (row.resolution_code != null or row.resolution_content_id != null or row.length != null or row.digest != null) return error.CorruptStore;
+        return null;
+    };
+    const reference: content.ContentReference = .{ .length = row.length orelse return error.CorruptStore, .digest = row.digest orelse return error.CorruptStore };
+    return .{
+        .resolution = .{ .position = position.get(), .code = row.resolution_code orelse return error.CorruptStore, .content = .{ .length = reference.length, .digest = reference.digest } },
+        .location = .{ .store = a.store, .content_id = @intCast((row.resolution_content_id orelse return error.CorruptStore).get()), .reference = reference },
+    };
 }
