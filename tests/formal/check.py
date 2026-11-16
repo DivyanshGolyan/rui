@@ -30,6 +30,8 @@ TLC_SHA256 = "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"
 HERE = Path(__file__).resolve().parent
 
 OWNERSHIP = HERE / "mysql_ownership" / "MysqlOwnership.tla"
+BACKGROUND = HERE / "background_delivery" / "BackgroundDelivery.tla"
+DELIVERY = ("DeliveredAtMostOnce", "ResolvedOnce", "CreditsHeld")
 SAFETY = ("TypeOK", "SavedOnce", "SavedMeansSaved", "OnlyLatestOwnerWrites")
 
 # (name, spec, config, invariants that hold, known findings)
@@ -41,13 +43,21 @@ CHECKS = (
     # does not: it reads commit_seq as final once it holds the lock.
     ("mysql ownership, advisory lock", OWNERSHIP, "AdvisoryLock.cfg",
      SAFETY, ("RerunOnlyUnsaved",)),
+    # #1550 admits a background result while the attached parent's stop is
+    # owed but unsettled, and the next input boundary takes it. Checking
+    # the owed stop at admission, as eligibleSql does, holds every rule.
+    ("background delivery, #1550", BACKGROUND, "Pr1550.cfg", DELIVERY, ("StopWins",)),
+    ("background delivery, owed stop checked", BACKGROUND, "OwedStopChecked.cfg",
+     DELIVERY + ("StopWins",), ()),
 )
 
-# (switch, config, invariant that must break)
+# (spec, switch, config, invariant that must break)
 MUTATIONS = (
-    ("BreakFenceEpoch", "AdvisoryLock.cfg", "OnlyLatestOwnerWrites"),
-    ("BreakLockWait", "ExactLock.cfg", "RerunOnlyUnsaved"),
-    ("BreakSettleEpoch", "ExactLock.cfg", "SavedMeansSaved"),
+    (OWNERSHIP, "BreakFenceEpoch", "AdvisoryLock.cfg", "OnlyLatestOwnerWrites"),
+    (OWNERSHIP, "BreakLockWait", "ExactLock.cfg", "RerunOnlyUnsaved"),
+    (OWNERSHIP, "BreakSettleEpoch", "ExactLock.cfg", "SavedMeansSaved"),
+    (BACKGROUND, "BreakStoppedCheck", "OwedStopChecked.cfg", "StopWins"),
+    (BACKGROUND, "BreakResolvedGuard", "OwedStopChecked.cfg", "ResolvedOnce"),
 )
 
 
@@ -70,22 +80,26 @@ def tla2tools():
     return jar
 
 
-def config_text(spec, config, invariants, switch=None):
+def config_text(spec, config, invariants, switch=None, properties=True):
+    """The config with `invariants` in place of its own, keeping its
+    PROPERTIES only when `properties`, so one rule can be checked alone."""
     text = (spec.parent / config).read_text()
     head = text.split("INVARIANTS")[0]
+    temporal = text.split("PROPERTIES", 1)[1] if "PROPERTIES" in text and properties else None
     if switch:
         head, count = re.subn(rf"\b{switch} = FALSE\b", f"{switch} = TRUE", head)
         if count != 1:
             raise ValueError(f"{config} has no '{switch} = FALSE'")
-    return head + "INVARIANTS\n" + "".join(f"    {name}\n" for name in invariants)
+    tail = f"PROPERTIES{temporal}" if temporal else ""
+    return head + "INVARIANTS\n" + "".join(f"    {name}\n" for name in invariants) + tail
 
 
-def run(spec, config, invariants, switch=None):
+def run(spec, config, invariants, switch=None, properties=True):
     """TLC's verdict: (None, output) when every invariant holds, else (name, output)."""
     with tempfile.TemporaryDirectory() as scratch:
         # TLC reads the config beside the spec, so both are copied in.
         (Path(scratch) / spec.name).write_text(spec.read_text())
-        (Path(scratch) / f"{spec.stem}.cfg").write_text(config_text(spec, config, invariants, switch))
+        (Path(scratch) / f"{spec.stem}.cfg").write_text(config_text(spec, config, invariants, switch, properties))
         result = subprocess.run(
             [os.environ.get("JAVA", "java"), "-XX:+UseParallelGC", "-cp", str(tla2tools()), "tlc2.TLC",
              "-workers", "1", "-cleanup", "-metadir", str(Path(scratch) / "states"),
@@ -95,6 +109,8 @@ def run(spec, config, invariants, switch=None):
     broken = re.search(r"Invariant (\w+) is violated", output)
     if broken:
         return broken.group(1), output
+    if "Temporal properties were violated" in output:
+        return "a temporal property", output
     if "Deadlock reached" in output:
         return "NoDeadlock", output
     if result.returncode != 0 or "Model checking completed. No error has been found." not in output:
@@ -114,14 +130,14 @@ def failures(trace=False):
         if broken:
             found.append(f"{name}: {broken} breaks:\n  " + "\n  ".join(path_of(output)))
         for invariant in known:
-            broken, output = run(spec, config, (invariant,))
+            broken, output = run(spec, config, (invariant,), properties=False)
             if broken is None:
                 found.append(f"{name}: known finding {invariant} now holds; move it to the holding list")
             elif trace:
                 print(f"{name}: known finding {invariant}:\n  " + "\n  ".join(path_of(output)))
-    for switch, config, expected in MUTATIONS:
-        holding = next(h for _, spec, c, h, _ in CHECKS if c == config)
-        broken, _ = run(OWNERSHIP, config, holding, switch)
+    for spec, switch, config, expected in MUTATIONS:
+        holding = next(h for _, s, c, h, _ in CHECKS if s == spec and c == config)
+        broken, _ = run(spec, config, holding, switch)
         if broken != expected:
             found.append(f"{switch} on {config}: expected {expected} to break, got {broken or 'no violation'}")
     return found

@@ -50,6 +50,9 @@ def _documentation_path(path: str) -> bool:
     parts = path.split('/')
     if len(parts) < 2 or any(not p or p.startswith('.') for p in parts[1:]):
         return False
+    # The feature map is test input, including its README and frame instructions.
+    if path.startswith('.claude/skills/verify-rui/features/'):
+        return False
     if parts[0] == '.claude':
         return path.endswith('.md')
     if parts[0] == 'research':

@@ -6,7 +6,7 @@ Physical keys and the mouse wheel in a real GUI terminal (Terminal.app, iTerm2, 
 
 - `hw-keys`: typed text, Enter, PgUp/PgDn, arrows, Esc, Ctrl-G and Ctrl-C from the physical keyboard.
 - `hw-wheel`: physical wheel notches scroll the conversation. The terminal sends mouse reports or arrows (alternate scroll).
-- `hw-consent`: physical `a`/`d` Enter on a fully read Action.
+- `hw-consent`: physical Left/Right and Enter on a fully read Approval.
 - `hw-focus-click`: clicking or focusing the window injects no draft text.
 
 ## How to get to it (user POV)
@@ -27,7 +27,7 @@ Preconditions:
   - grades each step automatically from the bytes Rui received, committed frames, provider requests, capture keys and `project/progress.log`;
   - after the 13 direct steps, opens a third window attached to an owned tmux window on Session `demo` for 4 tmux steps;
   - ends with cleanup, keeping the evidence.
-- **Direct steps:**
+- **Direct steps in the current coach:**
   - type `hello physical`: typed one key per chunk, no paste marker, draft shown;
   - Enter: one CR, one provider request with the exact text, one capture key with the same text, answer shown;
   - PgUp ×2: Browsing;
@@ -47,6 +47,8 @@ Preconditions:
 - **Tooling rehearsal.** Run `$V physical FULLSHA --rehearse` (synthetic L1/L3 input, `REHEARSAL-PASS`). Run `--rehearse --no-tmux --rehearse-omit pgup wheel-up` as the negative control: it must print `REHEARSAL-ISSUES` and exit 1. A rehearsal validates the grader only.
 
 ## Gotchas
+
+- The current coach and rehearsal still use `a`/`d` plus Enter for approval. Source now uses Left/Right and Enter. The coach cannot establish passing approval evidence until it is updated; use the current controls in [Consent](./consent.md) for a manual physical check. No named `frames` state proves hardware input.
 
 - Without a human this feature is BLOCKED. Synthetic CGEvent keystrokes need Accessibility. Even with it, they are synthetic and not physical.
 - At byte level a wheel notch and an arrow key are identical (`ESC[A`/`ESC OA`). The wheel rows rest on the coach's instruction plus the bytes and their timing. Ask the human to use only the wheel during wheel steps.
