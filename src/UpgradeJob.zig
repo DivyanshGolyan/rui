@@ -784,7 +784,7 @@ test "background discovery domain covers version order publication failure cance
     for (0..4) |case| {
         var init: std.process.Init = undefined;
         init.io = std.testing.io;
-        var job: Self = .{ .init = init, .started = true, .operation = .discover, .discovery_attempted = true, .available = .{ .schema = 60, .patch = 2 } };
+        var job: Self = .{ .init = init, .allocator = std.testing.allocator, .started = true, .operation = .discover, .discovery_attempted = true, .available = .{ .schema = 60, .patch = 2 } };
         defer job.deinit();
         try std.testing.expectEqual(@as(?upgrade_status.Version, null), job.availability());
         try job.task.start(init.io, &job, Worker.run);

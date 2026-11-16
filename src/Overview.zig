@@ -7601,7 +7601,7 @@ test "Session pin drawn Root gestures preserve composer focus draft and caret ac
 
 test "background discovery reaches the production version widget without requesting an upgrade" {
     for (0..3) |case| {
-        const failed = case == 1;
+        const discovery_failed = case == 1;
         const rig = try openOverview();
         defer rig.close();
         const overview = rig.overview;
@@ -7634,13 +7634,13 @@ test "background discovery reaches the production version widget without request
             continue;
         }
         try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &job.task, ClientTask.completed);
-        if (failed) job.failure = error.ConnectionRefused;
+        if (discovery_failed) job.failure = error.ConnectionRefused;
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
         try overview.appDiscoverUpgrade(&ctx);
         try std.testing.expect(!overview.state.upgrading());
         try std.testing.expect(overview.state.upgrade.run == null);
-        try std.testing.expectEqual(!failed, overview.state.upgrade.available != null);
+        try std.testing.expectEqual(!discovery_failed, overview.state.upgrade.available != null);
         try std.testing.expect(job.finished and job.task.thread == null and job.result == null and job.checked == null);
         var shown = try rig.shown(80, 24);
         defer shown.deinit();
@@ -7649,7 +7649,7 @@ test "background discovery reaches the production version widget without request
             if (std.mem.startsWith(u8, try shown.line(@intCast(row)), "  Settings")) break @intCast(row);
         } else return error.TestExpectedSettingsRow;
         const bottom = try shown.line(settings_row + 1);
-        try std.testing.expectEqual(!failed, std.mem.indexOf(u8, bottom, "Update to 0.999.2") != null);
+        try std.testing.expectEqual(!discovery_failed, std.mem.indexOf(u8, bottom, "Update to 0.999.2") != null);
         try std.testing.expect(std.mem.indexOf(u8, bottom, "Update failed") == null);
         try overview.appDiscoverUpgrade(&ctx);
         try std.testing.expect(job.task.thread == null);

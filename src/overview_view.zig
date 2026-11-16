@@ -3250,16 +3250,13 @@ test "conversation footer domain carries chat notices but never upgrade status" 
     defer state.deinit();
     const version: upgrade_status.Version = .{ .schema = 60, .patch = 0 };
     const endings = [_]upgrade_status.Ended{
-        .{ .up_to_date = version }, .superseded, .cancelled,
-        .{ .refused = .source_build }, .{ .failed = .download },
-        .{ .upgraded = .{ .version = version, .restarted = true } },
+        .{ .up_to_date = version },    .superseded,              .cancelled,
+        .{ .refused = .source_build }, .{ .failed = .download }, .{ .upgraded = .{ .version = version, .restarted = true } },
         .{ .incompatible = version },
     };
     const runs = [_]?upgrade_status.Run{
-        null, .checking, .cancelling,
-        .{ .installing = .{ .found = .{ .host = .none }, .step = .preparing } },
-        .{ .installing = .{ .found = .{ .host = .none }, .step = .publishing } },
-        .{ .installing = .{ .found = .{ .host = .none }, .step = .restarting } },
+        null,                                                                    .checking,                                                                .cancelling,
+        .{ .installing = .{ .found = .{ .host = .none }, .step = .preparing } }, .{ .installing = .{ .found = .{ .host = .none }, .step = .publishing } }, .{ .installing = .{ .found = .{ .host = .none }, .step = .restarting } },
     };
     for ([_]?upgrade_status.Version{ null, version }) |available| for (runs) |run| for ([_]bool{ false, true }) |notice| {
         state.upgrade.available = available;
