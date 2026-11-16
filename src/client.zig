@@ -5698,3 +5698,125 @@ test "capture routing metadata rejects invalid private sources and keeps legacy 
     const paths = try legacy.resolvePaths(io);
     try std.testing.expectEqualStrings(root, paths.store_identity.slice());
 }
+
+test "capture routing publication faults preserve request custody and never replace an existing pair" {
+    const Fault = struct {
+        const Stage = enum { route_create, route_write, route_sync, route_rename, route_directory_sync, request_sync, request_rename, request_directory_sync };
+        var stage: Stage = undefined;
+        var route_file: std.posix.fd_t = -1;
+        var body_file: std.posix.fd_t = -1;
+        var directory_syncs: usize = 0;
+        var fired = false;
+        fn create(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8, options: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
+            const route = std.mem.endsWith(u8, path, ".routing.tmp");
+            if (route and stage == .route_create) {
+                fired = true;
+                return error.NoSpaceLeft;
+            }
+            const file = try std.testing.io.vtable.dirCreateFile(userdata, dir, path, options);
+            if (route) route_file = file.handle;
+            if (std.mem.endsWith(u8, path, ".capture.tmp")) body_file = file.handle;
+            return file;
+        }
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            if (operation == .file_write_streaming and operation.file_write_streaming.file.handle == route_file and stage == .route_write) {
+                fired = true;
+                return .{ .file_write_streaming = error.NoSpaceLeft };
+            }
+            return std.testing.io.vtable.operate(userdata, operation);
+        }
+        fn sync(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.SyncError!void {
+            const directory = (file.stat(std.testing.io) catch return error.InputOutput).kind == .directory;
+            if (directory) directory_syncs += 1;
+            if ((stage == .route_sync and !directory and file.handle == route_file) or
+                (stage == .request_sync and !directory and file.handle == body_file) or
+                (stage == .route_directory_sync and directory and directory_syncs == 1) or
+                (stage == .request_directory_sync and directory and directory_syncs == 2))
+            {
+                fired = true;
+                return error.NoSpaceLeft;
+            }
+            return std.testing.io.vtable.fileSync(userdata, file);
+        }
+        fn rename(userdata: ?*anyopaque, old_dir: std.Io.Dir, old_path: []const u8, new_dir: std.Io.Dir, new_path: []const u8) std.Io.Dir.RenamePreserveError!void {
+            if ((stage == .route_rename and std.mem.endsWith(u8, new_path, ".routing")) or
+                (stage == .request_rename and std.mem.eql(u8, new_path, "request.json")))
+            {
+                fired = true;
+                return error.NoSpaceLeft;
+            }
+            return std.testing.io.vtable.dirRenamePreserve(userdata, old_dir, old_path, new_dir, new_path);
+        }
+    };
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    for (std.enums.values(Fault.Stage)) |stage| {
+        var tmp = try @import("socket_fixture.zig").Directory.init();
+        defer tmp.cleanup();
+        const root = tmp.root[0..tmp.root_len];
+        const path = try std.fs.path.join(gpa, &.{ root, "request.json" });
+        defer gpa.free(path);
+        var vtable = io.vtable.*;
+        vtable.dirCreateFile = Fault.create;
+        vtable.operate = Fault.operate;
+        vtable.fileSync = Fault.sync;
+        vtable.dirRenamePreserve = Fault.rename;
+        const failing: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+        Fault.stage = stage;
+        Fault.fired = false;
+        Fault.route_file = -1;
+        Fault.body_file = -1;
+        Fault.directory_syncs = 0;
+        try std.testing.expectError(if (stage == .route_directory_sync or stage == .request_directory_sync) error.RecordDirectorySyncFailed else error.NoSpaceLeft, captureSessionStop(failing, .{ .store = root, .session = "k7m2qx" }, .{ .explicit = .{ .record = path, .key = "stable" } }));
+        try std.testing.expect(Fault.fired);
+        if (stage == .request_directory_sync) {
+            var recovered = try openCaptured(io, .{ .explicit = .{ .store = root, .record = path, .kind = .session_stop } });
+            defer recovered.close(io);
+            try std.testing.expect(recovered.routing != null);
+            try std.testing.expectEqualStrings(root, (try recovered.resolvePaths(io)).selector());
+        } else {
+            try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "request.json", .{}));
+            try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "request.json.routing", .{}));
+            // A crashed pre-request publisher can leave an orphan companion.
+            try tmp.dir.writeFile(io, .{ .sub_path = "request.json.routing", .data = "orphan", .flags = .{ .permissions = .fromMode(0o600) } });
+            var retried = try captureSessionStop(io, .{ .store = root, .session = "k7m2qx" }, .{ .explicit = .{ .record = path, .key = "stable" } });
+            retried.close(io);
+        }
+        const before = try tmp.dir.readFileAlloc(io, "request.json.routing", gpa, .limited(4096));
+        defer gpa.free(before);
+        try std.testing.expectError(error.RecordAlreadyExists, captureSessionStop(io, .{ .store = root, .session = "09azvw" }, .{ .explicit = .{ .record = path, .key = "different" } }));
+        const after = try tmp.dir.readFileAlloc(io, "request.json.routing", gpa, .limited(4096));
+        defer gpa.free(after);
+        try std.testing.expectEqualStrings(before, after);
+    }
+}
+
+test "capture routing retains OS bytes and legacy opaque runtime without storing a socket" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const root = tmp.root[0..tmp.root_len];
+    const directory = try std.fs.path.join(gpa, &.{ root, "host-\xff" });
+    defer gpa.free(directory);
+    var host = try std.Io.Dir.cwd().createDirPathOpen(io, directory, .{ .permissions = .fromMode(0o700) });
+    const document = try std.fmt.allocPrint(gpa, "{{\"store\":{{\"sqlite\":{{\"dir\":\"{s}/data\"}}}}}}", .{root});
+    defer gpa.free(document);
+    try host.writeFile(io, .{ .sub_path = "host.json", .data = document, .flags = .{ .permissions = .fromMode(0o600) } });
+    host.close(io);
+    var captured = try captureSessionStop(io, .{ .store = directory, .session = "k7m2qx" }, .{ .generated = root });
+    const key = captured.saved.key;
+    captured.close(io);
+    var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } });
+    defer recovered.close(io);
+    const paths = try recovered.resolvePaths(io);
+    try std.testing.expectEqualStrings(directory, paths.selector());
+    const legacy = try platform.mysqlClientPaths(io, "0123456789abcdef0123456789abcdef", root);
+    const route = try CaptureRouting.fromPaths(&legacy);
+    try std.testing.expectEqual(@as(usize, 0), route.host_directory.len);
+    try std.testing.expectEqualStrings(root, route.runtime_hint.slice());
+    const restored = try route.resolve(io, legacy.store_identity.slice());
+    try std.testing.expectEqualStrings(legacy.socket.slice(), restored.socket.slice());
+    try std.testing.expectEqualStrings(legacy.store_identity.slice(), restored.store_identity.slice());
+    try std.testing.expectError(error.InvalidStorePath, route.resolve(io, "/not-an-opaque-identity"));
+}
