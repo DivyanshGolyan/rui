@@ -1164,14 +1164,6 @@ test "background final input joins the next Turn boundary without changing an in
                     else => {},
                 };
                 try std.testing.expectEqual(@as(usize, 1), received);
-                var activity_json: protocol.FixedJsonBuffer(@import("../../activity_reply.zig").max_page_bytes) = .{};
-                try activity_json.render(@import("../../host_reply.zig").renderActivityPage, .{&activity});
-                const decoded = try @import("../../protocol_reply.zig").ActivityPage.parse(activity_json.slice(), .{});
-                var decoded_sources: usize = 0;
-                for (decoded.facts.items[0..decoded.facts.count]) |item| if (item.value == .received and item.value.received.source_action == action) {
-                    decoded_sources += 1;
-                };
-                try std.testing.expectEqual(received, decoded_sources);
                 const person = try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = .initOne(.admission) });
                 for (person.items[0..person.count]) |item| try std.testing.expect(item.value.admission.source_action == null);
                 const public = try store_core.publicConversationPageForTesting(&storage, .{ .session = session });
@@ -1183,15 +1175,6 @@ test "background final input joins the next Turn boundary without changing an in
                     projected += 1;
                 };
                 try std.testing.expectEqual(@as(usize, 1), projected);
-                var json: protocol.FixedJsonBuffer(protocol.max_conversation_page_response_bytes) = .{};
-                try json.render(@import("../../host_reply.zig").renderConversationPage, .{&public});
-                const parsed = try @import("../../protocol_reply.zig").ConversationPage.parse(json.slice(), .{ .end = 0 });
-                var wire_sources: usize = 0;
-                for (parsed.items[0..parsed.count]) |item| if (item.source_action) |source| {
-                    try std.testing.expectEqual(action, source);
-                    wire_sources += 1;
-                };
-                try std.testing.expectEqual(projected, wire_sources);
                 try NativePromotion.finishModel(&storage, &tmp, next);
                 try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE source_action_id=?1", .{action}));

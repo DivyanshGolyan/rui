@@ -279,6 +279,35 @@ const PromotedAction = struct {
         try std.testing.expect(!storage.isFenced());
     }
 
+    fn expectFinalInput(self: PromotedAction, storage: *store.Store, text: []const u8) !void {
+        const page = try std.testing.allocator.create(protocol_reply.ActivityPage);
+        defer std.testing.allocator.destroy(page);
+        try readNativeActivity(storage, &.{ .session = self.session, .kinds = .initOne(.received) }, page);
+        try std.testing.expectEqual(@as(usize, 1), page.facts.count);
+        const message = page.facts.items[0].value.received;
+        try std.testing.expectEqual(@as(?u64, self.action), message.source_action);
+        try std.testing.expect(message.sender == null);
+        try std.testing.expectEqual(@as(u64, text.len), message.content.length);
+        try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &message.content.digest);
+
+        const produced = try std.testing.allocator.create(@import("command_reply.zig").PublicConversationPage);
+        defer std.testing.allocator.destroy(produced);
+        try storage.publicConversationPage(&.{ .session = self.session }, produced);
+        var rendered: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer rendered.deinit();
+        try @import("host_reply.zig").renderConversationPage(.{ .writer = &rendered.writer }, produced);
+        const parsed = try protocol_reply.ConversationPage.parse(rendered.written(), .{ .end = 0 });
+        var sources: usize = 0;
+        for (parsed.items[0..parsed.count]) |item| if (item.source_action) |source| {
+            try std.testing.expectEqual(self.action, source);
+            try std.testing.expect(item.sender == null);
+            try std.testing.expectEqual(@as(u64, text.len), item.content.bytes);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &item.content.digest);
+            sources += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), sources);
+    }
+
     fn receipt(self: PromotedAction, storage: *store.Store) !@import("activity_facts.zig").Item.Content {
         var request: protocol.ActivityPage = .{ .kinds = .initOne(.tool_result) };
         try request.session.set(self.session.slice());
@@ -391,6 +420,11 @@ test "native Current separates background fulfillment from final Resolution acro
         if (settle == .after) _ = try storage.settleActionAttempt(binding, .succeeded, "Sole final result", .{});
         try promoted.expectCurrent(&storage, &tmp, .resolved_closed);
         try std.testing.expectEqualDeep(original, try promoted.receipt(&storage));
+        if (settle == .after) {
+            const delivered = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try PromotedAction.finish(&storage, &tmp, delivered);
+        }
+        try promoted.expectFinalInput(&storage, "Sole final result");
     }
 }
 
