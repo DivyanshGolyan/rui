@@ -763,13 +763,15 @@ def tap_main(args):
 # ---------------------------------------------------------------- new run
 
 
-def launch_host(run):
+def launch_host(run, *, restartable=False):
     """Start this run's Host from the options saved at `new`; return its ready status."""
     options = run.meta["host_options"]
     host_argv = [str(run.rui), "host", "serve", "--store", str(run.store),
                  "--set", f"execution.activeCapacity={options['active_capacity']}",
                  "--set", "providers={}", "--set", f"providers.codex.endpoint={run.meta['fixture_url']}",
-                 "--set", "providers.codex.unauthenticated=true", "--test-retry-waits-ms", "50,100,150"]
+                 "--set", "providers.codex.unauthenticated=true"]
+    if not restartable:
+        host_argv += ["--test-retry-waits-ms", "50,100,150"]
     host_env = run.env()
     for assignment in options["host_setenv"]:
         key, _, value = assignment.partition("=")
@@ -2833,7 +2835,7 @@ def frame_upgrade_run(run, state, build):
             (selected / "THIRD_PARTY_NOTICES.md").write_text("Synthetic selected release\n")
         frame_command(subprocess.run([str(actor), "--publish-install", str(isolated.home), str(selected), "released-install"],
                                      env=isolated.env(), capture_output=True, text=True, timeout=25), "select managed release")
-        ready = launch_host(isolated)
+        ready = launch_host(isolated, restartable=True)
         isolated.meta["upgrade_previous_instance"] = json.loads(ready.stdout)["instance"]
         replacements = {"{upgrade_version}": version, "{available_version}": available}
         def expand(value, regex=False):

@@ -46,13 +46,17 @@ class VerifyRuiTest(unittest.TestCase):
                 kwargs["stderr"].close()
                 return types.SimpleNamespace(pid=123)
 
-            with patch("subprocess.Popen", start):
-                launch(run)
-            self.assertEqual(captured["argv"], ["/candidate/rui", "host", "serve", "--store", str(run.store),
-                "--set", "execution.activeCapacity=8", "--set", "providers={}",
-                "--set", "providers.codex.endpoint=http://127.0.0.1:1234/responses",
-                "--set", "providers.codex.unauthenticated=true", "--test-retry-waits-ms", "50,100,150"])
-            self.assertEqual(captured["env"]["HOST_ONLY"], "secret")
+            for restartable in (False, True):
+                with self.subTest(restartable=restartable), patch("subprocess.Popen", start):
+                    launch(run, restartable=restartable)
+                expected = ["/candidate/rui", "host", "serve", "--store", str(run.store),
+                            "--set", "execution.activeCapacity=8", "--set", "providers={}",
+                            "--set", "providers.codex.endpoint=http://127.0.0.1:1234/responses",
+                            "--set", "providers.codex.unauthenticated=true"]
+                if not restartable:
+                    expected += ["--test-retry-waits-ms", "50,100,150"]
+                self.assertEqual(captured["argv"], expected)
+                self.assertEqual(captured["env"]["HOST_ONLY"], "secret")
 
     def test_child_imports_user_site_with_synthetic_home(self):
         run_type = runpy.run_path(str(SCRIPT))["Run"]
@@ -2625,7 +2629,8 @@ class UpgradeFramesTest(unittest.TestCase):
             run = self.helper["Run"](root)
             build = {"sha": "a" * 40, "tree": "tree", "upgrade_actor": {
                 "binary": str(actor), "sha256": self.helper["sha256"](actor), "sha": "a" * 40, "tree": "tree"}}
-            def launch(isolated):
+            def launch(isolated, *, restartable=False):
+                self.assertTrue(restartable)
                 isolated.store.mkdir()
                 events.append("host started")
                 return types.SimpleNamespace(stdout='{"instance":"old-instance"}')
