@@ -1,6 +1,8 @@
 const std = @import("std");
+const Protocol = @This();
 const session_settings = @import("session_settings.zig");
 const cli_value = @import("cli_value.zig");
+const command_spec = @import("command_spec.zig");
 const built_in_tool = @import("built_in_tool.zig");
 const model_capability = @import("model_capability.zig");
 const model_list = @import("model_list.zig");
@@ -1981,13 +1983,20 @@ pub const message_request = struct {
     pub const tail = .{"}"};
 };
 
-pub const max_session_stop_request_bytes = shapeBytes(session_stop_request);
-pub const max_session_archive_request_bytes = shapeBytes(session_archive_request.all);
-pub const max_session_pin_request_bytes = shapeBytes(session_pin_request.all);
-pub const max_model_interruption_request_bytes = shapeBytes(model_interruption_request);
-pub const max_permission_decision_request_bytes = shapeBytes(permission_decision_request);
-pub const max_action_background_request_bytes = shapeBytes(action_background_request);
-pub const max_control_request_bytes = maxShapeBytes(.{ session_stop_request, session_archive_request.all, session_pin_request.all, model_interruption_request, permission_decision_request, action_background_request });
+pub const max_session_stop_request_bytes = command_spec.spec(.session_stop).Request.maxBytes(Protocol).?;
+pub const max_session_archive_request_bytes = command_spec.spec(.session_archive).Request.maxBytes(Protocol).?;
+pub const max_session_pin_request_bytes = command_spec.spec(.session_pin).Request.maxBytes(Protocol).?;
+pub const max_model_interruption_request_bytes = command_spec.spec(.model_interruption).Request.maxBytes(Protocol).?;
+pub const max_permission_decision_request_bytes = command_spec.spec(.permission_decision).Request.maxBytes(Protocol).?;
+pub const max_action_background_request_bytes = command_spec.spec(.action_background).Request.maxBytes(Protocol).?;
+pub const max_control_request_bytes = blk: {
+    var bytes: usize = 0;
+    for (std.meta.tags(CommandKind)) |kind| {
+        const facts = command_spec.spec(kind);
+        if (facts.is_control) bytes = @max(bytes, facts.Request.maxBytes(Protocol).?);
+    }
+    break :blk bytes;
+};
 pub const max_observe_command_request_bytes = shapeBytes(observe_command_request.all);
 pub const max_host_info_request_bytes = shapeBytes(host_info_request);
 pub const max_host_stop_request_bytes = shapeBytes(host_stop_request);
@@ -2019,7 +2028,7 @@ pub fn jsonListBytes(comptime count: usize, comptime item_bytes: usize) usize {
 pub const content_reference_shape = .{ "{\"type\":\"text\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
 
 pub const configuration_reply = struct {
-    const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":";
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"" ++ command_spec.spec(.configure).reply_type ++ "\",\"answer\":{\"status\":";
     const execution = "},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}";
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"revision\":\"", Hole.decimal, "\",\"created\":", Hole.boolean, execution };
     pub const accepted_skills = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"revision\":\"", Hole.decimal, "\",\"created\":false,\"skills\":\"", Hole{ .tag = SkillsReloadStatus }, "\"" ++ execution };
@@ -2029,7 +2038,7 @@ pub const configuration_reply = struct {
 };
 
 pub const message_reply = struct {
-    const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":";
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"" ++ command_spec.spec(.message).reply_type ++ "\",\"answer\":{\"status\":";
     const execution = ",\"execution\":{\"status\":\"queued\"}}";
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"admission\":\"", Hole.decimal, "\"},\"input\":" } ++
         content_reference_shape ++ .{ ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" ++ execution };
@@ -2040,7 +2049,7 @@ pub const message_reply = struct {
 };
 
 pub const session_stop_reply = struct {
-    const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":";
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"" ++ command_spec.spec(.session_stop).reply_type ++ "\",\"answer\":{\"status\":";
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"selection\":{\"turn\":", Hole.optional_id, ",\"admission_cutoff\":\"", Hole.decimal, "\"}},\"completion\":{\"status\":\"", Hole{ .tag = SessionStopCompletion }, "\"}}" };
     pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = SessionStopRejection }, "\"},\"completion\":{\"status\":\"unavailable\"}}" };
     pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"},\"completion\":{\"status\":\"unavailable\"}}" };
@@ -2048,7 +2057,7 @@ pub const session_stop_reply = struct {
 };
 
 pub const session_archive_reply = struct {
-    const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_archive_reply\",\"answer\":{\"status\":";
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"" ++ command_spec.spec(.session_archive).reply_type ++ "\",\"answer\":{\"status\":";
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"archived\":", Hole.boolean, "},\"completion\":{\"status\":\"", Hole{ .tag = SessionStopCompletion }, "\"}}" };
     pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = SessionArchiveRejection }, "\"},\"completion\":{\"status\":\"unavailable\"}}" };
     pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"},\"completion\":{\"status\":\"unavailable\"}}" };
@@ -2056,7 +2065,7 @@ pub const session_archive_reply = struct {
 };
 
 pub const session_pin_reply = struct {
-    const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_pin_reply\",\"answer\":{\"status\":";
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"" ++ command_spec.spec(.session_pin).reply_type ++ "\",\"answer\":{\"status\":";
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"pinned\":", Hole.boolean, "}}" };
     pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = SessionPinRejection }, "\"}}" };
     pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"}}" };
@@ -2066,7 +2075,7 @@ pub const session_pin_reply = struct {
 pub const model_interruption_target_shape = .{ "{\"session\":", Hole{ .string = max_session_bytes }, ",\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\"}" };
 
 pub const model_interruption_reply = struct {
-    const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"model_interruption_reply\",\"answer\":{\"status\":";
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"" ++ command_spec.spec(.model_interruption).reply_type ++ "\",\"answer\":{\"status\":";
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"target\":" } ++ model_interruption_target_shape ++ .{"}}"};
     pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"target\":" } ++ model_interruption_target_shape ++ .{ ",\"code\":\"", Hole{ .tag = ModelInterruptionRejection }, "\"}}" };
     pub const conflict = .{head ++ "\"conflict\",\"replayed\":false,\"target\":"} ++ model_interruption_target_shape ++ .{",\"code\":\"idempotency_key_conflict\"}}"};
@@ -2074,7 +2083,7 @@ pub const model_interruption_reply = struct {
 };
 
 pub const permission_decision_reply = struct {
-    const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"permission_decision_reply\",\"answer\":{\"status\":";
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"" ++ command_spec.spec(.permission_decision).reply_type ++ "\",\"answer\":{\"status\":";
     const target = .{ ",\"session\":", Hole{ .string = max_session_bytes }, ",\"action\":\"", Hole.decimal, "\",\"decision\":\"", Hole{ .tag = PermissionDecision }, "\"" };
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean } ++ target ++ .{"}}"};
     pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean } ++ target ++ .{ ",\"code\":\"", Hole{ .tag = PermissionDecisionRejection }, "\"}}" };
@@ -2083,7 +2092,7 @@ pub const permission_decision_reply = struct {
 };
 
 pub const action_background_reply = struct {
-    const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"action_background_reply\",\"answer\":{\"status\":";
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"" ++ command_spec.spec(.action_background).reply_type ++ "\",\"answer\":{\"status\":";
     const target = .{ ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"" };
     pub const selection = .{ ",\"action_selection\":{\"kind\":\"", Hole{ .tag = @FieldType(@import("action_control.zig").Selection, "kind") }, "\",\"position\":\"", Hole.decimal, "\"}" };
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean } ++ target ++ selection ++ .{"}}"};
@@ -2176,16 +2185,7 @@ pub const command_observation_reply = struct {
 
     pub fn maxBytes(comptime kind: CommandKind) usize {
         @setEvalBranchQuota(30_000);
-        const body = switch (kind) {
-            .configure => shapeBytes(revision),
-            .message => maxShapeBytes(message_variants),
-            .session_stop => shapeBytes(session_stop),
-            .session_archive => shapeBytes(session_archive),
-            .session_pin => shapeBytes(session_pin),
-            .model_interruption => shapeBytes(model_interruption),
-            .permission_decision => shapeBytes(permission_decision),
-            .action_background => shapeBytes(action_target) + shapeBytes(action_selection),
-        };
+        const body = maxShapeBytes(command_spec.spec(kind).Observation.shapes(Protocol).values);
         return shapeBytes(head(kind)) + shapeBytes(code) + body + shapeBytes(tail);
     }
 
@@ -2200,10 +2200,11 @@ pub const ErrorType = enum { invocation_error, observation_error, busy, unsuppor
 pub const error_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"", Hole{ .tag = ErrorType }, "\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
 pub const max_control_error_response_bytes = shapeBytes(error_reply);
 
-pub const max_mutation_response_bytes = @max(
-    @max(@max(configuration_reply.max_bytes, message_reply.max_bytes), @max(session_stop_reply.max_bytes, model_interruption_reply.max_bytes)),
-    @max(session_pin_reply.max_bytes, @max(session_archive_reply.max_bytes, @max(action_background_reply.max_bytes, @max(permission_decision_reply.max_bytes, max_control_error_response_bytes)))),
-);
+pub const max_mutation_response_bytes = blk: {
+    var bytes: usize = max_control_error_response_bytes;
+    for (std.meta.tags(CommandKind)) |kind| bytes = @max(bytes, command_spec.spec(kind).Reply(Protocol).max_bytes);
+    break :blk bytes;
+};
 
 pub const host_info_reply = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"paused\":", Hole.boolean };

@@ -39,6 +39,7 @@ const cores = .{
     .{ "codex_token_wire.zig", @import("codex_token_wire.zig") },
     .{ "command_input.zig", @import("command_input.zig") },
     .{ "command_reply.zig", @import("command_reply.zig") },
+    .{ "command_spec.zig", @import("command_spec.zig") },
     .{ "command_value.zig", @import("command_value.zig") },
     .{ "configuration_admission.zig", @import("configuration_admission.zig") },
     .{ "configure_input.zig", @import("configure_input.zig") },

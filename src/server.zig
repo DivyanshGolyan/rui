@@ -24,6 +24,7 @@ const platform = @import("platform.zig");
 const provider = @import("provider.zig");
 const providers = @import("providers.zig");
 const protocol = @import("protocol.zig");
+const command_spec = @import("command_spec.zig");
 const host_reply = @import("host_reply.zig");
 const ScratchBudget = @import("ScratchBudget.zig");
 const wire_request = @import("wire_request.zig");
@@ -394,13 +395,10 @@ const Intake = struct {
                         .host_info => protocol.max_host_info_request_bytes,
                         .host_stop => protocol.max_host_stop_request_bytes,
                         .host_pause => protocol.max_host_pause_request_bytes,
-                        .session_stop => protocol.max_session_stop_request_bytes,
-                        .session_archive => protocol.max_session_archive_request_bytes,
-                        .session_pin => protocol.max_session_pin_request_bytes,
-                        .model_interruption => protocol.max_model_interruption_request_bytes,
-                        .permission_decision => protocol.max_permission_decision_request_bytes,
-                        .action_background => protocol.max_action_background_request_bytes,
-                        else => std.math.maxInt(u64),
+                        inline else => |route| if (comptime std.meta.stringToEnum(protocol.CommandKind, @tagName(route))) |kind|
+                            if (command_spec.spec(kind).is_control) command_spec.spec(kind).Request.maxBytes(protocol).? else std.math.maxInt(u64)
+                        else
+                            std.math.maxInt(u64),
                     };
                     if (self.header.content_length > limit) return error.RequestTooLarge;
                     const request_length = try self.reserveEnvironment();
@@ -1490,7 +1488,13 @@ const Route = enum {
     unsupported_control,
 
     fn isControl(self: Route) bool {
-        return self == .host_stop or self == .host_pause or self == .session_stop or self == .session_archive or self == .session_pin or self == .model_interruption or self == .permission_decision or self == .action_background or self == .unsupported_control;
+        return switch (self) {
+            .host_stop, .host_pause, .unsupported_control => true,
+            inline else => |route| if (comptime std.meta.stringToEnum(protocol.CommandKind, @tagName(route))) |command_kind|
+                command_spec.spec(command_kind).is_control
+            else
+                false,
+        };
     }
 
     fn atomicOnly(self: Route) bool {
