@@ -91,7 +91,9 @@ A command that arrives while you are writing a message leaves your draft in plac
 You can edit and paste multiline text at the prompt.
 On an empty prompt, Ctrl-P brings back the last message you sent, for editing, and Ctrl-P again goes further back; Ctrl-N goes forward, and past your newest message the prompt is empty again.
 Messages from other Sessions never come back this way.
-There is no completion.
+When a command or skill row is highlighted above a nonempty draft, Tab accepts that drawn row through the same path as Enter.
+A complete command can run immediately; a command that needs an argument fills its name and a space.
+Otherwise Tab moves focus through the footer.
 For input longer than 64 KiB, redirect a file into `rui session send --to ID < FILE`.
 If a submission is uncertain, Ctrl-R retries that same request instead of creating a new one.
 
@@ -114,6 +116,7 @@ If that happens, run your terminal's reset command.
 
 Rui calls a saved conversation a **Session**.
 Bare `rui` opens the overview of unarchived Sessions in this Store; each row shows its project.
+The pinned **+ New Session** row always shows a quiet **Archived** at its right end, which opens the archived Sessions inside the overview (see [Archive Sessions](#archive-sessions)).
 Select the pinned **+ New Session** at the top with Home, then Enter, or click it, to create an empty Session and open its focused chat input.
 Creating it sends configuration only: it has no Messages until you type and send one in the chat.
 Sessions without a first Message are omitted from the list, except for the currently open chat’s selected row in a wide sidebar.
@@ -130,8 +133,9 @@ The overview list uses the full width at every terminal size, with no empty chat
 | --- | --- |
 | Up, Down, Home, End | Move through the whole list, including pinned **+ New Session** and **Settings**. |
 | Shift-Up, Shift-Down | Select the row above or below. |
-| Enter | Opens the selected Session, creates an empty chat from **+ New Session**, or opens **Settings**. In Settings, open **Model** to pick the default for future Sessions. |
-| Esc, Ctrl-G | Closes the topmost choice or panel; no draft or per-start settings exist to clear. |
+| Right, Left | On **+ New Session**, Right selects **Archived**, and Left goes back to **New Session**. Right on a Session row opens it, as Enter does. |
+| Enter | Opens the selected Session, creates an empty chat from **+ New Session**, or opens **Settings**. On **Archived** it opens the archived Sessions, or from there returns to the usual list; a click on **Archived** does the same, and a click elsewhere on the row is still **New Session**. In Settings, open **Model** to pick the default for future Sessions. |
+| Esc, Ctrl-G | Closes the topmost choice or panel, and in the archived Sessions returns to the usual list; no draft or per-start settings exist to clear. |
 | Ctrl-X | Stops the selected Session’s work through the same request owner as the CLI. |
 | Ctrl-D, Ctrl-C | Leaves. |
 
@@ -142,7 +146,7 @@ A rejected creation shows its failure; an unconfirmed creation retains its origi
 A stop works like `rui session stop`: if its reply is lost, the overview says it is not sure the Session stopped, and prints the `rui request recover` command when you leave.
 To stop every Session that Ctrl-X could stop at once, run `rui session stop --all`.
 A stop still waiting to be sent when you leave is reported as not sent.
-The overview holds at most eight creation and stop requests awaiting answers, and refuses more until one is answered.
+The overview holds at most eight creation, stop, archive, restore, pin, and unpin requests awaiting answers, and refuses more until one is answered.
 Sessions the stopped Session messaged keep running.
 
 The overview paints its own colours, in khadi: an indigo ground with cotton text on a dark terminal, a cotton ground with indigo ink on a light one.
@@ -166,6 +170,33 @@ rui session list --all             # Sessions from every project
 
 Existing Sessions keep their saved settings, including approval mode and model.
 
+### Pin Sessions
+
+Enter `/pin` in a chat to keep it below **+ New Session**, above unpinned Sessions.
+Enter `/unpin` to return it to the ordinary order.
+The newest pin comes first.
+Repeating `/pin` preserves its place; unpinning and pinning again moves it above earlier pins.
+Work and new Messages do not reshuffle pinned Sessions.
+
+Right-click or Option/Alt-click a Session row to toggle its pin without opening it.
+The gesture keeps your current chat, focus, and draft intact.
+It opens no menu and adds no marker.
+New Session and Settings do not respond to that gesture.
+
+Pins are shared by clients using the same Store and survive Host restart.
+A pinned empty Session stays in the list after you leave it.
+Archiving clears its pin immediately, even while the stop is pending.
+Restoring or sending a new Message does not pin it again.
+Ordinary stop leaves pins unchanged, and parent and child pins are independent.
+You cannot pin an archiving or archived Session.
+
+From a script, use these commands.
+
+```sh
+rui session pin --session SESSION_REF
+rui session unpin --session SESSION_REF
+```
+
 ### Archive Sessions
 
 Select a Session in the overview and press **Alt+A**.
@@ -176,7 +207,9 @@ Alt+A keeps your draft intact.
 For **Stop and archive**, press Enter to confirm or Esc to cancel; neither sends or clears your draft.
 
 The overview shows unarchived Sessions; its former `/sessions`, `/archive`, `/unarchive` and other overview slash commands are gone.
-Use the shell commands below to list archived Sessions or restore one without starting work.
+The pinned **+ New Session** row always shows **Archived** at its right end, including in the conversation sidebar and when the archive is empty.
+Press Right on that row to select it (Left goes back), then Enter, or click it, to list the archived Sessions in the overview; Enter or a click on it there, or Esc, returns to the usual list.
+Use the shell commands below to list archived Sessions from a script or restore one without starting work.
 Inside an open chat, `/archive` and `/unarchive` still act on that Session.
 
 Archive keeps history, saved results, settings, and files.

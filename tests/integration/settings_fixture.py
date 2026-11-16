@@ -1,8 +1,10 @@
 """Settings document helpers shared by the SQLite and MySQL fixtures."""
 import codecs
+import http.server
 import json
 import os_semantics
 import struct
+import threading
 
 import host_process
 
@@ -70,3 +72,28 @@ def refusal(process, forbidden=(), *, expected_exit=1):
     for secret in forbidden:
         assert secret.encode() not in out + err, "a refusal exposed secret bytes"
     return failure
+
+
+def mcp_server(names):
+    """A loopback MCP server whose tools/list names `names`."""
+    tools = [{"name": name, "inputSchema": {"type": "object"}} for name in names]
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            body = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"tools": tools}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server

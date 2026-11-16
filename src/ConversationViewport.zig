@@ -2,11 +2,11 @@
 //! vaxis lays out and draws rows (`Window.print`); this module keeps retained
 //! bytes, trusted styles and which row of which logical line a view starts at.
 const std = @import("std");
+const utf8_validation = @import("utf8_validation.zig");
 const vaxis = @import("vaxis");
 const gwidth = @import("terminal_width");
 const unicode = @import("terminal_unicode");
 const state_marks = @import("marks.zig");
-const draft_layout = @import("draft_layout.zig");
 const TerminalText = @import("TerminalText.zig");
 const tool_fold = @import("tool_fold.zig");
 const display_text = @import("display_text.zig");
@@ -52,24 +52,6 @@ pub var measured_lines: if (@import("builtin").is_test) usize else void = if (@i
 fn rowsUsed(result: vaxis.Window.PrintResult) u16 {
     return if (result.col == 0 and result.row != 0 and !result.overflow) result.row else result.row +| 1;
 }
-
-/// The draft as the input draws it, for `draft_layout`: whole clusters
-/// measured as the terminal measures them. The screen has already shown
-/// tabs as one space and refused clusters the terminal cannot draw.
-pub const DraftPieces = struct {
-    bytes: []const u8,
-    method: gwidth.Method,
-    at: usize = 0,
-
-    pub fn next(self: *DraftPieces) ?draft_layout.Piece {
-        if (self.at == self.bytes.len) return null;
-        var clusters = unicode.graphemeIterator(self.bytes[self.at..]);
-        const cluster = clusters.next().?.bytes(self.bytes[self.at..]);
-        self.at += cluster.len;
-        const kind = draft_layout.kindOf(cluster);
-        return .{ .len = cluster.len, .cells = if (kind == .newline) 0 else gwidth.gwidth(cluster, self.method), .kind = kind };
-    }
-};
 
 /// Leading spaces and a list or role marker stay in the first row;
 /// continuation rows start under the text after them, up to half the width.
@@ -117,42 +99,50 @@ pub const Colours = struct {
     selection: vaxis.Color = .default,
 };
 
-/// Retained style byte, display-only: bits 0-2 bold, italic and underline,
+/// Retained style and provenance word: bits 0-2 bold, italic and underline,
 /// bits 3-5 a foreground index, bit 6 user text and bit 7 its dim summary.
 /// Bit 7 alone marks a sidenote, drawn in the right margin.
 /// Slot 5 marks code: SGR 40 covers each complete body line, including its
 /// newline, so even an empty line and an evicted prefix need no side storage.
-/// Two foreground indexes no colour uses mark an OSC 8 link: its address,
+/// Bit 8 marks renderer-owned body text. Two foreground indexes mark an OSC 8 link: its address,
 /// kept in the text but never drawn, and right after it the text it links.
-const foreground_mask: u8 = 0b111 << 3;
+pub const RetainedStyle = u16;
+const body_bit: RetainedStyle = 1 << 8;
+const AllText = struct {
+    pub fn includes(_: *@This(), _: usize) bool {
+        return true;
+    }
+};
+
+const foreground_mask: RetainedStyle = 0b111 << 3;
 const code_index: u8 = 5;
 const linked_index: u8 = 6;
 const address_index: u8 = 7;
 
 /// End link runs at a document seam while retaining the blank code-line role.
-pub fn seamStyle(value: u8) u8 {
-    return if (foregroundIndex(value) == code_index) code_index << 3 else 0;
+pub fn seamStyle(value: RetainedStyle) RetainedStyle {
+    return (value & body_bit) | (if (foregroundIndex(value) == code_index) @as(RetainedStyle, code_index) << 3 else 0);
 }
 
-fn foregroundIndex(value: u8) u8 {
-    return (value & foreground_mask) >> 3;
+fn foregroundIndex(value: RetainedStyle) u8 {
+    return @intCast((value & foreground_mask) >> 3);
 }
 
 // Only links underline, so a coloured, underlined label can retain its ink
 // or quiet foreground without a second style byte. Other labels use slot 6.
-fn isLinked(value: u8) bool {
+fn isLinked(value: RetainedStyle) bool {
     const index = foregroundIndex(value);
     return index == linked_index or (index >= 1 and index <= 4 and value & 4 != 0);
 }
-const user_bit: u8 = 1 << 6;
-const summary_bit: u8 = 1 << 7;
+const user_bit: RetainedStyle = 1 << 6;
+const summary_bit: RetainedStyle = 1 << 7;
 /// From this width a document with sidenotes keeps a right margin, and the
 /// first sidenote of a line shows at its first row; narrower, none shows.
 pub const sidenote_width = 60;
 const sidenote_margin = 7;
 const sidenote_cells = 5;
 
-fn isSidenote(value: u8) bool {
+fn isSidenote(value: RetainedStyle) bool {
     return value & (user_bit | summary_bit) == summary_bit;
 }
 pub const CellStyle = struct {
@@ -164,7 +154,7 @@ pub const CellStyle = struct {
 };
 /// User text is quiet and italic with colour. Summaries and sidenotes are
 /// quiet but upright; without colour, position alone sets user text apart.
-pub fn cellStyle(value: u8, colour: bool) CellStyle {
+pub fn cellStyle(value: RetainedStyle, colour: bool) CellStyle {
     const index = foregroundIndex(value);
     const quiet = colour and value & (user_bit | summary_bit) != 0;
     return .{
@@ -189,8 +179,8 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
     return struct {
         const Self = @This();
         bytes: [limit]u8 = undefined,
-        styles: [if (styled) limit else 0]u8 = undefined,
-        style: u8 = 0,
+        styles: [if (styled) limit else 0]RetainedStyle = undefined,
+        style: RetainedStyle = 0,
         control: [8]u8 = undefined,
         control_length: usize = 0,
         /// Where the OSC 8 link being received is: its address or its text.
@@ -224,9 +214,9 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                     self.control_length += 1;
                     if (byte == 'm') {
                         const code = self.control[0..self.control_length];
-                        if (std.mem.eql(u8, code, "\x1b[0m")) self.style = 0 else if (std.mem.eql(u8, code, "\x1b[1m")) self.style |= 1 else if (std.mem.eql(u8, code, "\x1b[3m")) self.style |= 2 else if (std.mem.eql(u8, code, "\x1b[4m")) self.style |= 4 else if (std.mem.eql(u8, code, "\x1b[2m")) self.style |= user_bit else if (std.mem.eql(u8, code, "\x1b[2;8m")) self.style |= user_bit | summary_bit else if (std.mem.eql(u8, code, "\x1b[8m")) self.style = (self.style & ~user_bit) | summary_bit else if (std.mem.eql(u8, code, "\x1b[39m")) self.style &= ~foreground_mask else {
+                        if (std.mem.eql(u8, code, TerminalText.body_on)) self.style |= body_bit else if (std.mem.eql(u8, code, TerminalText.body_off)) self.style &= ~body_bit else if (std.mem.eql(u8, code, "\x1b[0m")) self.style &= body_bit else if (std.mem.eql(u8, code, "\x1b[1m")) self.style |= 1 else if (std.mem.eql(u8, code, "\x1b[3m")) self.style |= 2 else if (std.mem.eql(u8, code, "\x1b[4m")) self.style |= 4 else if (std.mem.eql(u8, code, "\x1b[2m")) self.style |= user_bit else if (std.mem.eql(u8, code, "\x1b[2;8m")) self.style |= user_bit | summary_bit else if (std.mem.eql(u8, code, "\x1b[8m")) self.style = (self.style & ~user_bit) | summary_bit else if (std.mem.eql(u8, code, "\x1b[39m")) self.style &= ~foreground_mask else {
                             const colour_index: u8 = if (std.mem.eql(u8, code, "\x1b[33m")) 1 else if (std.mem.eql(u8, code, "\x1b[90m")) 2 else if (std.mem.eql(u8, code, "\x1b[91m")) 3 else if (std.mem.eql(u8, code, "\x1b[94m")) 4 else if (std.mem.eql(u8, code, "\x1b[40m")) code_index else unreachable;
-                            self.style = (self.style & ~foreground_mask) | (colour_index << 3);
+                            self.style = (self.style & ~foreground_mask) | (@as(RetainedStyle, colour_index) << 3);
                         }
                         self.control_length = 0;
                     } else if (std.mem.eql(u8, self.control[0..self.control_length], TerminalText.link_open)) {
@@ -260,7 +250,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                     // window can extend them with combining, RI or ZWJ bytes.
                     if (discard == 0) return error.DisplayGraphemeTooLarge;
                     std.mem.copyForwards(u8, &self.bytes, self.bytes[discard..self.length]);
-                    if (styled) std.mem.copyForwards(u8, &self.styles, self.styles[discard..self.length]);
+                    if (styled) std.mem.copyForwards(RetainedStyle, &self.styles, self.styles[discard..self.length]);
                     self.length -= discard;
                     self.origin += discard;
                 }
@@ -277,13 +267,13 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         }
 
         /// The retained style of text appended now, with any link mark.
-        fn cellValue(self: *const Self) u8 {
+        fn cellValue(self: *const Self) RetainedStyle {
             const index: u8 = switch (self.link) {
                 .none => return self.style,
                 .address => address_index,
                 .text => if (self.style & 4 != 0 and foregroundIndex(self.style) >= 1 and foregroundIndex(self.style) <= 4) return self.style else linked_index,
             };
-            return (self.style & ~foreground_mask) | (index << 3);
+            return (self.style & ~foreground_mask) | (@as(RetainedStyle, index) << 3);
         }
 
         /// The address of the link whose text holds `position`: the hidden
@@ -321,44 +311,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return if (std.mem.startsWith(u8, uri, TerminalText.session_link)) uri[TerminalText.session_link.len..] else null;
         }
 
-        /// The last position in `[from, to)` on a peer's name that its line,
-        /// laid out at `layout`, shows in a cell. A name clipped off its row
-        /// entirely is not on screen, so it is not there to open.
-        pub fn lastShownSession(self: *const Self, gpa: std.mem.Allocator, layout: Layout, from: usize, to: usize) !?usize {
-            comptime std.debug.assert(styled);
-            var end = @min(to, self.text().len);
-            while (end > from) {
-                end -= 1;
-                const id = self.sessionAt(end) orelse continue;
-                var start = end;
-                while (start > from) : (start -= 1) {
-                    const before = self.sessionAt(start - 1) orelse break;
-                    if (!std.mem.eql(u8, before, id)) break;
-                }
-                if (try self.shows(gpa, layout, start, end + 1)) return end;
-                end = start;
-            }
-            return null;
-        }
-
-        /// Whether laying out the line holding `[from, to)` puts any of
-        /// those bytes in a cell.
-        fn shows(self: *const Self, gpa: std.mem.Allocator, layout: Layout, from: usize, to: usize) !bool {
-            const line = if (std.mem.lastIndexOfScalar(u8, self.text()[0..from], '\n')) |at| at + 1 else 0;
-            const rows = self.lineRows(layout, line);
-            const cells = try gpa.alloc(vaxis.Cell, @as(usize, layout.width) * rows);
-            defer gpa.free(cells);
-            @memset(cells, .{});
-            var screen: vaxis.Screen = .{ .width = layout.width, .height = rows, .width_method = layout.method, .buf = cells };
-            const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = layout.width, .height = rows, .screen = &screen };
-            _ = self.printLine(window, 0, line, true, false, .{}, .{});
-            for (cells) |cell| {
-                const at = self.cellOffset(cell) orelse continue;
-                if (at >= from and at < to) return true;
-            }
-            return false;
-        }
-
         /// Where in the current text a cell laid out from it starts, or
         /// null for a cell that shows none of it: blank, indent, `…` or
         /// `┆`. A text cell's grapheme points into the text.
@@ -374,22 +326,35 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         /// right-margin times and hidden link addresses are left out, and a
         /// tab, shown as a space, copies as one. Null past `most` bytes.
         pub fn shownText(self: *const Self, gpa: std.mem.Allocator, from: usize, to: usize, most: usize) !?[]u8 {
+            return self.shownTextWhere(gpa, from, to, most, AllText{});
+        }
+
+        /// The same displayed extraction, restricted by a body provenance owner.
+        pub fn shownTextWhere(self: *const Self, gpa: std.mem.Allocator, from: usize, to: usize, most: usize, eligibility: anytype) !?[]u8 {
             comptime std.debug.assert(styled);
             const end = @min(to, self.text().len);
             const start = @min(from, end);
             var length: usize = 0;
+            var filter = eligibility;
             for (start..end) |index| {
-                if (!isSidenote(self.styles[index]) and !self.hidden(index)) length += 1;
+                if (filter.includes(index) and !isSidenote(self.styles[index]) and !self.hidden(index)) length += 1;
             }
             if (length > most) return null;
             const out = try gpa.alloc(u8, length);
             length = 0;
+            filter = eligibility;
             for (start..end) |index| {
-                if (isSidenote(self.styles[index]) or self.hidden(index)) continue;
+                if (!filter.includes(index) or isSidenote(self.styles[index]) or self.hidden(index)) continue;
                 out[length] = if (self.bytes[index] == '\t') ' ' else self.bytes[index];
                 length += 1;
             }
             return out;
+        }
+
+        /// Semantic provenance emitted by the rendering owner, never inferred
+        /// from visible prefixes, style or Activity kind.
+        pub fn bodyAt(self: *const Self, position: usize) bool {
+            return styled and position < self.text().len and self.styles[position] & body_bit != 0;
         }
 
         /// Whether a drawn cell's text at `position` belongs to the body:
@@ -410,14 +375,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         }
 
         pub fn text(self: *const Self) []const u8 {
-            var end = self.length;
-            if (end != 0) {
-                var start = end - 1;
-                while (start > 0 and self.bytes[start] & 0xc0 == 0x80) start -= 1;
-                const n = std.unicode.utf8ByteSequenceLength(self.bytes[start]) catch 1;
-                if (end - start < n) end = start;
-            }
-            return self.bytes[0..end];
+            return utf8_validation.completePrefix(self.bytes[0..self.length]);
         }
 
         /// Output has no canonical byte offsets: escape standalone invisible
@@ -435,7 +393,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 if (std.mem.eql(u8, raw_cluster, "\n") or std.mem.eql(u8, raw_cluster, "\t") or representable(raw_cluster, self.width_method)) continue;
                 const length = self.length;
                 var bytes: [limit]u8 = undefined;
-                var styles: [if (styled) limit else 0]u8 = undefined;
+                var styles: [if (styled) limit else 0]RetainedStyle = undefined;
                 @memcpy(bytes[0..length], self.bytes[0..length]);
                 if (styled) @memcpy(styles[0..length], self.styles[0..length]);
                 const complete = self.text().len;
@@ -454,8 +412,20 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 while (clusters.next()) |value| {
                     if (styled) self.style = styles[value.start];
                     const raw = value.bytes(bytes[0..complete]);
-                    var displayed: display_text.Cluster = .{ .raw = raw, .method = self.width_method };
-                    while (displayed.next()) |piece| try self.appendText(piece.bytes);
+                    if (std.mem.eql(u8, raw, "\n") or std.mem.eql(u8, raw, "\t") or representable(raw, self.width_method)) {
+                        for (raw, value.start..) |byte, at| {
+                            if (styled) self.style = styles[at];
+                            try self.appendText(&.{byte});
+                        }
+                    } else {
+                        // A displayed escape represents the entire source
+                        // cluster. Mixed body/chrome clusters grant nothing.
+                        if (styled) for (styles[value.start..][0..raw.len]) |original| {
+                            if (original & body_bit == 0) self.style &= ~body_bit;
+                        };
+                        var displayed: display_text.Cluster = .{ .raw = raw, .method = self.width_method };
+                        while (displayed.next()) |piece| try self.appendText(piece.bytes);
+                    }
                 }
                 if (styled and complete < length) self.style = styles[complete];
                 try self.appendText(bytes[complete..length]);
@@ -465,28 +435,32 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
 
         /// Tool identity uses the same retained, hidden address representation as
         /// internal Session links, with no new style bytes or closed output cache.
-        fn lineMarker(self: *const Self, offset: usize) ?struct { uri: []const u8, end: usize } {
+        const LineMarker = struct { marker: tool_fold.Marker, end: usize };
+
+        fn lineMarker(self: *const Self, offset: usize) ?LineMarker {
             if (!styled or offset >= self.text().len or foregroundIndex(self.styles[offset]) != address_index) return null;
             var end = offset;
             while (end < self.text().len and foregroundIndex(self.styles[end]) == address_index) : (end += 1) {}
-            const uri = self.bytes[offset..end];
-            if (!std.mem.eql(u8, uri, tool_fold.heading_uri) and !std.mem.eql(u8, uri, tool_fold.output_uri) and !std.mem.eql(u8, uri, tool_fold.more_uri)) return null;
-            return .{ .uri = uri, .end = end };
+            return .{ .marker = tool_fold.Marker.of(self.bytes[offset..end]) orelse return null, .end = end };
+        }
+
+        fn markerAt(self: *const Self, offset: usize) ?tool_fold.Marker {
+            return (self.lineMarker(offset) orelse return null).marker;
         }
 
         /// A tool row's heading line: the row Ctrl-O or a click folds.
         pub fn toolHeading(self: *const Self, offset: usize) bool {
-            const mark = self.lineMarker(offset) orelse return false;
-            return std.mem.eql(u8, mark.uri, tool_fold.heading_uri);
+            return self.markerAt(offset) == .heading;
         }
 
-        fn toolOutput(self: *const Self, offset: usize) bool {
-            const mark = self.lineMarker(offset) orelse return false;
-            return std.mem.eql(u8, mark.uri, tool_fold.output_uri) or std.mem.eql(u8, mark.uri, tool_fold.more_uri);
+        /// Whether the heading line at `offset` has its output shown on the
+        /// lines after it.
+        fn headingOpen(self: *const Self, offset: usize) bool {
+            return self.markerAt(self.nextLine(offset) orelse return false) == .output;
         }
 
         pub fn toolIsOpen(self: *const Self, offset: usize) bool {
-            return self.toolHeading(offset) and self.toolOutput(self.nextLine(offset) orelse return false);
+            return self.toolHeading(offset) and self.headingOpen(offset);
         }
 
         /// Where the line starting at `offset` ends (its newline or the text end).
@@ -526,11 +500,11 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
 
         /// A line's trusted marker owns its band, never an independent code
         /// painter or a retained list of byte offsets to repair after edits.
-        fn lineKind(self: *const Self, offset: usize) Line {
-            if (self.lineMarker(offset)) |mark| {
-                if (std.mem.eql(u8, mark.uri, tool_fold.output_uri) or std.mem.eql(u8, mark.uri, tool_fold.more_uri)) return .output;
-                if (self.toolIsOpen(offset)) return .selected;
-            }
+        fn lineKind(self: *const Self, offset: usize, mark: ?LineMarker) Line {
+            if (mark) |value| switch (value.marker) {
+                .output => return .output,
+                .heading => if (self.headingOpen(offset)) return .selected,
+            };
             if (styled and offset < self.length and foregroundIndex(self.styles[offset]) == code_index) return .code;
             return .plain;
         }
@@ -542,7 +516,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             const end = self.lineEnd(offset);
             const mark = self.lineMarker(offset);
             const content_start = if (mark) |value| value.end else offset;
-            const kind = self.lineKind(offset);
+            const kind = self.lineKind(offset, mark);
             const output = kind == .output;
             const plain = kind.style(colour, base, colours);
             // Every band (including selection) is painted here, over the
@@ -638,7 +612,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 var stop = end;
                 if (styled) {
                     stop = start + 1;
-                    while (stop < end and self.styles[stop] == self.styles[start]) stop += 1;
+                    while (stop < end and (self.styles[stop] & ~body_bit) == (self.styles[start] & ~body_bit)) stop += 1;
                 }
                 const shown = !styled or (isSidenote(self.styles[start]) == notes and foregroundIndex(self.styles[start]) != address_index);
                 if (shown) {
@@ -839,7 +813,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             if (position <= self.origin) return;
             const count: usize = @intCast(@min(position - self.origin, self.length));
             std.mem.copyForwards(u8, &self.bytes, self.bytes[count..self.length]);
-            if (styled) std.mem.copyForwards(u8, &self.styles, self.styles[count..self.length]);
+            if (styled) std.mem.copyForwards(RetainedStyle, &self.styles, self.styles[count..self.length]);
             self.length -= count;
             self.origin += count;
             self.top = null;
@@ -862,7 +836,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             std.mem.copyBackwards(u8, self.bytes[older.length..][0..keep], self.bytes[0..keep]);
             @memcpy(self.bytes[0..older.length], older.bytes[0..older.length]);
             if (styled) {
-                std.mem.copyBackwards(u8, self.styles[older.length..][0..keep], self.styles[0..keep]);
+                std.mem.copyBackwards(RetainedStyle, self.styles[older.length..][0..keep], self.styles[0..keep]);
                 @memcpy(self.styles[0..older.length], older.styles[0..older.length]);
             }
             self.length = older.length + keep;
@@ -982,10 +956,6 @@ test "vaxis wraps reading text at words with hanging indentation" {
     var wide: Sized(64, false) = .{};
     try wide.append("abc中");
     try std.testing.expectEqual(@as(u16, 2), wide.lineRows(.{ .width = 4, .method = .unicode }, 0));
-    // A draft's wide cluster moves whole to the next row.
-    const whole = draft_layout.shape(DraftPieces{ .bytes = "abcd中", .method = .unicode }, 5, 7, 0);
-    try std.testing.expectEqual(@as(usize, 2), whole.lines);
-    try std.testing.expectEqual(@as(u16, 2), whole.caret_column);
 }
 
 test "a clipped final wrapped line leaves an unread row in plain and styled documents" {
@@ -1526,7 +1496,7 @@ test "code bands cover blank and wrapped rows at every width and append split wi
         try view.append(input[split..]);
         try view.prepare();
         try std.testing.expectEqualStrings("before\nabcdefghijkl\n\nz\nafter\n", view.text());
-        try std.testing.expectEqual(@sizeOf(@TypeOf(view.bytes)), @sizeOf(@TypeOf(view.styles)));
+        try std.testing.expectEqual(2 * @sizeOf(@TypeOf(view.bytes)), @sizeOf(@TypeOf(view.styles)));
         for (1..17) |width_value| {
             const width: u16 = @intCast(width_value);
             const wrapped: u16 = @intCast((12 + width_value - 1) / width_value);
@@ -1656,7 +1626,7 @@ test "wrapped code keeps its own indent across widths clipping and scripts witho
             try view.append(output.written()[0..split]);
             try view.append(output.written()[split..]);
             try view.prepare();
-            try std.testing.expectEqual(@sizeOf(@TypeOf(view.bytes)), @sizeOf(@TypeOf(view.styles)));
+            try std.testing.expectEqual(2 * @sizeOf(@TypeOf(view.bytes)), @sizeOf(@TypeOf(view.styles)));
             for (1..21) |width_value| {
                 const width: u16 = @intCast(width_value);
                 const indent = @min(if (std.mem.indexOfScalar(u8, prefix, '\t') != null) prefix.len * 8 else prefix.len, width - 1);
@@ -1768,4 +1738,45 @@ test "Document rows answer down within measure for every row from every first ro
     tall.* = .{};
     var none = tall.rowsFrom(narrow, .{});
     try std.testing.expectEqual(@as(?Position, null), none.next());
+}
+
+test "quote body extraction retains metadata through split controls normalization links and eviction" {
+    const input = "prefix " ++ TerminalText.body_on ++ "\u{301}body\x1b[1m bold\x1b[0m\n" ++ TerminalText.link_open ++ "https://example.test/" ++ TerminalText.link_end ++ "label" ++ TerminalText.link_close ++ "\n\u{200b}" ++ TerminalText.body_off ++ "status\n";
+    for (0..input.len + 1) |split| {
+        var document: Sized(256, true) = .{};
+        try document.append(input[0..split]);
+        try document.append(input[split..]);
+        try document.prepare();
+        try std.testing.expect(!document.bodyAt(0));
+        const body = std.mem.indexOf(u8, document.text(), "body").?;
+        try std.testing.expect(document.bodyAt(body));
+        try std.testing.expect(document.bodyAt(body - "\u{301}".len));
+        const label = std.mem.indexOf(u8, document.text(), "label").?;
+        try std.testing.expect(document.bodyAt(label));
+        try std.testing.expectEqualStrings("https://example.test/", document.terminalLink(label));
+        try std.testing.expect(!document.bodyAt(std.mem.indexOf(u8, document.text(), "status").?));
+        try std.testing.expect(seamStyle(document.styles[label]) & body_bit != 0);
+        document.discardFront(document.origin + body);
+        try std.testing.expect(document.bodyAt(0));
+        document.clear();
+        try document.append("unknown");
+        try std.testing.expect(!document.bodyAt(0));
+    }
+}
+
+test "quote body extraction metadata leaves grapheme layout and visual styles unchanged" {
+    var marked: Sized(256, true) = .{};
+    try marked.append("prefix " ++ TerminalText.body_on ++ "\u{301}body\n\u{200b}" ++ TerminalText.body_off ++ " status\n");
+    try marked.prepare();
+    var plain: Sized(256, true) = .{};
+    try plain.append("prefix \u{301}body\n\u{200b} status\n");
+    try plain.prepare();
+    for (1..41) |width| for ([_]bool{ false, true }) |colour| {
+        var actual: TestScreen = undefined;
+        var expected: TestScreen = undefined;
+        const a = marked.draw(actual.window(@intCast(width), 14), .{}, true, colour, .{}, .{});
+        const b = plain.draw(expected.window(@intCast(width), 14), .{}, true, colour, .{}, .{});
+        try std.testing.expectEqualDeep(b, a);
+        try std.testing.expectEqualDeep(expected.cells[0 .. width * 14], actual.cells[0 .. width * 14]);
+    };
 }

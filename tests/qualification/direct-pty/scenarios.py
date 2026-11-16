@@ -167,7 +167,7 @@ def editor(fixture, row):
         # first conversation explicitly instead of relying on chat selection.
         # If Esc merged with a later byte, this overview observation must fail.
         escaped_overview(tty, "TD4 saved conversation")
-        tty.send(b"\x1b[H\x1b[B\r")
+        tty.send(b"\x1b[H\x1b[B\x1b[B\r")
         # The reopened chat retains its own draft and caret.
         tty.draft(row["reopen_draft"], 2 + len(row["reopen_draft"]))
         chunks(tty, row["submit_chunks"])

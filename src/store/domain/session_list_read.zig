@@ -3,6 +3,7 @@
 //! read steps, then the page's tail. The Host writes the reply.
 
 const std = @import("std");
+const utf8_validation = @import("../../utf8_validation.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const change_ring = @import("../../change_ring.zig");
 const model_capability = @import("../../model_capability.zig");
@@ -228,6 +229,7 @@ fn readChangedSessions(a: *ReadAccess, request: *const session_list.ListSessions
 
 const settings_columns = "session.session_ref,session.parent_ref,session.workspace,session.provider,session.model," ++ tool_set.namesSql("session.tool_set_id") ++ " AS tools,session.permission_mode,session.label,session.created_at,session.revision,session.next_position," ++
     command_domain.archive_state_sql ++ " AS archive_state," ++
+    "(SELECT pin_command.command_seq FROM session_pin pin JOIN core_command pin_command ON pin_command.command_key=pin.command_key WHERE pin.session_ref=session.session_ref) AS pin_order," ++
     "(" ++ report_domain.person_message_sql ++ ") AS from_person_at," ++
     last_line_columns ++ ",";
 
@@ -280,6 +282,7 @@ const ListRow = struct {
     revision: rsql.Positive,
     next_position: rsql.Positive,
     archive_state: session_archive.State,
+    pin_order: ?rsql.Positive,
     from_person_at: ?rsql.Positive,
     last_turn_position: ?rsql.Positive,
     last_answer: ?rsql.Blob(1024),
@@ -375,9 +378,7 @@ fn RowsRead(comptime Visitor: type) type {
     };
 }
 
-fn ErrorOf(comptime function: anytype) type {
-    return @typeInfo(@typeInfo(@TypeOf(function)).@"fn".return_type.?).error_union.error_set;
-}
+const ErrorOf = @import("../../error_set.zig").Of;
 
 /// The plain values of the shown row `index`, checked in main's order.
 /// They borrow `row`, `sorted` and `last_text`.
@@ -390,6 +391,7 @@ fn rowValues(rows: []const ShownRow, index: usize, now_ms: u64, row: *const List
     const first_message = try report_domain.firstMessage(row, rows[index].first);
     return .{
         .archive_state = row.archive_state,
+        .pin_order = if (row.pin_order) |rank| rank.get() else null,
         .reference = row.session_ref.slice(),
         .parent = if (row.parent_ref) |*parent| parent.slice() else null,
         .workspace = row.workspace.slice(),
@@ -422,13 +424,7 @@ fn lastLine(row: anytype, text: *Bounded(session_list.max_last_line_bytes)) ?ses
     if (row.last_answer) |*prefix| {
         // The bounded byte prefix can end inside a UTF-8 code point. Drop
         // only that incomplete suffix before choosing a non-blank line.
-        var bytes = prefix.slice();
-        if (bytes.len != 0) {
-            var start = bytes.len - 1;
-            while (start > 0 and bytes[start] & 0xc0 == 0x80) start -= 1;
-            const width = std.unicode.utf8ByteSequenceLength(bytes[start]) catch 1;
-            if (start + width > bytes.len) bytes = bytes[0..start];
-        }
+        const bytes = utf8_validation.completePrefix(prefix.slice());
         var lines = std.mem.splitAny(u8, bytes, "\r\n");
         while (lines.next()) |line| {
             const trimmed = session_line.firstLine(line);

@@ -38,8 +38,11 @@ pub const Mode = enum {
     /// One domain write: SQLite autocommit under the Entry lock, or an
     /// ownership-fenced transaction on a batching engine. It takes no
     /// identities or positions; `commit` runs exactly one queued write.
-    /// Only the transition runner opens one (`transition.Commit.single`).
     single,
+    // Only the transition runner opens a writing Access, `.write`,
+    // `.settlement` or `.single` (`transition.Commit`, `transition.Pass`);
+    // "Store entry points queue and fence only through canonical access"
+    // refuses one opened in any other Store file, tests included.
 };
 
 /// What a round reports besides its guards' errors. Each one fences.
@@ -1076,7 +1079,7 @@ pub fn failedName(a: anytype, comptime named: anytype) ?NamedErrors(named) {
 
 /// The errors `A.run` returns.
 fn RunError(comptime A: type) type {
-    return @typeInfo(@typeInfo(@TypeOf(A.run)).@"fn".return_type.?).error_union.error_set;
+    return @import("../error_set.zig").Of(A.run);
 }
 
 /// The errors `runNamed`'s and `failedName`'s pairs name.

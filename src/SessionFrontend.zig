@@ -1,6 +1,7 @@
 //! One persistent caller owns drafts, terminal and joined Client borrowers.
 //! No worker writes the terminal; canonical activity supplies live output.
 const std = @import("std");
+const utf8_validation = @import("utf8_validation.zig");
 const session_list = @import("session_list.zig");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -25,8 +26,9 @@ const Submission = @import("SessionSubmission.zig");
 const original_state = @import("submission_state.zig");
 const Task = @import("ClientTask.zig");
 const Screen = @import("SessionScreen.zig");
-const Editor = @import("TerminalEditor.zig");
+const Editor = @import("DraftEditor.zig");
 const keymap = @import("keymap.zig");
+const keypress = @import("keypress.zig");
 const overview_view = @import("overview_view.zig");
 const test_poll = @import("test_poll");
 const View = @import("session_view.zig");
@@ -143,7 +145,6 @@ reading: struct {
     fills: FeedPolicy.Fills = .{},
     // An Action the reader found, adopted once input is idle.
     prepared_action: ?u64 = null,
-    prepared_summary: View.ActionSummary = .{},
     // One joined read at a time; no reuse until its live diagnostic is delivered.
     pending_diagnostic: ?struct { failure: protocol_reply.ReadFailure, phase: ReadPhase, recoverable: bool } = null,
 } = .{},
@@ -190,7 +191,6 @@ expansion: struct {
     reading: ?OpenRequest = null,
     generation: u64 = 0,
 } = .{},
-action_summary: View.ActionSummary = .{},
 // A frontend-owned change the next frame must show: input, notices, status,
 // live text or scrolling. The Screen's own changes make it stale() instead.
 dirty: bool = true,
@@ -383,9 +383,9 @@ fn launch(self: *Self, job: *const Job, worker: Task.Run) !void {
 pub const Lender = struct {
     context: *anyopaque,
     /// Steps the overview with semantic input for this exact conversation.
-    /// Returns whether this event admitted a new archive request; other inputs
+    /// Returns whether this event admitted a new organization request; other inputs
     /// return refused, without changing their own effect semantics.
-    step: *const fn (context: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) anyerror!overview_view.ArchiveAdmission,
+    step: *const fn (context: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) anyerror!overview_view.IntentAdmission,
     /// Runs the overview between the conversation's frames, without the
     /// screen or input: answers its finished job, keeps its listing going,
     /// so another Session's news still notifies, and starts its next stop
@@ -423,7 +423,7 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []
     self.* = .{ .init = init, .home = init.environ_map.get("HOME") orelse "", .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .screen = screen, .interrupted = interrupted, .lender = lender, .colour = screen.colour };
     self.startInput();
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
-    self.app_content = .{ .window = &screen.feed, .anchor = &screen.anchor, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appClick, .on_retry = appRetry } };
+    self.app_content = .{ .window = &screen.feed, .anchor = &screen.anchor, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appClick, .on_retry = appRetry, .quote = .{ .begin = appQuoteBegin, .insert = appQuoteInsert } } };
     self.app_input = .{ .composer = .{ .editor = &self.input.editors[self.input.active] } };
     self.app_document = .{ .document = &screen.browsing, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll } };
     self.app_body = .{ .shown = self.app_content.widget() };
@@ -467,18 +467,23 @@ fn focusField(raw: *anyopaque, set: ?@import("app_input.zig").Field) @import("ap
     return self.footer.focus;
 }
 
+fn acceptsTab(raw: *anyopaque) bool {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return self.footer.focus == .input and self.app_consent.request == null and self.input.composition().bytes.len != 0 and self.shownRow(self.app_palette.drawn) != null;
+}
+
 fn focusCandidates(raw: *anyopaque, items: *[std.enums.values(@import("app_input.zig").Target).len]Root.Candidate) Root.Projection {
     const self: *Self = @ptrCast(@alignCast(raw));
     const candidates = [_]Root.Candidate{
         .{ .target = .input, .widget = self.app_input.composer.widget() },
-        .{ .target = .back, .widget = self.chrome.facts.back.widget() },
-        .{ .target = .model, .widget = self.chrome.facts.model.widget() },
-        .{ .target = .effort, .widget = self.chrome.facts.effort.widget() },
-        .{ .target = .info, .widget = self.chrome.info.widget() },
-        .{ .target = .latest, .widget = self.chrome.marker.widget() },
-        .{ .target = .details, .widget = self.chrome.details.widget() },
-        .{ .target = .needs, .widget = self.chrome.status.key.widget() },
-        .{ .target = .stop, .widget = self.chrome.status.stop.widget() },
+        .{ .target = .back, .widget = self.chrome.facts.back.widget(), .activate = @import("Chip.zig").activate },
+        .{ .target = .model, .widget = self.chrome.facts.model.widget(), .activate = @import("Chip.zig").activate },
+        .{ .target = .effort, .widget = self.chrome.facts.effort.widget(), .activate = @import("Chip.zig").activate },
+        .{ .target = .info, .widget = self.chrome.info.widget(), .activate = @import("Chip.zig").activate },
+        .{ .target = .latest, .widget = self.chrome.marker.widget(), .activate = @import("Chip.zig").activate },
+        .{ .target = .details, .widget = self.chrome.details.widget(), .activate = @import("Chip.zig").activate },
+        .{ .target = .needs, .widget = self.chrome.status.key.widget(), .activate = @import("Chip.zig").activate },
+        .{ .target = .stop, .widget = self.chrome.status.stop.widget(), .activate = @import("Chip.zig").activate },
     };
     @memcpy(items[0..candidates.len], &candidates);
     return .{ .len = candidates.len, .modal = self.info_open or self.app_info.standaloneOpen() };
@@ -486,7 +491,7 @@ fn focusCandidates(raw: *anyopaque, items: *[std.enums.values(@import("app_input
 
 pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widget {
     self.app_hooks = hooks;
-    hooks.root.session_focus = .{ .context = self, .field = focusField, .candidates = focusCandidates };
+    hooks.root.session_focus = .{ .context = self, .field = focusField, .accepts_tab = acceptsTab, .candidates = focusCandidates };
     self.app_info = .{ .backend = self.infoBackend(), .home = self.home };
     if (hooks.drafts) |drafts| if (drafts.take(self.init.gpa, self.session)) |draft| {
         defer draft.deinit(self.init.gpa);
@@ -495,7 +500,7 @@ pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widge
     self.app_caps = caps;
     self.screen.setWidth(caps.width);
     self.app_preview = .{ .document = &self.screen.browsing, .colour = self.colour, .more = true, .handler = .{ .userdata = self, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appPreviewClick } };
-    self.app_card = .{ .consent = &self.app_consent, .description = "", .body = self.app_preview.widget(), .userdata = self, .on_decision = appDecision };
+    self.app_card = .{ .consent = &self.app_consent, .body = self.app_preview.widget(), .userdata = self, .on_decision = appDecision };
     self.chrome = .init(.{ .userdata = self, .key = chromeClick(.needs), .stop = chromeClick(.{ .action = .stop }), .back = chromeClick(.{ .action = .close }), .latest = chromeClick(.{ .action = .latest }), .status_page = chromeClick(.status), .details = chromeClick(.details), .pick = chromeClick(.footer_pick), .close = chromeClick(.footer_close), .model = chromeClick(.{ .footer = .model }), .effort = chromeClick(.{ .footer = .effort }) });
     return self.widget();
 }
@@ -604,7 +609,7 @@ fn infoBackend(self: *Self) ChatInfo.Backend {
             frontend.info_effect = .configure;
             frontend.dirty = true;
         }
-        fn archive(raw: *anyopaque) !overview_view.ArchiveAdmission {
+        fn archive(raw: *anyopaque) !overview_view.IntentAdmission {
             const frontend = owner(raw);
             frontend.infoMaySave() catch return .refused;
             const admission = try frontend.archive();
@@ -755,6 +760,27 @@ fn appNotice(raw: *anyopaque, ctx: *vxfw.EventContext, text: []const u8) !void {
     ctx.redraw = true;
 }
 
+fn quoteReady(self: *const Self) bool {
+    return self.leaving == null and self.screen.view == .feed and !self.info_open and !self.app_info.standaloneOpen() and self.app_consent.request == null and !self.app_hooks.root.input.pasting;
+}
+
+fn appQuoteBegin(raw: *anyopaque) ?Input.Insertion {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return if (self.quoteReady()) self.input.insertionTarget() else null;
+}
+
+fn appQuoteInsert(raw: *anyopaque, ctx: *vxfw.EventContext, target: Input.Insertion, body: []const u8) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (!self.quoteReady()) return;
+    const outcome = try self.input.insertQuote(ctx.alloc, target, body);
+    if (outcome == .refused) try appNotice(raw, ctx, "Quote could not be inserted; draft unchanged");
+    if (outcome == .redraw) {
+        self.dirty = true;
+        try ctx.requestFocus(self.app_input.composer.widget());
+    }
+    try self.afterInput(ctx);
+}
+
 /// A click on a peer's name: leave for that Session where Esc would leave,
 /// else say what keeps this one open. The draft and Session stay as they are.
 fn appOpen(raw: *anyopaque, ctx: *vxfw.EventContext, id: []const u8) !void {
@@ -896,10 +922,20 @@ pub fn keyOwner(self: *Self) Root.Keys {
 fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery: @import("app_input.zig").Effects.Delivery) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.leaving != null) return;
+    if (self.app_content.cancelQuote()) {
+        ctx.redraw = true;
+        if (event == .key_press and event.key_press.matches(vaxis.Key.escape, .{})) {
+            ctx.consumeEvent();
+            return;
+        }
+    }
     self.shown_notice.dismiss();
     const input: session_keys.Input = .{ .key = sessionKey(event), .pasted = delivery.pasted };
-    // Only Enter takes a row, so only Enter reads the list.
-    const shown = if (input.key == .enter and !input.pasted) self.shownRow() else null;
+    const tab = input.key == .named and input.key.named == .tab;
+    const shown = if ((input.key == .enter or tab) and !input.pasted)
+        self.shownRow(if (tab) self.app_palette.drawn else null)
+    else
+        null;
     const previous = self.app_consent.row;
     const consent: ?*ActionConsent = if (self.app_consent.request != null) &self.app_consent else null;
     const take = session_keys.step(.{ .footer = &self.footer, .consent = consent }, .{
@@ -956,7 +992,8 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
         },
         .take_row => {
             self.notice = null;
-            try self.takeRow(shown.?);
+            if (tab) self.screen.commands = shown.?;
+            try self.takeRow(&shown.?);
         },
         .edit => |edit| {
             self.notice = null;
@@ -990,7 +1027,7 @@ fn sessionKey(event: vxfw.Event) session_keys.Key {
     return switch (event) {
         .paste_start => .paste_start,
         .paste_end => .paste_end,
-        .key_press => |key| if (Editor.named(key)) |name| .{ .named = name } else if (Editor.isEnter(key)) .enter else if (key.matches('i', .{ .alt = true })) .info else if (key.matches('d', .{ .alt = true })) .details else if (hostStartKey(key)) .host_start else switch (Editor.selectKey(conversation_keys, key)) {
+        .key_press => |key| if (keypress.named(key)) |name| .{ .named = name } else if (keypress.isEnter(key)) .enter else if (key.matches('i', .{ .alt = true })) .info else if (key.matches('d', .{ .alt = true })) .details else if (hostStartKey(key)) .host_start else switch (keypress.selectKey(conversation_keys, key)) {
             .text => .text,
             else => .other,
         },
@@ -1026,7 +1063,6 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                 const blurred = self.input.appEvent(conversation_keys, .focus_out, self.app_hooks.root.input.pasting, false);
                 if (blurred == .editor and blurred.editor == .refused) self.notice = refusedNotice(blurred.editor.refused);
                 try self.screen.showFile(self.init.io, self.files.action, .action);
-                self.action_summary = self.reading.prepared_summary;
                 self.reading.prepared_action = null;
                 self.reading.phase = .activity;
                 self.app_consent.adopt(request);
@@ -1094,6 +1130,7 @@ fn depart(self: *Self, ctx: *vxfw.EventContext) !void {
 fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const screen = self.screen;
+    if (!self.quoteReady()) _ = self.app_content.cancelQuote();
     const normal = style.of(self.app_caps, .{});
     const quiet = style.of(self.app_caps, .{ .colour = .quiet });
     const attention = style.of(self.app_caps, .{ .colour = .attention });
@@ -1107,18 +1144,15 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .band = style.of(self.app_caps, .{ .background = .bar }).bg,
         .selection = style.of(self.app_caps, .{ .background = .selection }).bg,
     };
-    const facts_style = style.of(self.app_caps, .{ .colour = .quiet, .background = .bar });
+    const facts_style = quiet;
     self.app_screen.style = normal;
     self.app_input.composer.caret = self.app_hooks.root.input.mainFocused() and !self.info_open and !self.app_info.standaloneOpen() and self.footer.focus == .input;
-    self.app_input.composer.style = normal;
-    self.app_input.composer.quiet = quiet;
-    self.app_input.composer.method = self.app_caps.width;
+    self.app_input.composer.setCaps(self.app_caps);
     self.app_input.composer.placeholder = if (self.line.read != null and self.line.folder != null) "Type a task" else "";
     self.app_input.composer.editor = &self.input.editors[self.input.active];
     self.app_card.style = normal;
     self.app_card.quiet = quiet;
     self.app_card.hover_style = hover;
-    self.app_card.description = self.action_summary.description.slice();
     self.app_card.method = self.app_caps.width;
     self.app_preview.style = normal;
     self.app_preview.colours = colours;
@@ -1139,8 +1173,9 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     if (self.app_consent.request == null) if (screen.commands) |*shown| {
         self.app_palette.shown = shown;
         self.app_palette.caps = self.app_caps;
-        self.app_palette.style = normal;
-        self.app_palette.quiet = quiet;
+        self.app_palette.style = style.of(self.app_caps, .{ .background = .input_surface });
+        self.app_palette.quiet = style.of(self.app_caps, .{ .colour = .quiet, .background = .input_surface });
+        self.app_palette.max_height = @max(1, ctx.max.height.? / 3 -| 1);
         self.app_palette.hover_style = hover;
         self.app_palette.userdata = self;
         self.app_palette.on_select = appSelectCommand;
@@ -1282,11 +1317,11 @@ test "App Session retains the draft across a permission card arriving during pas
         try std.testing.expect(!user.style.dim);
         try std.testing.expectEqual(case.ground, rendered.readCell(79, 10).?.style.bg);
         try std.testing.expectEqual(case.ground, rendered.readCell(79, 22).?.style.bg);
-        try std.testing.expectEqual(case.band, rendered.readCell(79, 23).?.style.bg);
+        try std.testing.expectEqual(case.ground, rendered.readCell(79, 23).?.style.bg);
     }
     self.app_caps = .{ .depth = .none };
     _ = self.input.append("headTAIL");
-    self.input.editors[self.input.active].cursor = 4;
+    self.input.editors[self.input.active].setCursor(4);
     // Root hands the Session's core its keys with the paste they arrive in.
     const pasted: @import("app_input.zig").Effects.Delivery = .{ .under = .main, .pasted = true };
     const typed: @import("app_input.zig").Effects.Delivery = .{ .under = .main, .pasted = false };
@@ -1327,7 +1362,7 @@ test "App Session approval keeps typed abc through Esc and Allow once with its c
         const self = &held.self;
         if (existing_draft) {
             _ = self.input.append("leftTAIL");
-            self.input.editors[self.input.active].cursor = 4;
+            self.input.editors[self.input.active].setCursor(4);
         }
         const file = try held.adopt(3);
         defer file.close(std.testing.io);
@@ -1365,7 +1400,7 @@ test "App Session approval pastes into the kept draft and draft arrows never mov
     defer held.destroy();
     const self = &held.self;
     _ = self.input.append("leftTAIL");
-    self.input.editors[self.input.active].cursor = 4;
+    self.input.editors[self.input.active].setCursor(4);
     const file = try held.adopt(3);
     defer file.close(std.testing.io);
     try held.keys("\x1b[200~abc\r\nxyz\x1b[201~");
@@ -1406,7 +1441,7 @@ test "App Session approval routing gives the draft editor first refusal for sing
         _ = normal.appEvent(conversation_keys, .{ .key_press = .{ .codepoint = 0, .text = draft.text } }, true, true);
         _ = normal.appEvent(conversation_keys, .paste_end, false, true);
         try std.testing.expectEqualStrings(draft.text, normal.composition().bytes);
-        normal.editors[normal.active].cursor = draft.cursor;
+        normal.editors[normal.active].setCursor(draft.cursor);
         const outcome = normal.appEvent(conversation_keys, .{ .key_press = case.press }, false, true);
         const vertical = case.key == .up or case.key == .down;
         const falls_through = vertical and !draft.multiline;
@@ -1426,7 +1461,7 @@ test "App Session approval routing gives the draft editor first refusal for sing
         try held.keys(draft.text);
         try held.keys("\x1b[201~");
         try std.testing.expectEqualStrings(draft.text, self.input.composition().bytes);
-        self.input.editors[self.input.active].cursor = draft.cursor;
+        self.input.editors[self.input.active].setCursor(draft.cursor);
         const file = try held.adopt(100);
         defer file.close(std.testing.io);
         if (row == .draft) try held.keys("x\x7f"); // Enter the draft row without changing its contents.
@@ -1509,7 +1544,7 @@ test "App Session leaves from a permission card on Ctrl-C or Ctrl-D and keeps th
         // A hidden draft with its caret at the start: leaving never deletes
         // what the card hides.
         _ = self.input.append("kept");
-        self.input.editors[self.input.active].cursor = 0;
+        self.input.editors[self.input.active].setCursor(0);
         self.reading.prepared_action = 17;
         self.live.work.first_action = 17;
         try widget_.handleEvent(&ctx, .tick);
@@ -1809,6 +1844,7 @@ const Slash = union(enum) {
     model,
     archive,
     unarchive,
+    pin: bool,
     /// Waits for the reader, then shows its page; Host commands included.
     inspection: Inspection,
     discard,
@@ -1828,6 +1864,8 @@ fn parse(text: []const u8) Slash {
         .model => .model,
         .archive => .archive,
         .unarchive => .unarchive,
+        .pin => .{ .pin = true },
+        .unpin => .{ .pin = false },
         .requests => .{ .inspection = .requests },
         // The table's /copy words are `reads.Copy`'s own names.
         .copy => .{ .inspection = .{ .copy = if (command.argument.len == 0) .answer else std.meta.stringToEnum(reads.Copy, command.argument).? } },
@@ -1844,7 +1882,7 @@ fn slashCommand(self: *Self, text: []const u8) !void {
     // Lender intents have one admission boundary in converse, shared with
     // shortcuts and confirmation. Other commands retain their own hold policy.
     const admitted_elsewhere = switch (parsed) {
-        .archive, .unarchive => true,
+        .archive, .unarchive, .pin => true,
         else => false,
     };
     if (self.upgradeHeld() and !admitted_elsewhere) {
@@ -1856,6 +1894,7 @@ fn slashCommand(self: *Self, text: []const u8) !void {
         .model => self.requestFooterChoice(.model),
         .archive => try self.perform(.archive),
         .unarchive => try self.converse(.unarchive),
+        .pin => |pinned| try self.converse(.{ .pin = pinned }),
         .inspection => self.input.queueCommand(text),
         .discard => {
             self.submission.discardRejected() catch {
@@ -1875,6 +1914,11 @@ fn slashCommand(self: *Self, text: []const u8) !void {
         },
         .unknown => self.unknownCommand(text),
     }
+}
+
+pub fn newSession(self: *Self, ctx: *vxfw.EventContext) !void {
+    self.newChat();
+    try self.afterInput(ctx);
 }
 
 fn newChat(self: *Self) void {
@@ -1964,7 +2008,7 @@ test "a Session lists the skills it saved for the caret's /word, and Tab or Ente
     // A leading slash shares the loaded skills with the listed commands.
     try held.keys("/");
     try Fake.answered(held);
-    try std.testing.expectEqual(@as(usize, 14), held.screen.commands.?.list.count);
+    try std.testing.expectEqual(@as(usize, 16), held.screen.commands.?.list.count);
     try held.keys("re\x1b[B\x1b[B\x1b[B\x1b[B\r");
     try std.testing.expectEqualStrings("/recap ", held.self.input.composition().bytes);
     try std.testing.expect(held.self.submission.view() == null);
@@ -2061,7 +2105,7 @@ test "Enter, Esc and Ctrl-G read every draft as the grammar does, with and witho
                 defer _ = self.skills.reset();
                 try std.testing.expect(self.skills.answer(self.skills.ask("").?.read, .{ .entries = @constCast(&entries), .total = entries.len }, "") == null);
                 _ = self.input.append(case.text);
-                self.input.editors[self.input.active].cursor = case.caret orelse case.text.len;
+                self.input.editors[self.input.active].setCursor(case.caret orelse case.text.len);
                 if (drawn) _ = try held.draw();
                 const listed = drawn and case.list;
                 try std.testing.expectEqual(listed, self.shownCommands() != null);
@@ -2612,9 +2656,7 @@ fn statusLines(buffer: *[status_capacity]u8, context: []const u8, base: []const 
     const room = buffer.len - base.len - (if (badge) |text| text.len else 0) - "\n… · ".len;
     var context_line = context;
     if (context_line.len > room) {
-        var end = room;
-        while (end > 0 and (context_line[end] & 0xc0) == 0x80) end -= 1;
-        context_line = context_line[0..end];
+        context_line = context_line[0..utf8_validation.scalarStart(context_line, room)];
     }
     if (context_line.len != 0) {
         status.writeAll(context_line) catch unreachable;
@@ -2772,7 +2814,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
 }
 
 /// All archive surfaces use this admission result from the overview owner.
-fn archive(self: *Self) !overview_view.ArchiveAdmission {
+fn archive(self: *Self) !overview_view.IntentAdmission {
     if (self.reading.opening) {
         self.notice = "Archive is available once the Session opens.";
         return .refused;
@@ -2785,11 +2827,11 @@ fn converse(self: *Self, input: overview_view.ConversationInput) !void {
     _ = try self.converseAdmission(input);
 }
 
-fn converseAdmission(self: *Self, input: overview_view.ConversationInput) !overview_view.ArchiveAdmission {
+fn converseAdmission(self: *Self, input: overview_view.ConversationInput) !overview_view.IntentAdmission {
     // The Upgrade's own inputs are no Host requests, so no hold refuses them.
     const host_intent = switch (input) {
         .other, .cancel_upgrade, .upgrade_failed => false,
-        .stop, .archive, .unarchive => true,
+        .stop, .archive, .unarchive, .pin => true,
     };
     if (host_intent and self.hostHeld()) return .refused;
     if (host_intent and self.upgradeHeld()) {
@@ -2986,17 +3028,21 @@ fn runLine(self: *Self) !void {
     try self.slashCommand(self.input.composition().bytes);
 }
 
-/// The list whose highlighted row Enter takes: one the latest frame drew.
-fn shownRow(self: *Self) ?*slash_commands_shared.Shown {
+/// The highlighted row Enter or Tab takes from the latest frame.
+fn shownRow(self: *Self, drawn: ?slash_commands_shared.Shown.Pick) ?slash_commands_shared.Shown {
     // A rejected line is the editor's to refuse and clear.
     if (self.input.editors[self.input.active].rejected != null) return null;
-    return self.shownCommands();
+    if (drawn) |pick| {
+        var stored = self.screen.commands;
+        return (slash_commands_shared.Shown.pickedNow(&stored, self.nextCommands(stored), pick) orelse return null).*;
+    }
+    return (self.shownCommands() orelse return null).*;
 }
 
-/// Enter or a click on the list's highlighted row, as `skill_completion`
+/// Enter, Tab or a click on the list's highlighted row, as `skill_completion`
 /// reads it: the row's word goes into the draft, and a row that runs then
 /// runs the line, admitted as a typed command is.
-fn takeRow(self: *Self, shown: *slash_commands_shared.Shown) !void {
+fn takeRow(self: *Self, shown: *const slash_commands_shared.Shown) !void {
     const draft = self.input.composition();
     const refused = switch (skill_completion.enter(draft.bytes, draft.cursor, shown)) {
         .run => |rest| {
@@ -3185,9 +3231,10 @@ fn readInspection(self: *const Self) reader_policy.Inspection {
     };
 }
 
-/// What the queued row shows, if it shows (see `queued_line.unshown`): the
-/// newest waiting Message, by the line read from it, and how many wait
-/// that live output has not shown.
+/// What the queued row shows, if it shows: the newest waiting Message, by
+/// the line read from it, and how many wait. While the work holds nothing
+/// back, the oldest waiting Message is already being taken, so it is not
+/// counted.
 pub fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.Waiting } {
     const queued = self.live.queued;
     const count = queued.count - @intFromBool(queued.count != 0 and !self.live.work.state.holdsQueue());
@@ -3476,7 +3523,6 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         }
         if (phase == .permission) {
             self.reading.prepared_action = self.job.result.action;
-            self.reading.prepared_summary = self.job.result.summary;
             if (self.reading.prepared_action == null) self.reading.phase = .activity;
         }
     }
@@ -4340,25 +4386,218 @@ test "a key on a draft changed since the latest frame acts on that draft's list 
     try std.testing.expect(held.screen.commands == null);
 }
 
-test "Tab focuses footer without completing a command and Enter still takes drawn command choices" {
+test "Tab accepts the drawn slash row exactly as Enter without submitting a Message" {
+    const Case = struct {
+        text: []const u8,
+        caret: ?usize = null,
+        cursor: ?usize = null,
+        down: bool = false,
+        draft: []const u8,
+        command: ?[]const u8 = null,
+    };
+    const cases = [_]Case{
+        .{ .text = "/eff", .draft = "/effort " },
+        .{ .text = "/r", .down = true, .draft = "/rename " },
+        .{ .text = "/set", .draft = "", .command = "/setup" },
+        .{ .text = "/setup --mo", .draft = "/setup --model " },
+        .{ .text = "/setup --permission-mode a", .draft = "", .command = "/setup --permission-mode ask" },
+        .{ .text = "/eff later", .caret = "/eff".len, .cursor = "/effort".len, .draft = "/effort later" },
+    };
+    for (cases) |case| for ([_][]const u8{ "\r", "\t", "\x1b[9u" }) |key| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        errdefer std.debug.print("row acceptance: text={s} key={any}\n", .{ case.text, key });
+        _ = self.input.append(case.text);
+        self.input.editors[self.input.active].setCursor(case.caret orelse case.text.len);
+        _ = try held.draw();
+        try std.testing.expect(self.shownRow(null) != null);
+        if (case.down) {
+            try held.keys("\x1b[B");
+            _ = try held.draw();
+        }
+        try held.keys(key);
+        try std.testing.expectEqualStrings(case.draft, self.input.composition().bytes);
+        try std.testing.expectEqual(case.cursor orelse case.draft.len, self.input.composition().cursor);
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try std.testing.expect(self.submission.intent == null);
+        if (case.command) |command| {
+            try std.testing.expectEqualStrings(command, self.input.takeCommand().?);
+            try std.testing.expect(self.input.takeCommand() == null);
+        } else try std.testing.expect(self.input.queuedCommand() == null);
+    };
+}
+
+test "Tab accepts drawn skill names and arguments at the caret exactly as Enter" {
+    const entries = [_]skill_suggestions.Entry{
+        .{ .name = "recap", .description = "Summarise" },
+        .{ .name = "review", .description = "Review a change" },
+    };
+    const Case = struct {
+        text: []const u8,
+        caret: ?usize = null,
+        down: bool = false,
+        draft: []const u8,
+        cursor: usize,
+    };
+    for ([_]Case{
+        .{ .text = "/rev", .draft = "/review ", .cursor = "/review ".len },
+        .{ .text = "Use /re", .down = true, .draft = "Use /review ", .cursor = "Use /review ".len },
+        .{ .text = "/rev this change", .caret = "/rev".len, .draft = "/review this change", .cursor = "/review".len },
+        .{ .text = "please /rev now", .caret = "please /rev".len, .draft = "please /review now", .cursor = "please /review".len },
+        .{ .text = "please /review now", .caret = "please /r".len, .draft = "please /review now", .cursor = "please /review".len },
+    }) |case| for ([_][]const u8{ "\r", "\t", "\x1b[9u" }) |key| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        errdefer std.debug.print("skill row acceptance: text={s} key={any}\n", .{ case.text, key });
+        defer _ = self.skills.reset();
+        try std.testing.expect(self.skills.answer(self.skills.ask("").?.read, .{ .entries = @constCast(&entries), .total = entries.len }, "") == null);
+        _ = self.input.append(case.text);
+        self.input.editors[self.input.active].setCursor(case.caret orelse case.text.len);
+        _ = try held.draw();
+        try std.testing.expect(self.shownRow(null) != null);
+        if (case.down) {
+            try held.keys("\x1b[B");
+            _ = try held.draw();
+        }
+        try held.keys(key);
+        try std.testing.expectEqualStrings(case.draft, self.input.composition().bytes);
+        try std.testing.expectEqual(case.cursor, self.input.composition().cursor);
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try std.testing.expect(self.submission.intent == null);
+        try std.testing.expect(self.input.queuedCommand() == null);
+    };
+}
+
+test "Tab cannot take a stale row after draft caret or skill source changes" {
+    const entries = [_]skill_suggestions.Entry{.{ .name = "review", .description = "Review" }};
+    const Change = enum { narrowed, changed, caret, source };
+    for ([_]Change{ .narrowed, .changed, .caret, .source }) |change| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        defer _ = self.skills.reset();
+        try std.testing.expect(self.skills.answer(self.skills.ask("").?.read, .{ .entries = @constCast(&entries), .total = entries.len }, "") == null);
+        _ = self.input.append("please /rev");
+        _ = try held.draw();
+        try std.testing.expect(self.shownRow(self.app_palette.drawn) != null);
+        switch (change) {
+            .narrowed => _ = self.input.append("i"),
+            .changed => {
+                self.input.clear();
+                _ = self.input.append("please /re");
+            },
+            .caret => self.input.editors[self.input.active].setCursor("please ".len),
+            .source => _ = self.skills.reset(),
+        }
+        const draft = self.input.composition();
+        const expected = try std.testing.allocator.dupe(u8, draft.bytes);
+        defer std.testing.allocator.free(expected);
+        try std.testing.expect(self.shownRow(self.app_palette.drawn) == null);
+        try held.keys("\t");
+        try std.testing.expectEqualStrings(expected, self.input.composition().bytes);
+        try std.testing.expectEqual(draft.cursor, self.input.composition().cursor);
+        try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
+        try std.testing.expect(self.submission.intent == null);
+        try std.testing.expect(self.input.queuedCommand() == null);
+    }
+}
+
+test "Tab takes the highlighted skill actually drawn while Enter retains pending arrow behavior" {
+    const entries = [_]skill_suggestions.Entry{
+        .{ .name = "recap", .description = "Summarise" },
+        .{ .name = "review", .description = "Review" },
+    };
+    for ([_][]const u8{ "\r", "\t", "\x1b[9u" }) |key| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        defer _ = self.skills.reset();
+        try std.testing.expect(self.skills.answer(self.skills.ask("").?.read, .{ .entries = @constCast(&entries), .total = entries.len }, "") == null);
+        _ = self.input.append("Use /re");
+        _ = try held.draw();
+        try held.keys("\x1b[B");
+        try held.keys(key);
+        try std.testing.expectEqualStrings(if (key[0] == '\r') "Use /review " else "Use /recap ", self.input.composition().bytes);
+        try std.testing.expect(self.submission.intent == null);
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+    }
+}
+
+test "Tab and pointer refuse effort rows from the previous model until repaint" {
+    for ([_]bool{ false, true }) |pointer| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        self.line.read = .{ .revision = 1, .end = 1 };
+        try self.line.model.set("unlisted-model");
+        _ = self.input.append("/effort ");
+        _ = try held.draw();
+        const pick = self.app_palette.drawn;
+        try std.testing.expectEqualStrings("none", self.screen.commands.?.list.entries[pick.index].word);
+        try self.line.model.set("gpt-4o");
+        if (pointer) {
+            var ctx = held.context();
+            try appSelectCommand(self, &ctx, pick);
+        } else try held.keys("\t");
+        try std.testing.expectEqualStrings("/effort ", self.input.composition().bytes);
+        try std.testing.expect(self.input.queuedCommand() == null);
+        try std.testing.expect(self.info_edit == null);
+        try std.testing.expect(self.submission.intent == null);
+        self.footer.focus = .input;
+        _ = try held.draw();
+        const fresh = self.app_palette.drawn;
+        try std.testing.expectEqualStrings("default", self.screen.commands.?.list.entries[fresh.index].word);
+        if (pointer) {
+            var ctx = held.context();
+            try appSelectCommand(self, &ctx, fresh);
+        } else try held.keys("\t");
+        try std.testing.expectEqualStrings("/effort default", self.input.takeCommand().?);
+        try std.testing.expectEqualStrings("", self.input.composition().bytes);
+        try std.testing.expect(self.submission.intent == null);
+    }
+}
+
+test "Tab outside a drawn slash row retains footer navigation and the draft" {
+    const Case = struct { text: []const u8, draw: bool = true, closed: bool = false, rejected: bool = false };
+    for ([_]Case{
+        .{ .text = "" },
+        .{ .text = "ordinary text" },
+        .{ .text = "/genuinely-unknown" },
+        .{ .text = "/rename my chat" },
+        .{ .text = "/eff", .draw = false },
+        .{ .text = "/eff", .closed = true },
+        .{ .text = "/eff", .rejected = true },
+    }) |case| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        _ = self.input.append(case.text);
+        if (case.draw) _ = try held.draw();
+        if (case.closed) self.screen.commands.?.close();
+        if (case.rejected) self.input.editors[self.input.active].rejected = .invalid;
+        try std.testing.expect(self.shownRow(null) == null);
+        try held.keys("\t");
+        try std.testing.expectEqualStrings(case.text, self.input.composition().bytes);
+        try std.testing.expectEqual(case.text.len, self.input.composition().cursor);
+        try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
+        try std.testing.expect(self.submission.intent == null);
+        try std.testing.expect(self.input.queuedCommand() == null);
+    }
+}
+
+test "pasted Tab beside a drawn row stays in the draft" {
     const held = try HeldFrontend.create();
     defer held.destroy();
-    const self = &held.self;
-    try held.settle();
-    try stepKeys(held, "/set");
-    // Tab visits only drawn controls: the footer draws Model once the line
-    // names one, and the narrow chat draws ‹ before it.
-    self.line.read = .{ .revision = 1, .end = 1 };
-    try self.line.model.set("gpt-5.5");
-    try held.frame();
-    try stepKeys(held, "\t\t");
-    try std.testing.expectEqualStrings("/set", self.input.composition().bytes);
-    try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
-    try held.keys("\x07");
-    try held.settle();
-    try held.keys("\r");
-    try std.testing.expectEqualStrings("/setup", self.input.takeCommand().?);
-    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+    _ = held.self.input.append("/eff");
+    _ = try held.draw();
+    try std.testing.expect(held.self.shownRow(null) != null);
+    try held.keys("\x1b[200~\t\x1b[201~");
+    try std.testing.expectEqualStrings("/eff\t", held.self.input.composition().bytes);
+    try std.testing.expectEqual(session_chrome.FooterFocus.input, held.self.footer.focus);
+    try std.testing.expect(held.self.submission.intent == null);
+    try std.testing.expect(held.self.input.queuedCommand() == null);
 }
 
 test "a key before a new Session's first frame finds no list the previous Session drew" {
@@ -4471,12 +4710,13 @@ test "the /requests page lists its rows over an empty draft, Enter takes a row a
     try std.testing.expectEqualStrings("/result " ++ original, held.screen.commands.?.list.entries[0].word);
     // Tab leaves the highlighted row and draft intact; Enter retains its action.
     try held.keys("\x1b[B");
-    // Tab visits only drawn controls: the footer draws Model once the line
-    // names one, and the narrow chat draws ‹ before it.
+    // Focus follows controls actually drawn: provide the Model control and
+    // render through Root. The narrow chat's Back control precedes Model.
     self.line.read = .{ .revision = 1, .end = 1 };
     try self.line.model.set("gpt-5.5");
     try held.frame();
     try held.keys("\t\t");
+    try std.testing.expectEqual(@as(usize, 1), held.screen.commands.?.highlight);
     try std.testing.expectEqualStrings("", self.input.composition().bytes);
     try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
     try held.keys("\x07\r");
@@ -4710,7 +4950,7 @@ test "Ctrl-R recovers only as Ctrl-R, never with Shift hidden by its reported te
 
 /// An overview that lent the terminal and says nothing under its input.
 const quiet_overview: Lender = .{ .context = undefined, .step = struct {
-    fn step(_: *anyopaque, _: protocol.session_work.Kind, _: overview_view.ConversationInput) !overview_view.ArchiveAdmission {
+    fn step(_: *anyopaque, _: protocol.session_work.Kind, _: overview_view.ConversationInput) !overview_view.IntentAdmission {
         return .refused;
     }
 }.step, .service = struct {
@@ -4742,7 +4982,7 @@ const FakeOverview = struct {
     stops: usize = 0,
     notice: ?[]const u8 = null,
 
-    fn step(raw: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) !overview_view.ArchiveAdmission {
+    fn step(raw: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) !overview_view.IntentAdmission {
         const fake: *FakeOverview = @ptrCast(@alignCast(raw));
         fake.notice = null;
         if (input != .stop) return .refused;
@@ -4965,11 +5205,11 @@ test "chat info owns typed keys before Host restart across every modal editor an
         switch (mode) {
             .rename => {
                 try std.testing.expect(page.renaming);
-                try std.testing.expectEqualStrings("Beforerra", page.rename_editor.buffer[0..page.rename_editor.length]);
+                try std.testing.expectEqualStrings("Beforerra", page.rename_editor.text());
             },
             .model => {
                 try std.testing.expect(page.model_choice.active);
-                try std.testing.expectEqualStrings("rra", page.model_choice.editor.buffer[0..page.model_choice.editor.length]);
+                try std.testing.expectEqualStrings("rra", page.model_choice.editor.text());
             },
             .rows => try std.testing.expect(!page.hasChoice()),
             .effort, .permissions, .tools => try std.testing.expect(page.panel.choice != null),
@@ -5027,8 +5267,8 @@ test "app settings starts the overview's run and keeps the original submission; 
     const held = try HeldFrontend.create();
     defer held.destroy();
     var overview: ArchiveOverview = .{ .state = undefined };
-    try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-    defer overview.state.deinit();
+    try overview.init();
+    defer overview.deinit();
     held.self.lender = overview.lender();
     const self = &held.self;
     const original = self.input.submitText("original indeterminate model input");
@@ -5143,8 +5383,8 @@ test "an Upgrade hold refuses commands without losing their drafts" {
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         const self = &held.self;
         _ = try overview_view.step(&overview.state, .start_upgrade);
@@ -5202,6 +5442,8 @@ test "upgrade quiescing reobservation and protocol holds refuse a fresh Message 
 const ArchiveOverview = struct {
     state: overview_view.State,
     archives: usize = 0,
+    pins: usize = 0,
+    pin_requested: ?bool = null,
     stops: usize = 0,
     host_inputs: usize = 0,
     cancels: usize = 0,
@@ -5209,11 +5451,20 @@ const ArchiveOverview = struct {
     archived: ?overview_view.Reference = null,
     requested: bool = true,
 
-    fn step(raw: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) !overview_view.ArchiveAdmission {
+    /// Starts the Overview in place: its lender points into `self`.
+    fn init(self: *ArchiveOverview) !void {
+        try self.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+    }
+
+    fn deinit(self: *ArchiveOverview) void {
+        self.state.deinit();
+    }
+
+    fn step(raw: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) !overview_view.IntentAdmission {
         const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
         switch (input) {
             .other, .cancel_upgrade, .upgrade_failed => {},
-            .stop, .archive, .unarchive => self.host_inputs += 1,
+            .stop, .archive, .unarchive, .pin => self.host_inputs += 1,
         }
         const effects = try overview_view.step(&self.state, .{ .conversed = .{ .reference = "k7m2qx".*, .work = work, .input = input } });
         for (effects.slice()) |effect| switch (effect) {
@@ -5222,11 +5473,16 @@ const ArchiveOverview = struct {
                 self.archived = request.reference;
                 self.requested = request.archived;
             },
+            .pin => |request| {
+                try std.testing.expectEqualStrings("k7m2qx", &request.reference);
+                self.pins += 1;
+                self.pin_requested = request.pinned;
+            },
             .stop => self.stops += 1,
             .cancel_upgrade => self.cancels += 1,
             else => return error.TestUnexpectedEffect,
         };
-        return effects.archive_admission;
+        return effects.intent_admission;
     }
 
     fn line(raw: *anyopaque, work: protocol.session_work.Kind) Lender.Said {
@@ -5257,8 +5513,8 @@ test "one settled stop read updates the chat and its list row without a listing"
     const held = fixture.held;
     const self = &held.self;
     var overview: ArchiveOverview = .{ .state = undefined };
-    try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-    defer overview.state.deinit();
+    try overview.init();
+    defer overview.deinit();
     _ = try overview_view.step(&overview.state, .{ .host = .{ .instance = @splat(0xab), .started_at = 1, .slots = 2, .slots_in_use = 0 } });
     const ref = "k7m2qx".*;
     const stopping: protocol.WorkState = .{ .stopping = .{ .since = 1 } };
@@ -5298,8 +5554,6 @@ test "one settled stop read updates the chat and its list row without a listing"
     const row = overview.state.find(ref).?;
     try std.testing.expectEqualDeep(stopped.state, overview.state.workOf(row).state);
     try std.testing.expectEqual(stopped.turn, overview.state.workOf(row).turn);
-    var detail: [overview_view.max_second_line_bytes]u8 = undefined;
-    try std.testing.expectEqualStrings("Stopped", overview_view.secondLine(&overview.state, row, &detail));
     try std.testing.expect(!ArchiveOverview.line(&overview, .stopped).stoppable);
     try std.testing.expectEqual(@as(usize, 0), overview.state.summary.counts.working);
 }
@@ -5309,8 +5563,8 @@ test "Alt-A archives the open conversation at once without submitting or changin
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         held.self.live.work.state = .{ .working = .{ .since = 1 } };
         const ticket: ?Input.Ticket = if (original) held.self.input.submitText("retained original") else null;
@@ -5336,8 +5590,8 @@ test "Alt-A and Ctrl-X during opening forward no intent and keep the draft" {
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         try sendKeys(&held.self, "keep draft\x1b[D");
         const revision = held.self.input.revision;
@@ -5367,8 +5621,8 @@ test "conversation slash archive archives a busy Session at once and consumes on
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         held.self.command = UnusedArchiveCommand.command;
         UnusedArchiveCommand.calls = 0;
@@ -5398,8 +5652,8 @@ test "conversation slash and shortcut archive restore share one pending or unkno
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         held.self.command = UnusedArchiveCommand.command;
         UnusedArchiveCommand.calls = 0;
@@ -5431,8 +5685,8 @@ test "Ctrl-X stops at once beside a typed slash archive, and Enter then archives
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         held.self.live.work.state = .{ .working = .{ .since = 1 } };
         try sendKeys(&held.self, "/archive\x18");
@@ -5447,7 +5701,7 @@ test "Ctrl-X stops at once beside a typed slash archive, and Enter then archives
 
 test "conversation slash archive errors propagate and consume only the submitted line" {
     const Failed = struct {
-        fn step(_: *anyopaque, _: protocol.session_work.Kind, input: overview_view.ConversationInput) !overview_view.ArchiveAdmission {
+        fn step(_: *anyopaque, _: protocol.session_work.Kind, input: overview_view.ConversationInput) !overview_view.IntentAdmission {
             if (input == .archive or input == .unarchive) return error.TestArchiveDispatchFailed;
             return .refused;
         }
@@ -5470,8 +5724,8 @@ test "upgrade holds classify every lender intent before forwarding and allow loc
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         overview.state.upgrade = heldUpgrade(hold, .{ .blocked, .reobserving });
         try held.self.converse(input);
@@ -5490,8 +5744,8 @@ test "upgrade holds refuse archive shortcuts and slash commands without consumin
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         held.self.live.work.state = switch (work) {
             .idle => .{ .idle = .{ .since = 1 } },
@@ -5540,8 +5794,8 @@ test "upgrade reobservation retains a refused archive command from the completio
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         try sendKeys(&held.self, line);
         try held.settle();
@@ -8748,8 +9002,8 @@ test "chat info Archive delegates once and settles only its exact Session answer
         const held = try HeldFrontend.createWithDrafts("k7m2qx", null);
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         try captureInfo(held, "Fix retry deadline");
         try held.keys("draft\x1bi");
@@ -8783,8 +9037,8 @@ test "chat info archive admission refuses full and unresolved ledgers without tr
         const held = try HeldFrontend.createWithDrafts("k7m2qx", null);
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         if (full) {
             for (&overview.state.requests, 0..) |*request, i| {
@@ -8848,7 +9102,7 @@ test "chat info archive admission refuses full and unresolved ledgers without tr
 
 test "chat info archive owner errors propagate instead of becoming ordinary admission refusals" {
     const Failed = struct {
-        fn step(_: *anyopaque, _: protocol.session_work.Kind, _: overview_view.ConversationInput) !overview_view.ArchiveAdmission {
+        fn step(_: *anyopaque, _: protocol.session_work.Kind, _: overview_view.ConversationInput) !overview_view.IntentAdmission {
             return error.TestArchiveDispatchFailed;
         }
     };
@@ -8915,7 +9169,7 @@ test "chat info Configure and Copy admission either owns work or refuses before 
         const result = if (effect == edits.len) backend.copy_last_answer(backend.context, &ctx) else backend.configure(backend.context, edits[effect]);
         if (hold != .none) {
             try std.testing.expectError(error.Busy, result);
-            try std.testing.expectEqual(overview_view.ArchiveAdmission.refused, try backend.archive(backend.context));
+            try std.testing.expectEqual(overview_view.IntentAdmission.refused, try backend.archive(backend.context));
             try std.testing.expectEqual(before_effect, self.info_effect);
             try std.testing.expectEqualDeep(before_edit, self.info_edit);
             try std.testing.expectEqualDeep(before_command, self.input.queuedCommand());
@@ -9012,8 +9266,8 @@ test "chat info retains Session stop and archive bindings in full-page and stand
         const held = try HeldFrontend.createWithDrafts("k7m2qx", null);
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         held.self.live.work.state = .{ .working = .{ .since = 1 } };
         try captureInfo(held, "Fix retry deadline");
@@ -9277,6 +9531,48 @@ test "chat info repair details never overwrite the active reader staging file" {
     try std.testing.expect(self.reader.thread != null and !self.reader.completed());
 }
 
+test "chat input surface grows with draft while rules and footer stay plain in both themes" {
+    for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 } }) |size| {
+        for ([_]?overview_view.Rgb{ null, .{ 255, 255, 255 } }) |background| {
+            for ([_]overview_view.Caps.Depth{ .direct, .indexed, .none }) |depth| {
+                for ([_][]const u8{ "", "first line\nsecond line\nthird line" }) |draft| {
+                    for ([_]bool{ false, true }) |list_focused| {
+                        const held = try HeldFrontend.create();
+                        defer held.destroy();
+                        held.size = .{ .width = size.width, .height = size.height };
+                        held.root.size = size;
+                        held.self.app_caps = .{ .background = background, .depth = depth };
+                        try held.keys("\x1b[200~");
+                        try held.keys(draft);
+                        try held.keys("\x1b[201~");
+                        try std.testing.expectEqualStrings(draft, held.self.input.composition().bytes);
+                        held.root.input.area = if (list_focused) .list else .main;
+                        const surface = try held.draw();
+                        var rendered: vaxis.Screen = try .init(held.arena.allocator(), .{ .rows = size.height, .cols = size.width, .x_pixel = 0, .y_pixel = 0 });
+                        try surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = size.width, .height = size.height, .screen = &rendered }, held.self.app_input.composer.widget());
+                        const input_style = style.of(held.self.app_caps, .{ .background = .input_surface });
+                        const quiet_input = style.of(held.self.app_caps, .{ .colour = .quiet, .background = .input_surface });
+                        const plain = style.of(held.self.app_caps, .{ .colour = .quiet });
+                        const rows: u16 = if (draft.len == 0) 1 else 3;
+                        const first = size.height - rows - 2;
+                        for (0..size.width) |col| {
+                            for (first..first + rows) |row| {
+                                const actual = rendered.readCell(@intCast(col), @intCast(row)).?.style.bg;
+                                try std.testing.expectEqual(input_style.bg, actual);
+                            }
+                            for ([_]u16{ first - 1, size.height - 2, size.height - 1 }) |row| try std.testing.expectEqual(plain.bg, rendered.readCell(@intCast(col), @intCast(row)).?.style.bg);
+                        }
+                        const prompt = rendered.readCell(1, first).?;
+                        try std.testing.expectEqual(if (list_focused) quiet_input.fg else input_style.fg, prompt.style.fg);
+                        if (draft.len != 0) try std.testing.expectEqual(input_style.fg, rendered.readCell(3, first).?.style.fg);
+                        try std.testing.expectEqual(plain.fg, rendered.readCell(size.width - 1, size.height - 1).?.style.fg);
+                    }
+                }
+            }
+        }
+    }
+}
+
 test "chat info supplies the one bottom footer after the input and both dividers" {
     for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 } }) |size| for ([_]bool{ false, true }) |choice| {
         const held = try HeldFrontend.create();
@@ -9326,6 +9622,52 @@ test "chat info supplies the one bottom footer after the input and both dividers
     };
 }
 
+test "App Session palette total budget stays input anchored without reserving feed rows" {
+    const Find = struct {
+        fn widget(surface: vxfw.Surface, target: vxfw.Widget) ?vxfw.SubSurface {
+            if (surface.widget.eql(target)) return .{ .origin = .{ .row = 0, .col = 0 }, .surface = surface };
+            for (surface.children) |child| {
+                var found = @This().widget(child.surface, target) orelse continue;
+                found.origin.row += child.origin.row;
+                found.origin.col += child.origin.col;
+                return found;
+            }
+            return null;
+        }
+    };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const before = try held.draw();
+    const input_before = Find.widget(before, held.self.app_input.widget()).?;
+    const feed_before = held.self.app_content.size;
+    try held.keys("/");
+    const after = try held.draw();
+    try std.testing.expectEqual(input_before.origin, Find.widget(after, held.self.app_input.widget()).?.origin);
+    try std.testing.expectEqual(feed_before, held.self.app_content.size);
+    try std.testing.expect(!held.self.app_screen.overlay_reserves_space);
+    held.screen.commands.?.highlight = held.screen.commands.?.list.count - 1;
+    for (1..49) |height| {
+        held.size.height = @intCast(height);
+        const surface = try held.draw();
+        const input = Find.widget(surface, held.self.app_input.widget()).?;
+        const panel = Find.widget(surface, held.self.app_palette.widget()).?;
+        const limit = @max(1, height / 3 -| 1);
+        try std.testing.expectEqual(limit, held.self.app_palette.max_height);
+        try std.testing.expect(panel.surface.size.height <= limit);
+        try std.testing.expectEqual(input.origin.row, panel.origin.row + panel.surface.size.height);
+        if (input.origin.row == 0) {
+            try std.testing.expectEqual(@as(u16, 0), panel.surface.size.height);
+            try std.testing.expectEqual(.hidden, held.screen.commands.?.seen);
+        } else {
+            try std.testing.expect(panel.surface.size.height > 0);
+            try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
+            const index = held.screen.commands.?.highlight - held.self.app_palette.first;
+            const rect = held.self.app_palette.hover.targets[index];
+            try std.testing.expect(panel.surface.readCell(@intCast(rect.col), @intCast(rect.row)).style.reverse);
+        }
+    }
+}
+
 test "App Session palette clicks follow Enter for command words options and values and retain hover across frames" {
     const Case = struct { draft: []const u8, word: []const u8, after: []const u8, queued: ?[]const u8 = null, notice: ?[]const u8 = null };
     for ([_]Case{
@@ -9346,10 +9688,11 @@ test "App Session palette clicks follow Enter for command words options and valu
         const index = for (shown.list.shown(), 0..) |entry, index| {
             if (std.mem.eql(u8, case.word, entry.word)) break index;
         } else return error.TestExpectedRow;
-        shown.highlight = if (index == 0) shown.list.count - 1 else 0;
+        shown.highlight = @min(index + 1, shown.list.count - 1);
         const selected = shown.highlight;
         _ = try held.draw();
-        const row: i16 = @intCast(index - held.self.app_palette.first);
+        const target = held.self.app_palette.hover.targets[index - held.self.app_palette.first];
+        const row: i16 = @intCast(target.row);
         const widget_ = held.self.app_palette.widget();
         var events = held.context();
         try widget_.handleEvent(&events, .mouse_enter);
@@ -9363,7 +9706,7 @@ test "App Session palette clicks follow Enter for command words options and valu
             try std.testing.expect(!cell.style.reverse);
             try std.testing.expectEqual(held.self.app_palette.hover_style.bg, cell.style.bg);
             try std.testing.expectEqual(held.self.app_palette.hover_style.ul_style, cell.style.ul_style);
-            try std.testing.expect(palette.readCell(2, @intCast(selected - held.self.app_palette.first)).style.reverse);
+            try std.testing.expect(palette.readCell(2, @intCast(held.self.app_palette.hover.targets[selected - held.self.app_palette.first].row)).style.reverse);
         }
         try std.testing.expectEqual(selected, held.screen.commands.?.highlight);
         try std.testing.expectEqualStrings(case.draft, held.self.input.composition().bytes);
@@ -9390,7 +9733,8 @@ test "App Session palette refuses clicks on stale drafts closed lists and during
     _ = try held.draw();
     const widget_ = held.self.app_palette.widget();
     var events = held.context();
-    const click: vxfw.Event = .{ .mouse = .{ .col = 2, .row = 0, .button = .left, .type = .press, .mods = .{} } };
+    const target = held.self.app_palette.hover.targets[0];
+    const click: vxfw.Event = .{ .mouse = .{ .col = @intCast(target.col), .row = @intCast(target.row), .button = .left, .type = .press, .mods = .{} } };
     try held.keys("en"); // The drawn /reload-skills row is not the new /rename row.
     try widget_.handleEvent(&events, click);
     try std.testing.expectEqualStrings("/ren", held.self.input.composition().bytes);
@@ -9431,10 +9775,10 @@ test "App Session palette clicks requests rows with an empty draft as Enter does
     var events = held.context();
     const widget_ = held.self.app_palette.widget();
     try widget_.handleEvent(&events, .mouse_enter);
-    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 2, .button = .none, .type = .motion, .mods = .{} } });
     try std.testing.expectEqual(@as(usize, 0), held.screen.commands.?.highlight);
     try widget_.handleEvent(&events, .mouse_leave);
-    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 1, .button = .left, .type = .press, .mods = .{} } });
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 2, .button = .left, .type = .press, .mods = .{} } });
     try std.testing.expectEqualStrings("/result " ++ older, held.self.input.queuedCommand().?);
     try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
 }
@@ -9463,13 +9807,13 @@ test "App Session palette clicks replace the caret skill without sending or movi
     const widget_ = held.self.app_palette.widget();
     var events = held.context();
     try widget_.handleEvent(&events, .mouse_enter);
-    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 2, .button = .none, .type = .motion, .mods = .{} } });
     _ = try held.draw();
     try std.testing.expectEqual(@as(usize, 0), held.screen.commands.?.highlight);
     try std.testing.expectEqualStrings("please /re now", held.self.input.composition().bytes);
     for (events.cmds.items) |command| try std.testing.expect(command != .request_focus);
     try widget_.handleEvent(&events, .mouse_leave);
-    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 1, .button = .left, .type = .press, .mods = .{} } });
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 2, .button = .left, .type = .press, .mods = .{} } });
     try std.testing.expectEqualStrings("please /review now", held.self.input.composition().bytes);
     try std.testing.expectEqual("please /review".len, held.self.input.composition().cursor);
     try std.testing.expectEqual(null, held.self.input.queuedCommand());
@@ -10068,7 +10412,7 @@ test "App Session Left on an empty draft alone focuses the list while Esc leaves
         held.root.size = .{ .width = width, .height = 30 };
         _ = try held.draw();
         _ = held.self.input.append(draft.bytes);
-        held.self.input.editors[held.self.input.active].cursor = draft.cursor;
+        held.self.input.editors[held.self.input.active].setCursor(draft.cursor);
         try held.keys(switch (key) {
             .left => "\x1b[D",
             .escape => "\x1b",
@@ -10196,14 +10540,14 @@ test "App Session paste completion preserves retained draft caret after empty ne
         held.root.size = .{ .width = width, .height = 30 };
         _ = try held.draw();
         _ = held.self.input.append("ab");
-        held.self.input.editors[held.self.input.active].cursor = cursor;
+        held.self.input.editors[held.self.input.active].setCursor(cursor);
         held.root.input.area = if (list_focused) .list else .main;
         try held.keys("\x1b[200~");
-        try std.testing.expectEqual(!list_focused, held.self.input.editors[held.self.input.active].pasting);
+        try std.testing.expectEqual(!list_focused, held.self.input.editors[held.self.input.active].pasting());
         try held.keys(paste);
         try held.keys("\x1b[201~");
         try std.testing.expect(!held.root.input.pasting);
-        try std.testing.expect(!held.self.input.editors[held.self.input.active].pasting);
+        try std.testing.expect(!held.self.input.editors[held.self.input.active].pasting());
         try std.testing.expect(held.self.submission.intent == null and held.self.input.submitted == null);
         // The list has no editor: a paste there cannot alter the hidden chat.
         var pasted: [32]u8 = undefined;
@@ -10256,7 +10600,85 @@ test "every listed chat command dispatches to its existing owner" {
         .{ "/requests", Slash{ .inspection = .requests } },           .{ "/result key", Slash{ .inspection = .command } },
         .{ "/reload-skills", Slash{ .inspection = .command } },       .{ "/new", Slash.new_session },
         .{ "/clear", Slash.new_session },                             .{ "/model", Slash.model },
+        .{ "/pin", Slash{ .pin = true } },                            .{ "/unpin", Slash{ .pin = false } },
         .{ "/configurex", Slash.unknown },
     };
     inline for (cases) |case| try std.testing.expectEqualDeep(case[1], parse(case[0]));
+}
+
+test "conversation slash pin and unpin share organization admission without model or command dispatch" {
+    for ([_]bool{ false, true }) |pinned| for ([_]bool{ false, true }) |completion| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        var overview: ArchiveOverview = .{ .state = undefined };
+        try overview.init();
+        defer overview.deinit();
+        held.self.lender = overview.lender();
+        held.self.command = UnusedArchiveCommand.command;
+        UnusedArchiveCommand.calls = 0;
+        const original = held.self.input.submitText("retained original");
+        const line = if (pinned) (if (completion) "/pi" else "/pin") else (if (completion) "/unp" else "/unpin");
+        try sendKeys(&held.self, line);
+        if (completion) try held.settle();
+        try sendKeys(&held.self, "\r");
+        try std.testing.expectEqual(@as(usize, 1), overview.pins);
+        try std.testing.expectEqual(pinned, overview.pin_requested.?);
+        try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+        try std.testing.expectEqualStrings("retained original", try held.self.input.message(original));
+        try std.testing.expect(held.self.input.queuedCommand() == null);
+        try std.testing.expect(held.self.submission.view() == null);
+        try std.testing.expectEqual(@as(usize, 0), UnusedArchiveCommand.calls);
+        _ = try overview_view.step(&overview.state, .{ .pin = .{ .request = .{ .reference = "k7m2qx".*, .pinned = pinned }, .outcome = .{ .unconfirmed = "saved-pin-handle" } } });
+        try sendKeys(&held.self, if (pinned) "/unpin\r" else "/pin\r");
+        try std.testing.expectEqual(@as(usize, 1), overview.pins);
+        try std.testing.expectEqual(@as(usize, 1), overview.state.request_count);
+        var buffer: [1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try overview_view.writeDeparture(&overview.state, null, &writer);
+        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "rui request recover saved-pin-handle") != null);
+    };
+}
+
+test "App Session quote gesture preserves the caret and cancels under Escape modal and footer input" {
+    const Pointer = @import("testing/app_events.zig");
+    const Case = enum { insert, escape, modal, footer, input };
+    for (std.enums.values(Case)) |case| {
+        var fixture: ChromeFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const self = fixture.self;
+        self.screen.feed.trim(self.screen.feed.count, 0);
+        var document: viewport.Sized(128, true) = .{};
+        try document.append(TerminalText.body_on ++ "quoted source\n" ++ TerminalText.body_off);
+        try document.prepare();
+        try self.screen.feed.append(&.{.{ .key = .{ .position = 1 }, .text = feed_window.Text.fromDocument(&document) }});
+        self.screen.anchor.follow();
+        _ = self.input.append("leftRIGHT");
+        self.input.editors[self.input.active].setCursor(4);
+        const rows = try fixture.rows();
+        const row = ChromeFixture.find(&rows, "quoted source").?;
+        const frame = try fixture.draw();
+        const start_row = switch (case) {
+            .footer => 23,
+            .input => 22,
+            else => row,
+        };
+        try Pointer.mouse(&fixture.ctx, frame, .{ .row = @intCast(start_row), .col = 1, .type = .press, .button = .left, .mods = .{ .alt = true } });
+        try Pointer.mouse(&fixture.ctx, frame, .{ .row = @intCast(row), .col = 13, .type = .drag, .button = .left, .mods = .{ .alt = true } });
+        switch (case) {
+            .escape => try fixture.press(.{ .codepoint = vaxis.Key.escape }),
+            .modal => {
+                self.info_open = true;
+                _ = try fixture.draw();
+            },
+            else => {},
+        }
+        try Pointer.mouse(&fixture.ctx, frame, .{ .row = @intCast(row), .col = 13, .type = .release, .button = .left, .mods = .{ .alt = true } });
+        try std.testing.expectEqualStrings(if (case == .insert) "left\n> quoted source\nRIGHT" else "leftRIGHT", self.input.composition().bytes);
+        try std.testing.expectEqual(null, self.input.submitted);
+        try std.testing.expectEqual(null, self.submission.intent);
+        try std.testing.expectEqual(null, self.leaving);
+        for (fixture.ctx.cmds.items) |command| try std.testing.expect(command != .copy_to_clipboard);
+        if (case == .insert) try std.testing.expectEqual(@as(usize, "left\n> quoted source\n".len), self.input.composition().cursor);
+    }
 }

@@ -222,7 +222,7 @@ pub const OutputMetadataReader = struct {
     offset: u64 = 0,
     length: u64,
 
-    pub fn init(io: std.Io, file: std.Io.File, _: u64) !OutputMetadataReader {
+    pub fn init(io: std.Io, file: std.Io.File) !OutputMetadataReader {
         const length = try file.length(io);
         return .{ .io = io, .file = file, .length = length };
     }
@@ -449,7 +449,7 @@ test "a metadata record's replay-rule byte is set only on a reasoning item recor
         const file = try tmp.dir.createFile(std.testing.io, "record", .{ .read = true, .truncate = true });
         defer file.close(std.testing.io);
         try file.writeStreamingAll(std.testing.io, &bytes);
-        var reader = try OutputMetadataReader.init(std.testing.io, file, 1);
+        var reader = try OutputMetadataReader.init(std.testing.io, file);
         const valid = flag == 0 or (flag == 1 and tag == .item and kind == .reasoning);
         if (reader.next()) |record| {
             try std.testing.expect(valid);
@@ -473,7 +473,7 @@ test "an action record holds its action and outcome, only on a web search call" 
         const file = try tmp.dir.createFile(std.testing.io, "record", .{ .read = true, .truncate = true });
         defer file.close(std.testing.io);
         try file.writeStreamingAll(std.testing.io, &bytes);
-        var reader = try OutputMetadataReader.init(std.testing.io, file, 1);
+        var reader = try OutputMetadataReader.init(std.testing.io, file);
         const valid = switch (tag) {
             .action => kind == .web_search_call and action <= 3,
             .pattern => kind == .web_search_call and action == 0 and failed == 0,

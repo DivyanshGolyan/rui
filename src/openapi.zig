@@ -149,6 +149,14 @@ pub const routes = [_]Route{
         .conflict = jsonReply(.{protocol.session_archive_reply.conflict}),
     },
     .{
+        .path = protocol.CommandKind.session_pin.route(),
+        .kind = .session_pin,
+        .summary = "Pins or unpins a Session without changing its work. Retried by its key.",
+        .variants = &.{variant(protocol.session_pin_request.all, .{})},
+        .reply = jsonReply(.{ protocol.session_pin_reply.accepted, protocol.session_pin_reply.rejected }),
+        .conflict = jsonReply(.{protocol.session_pin_reply.conflict}),
+    },
+    .{
         .path = protocol.CommandKind.model_interruption.route(),
         .kind = .model_interruption,
         .summary = "Interrupts one model Operation. Retried by its key.",
@@ -163,6 +171,13 @@ pub const routes = [_]Route{
         .variants = &.{variant(protocol.permission_decision_request, .{})},
         .reply = jsonReply(.{ protocol.permission_decision_reply.accepted, protocol.permission_decision_reply.rejected }),
         .conflict = jsonReply(.{protocol.permission_decision_reply.conflict}),
+    },
+    .{
+        .path = "/v1/read-action",
+        .kind = .read_action,
+        .summary = "Reads one Session-owned Action's status and one bounded final-result window without waiting or consuming it.",
+        .variants = &.{variant(protocol.read_action_request.head ++ .{Optional(protocol.read_action_request.offset)} ++ protocol.read_action_request.tail, .{})},
+        .reply = jsonReply(.{ protocol.action_read_reply.head ++ protocol.action_read_reply.pending, protocol.action_read_reply.head ++ protocol.action_read_reply.final }),
     },
     .{
         .path = "/v1/observe-command",
@@ -487,6 +502,7 @@ fn observationSchema(d: *Document) anyerror!Value {
             .message => o.message_variants,
             .session_stop => .{ .{}, o.session_stop },
             .session_archive => .{ .{}, o.session_archive },
+            .session_pin => .{ .{}, o.session_pin },
             .model_interruption => .{ .{}, o.model_interruption },
             .permission_decision => .{ .{}, o.permission_decision },
         };
@@ -1205,10 +1221,6 @@ fn camel(arena: std.mem.Allocator, snake: []const u8) ![]const u8 {
 /// Writes `shape` with an example value in each hole: the hole's default,
 /// or the JSON `examples` gives for its index, as `.{ index, json }` pairs.
 /// A third entry overrides the example when optional members are absent.
-pub fn writeExample(out: *std.Io.Writer, comptime shape: anytype, comptime examples: anytype) !void {
-    return writeExampleWith(out, shape, examples, true);
-}
-
 fn writeExampleWith(out: *std.Io.Writer, comptime shape: anytype, comptime examples: anytype, optional: bool) anyerror!void {
     return writeExampleFrom(out, shape, examples, optional, 0);
 }
@@ -1703,6 +1715,24 @@ test "replies the Host renders conform to their schemas" {
     // Render the real request refusal, including its advisory server names.
     const reply = @import("command_reply.zig");
     const host_reply = @import("host_reply.zig");
+    const action_read = @import("action_read.zig");
+    const action = try a.create(action_read.Read);
+    action.* = .{ .session = .{}, .action_id = 1, .status = .{ .pending = .queued } };
+    try action.session.set("k7m2qx");
+    for (std.enums.values(action_read.PendingState)) |state| {
+        action.status = .{ .pending = state };
+        try host_reply.renderActionRead(.{ .writer = &out.writer }, action);
+        try Case.check(schemas, "ReadActionReply", out.written(), a);
+        out.clearRetainingCapacity();
+    }
+    action.status = .{ .resolved = .{
+        .resolution = .{ .position = 2, .code = .{}, .content = .{ .length = 0, .digest = protocol.contentDigest("") } },
+        .window = .{ .offset = 0, .next = 0, .more = false, .text = .{} },
+    } };
+    try action.status.resolved.resolution.code.set("succeeded");
+    try host_reply.renderActionRead(.{ .writer = &out.writer }, action);
+    try Case.check(schemas, "ReadActionReply", out.written(), a);
+    out.clearRetainingCapacity();
     var configured: reply.ConfigureReply = .{ .rejected = .{ .replayed = false, .code = .mcp_server_unavailable } };
     var host_tool_set = @import("tools.zig").built_in_tool_set;
     host_tool_set.configured_servers = &.{"notes"};
@@ -1838,7 +1868,7 @@ test "statuses, media types and required headers match what the Host sends" {
     var document: Document = .init(arena.allocator());
     const built = try document.build();
     const paths = built.object.get("paths").?.object;
-    const mutations = [_]protocol.CommandKind{ .configure, .message, .session_stop, .session_archive, .model_interruption, .permission_decision };
+    const mutations = [_]protocol.CommandKind{ .configure, .message, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision };
     for (mutations) |kind| {
         const responses = paths.get(kind.route()).?.object.get("post").?.object.get("responses").?.object;
         try std.testing.expect(responses.contains("409"));

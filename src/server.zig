@@ -445,6 +445,7 @@ const Intake = struct {
                         .host_pause => protocol.max_host_pause_request_bytes,
                         .session_stop => protocol.max_session_stop_request_bytes,
                         .session_archive => protocol.max_session_archive_request_bytes,
+                        .session_pin => protocol.max_session_pin_request_bytes,
                         .model_interruption => protocol.max_model_interruption_request_bytes,
                         .permission_decision => protocol.max_permission_decision_request_bytes,
                         else => std.math.maxInt(u64),
@@ -1620,10 +1621,12 @@ const Route = enum {
     message,
     session_stop,
     session_archive,
+    session_pin,
     model_interruption,
     permission_decision,
     observe,
     read_result,
+    read_action,
     read_action_call_id,
     read_action_arguments,
     inspect,
@@ -1638,7 +1641,7 @@ const Route = enum {
     unsupported_control,
 
     fn isControl(self: Route) bool {
-        return self == .host_stop or self == .host_pause or self == .session_stop or self == .session_archive or self == .model_interruption or self == .permission_decision or self == .unsupported_control;
+        return self == .host_stop or self == .host_pause or self == .session_stop or self == .session_archive or self == .session_pin or self == .model_interruption or self == .permission_decision or self == .unsupported_control;
     }
 
     /// Answered on the listener from atomics and fixed values alone,
@@ -1878,6 +1881,17 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderSessionArchiveReply, .{ command.session.slice(), result });
             fd.timing = timing;
         },
+        .session_pin => |*command| {
+            var timing = ControlTiming.init(host, command.key, "session_pin", accepted_at_ns);
+            const result = host.store.pinSession(command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
+            if (result == .infrastructure_failure) {
+                fenceDispatch(host, "Session pin save", error.CanonicalStoreFailure);
+            }
+            if (result == .accepted) publishControlHint(host, command.key.slice());
+            if (header.drop == .after_commit and result != .infrastructure_failure) return;
+            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderSessionPinReply, .{ command.session.slice(), result });
+            fd.timing = timing;
+        },
         .model_interruption => |*command| {
             var timing = ControlTiming.init(host, command.key, "model_interruption", accepted_at_ns);
             const result = host.store.interruptModel(command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
@@ -1932,6 +1946,19 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
             };
             try fd.setContent(location, 0, true, false);
+        },
+        .read_action => |*command| {
+            const value = try createUnfilled(host.allocator, @import("action_read.zig").Read);
+            defer host.allocator.destroy(value);
+            host.store.readAction(command, value) catch |err| switch (err) {
+                error.ActionNotFound => return respondStatic(fd, 404, .action_unavailable, "action_not_found"),
+                error.InvalidCursor => return respondStatic(fd, 400, .action_unavailable, "invalid_cursor"),
+                else => {
+                    fenceDispatch(host, "Action status observation", err);
+                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+                },
+            };
+            try fd.json(200, protocol.action_read_reply.max_bytes, host_reply.renderActionRead, .{value});
         },
         .read_action_arguments => |*command| deliverActionContent(host, fd, command, false),
         .read_action_call_id => |*command| deliverActionContent(host, fd, command, true),
@@ -2202,6 +2229,8 @@ const HeaderReader = struct {
             .observe
         else if (std.mem.eql(u8, path, "/v1/read-result"))
             .read_result
+        else if (std.mem.eql(u8, path, "/v1/read-action"))
+            .read_action
         else if (std.mem.eql(u8, path, "/v1/read-action-call-id"))
             .read_action_call_id
         else if (std.mem.eql(u8, path, "/v1/read-action-arguments"))
@@ -2346,11 +2375,11 @@ fn expectMutationFieldPresence(body: []const u8, status: u16, session: []const u
     }
 }
 
-test "mutation decoder validates all six actual producers and preserved domain answers" {
+test "mutation decoder validates every actual producer and preserved domain answers" {
     const protocol_reply = @import("protocol_reply.zig");
     const session = "k7m2qx";
     const content: store_module.ContentReference = .{ .length = 9, .digest = protocol.contentDigest("seven\nµ!") };
-    inline for (.{ host_reply.renderConfigureReply, host_reply.renderMessageReply, host_reply.renderSessionStopReply, host_reply.renderModelInterruptionReply, host_reply.renderPermissionDecisionReply, host_reply.renderSessionArchiveReply }, 0..) |render, index| {
+    inline for (.{ host_reply.renderConfigureReply, host_reply.renderMessageReply, host_reply.renderSessionStopReply, host_reply.renderModelInterruptionReply, host_reply.renderPermissionDecisionReply, host_reply.renderSessionArchiveReply, host_reply.renderSessionPinReply }, 0..) |render, index| {
         const MutationReply = @typeInfo(@TypeOf(render)).@"fn".param_types[2].?;
         var named: protocol.Bounded(protocol.max_session_bytes) = .{};
         try named.set(session);
@@ -2366,6 +2395,7 @@ test "mutation decoder validates all six actual producers and preserved domain a
             3 => .{ .model_interruption = .{ .turn = 3, .operation = 11 } },
             4 => .{ .permission_decision = .{ .action = 7, .decision = .deny } },
             5 => .{ .session_archive = .{ .archived = true } },
+            6 => .{ .session_pin = .{ .pinned = false } },
             else => unreachable,
         };
         const accepted: MutationReply = switch (index) {
@@ -2374,6 +2404,7 @@ test "mutation decoder validates all six actual producers and preserved domain a
             2 => .{ .accepted = .{ .replayed = true, .selection = .{ .selected_turn_id = 19, .admission_cutoff = 23 }, .completion = .pending } },
             3, 4 => .{ .accepted = .{ .replayed = true } },
             5 => .{ .accepted = .{ .replayed = true, .archived = true, .completion = .pending } },
+            6 => .{ .accepted = .{ .replayed = true, .pinned = false } },
             else => unreachable,
         };
         const rejected: MutationReply = if (index == 1)
@@ -2414,6 +2445,7 @@ test "mutation decoder validates all six actual producers and preserved domain a
                         try std.testing.expect(value.archived);
                         try std.testing.expectEqual(.pending, value.completion);
                     },
+                    .session_pin => |value| try std.testing.expect(!value.pinned),
                     .model_interruption, .permission_decision => {},
                 };
             }
@@ -3071,7 +3103,7 @@ test "reply delivery interrupted poll consumes the existing inactivity budget" {
 
 test "delayed control replies retain command identity after request storage reuse" {
     const native = @import("posix");
-    inline for (.{ "session_stop", "session_archive", "model_interruption", "permission_decision" }) |kind| {
+    inline for (.{ "session_stop", "session_archive", "session_pin", "model_interruption", "permission_decision" }) |kind| {
         var descriptors: [2]c_int = undefined;
         try std.testing.expectEqual(@as(c_int, 0), native.pipe(&descriptors));
         defer _ = native.close(descriptors[0]);
@@ -3538,6 +3570,7 @@ test "retired reserved exchanges cannot block their successors while workers are
                 .host_pause => "control/host-pause",
                 .session_stop => "control/session-stop",
                 .session_archive => "control/session-archive",
+                .session_pin => "control/session-pin",
                 .model_interruption => "control/model-interruption",
                 .permission_decision => "control/permission-decision",
                 .unsupported_control => "control/unknown",

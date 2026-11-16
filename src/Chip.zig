@@ -2,16 +2,17 @@
 //! retries`, `+2 more running · info`. A press and release on it runs
 //! `on_click`, the same action as its key; moving off before release
 //! cancels. Hover changes only its look and the pointer shape. Mouse events never
-//! take keyboard focus; Enter is delivered by the screen focus owner.
+//! take keyboard focus; the screen focus owner invokes `activate`.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
+const Hover = @import("widgets/Hover.zig");
 const Self = @This();
 
 label: []const u8,
 style: vaxis.Style = .{},
 /// While the pointer is over it.
-hover: vaxis.Style = .{ .ul_style = .single },
+hover: vaxis.Style = Hover.underlined(.{}),
 method: vaxis.gwidth.Method = .unicode,
 userdata: *anyopaque,
 on_click: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
@@ -29,13 +30,16 @@ pub fn width(self: *const Self) u16 {
     return @intCast(@min(vaxis.gwidth.gwidth(self.label, self.method), std.math.maxInt(u16)));
 }
 
+/// Runs the semantic action selected by the screen focus owner.
+pub fn activate(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    ctx.consumeAndRedraw();
+    try self.on_click(self.userdata, ctx);
+}
+
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (input) {
-        .key_press => |key| if (key.matches(vaxis.Key.enter, .{})) {
-            ctx.consumeAndRedraw();
-            try self.on_click(self.userdata, ctx);
-        },
         .mouse => |mouse| {
             if (mouse.button == .left and mouse.type == .press) {
                 self.pressed = true;

@@ -362,7 +362,7 @@ def main():
             assert status(store) == "owned_unavailable"
             assert host.poll() is None, "acknowledgement was mistaken for completion"
             contender = subprocess.run(
-                [RUI, "host", "serve", "--store", store, "--active-capacity", "1"],
+                [RUI, "host", "serve", "--store", store, "--set", 'execution.activeCapacity=1', "--set", "providers={}"],
                 capture_output=True, timeout=10,
             )
             assert contender.returncode != 0 and b"ready " not in contender.stdout, contender

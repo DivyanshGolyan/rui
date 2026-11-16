@@ -25,6 +25,23 @@ pub const Rect = struct {
     }
 };
 
+/// `style` under the pointer: of `hover` only its background, reverse and
+/// underline apply, so the drawn foreground stays.
+pub fn look(style: vaxis.Style, hover: vaxis.Style) vaxis.Style {
+    var drawn = style;
+    drawn.bg = hover.bg;
+    drawn.reverse = hover.reverse;
+    drawn.ul_style = hover.ul_style;
+    return drawn;
+}
+
+/// A chip's hover look: its own style, underlined.
+pub fn underlined(style: vaxis.Style) vaxis.Style {
+    var drawn = style;
+    drawn.ul_style = .single;
+    return drawn;
+}
+
 const Point = struct { col: i17, row: i17 };
 point: ?Point = null,
 pointing: bool = false,

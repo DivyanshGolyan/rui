@@ -238,6 +238,7 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
     };
     // K10 is the 66 -> 67 transition, even after later formats append steps.
     const from: u32 = 66;
+    try dropPinOrganization(storage);
     try dropObligationFrontier(storage);
     // Reconstruct the historical row width from its owning CREATE, not a
     // hand-maintained list of every column later formats append. Both engines
@@ -303,6 +304,35 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
     }
 }
 
+/// Rewind pin-free upgrade fixtures before replaying the format-75 step.
+fn dropPinOrganization(storage: *Store) !void {
+    const schema = @import("schema.zig");
+    const Native = struct {
+        fn exec(store: *Store, sql: [:0]const u8) !void {
+            if (store.engine == .mysql) return mysql_testing.rawExec(store, sql);
+            return sqlite.exec(store.sqliteDatabase(), sql);
+        }
+    };
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_pin_command", .{}));
+    try Native.exec(storage, "DROP TABLE session_pin");
+    try Native.exec(storage, "DROP TABLE session_pin_command");
+    if (storage.engine == .mysql) {
+        try Native.exec(storage, "SET @rui_pin_kind_ddl=NULL");
+        try Native.exec(storage, "SET @rui_pin_kind_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK(kind BETWEEN 1 AND 6)') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 7')");
+        try Native.exec(storage, "PREPARE rui_pin_kind FROM @rui_pin_kind_ddl");
+        try Native.exec(storage, "EXECUTE rui_pin_kind");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_pin_kind");
+        try Native.exec(storage, "SET @rui_pin_kind_ddl=NULL");
+    } else {
+        try Native.exec(storage, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        defer Native.exec(storage, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF") catch unreachable;
+        const step = schema.migrations[74 - schema.migration_baseline];
+        try Native.exec(storage, step.sqlite[0]);
+        try Native.exec(storage, schema.migrations[56 - schema.migration_baseline].sqlite[1]);
+        for (step.sqlite[2..5]) |sql| try Native.exec(storage, sql);
+    }
+}
+
 /// Remove only format 73's derived representation; keep canonical input and
 /// forwarding facts so the production migration must reconstruct the frontier.
 fn dropObligationFrontier(storage: *Store) !void {
@@ -327,6 +357,7 @@ fn dropObligationFrontier(storage: *Store) !void {
 /// current format, before the runtime opens its SELECT/INSERT/UPDATE Store.
 pub fn stageObligationUpgrade(storage: *Store) !void {
     const schema = @import("schema.zig");
+    try dropPinOrganization(storage);
     try dropObligationFrontier(storage);
     if (storage.engine == .mysql) {
         try mysql_testing.rawExec(storage, "UPDATE store_meta SET meta_value='72' WHERE meta_key='format'");
@@ -340,6 +371,7 @@ pub fn stageObligationUpgrade(storage: *Store) !void {
 /// Words a fixture's SQL may not hold outside string literals, matched
 /// whole and ignoring case: each names a SQLite setting, schema change,
 /// transaction or connection mechanism. A test that needs one belongs in
+/// the SQLite test files under sqlite_tests/. Shared SQLite helpers stay in
 /// sqlite_tests.zig. tests/ci/store_conformance.py reads this list.
 pub const fixture_sqlite_words = [_][]const u8{
     "PRAGMA", "temp",      "CREATE", "ALTER",  "DROP",     "TRIGGER", "VIEW",
@@ -389,10 +421,10 @@ pub fn fixtureTextError(comptime text: []const u8) ?[]const u8 {
             const word = text[index..end];
             index = end;
             for (fixture_sqlite_words) |sqlite_word| {
-                if (std.ascii.eqlIgnoreCase(word, sqlite_word)) return "fixture: '" ++ word ++ "' is a SQLite mechanism; write the test in sqlite_tests.zig";
+                if (std.ascii.eqlIgnoreCase(word, sqlite_word)) return "fixture: '" ++ word ++ "' is a SQLite mechanism; write the test under sqlite_tests/";
             }
             for (fixture_sqlite_prefixes) |prefix| {
-                if (std.ascii.startsWithIgnoreCase(word, prefix)) return "fixture: '" ++ word ++ "' is a SQLite mechanism; write the test in sqlite_tests.zig";
+                if (std.ascii.startsWithIgnoreCase(word, prefix)) return "fixture: '" ++ word ++ "' is a SQLite mechanism; write the test under sqlite_tests/";
             }
             if (std.ascii.eqlIgnoreCase(previous, "AS") and std.ascii.eqlIgnoreCase(word, "TEXT"))
                 return "fixture: 'AS TEXT' is not a MySQL cast; compare the bytes another way";
@@ -509,8 +541,53 @@ pub fn queryU64(storage: *Store, comptime sql: [:0]const u8, args: anytype) !u64
     return sqliteQueryU64(storage.sqliteDatabase(), sql, args);
 }
 
-/// `exec` on a SQLite connection, for any SQLite text: sqlite_tests.zig's
-/// raw SQL.
+pub fn expectSqliteObligationProjection(comptime sql: [:0]const u8, comptime ddl_text: [:0]const u8, comptime cases: anytype) !void {
+    var raw: ?*sqlite.c.sqlite3 = null;
+    if (sqlite.c.sqlite3_open(":memory:", &raw) != sqlite.c.SQLITE_OK) {
+        if (raw) |opened| _ = sqlite.c.sqlite3_close(opened);
+        return error.StoreOpenFailed;
+    }
+    const local = raw.?;
+    defer {
+        const closed = sqlite.c.sqlite3_close(local);
+        if (closed != sqlite.c.SQLITE_OK) std.log.err("obligation parity SQLite close failed: {d}", .{closed});
+    }
+    try sqlite.exec(local, ddl_text);
+    try sqlite.exec(local, "INSERT INTO session(session_ref,obligation_since) VALUES('aaaaaa',NULL),('bbbbbb',80)");
+    const statement = try sqlite.prepare(local, sql);
+    defer _ = sqlite.c.sqlite3_finalize(statement);
+    inline for (cases) |case| {
+        const saved = if (case.saved) |n| std.fmt.comptimePrint("{d}", .{n}) else "NULL";
+        const key = if (case.missing) "zzzzzz" else "aaaaaa";
+        try sqlite.exec(local, "UPDATE session SET obligation_since=" ++ saved ++ " WHERE session_ref='aaaaaa'");
+        try std.testing.expectEqual(sqlite.c.SQLITE_OK, sqlite.c.sqlite3_reset(statement));
+        try std.testing.expectEqual(sqlite.c.SQLITE_OK, sqlite.c.sqlite3_clear_bindings(statement));
+        try std.testing.expectEqual(sqlite.c.SQLITE_OK, sqlite.c.sqlite3_bind_text(statement, 1, key.ptr, @intCast(key.len), null));
+        const bound = if (case.owed) |n| sqlite.c.sqlite3_bind_int64(statement, 2, @intCast(n)) else sqlite.c.sqlite3_bind_null(statement, 2);
+        try std.testing.expectEqual(sqlite.c.SQLITE_OK, bound);
+        const other_bound = if (case.other) |n| sqlite.c.sqlite3_bind_int64(statement, 3, @intCast(n)) else sqlite.c.sqlite3_bind_null(statement, 3);
+        try std.testing.expectEqual(sqlite.c.SQLITE_OK, other_bound);
+        const local_result = sqlite.c.sqlite3_step(statement);
+        if (case.refused) {
+            try std.testing.expectEqual(sqlite.c.SQLITE_CONSTRAINT, local_result & 0xff);
+        } else {
+            try std.testing.expectEqual(sqlite.c.SQLITE_DONE, local_result);
+            try std.testing.expectEqual(case.rows, @as(u64, @intCast(sqlite.c.sqlite3_changes64(local))));
+        }
+        const check = try sqlite.prepare(local, "SELECT obligation_since FROM session ORDER BY session_ref");
+        defer _ = sqlite.c.sqlite3_finalize(check);
+        try std.testing.expectEqual(sqlite.c.SQLITE_ROW, sqlite.c.sqlite3_step(check));
+        if (case.expected) |n| {
+            try std.testing.expectEqual(n, @as(u64, @intCast(sqlite.c.sqlite3_column_int64(check, 0))));
+        } else try std.testing.expectEqual(sqlite.c.SQLITE_NULL, sqlite.c.sqlite3_column_type(check, 0));
+        try std.testing.expectEqual(sqlite.c.SQLITE_ROW, sqlite.c.sqlite3_step(check));
+        try std.testing.expectEqual(@as(i64, 80), sqlite.c.sqlite3_column_int64(check, 0));
+        try std.testing.expectEqual(sqlite.c.SQLITE_DONE, sqlite.c.sqlite3_step(check));
+    }
+}
+
+/// `exec` on a SQLite connection, for any SQLite text: the raw SQL of
+/// sqlite_tests.zig and sqlite_tests/.
 pub fn sqliteExec(database: *sqlite.c.sqlite3, sql: [:0]const u8, args: anytype) !void {
     if (args.len == 0) return sqlite.exec(database, sql);
     const statement = try sqlite.prepare(database, sql);
@@ -519,8 +596,8 @@ pub fn sqliteExec(database: *sqlite.c.sqlite3, sql: [:0]const u8, args: anytype)
     try sqlite.expectDone(statement);
 }
 
-/// `queryU64` on a SQLite connection, for any SQLite text:
-/// sqlite_tests.zig's raw SQL.
+/// `queryU64` on a SQLite connection, for any SQLite text: the raw SQL
+/// of sqlite_tests.zig and sqlite_tests/.
 pub fn sqliteQueryU64(database: *sqlite.c.sqlite3, sql: [:0]const u8, args: anytype) !u64 {
     const statement = try sqlite.prepare(database, sql);
     defer _ = sqlite.c.sqlite3_finalize(statement);
@@ -555,7 +632,7 @@ pub fn withoutForeignKeys(storage: *Store, comptime sql: [:0]const u8, args: any
 }
 
 /// The same fixtures for tests that run only on SQLite
-/// (sqlite_tests.zig): `sql` is SQLite's text, held to no portability
+/// (sqlite_tests.zig and sqlite_tests/): `sql` is SQLite's text, held to no portability
 /// rule and never handed to the live MySQL check.
 pub const sqlite_only = struct {
     pub fn exec(storage: *Store, sql: [:0]const u8, args: anytype) !void {

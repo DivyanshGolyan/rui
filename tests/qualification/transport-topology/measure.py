@@ -137,7 +137,7 @@ def main():
         thread.start()
         store = root / "store"
         host = dispatch.start_host(store, f"https://localhost:{endpoint.server_address[1]}/responses",
-                                   "--provider-ca-file", str(root / "cert.pem"), active_capacity=100)
+                                   "--set", "network.caFile=" + str(str(root / "cert.pem")), active_capacity=100)
         try:
             sessions = []
             for index in range(100):

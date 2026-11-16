@@ -171,10 +171,18 @@ pub const Copy = union(enum) {
 /// What releasing a drag over `range` copies: the text as shown, at most
 /// the clipboard limit. Text that has left the document is skipped.
 pub fn copy(gpa: std.mem.Allocator, document: anytype, range: Range) !Copy {
+    return extract(gpa, document, range, null);
+}
+
+pub fn copyBody(gpa: std.mem.Allocator, window: anytype, range: Range) !Copy {
+    return extract(gpa, &window.document, range, @import("feed_window.zig").Window.QuoteFilter{ .window = window });
+}
+
+fn extract(gpa: std.mem.Allocator, document: anytype, range: Range, filter: anytype) !Copy {
     const from = retained(document, range.from);
     const to = retained(document, range.to);
     if (from >= to) return .nothing;
-    const bytes = try document.shownText(gpa, from, to, TerminalText.clipboard_limit) orelse return .too_large;
+    const bytes = (if (@TypeOf(filter) == @TypeOf(null)) try document.shownText(gpa, from, to, TerminalText.clipboard_limit) else try document.shownTextWhere(gpa, from, to, TerminalText.clipboard_limit, filter)) orelse return .too_large;
     if (bytes.len == 0) {
         gpa.free(bytes);
         return .nothing;

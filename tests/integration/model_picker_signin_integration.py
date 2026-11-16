@@ -62,7 +62,9 @@ def main():
             assert changed.returncode == 0, changed.stderr
             master, slave = open_pty(columns=80, rows=24)
             catalog = AppModelCatalog(host)
-            caller = spawn([str(fixture.RUI), "--store", str(store)], cwd=state,
+            # This fixture tests Model persistence, not API model admission.
+            # Name the known initial model; keep the saved provider authoritative.
+            caller = spawn([str(fixture.RUI), "--store", str(store), "--model", "gpt-5.5"], cwd=state,
                            env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             overview_frame(master, overview_title)
             app_model_open(master, b"gpt-6-luna", catalog=catalog)

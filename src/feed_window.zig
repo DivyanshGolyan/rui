@@ -26,7 +26,7 @@ pub const Feed = @import("widgets/Feed.zig").Feed(Key);
 /// this window neither parses SGR nor implements text layout a second time.
 pub const Text = struct {
     bytes: []const u8,
-    styles: []const u8 = &.{},
+    styles: []const viewport.RetainedStyle = &.{},
 
     pub fn fromDocument(document: anytype) Text {
         std.debug.assert(!document.dirty);
@@ -166,6 +166,7 @@ pub const Window = struct {
     document: Document = .{ .dirty = false, .sidenotes = true, .quotes = true },
     entries: [entry_capacity]Stored = undefined,
     count: usize = 0,
+    revision: u64 = 0,
     opened: Opened = .{},
     // Page cursors are facts, not aliases for rendered row keys: filtered or
     // empty pages can advance them without adding any rendered text.
@@ -224,13 +225,14 @@ pub const Window = struct {
     }
 
     pub fn trim(self: *Window, drop_front: usize, drop_back: usize) void {
+        if (drop_front != 0 or drop_back != 0) self.revision +%= 1;
         std.debug.assert(drop_front + drop_back <= self.count);
         const end = self.count - drop_back;
         const start_byte = if (drop_front < self.count) self.entries[drop_front].offset else self.document.length;
         const end_byte = if (end < self.count) self.entries[end].offset else self.document.length;
         const length = end_byte - start_byte;
         std.mem.copyForwards(u8, &self.document.bytes, self.document.bytes[start_byte..end_byte]);
-        std.mem.copyForwards(u8, &self.document.styles, self.document.styles[start_byte..end_byte]);
+        std.mem.copyForwards(viewport.RetainedStyle, &self.document.styles, self.document.styles[start_byte..end_byte]);
         std.mem.copyForwards(Stored, &self.entries, self.entries[drop_front..end]);
         self.count = end - drop_front;
         for (self.entries[0..self.count]) |*entry| entry.offset -= start_byte;
@@ -252,6 +254,14 @@ pub const Window = struct {
         self.target_count = kept;
         // Open keys deliberately survive both sides, including an empty window.
     }
+
+    /// Quote extraction consumes the renderer's retained semantic provenance.
+    pub const QuoteFilter = struct {
+        window: *const Window,
+        pub fn includes(self: *QuoteFilter, at: usize) bool {
+            return self.window.document.bodyAt(at);
+        }
+    };
 
     /// Text borrows the window and is invalidated by any edit, not by heights.
     pub fn text(self: *const Window, key: Key) Text {
@@ -602,10 +612,10 @@ pub const Window = struct {
         const tail = self.document.length - old_end;
         if (new_end > old_end) {
             std.mem.copyBackwards(u8, self.document.bytes[new_end..][0..tail], self.document.bytes[old_end..][0..tail]);
-            std.mem.copyBackwards(u8, self.document.styles[new_end..][0..tail], self.document.styles[old_end..][0..tail]);
+            std.mem.copyBackwards(viewport.RetainedStyle, self.document.styles[new_end..][0..tail], self.document.styles[old_end..][0..tail]);
         } else {
             std.mem.copyForwards(u8, self.document.bytes[new_end..][0..tail], self.document.bytes[old_end..][0..tail]);
-            std.mem.copyForwards(u8, self.document.styles[new_end..][0..tail], self.document.styles[old_end..][0..tail]);
+            std.mem.copyForwards(viewport.RetainedStyle, self.document.styles[new_end..][0..tail], self.document.styles[old_end..][0..tail]);
         }
         const rest = self.count - first - remove;
         if (incoming.len > remove) {
@@ -643,6 +653,7 @@ pub const Window = struct {
         }
         self.document.length = length;
         self.count = count;
+        self.revision +%= 1;
     }
 };
 
@@ -1178,4 +1189,124 @@ test "feed_window rows answer positionAtWith for every screen row from every fir
     try testing.expect(total > 400);
     var rows = tall.rowsWith(.{ .first = 0 }, narrow, .{});
     for (0..total + 1) |screen_row| try testing.expectEqual(tall.positionAt(.{ .first = 0 }, @intCast(screen_row), narrow), rows.next() orelse null);
+}
+
+const QuoteTestSink = struct {
+    writer: *std.Io.Writer,
+    in_body: bool = false,
+    pub fn feed(self: *@This(), bytes: []const u8) !void {
+        if (self.in_body) try self.writer.writeAll(@import("TerminalText.zig").body_off);
+        self.in_body = false;
+        try self.writer.writeAll(bytes);
+    }
+    pub fn body(self: *@This(), bytes: []const u8) !void {
+        if (!self.in_body) try self.writer.writeAll(@import("TerminalText.zig").body_on);
+        self.in_body = true;
+        try self.writer.writeAll(bytes);
+    }
+};
+
+test "quote body extraction consumes user renderer provenance and denies lookalike chrome" {
+    const gpa = std.testing.allocator;
+    var rendered: std.Io.Writer.Allocating = .init(gpa);
+    defer rendered.deinit();
+    var sink: QuoteTestSink = .{ .writer = &rendered.writer };
+    try sink.feed("Finished\n");
+    try View.userPrefix(&sink, false, 0);
+    const source = "  雪e\u{301}\n  body\n\nlast";
+    var user: View.UserBody(*QuoteTestSink) = undefined;
+    try user.init(&sink, source.len, false);
+    try user.feed(source);
+    try std.testing.expect(!try user.finish());
+    try sink.body("\n");
+    try sink.feed(View.Mark.body ++ "unknown lookalike body\n" ++ View.Mark.reset);
+    var document: viewport.Sized(2048, true) = .{};
+    try document.append(rendered.written());
+    try document.prepare();
+    const window = try gpa.create(Window);
+    defer gpa.destroy(window);
+    window.* = .{};
+    try window.append(&.{.{ .key = .{ .position = 1 }, .text = Text.fromDocument(&document) }});
+    const result = try @import("transcript_selection.zig").copyBody(gpa, window, .{ .from = 0, .to = window.document.length });
+    defer gpa.free(result.text.bytes);
+    try std.testing.expectEqualStrings(source ++ "\n", result.text.bytes);
+    const normal = try @import("transcript_selection.zig").copy(gpa, &window.document, .{ .from = 0, .to = window.document.length });
+    defer gpa.free(normal.text.bytes);
+    try std.testing.expect(std.mem.startsWith(u8, normal.text.bytes, "Finished\n› "));
+    try std.testing.expect(std.mem.indexOf(u8, normal.text.bytes, "unknown lookalike body") != null);
+}
+
+test "quote body extraction consumes tool output provenance and keeps linked answer text" {
+    const gpa = std.testing.allocator;
+    const fold = @import("tool_fold.zig");
+    var rendered: std.Io.Writer.Allocating = .init(gpa);
+    defer rendered.deinit();
+    var sink: QuoteTestSink = .{ .writer = &rendered.writer };
+    try sink.feed(fold.heading_marker ++ "✓ Bash succeeded\n");
+    var output: fold.Output = .{};
+    try output.feed("    actual indent\n\nliteral ┄ authored\n");
+    for (0..fold.max_lines) |_| try output.feed("tail\n");
+    try output.finish(&sink);
+    try sink.feed("Finished\n");
+    var answer: View.Answer(*QuoteTestSink) = undefined;
+    answer.init(&sink, "", false, .{ .viewport = .unicode });
+    const linked = "[shown label](https://example.test/private-hidden-address)\n";
+    // Force writer chunks across every control/address byte.
+    for (linked) |byte| try answer.feed(&.{byte});
+    try answer.finish();
+    try sink.body("\n");
+    try sink.feed("");
+    var document: viewport.Sized(4096, true) = .{};
+    try document.append(rendered.written());
+    try document.prepare();
+    const window = try gpa.create(Window);
+    defer gpa.destroy(window);
+    window.* = .{};
+    try window.append(&.{.{ .key = .{ .position = 1 }, .text = Text.fromDocument(&document) }});
+    const result = try @import("transcript_selection.zig").copyBody(gpa, window, .{ .from = 0, .to = window.document.length });
+    defer gpa.free(result.text.bytes);
+    var expected: std.Io.Writer.Allocating = .init(gpa);
+    defer expected.deinit();
+    try expected.writer.writeAll("    actual indent\n\nliteral ┄ authored\n");
+    for (0..fold.max_lines - 3) |_| try expected.writer.writeAll("tail\n");
+    try expected.writer.writeAll("shown label\n\n");
+    try std.testing.expectEqualStrings(expected.written(), result.text.bytes);
+}
+
+test "quote body extraction keeps actual UserBody preview prefixes beside inline ellipses" {
+    const gpa = std.testing.allocator;
+    var source_storage: [2048]u8 = undefined;
+    var source_writer = std.Io.Writer.fixed(&source_storage);
+    const phrase = "Konstantin Oberhauser-Wettstein reviewed the Unicode selection boundary. ";
+    for (0..2) |_| {
+        for (0..8) |_| try source_writer.writeAll(phrase);
+        try source_writer.writeByte('\n');
+    }
+    try source_writer.writeAll("private hidden remainder must not be quoted\n");
+    const source = source_writer.buffered();
+    var rendered: std.Io.Writer.Allocating = .init(gpa);
+    defer rendered.deinit();
+    var sink: QuoteTestSink = .{ .writer = &rendered.writer };
+    try View.userPrefix(&sink, false, 0);
+    var body: View.UserBody(*QuoteTestSink) = undefined;
+    try body.init(&sink, source.len, false);
+    try body.feed(source);
+    try std.testing.expect(try body.finish());
+    try sink.feed("\n");
+    var document: viewport.Sized(2048, true) = .{};
+    try document.append(rendered.written());
+    try document.prepare();
+    const window = try gpa.create(Window);
+    defer gpa.destroy(window);
+    window.* = .{};
+    try window.append(&.{.{ .key = .{ .position = 1 }, .text = Text.fromDocument(&document) }});
+    const first = std.mem.indexOf(u8, window.document.text(), "Konstantin").?;
+    const partial = try @import("transcript_selection.zig").copyBody(gpa, window, .{ .from = first, .to = first + 100 });
+    defer gpa.free(partial.text.bytes);
+    try std.testing.expectEqualStrings(source[0..100], partial.text.bytes);
+    const whole = try @import("transcript_selection.zig").copyBody(gpa, window, .{ .from = 0, .to = window.document.length });
+    defer gpa.free(whole.text.bytes);
+    const expected = try std.mem.concat(gpa, u8, &.{ source[0..200], "\n", source[0..200], "\n" });
+    defer gpa.free(expected);
+    try std.testing.expectEqualStrings(expected, whole.text.bytes);
 }

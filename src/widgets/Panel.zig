@@ -5,6 +5,9 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Self = @This();
 const Hover = @import("Hover.zig");
+const app_input = @import("../app_input.zig");
+const keypress = @import("../keypress.zig");
+const cell_line = @import("cell_line.zig");
 
 /// Aligned field values start here; callers may fit bounded values to it.
 pub const value_column: u16 = 19;
@@ -17,11 +20,14 @@ pub const CustomChoice = struct {
     widget: vxfw.Widget,
     /// While open, this replaces the field's saved value at its value column.
     value_widget: ?vxfw.Widget = null,
+    reset_draw: ?*const fn (*anyopaque) void = null,
     height: u16 = 8,
 };
 const Target = struct { row: u16, start: u16, end: u16, index: usize, choice: bool = false };
 
 title: []const u8,
+subtitle: ?[]const u8 = null,
+body: struct { top: u16 = 2, height: u16 = 0 } = .{},
 /// Fit hosted content, including one trailing ground row; full pages fill by default.
 natural_height: bool = false,
 unicode: bool = true,
@@ -47,7 +53,7 @@ quiet: vaxis.Style = .{},
 rule_style: vaxis.Style = .{},
 scroll: usize = 0,
 /// Borrowed from the last draw arena, just like the framework's hit surface.
-/// Replaced on every draw; never read outside a mouse event for that frame.
+/// Replaced on every draw; used for mouse hits and drawn-only traversal.
 targets: []const Target = &.{},
 hover: Hover = .{},
 
@@ -90,25 +96,6 @@ fn move(self: *Self, down: bool, only: ?usize) void {
     }
 }
 
-/// Keyboard and pointer navigation use the same drawn targets. A choice is
-/// modal within the panel; fields behind it are not part of its Tab cycle.
-fn tab(self: *Self, reverse: bool, only: ?usize) void {
-    const current = if (self.choice) |choice| choice.selected else only orelse self.selected;
-    var first: ?usize = null;
-    var last: ?usize = null;
-    var previous: ?usize = null;
-    var next: ?usize = null;
-    for (self.targets) |target| {
-        if (target.choice != (self.choice != null)) continue;
-        if (first == null) first = target.index;
-        last = target.index;
-        if (target.index < current) previous = target.index;
-        if (target.index > current and next == null) next = target.index;
-    }
-    const chosen = (if (reverse) previous orelse last else next orelse first) orelse return;
-    if (self.choice) |*choice| choice.selected = chosen else self.selected = chosen;
-}
-
 fn activate(self: *Self, ctx: *vxfw.EventContext, only: ?usize) !void {
     if (self.choice) |choice| {
         self.closeChoice();
@@ -121,7 +108,8 @@ fn activate(self: *Self, ctx: *vxfw.EventContext, only: ?usize) !void {
 
 /// The only keys a panel takes; every other key is its caller's.
 pub fn takesKey(key: vaxis.Key) bool {
-    return key.matches(vaxis.Key.up, .{}) or key.matches(vaxis.Key.down, .{}) or key.matches(vaxis.Key.enter, .{}) or key.matches(vaxis.Key.tab, .{}) or key.matches(vaxis.Key.tab, .{ .shift = true });
+    if (keypress.named(key)) |name| if (app_input.keys.get(name) != null) return true;
+    return key.matches(vaxis.Key.up, .{}) or key.matches(vaxis.Key.down, .{}) or key.matches(vaxis.Key.enter, .{});
 }
 
 /// The caller derives this field from its current standalone presentation.
@@ -133,6 +121,25 @@ pub fn choiceEvent(self: *Self, ctx: *vxfw.EventContext, input: vxfw.Event, fiel
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     try self.eventFor(ctx, input, null);
+}
+
+fn traverse(self: *Self, ctx: *vxfw.EventContext, reverse: bool) !void {
+    const order = try ctx.alloc.alloc(usize, self.targets.len);
+    defer ctx.alloc.free(order);
+    var count: usize = 0;
+    for (self.targets) |target| {
+        if (target.choice != (self.choice != null)) continue;
+        if (!target.choice and !self.selectable(target.index)) continue;
+        if (target.end <= target.start) continue;
+        if (std.mem.indexOfScalar(usize, order[0..count], target.index) != null) continue;
+        order[count] = target.index;
+        count += 1;
+    }
+    const current = if (self.choice) |choice| choice.selected else self.selected;
+    if (app_input.tabNextValue(usize, order[0..count], current, reverse)) |next| {
+        if (self.choice) |*choice| choice.selected = next else self.selected = next;
+    }
+    ctx.consumeAndRedraw();
 }
 
 fn eventFor(self: *Self, ctx: *vxfw.EventContext, input: vxfw.Event, only: ?usize) !void {
@@ -151,9 +158,10 @@ fn eventFor(self: *Self, ctx: *vxfw.EventContext, input: vxfw.Event, only: ?usiz
     try self.hover.handleEvent(ctx, input);
     switch (input) {
         .key_press => |key| {
-            if (key.matches(vaxis.Key.tab, .{}) or key.matches(vaxis.Key.tab, .{ .shift = true })) {
-                self.tab(key.mods.shift, only);
-            } else if (key.matches(vaxis.Key.up, .{})) {
+            if (keypress.named(key)) |name| if (app_input.keys.get(name)) |direction| {
+                return self.traverse(ctx, direction == .previous);
+            };
+            if (key.matches(vaxis.Key.up, .{})) {
                 self.move(false, only);
             } else if (key.matches(vaxis.Key.down, .{})) {
                 self.move(true, only);
@@ -214,13 +222,22 @@ fn activeRow(self: *const Self) usize {
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const available = ctx.max.size();
+    if (self.custom_choice) |choice| if (choice.reset_draw) |reset| reset(choice.widget.userdata);
     self.targets = &.{};
+    self.body = .{};
     self.custom_origin = 0;
     self.custom_height = 0;
     self.hover.targets = &.{};
     // At tiny heights, content takes precedence over the trailing ground row.
     const bottom_padding: u16 = @intFromBool(self.natural_height and available.height > 3);
-    const available_body = available.height -| 2 -| bottom_padding;
+    var subtitle_surface: ?vxfw.Surface = null;
+    if (self.subtitle) |text| if (available.width > 3 and available.height > 4 + bottom_padding) {
+        const subtitle = try ctx.arena.create(vxfw.Text);
+        subtitle.* = .{ .text = text, .style = self.quiet, .width_basis = .parent };
+        subtitle_surface = try subtitle.draw(ctx.withConstraints(.{}, .{ .width = available.width - 3, .height = available.height - 4 - bottom_padding }));
+    };
+    const header: u16 = 2 + if (subtitle_surface) |surface| surface.size.height + 1 else @as(u16, 0);
+    const available_body = available.height -| header -| bottom_padding;
     // Measure a custom choice once. Its actual result count is also the sole
     // height used for later rows, scrolling and mouse dispatch this frame.
     var custom_surface: ?vxfw.Surface = null;
@@ -232,10 +249,14 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     for (self.fields) |field| visible_fields += @intFromBool(field.visible);
     const rows = visible_fields + self.custom_height + (if (self.actions.len > 0) (if (self.stacked_actions) self.actions.len else @as(usize, 1)) + self.action_gap else 0) + if (self.choice) |choice| choice.labels.len else @as(usize, 0);
     var size = available;
-    if (self.natural_height) size.height = @intCast(@min(available.height, @max(ctx.min.height, 2 + rows + bottom_padding)));
+    if (self.natural_height) size.height = @intCast(@min(available.height, @max(ctx.min.height, header + rows + bottom_padding)));
+    self.body = .{ .top = header, .height = size.height -| header -| bottom_padding };
     var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
     @memset(surface.buffer, .{ .style = self.ground });
-    if (size.width == 0 or size.height == 0) return surface;
+    if (size.width == 0 or size.height == 0) {
+        self.body.height = 0;
+        return surface;
+    }
     for (0..size.width) |col| surface.writeCell(@intCast(col), 0, .{ .char = .{ .grapheme = if (self.unicode) "─" else "-", .width = 1 }, .style = self.rule_style });
     if (size.height == 1) return surface;
     _ = paint(ctx, surface, try displayText(ctx.arena, self.title, self.unicode), 1, 1, self.title_style);
@@ -243,7 +264,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     if (self.title_widget) |title_widget| if (size.width > 1) {
         try children.append(.{ .origin = .{ .row = 1, .col = 1 }, .surface = try title_widget.draw(ctx.withConstraints(.{}, .{ .width = size.width - 1, .height = 1 })) });
     };
-    const body_height = size.height -| 2 -| bottom_padding;
+    if (subtitle_surface) |surface_| try children.append(.{ .origin = .{ .row = 2, .col = 3 }, .surface = surface_ });
+    const body_height = self.body.height;
     if (body_height == 0) {
         surface.children = children.items;
         return surface;
@@ -258,7 +280,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     var targets: std.array_list.Managed(Target) = .init(ctx.arena);
     for (self.fields, 0..) |field, index| {
         if (!field.visible) continue;
-        if (self.visible(self.rowOf(index), body_height)) |row| {
+        if (self.visible(self.rowOf(index))) |row| {
             const selected = self.choice == null and self.custom_choice == null and self.selected == index and field.selectable;
             const style = if (self.custom_choice == null and field.selectable) self.look(selected, .{ .row = row, .width = size.width }) else self.ground;
             fillRow(surface, row, style);
@@ -267,7 +289,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         }
         if (self.choice) |choice| if (choice.field == index) {
             for (choice.labels, 0..) |label, at| {
-                const row = self.visible(self.rowOf(index) + 1 + at, body_height) orelse continue;
+                const row = self.visible(self.rowOf(index) + 1 + at) orelse continue;
                 const style = self.look(at == choice.selected, .{ .row = row, .width = size.width });
                 fillRow(surface, row, style);
                 _ = paint(ctx, surface, if (choice.current == at) (if (self.unicode) "✓" else "+") else " ", 5, row, style);
@@ -277,7 +299,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         };
     }
     if (self.custom_choice) |choice| if (self.custom_height > 0) {
-        if (self.visible(self.rowOf(choice.field) + 1, body_height)) |row| {
+        if (self.visible(self.rowOf(choice.field) + 1)) |row| {
             self.custom_origin = row;
             try children.append(.{ .origin = .{ .row = row, .col = 0 }, .surface = custom_surface.? });
         }
@@ -285,7 +307,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     {
         var col: u16 = @min(3, size.width);
         for (self.actions, 0..) |action, at| {
-            const row = self.visible(self.rowOf(self.fields.len + at), body_height) orelse continue;
+            const row = self.visible(self.rowOf(self.fields.len + at)) orelse continue;
             if (self.stacked_actions) col = @min(3, size.width);
             const start = col;
             const selected = self.choice == null and self.custom_choice == null and self.selected == self.fields.len + at;
@@ -344,7 +366,9 @@ fn bindTargets(self: *Self, arena: std.mem.Allocator, targets: []const Target) s
 /// Draw the current owner's field without retaining a standalone mode.
 /// Its wrapper routes events through choiceEvent with the same current field.
 pub fn drawChoice(self: *Self, ctx: vxfw.DrawContext, index: usize) std.mem.Allocator.Error!vxfw.Surface {
+    if (self.custom_choice) |choice| if (choice.reset_draw) |reset| reset(choice.widget.userdata);
     self.targets = &.{};
+    self.body = .{};
     self.hover.targets = &.{};
     self.custom_origin = 0;
     self.custom_height = 0;
@@ -406,9 +430,15 @@ fn look(self: *const Self, selected: bool, rect: Hover.Rect) vaxis.Style {
     return if (self.hover.contains(rect)) self.hover_style else self.ground;
 }
 
-fn visible(self: *const Self, logical: usize, height: u16) ?u16 {
-    if (logical < self.scroll or logical - self.scroll >= height) return null;
-    return @intCast(logical - self.scroll + 2);
+fn visible(self: *const Self, logical: usize) ?u16 {
+    if (logical < self.scroll or logical - self.scroll >= self.body.height) return null;
+    return @intCast(logical - self.scroll + self.body.top);
+}
+
+/// The field's row in the last full-panel draw, including noninteractive facts.
+pub fn fieldRow(self: *const Self, index: usize) ?u16 {
+    if (index >= self.fields.len or !self.fields[index].visible) return null;
+    return self.visible(self.rowOf(index));
 }
 
 fn fillRow(surface: vxfw.Surface, row: u16, style: vaxis.Style) void {
@@ -449,23 +479,10 @@ pub fn displayText(arena: std.mem.Allocator, text: []const u8, unicode: bool) st
 
 /// Single-line, terminal-cell clipping, including labels and quiet tails.
 fn paint(ctx: vxfw.DrawContext, surface: vxfw.Surface, text: []const u8, start: u16, row: u16, style: vaxis.Style) u16 {
-    return paintTo(ctx, surface, text, start, row, style, surface.size.width);
+    return cell_line.paint(ctx, surface, text, start, row, style, surface.size.width);
 }
 
-fn paintTo(ctx: vxfw.DrawContext, surface: vxfw.Surface, text: []const u8, start: u16, row: u16, style: vaxis.Style, limit: u16) u16 {
-    var col = @min(start, limit);
-    var iter = ctx.graphemeIterator(text);
-    while (iter.next()) |part| {
-        const grapheme = part.bytes(text);
-        if (std.mem.indexOfAny(u8, grapheme, "\r\n") != null) break;
-        const width = ctx.stringWidth(grapheme);
-        if (width > limit - col) break;
-        if (width == 0) continue;
-        surface.writeCell(col, row, .{ .char = .{ .grapheme = grapheme, .width = @intCast(width) }, .style = style });
-        col += @intCast(width);
-    }
-    return col;
-}
+const paintTo = cell_line.paint;
 
 const Fixture = struct {
     activated: ?usize = null,
@@ -1094,32 +1111,82 @@ test "Panel explicit choice scope never persists into normal page events or draw
     try std.testing.expectEqual(@as(?usize, 1), fixture.activated);
 }
 
-test "Panel Tab uses only drawn selectable targets and wraps both directions inside choices" {
+test "Panel subtitle and visible field projection share actual bounded body geometry" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |reverse| {
-        var panel: Self = .{ .title = "Settings", .fields = &.{
-            .{ .label = "First", .value = "one" },
-            .{ .label = "Read only", .value = "skip", .selectable = false },
-            .{ .label = "Hidden", .value = "skip", .visible = false },
-            .{ .label = "Last", .value = "two" },
-        }, .actions = &.{"Save"} };
-        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} };
-        _ = try panel.widget().draw(ctx);
-        const order = [_]usize{ 0, 3, 4 };
-        for (order, 0..) |at, i| {
-            panel.selected = at;
-            try panel.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.tab, .mods = .{ .shift = reverse } } });
-            try std.testing.expectEqual(order[(i + (if (reverse) order.len - 1 else @as(usize, 1))) % order.len], panel.selected);
-        }
-        panel.selected = 0;
-        panel.openChoice(&.{ "one", "two", "three" }, 0);
-        _ = try panel.widget().draw(ctx);
-        for (0..3) |at| {
-            panel.choice.?.selected = at;
-            try panel.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.tab, .mods = .{ .shift = reverse } } });
-            try std.testing.expectEqual((at + (if (reverse) @as(usize, 2) else 1)) % 3, panel.choice.?.selected);
-        }
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 12 }, .cell_size = .{} };
+    var panel: Self = .{
+        .title = "Sign in",
+        .subtitle = "Choose an account.",
+        .natural_height = true,
+        .fields = &.{ .{ .label = "Account", .value = "ChatGPT" }, .{ .label = "Code", .value = "ABCD-1234", .selectable = false } },
+        .actions = &.{"[ Close ]"},
+        .action_gap = 1,
     };
+    const full = try panel.widget().draw(ctx);
+    try std.testing.expectEqual(@as(?u16, 4), panel.fieldRow(0));
+    try std.testing.expectEqual(@as(?u16, 5), panel.fieldRow(1));
+    try std.testing.expectEqualStrings("C", full.readCell(3, 5).char.grapheme);
+    try std.testing.expectEqual(@as(usize, 2), panel.targets.len);
+    try std.testing.expectEqual(@as(u16, 7), panel.targets[1].row);
+    try std.testing.expectEqual(@as(usize, 2), panel.targets[1].index);
+    try std.testing.expectEqual(@as(usize, 1), full.children.len);
+    try std.testing.expectEqual(@as(i17, 2), full.children[0].origin.row);
+    for ([_]u16{ 0, 1, 2, 3, 4, 19, 46 }) |width| for (0..13) |height| {
+        panel.selected = 2;
+        const value = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = @intCast(height) }));
+        for (value.children) |child| {
+            try std.testing.expect(child.origin.row >= 0 and child.origin.col >= 0);
+            try std.testing.expect(child.origin.row + child.surface.size.height <= value.size.height);
+            try std.testing.expect(child.origin.col + child.surface.size.width <= value.size.width);
+        }
+        for (panel.targets) |target| try std.testing.expect(target.row < value.size.height and target.start < target.end and target.end <= value.size.width);
+        for (0..panel.fields.len) |index| if (panel.fieldRow(index)) |row| {
+            try std.testing.expect(width > 0 and row < value.size.height);
+            if (width > 3) try std.testing.expectEqualStrings(if (index == 0) "A" else "C", value.readCell(3, row).char.grapheme);
+        };
+        if (width == 0 or height <= 2) try std.testing.expect(panel.fieldRow(0) == null and panel.fieldRow(1) == null);
+    };
+    _ = try panel.drawChoice(ctx, 0);
+    try std.testing.expect(panel.fieldRow(0) == null and panel.fieldRow(1) == null);
+    panel.subtitle = null;
+    panel.selected = 0;
+    panel.scroll = 0;
+    _ = try panel.widget().draw(ctx);
+    try std.testing.expectEqual(@as(?u16, 2), panel.fieldRow(0));
+}
+
+test "Tab wraps only drawn selectable targets and inline choices" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    const fields = [_]Field{
+        .{ .label = "one", .value = "1" },
+        .{ .label = "hidden", .value = "2", .visible = false },
+        .{ .label = "fact", .value = "3", .selectable = false },
+        .{ .label = "four", .value = "4" },
+    };
+    var panel: Self = .{ .title = "Settings", .fields = &fields, .actions = &.{"Done"} };
+    const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 10 }, .cell_size = .{} };
+    _ = try panel.widget().draw(draw_ctx);
+    const tab: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.tab } };
+    const previous: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.tab, .mods = .{ .shift = true } } };
+    try std.testing.expect(takesKey(tab.key_press));
+    try panel.widget().handleEvent(&ctx, tab);
+    try std.testing.expectEqual(@as(usize, 3), panel.selected);
+    try panel.widget().handleEvent(&ctx, tab);
+    try std.testing.expectEqual(@as(usize, 4), panel.selected);
+    try panel.widget().handleEvent(&ctx, tab);
+    try std.testing.expectEqual(@as(usize, 0), panel.selected);
+    try panel.widget().handleEvent(&ctx, previous);
+    try std.testing.expectEqual(@as(usize, 4), panel.selected);
+    panel.selected = 0;
+    panel.openChoice(&.{ "yes", "no" }, 0);
+    _ = try panel.widget().draw(draw_ctx);
+    try panel.widget().handleEvent(&ctx, previous);
+    try std.testing.expectEqual(@as(usize, 1), panel.choice.?.selected);
+    try std.testing.expectEqual(@as(usize, 0), panel.selected);
+    _ = try panel.widget().draw(draw_ctx.withConstraints(.{}, .{ .width = 0, .height = 0 }));
+    try panel.widget().handleEvent(&ctx, tab);
+    try std.testing.expectEqual(@as(usize, 1), panel.choice.?.selected);
 }

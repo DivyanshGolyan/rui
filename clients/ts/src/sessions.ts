@@ -16,6 +16,7 @@ export interface Link {
 }
 
 type Schemas = components["schemas"];
+export type ActionStatus = Schemas["ReadActionReply"];
 
 /** The Session settings the Host takes today. */
 export interface AgentSpec {
@@ -78,6 +79,8 @@ export interface SessionArchiveResult {
 	/** Accepted intent can remain pending until stopped work has really settled. */
 	completion: "pending" | "completed";
 }
+
+export type SessionPinResult = Pick<Extract<Schemas["SessionPinReply"]["answer"], { status: "accepted" }>, "pinned">;
 
 export interface SessionSummary {
 	id: string;
@@ -300,6 +303,41 @@ export class Session {
 		if (completion === "unavailable") throw new RuiRequestError("invocation_error", "invalid_response");
 		this.#link.activity?.notify(this.id);
 		return { archived: answer.archived, completion };
+	}
+
+	/** Pins this Session without starting or interrupting work. Repeated pins preserve its position. */
+	pin(options?: WriteOptions): Promise<SessionPinResult> {
+		return this.#setPinned(true, options);
+	}
+
+	/** Removes this Session's pin without changing its work. */
+	unpin(options?: WriteOptions): Promise<SessionPinResult> {
+		return this.#setPinned(false, options);
+	}
+
+	async #setPinned(pinned: boolean, options?: WriteOptions): Promise<SessionPinResult> {
+		const idempotencyKey = key(options);
+		const reply = parse<Schemas["SessionPinReply"]>(await this.#link.exchange(
+			"/v1/control/session-pin",
+			(store) => JSON.stringify({
+				version: WIRE_VERSION,
+				kind: "session_pin",
+				store,
+				key: idempotencyKey,
+				session: this.id,
+				pinned,
+			} satisfies Schemas["SessionPinRequest"]),
+		));
+		const answer = accepted(reply.answer);
+		this.#link.activity?.notify(this.id);
+		return { pinned: answer.pinned };
+	}
+
+	/** Reads an owned Action. Acceptance and attempted state do not assert a running process. */
+	async readAction(action: string, offset = "0"): Promise<ActionStatus> {
+		return parse<ActionStatus>(await this.#link.exchange("/v1/read-action", (store) => JSON.stringify({
+			version: WIRE_VERSION, kind: "read_action", store, session: this.id, action, offset,
+		} satisfies Schemas["ReadActionRequest"])));
 	}
 
 	/**

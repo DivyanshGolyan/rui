@@ -13,6 +13,7 @@ const AppScreen = @import("AppScreen.zig");
 const ActivityBlock = @import("ActivityBlock.zig");
 const StatusRow = @import("StatusRow.zig");
 const Chip = @import("Chip.zig");
+const Hover = @import("widgets/Hover.zig");
 const Footer = @import("widgets/Footer.zig");
 const session_line = @import("session_line.zig");
 const Self = @This();
@@ -225,15 +226,11 @@ fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     for (spans.spans[0..spans.len]) |span| {
         const width = ctx.stringWidth(span.text);
         if (span.field) |field| {
-            const chip = switch (field) {
-                .model => &self.facts.model,
-                .effort => &self.facts.effort,
+            const chip, const selected = switch (field) {
+                .model => .{ &self.facts.model, self.facts.focus == .model },
+                .effort => .{ &self.facts.effort, self.facts.focus == .effort },
             };
             chip.label = span.text;
-            const selected = switch (field) {
-                .model => self.facts.focus == .model,
-                .effort => self.facts.focus == .effort,
-            };
             if (identity_col + width <= right_col) {
                 children[count] = try footerChip(chip, if (selected) self.facts.selected else self.facts.style, self.facts.method, ctx, @intCast(identity_col), @intCast(width));
                 count += 1;
@@ -267,8 +264,7 @@ fn choiceChip(self: *Self, action: chrome.ChoiceAction) *Chip {
 fn footerChip(chip: *Chip, style: vaxis.Style, method: vaxis.gwidth.Method, ctx: vxfw.DrawContext, col: u16, width: u16) !vxfw.SubSurface {
     chip.method = method;
     chip.style = style;
-    chip.hover = style;
-    chip.hover.ul_style = .single;
+    chip.hover = Hover.underlined(style);
     return .{ .origin = .{ .col = col, .row = 0 }, .surface = try chip.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = 1 })) };
 }
 
@@ -305,7 +301,7 @@ test "the Session chrome fills the slots for the latest view and for browsing, a
     var recorder: Recorder = .{};
     var self: Self = .init(recorder.actions());
     var bytes: [16]u8 = undefined;
-    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
+    var editor: @import("DraftEditor.zig") = .init(&bytes);
     var input: @import("InputArea.zig") = .{ .composer = .{ .editor = &editor } };
     const document = try std.testing.allocator.create(@import("ConversationViewport.zig").Document);
     defer std.testing.allocator.destroy(document);
@@ -349,7 +345,7 @@ test "SessionChrome puts notices in Footer without a state row and preserves nee
     var recorder: Recorder = .{};
     var self: Self = .init(recorder.actions());
     var bytes: [16]u8 = undefined;
-    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
+    var editor: @import("DraftEditor.zig") = .init(&bytes);
     var input: @import("InputArea.zig") = .{ .composer = .{ .editor = &editor } };
     const document = try std.testing.allocator.create(@import("ConversationViewport.zig").Document);
     defer std.testing.allocator.destroy(document);
@@ -390,7 +386,7 @@ test "SessionChrome footer keeps identity left and active keys right, with back 
     var recorder: Recorder = .{};
     var self: Self = .init(recorder.actions());
     var bytes: [16]u8 = undefined;
-    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
+    var editor: @import("DraftEditor.zig") = .init(&bytes);
     var input: @import("InputArea.zig") = .{ .composer = .{ .editor = &editor } };
     const document = try std.testing.allocator.create(@import("ConversationViewport.zig").Document);
     defer std.testing.allocator.destroy(document);
@@ -430,7 +426,7 @@ test "SessionChrome archive confirmation is one durable badge at both widths, wi
     var recorder: Recorder = .{};
     var self: Self = .init(recorder.actions());
     var bytes: [16]u8 = undefined;
-    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
+    var editor: @import("DraftEditor.zig") = .init(&bytes);
     var input: @import("InputArea.zig") = .{ .composer = .{ .editor = &editor } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -457,7 +453,7 @@ test "SessionChrome transient reply categories appear once in Footer and never i
     var recorder: Recorder = .{};
     var self: Self = .init(recorder.actions());
     var bytes: [16]u8 = undefined;
-    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
+    var editor: @import("DraftEditor.zig") = .init(&bytes);
     var input: @import("InputArea.zig") = .{ .composer = .{ .editor = &editor } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -524,7 +520,7 @@ test "Session chrome back control exists only while the shell hides the list" {
     var recorder: Recorder = .{};
     var self: Self = .init(recorder.actions());
     var bytes: [1]u8 = undefined;
-    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
+    var editor: @import("DraftEditor.zig") = .init(&bytes);
     var input: @import("InputArea.zig") = .{ .composer = .{ .editor = &editor } };
     var screen: AppScreen.Session = .{ .content = undefined, .input = input.widget(), .userdata = &recorder, .on_event = Recorder.event };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);

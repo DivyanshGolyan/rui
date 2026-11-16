@@ -72,6 +72,8 @@ pub const keys: keymap.Keymap(Move) = .init(.{
     .ctrl_r = null,
     .ctrl_x = null,
     .alt_a = null,
+    .alt_up = null,
+    .alt_down = null,
     .up = null,
     .down = null,
     .left = null,
@@ -89,8 +91,14 @@ pub const keys: keymap.Keymap(Move) = .init(.{
 
 /// The one wrapping traversal over a drawn order.
 pub fn tabNext(order: []const Target, current: Target, reverse: bool) ?Target {
+    return tabNextValue(Target, order, current, reverse);
+}
+
+/// Panels provide their drawn field identities; the wrapping policy is the
+/// same owner used by the app's semantic frame and Session footer fallback.
+pub fn tabNextValue(comptime T: type, order: []const T, current: T, reverse: bool) ?T {
     if (order.len == 0) return null;
-    const at = std.mem.indexOfScalar(Target, order, current) orelse return if (reverse) order[order.len - 1] else order[0];
+    const at = std.mem.indexOfScalar(T, order, current) orelse return if (reverse) order[order.len - 1] else order[0];
     return order[(at + (if (reverse) order.len - 1 else @as(usize, 1))) % order.len];
 }
 
@@ -149,6 +157,8 @@ pub const Facts = struct {
     wide: bool = false,
     frame: Frame = .{},
     field: Field = .input,
+    /// The drawn slash list owns Tab before focus traversal.
+    accepts_tab: bool = false,
 
     pub const Settings = struct {
         /// The Keys reference is open over the page.
@@ -340,13 +350,10 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
     if (input == .mouse and (input.mouse == .click or input.mouse == .list_click or input.mouse == .chat_click) and state.pasting) return .{ .route = .swallow };
     // The sign-in page owns keys and pastes even over settings or a list
     // that had focus before it opened, and no click navigates behind it.
-    if (state.layer == .sign_in) return switch (input) {
-        .mouse => .{ .route = .swallow },
-        else => .{ .route = .sign_in },
-    };
+    if (state.layer == .sign_in) return .{ .route = .sign_in };
     if (input == .key and state.layer == .settings) return settingsKey(state, facts.settings, input.key);
     if (input == .key and !state.pasting and !facts.frame.modal) {
-        const move = if (input.key.named) |name| keys.get(name) else null;
+        const move = if (facts.accepts_tab and input.key.named == .tab) null else if (input.key.named) |name| keys.get(name) else null;
         if (move) |direction| if (tabNext(facts.frame.slice(), currentFocus(state.*, facts.field), direction == .previous)) |target| {
             var effect: Effects = .{ .route = .swallow, .redraw = true };
             chooseFocus(state, target, &effect);
@@ -382,6 +389,10 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
     // editor that accepted the start owns its completion, even with no text.
     const delivery: Effects.Delivery = .{ .under = .main, .pasted = state.pasting };
     if (facts.frame.modal and facts.session_open) return .{ .route = .{ .session = delivery } };
+    // Chat switching belongs to the list's opening owner even while the
+    // composer has keys. Paste and covering pages retain their own custody.
+    if (!state.pasting and input == .key and (input.key.named == .alt_up or input.key.named == .alt_down))
+        return .{ .route = .{ .overview = .{ .under = .main, .pasted = false, .wide = facts.wide } } };
     if (state.listFocused()) return .{ .route = .{ .overview = .{ .under = .main, .pasted = state.pasting, .wide = facts.wide } } };
     return .{ .route = if (facts.session_open) .{ .session = delivery } else .{ .overview = .{ .under = .main, .pasted = state.pasting, .wide = facts.wide } } };
 }
@@ -509,7 +520,7 @@ test "Root input routing over every layer, main pane, settings state and input" 
         .{ .layers = &signing, .events = &pressed, .effects = .{ .route = .sign_in } },
         .{ .layers = &signing, .events = &.{.paste_start}, .effects = .{ .route = .sign_in }, .pasting = true },
         .{ .layers = &signing, .events = &.{.paste_end}, .effects = .{ .route = .sign_in }, .pasting = false },
-        .{ .layers = &signing, .events = &.{ .click, .wheel }, .effects = .{ .route = .swallow } },
+        .{ .layers = &signing, .events = &.{ .click, .wheel }, .effects = .{ .route = .sign_in } },
         // Under main and settings, vxfw's path takes the rest.
         .{ .layers = &.{.settings}, .events = &.{.paste_start}, .effects = .{}, .pasting = true },
         .{ .layers = &.{.settings}, .events = &.{.paste_end}, .effects = .{}, .pasting = false },
@@ -830,4 +841,58 @@ test "App input paste completion routes to the same owner for every focus and pa
         try std.testing.expect(!delivery.pasted and !state.pasting);
         try std.testing.expectEqual(list_focused, state.listFocused());
     };
+}
+
+test "Option session navigation routes main chords without taking paste or modal custody" {
+    for ([_]keymap.Key{ .alt_up, .alt_down }) |key| for ([_]bool{ false, true }) |wide| for ([_]bool{ false, true }) |open| for ([_]bool{ false, true }) |focused| for ([_]bool{ false, true }) |pasted| for ([_]Layer{ .main, .settings, .{ .sign_in = .{ .over = .main } } }) |layer| {
+        var state: State = .{ .layer = layer, .area = if (focused) .list else .main, .pasting = pasted };
+        const effects = step(&state, .{ .wide = wide, .session_open = open }, .{ .key = .{ .named = key } });
+        if (layer == .sign_in) {
+            try std.testing.expect(effects.route == .sign_in);
+        } else if (layer == .settings) {
+            if (pasted) try std.testing.expect(effects.route == .swallow) else {
+                try std.testing.expect(effects.route == .overview);
+                try std.testing.expectEqual(Layer.Covered.settings, effects.route.overview.under);
+            }
+        } else if (layer == .main) {
+            if (!pasted or focused or !open) {
+                try std.testing.expect(effects.route == .overview);
+                try std.testing.expectEqual(pasted, effects.route.overview.pasted);
+            } else try std.testing.expect(effects.route == .session);
+        }
+        try std.testing.expectEqual(focused, state.listFocused());
+        try std.testing.expectEqual(pasted, state.pasting);
+        try std.testing.expect(effects.focus == null);
+    };
+}
+
+test "drawn slash acceptance owns Tab but not reverse focus traversal" {
+    var frame: Frame = .{};
+    frame.append(.input);
+    frame.append(.model);
+    for ([_]bool{ false, true }) |accepts| {
+        var state: State = .{};
+        const effect = step(&state, .{ .session_open = true, .frame = frame, .accepts_tab = accepts }, .{ .key = .{ .named = .tab } });
+        if (accepts) {
+            try std.testing.expect(effect.route == .session);
+            try std.testing.expectEqual(@as(?Field, null), effect.field);
+        } else {
+            try std.testing.expect(effect.route == .swallow);
+            try std.testing.expectEqual(@as(?Field, .model), effect.field);
+        }
+    }
+    var state: State = .{};
+    const reverse = step(&state, .{ .session_open = true, .frame = frame, .accepts_tab = true }, .{ .key = .{ .named = .shift_tab } });
+    try std.testing.expect(reverse.route == .swallow);
+    try std.testing.expectEqual(@as(?Field, .model), reverse.field);
+}
+
+test "panel identities share wrapping traversal and absent focus recovery" {
+    const order = [_]usize{ 2, 5, 9 };
+    try std.testing.expectEqual(@as(?usize, 5), tabNextValue(usize, &order, 2, false));
+    try std.testing.expectEqual(@as(?usize, 2), tabNextValue(usize, &order, 9, false));
+    try std.testing.expectEqual(@as(?usize, 9), tabNextValue(usize, &order, 2, true));
+    try std.testing.expectEqual(@as(?usize, 2), tabNextValue(usize, &order, 4, false));
+    try std.testing.expectEqual(@as(?usize, 9), tabNextValue(usize, &order, 4, true));
+    try std.testing.expectEqual(@as(?usize, null), tabNextValue(usize, &.{}, 2, false));
 }

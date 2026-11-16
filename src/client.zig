@@ -1,4 +1,5 @@
 const std = @import("std");
+const utf8_validation = @import("utf8_validation.zig");
 const socket_os = @import("os/socket.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
@@ -239,6 +240,18 @@ pub const Requests = struct {
         return readReportResponse(self, fd, sink, reply_buffer);
     }
 
+    pub fn readAction(self: Requests, store_path: []const u8, session: []const u8, action_id: u64, offset: u64, sink: anytype, reply_buffer: *ReplyBuffer) !protocol_reply.ReportReply {
+        reply_buffer.len = 0;
+        try self.check();
+        if (!protocol.validSessionId(session) or action_id == 0 or action_id > std.math.maxInt(i64) or offset > protocol.max_sqlite_content_bytes) return error.InvalidTarget;
+        const paths = try platform.resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        try body.appendShape(protocol.read_action_request.all, .{ paths.store.slice(), session, action_id, offset });
+        const fd = try openRead(self, &paths, "/v1/read-action", body.slice());
+        defer closeSocket(self.io, fd);
+        return readReportResponse(self, fd, sink, reply_buffer);
+    }
+
     pub fn readActionArguments(self: Requests, store_path: []const u8, session: []const u8, action_id: u64, destination: std.Io.File, reply_buffer: *ReplyBuffer) !protocol_reply.ResultReply {
         return readActionContent(self, store_path, session, action_id, protocol.read_action_arguments_request, "/v1/read-action-arguments", destination, reply_buffer);
     }
@@ -410,22 +423,10 @@ fn readFirstLine(requests: Requests, fd: std.posix.fd_t, buffer: []u8) !protocol
         if (count == 0) return requests.transportFailure(error.TruncatedResponse);
         if (std.mem.indexOfScalar(u8, buffer[filled..][0..count], '\n')) |index| break buffer[0 .. filled + index];
         filled += count;
-    } else if (wanted < head.content_length) wholeScalars(buffer[0..wanted]) else buffer[0..wanted];
+    } else if (wanted < head.content_length) utf8_validation.completePrefix(buffer[0..wanted]) else buffer[0..wanted];
     const text = std.mem.trimEnd(u8, line, "\r");
     if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidResponse;
     return .{ .line = text };
-}
-
-/// Drops a scalar the limit cut, so the line ends on a whole character.
-fn wholeScalars(bytes: []const u8) []const u8 {
-    var start = bytes.len;
-    while (start != 0 and bytes.len - start < 4) {
-        start -= 1;
-        if (bytes[start] & 0xc0 != 0x80) break;
-    }
-    if (start == bytes.len) return bytes;
-    const length = std.unicode.utf8ByteSequenceLength(bytes[start]) catch return bytes;
-    return if (start + length > bytes.len) bytes[0..start] else bytes;
 }
 
 fn readPublicContentResponse(requests: Requests, fd: std.posix.fd_t, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {
@@ -494,6 +495,12 @@ test "Session addresses are exactly six lowercase Crockford characters" {
 pub const SessionStopInput = struct {
     store: []const u8,
     session: []const u8,
+};
+
+pub const SessionPinInput = struct {
+    store: []const u8,
+    session: []const u8,
+    pinned: bool,
 };
 
 pub const SessionArchiveInput = struct {
@@ -674,7 +681,9 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     var problem: @import("cli_grammar.zig").Refusal = undefined;
-    const parsed = @import("serve_grammar.zig").definition.parseSyntax(snapshot.argv[3..], arena.allocator(), &problem) catch return error.HostServeArgumentsUnreadable;
+    const serve_grammar = @import("serve_grammar.zig");
+    const arguments = serve_grammar.currentArguments(arena.allocator(), snapshot.argv[3..]) catch return error.HostServeArgumentsUnreadable;
+    const parsed = serve_grammar.definition.parseSyntax(arguments, arena.allocator(), &problem) catch return error.HostServeArgumentsUnreadable;
     const supplied = parsed.get("store") orelse return error.HostServeStoreMissing;
     // A relative argv path is not relative to this client. Without a verified
     // canonical identity, report it rather than probing a guessed Store.
@@ -803,17 +812,23 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
     const Mode = enum {
         current,
         historical,
+        historical_18,
+        historical_17,
         historical_16,
         historical_15,
         historical_14,
         historical_13,
         historical_13_chatgpt,
         strict,
+        strict_18,
+        strict_17,
         strict_16,
         strict_15,
         strict_14,
         strict_13,
         exact,
+        exact_18,
+        exact_17,
         exact_16,
         exact_15,
         exact_14,
@@ -862,11 +877,13 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
             const io = std.testing.io;
             const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 2 * std.time.ns_per_s;
             const count: usize = switch (self.mode) {
-                .historical, .body_mismatch, .unknown => 6,
-                .historical_13, .historical_13_chatgpt => 5,
-                .historical_14 => 4,
-                .historical_15 => 3,
-                .historical_16, .budget => 2,
+                .historical, .body_mismatch, .unknown => 8,
+                .historical_13, .historical_13_chatgpt => 7,
+                .historical_14 => 6,
+                .historical_15 => 5,
+                .historical_16 => 4,
+                .historical_17 => 3,
+                .historical_18, .budget => 2,
                 else => 1,
             };
             for (0..count) |index| {
@@ -874,9 +891,11 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                 const connection = try self.listener.accept(io);
                 defer connection.close(io);
                 const fd = connection.socket.handle;
-                const order = [_][]const u8{ protocol.wire_version, protocol_reply.HostInfoProfile.released_16.wire(), protocol_reply.HostInfoProfile.released_15.wire(), protocol_reply.HostInfoProfile.released_14.wire(), protocol_reply.HostInfoProfile.released_13.wire(), protocol_reply.HostInfoProfile.released_9.wire() };
+                const order = [_][]const u8{ protocol.wire_version, protocol_reply.HostInfoProfile.released_18.wire(), protocol_reply.HostInfoProfile.released_17.wire(), protocol_reply.HostInfoProfile.released_16.wire(), protocol_reply.HostInfoProfile.released_15.wire(), protocol_reply.HostInfoProfile.released_14.wire(), protocol_reply.HostInfoProfile.released_13.wire(), protocol_reply.HostInfoProfile.released_9.wire() };
                 const expected_wire = switch (self.mode) {
                     .exact => protocol_reply.HostInfoProfile.released_9.wire(),
+                    .exact_18 => protocol_reply.HostInfoProfile.released_18.wire(),
+                    .exact_17 => protocol_reply.HostInfoProfile.released_17.wire(),
                     .exact_16 => protocol_reply.HostInfoProfile.released_16.wire(),
                     .exact_15 => protocol_reply.HostInfoProfile.released_15.wire(),
                     .exact_14 => protocol_reply.HostInfoProfile.released_14.wire(),
@@ -927,6 +946,8 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                 const response_wire = switch (self.mode) {
                     .current, .unavailable, .activation_current => protocol.wire_version,
                     .unknown => "8",
+                    .historical_18, .strict_18, .exact_18 => protocol_reply.HostInfoProfile.released_18.wire(),
+                    .historical_17, .strict_17, .exact_17 => protocol_reply.HostInfoProfile.released_17.wire(),
                     .historical_16, .strict_16, .exact_16 => protocol_reply.HostInfoProfile.released_16.wire(),
                     .historical_15, .strict_15, .exact_15 => protocol_reply.HostInfoProfile.released_15.wire(),
                     .historical_14, .strict_14, .exact_14 => protocol_reply.HostInfoProfile.released_14.wire(),
@@ -935,7 +956,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                 };
                 const body_wire = if (self.mode == .body_mismatch or self.mode == .activation_body_version) protocol.wire_version else response_wire;
                 var body_buffer: [1024]u8 = undefined;
-                const host_body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"{s}\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"providers\":{{\"codex\":\"endpoint\",\"openai\":\"unserved\"{s}}}}}}}", .{ body_wire, if (self.mode == .activation_wrong_store) "/wrong-store" else self.store, if (std.mem.eql(u8, response_wire, protocol.wire_version) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_16.wire()) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_15.wire()) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_14.wire()) or self.mode == .historical_13_chatgpt) ",\"chatgpt\":\"unserved\"" else "" });
+                const host_body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"{s}\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"providers\":{{\"codex\":\"endpoint\",\"openai\":\"unserved\"{s}}}}}}}", .{ body_wire, if (self.mode == .activation_wrong_store) "/wrong-store" else self.store, if (std.mem.eql(u8, response_wire, protocol.wire_version) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_18.wire()) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_17.wire()) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_16.wire()) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_15.wire()) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_14.wire()) or self.mode == .historical_13_chatgpt) ",\"chatgpt\":\"unserved\"" else "" });
                 var error_buffer: [256]u8 = undefined;
                 const body: []const u8 = switch (self.mode) {
                     .activation_400, .activation_bad_rejection, .activation_500, .activation_503, .strict_503 => try std.fmt.bufPrint(&error_buffer, "{{\"version\":\"{s}\",\"type\":\"invocation_error\",\"code\":\"{s}\"}}", .{ response_wire, if (self.mode == .activation_bad_rejection) "SomeOtherFailure" else "WrongWireVersion" }),
@@ -978,8 +999,10 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                 else => {},
             }
             const observed = switch (mode) {
-                .strict, .strict_16, .strict_15, .strict_14, .strict_13, .strict_503 => if (observeHostProcess(io, root, null)) |_| return error.TestUnexpectedResult else |err| return err,
+                .strict, .strict_18, .strict_17, .strict_16, .strict_15, .strict_14, .strict_13, .strict_503 => if (observeHostProcess(io, root, null)) |_| return error.TestUnexpectedResult else |err| return err,
                 .exact => try observeHostForUpgradeProfile(io, root, .released_9, null),
+                .exact_18 => try observeHostForUpgradeProfile(io, root, .released_18, null),
+                .exact_17 => try observeHostForUpgradeProfile(io, root, .released_17, null),
                 .exact_16 => try observeHostForUpgradeProfile(io, root, .released_16, null),
                 .exact_15 => try observeHostForUpgradeProfile(io, root, .released_15, null),
                 .exact_14 => try observeHostForUpgradeProfile(io, root, .released_14, null),
@@ -1039,7 +1062,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                     }
                 }
                 switch (mode) {
-                    .strict, .strict_16, .strict_15, .strict_14, .strict_13, .strict_503, .unknown => try std.testing.expectError(error.WrongWireVersion, result),
+                    .strict, .strict_18, .strict_17, .strict_16, .strict_15, .strict_14, .strict_13, .strict_503, .unknown => try std.testing.expectError(error.WrongWireVersion, result),
                     .budget => try std.testing.expectError(error.ResponseInactive, result),
                     .body_mismatch,
                     .unavailable,
@@ -1058,12 +1081,14 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                         try std.testing.expect(reading == .incompatible);
                         try std.testing.expectEqual(std.c.getpid(), reading.incompatible);
                     },
-                    .current, .historical, .historical_16, .historical_15, .historical_14, .historical_13, .historical_13_chatgpt, .exact, .exact_16, .exact_15, .exact_14, .exact_13, .activation_current => {
+                    .current, .historical, .historical_18, .historical_17, .historical_16, .historical_15, .historical_14, .historical_13, .historical_13_chatgpt, .exact, .exact_18, .exact_17, .exact_16, .exact_15, .exact_14, .exact_13, .activation_current => {
                         const reading = try result;
                         try std.testing.expect(reading == .compatible);
                         const observed = reading.compatible;
                         const expected_profile: protocol_reply.HostInfoProfile = switch (mode) {
                             .current, .activation_current => .current,
+                            .historical_18, .exact_18 => .released_18,
+                            .historical_17, .exact_17 => .released_17,
                             .historical_16, .exact_16 => .released_16,
                             .historical_15, .exact_15 => .released_15,
                             .historical_14, .exact_14 => .released_14,
@@ -1083,11 +1108,13 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                 }
                 try std.testing.expectEqual(@as(?anyerror, null), peer.failure);
                 try std.testing.expectEqual(@as(usize, switch (mode) {
-                    .historical, .body_mismatch, .unknown => 6,
-                    .historical_13, .historical_13_chatgpt => 5,
-                    .historical_14 => 4,
-                    .historical_15 => 3,
-                    .historical_16, .budget => 2,
+                    .historical, .body_mismatch, .unknown => 8,
+                    .historical_13, .historical_13_chatgpt => 7,
+                    .historical_14 => 6,
+                    .historical_15 => 5,
+                    .historical_16 => 4,
+                    .historical_17 => 3,
+                    .historical_18, .budget => 2,
                     else => 1,
                 }), peer.seen);
             }
@@ -1212,8 +1239,7 @@ fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) proto
     var body: protocol.RequestBuffer = .{};
     body.appendShape(protocol.host_info_request, .{paths.store.slice()}) catch unreachable;
     var reply_buffer: ReplyBuffer = .{};
-    const probe_end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
-    const until = @min(probe_end, deadline orelse probe_end);
+    const until = hostObservationDeadline(io, deadline);
     const reply = sendSource(.{ .io = io }, paths, "/v1/host-info", .{}, body.len, null, body.slice(), null, null, &reply_buffer, until).get() catch |err| return switch (err) {
         error.AccessDenied, error.PermissionDenied => .access_failure,
         error.WrongWireVersion, error.InvalidResponse, error.ResponseHeaderTooLarge, error.ResponseTooLarge, error.InvalidCharacter, error.Overflow => .incompatible,
@@ -1241,11 +1267,16 @@ pub fn captureSessionArchive(io: std.Io, input: SessionArchiveInput, target: Cap
     var key_buffer: [36]u8 = undefined;
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     try protocol_reply.validateIdentityInputs(location.key, input.session);
-    var output_buffer: [protocol.content_window_bytes]u8 = undefined;
-    var capture = try Capture.open(io, location.record, &output_buffer);
-    errdefer capture.abort();
-    try capture.writeRequest(protocol.session_archive_request.all, .{ paths.store.slice(), location.key, input.session, input.archived });
-    return finishCapture(io, &capture, &location, paths.store.slice(), input.session, .session_archive);
+    return runCapture(io, paths.store.slice(), &location, input.session, .session_archive, null, Capture.writeRequest, .{ protocol.session_archive_request.all, .{ paths.store.slice(), location.key, input.session, input.archived } });
+}
+
+pub fn captureSessionPin(io: std.Io, input: SessionPinInput, target: CaptureTarget) !CapturedRecord {
+    const paths = try platform.resolveClientPaths(io, input.store);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const location = try target.resolve(io, &path_buffer, &key_buffer);
+    try protocol_reply.validateIdentityInputs(location.key, input.session);
+    return runCapture(io, paths.store.slice(), &location, input.session, .session_pin, null, Capture.writeRequest, .{ protocol.session_pin_request.all, .{ paths.store.slice(), location.key, input.session, input.pinned } });
 }
 
 pub fn captureModelInterruption(io: std.Io, input: ModelInterruptionInput, target: CaptureTarget) !CapturedRecord {
@@ -1695,6 +1726,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         configuration: ?CapturedConfiguration = null,
         require_model: ?bool = null,
         archived: bool = true,
+        pinned: ?bool = null,
         reload_skills: ?bool = null,
         sender: ?protocol_reply.JsonAddress = null,
         sender_handle: ?protocol_reply.JsonString(32) = null,
@@ -1734,6 +1766,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         },
         .session_stop => .session_stop,
         .session_archive => .{ .session_archive = .{ .archived = fields.archived } },
+        .session_pin => .{ .session_pin = .{ .pinned = fields.pinned orelse return error.InvalidRequestRecord } },
         .model_interruption => .{ .model_interruption = .{
             .turn = protocol_reply.decimalId(fields.target.?.turn, true) catch return error.InvalidRequestRecord,
             .operation = protocol_reply.decimalId(fields.target.?.operation, true) catch return error.InvalidRequestRecord,
@@ -1748,6 +1781,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
     if ((kind != .configure and kind != .message and fields.configuration != null) or
         (fields.require_model != null and !(kind == .configure or kind == .message and fields.configuration != null)) or
         (kind != .configure and fields.reload_skills != null) or
+        (kind != .session_pin and fields.pinned != null) or
         (kind != .message and (fields.text != null or fields.sender != null or fields.sender_handle != null)) or (kind != .model_interruption and fields.target != null) or
         (kind != .permission_decision and (fields.action != null or fields.decision != null))) return error.InvalidRequestRecord;
     return .{ .saved = saved, .target = target };
@@ -1795,10 +1829,7 @@ fn readCapturedIdentity(io: std.Io, file: *std.Io.File, handle: []const u8) !pro
     return identity;
 }
 
-/// The error set a function returns.
-fn ErrorOf(comptime function: anytype) type {
-    return @typeInfo(@typeInfo(@TypeOf(function)).@"fn".return_type.?).error_union.error_set;
-}
+const ErrorOf = @import("error_set.zig").Of;
 
 pub const CaptureError = ErrorOf(platform.resolveClientPaths) || ErrorOf(writeConfigureCapture) || ErrorOf(writeMessageCapture);
 
@@ -1824,16 +1855,36 @@ fn writeConfigureCapture(io: std.Io, paths: *const platform.Paths, input: Config
     };
     if (location.key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(location.key)) return error.InvalidKey;
     if (input.session == .named and !protocol.validSessionId(session)) return error.InvalidSession;
-    var output_buffer: [protocol.content_window_bytes]u8 = undefined;
-    var capture = try Capture.open(io, location.record, &output_buffer);
-    capture.input_failure = input_failure;
-    errdefer capture.abort();
-    try capture.writeRequest(protocol.configure_request.head, .{ paths.store.slice(), location.key, session });
+    return runCapture(io, paths.store.slice(), &location, session, .configure, input_failure, writeConfigureRequest, .{ paths.store.slice(), location.key, session, input });
+}
+
+fn writeConfigureRequest(capture: *Capture, store: []const u8, key: []const u8, session: []const u8, input: ConfigureInput) !void {
+    try capture.writeRequest(protocol.configure_request.head, .{ store, key, session });
     try capture.writeConfiguration(input);
     if (input.reload_skills) try capture.writeRequest(protocol.configure_request.reload_skills, .{});
     if (input.require_model) try capture.writeRequest(protocol.configure_request.require_model, .{});
     try capture.writeRequest(protocol.configure_request.tail, .{});
-    return finishCapture(io, &capture, &location, paths.store.slice(), session, .configure);
+}
+
+/// Opens the record at `location`, has `write` put the request in it, and
+/// finishes the capture; from the open on, any failure aborts it. Callers
+/// validate their input first, so a refused input opens nothing.
+fn runCapture(
+    io: std.Io,
+    store: []const u8,
+    location: *const CaptureTarget.Location,
+    session: []const u8,
+    kind: protocol.CommandKind,
+    input_failure: ?*?Step,
+    comptime write: anytype,
+    args: anytype,
+) !CapturedRecord {
+    var output_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var capture = try Capture.open(io, location.record, &output_buffer);
+    capture.input_failure = input_failure;
+    errdefer capture.abort();
+    try @call(.auto, write, .{&capture} ++ args);
+    return finishCapture(io, &capture, location, store, session, kind);
 }
 
 /// The one check of a peer identity's shape, shared by the CLI (which
@@ -1863,11 +1914,11 @@ fn writeMessageCapture(io: std.Io, paths: *const platform.Paths, input: MessageI
     if (input.configuration != null) {
         if (input.session.len != 0 or location.key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(location.key)) return error.InvalidSession;
     } else try protocol_reply.validateIdentityInputs(location.key, input.session);
-    var output_buffer: [protocol.content_window_bytes]u8 = undefined;
-    var capture = try Capture.open(io, location.record, &output_buffer);
-    capture.input_failure = input_failure;
-    errdefer capture.abort();
-    try capture.writeRequest(protocol.message_request.head, .{ paths.store.slice(), location.key, input.session });
+    return runCapture(io, paths.store.slice(), &location, input.session, .message, input_failure, writeMessageRequest, .{ paths.store.slice(), location.key, input });
+}
+
+fn writeMessageRequest(capture: *Capture, store: []const u8, key: []const u8, input: MessageInput) !void {
+    try capture.writeRequest(protocol.message_request.head, .{ store, key, input.session });
     if (input.sender) |sender| {
         try capture.writeRequest(protocol.message_request.sender, .{ sender.store.?, sender.session });
     } else try capture.writeRequest(protocol.message_request.no_sender, .{});
@@ -1889,15 +1940,10 @@ fn writeMessageCapture(io: std.Io, paths: *const platform.Paths, input: MessageI
     if (input.configuration != null and input.configuration.?.require_model)
         try capture.writeRequest(protocol.message_request.require_model, .{});
     try capture.writeRequest(protocol.message_request.tail, .{});
-    return finishCapture(io, &capture, &location, paths.store.slice(), input.session, .message);
 }
 
 fn writeSessionStopCapture(io: std.Io, paths: *const platform.Paths, input: SessionStopInput, location: CaptureTarget.Location) !CapturedRecord {
-    var output_buffer: [protocol.content_window_bytes]u8 = undefined;
-    var capture = try Capture.open(io, location.record, &output_buffer);
-    errdefer capture.abort();
-    try capture.writeRequest(protocol.session_stop_request, .{ paths.store.slice(), location.key, input.session });
-    return finishCapture(io, &capture, &location, paths.store.slice(), input.session, .session_stop);
+    return runCapture(io, paths.store.slice(), &location, input.session, .session_stop, null, Capture.writeRequest, .{ protocol.session_stop_request, .{ paths.store.slice(), location.key, input.session } });
 }
 
 fn writeModelInterruptionCapture(
@@ -1906,11 +1952,7 @@ fn writeModelInterruptionCapture(
     input: ModelInterruptionInput,
     location: CaptureTarget.Location,
 ) !CapturedRecord {
-    var output_buffer: [protocol.content_window_bytes]u8 = undefined;
-    var capture = try Capture.open(io, location.record, &output_buffer);
-    errdefer capture.abort();
-    try capture.writeRequest(protocol.model_interruption_request, .{ paths.store.slice(), location.key, input.session, input.turn_id, input.operation_id });
-    return finishCapture(io, &capture, &location, paths.store.slice(), input.session, .model_interruption);
+    return runCapture(io, paths.store.slice(), &location, input.session, .model_interruption, null, Capture.writeRequest, .{ protocol.model_interruption_request, .{ paths.store.slice(), location.key, input.session, input.turn_id, input.operation_id } });
 }
 
 pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, target: CaptureTarget) !CapturedRecord {
@@ -1920,11 +1962,7 @@ pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, tar
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     try protocol_reply.validateIdentityInputs(location.key, input.session);
     if (input.action_id == 0) return error.InvalidTarget;
-    var output_buffer: [protocol.content_window_bytes]u8 = undefined;
-    var capture = try Capture.open(io, location.record, &output_buffer);
-    errdefer capture.abort();
-    try capture.writePermissionDecision(paths.store.slice(), location.key, input);
-    return finishCapture(io, &capture, &location, paths.store.slice(), input.session, .permission_decision);
+    return runCapture(io, paths.store.slice(), &location, input.session, .permission_decision, null, Capture.writePermissionDecision, .{ paths.store.slice(), location.key, input });
 }
 
 fn finishCapture(io: std.Io, capture: *Capture, location: *const CaptureTarget.Location, store: []const u8, session: []const u8, kind: protocol.CommandKind) !CapturedRecord {
@@ -3208,6 +3246,7 @@ test "client read boundaries reject noncanonical Sessions before path or socket 
         try std.testing.expectError(error.InvalidSession, protocol_reply.MessageAddress.init("/never-open", session, "key\x00雪"));
         try std.testing.expectError(error.InvalidSession, requests.inspectSession("/never-open", session, .current, file, &reply));
         try std.testing.expectError(error.InvalidSession, requests.exportFailedResponse("/never-open", session, .{ .operation = 1, .attempt = 1, .part = .metadata }, file, &reply));
+        try std.testing.expectError(error.InvalidTarget, requests.readAction("/never-open", session, 1, 0, file, &reply));
         try std.testing.expectError(error.InvalidTarget, requests.readActionArguments("/never-open", session, 1, file, &reply));
         try std.testing.expectError(error.InvalidTarget, requests.readActionCallId("/never-open", session, 1, file, &reply));
         try std.testing.expectError(error.InvalidSession, requests.conversationPage("/never-open", session, .{ .end = 0 }));
@@ -3215,6 +3254,10 @@ test "client read boundaries reject noncanonical Sessions before path or socket 
         try std.testing.expectError(error.InvalidSession, requests.activityPage("/never-open", session, .{}));
         try std.testing.expectError(error.InvalidSession, requests.readActivityContent("/never-open", session, 1, 0, null, file));
     }
+    for ([_]u64{ 0, std.math.maxInt(u64) }) |action_id| {
+        try std.testing.expectError(error.InvalidTarget, requests.readAction("/never-open", "k7m2qx", action_id, 0, file, &reply));
+    }
+    try std.testing.expectError(error.InvalidTarget, requests.readAction("/never-open", "k7m2qx", 1, protocol.max_sqlite_content_bytes + 1, file, &reply));
     try std.testing.expectEqual(@as(u64, 0), try file.length(std.testing.io));
 }
 
@@ -3244,6 +3287,7 @@ test "client capture rejects noncanonical Session references before publication"
                 .message => captureMessage(io, .{ .store = root, .session = session, .text_path = "", .text = "input\x00雪" }, target).get(),
                 .session_stop => captureSessionStop(io, .{ .store = root, .session = session }, target),
                 .session_archive => captureSessionArchive(io, .{ .store = root, .session = session }, target),
+                .session_pin => captureSessionPin(io, .{ .store = root, .session = session, .pinned = true }, target),
                 .model_interruption => captureModelInterruption(io, .{ .store = root, .session = session, .turn_id = 1, .operation_id = 1 }, target),
                 .permission_decision => capturePermissionDecision(io, .{ .store = root, .session = session, .action_id = 1 }, target),
             };
@@ -3283,6 +3327,7 @@ test "client recovery rejects noncanonical Session references without retransmis
                     .message => ",\"text\":{\"state\":\"value\",\"value\":\"input\\u0000雪\"}}",
                     .session_stop => "}",
                     .session_archive => ",\"archived\":true}",
+                    .session_pin => ",\"pinned\":true}",
                     .model_interruption => ",\"turn\":\"1\",\"operation\":\"1\"}}",
                     .permission_decision => ",\"action\":\"1\",\"decision\":\"deny\"}",
                 });
@@ -4255,6 +4300,7 @@ test "every request renders its exact worst-case bound from the shape it writes"
     const cases = .{
         .{ protocol.session_stop_request, .{ &store, &key, &session }, protocol.max_session_stop_request_bytes },
         .{ protocol.session_archive_request.all, .{ &store, &key, &session, false }, protocol.max_session_archive_request_bytes },
+        .{ protocol.session_pin_request.all, .{ &store, &key, &session, false }, protocol.max_session_pin_request_bytes },
         .{ protocol.model_interruption_request, .{ &store, &key, &session, id, id }, protocol.max_model_interruption_request_bytes },
         .{ protocol.permission_decision_request, .{ &store, &key, &session, id, protocol.PermissionDecision.allow_once }, protocol.max_permission_decision_request_bytes },
         .{ protocol.observe_command_request.all, .{ &store, &key, @as(?[]const u8, &observation_token) }, protocol.max_observe_command_request_bytes },
@@ -4739,6 +4785,7 @@ test "transport cancellation preserves caller capture and rejects before path ac
     try std.testing.expectError(error.Cancelled, requests.readResultStream("/never-open", "k", file, &buffer));
     try std.testing.expectError(error.Cancelled, requests.inspectSession("/never-open", "s", .current, file, &buffer));
     try std.testing.expectError(error.Cancelled, requests.listSessions("/never-open", null, .{}, file, &buffer));
+    try std.testing.expectError(error.Cancelled, requests.readAction("/never-open", "s", 1, 0, file, &buffer));
     try std.testing.expectError(error.Cancelled, requests.readActionArguments("/never-open", "s", 1, file, &buffer));
     try std.testing.expectError(error.Cancelled, requests.readActionCallId("/never-open", "s", 1, file, &buffer));
     try std.testing.expectEqual(@as(usize, 0), buffer.len);
@@ -5498,4 +5545,35 @@ test "socket upgrade discovery distinguishes stale free Store from refused held 
     try std.testing.expect(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - stale_at < refused_connect_retry_ns);
     // Discovery is read-only: a later lease holder, not discovery, reclaims it.
     _ = try std.Io.Dir.cwd().statFile(io, socket.slice(), .{ .follow_symlinks = false });
+}
+
+test "pin captures preserve pin and unpin intent through generated and explicit recovery" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    for ([_]bool{ true, false }) |pinned| {
+        var captured = try captureSessionPin(io, .{ .store = root, .session = "k7m2qx", .pinned = pinned }, .{ .generated = root });
+        const identity = captured.saved;
+        var original: [2048]u8 = undefined;
+        const count = try captured.file.readPositionalAll(io, &original, 0);
+        try std.testing.expectEqual(protocol.CommandKind.session_pin, identity.kind);
+        try std.testing.expectEqual(pinned, captured.target.session_pin.pinned);
+        captured.close(io);
+        var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = identity.key.slice() } });
+        try std.testing.expectEqual(pinned, recovered.target.session_pin.pinned);
+        var replayed: [2048]u8 = undefined;
+        const replayed_count = try recovered.file.readPositionalAll(io, &replayed, 0);
+        try std.testing.expectEqualSlices(u8, original[0..count], replayed[0..replayed_count]);
+        recovered.close(io);
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = try requestPath(root, identity.key.slice(), &path_buffer);
+        var explicit = try openCaptured(io, .{ .explicit = .{ .store = root, .record = path, .kind = .session_pin } });
+        try std.testing.expectEqual(pinned, explicit.target.session_pin.pinned);
+        explicit.close(io);
+        try std.testing.expectEqual(protocol.CommandKind.session_pin, (try inspectCaptured(io, root, identity.key.slice())).kind);
+        try std.testing.expectError(error.RequestBindingMismatch, openCaptured(io, .{ .explicit = .{ .store = root, .record = path, .kind = .session_stop } }));
+    }
 }

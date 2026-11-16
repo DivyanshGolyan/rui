@@ -94,10 +94,13 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# These Hosts served no provider on main, so admitted messages stay queued:
+# say so explicitly now that a Host without a providers setting serves the
+# automatic set.
 start_host() {
     : >"$ready"
     : >"$server_log"
-    "$rui" host serve --store "$store" "$@" >"$ready" 2>"$server_log" &
+    "$rui" host serve --store "$store" --set 'providers={}' "$@" >"$ready" 2>"$server_log" &
     host_pid=$!
     attempts=0
     while ! grep -q '^ready ' "$ready"; do
@@ -241,7 +244,7 @@ PYCAPTURE
 
 # The OS-held lock rejects a competing owner without relying on PID/socket state.
 status=0
-"$rui" host serve --store "$store" >"$state/competing.out" 2>"$state/competing.err" || status=$?
+"$rui" host serve --store "$store" --set 'providers={}' >"$state/competing.out" 2>"$state/competing.err" || status=$?
 if [ "$status" -ne 6 ]; then
     echo "expected competing Host failure with exit 6, got $status" >&2
     exit 1
@@ -289,7 +292,7 @@ fi
 drain_store="$state/drain-store"
 drain_ready="$state/drain-ready"
 drain_error="$state/drain-error"
-"$rui" host serve --store "$drain_store" --fault shutdown-after-accept >"$drain_ready" 2>"$drain_error" &
+"$rui" host serve --store "$drain_store" --set 'providers={}' --fault shutdown-after-accept >"$drain_ready" 2>"$drain_error" &
 extra_pid=$!
 attempts=0
 while ! grep -q '^ready ' "$drain_ready"; do
@@ -846,7 +849,7 @@ require_test 'first streamed request scratch survives Host crash' -f "$store/scr
 printf unrelated >"$store/scratch/request-00-1.tmp"
 printf diagnostic >"$store/scratch/diagnostic.log"
 printf unrelated >"$store/scratch/unrelated.data"
-if "$rui" host serve --store "$store" --fault startup-cleanup >"$state/startup.out" 2>"$state/startup.err"; then
+if "$rui" host serve --store "$store" --set 'providers={}' --fault startup-cleanup >"$state/startup.out" 2>"$state/startup.err"; then
     echo "Host admitted after failed startup cleanup" >&2
     exit 1
 fi
@@ -867,7 +870,7 @@ recovered_session=$(printf '%s' "$recovered" | session_id)
 stop_host
 mkdir "$store/scratch/request-1-1.tmp"
 status=0
-"$rui" host serve --store "$store" >"$state/startup-type.out" 2>"$state/startup-type.err" || status=$?
+"$rui" host serve --store "$store" --set 'providers={}' >"$state/startup-type.out" 2>"$state/startup-type.err" || status=$?
 if [ "$status" -ne 1 ]; then
     echo "expected startup-type failure with exit 1, got $status" >&2
     exit 1
@@ -996,7 +999,7 @@ contains "$(cat "$state/no-host.err")" "rui host start --store \$'$store'."
 insecure_store="$state/insecure-store"
 mkdir -m 755 "$insecure_store"
 status=0
-"$rui" host serve --store "$insecure_store" >"$state/insecure.out" 2>"$state/insecure.err" || status=$?
+"$rui" host serve --store "$insecure_store" --set 'providers={}' >"$state/insecure.out" 2>"$state/insecure.err" || status=$?
 if [ "$status" -ne 6 ]; then
     echo "expected insecure Store failure with exit 6, got $status" >&2
     exit 1
@@ -1006,7 +1009,7 @@ contains "$(cat "$state/insecure.err")" "[store_unavailable]"
 format_store="$state/format-store"
 format_ready="$state/format-ready"
 format_error="$state/format-error"
-"$rui" host serve --store "$format_store" >"$format_ready" 2>"$format_error" &
+"$rui" host serve --store "$format_store" --set 'providers={}' >"$format_ready" 2>"$format_error" &
 extra_pid=$!
 attempts=0
 while ! grep -q '^ready ' "$format_ready"; do
@@ -1034,7 +1037,7 @@ database.commit()
 database.close()
 PY
 status=0
-"$rui" host serve --store "$format_store" >"$state/wrong-format.out" 2>"$state/wrong-format.err" || status=$?
+"$rui" host serve --store "$format_store" --set 'providers={}' >"$state/wrong-format.out" 2>"$state/wrong-format.err" || status=$?
 if [ "$status" -ne 1 ]; then
     echo "expected wrong-format failure with exit 1, got $status" >&2
     exit 1

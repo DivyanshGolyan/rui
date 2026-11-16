@@ -1,12 +1,14 @@
 //! Names accepted by the option accessors. cli_args checks this against its definitions.
+const std = @import("std");
+
 pub const names = [_][]const u8{
     "action",
-    "active-capacity",
+    "check",
+    "paths",
+    "set",
     "all",
     "archived",
     "attempt",
-    "bash-path",
-    "bash-timeout-ms",
     "clear-model",
     "compaction-trigger",
     "device-code",
@@ -24,6 +26,7 @@ pub const names = [_][]const u8{
     "loaded-tools",
     "model",
     "notifications",
+    "offset",
     "operation",
     "ordinal",
     "output-reservation",
@@ -32,8 +35,6 @@ pub const names = [_][]const u8{
     "position",
     "profile",
     "provider",
-    "provider-ca-file",
-    "provider-endpoint",
     "reasoning-effort",
     "record",
     "reload-skills",
@@ -88,13 +89,7 @@ pub const names = [_][]const u8{
 
 pub fn contains(name: []const u8) bool {
     for (names) |candidate| {
-        if (equal(candidate, name)) return true;
+        if (std.mem.eql(u8, candidate, name)) return true;
     }
     return false;
-}
-
-fn equal(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |x, y| if (x != y) return false;
-    return true;
 }

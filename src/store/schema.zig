@@ -5,6 +5,7 @@
 const std = @import("std");
 const session_settings = @import("../session_settings.zig");
 const store_path = @import("../store_path.zig");
+const validStoreId = @import("../store_id.zig").valid;
 const tool_name = @import("../tool_name.zig");
 const Bounded = @import("../bounded.zig").Bounded;
 const tool_defs = @import("../tool_record.zig");
@@ -19,7 +20,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 74;
+pub const schema_version: u32 = 75;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -60,6 +61,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 72, .digest = 0x93ee71c21e7438ab },
     .{ .schema_version = 73, .digest = 0x515b60c7f5df332d },
     .{ .schema_version = 74, .digest = 0xda8e267adbfcef45 },
+    .{ .schema_version = 75, .digest = 0xcea5bf4db0d3978d },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -697,6 +699,28 @@ pub const migrations = [_]Migration{
             "DELETE FROM store_meta WHERE meta_key='wire_version'",
         },
     },
+    .{
+        .from = 74,
+        .sqlite = &.{
+            "ALTER TABLE core_command RENAME TO core_command_pin_previous",
+            "CREATE TABLE core_command(\n command_key TEXT NOT NULL UNIQUE CHECK(length(CAST(command_key AS BLOB))<=128),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 7),\n target TEXT NOT NULL CHECK(length(CAST(target AS BLOB))<=128),\n input_digest BLOB NOT NULL CHECK(length(input_digest)=32),\n primary_content_id INTEGER REFERENCES content(content_id),\n secondary_content_id INTEGER REFERENCES content(content_id),\n accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),\n code TEXT NOT NULL CHECK(length(CAST(code AS BLOB))<=96),\n revision INTEGER NOT NULL CHECK(revision>=0),\n created INTEGER NOT NULL CHECK(created IN (0,1)),\n command_seq INTEGER PRIMARY KEY NOT NULL CHECK(command_seq>0)\n) STRICT",
+            "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM core_command_pin_previous",
+            "DROP TABLE core_command_pin_previous",
+            "CREATE INDEX core_command_target_order ON core_command(target,kind,command_seq)",
+            "CREATE TABLE session_pin(\n session_ref TEXT PRIMARY KEY NOT NULL REFERENCES session(session_ref),\n command_key TEXT UNIQUE REFERENCES core_command(command_key)\n) STRICT, WITHOUT ROWID",
+            "CREATE TABLE session_pin_command(\n command_key TEXT PRIMARY KEY NOT NULL REFERENCES core_command(command_key),\n pinned INTEGER NOT NULL CHECK(pinned IN (0,1))\n) STRICT, WITHOUT ROWID",
+        },
+        .mysql = &.{
+            "SET @rui_pin_kind_ddl=NULL",
+            "SET @rui_pin_kind_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK(kind BETWEEN 1 AND 7)') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 6')",
+            "PREPARE rui_pin_kind FROM @rui_pin_kind_ddl",
+            "EXECUTE rui_pin_kind",
+            "DEALLOCATE PREPARE rui_pin_kind",
+            "SET @rui_pin_kind_ddl=NULL",
+            "CREATE TABLE session_pin(\n session_ref VARCHAR(6) NOT NULL,\n command_key VARCHAR(128),\n PRIMARY KEY(session_ref),\n UNIQUE(command_key),\n FOREIGN KEY(session_ref) REFERENCES session(session_ref),\n FOREIGN KEY(command_key) REFERENCES core_command(command_key)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE TABLE session_pin_command(\n command_key VARCHAR(128) NOT NULL,\n pinned TINYINT NOT NULL,\n PRIMARY KEY(command_key),\n FOREIGN KEY(command_key) REFERENCES core_command(command_key),\n CHECK(pinned IN (0,1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+        },
+    },
 };
 
 comptime {
@@ -1175,7 +1199,7 @@ pub const tables = [_]Table{
         .name = "core_command",
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = .{ .max = 128 } } },
-            .{ .name = "kind", .type = .int, .check = "kind BETWEEN 1 AND 6" },
+            .{ .name = "kind", .type = .int, .check = "kind BETWEEN 1 AND 7" },
             .{ .name = "target", .type = .{ .text = .{ .max = 128 } } },
             .{ .name = "input_digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
             .{ .name = "primary_content_id", .type = .int, .nullable = true },
@@ -1369,6 +1393,30 @@ pub const tables = [_]Table{
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = null } },
             .{ .name = "archived", .type = .flag },
+        },
+        .primary_key = &.{"command_key"},
+        .foreign_keys = &.{references("command_key", "core_command", command_reference)},
+        .without_rowid = true,
+    },
+    .{
+        .name = "session_pin",
+        .columns = &.{
+            .{ .name = "session_ref", .type = .{ .text = null } },
+            .{ .name = "command_key", .type = .{ .text = null }, .nullable = true },
+        },
+        .primary_key = &.{"session_ref"},
+        .uniques = &.{&.{"command_key"}},
+        .foreign_keys = &.{
+            references("session_ref", "session", session_reference),
+            references("command_key", "core_command", command_reference),
+        },
+        .without_rowid = true,
+    },
+    .{
+        .name = "session_pin_command",
+        .columns = &.{
+            .{ .name = "command_key", .type = .{ .text = null } },
+            .{ .name = "pinned", .type = .flag },
         },
         .primary_key = &.{"command_key"},
         .foreign_keys = &.{references("command_key", "core_command", command_reference)},
@@ -2754,7 +2802,7 @@ fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch
         const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_id'");
         defer _ = c.sqlite3_finalize(statement);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreIdentity;
-        if (!isStoreId(try columnText(statement, 0))) return error.WrongStoreIdentity;
+        if (!validStoreId(try columnText(statement, 0))) return error.WrongStoreIdentity;
     }
     {
         const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_selector'");
@@ -2767,11 +2815,6 @@ fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch
             return error.StoreIdentityMismatch;
         }
     }
-}
-
-/// Whether `text` is a Store id as store_meta holds it.
-pub fn isStoreId(text: []const u8) bool {
-    return @import("../store_id.zig").valid(text);
 }
 
 /// Column `column` of the current row, which is not NULL, as text.
@@ -2965,6 +3008,68 @@ test "MySQL sessions read literals as rsql copies them, and strictly" {
     }
 }
 
+test "schema 75 migration creates canonical pin objects on SQLite and MySQL" {
+    const step = migrations[74 - migration_baseline];
+    inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
+        const expected = comptime objects(dialect);
+        const statements = if (dialect == .sqlite) step.sqlite else step.mysql;
+        var matched: usize = 0;
+        for (statements) |statement| {
+            if (!std.mem.startsWith(u8, statement, "CREATE ")) continue;
+            for (expected) |object| {
+                if (std.mem.eql(u8, object.sql, statement)) {
+                    matched += 1;
+                    break;
+                }
+            } else return error.NoncanonicalMigrationObject;
+        }
+        try std.testing.expectEqual(@as(usize, if (dialect == .sqlite) 4 else 2), matched);
+    }
+}
+
+test "schema 75 preserves Commands and references while adding empty pin organization" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [store_path.max_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [store_path.max_bytes + 32]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/store.sqlite3", .{root}, 0);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(path, &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |step| {
+        if (step.from >= 74) break;
+        for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    try sqlite.exec(database, "CREATE TEMP TABLE original_commands AS SELECT * FROM core_command");
+    try sqlite.exec(database, "CREATE TEMP TABLE original_stops AS SELECT * FROM session_stop");
+    try sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF;PRAGMA user_version=74");
+    try sqlite.exec(database, identity_sql);
+    const meta = try sqlite.prepare(database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_selector',?1),('format','74')");
+    defer _ = c.sqlite3_finalize(meta);
+    try sqlite.bindText(meta, 1, root);
+    try sqlite.expectDone(meta);
+    try openExisting(std.testing.io, database, root, null, null);
+    try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_commands EXCEPT SELECT * FROM core_command)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM core_command EXCEPT SELECT * FROM original_commands)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_stops EXCEPT SELECT * FROM session_stop)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_pin"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_pin_command"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
+    try sqlite.exec(database, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('pin-migration',7,'d8mv7p',zeroblob(32),1,'',0,0,100)");
+    try sqlite.exec(database, "INSERT INTO session_pin_command(command_key,pinned) VALUES('pin-migration',1)");
+    try sqlite.exec(database, "INSERT INTO session_pin(session_ref,command_key) VALUES('d8mv7p','pin-migration')");
+    try sqlite.exec(database, "UPDATE session_pin SET command_key=NULL WHERE session_ref='d8mv7p'");
+    try openExisting(std.testing.io, database, root, null, null);
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_pin WHERE command_key IS NULL"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT pinned FROM session_pin_command WHERE command_key='pin-migration'"));
+}
+
 test "schema 74 migration only deletes the saved wire label on SQLite and MySQL" {
     const step = migrations[73 - migration_baseline];
     try std.testing.expectEqual(@as(u32, 73), step.from);
@@ -2975,7 +3080,7 @@ test "schema 74 migration only deletes the saved wire label on SQLite and MySQL"
     }
     try std.testing.expectEqualStrings("DELETE FROM store_meta WHERE meta_key='wire_version';\n", mysqlMigration(73));
     // Older formats' composed text ends with the format alone, never a wire label.
-    try std.testing.expect(std.mem.endsWith(u8, mysqlMigrationFrom(migration_baseline).?, "DELETE FROM store_meta WHERE meta_key='wire_version';\nUPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format';\n"));
+    try std.testing.expect(std.mem.endsWith(u8, mysqlMigrationFrom(migration_baseline).?, "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format';\n"));
 }
 
 test "schema 72 migration updates only wire metadata on SQLite and MySQL" {
@@ -3037,6 +3142,7 @@ test "schema 57 migration creates the canonical archive objects on SQLite and My
                 }
             } else {
                 const retired = [_][]const u8{
+                    "CREATE TABLE core_command(\n command_key TEXT NOT NULL UNIQUE CHECK(length(CAST(command_key AS BLOB))<=128),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 6),\n target TEXT NOT NULL CHECK(length(CAST(target AS BLOB))<=128),\n input_digest BLOB NOT NULL CHECK(length(input_digest)=32),\n primary_content_id INTEGER REFERENCES content(content_id),\n secondary_content_id INTEGER REFERENCES content(content_id),\n accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),\n code TEXT NOT NULL CHECK(length(CAST(code AS BLOB))<=96),\n revision INTEGER NOT NULL CHECK(revision>=0),\n created INTEGER NOT NULL CHECK(created IN (0,1)),\n command_seq INTEGER PRIMARY KEY NOT NULL CHECK(command_seq>0)\n) STRICT",
                     "CREATE TABLE session_ending_owed(\n turn_id INTEGER PRIMARY KEY NOT NULL REFERENCES turn(turn_id) CHECK(turn_id>0),\n delivered INTEGER NOT NULL CHECK(delivered BETWEEN 0 AND 1),\n suppress_message INTEGER NOT NULL DEFAULT 0 CHECK(suppress_message IN (0,1))\n) STRICT, WITHOUT ROWID",
                     "CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)",
                 };
@@ -3176,7 +3282,7 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
         "UPDATE session_forward SET suppress_message=2 WHERE source_id=1",
         "UPDATE session_forward SET suppress_message=NULL WHERE source_id=1",
         "UPDATE core_command SET kind=0 WHERE command_key='archive-request'",
-        "UPDATE core_command SET kind=7 WHERE command_key='archive-request'",
+        "UPDATE core_command SET kind=8 WHERE command_key='archive-request'",
         "UPDATE core_command SET command_key='fixture-stop' WHERE command_key='archive-request'",
         "INSERT INTO session_archive(session_ref,command_key) VALUES('k7m2qx','fixture-stop')",
         // A Command without a durable stop cannot become archive intent.

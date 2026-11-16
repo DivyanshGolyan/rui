@@ -58,6 +58,9 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .ctrl_r = .recover,
     .ctrl_x = .stop,
     .alt_a = .archive,
+    // Root routes chat switching to the overview, including from the draft.
+    .alt_up = null,
+    .alt_down = null,
     .up = .previous,
     .down = .next,
     // The draft's caret; Left on an empty draft goes to the list and the
@@ -240,7 +243,7 @@ pub const Facts = struct {
     draft_empty: bool = true,
     /// The Host is stopped and a start can mend it now.
     host_startable: bool = false,
-    /// Enter on this draft takes the highlighted row of the list the
+    /// Enter or Tab on this draft takes the highlighted row of the list the
     /// latest frame drew.
     shown_row: bool = false,
     send: Send = .{},
@@ -300,7 +303,7 @@ pub const Take = union(enum) {
     needs_decision,
     /// The draft beside the Action's choice edits with it; nothing sends.
     consent_draft,
-    /// Enter takes the shown list's highlighted row into the draft.
+    /// Enter or Tab takes the shown list's highlighted row into the draft.
     take_row,
     /// Left on an empty draft: focus the list beside the chat, else leave
     /// as Esc does. Esc itself stays the editor's.
@@ -311,7 +314,7 @@ pub const Take = union(enum) {
 
 /// What one input Root handed the Session means, in order: an open panel
 /// or footer choice; footer focus; the Host start key; Alt-I and Alt-D;
-/// an Action's choice; else the draft, with Enter on a shown list's row.
+/// an Action's choice; else the draft, with Enter or Tab on a shown row.
 pub fn step(state: State, facts: Facts, input: Input) Take {
     const action = input.action();
     if (!facts.info_open and facts.choice != .closed and input.closes()) return .close_choice;
@@ -322,8 +325,29 @@ pub fn step(state: State, facts: Facts, input: Input) Take {
         if (input.closes()) return if (facts.info_choice) .cancel_panel_choice else .close_info;
         return .panel;
     }
-    // Focus order is Root's: a Tab that reaches the chat moves nothing here.
-    if (!input.pasted and input.key == .named and @import("app_input.zig").keys.get(input.key.named) != null) return .taken;
+    if (input.key == .named and input.key.named == .tab and !input.pasted and facts.shown_row and !facts.draft_empty and state.footer.focus == .input and state.consent == null) return .take_row;
+    // Root normally takes traversal. With no drawn target, use that same
+    // order owner over the footer fields rather than a second cycle policy.
+    if (!input.pasted and input.key == .named) {
+        const focus = @import("app_input.zig");
+        if (focus.keys.get(input.key.named)) |move| {
+            const order = [_]focus.Target{ .input, .model, .effort };
+            const current: focus.Target = switch (state.footer.focus) {
+                .input => .input,
+                .model => .model,
+                .effort => .effort,
+            };
+            const target = focus.tabNext(order[0..if (facts.has_effort) @as(usize, 3) else 2], current, move == .previous).?;
+            state.footer.focus = switch (target) {
+                .input => .input,
+                .model => .model,
+                .effort => .effort,
+                else => unreachable,
+            };
+            state.footer.pending = null;
+            return .taken;
+        }
+    }
     switch (footer(state.footer, .{ .has_effort = facts.has_effort, .opens = !facts.info_open and !facts.saving }, footerKey(input))) {
         .open_choice => return .open_choice,
         .taken => return .taken,
@@ -445,7 +469,7 @@ test "every key Root hands the Session means one thing in each Session state" {
         .{ .setups = &sends, .keys = &(edits ++ [_]Pressed{ .host_start, .details }), .take = send },
         .{ .setups = &held, .keys = &edits, .take = hold },
         .{ .setups = &.{ .plain, .choice_pending }, .keys = &.{.enter}, .take = send },
-        .{ .setups = &.{.shown_row}, .keys = &.{.enter}, .take = .take_row },
+        .{ .setups = &.{.shown_row}, .keys = &.{ .enter, .tab }, .take = .take_row },
         .{ .setups = &held, .keys = &.{.enter}, .take = hold },
         .{ .setups = &.{ .plain, .shown_row }, .keys = &closing, .take = send },
         .{ .setups = &held, .keys = &closing, .take = hold },
@@ -458,9 +482,13 @@ test "every key Root hands the Session means one thing in each Session state" {
         .{ .setups = &.{.submitting}, .keys = &.{.details}, .take = .details },
         .{ .setups = &.{ .host_held, .opening, .preparing, .command_active }, .keys = &.{.details}, .take = hold },
         .{ .setups = &main, .keys = &.{.info}, .take = .open_info },
-        // Root moves focus with Tab and Shift-Tab; one that reaches the
-        // chat without a panel moves and edits nothing.
-        .{ .setups = &(main ++ [_]Setup{ .selector, .draft_row, .footer_focused }), .keys = &.{ .tab, .shift_tab }, .take = .taken },
+
+        // Footer focus takes Tab outside the drawn list, and always Shift-Tab.
+        .{ .setups = &.{ .plain, .choice_pending, .host_held, .opening, .preparing, .command_active, .submitting, .selector, .draft_row }, .keys = &.{.tab}, .take = .taken, .focus = .model },
+        .{ .setups = &(main ++ [_]Setup{ .selector, .draft_row }), .keys = &.{.shift_tab}, .take = .taken, .focus = .effort },
+
+        .{ .setups = &.{.footer_focused}, .keys = &.{.tab}, .take = .taken, .focus = .effort },
+        .{ .setups = &.{.footer_focused}, .keys = &.{.shift_tab}, .take = .taken, .focus = .input },
         // Focus on the footer's model.
         .{ .setups = &.{.footer_focused}, .keys = &.{ .printable, .host_start, .paste_start }, .take = send, .focus = .input },
         .{ .setups = &.{.footer_focused}, .keys = &.{ .pasted_printable, .pasted_enter, .ctrl_c, .ctrl_d, .left, .right, .details, .paste_end }, .take = send },
@@ -570,4 +598,44 @@ test "every key Root hands the Session means one thing in each Session state" {
         try std.testing.expectEqual(@as(?session_chrome.FooterField, if (take == .open_choice) .model else null), footer_state.pending);
     };
     for (used) |hit| try std.testing.expect(hit);
+}
+
+test "drawn slash Tab acceptance preserves modal consent paste and footer focus owners" {
+    const Case = struct {
+        focus: session_chrome.FooterFocus = .input,
+        info: bool = false,
+        empty: bool = false,
+        choice: Facts.Choice = .closed,
+        consent: ?ConsentPolicy.Row = null,
+        key: Key = .{ .named = .tab },
+        pasted: bool = false,
+        expected: Take,
+        after: session_chrome.FooterFocus,
+    };
+    for ([_]Case{
+        .{ .expected = .take_row, .after = .input },
+        .{ .empty = true, .expected = .taken, .after = .model },
+        .{ .choice = .pending, .expected = .take_row, .after = .input },
+        .{ .focus = .model, .expected = .taken, .after = .effort },
+        .{ .focus = .effort, .expected = .taken, .after = .input },
+        .{ .info = true, .expected = .panel, .after = .input },
+        .{ .choice = .shown, .expected = .panel, .after = .input },
+        .{ .consent = .selector, .expected = .taken, .after = .model },
+        .{ .consent = .draft, .expected = .taken, .after = .model },
+        .{ .key = .{ .named = .shift_tab }, .expected = .taken, .after = .effort },
+        .{ .pasted = true, .expected = .{ .edit = .{ .send = true } }, .after = .input },
+    }) |case| {
+        var footer_state: session_chrome.Footer = .{ .focus = case.focus };
+        var consent: ActionConsent = .{};
+        consent.adopt(17);
+        consent.row = case.consent orelse .selector;
+        try std.testing.expectEqualDeep(case.expected, step(.{ .footer = &footer_state, .consent = if (case.consent != null) &consent else null }, .{
+            .info_open = case.info,
+            .draft_empty = case.empty,
+            .choice = case.choice,
+            .has_effort = true,
+            .shown_row = true,
+        }, .{ .key = case.key, .pasted = case.pasted }));
+        try std.testing.expectEqual(case.after, footer_state.focus);
+    }
 }

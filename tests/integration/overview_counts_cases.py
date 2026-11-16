@@ -1,4 +1,4 @@
-"""Two-line overview rows, pinned Settings and one Footer through a real PTY.
+"""One-line overview rows, pinned Settings and one Footer through a real PTY.
 
 The historical counts group now checks the replacement presentation. The
 list has no editor or overview command surface.
@@ -53,9 +53,8 @@ def rows_by_mark():
             frame = screen.contains("◌ q1")
             lines = frame.split("\n")
             queued = next(i for i, line in enumerate(lines) if "◌ q1" in line)
-            assert lines[queued].strip() == "◌ q1", frame
-            assert lines[queued + 1].startswith("   Queued"), frame
-            assert lines[queued + 1].rstrip().endswith("workspace"), frame
+            assert re.fullmatch(r"◌ q1 +\d+s", lines[queued].strip()), frame
+            assert "Queued" not in frame and "workspace" not in frame, frame
             assert "slots " not in frame, frame
             # Live app memory belongs only on the pinned Settings row, not
             # the Session rows or a replacement counts/status line.
@@ -68,7 +67,7 @@ def rows_by_mark():
             for held in holds.values():
                 held.set()
             screen.contains("✓ q1")
-    print("overview drawing: two-line state rows replace counts and slots", flush=True)
+    print("overview drawing: one-line state rows replace counts and slots", flush=True)
 
 
 def pinned_settings():

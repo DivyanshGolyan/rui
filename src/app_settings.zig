@@ -368,8 +368,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const footer = try ctx.arena.create(Footer);
     footer.* = .{
         .left = try Panel.displayText(ctx.arena, if (self.narrow) " ‹ Rui · settings" else " Rui · settings", self.panel.unicode),
-        .right = try Panel.displayText(ctx.arena, if (self.narrow) "esc close" else "↑↓ · tab · enter change · esc close", self.panel.unicode),
-        .style = self.panel.quiet,
+        .right = try Panel.displayText(ctx.arena, if (self.narrow) "esc close" else "↑↓ · enter change · esc close", self.panel.unicode),
+        .style = widget_style.of(if (self.backend) |b| b.caps(b.context) else .{}, .{ .colour = .quiet }),
     };
     children[1] = .{ .origin = .{ .row = size.height - 1, .col = 0 }, .surface = try footer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 })) };
     return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children, .cursor = children[0].surface.cursor };
@@ -377,6 +377,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
 
 const Fixture = struct {
     unicode: bool = true,
+    background: ?view.Rgb = null,
     memory_value: ?view.Memory = null,
     read_calls: usize = 0,
     save_calls: usize = 0,
@@ -427,7 +428,7 @@ const Fixture = struct {
     }
     fn caps(raw: *anyopaque) view.Caps {
         const self: *Fixture = @ptrCast(@alignCast(raw));
-        return .{ .unicode = self.unicode };
+        return .{ .unicode = self.unicode, .background = self.background };
     }
 };
 
@@ -445,7 +446,7 @@ test "App settings choices submit typed edits and show saved values after the ba
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(page.hasChoice());
     try press(&page, &ctx, vaxis.Key.down);
-    const chosen_model = page.model_choice.menu.entries[page.model_choice.navigation.selected().?].id;
+    const chosen_model = page.model_choice.menu.entries[page.model_choice.focus.selected().?].id;
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(!page.hasChoice());
     const model_edit = fixture.last_edit.?;
@@ -581,6 +582,20 @@ test "App settings completion uses the backend outcome and reports read failures
             }
         }
     }
+}
+
+test "App settings footer stays plain in both themes and widths" {
+    var fixture: Fixture = .{};
+    var page: Self = .{ .backend = fixture.backend() };
+    try page.refresh();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]?view.Rgb{ null, .{ 255, 255, 255 } }) |background| for ([_]u16{ 140, 46 }) |width| {
+        fixture.background = background;
+        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} });
+        const plain = widget_style.of(fixture.backend().caps(&fixture), .{ .colour = .quiet });
+        for (surface.children[1].surface.buffer) |cell| try std.testing.expectEqual(plain, cell.style);
+    };
 }
 
 test "App settings page text and ground at 99x20 and 46x20" {
@@ -764,7 +779,7 @@ test "App settings Model shares the provider list at full width and preserves ma
     try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'f', .text = "future" } });
     try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'z', .text = "zzzz" } });
     try std.testing.expect(page.model_choice.no_match);
-    try std.testing.expectEqualStrings("future", page.model_choice.editor.buffer[0..page.model_choice.editor.length]);
+    try std.testing.expectEqualStrings("future", page.model_choice.editor.text());
     for ([_]u16{ 99, 46 }) |width| {
         const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 20, .x_pixel = 0, .y_pixel = 0 });

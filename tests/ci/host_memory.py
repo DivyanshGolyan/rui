@@ -94,9 +94,11 @@ def served(endpoint, args, **options):
 
 
 def codex_args(binary, root, store, endpoint):
-    return [binary, "host", "serve", "--store", store, "--active-capacity", AGENTS,
-            "--provider-endpoint", f"https://localhost:{endpoint.server_address[1]}/responses",
-            "--provider-ca-file", root / "cert.pem"]
+    return [binary, "host", "serve", "--store", store, "--set", "execution.activeCapacity=" + str(AGENTS),
+            "--set", "providers={}",
+                "--set", "providers.codex.endpoint=" + str(f"https://localhost:{endpoint.server_address[1]}/responses"),
+                "--set", "providers.codex.unauthenticated=true",
+            "--set", "network.caFile=" + str(root / "cert.pem")]
 
 
 @contextlib.contextmanager
@@ -134,8 +136,8 @@ def model_listing(binary, root, store):
     environment = {**os.environ, "RUI_OPENAI_KEY_FILE": str(root / "openai.key"),
                    "RUI_OPENAI_BASE_URL": f"https://localhost:{endpoint.server_address[1]}/v1/",
                    **os_semantics.system_trust(root / "cert.pem")}
-    with served(endpoint, [binary, "host", "serve", "--store", store, "--provider", "openai",
-                           "--active-capacity", AGENTS], env=environment) as (host, _):
+    with served(endpoint, [binary, "host", "serve", "--store", store, "--set", 'providers={"openai":{}}',
+                           "--set", "execution.activeCapacity=" + str(AGENTS)], env=environment) as (host, _):
         host_process.wait_for(lambda: any(headers[b":path"] == b"/v1/models" for headers in list(endpoint.request_headers)),
                               "the OpenAI model listing held open", timeout=10)
         yield host.pid

@@ -251,12 +251,12 @@ test "Session archive gates core peer sends and restores only fresh delivered wo
                 .{ .item_id = "core-two", .name = "message_agent", .encoded_call_id = "core-two", .decoded_call_id = "core-two", .encoded_arguments = encoded, .decoded_arguments = decoded },
             };
             try fixtures.settleCallsForTesting(&storage, &tmp, model, "archive-core-calls", &calls);
-            const blocked = (try storage.nextCoreWork() orelse return error.ExpectedBlockedCoreWork).action;
+            const blocked = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true }) orelse return error.ExpectedBlockedCoreWork).action;
             try std.testing.expectEqual(@as(@import("domain/command.zig").AgentDelivery, .failed), try storage.deliverAgentMessage(blocked.binding, receiver.session.slice(), "blocked", .{}));
             try expectState(&storage, receiver.session.slice(), .archiving);
             try std.testing.expectEqual(action.ActionSettlement.session_stop, try storage.settleActionAttempt(receiver.binding, .cancelled, "Bash stopped.", .{}));
             try expectState(&storage, receiver.session.slice(), .archived);
-            const fresh = (try storage.nextCoreWork() orelse return error.ExpectedFreshCoreWork).action;
+            const fresh = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true }) orelse return error.ExpectedFreshCoreWork).action;
             try std.testing.expectEqual(@as(@import("domain/command.zig").AgentDelivery, .delivered), try storage.deliverAgentMessage(fresh.binding, receiver.session.slice(), "fresh", .{}));
             try expectState(&storage, receiver.session.slice(), .active);
             try std.testing.expect(storage.archiveSession(&archive, .{}).accepted.replayed);
@@ -324,7 +324,7 @@ fn attachedFamily(storage: *Store, tmp: *std.testing.TmpDir) !Family {
         .encoded_arguments = "{}",
         .decoded_arguments = "{}",
     }});
-    const start = (try storage.nextCoreWork() orelse return error.ExpectedStartAgent).action;
+    const start = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true }) orelse return error.ExpectedStartAgent).action;
     var spec = try fixtures.testingAgentSpec(&.{"bash"}, "bypass");
     try std.testing.expectEqual(@as(@import("domain/command.zig").AgentStart, .started), try storage.startAgent(start.binding, parent.slice(), "child task", true, &spec, null, .{}));
     const listing = try fixtures.TestingListing.read(storage, tmp, .{ .archive = .all });
@@ -335,7 +335,7 @@ fn attachedFamily(storage: *Store, tmp: *std.testing.TmpDir) !Family {
 }
 
 fn drainChildStop(storage: *Store) !void {
-    const stop = (try storage.nextCoreWork() orelse return error.ExpectedChildStop).stop;
+    const stop = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true }) orelse return error.ExpectedChildStop).stop;
     var owed: protocol.SessionStopCommand = .{ .key = stop.key };
     try owed.session.set(stop.session.slice());
     try std.testing.expect(storage.stopOwedSession(&owed, .{}) == .accepted);
@@ -361,7 +361,7 @@ test "Session archive preserves child organization and suppresses owed endings" 
             try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
             try expectState(&storage, parent.slice(), .archived);
             try expectState(&storage, child, .active);
-            const stop = (try storage.nextCoreWork() orelse return error.ExpectedChildStop).stop;
+            const stop = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true }) orelse return error.ExpectedChildStop).stop;
             var owed: protocol.SessionStopCommand = .{ .key = stop.key };
             try owed.session.set(stop.session.slice());
             try std.testing.expect(storage.stopOwedSession(&owed, .{}) == .accepted);
@@ -443,7 +443,7 @@ test "Session archive ending causality survives restored parents and ordinary ch
                 const expected_pending: u64 = if (ordering == .fresh_after_restore) 1 else 0;
                 try std.testing.expectEqual(expected_pending, (try storage.inspectSessionForTesting(family.parent.slice())).pending_messages);
                 if (ordering != .close_before_owed_stop) {
-                    const forward = (try storage.nextCoreWork() orelse return error.ExpectedEndingForward).forward;
+                    const forward = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true }) orelse return error.ExpectedEndingForward).forward;
                     try std.testing.expect(try storage.deliverSessionForward(forward, .{}));
                     const page = try store_core.activityPageForTesting(&storage, .{ .session = family.parent, .kinds = .initOne(.turn_ended) });
                     var forwarded: usize = 0;
@@ -455,6 +455,68 @@ test "Session archive ending causality survives restored parents and ordinary ch
                 try expectState(&storage, family.child.slice(), .active);
                 if (ordering != .fresh_after_restore) try std.testing.expect((try storage.admitModelAttempt(.message, .{})) == null);
             }
+        }
+    }.run);
+}
+
+test "Session pin archive admission clears immediately through pending stop and Message restore" {
+    const pin = @import("pin_tests.zig");
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const receiver = try runningBash(&storage, &tmp, "pin-archive-busy");
+            var request = try pin.command("pin-before-busy-archive", receiver.session.slice(), true);
+            try std.testing.expect(storage.pinSession(&request, .{}) == .accepted);
+            var archive = try archiveCommand("pin-busy-archive", receiver.session.slice(), true);
+            const accepted = storage.archiveSession(&archive, .{});
+            try std.testing.expectEqual(protocol.SessionStopCompletion.pending, accepted.accepted.completion);
+            try std.testing.expectEqual(@as(?u64, null), try pin.order(&storage, &tmp, receiver.session.slice()));
+            try request.key.set("pin-during-archive");
+            try std.testing.expectEqual(protocol.SessionPinRejection.session_archiving, storage.pinSession(&request, .{}).rejected.code);
+            request.pinned = false;
+            try request.key.set("unpin-during-archive");
+            try std.testing.expect(storage.pinSession(&request, .{}) == .accepted);
+            _ = try storage.settleActionAttempt(receiver.binding, .cancelled, "Bash stopped.", .{});
+            var incoming = try message(&tmp, "pin-message-restore", receiver.session.slice());
+            defer incoming.removeTemporaryContent(std.testing.io) catch unreachable;
+            try std.testing.expect(storage.submitMessageWithModel(&incoming, null, .{}) == .accepted);
+            try std.testing.expectEqual(@as(?u64, null), try pin.order(&storage, &tmp, receiver.session.slice()));
+            request.pinned = true;
+            try request.key.set("pin-after-message-restore");
+            try std.testing.expect(storage.pinSession(&request, .{}) == .accepted);
+        }
+    }.run);
+}
+
+test "Session pin parent and child organization stays independent during attached stop forwarding" {
+    const pin = @import("pin_tests.zig");
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const family = try attachedFamily(&storage, &tmp);
+            var parent = try pin.command("pin-family-parent", family.parent.slice(), true);
+            var child = try pin.command("pin-family-child", family.child.slice(), true);
+            try std.testing.expect(storage.pinSession(&parent, .{}) == .accepted);
+            try std.testing.expect(storage.pinSession(&child, .{}) == .accepted);
+            const child_rank = (try pin.order(&storage, &tmp, family.child.slice())).?;
+            var archive = try archiveCommand("pin-family-archive-parent", family.parent.slice(), true);
+            try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+            try drainChildStop(&storage);
+            try std.testing.expectEqual(@as(?u64, null), try pin.order(&storage, &tmp, family.parent.slice()));
+            try std.testing.expectEqual(child_rank, (try pin.order(&storage, &tmp, family.child.slice())).?);
+            archive = try archiveCommand("pin-family-archive-child", family.child.slice(), true);
+            try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+            try std.testing.expectEqual(@as(?u64, null), try pin.order(&storage, &tmp, family.child.slice()));
+            try std.testing.expect(storage.pinSession(&child, .{}).accepted.replayed);
+            try std.testing.expectEqual(@as(?u64, null), try pin.order(&storage, &tmp, family.child.slice()));
         }
     }.run);
 }

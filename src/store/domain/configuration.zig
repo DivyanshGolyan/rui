@@ -6,7 +6,6 @@ const operation_effort = @import("operation_effort.zig");
 const session_settings = @import("../../session_settings.zig");
 const command_reply = @import("../../command_reply.zig");
 const command_input = @import("../../command_input.zig");
-const session_field = @import("../../session_field.zig");
 const configuration_admission = @import("../../configuration_admission.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const provider_route = @import("../../provider_route.zig");
@@ -23,7 +22,6 @@ const model_capability = @import("../../model_capability.zig");
 const product_defaults = @import("../../product_defaults.zig");
 const tool_defs = @import("../../tool_record.zig");
 const store_core = @import("../Store.zig");
-const Store = store_core.Store;
 const command_domain = @import("command.zig");
 const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
@@ -165,11 +163,6 @@ pub const SessionFacts = struct {
     output_reservation: ?u64 = null,
     reasoning_effort: ?model_capability.ReasoningEffort = null,
     created_at: u64,
-};
-
-pub const RevisionContentField = enum(c_int) {
-    instructions = 0,
-    output_schema = 1,
 };
 
 pub const ConfigurationContentAction = enum(u2) {
@@ -359,7 +352,7 @@ pub fn planConfigurationUpdate(
 
 // A saved preset refusal keeps its original request identity, even when
 // this Host can now resolve it. All other answers bind the resolved spec.
-// noinline: preset resolution and hashing finish before applyConfiguration,
+// noinline: preset resolution and hashing finish before validation,
 // keeping their scratch off the engine thread's deepest chain.
 pub noinline fn configureDigest(
     command: *const content_custody.ConfigureCommand,
@@ -380,7 +373,7 @@ pub noinline fn configureDigest(
     digest.* = command.semanticDigest();
 }
 
-/// Settings `applyConfiguration` wrote to a Session, whose revision row
+/// Settings `applyStep` wrote to a Session, whose revision row
 /// `queueConfiguredCommand` records with the command.
 pub const Applied = struct {
     session: Bounded(session_id.max_reference_bytes),
@@ -390,7 +383,7 @@ pub const Applied = struct {
     output_schema_id: ?u64,
     instructions_updated: bool,
     /// The settings this revision changed; empty for a creation.
-    changes: std.EnumSet(session_field.SessionField) = .empty,
+    changes: std.EnumSet(session_settings.SessionField) = .empty,
 };
 
 /// The settings a revision can change, as `next` holds them before and
@@ -425,8 +418,8 @@ const Settings = struct {
     }
 
     /// Each field whose value differs, by its name in `SessionField`.
-    fn changed(before: *const Settings, after: *const CurrentConfiguration) std.EnumSet(session_field.SessionField) {
-        var fields: std.EnumSet(session_field.SessionField) = .empty;
+    fn changed(before: *const Settings, after: *const CurrentConfiguration) std.EnumSet(session_settings.SessionField) {
+        var fields: std.EnumSet(session_settings.SessionField) = .empty;
         inline for (session_settings.entries) |entry| {
             if (comptime entry.changeable) {
                 const name = comptime settingsField(entry);
@@ -439,7 +432,7 @@ const Settings = struct {
                         old.eql(next.slice()),
                     .choice, .content, .tools, .decimal_policy => old == next,
                 };
-                fields.setPresent(@field(session_field.SessionField, entry.field), !same);
+                fields.setPresent(@field(session_settings.SessionField, entry.field), !same);
             }
         }
         return fields;
@@ -453,11 +446,6 @@ fn settingsField(comptime entry: session_settings.Entry) []const u8 {
         else => entry.column,
     };
 }
-
-pub const Application = union(enum) {
-    accepted: Applied,
-    rejected: configuration_admission.Rejection,
-};
 
 /// Skills discovery already asks whether this key exists. Fold its inherited
 /// Workspace into that same read, rather than adding a parent preflight round.
@@ -878,7 +866,7 @@ fn readCreation(a: anytype, reads: *ConfigurationReads) void {
 /// D133: only a spec with Bash needs a directory, and the parser and
 /// configurationBeforeWorkspace refused one without it. The Workspace column
 /// stays nonempty, so a spec without one saves the root. noinline: the
-/// digest's hash state stays off applyConfiguration's frame, which sits on
+/// digest's hash state stays off `validateStep`'s frame, which sits on
 /// the engine thread's deepest chain.
 noinline fn saveUnusedWorkspace(configuration: *const content_custody.Configuration, next: *CurrentConfiguration, reads: *ConfigurationReads) void {
     std.debug.assert(!requestsBash(configuration));
@@ -888,7 +876,7 @@ noinline fn saveUnusedWorkspace(configuration: *const content_custody.Configurat
 
 // Both mutation branches validate after keyed replay and Configure's existing
 // preset/capability precedence. Empty targets retain creation semantics;
-// creating Messages share this check through applyConfiguration.
+// creating Messages share this check through `validateStep`.
 pub fn targetRejection(session: []const u8) ?configuration_admission.Rejection {
     return if (session.len != 0 and !session_id.valid(session)) .invalid_session_reference else null;
 }
@@ -902,7 +890,6 @@ pub const ValidatedConfiguration = struct {
     content_actions: @FieldType(ConfigurationUpdatePlan, "update"),
     before: ?Settings,
 };
-pub const ConfigurationValidation = union(enum) { ready: *const ValidatedConfiguration, rejected: configuration_admission.Rejection };
 
 /// What applying a configuration reads besides the Store's rows: the
 /// request, and the Host values its shell passes in. Each is the caller's,
@@ -919,11 +906,6 @@ pub const Request = struct {
     /// outlives the round: its hash state is aligned beyond the Store's
     /// scratch, so `ConfigurationReads` cannot hold it.
     saved: *tool_set.SavedSelection,
-
-    /// A request with `store`'s Host values, for a caller that holds it.
-    pub fn of(store: *Store, io: std.Io, session: []const u8, configuration: *const content_custody.Configuration, initial_skills: ?*const skills_domain.Initial, saved: *tool_set.SavedSelection) Request {
-        return .{ .io = io, .tools = store.hostTools(), .served = store.served, .session = session, .configuration = configuration, .initial_skills = initial_skills, .saved = saved };
-    }
 };
 
 /// The rounds validating a configuration may ask for after
@@ -978,29 +960,6 @@ pub fn validateStep(a: anytype, request: *const Request, reads: *ConfigurationRe
         },
         .loaded => return finishValidation(request, reads),
     }
-}
-
-/// `validateStep` in rounds its caller runs. noinline: its request and
-/// visitor stay off its caller's frame.
-pub noinline fn validateConfiguration(
-    a: anytype,
-    io: std.Io,
-    session: []const u8,
-    configuration: *const content_custody.Configuration,
-    initial_skills: ?*const skills_domain.Initial,
-    reads: *ConfigurationReads,
-) !ConfigurationValidation {
-    var saved: tool_set.SavedSelection = undefined;
-    const request: Request = .of(a.store, io, session, configuration, initial_skills, &saved);
-    var ran: ?ValidationRound = null;
-    while (true) switch (try validateStep(a, &request, reads, ran)) {
-        .round => |at| {
-            try a.run();
-            ran = at;
-        },
-        .rejected => |code| return .{ .rejected = code },
-        .ready => |plan| return .{ .ready = plan },
-    };
 }
 
 /// What the request and round 1 decide, then the model's facts read.
@@ -1106,13 +1065,6 @@ fn finishValidation(request: *const Request, reads: *ConfigurationReads) Validat
     return .{ .ready = &reads.validated };
 }
 
-pub fn applyConfiguration(a: anytype, io: std.Io, session: []const u8, configuration: *const content_custody.Configuration, initial_skills: ?*const skills_domain.Initial, faults: Faults, reads: *ConfigurationReads) !Application {
-    return switch (try validateConfiguration(a, io, session, configuration, initial_skills, reads)) {
-        .rejected => |code| .{ .rejected = code },
-        .ready => try applyValidatedConfiguration(a, io, session, configuration, initial_skills, faults, reads),
-    };
-}
-
 /// The rounds applying a validated configuration may ask for, in order:
 /// whether a created Session's drawn reference is free, once for each
 /// draw, then the lookups its first skill catalog needs.
@@ -1148,21 +1100,6 @@ pub fn applyStep(a: anytype, request: *const Request, faults: Faults, reads: *Co
             return .{ .accepted = &reads.applied };
         },
     }
-}
-
-/// `applyStep` in rounds its caller runs, after `validateConfiguration`
-/// readied `reads.validated`. noinline, as `validateConfiguration`.
-pub noinline fn applyValidatedConfiguration(a: anytype, io: std.Io, session: []const u8, configuration: *const content_custody.Configuration, initial_skills: ?*const skills_domain.Initial, faults: Faults, reads: *ConfigurationReads) !Application {
-    // Application reads no saved set.
-    const request: Request = .of(a.store, io, session, configuration, initial_skills, undefined);
-    var ran: ?ApplyRound = null;
-    while (true) switch (try applyStep(a, &request, faults, reads, ran)) {
-        .round => |at| {
-            try a.run();
-            ran = at;
-        },
-        .accepted => |applied| return .{ .accepted = applied.* },
-    };
 }
 
 /// The content, the tool sets and an existing Session's update; a
@@ -1390,16 +1327,16 @@ test "Session settings changed detects each mutable value without comparing boun
     try current.label.?.set("label");
     const before = Settings.of(&current);
     inline for (.{
-        session_field.SessionField.model,
-        session_field.SessionField.instructions,
-        session_field.SessionField.tools,
-        session_field.SessionField.loaded_tools,
-        session_field.SessionField.permission_mode,
-        session_field.SessionField.output_schema,
-        session_field.SessionField.compaction_trigger,
-        session_field.SessionField.output_reservation,
-        session_field.SessionField.reasoning_effort,
-        session_field.SessionField.label,
+        session_settings.SessionField.model,
+        session_settings.SessionField.instructions,
+        session_settings.SessionField.tools,
+        session_settings.SessionField.loaded_tools,
+        session_settings.SessionField.permission_mode,
+        session_settings.SessionField.output_schema,
+        session_settings.SessionField.compaction_trigger,
+        session_settings.SessionField.output_reservation,
+        session_settings.SessionField.reasoning_effort,
+        session_settings.SessionField.label,
     }) |field| {
         var next = current;
         switch (field) {

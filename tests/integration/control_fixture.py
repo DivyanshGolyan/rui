@@ -137,12 +137,11 @@ def start_host(store, endpoint=None, *extra, active_capacity=2, observations=Non
         "host", "serve",
         "--store",
         str(store),
-        "--active-capacity",
-        str(active_capacity),
+        "--set", "execution.activeCapacity=" + str(active_capacity),
     ]
     required = {"execution": "unavailable"}
     if endpoint is not None:
-        args += ["--provider-endpoint", endpoint]
+        args += ["--set", "providers={}", "--set", "providers.codex.endpoint=" + str(endpoint), "--set", "providers.codex.unauthenticated=true"]
         required = {"execution": "enabled", "nghttp2": "1.70.0"}
     args += extra
     if observations is not None and "--test-phase-trace" not in args:

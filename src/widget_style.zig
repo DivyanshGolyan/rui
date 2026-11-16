@@ -25,7 +25,7 @@ pub fn of(caps: view.Caps, role: view.Style) vaxis.Style {
     };
     const background: theme.Background = switch (role.background) {
         .ground => .ground,
-        .bar => .selvedge,
+        .bar, .input_surface => .selvedge,
         .selection => .selection,
         .hover => .hover,
         .band => .alert,
@@ -57,7 +57,7 @@ test "widget styles resolve theme colours and preserve NO_COLOR" {
     try std.testing.expectEqual(vaxis.Color{ .rgb = .{ 0xf3, 0xee, 0xe2 } }, day.bg);
     const night = of(.{}, .{ .colour = .failure, .background = .selection, .bold = true });
     try std.testing.expectEqual(vaxis.Color{ .rgb = .{ 0xf0, 0x8b, 0x74 } }, night.fg);
-    try std.testing.expectEqual(vaxis.Color{ .rgb = .{ 0x2a, 0x34, 0x67 } }, night.bg);
+    try std.testing.expectEqual(vaxis.Color{ .rgb = .{ 0x2b, 0x2f, 0x45 } }, night.bg);
     try std.testing.expect(night.bold);
     const indexed = of(.{ .depth = .indexed }, .{ .colour = .strong });
     try std.testing.expectEqual(vaxis.Color{ .index = 255 }, indexed.fg);
@@ -97,9 +97,19 @@ test "hover differs from the ground, bar and selection it sits beside in every s
                 continue;
             }
             try std.testing.expectEqual(vaxis.Style.Underline.off, hover.ul_style);
-            for ([_]view.Background{ .ground, .bar, .selection }) |surface| {
+            for ([_]view.Background{ .ground, .bar, .input_surface, .selection }) |surface| {
                 try std.testing.expect(!std.meta.eql(of(caps, .{ .background = surface }).bg, hover.bg));
             }
+        }
+    }
+}
+
+test "input surface stays distinct from ink wash selection in both themes and depths" {
+    for ([_]?view.Rgb{ .{ 255, 255, 255 }, null }) |terminal| {
+        for ([_]view.Caps.Depth{ .direct, .indexed }) |depth| {
+            const caps: view.Caps = .{ .depth = depth, .background = terminal };
+            const input = of(caps, .{ .background = .input_surface });
+            try std.testing.expect(!std.meta.eql(input.bg, of(caps, .{ .background = .selection }).bg));
         }
     }
 }
@@ -135,8 +145,8 @@ test "widget indexed colours use nearest xterm entries and decided pins" {
             const indexed = of(.{ .depth = .indexed, .background = terminal }, role);
             const expected_fg: u8 = if (terminal != null and colour == .attention) 58 else Check.nearest(direct.fg.rgb);
             const expected_bg: u8 = switch (ground) {
-                .selection => if (terminal == null) 237 else Check.nearest(direct.bg.rgb),
-                .hover => if (terminal == null) 235 else 231,
+                .selection => if (terminal == null) 237 else 188,
+                .hover => if (terminal == null) 235 else 254,
                 else => Check.nearest(direct.bg.rgb),
             };
             try std.testing.expectEqual(vaxis.Color{ .index = expected_fg }, indexed.fg);
@@ -150,26 +160,14 @@ test "widget text meets WCAG contrast on each used ground" {
         fn rgb(color: vaxis.Color) [3]u8 {
             return switch (color) {
                 .rgb => |value| value,
-                .index => |i| if (i < 232) blk: {
-                    const levels = [_]u8{ 0, 95, 135, 175, 215, 255 };
-                    const n: usize = i - 16;
-                    break :blk .{ levels[n / 36], levels[n / 6 % 6], levels[n % 6] };
-                } else @splat(@intCast(8 + 10 * (@as(u16, i) - 232))),
+                .index => |i| theme.xtermRgb(i),
                 else => unreachable,
             };
         }
-        fn luminance(c: [3]u8) f64 {
-            var result: f64 = 0;
-            for (c, [_]f64{ 0.2126, 0.7152, 0.0722 }) |byte, weight| {
-                const s = @as(f64, @floatFromInt(byte)) / 255;
-                result += weight * (if (s <= 0.04045) s / 12.92 else std.math.pow(f64, (s + 0.055) / 1.055, 2.4));
-            }
-            return result;
-        }
         fn check(caps: view.Caps, role: view.Style) !void {
             const style = of(caps, role);
-            const a = luminance(rgb(style.fg));
-            const b = luminance(rgb(style.bg));
+            const a = theme.relativeLuminance(rgb(style.fg));
+            const b = theme.relativeLuminance(rgb(style.bg));
             const contrast = (@max(a, b) + 0.05) / (@min(a, b) + 0.05);
             if (contrast < 4.5) std.debug.print("{s} {s} on {s}: {d:.3}\n", .{ @tagName(caps.depth), @tagName(role.colour), @tagName(role.background), contrast });
             try std.testing.expect(contrast >= 4.5);
@@ -178,7 +176,7 @@ test "widget text meets WCAG contrast on each used ground" {
     for ([_]?view.Rgb{ .{ 255, 255, 255 }, null }) |terminal| {
         for ([_]view.Caps.Depth{ .direct, .indexed }) |depth| {
             const caps: view.Caps = .{ .depth = depth, .background = terminal };
-            for ([_]view.Background{ .ground, .bar, .selection, .hover }) |ground| {
+            for ([_]view.Background{ .ground, .bar, .input_surface, .selection, .hover }) |ground| {
                 for ([_]view.Colour{ .strong, .ink, .normal, .quiet, .mark, .attention, .failure }) |colour| {
                     try Check.check(caps, .{ .colour = colour, .background = ground });
                 }

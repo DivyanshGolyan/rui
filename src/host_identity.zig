@@ -24,11 +24,10 @@ pub const Snapshot = struct {
     entries: [][]const u8,
 
     pub fn deinit(self: *Snapshot, allocator: std.mem.Allocator) void {
-        std.crypto.secureZero(u8, self.storage);
         allocator.free(self.entries);
         // Preserve the secure wipe through allocators whose free is a no-op
         // (arenas), rather than replacing it with debug undefined poisoning.
-        allocator.rawFree(self.storage, .fromByteUnits(@alignOf(u8)), @returnAddress());
+        @import("secret_value.zig").wipeAndFree(allocator, self.storage, .fromByteUnits(@alignOf(u8)), @returnAddress());
         self.* = undefined;
     }
 };
@@ -265,4 +264,8 @@ test "host identity native Unix peer is same effective user and actual process" 
     defer _ = std.c.close(pair[1]);
     try std.testing.expectEqual(std.c.getpid(), try peer(pair[0]));
     try std.testing.expectEqual(std.c.getpid(), try peer(pair[1]));
+}
+
+pub fn matchesLaunch(pid: c_int, started: u64, observed: *const Snapshot, executable: []const u8) bool {
+    return pid > 0 and started != 0 and observed.pid == pid and observed.started == started and std.mem.eql(u8, observed.executable, executable);
 }

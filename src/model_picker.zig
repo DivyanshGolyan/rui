@@ -9,6 +9,8 @@ const product_defaults = @import("product_defaults.zig");
 const model_capability = @import("model_capability.zig");
 const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
+const nextToken = model_list.nextToken;
+const objectKey = model_list.objectKey;
 
 pub const Provider = provider_name.Provider;
 pub const Providers = std.enums.EnumSet(Provider);
@@ -107,64 +109,19 @@ pub const Defaults = struct {
     effort: ?ReasoningEffort = null,
 };
 
-pub const Side = enum { lower, higher };
-
-/// A row as the picker shows it: what Enter on it saves for new Sessions,
-/// and the choices its model leaves. Moving to another row starts from
-/// that row's own.
+/// A matching model row with its effective effort, sign-in and saved mark.
 pub const Row = struct {
     /// Null for a model that takes no effort.
     effort: ?ReasoningEffort,
     provider: Provider,
-    /// The efforts the model offers: its catalog row's, or every one Rui
-    /// knows for a model the catalog does not list, as a start admits.
-    efforts: catalog.Efforts,
-    providers: Providers,
     /// New Sessions use this model now: the row's ✓.
     current: bool,
-
-    /// The next effort on `side` the model offers; at the end, or with one
-    /// effort or none, the same.
-    pub fn stepEffort(self: Row, side: Side) Row {
-        const now = self.effort orelse return self;
-        const order = std.enums.values(ReasoningEffort);
-        var at = std.mem.indexOfScalar(ReasoningEffort, order, now).?;
-        while (true) {
-            switch (side) {
-                .lower => at = std.math.sub(usize, at, 1) catch return self,
-                .higher => {
-                    at += 1;
-                    if (at == order.len) return self;
-                },
-            }
-            if (self.efforts.contains(order[at])) {
-                var next = self;
-                next.effort = order[at];
-                return next;
-            }
-        }
-    }
-
-    /// The next sign-in the row offers, round to the first; with one, the
-    /// same.
-    pub fn nextSignIn(self: Row) Row {
-        const order = std.enums.values(Provider);
-        var at = std.mem.indexOfScalar(Provider, order, self.provider).?;
-        while (true) {
-            at = (at + 1) % order.len;
-            if (self.providers.contains(order[at])) {
-                var next = self;
-                next.provider = order[at];
-                return next;
-            }
-        }
-    }
 };
 
-/// The words typed after `/model`. Each word keeps the rows whose ID holds
+/// The model field's search words. Each word keeps the rows whose ID holds
 /// it, or that offer an effort or sign-in its name begins with; a word that
 /// names one whole sets it on each row that offers it, the last such word
-/// winning. So `/model terra low api` leaves one row, set to save as typed.
+/// winning. So `terra low api` leaves one row with low effort on the API key.
 /// Both ways into ChatGPT read "ChatGPT", so a word keeps a row that offers
 /// either: `chatgpt` and `codex` keep a ChatGPT sign-in's rows.
 pub const Query = struct {
@@ -197,12 +154,6 @@ pub const Query = struct {
         return self.match(entry, defaults);
     }
 
-    /// An explicitly typed, unlisted choice bypasses list admission. Its ID
-    /// and controls go to the provider rather than pretending it is listed.
-    pub fn typed(self: Query, entry: Entry, defaults: Defaults) Row {
-        return (Query{ .words = "", .effort = self.effort, .provider = self.provider }).match(entry, defaults).?;
-    }
-
     fn match(self: Query, entry: Entry, defaults: Defaults) ?Row {
         var efforts: catalog.Efforts = .empty;
         for (std.enums.values(ReasoningEffort)) |effort| {
@@ -224,8 +175,6 @@ pub const Query = struct {
         return .{
             .effort = model_capability.startEffort(catalog.shipped, self.effort, entry.id) orelse client_defaults.startEffort(entry.id, defaults.effort),
             .provider = provider,
-            .efforts = efforts,
-            .providers = entry.providers,
             .current = if (defaults.model) |model| std.mem.eql(u8, model, entry.id) else false,
         };
     }
@@ -354,25 +303,9 @@ pub fn read(gpa: std.mem.Allocator, providers: []const u8) error{ OutOfMemory, I
     return menu;
 }
 
-fn nextToken(scanner: *std.json.Scanner, scratch: std.mem.Allocator) error{ OutOfMemory, InvalidModelList }!std.json.Token {
-    return scanner.nextAlloc(scratch, .alloc_if_needed) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.InvalidModelList,
-    };
-}
-
 fn string(scanner: *std.json.Scanner, scratch: std.mem.Allocator) error{ OutOfMemory, InvalidModelList }![]const u8 {
     return switch (try nextToken(scanner, scratch)) {
         .string, .allocated_string => |text| text,
-        else => error.InvalidModelList,
-    };
-}
-
-/// The next member's key, or null at the object's end.
-fn objectKey(scanner: *std.json.Scanner, scratch: std.mem.Allocator) error{ OutOfMemory, InvalidModelList }!?[]const u8 {
-    return switch (try nextToken(scanner, scratch)) {
-        .object_end => null,
-        .string, .allocated_string => |key| key,
         else => error.InvalidModelList,
     };
 }
@@ -550,57 +483,6 @@ test "the ✓ marks the row of the model new Sessions use, whatever its sign-in"
         try std.testing.expect(!Query.parse("").row(entry, .{ .provider = .codex, .effort = .high }).?.current);
     }
     try std.testing.expectEqual(@as(usize, 1), marked);
-}
-
-test "left and right step the effort through those the model offers and stop at either end" {
-    var menu = try pickerMenu();
-    defer menu.deinit(std.testing.allocator);
-    const Case = struct { id: []const u8, side: Side, steps: []const ?ReasoningEffort };
-    const saved: Defaults = .{ .provider = .codex, .effort = .high };
-    for ([_]Case{
-        .{ .id = "gpt-6.1-sol", .side = .higher, .steps = &.{ .high, .xhigh, .max, .max } },
-        // gpt-6.1-sol offers no none.
-        .{ .id = "gpt-6.1-sol", .side = .lower, .steps = &.{ .high, .medium, .low, .low } },
-        // This one offers none, low, high and max: medium is skipped.
-        .{ .id = "@cf/deepseek-ai/deepseek-v4-flash-0731", .side = .lower, .steps = &.{ .high, .low, .none, .none } },
-        .{ .id = "@cf/deepseek-ai/deepseek-v4-flash-0731", .side = .higher, .steps = &.{ .high, .max, .max } },
-        // Unlisted: every effort Rui knows.
-        .{ .id = "ft:custom", .side = .lower, .steps = &.{ .high, .medium, .low, .none, .none } },
-        .{ .id = "ft:custom", .side = .higher, .steps = &.{ .high, .xhigh, .max, .max } },
-        // One effort, or none: the keys do nothing.
-        .{ .id = "azure/gpt-5-pro", .side = .lower, .steps = &.{ .high, .high } },
-        .{ .id = "azure/gpt-5-pro", .side = .higher, .steps = &.{ .high, .high } },
-        .{ .id = "openai/gpt-4.1", .side = .lower, .steps = &.{ null, null } },
-        .{ .id = "openai/gpt-4.1", .side = .higher, .steps = &.{ null, null } },
-    }) |case| {
-        var row = plainRow(&menu, case.id, saved);
-        for (case.steps) |expected| {
-            try std.testing.expectEqual(expected, row.effort);
-            row = row.stepEffort(case.side);
-        }
-        // Stepping never changes the sign-in.
-        try std.testing.expectEqual(plainRow(&menu, case.id, saved).provider, row.provider);
-    }
-    try std.testing.expectEqual(@as(usize, 5), plainRow(&menu, "gpt-6.1-sol", saved).efforts.count());
-    try std.testing.expectEqual(@as(usize, 6), plainRow(&menu, "ft:custom", saved).efforts.count());
-    try std.testing.expectEqual(@as(usize, 1), plainRow(&menu, "azure/gpt-5-pro", saved).efforts.count());
-    try std.testing.expectEqual(@as(usize, 0), plainRow(&menu, "openai/gpt-4.1", saved).efforts.count());
-}
-
-test "tab switches between the sign-ins the row offers, and does nothing with one" {
-    var menu = try pickerMenu();
-    defer menu.deinit(std.testing.allocator);
-    const both = plainRow(&menu, "gpt-6.1-sol", .{ .provider = .codex, .effort = .high });
-    try std.testing.expectEqual(Provider.codex, both.provider);
-    try std.testing.expectEqual(Provider.openai, both.nextSignIn().provider);
-    try std.testing.expectEqual(Provider.codex, both.nextSignIn().nextSignIn().provider);
-    // Switching never changes the effort.
-    try std.testing.expectEqual(@as(?ReasoningEffort, .high), both.nextSignIn().effort);
-    for ([_][]const u8{ "gpt-6-astra", "ft:custom" }) |id| {
-        const one = plainRow(&menu, id, .{ .provider = .openai });
-        try std.testing.expectEqual(one.provider, one.nextSignIn().provider);
-        try std.testing.expectEqual(@as(usize, 1), one.providers.count());
-    }
 }
 
 /// The IDs of the rows `typed` leaves, in the menu's order.

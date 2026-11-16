@@ -27,6 +27,32 @@ def committed(text, columns=100, lines=20):
 
 
 class VerifyRuiTest(unittest.TestCase):
+    def test_host_launcher_uses_exact_credential_free_generic_settings(self):
+        launch = runpy.run_path(str(SCRIPT))["launch_host"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = types.SimpleNamespace(
+                rui=Path("/candidate/rui"), store=root / "store", project=root, evidence=root,
+                meta={"host_options": {"active_capacity": 8, "host_setenv": ["HOST_ONLY=secret"]},
+                      "fixture_url": "http://127.0.0.1:1234/responses"},
+                env=lambda: {"HOME": str(root)}, own=lambda *_args, **_kwargs: None,
+                rui_cmd=lambda *_args, **_kwargs: types.SimpleNamespace(returncode=0, stdout='{"status":"ready"}', stderr=""))
+            captured = {}
+
+            def start(argv, **kwargs):
+                captured.update(argv=argv, env=kwargs["env"])
+                kwargs["stdout"].close()
+                kwargs["stderr"].close()
+                return types.SimpleNamespace(pid=123)
+
+            with patch("subprocess.Popen", start):
+                launch(run)
+            self.assertEqual(captured["argv"], ["/candidate/rui", "host", "serve", "--store", str(run.store),
+                "--set", "execution.activeCapacity=8", "--set", "providers={}",
+                "--set", "providers.codex.endpoint=http://127.0.0.1:1234/responses",
+                "--set", "providers.codex.unauthenticated=true", "--test-retry-waits-ms", "50,100,150"])
+            self.assertEqual(captured["env"]["HOST_ONLY"], "secret")
+
     def test_child_imports_user_site_with_synthetic_home(self):
         run_type = runpy.run_path(str(SCRIPT))["Run"]
         with tempfile.TemporaryDirectory() as temp:
@@ -61,9 +87,11 @@ class VerifyRuiTest(unittest.TestCase):
         new = module["cmd_new"]
         run_type = module["Run"]
         sent_to = []
+        started = []
 
         def rui_cmd(_run, *args, **_kwargs):
             if args[:2] == ("session", "start"):
+                started.append(args)
                 return types.SimpleNamespace(returncode=0, stdout=json.dumps({
                     "context": {"store": "/tmp/store", "session": "fybw8c", "kind": "message"},
                     "configuration": {"provider": "codex", "model": "gpt-5.5"},
@@ -74,24 +102,117 @@ class VerifyRuiTest(unittest.TestCase):
             return types.SimpleNamespace(returncode=0, stderr="request: fixture-request\n")
 
         def fixture(_args, **kwargs):
-            (Path(kwargs["env"]["TMPDIR"]).parent / "fixture.port").write_text("1234")
             kwargs["stdout"].close()
+            saved = json.loads(Path(_args[-1], "run.json").read_text())
+            self.assertIs(saved.get("no_sessions"), args.no_sessions)
+            (Path(kwargs["env"]["TMPDIR"]).parent / "fixture.port").write_text("1234")
             return types.SimpleNamespace(pid=123)
 
+        for no_sessions in (False, True):
+            sent_to.clear()
+            started.clear()
+            with self.subTest(no_sessions=no_sessions), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                build = {"tree": "tree", "binary": "/unused/rui", "files_sha256": {"rui": "hash"}, "source": temp}
+                args = types.SimpleNamespace(sha="a" * 40, label="test", active_capacity=2, host_setenv=[], no_sessions=no_sessions, seed=0 if no_sessions else 1)
+                replacements = {"CACHE": root / "cache", "SCRATCH_PARENT": root, "load_build": lambda _sha: build,
+                                "launch_host": lambda _run: types.SimpleNamespace(stdout='{"instance":"host"}'),
+                                "wait_request": lambda *_args: None}
+                with patch.dict(new.__globals__, replacements), patch.object(run_type, "rui_cmd", rui_cmd), \
+                        patch.object(run_type, "own"), patch("subprocess.Popen", fixture), \
+                        patch.dict(sys.modules, {"codex_integration": types.SimpleNamespace(credentials=lambda _path: None)}), \
+                        patch.object(sys, "argv", sys.argv[:]), patch.object(sys, "path", sys.path[:]), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    new(args)
+                self.assertEqual(sent_to, [] if no_sessions else ["fybw8c"])
+                self.assertEqual(len(started), 0 if no_sessions else 2)
+                saved = json.loads(next((root / "cache/runs").glob("*/run.json")).read_text())
+                self.assertIs(saved["no_sessions"], no_sessions)
+                if no_sessions:
+                    self.assertEqual(saved["sessions"], {})
+
+    def test_doctor_validates_registered_session_references(self):
+        module = runpy.run_path(str(SCRIPT))
+        doctor = module["cmd_doctor"]
+        normal = {"demo": "demo-id", "approve": "approve-id"}
+        listed = {"sessions": [{"reference": sid} for sid in normal.values()]}
+        cases = [
+            ("normal", {"sessions": normal, "no_sessions": False}, listed, 0, True),
+            ("legacy normal", {"sessions": normal}, listed, 0, True),
+            ("intentional empty", {"sessions": {}, "no_sessions": True}, {"sessions": []}, 0, True),
+            ("unmarked empty", {"sessions": {}}, {"sessions": []}, 0, False),
+            ("unexpected row", {"sessions": {}, "no_sessions": True}, listed, 0, False),
+            ("scenario", {"sessions": {"Agent": "agent-id"}, "no_sessions": True},
+             {"sessions": [{"reference": "agent-id"}]}, 0, True),
+            ("extra row", {"sessions": normal},
+             {"sessions": listed["sessions"] + [{"reference": "extra-id"}]}, 0, True),
+            ("ID only in label", {"sessions": normal},
+             {"sessions": [{"reference": "other-id", "label": "demo-id"},
+                           {"reference": "approve-id"}]}, 0, False),
+            ("missing scenario ID", {"sessions": {**normal, "Agent": "agent-id"}}, listed, 0, False),
+        ]
+        for name in normal:
+            cases.append(("missing mapping " + name,
+                          {"sessions": {key: sid for key, sid in normal.items() if key != name}}, listed, 0, False))
+            cases.append(("missing row " + name, {"sessions": normal},
+                          {"sessions": [{"reference": sid} for key, sid in normal.items() if key != name]}, 0, False))
+        for registry in (None, [], "bad", {"": "id"}, {" ": "id"}, {1: "id"}, {"Agent": ""},
+                         {"Agent": " "}, {"Agent": None}, {"Agent": 1}, {"Agent": []}, {"Agent": {}},
+                         {"demo": "same", "approve": "same"}):
+            cases.append(("invalid registry", {"sessions": registry, "no_sessions": True}, listed, 0, False))
+        cases.append(("missing registry", {"no_sessions": True}, {"sessions": []}, 0, False))
+        for flag in (None, 0, 1, "true", [], {}):
+            cases.append(("invalid flag", {"sessions": normal, "no_sessions": flag}, listed, 0, False))
+        for payload in (None, [], {}, {"sessions": None}, {"sessions": {}}, {"sessions": "bad"},
+                        {"sessions": [None]}, {"sessions": [{}]}, {"sessions": [{"reference": ""}]},
+                        {"sessions": [{"reference": 1}]}, {"sessions": [{"reference": None}]},
+                        {"sessions": listed["sessions"] * 2}):
+            cases.append(("invalid listing", {"sessions": normal}, payload, 0, False))
+        for row in (None, [], {}, {"reference": ""}, {"reference": " "},
+                    {"reference": 1}, {"reference": []}, {"reference": {}}):
+            cases.append(("invalid extra row", {"sessions": normal},
+                          {"sessions": listed["sessions"] + [row]}, 0, False))
+        cases.extend([
+            ("failed listing", {"sessions": normal}, listed, 1, False),
+            ("failed empty listing", {"sessions": {}, "no_sessions": True}, {"sessions": []}, 1, False),
+            ("malformed JSON", {"sessions": normal}, "not JSON", 0, False),
+        ])
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            build = {"tree": "tree", "binary": "/unused/rui", "files_sha256": {"rui": "hash"}, "source": temp}
-            args = types.SimpleNamespace(sha="a" * 40, label="test", active_capacity=2, host_setenv=[], no_sessions=False, seed=1)
-            replacements = {"CACHE": root / "cache", "SCRATCH_PARENT": root, "load_build": lambda _sha: build,
-                            "launch_host": lambda _run: types.SimpleNamespace(stdout='{"instance":"host"}'),
-                            "wait_request": lambda *_args: None}
-            with patch.dict(new.__globals__, replacements), patch.object(run_type, "rui_cmd", rui_cmd), \
-                    patch.object(run_type, "own"), patch("subprocess.Popen", fixture), \
-                    patch.dict(sys.modules, {"codex_integration": types.SimpleNamespace(credentials=lambda _path: None)}), \
-                    patch.object(sys, "argv", sys.argv[:]), patch.object(sys, "path", sys.path[:]), \
-                    contextlib.redirect_stdout(io.StringIO()):
-                new(args)
-            self.assertEqual(sent_to, ["fybw8c"])
+            binary = root / "rui"
+            binary.touch()
+            for name, metadata, payload, rc, expected in cases:
+                with self.subTest(name=name, metadata=metadata, payload=payload):
+                    reports = []
+                    run = types.SimpleNamespace(root=root, scratch=root, home=root / "home", store=root / "store",
+                        evidence=root, rui=binary, sock=root / "absent-socket",
+                        meta={"sha": "sha", "binary_sha256": "hash", "source": temp,
+                              "fixture_url": "http://fixture/responses", "id": "run", "host_instance": "host", **metadata},
+                        owned=lambda: [{"kind": "host", "pid": 123, "lstart": "start"}])
+                    run.sid = types.MethodType(module["Run"].sid, run)
+                    def command(*args, **kwargs):
+                        if args[:2] == ("session", "list"):
+                            return types.SimpleNamespace(returncode=rc, stdout=payload if isinstance(payload, str)
+                                                         else json.dumps(payload), stderr="")
+                        return types.SimpleNamespace(returncode=0, stdout='{"instance":"host"}', stderr="")
+                    run.rui_cmd = unittest.mock.Mock(side_effect=command)
+                    replacements = {"Run": lambda _path: run, "sha256": lambda _path: "hash",
+                        "load_build": lambda _sha: {"files_sha256": {"rui": "hash"}},
+                        "process_start": lambda _pid: ("start",), "accessibility": lambda: "unused",
+                        "append_jsonl": lambda _path, report: reports.append(report)}
+                    with patch.dict(doctor.__globals__, replacements), \
+                            patch("subprocess.run", side_effect=lambda argv, **_kwargs: types.SimpleNamespace(
+                                stdout="sha" if argv[0] == "git" else "n" + str(run.store))), \
+                            patch("urllib.request.urlopen", return_value=io.BytesIO(b'{"verify_rui_fixture":"run"}')), \
+                            contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as result:
+                        doctor(types.SimpleNamespace(run=root, expect_sha=None))
+                    session_check = next(check for check in reports[0]["checks"]
+                                         if check["check"] == "configured Sessions present")
+                    self.assertEqual(session_check["ok"], expected)
+                    self.assertEqual(result.exception.code, 0 if expected else 1)
+                    self.assertEqual(reports[0]["verdict"], "PASS" if expected else "ISSUES")
+                    self.assertEqual(sum(call.args[:2] == ("session", "list")
+                                         for call in run.rui_cmd.call_args_list), 1)
 
     def test_scratch_root_follows_host_platform(self):
         for platform, expected in (("darwin", "/private/tmp"), ("linux", "/tmp")):
@@ -442,7 +563,7 @@ class FramesTest(unittest.TestCase):
 
     def test_renderer_jobs_for_stills_and_movie_and_concat_durations(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             jobs = io.StringIO()
             self.helper["render_job"](jobs, root / "still.html")
             function = self.helper["recording_jobs"]
@@ -460,6 +581,24 @@ class FramesTest(unittest.TestCase):
                 f"file '{root}/movie/000000.png'", "duration 0.100",
                 f"file '{root}/movie/000001.png'", "duration 2.000", f"file '{root}/movie/000001.png'",
             ])
+
+    def test_renderer_job_canonicalizes_absolute_and_relative_aliases(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            actual = root / "actual"
+            actual.mkdir()
+            alias = root / "alias"
+            alias.symlink_to(actual, target_is_directory=True)
+            with contextlib.chdir(root):
+                for path in (alias / "still.html", Path("alias/still.html")):
+                    for movie in (False, True):
+                        with self.subTest(path=path, movie=movie):
+                            jobs = io.StringIO()
+                            self.helper["render_job"](jobs, path, movie=movie)
+                            self.assertEqual(json.loads(jobs.getvalue()), {
+                                "html": str(actual / "still.html"), "png": str(actual / "still.png"),
+                                "scale": 1 if movie else 2, "opaque": movie,
+                            })
 
     def test_encoder_uses_separate_palette_pass_and_same_concat(self):
         with patch("subprocess.run", return_value=types.SimpleNamespace(returncode=0, stderr="")) as run:
@@ -1397,6 +1536,74 @@ while True:
                                  ("initial-frame", screens[count - 1], False))
                 self.assertTrue(records[0]["ok"])
 
+    def test_initial_readiness_requires_complete_guided_account_controls(self):
+        # Nonblank rows from the actual4be first-run140x40 committed capture.
+        modal = (
+            '                                  ────────────────────────────────────────────────────────────────────────\n'
+            '                                   Sign in to Rui\n'
+            '                                     Choose account  Credentials stay out of conversations.\n'
+            '                                     ChatGPT         Use your subscription\n'
+            '                                     API key         OpenAI or a custom Responses API\n'
+            '                                     Close           Esc returns\n'
+            '                                     Navigation      Tab / Shift-Tab move. Enter chooses. Esc back.\n'
+        )
+        cases = [("", False), ("Sign in to Rui", False), (modal, True),
+                 (modal + "Opening…", False),
+                 ("  + New Session\n  Settings\nenter open", True), (" › Type a task", True)]
+        cases.extend((modal.replace(label, ""), False) for label in
+                     ("Sign in to Rui", "ChatGPT", "API key", "Close", "Tab / Shift-Tab"))
+
+        def check(predicate, _description, **_kwargs):
+            for text, expected in cases:
+                with self.subTest(text=text):
+                    self.assertEqual(bool(predicate(types.SimpleNamespace(completed=text))), expected)
+
+        self.helper["frame_initial_ready"](types.SimpleNamespace(wait=check))
+
+    def test_initial_readiness_accepts_grouped_choices_buttons_and_wrapped_footer(self):
+        modal = ("  Sign in to Rui\n"
+                 "    Choose an account. Credentials stay out\n"
+                 "    of conversations.\n"
+                 "    ChatGPT         Use your subscription\n"
+                 "    API key         OpenAI or a custom Responses API\n\n"
+                 "    [ Close ]\n\n"
+                 "    Tab / Shift-Tab move. Enter chooses.\n"
+                 "    Esc back.\n")
+        cases = [(modal, True), (modal + "Opening…", False)]
+        cases.extend((modal.replace(marker, ""), False) for marker in
+                     ("Sign in to Rui", "ChatGPT", "API key", "[ Close ]", "Tab / Shift-Tab"))
+        cases.append((modal.replace("[ Close ]", "[ Close"), False))
+
+        def check(predicate, _description, **_kwargs):
+            for text, expected in cases:
+                with self.subTest(text=text):
+                    self.assertEqual(bool(predicate(types.SimpleNamespace(completed=text))), expected)
+
+        self.helper["frame_initial_ready"](types.SimpleNamespace(wait=check))
+
+    def test_frame_url_wrap_keeps_every_character_in_readiness_and_saved_capture(self):
+        url = "https://auth.openai.com/codex/device"
+        wrapped = "  Open URL        https://auth.openai.com/cod\n                  ex/device\n  [ Copy code ]\n  ABCD-1234\n"
+        cases = [(wrapped, True), (url + "\n[ Copy code ]\nABCD-1234\n", True),
+                 (wrapped.replace("ex/device", "ex/devic"), False),
+                 (wrapped.replace("ex/device", "xe/device"), False),
+                 (wrapped.replace("[ Copy code ]", "[ Copy\n code ]"), False),
+                 (wrapped.replace("ABCD-1234", "ABCD-123"), False)]
+        state = {"name": "device", "expect": [url, "[ Copy code ]", "ABCD-1234"]}
+        run = types.SimpleNamespace(meta={"sha": "a" * 40})
+        for text, expected in cases:
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as temp:
+                terminal = types.SimpleNamespace(frame=committed(text, columns=46, lines=30))
+
+                def wait(predicate, _description, **_kwargs):
+                    self.assertEqual(bool(predicate(types.SimpleNamespace(completed=text))), expected)
+
+                terminal.wait = wait
+                self.helper["frame_ready"](terminal, state)
+                captured = self.helper["frame_capture"](run, terminal, Path(temp), state, (46, 30), None)
+                self.assertEqual(captured["ok"], expected)
+                self.assertEqual((Path(temp) / captured["files"]["txt"]).read_text(), text)
+
     def test_frame_terminal_receives_initial_size_and_theme(self):
         scenario = {"sizes": ["100x30"], "states": [{"name": "empty", "open": "overview", "steps": [], "theme": "day"}]}
         calls, _records = self.run_frames_scenario(scenario)
@@ -1529,6 +1736,48 @@ while True:
                 if ok:
                     self.assertNotIn("This Session", (out / record["files"]["txt"]).read_text())
                     self.assertIn("New Sessions", (out / record["files"]["txt"]).read_text())
+
+    def test_background_expectations_validate_before_launch(self):
+        for value in ({"› Type a task": "#e6ddc8"}, {"New Session": "#ABCDEF"}, {}):
+            data = self.scenario()
+            data["states"][0]["expect_background"] = value
+            self.assertEqual(self.helper["validate_scenario"](data)["states"][0]["expect_background"], value)
+        for value in (None, [], "#ffffff", {"": "#ffffff"}, {"a\nb": "#ffffff"},
+                      {"a\rb": "#ffffff"}, {"a\0b": "#ffffff"}, {"x": "ffffff"},
+                      {"x": "#fff"}, {"x": "#gggggg"}, {"x": None}):
+            data = self.scenario()
+            data["states"][0]["expect_background"] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "expect_background"):
+                self.helper["validate_scenario"](data)
+
+    def test_background_assertion_checks_committed_marker_cells_at_both_widths(self):
+        marker = "› Type a task"
+        for color, ground in (("e6ddc8", "f3eee2"), ("1a2246", "121933")):
+            for width, prefix in ((140, "sidebar │ "), (46, " ")):
+                for bad in (None, 0, len(marker) - 1):
+                    with self.subTest(color=color, width=width, bad=bad), tempfile.TemporaryDirectory() as temp:
+                        cells = tuple(Cell(char, None, False, bg=color if index != bad else ground)
+                                      for index, char in enumerate(marker))
+                        row = tuple(Cell(char, None, False, bg=ground) for char in prefix) + cells
+                        frame = Frame(width, 30, Cursor(2, 3), False, (row,), ground, "d4cebf", "d4cebf")
+                        state = {"name": "input", "steps": [], "expect": [marker],
+                                 "expect_background": {marker: "#" + color}}
+                        terminal = types.SimpleNamespace(frame=frame)
+                        run = types.SimpleNamespace(meta={"sha": "a" * 40})
+                        captured = self.helper["frame_capture"](run, terminal, Path(temp), state, (width, 30), None)
+                        self.assertEqual(captured["ok"], bad is None)
+                        self.assertEqual(captured["reason"],
+                                         None if bad is None else f"{marker!r} must have background=#{color}")
+                        self.assertTrue((Path(temp) / captured["files"]["txt"]).exists())
+                        # Style is a capture verdict: readiness never waits on colour.
+                        observed = []
+                        terminal.wait = lambda check, *_args, **_kw: observed.append(check(
+                            types.SimpleNamespace(completed=frame.text, frame=frame)))
+                        self.helper["frame_ready"](terminal, state)
+                        self.assertEqual(observed, [True])
+                        self.assertEqual(self.helper["frame_background_failure"](
+                            {"expect_background": {"missing": "#" + color}}, frame),
+                            "missing background specimen 'missing'")
 
     def test_capture_expectations_over_sizes_and_state_transitions(self):
         capture = self.helper["frame_capture"]

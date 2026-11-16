@@ -1,6 +1,6 @@
 # Permission ownership and disconnected clients: prior art
 
-Inspected 2026-09-13 for [Choose permission policy ownership and disconnected-client behavior](https://github.com/DivyanshGolyan/rui/issues/159). Four Luna researchers inspected one harness each; the parent checked source references and reconciled the findings. This is source evidence, not a Rui decision or runtime qualification. Accepted behavior remains in [ARCHITECTURE.md](../ARCHITECTURE.md#model-output-tools-and-permission).
+Inspected 2026-09-13 for [Choose permission policy ownership and disconnected-client behavior](https://github.com/DivyanshGolyan/rui/issues/159). Four Luna researchers inspected one harness each; the parent checked source references and reconciled the findings. This is source evidence, not a Rui decision or runtime qualification. Accepted behavior remains in [ARCHITECTURE.md](../docs/contracts/execution.md#model-output-tools-and-permission).
 
 ## Source revisions
 

@@ -11,8 +11,6 @@ const Palette = struct {
     ground: Rgb,
     selvedge: Rgb,
     selection: Rgb,
-    /// Per-channel midpoint of selvedge and selection: a pointer's row, quieter than the keyboard's.
-    hover: Rgb,
     strong: Rgb,
     body: Rgb,
     indigo: Rgb,
@@ -25,8 +23,7 @@ const Palette = struct {
 const light: Palette = .{
     .ground = .{ 0xf3, 0xee, 0xe2 },
     .selvedge = .{ 0xe6, 0xdd, 0xc8 },
-    .selection = .{ 0xdd, 0xe0, 0xee },
-    .hover = .{ 0xe1, 0xde, 0xdb },
+    .selection = .{ 0xde, 0xda, 0xd5 },
     .strong = .{ 0x1a, 0x18, 0x14 },
     .body = .{ 0x2f, 0x2b, 0x25 },
     .indigo = .{ 0x1f, 0x2d, 0x6b },
@@ -38,8 +35,7 @@ const light: Palette = .{
 const dark: Palette = .{
     .ground = .{ 0x12, 0x19, 0x33 },
     .selvedge = .{ 0x1a, 0x22, 0x46 },
-    .selection = .{ 0x2a, 0x34, 0x67 },
-    .hover = .{ 0x22, 0x2b, 0x56 },
+    .selection = .{ 0x2b, 0x2f, 0x45 },
     .strong = .{ 0xf2, 0xec, 0xdf },
     .body = .{ 0xd4, 0xce, 0xbf },
     .indigo = .{ 0xa9, 0xb6, 0xec },
@@ -56,13 +52,20 @@ fn palette(mode: Mode) Palette {
     };
 }
 
+/// The pointer wash follows the two surfaces it sits between, never a second palette.
+fn midpoint(a: Rgb, b: Rgb) Rgb {
+    var result: Rgb = undefined;
+    for (a, b, &result) |x, y, *out| out.* = @intCast((@as(u16, x) + y) / 2);
+    return result;
+}
+
 pub fn background(mode: Mode, depth: Depth, role: Background) Color {
     const p = palette(mode);
     const rgb = switch (role) {
         .ground => p.ground,
         .selvedge => p.selvedge,
         .selection => p.selection,
-        .hover => p.hover,
+        .hover => midpoint(p.selvedge, p.selection),
         .alert => Rgb{ 0xe9, 0xb1, 0x30 },
     };
     return switch (depth) {
@@ -77,8 +80,8 @@ pub fn text(mode: Mode, depth: Depth, role: Text, on: Background) Color {
         .strong => p.strong,
         .body => p.body,
         .indigo => p.indigo,
-        // Quiet text darkens on the day selvedge and hover to keep 4.5:1.
-        .quiet => if (mode == .light and (on == .selvedge or on == .hover)) Rgb{ 0x62, 0x5a, 0x4c } else p.quiet,
+        // Quiet text darkens on the day wash surfaces to keep 4.5:1.
+        .quiet => if (mode == .light and (on == .selvedge or on == .selection or on == .hover)) Rgb{ 0x62, 0x5a, 0x4c } else p.quiet,
         .attention => p.attention,
         .failure => p.failure,
         .on_alert => Rgb{ 0x14, 0x14, 0x14 },
@@ -97,13 +100,31 @@ pub fn thread(mode: Mode, depth: Depth) Color {
     };
 }
 
+/// The colour of xterm entry `index`, from the 6x6x6 cube or the grey ramp;
+/// the terminal defines entries 0-15 itself, so they have none here.
+pub fn xtermRgb(index: u8) Rgb {
+    std.debug.assert(index >= 16);
+    const levels = [_]u8{ 0, 95, 135, 175, 215, 255 };
+    const n: usize = index - 16;
+    return if (index < 232) .{ levels[n / 36], levels[n / 6 % 6], levels[n % 6] } else @splat(@intCast(8 + 10 * (@as(u16, index) - 232)));
+}
+
+/// WCAG 2 relative luminance of an sRGB colour.
+pub fn relativeLuminance(rgb: Rgb) f64 {
+    var result: f64 = 0;
+    for (rgb, [_]f64{ 0.2126, 0.7152, 0.0722 }) |byte, weight| {
+        const s = @as(f64, @floatFromInt(byte)) / 255.0;
+        result += weight * (if (s <= 0.04045) s / 12.92 else std.math.pow(f64, (s + 0.055) / 1.055, 2.4));
+    }
+    return result;
+}
+
 /// Nearest xterm cube or grey-ramp entry; terminal-defined entries 0–15 are excluded.
 pub fn nearestIndex(want: Rgb) u8 {
-    const levels = [_]u8{ 0, 95, 135, 175, 215, 255 };
     var best: u8 = 16;
     var distance: u32 = std.math.maxInt(u32);
     for (16..256) |i| {
-        const candidate: Rgb = if (i < 232) .{ levels[(i - 16) / 36], levels[(i - 16) / 6 % 6], levels[(i - 16) % 6] } else @splat(@intCast(8 + 10 * (i - 232)));
+        const candidate = xtermRgb(@intCast(i));
         var d: u32 = 0;
         for (want, candidate) |a, b| {
             const delta = @as(i32, a) - b;
@@ -123,18 +144,14 @@ const Indexed = struct {
     thread: u8,
 };
 
-/// The xterm grey ramp has no step between selvedge and selection in either skin, so the
-/// nearest hover entries (237 night, 253 day) would repeat them. Night hover takes 235,
-/// between ground and selvedge, a step from both and quieter than selection on each. Day
-/// hover takes white 231, lifting a row where selection darkens it; the darker free grey
-/// 252 would fail 4.5:1 under the pinned attention 58 and stand out more than selection.
+/// Nearest distinct entries beside the existing ground and selvedge. Day selection
+/// takes 188 because its nearest, 253, is the selvedge. Hover's nearest free grey,
+/// 252, fails 4.5:1 with attention 58; 254 is the nearest remaining readable entry.
+/// Night selection and hover take 237 and 235 around selvedge 236.
 fn pinnedBackground(mode: Mode, role: Background) ?u8 {
     return switch (role) {
-        .selection => if (mode == .dark) 237 else null,
-        .hover => switch (mode) {
-            .dark => 235,
-            .light => 231,
-        },
+        .selection => if (mode == .dark) 237 else 188,
+        .hover => if (mode == .dark) 235 else 254,
         else => null,
     };
 }
@@ -195,13 +212,25 @@ test "wordmark requires a known terminal and UTF-8" {
     }
 }
 
+test "selection uses ink wash and hover derives from its neighbouring surfaces" {
+    try std.testing.expectEqual(Rgb{ 0xde, 0xda, 0xd5 }, background(.light, .direct, .selection).direct);
+    try std.testing.expectEqual(Rgb{ 0x2b, 0x2f, 0x45 }, background(.dark, .direct, .selection).direct);
+    for (std.enums.values(Mode)) |mode| {
+        const bar = background(mode, .direct, .selvedge).direct;
+        const selection = background(mode, .direct, .selection).direct;
+        const hover = background(mode, .direct, .hover).direct;
+        for (bar, selection, hover) |a, b, actual| try std.testing.expectEqual(@as(u8, @intCast((@as(u16, a) + b) / 2)), actual);
+    }
+}
+
 test "decided indexed pins" {
     try std.testing.expectEqual(@as(u8, 58), text(.light, .indexed, .attention, .ground).indexed);
     try std.testing.expectEqual(@as(u8, 58), text(.light, .indexed, .attention, .selvedge).indexed);
+    try std.testing.expectEqual(@as(u8, 188), background(.light, .indexed, .selection).indexed);
     try std.testing.expectEqual(@as(u8, 237), background(.dark, .indexed, .selection).indexed);
     try std.testing.expectEqual(@as(u8, 234), background(.dark, .indexed, .ground).indexed);
     try std.testing.expectEqual(@as(u8, 235), background(.dark, .indexed, .hover).indexed);
-    try std.testing.expectEqual(@as(u8, 231), background(.light, .indexed, .hover).indexed);
+    try std.testing.expectEqual(@as(u8, 254), background(.light, .indexed, .hover).indexed);
     try std.testing.expectEqual(Rgb{ 0x62, 0x5a, 0x4c }, text(.light, .direct, .quiet, .selvedge).direct);
     try std.testing.expectEqual(Rgb{ 0x62, 0x5a, 0x4c }, text(.light, .direct, .quiet, .hover).direct);
 }
@@ -217,24 +246,12 @@ test "readable text meets WCAG contrast on its layout backgrounds" {
         fn rgb(color: Color) Rgb {
             return switch (color) {
                 .direct => |value| value,
-                .indexed => |i| if (i < 232) blk: {
-                    const levels = [_]u8{ 0, 95, 135, 175, 215, 255 };
-                    const n: usize = i - 16;
-                    break :blk .{ levels[n / 36], levels[n / 6 % 6], levels[n % 6] };
-                } else @splat(@intCast(8 + 10 * (@as(u16, i) - 232))),
+                .indexed => |i| xtermRgb(i),
             };
         }
-        fn luminance(c: Rgb) f64 {
-            var result: f64 = 0;
-            for (c, [_]f64{ 0.2126, 0.7152, 0.0722 }) |byte, weight| {
-                const s = @as(f64, @floatFromInt(byte)) / 255.0;
-                result += weight * (if (s <= 0.04045) s / 12.92 else std.math.pow(f64, (s + 0.055) / 1.055, 2.4));
-            }
-            return result;
-        }
         fn contrast(a: Color, b: Color) f64 {
-            const x = luminance(rgb(a));
-            const y = luminance(rgb(b));
+            const x = relativeLuminance(rgb(a));
+            const y = relativeLuminance(rgb(b));
             return (@max(x, y) + 0.05) / (@min(x, y) + 0.05);
         }
     };

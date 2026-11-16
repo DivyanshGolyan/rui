@@ -575,6 +575,4 @@ fn presentedCode(code: []const u8) error{CorruptStore}!tool_presentation.ToolPre
     return std.meta.stringToEnum(tool_presentation.ToolPresentation.Code, code) orelse error.CorruptStore;
 }
 
-fn optional(value: ?rsql.Positive) ?u64 {
-    return if (value) |positive| positive.get() else null;
-}
+const optional = rsql.Positive.optional;

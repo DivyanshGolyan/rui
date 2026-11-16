@@ -19,12 +19,14 @@ pub const Keys = struct {
     take: *const fn (*anyopaque, *vxfw.EventContext, vxfw.Event, app_input.Effects.Delivery) anyerror!void,
 };
 
-pub const Candidate = struct { target: app_input.Target, widget: vxfw.Widget };
+pub const Activate = *const fn (*anyopaque, *vxfw.EventContext) anyerror!void;
+pub const Candidate = struct { target: app_input.Target, widget: vxfw.Widget, activate: ?Activate = null, activation_context: ?*anyopaque = null };
 pub const Projection = struct { len: usize, modal: bool = false };
 pub const FocusOwner = struct {
     context: *anyopaque,
     /// Read or apply the existing footer's leaf focus. No navigation policy.
     field: *const fn (*anyopaque, ?app_input.Field) app_input.Field,
+    accepts_tab: ?*const fn (*anyopaque) bool = null,
     candidates: *const fn (*anyopaque, *[std.enums.values(app_input.Target).len]Candidate) Projection,
 };
 
@@ -43,6 +45,8 @@ overview: vxfw.Widget,
 overview_keys: ?Keys = null,
 session_focus: ?FocusOwner = null,
 settings_control: ?vxfw.Widget = null,
+settings_activate: ?Activate = null,
+settings_activate_context: ?*anyopaque = null,
 focus_frame: app_input.Frame = .{},
 drawn_focus: [std.enums.values(app_input.Target).len]Candidate = undefined,
 list: vxfw.Widget,
@@ -80,10 +84,9 @@ const Layout = struct {
 /// One derived pane decision drives drawing, visibility and return focus.
 fn chooseLayout(self: *const Self) Layout {
     std.debug.assert(!self.input.layer.signInOpen() or self.sign_in != null);
-    return .{
-        .split = self.size.width >= split_at and app_input.mainPane(self.input, self.session != null, self.size.width >= split_at) != .overview,
-        .pane = app_input.mainPane(self.input, self.session != null, self.size.width >= split_at),
-    };
+    const wide = self.size.width >= split_at;
+    const pane = app_input.mainPane(self.input, self.session != null, wide);
+    return .{ .split = wide and pane != .overview, .pane = pane };
 }
 
 pub fn closeMainPresentation(self: *Self) void {
@@ -147,7 +150,7 @@ fn navigate(self: *Self, ctx: *vxfw.EventContext, request: app_input.Input) !voi
 fn facts(self: *const Self, key: ?vaxis.Key) app_input.Facts {
     const session_open = self.session != null;
     const field = if (self.focusOwner()) |owner| owner.field(owner.context, null) else .input;
-    if (!self.input.layer.settingsOpen()) return .{ .session_open = session_open, .wide = self.size.width >= split_at, .frame = self.focus_frame, .field = field };
+    if (!self.input.layer.settingsOpen()) return .{ .session_open = session_open, .wide = self.size.width >= split_at, .frame = self.focus_frame, .field = field, .accepts_tab = if (self.focusOwner()) |owner| if (owner.accepts_tab) |accepts| accepts(owner.context) else false else false };
     const page = &self.settings_page;
     return .{ .session_open = session_open, .settings = .{
         .keys_open = page.keys_open,
@@ -179,7 +182,7 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, route
     };
     if (effects.activate) |target| for (self.drawn_focus[0..self.focus_frame.len]) |candidate| {
         if (candidate.target == target) {
-            try candidate.widget.handleEvent(ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+            if (candidate.activate) |activate| try activate(candidate.activation_context orelse candidate.widget.userdata, ctx);
             break;
         }
     };
@@ -238,12 +241,12 @@ pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
 fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const input: app_input.Input = switch (routed) {
-        .key_press => |key| .{ .key = .{ .named = @import("TerminalEditor.zig").named(key), .enter = @import("TerminalEditor.zig").isEnter(key) } },
+        .key_press => |key| .{ .key = .{ .named = @import("keypress.zig").named(key), .enter = @import("keypress.zig").isEnter(key) } },
         .paste_start => .paste_start,
         .paste_end => .paste_end,
         .mouse => |mouse| .{ .mouse = switch (mouse.button) {
             .wheel_up, .wheel_down, .wheel_left, .wheel_right => .wheel,
-            else => if (mouse.type == .motion) .motion else if (mouse.type != .press or mouse.button != .left or self.size.width < split_at) .click else if (mouse.col < list_width) .list_click else .chat_click,
+            else => if (mouse.type == .motion) .motion else if (mouse.type != .press or mouse.button != .left or mouse.mods.alt or self.size.width < split_at) .click else if (mouse.col < list_width) .list_click else .chat_click,
         } },
         .key_release => .key_release,
         .color_report, .color_scheme => .colors,
@@ -326,7 +329,7 @@ fn projectFocus(self: *Self, surface: vxfw.Surface, layout: Layout) void {
     if (layout.split or layout.pane == .overview) {
         const list = if (layout.split) self.list else self.overview;
         if (contains(surface, list)) self.appendFocus(.{ .target = .list, .widget = list });
-        if (self.settings_control) |control| if (contains(surface, control)) self.appendFocus(.{ .target = .settings_row, .widget = control });
+        if (self.settings_control) |control| if (contains(surface, control)) self.appendFocus(.{ .target = .settings_row, .widget = control, .activate = self.settings_activate, .activation_context = self.settings_activate_context });
     }
     if (self.focusOwner()) |owner| {
         var candidates: [std.enums.values(app_input.Target).len]Candidate = undefined;
@@ -362,8 +365,12 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const size = ctx.max.size();
     self.size = size;
     self.settings_page.narrow = size.width < split_at;
-    const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
-    const layout = self.chooseLayout();
+    const covering = self.input.layer.signInOpen();
+    const children = try ctx.arena.alloc(vxfw.SubSurface, if (covering) 2 else 1);
+    var background = self.input;
+    if (covering) background.layer = if (self.input.layer.settingsOpen()) .settings else .main;
+    const background_pane = app_input.mainPane(background, self.session != null, size.width >= split_at);
+    const layout: Layout = if (covering) .{ .pane = background_pane, .split = size.width >= split_at and background_pane != .overview } else self.chooseLayout();
     const pane = switch (layout.pane) {
         .overview => self.overview,
         .session => self.session.?,
@@ -385,6 +392,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     } else try pane.draw(ctx);
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = child };
     self.projectFocus(child, layout);
+    if (covering) children[1] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.sign_in.?.draw(ctx) };
     self.frames += 1;
     return .{ .size = size, .widget = self.widget(), .buffer = &.{}, .children = children };
 }
@@ -879,7 +887,7 @@ test "App root routes Model filter typing to settings and Escape closes only its
     try root.widget().captureEvent(&ctx, typed);
     try std.testing.expect(!ctx.consume_event);
     try root.settings_page.widget().handleEvent(&ctx, typed);
-    try std.testing.expectEqualStrings("gpt", root.settings_page.model_choice.editor.buffer[0..root.settings_page.model_choice.editor.length]);
+    try std.testing.expectEqualStrings("gpt", root.settings_page.model_choice.editor.text());
     ctx.consume_event = false;
     try root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
     try std.testing.expect(ctx.consume_event);
@@ -950,7 +958,7 @@ test "App root routes typed and pasted settings text only to the Model filter wi
         if (choice != .none) try app_events.send(&ctx, "\r", root.widget(), page.widget());
         const row = page.panel.selected;
         try app_events.send(&ctx, if (pasted) "\x1b[200~" ++ text ++ "\x1b[201~" else text, root.widget(), page.widget());
-        try std.testing.expectEqualStrings(if (choice == .model) text else "", page.model_choice.editor.buffer[0..page.model_choice.editor.length]);
+        try std.testing.expectEqualStrings(if (choice == .model) text else "", page.model_choice.editor.text());
         try std.testing.expectEqual(@as(usize, if (choice == .model or pasted) 0 else text.len), fixture.overview_keys);
         try std.testing.expectEqual(choice != .none, page.hasChoice());
         try std.testing.expectEqual(row, page.panel.selected);
@@ -976,133 +984,67 @@ test "App root routes typed and pasted settings text only to the Model filter wi
     };
 }
 
-test "Sign-in frames keep the list at 140 columns and the code link, browser link, masked entries and failure at 46" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const empty: vxfw.Text = .{ .text = "" };
-    const list: vxfw.Text = .{ .text = " rui" };
-    var root: Self = .{ .overview = empty.widget(), .list = list.widget(), .input = .{ .layer = .{ .sign_in = .{ .over = .main } } } };
-    // As the page's owner does: the page names the app only when the
-    // screen's list, whose header names it, is not shown.
-    const Owner = struct {
-        fn listVisible(raw: *anyopaque) bool {
-            const owner: *Self = @ptrCast(@alignCast(raw));
-            return owner.listVisible();
-        }
-    };
-    var page: @import("SignIn.zig") = .{ .userdata = &root, .list_visible = Owner.listVisible };
-    root.sign_in = page.widget();
-    const SignIn = @import("SignIn.zig");
-    const browser = try @import("os/pages.zig").Mapped(SignIn.Browser).map();
-    defer browser.unmap();
-    const link = "https://auth.openai.com/api/accounts/authorize?client_id=app_made_up&state=made-up";
-    const pasted = "http://127.0.0.1:1455/auth/callback?code=made-up-grant";
-    for ([_]u16{ 140, 46 }) |width| {
-        for ([_]@import("sign_in.zig").Stage{ .choice, .browser_waiting, .codex_waiting, .key_entry, .failed }) |stage| {
-            page.state = .{ .stage = stage, .failure = .answer };
-            try page.code.set("BDL9-KI88H");
-            const secret = "sk-secret";
-            @memcpy(page.key.bytes[0..secret.len], secret);
-            page.key.len = secret.len;
-            browser.value.init();
-            try browser.value.link.set(link);
-            browser.value.edit(.{ .append = pasted });
-            page.browser = if (stage == .browser_waiting) browser else null;
-            defer page.browser = null;
-            const surface = try root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} });
-            try std.testing.expectEqual(width >= split_at, root.listVisible());
-            var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 12, .x_pixel = 0, .y_pixel = 0 });
-            try surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 12, .screen = &screen }, root.widget());
-            var dump: std.Io.Writer.Allocating = .init(arena.allocator());
-            var linked: usize = 0;
-            var titles: usize = 0;
-            for (0..12) |row| {
-                var line: std.Io.Writer.Allocating = .init(arena.allocator());
-                for (0..width) |col| {
-                    const cell = screen.readCell(@intCast(col), @intCast(row)).?;
-                    try line.writer.writeAll(cell.char.grapheme);
-                    if (cell.link.uri.len != 0) {
-                        // The browser's link is its whole address behind its host.
-                        try std.testing.expectEqualStrings(if (stage == .browser_waiting) link else "https://auth.openai.com/codex/device", cell.link.uri);
-                        try std.testing.expect(std.mem.indexOf(u8, if (stage == .browser_waiting) "auth.openai.com" else "auth.openai.com/codex/device", cell.char.grapheme) != null);
-                        linked += 1;
-                    }
-                }
-                if (row == 0) titles = std.mem.count(u8, line.written(), " rui");
-                try dump.writer.writeAll(std.mem.trimEnd(u8, line.written(), " "));
-                try dump.writer.writeByte('\n');
-            }
-            const text = dump.written();
-            // One title on the top row: the list's beside the page, else the page's.
-            try std.testing.expectEqual(@as(usize, 1), titles);
-            try std.testing.expect(std.mem.startsWith(u8, text, " rui"));
-            try std.testing.expect(std.mem.indexOf(u8, text, secret) == null);
-            try std.testing.expect(std.mem.indexOf(u8, text, "made-up-grant") == null);
-            // Tab offers the device code while the browser waits and after it failed.
-            try std.testing.expectEqual(stage == .browser_waiting or stage == .failed, std.mem.indexOf(u8, text, "tab device code · esc back") != null);
-            switch (stage) {
-                .choice => try std.testing.expect(std.mem.indexOf(u8, text, "› ChatGPT    API key") != null),
-                .browser_waiting => {
-                    try std.testing.expectEqual(@as(usize, "auth.openai.com".len), linked);
-                    try std.testing.expect(std.mem.indexOf(u8, text, "••••••••••") != null);
-                },
-                // SignIn's own test checks the failure line fits.
-                .failed => {},
-                .codex_waiting => {
-                    try std.testing.expect(std.mem.indexOf(u8, text, "auth.openai.com/codex/device · BDL9-KI88H") != null);
-                    try std.testing.expectEqual(@as(usize, "auth.openai.com/codex/device".len), linked);
-                },
-                .key_entry => try std.testing.expect(std.mem.indexOf(u8, text, "•••••••••") != null),
-                else => unreachable,
-            }
-        }
-    }
-}
-
-test "Sign-in input stays with the row over settings and a previously focused list" {
-    const empty: vxfw.Text = .{ .text = "" };
+test "Sign-in is centered above the covered screen across every small bound" {
+    const background: vxfw.Text = .{ .text = "Retained draft" };
     var page: @import("SignIn.zig") = .{};
-    var root: Self = .{ .overview = empty.widget(), .list = empty.widget(), .sign_in = page.widget(), .input = .{ .layer = .{ .sign_in = .{ .over = .settings } } } };
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
-    const Events = @import("testing/app_events.zig").Events;
-    var input: Events = .init("\x1b[C\r\x1b[200~sk-masked\r\x1b[201~");
-    while (input.next()) |value| {
-        ctx.consume_event = false;
-        try root.widget().captureEvent(&ctx, value);
-        try std.testing.expect(ctx.consume_event);
+    var root: Self = .{ .overview = background.widget(), .list = background.widget(), .sign_in = page.widget(), .input = .{ .layer = .{ .sign_in = .{ .over = .main } } } };
+    for ([_]bool{ false, true }) |unicode| {
+        page.unicode = unicode;
+        for (0..81) |width| for (0..25) |height| {
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const surface = try root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
+            try std.testing.expectEqual(@as(usize, 2), surface.children.len);
+            try std.testing.expect(surface.children[0].surface.widget.eql(background.widget()));
+            const cover = surface.children[1].surface;
+            if (width == 0 or height == 0) continue;
+            const dialog = cover.children[0];
+            try std.testing.expectEqual(@as(i17, @intCast((width - dialog.surface.size.width) / 2)), dialog.origin.col);
+            try std.testing.expectEqual(@as(i17, @intCast((height - dialog.surface.size.height) / 2)), dialog.origin.row);
+            try std.testing.expect(dialog.origin.row + dialog.surface.size.height <= height);
+            try std.testing.expect(dialog.origin.col + dialog.surface.size.width <= width);
+            if (!unicode) for (dialog.surface.buffer) |cell| for (cell.char.grapheme) |byte| try std.testing.expect(byte < 128);
+        };
     }
-    try std.testing.expectEqual(@import("sign_in.zig").Stage.key_entry, page.state.stage);
-    try std.testing.expectEqualStrings("sk-masked", page.key.slice());
-    try std.testing.expect(!root.settings_page.hasChoice());
-    try root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
-    try std.testing.expectEqual(@import("sign_in.zig").Stage.choice, page.state.stage);
-    try std.testing.expectEqual(@as(usize, 0), page.key.len);
-    try std.testing.expect(root.input.layer.settingsOpen());
-    try root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = 'c', .mods = .{ .ctrl = true } } });
-    try std.testing.expect(ctx.quit);
 }
 
-test "Sign-in takes every click at each stage, over settings or not, and changes nothing" {
-    const empty: vxfw.Text = .{ .text = "" };
+test "Sign-in captures every mouse action above settings without background activation" {
+    const Find = struct {
+        fn label(surface: vxfw.Surface, text: []const u8) ?vxfw.RelativePoint {
+            for (0..surface.size.height) |row| for (0..surface.size.width) |col| {
+                if (surface.buffer.len == 0 or col + text.len > surface.size.width) continue;
+                for (text, 0..) |byte, offset| {
+                    const cell = surface.buffer[row * surface.size.width + col + offset];
+                    if (cell.char.grapheme.len != 1 or cell.char.grapheme[0] != byte) break;
+                } else return .{ .row = @intCast(row), .col = @intCast(col) };
+            };
+            for (surface.children) |child| if (label(child.surface, text)) |point| return .{ .row = point.row + child.origin.row, .col = point.col + child.origin.col };
+            return null;
+        }
+    };
+    const background: vxfw.Text = .{ .text = "Covered Settings" };
+    var page: @import("SignIn.zig") = .{};
+    defer page.deinit();
+    var root: Self = .{ .overview = background.widget(), .list = background.widget(), .sign_in = page.widget(), .input = .{ .layer = .{ .sign_in = .{ .over = .settings } } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const Stage = @import("sign_in.zig").Stage;
-    for ([_]bool{ false, true }) |settings_open| for (std.enums.values(Stage)) |stage| {
-        var page: @import("SignIn.zig") = .{ .state = .{ .stage = stage } };
-        var root: Self = .{ .overview = empty.widget(), .list = empty.widget(), .sign_in = page.widget(), .input = .{ .layer = .{ .sign_in = .{ .over = if (settings_open) .settings else .main } } } };
-        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
-        for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| {
-            ctx.consume_event = false;
-            try root.widget().captureEvent(&ctx, .{ .mouse = .{ .col = 4, .row = 3, .button = .left, .type = kind, .mods = .{} } });
-            try std.testing.expect(ctx.consume_event);
-        }
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    const surface = try root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 100, .height = 30 }, .cell_size = .{} });
+    const api = Find.label(surface.children[1].surface, "API key") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(api.row > 0 and api.col > 0);
+    for (std.enums.values(vaxis.Mouse.Type)) |kind| for (std.enums.values(vaxis.Mouse.Button)) |button| {
+        const before = std.meta.activeTag(page.state.page);
+        ctx.consume_event = false;
+        try root.widget().captureEvent(&ctx, .{ .mouse = .{ .row = 0, .col = 0, .button = button, .type = kind, .mods = .{} } });
+        try std.testing.expect(ctx.consume_event);
         try std.testing.expect(root.input.layer.signInOpen());
-        try std.testing.expectEqual(settings_open, root.input.layer.settingsOpen());
-        try std.testing.expectEqual(stage, page.state.stage);
-        try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
+        try std.testing.expect(root.input.layer.settingsOpen());
+        try std.testing.expectEqual(before, std.meta.activeTag(page.state.page));
     };
+    ctx.consume_event = false;
+    try root.widget().captureEvent(&ctx, .{ .mouse = .{ .row = @intCast(api.row), .col = @intCast(api.col), .button = .left, .type = .press, .mods = .{} } });
+    try std.testing.expect(ctx.consume_event and page.state.page == .api);
+    try std.testing.expect(root.input.layer.signInOpen() and root.input.layer.settingsOpen());
 }
 
 test "Root navigation closes the composed main presentation before focusing another pane" {
@@ -1217,6 +1159,7 @@ test "App root hands list activation unchanged to its one core" {
         .{ .col = 50, .row = 10, .button = .left, .type = .motion, .mods = .{} },
         .{ .col = 50, .row = 10, .button = .left, .type = .release, .mods = .{} },
         .{ .col = 50, .row = 10, .button = .right, .type = .press, .mods = .{} },
+        .{ .col = 50, .row = 10, .button = .left, .type = .press, .mods = .{ .alt = true } },
     }) |mouse| {
         try root.widget().captureEvent(&ctx, .{ .mouse = mouse });
         try std.testing.expect(root.input.listFocused());
