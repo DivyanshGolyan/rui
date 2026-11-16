@@ -109,8 +109,7 @@ pub const Requests = struct {
         self.check() catch |err| return .fail(null, err);
         const carried: ?Environment = if (captured.target == .message) environment else null;
         if (carried) |value| if (value.bytes() > protocol.max_environment_bytes) return .fail(null, error.EnvironmentTooLarge);
-        const paths = captured.paths orelse (resolveClientPaths(self.io, captured.saved.store.slice()) catch |err| return .fail(.store, err));
-        if (!paths.store_identity.eql(captured.saved.store.slice())) return .fail(.store, error.RequestBindingMismatch);
+        const paths = captured.resolvePaths(self.io) catch |err| return .fail(.store, err);
         const reply = switch (sendSource(self, &paths, std.meta.activeTag(captured.target).route(), self.mutation_timing, captured.length, &captured.file, null, null, carried, reply_buffer, null)) {
             .done => |reply| reply,
             .failed => |failure| return .fail(failure.step, failure.err),
@@ -127,16 +126,22 @@ pub const Requests = struct {
     }
 
     fn observeCommandUntil(self: Requests, store_path: []const u8, key: []const u8, since: ?protocol_reply.SessionToken, reply_buffer: *ObservationBuffer, until: ?i128) !protocol_reply.ObservationReply {
-        reply_buffer.len = 0;
         try self.check();
         if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
         const paths = try resolveClientPaths(self.io, store_path);
+        return self.observeCommandAt(&paths, key, since, reply_buffer, until);
+    }
+
+    pub fn observeCommandAt(self: Requests, paths: *const platform.Paths, key: []const u8, since: ?protocol_reply.SessionToken, reply_buffer: *ObservationBuffer, until: ?i128) !protocol_reply.ObservationReply {
+        reply_buffer.len = 0;
+        try self.check();
+        if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
         var body: protocol.RequestBuffer = .{};
         var token_buffer: [protocol_reply.SessionToken.max_bytes]u8 = undefined;
         try body.appendShape(protocol.observe_command_request.head, .{ paths.store_identity.slice(), key });
         if (since) |token| try body.appendShape(protocol.observe_command_request.since, .{@as(?[]const u8, token.format(&token_buffer))});
         try body.appendShape(protocol.observe_command_request.tail, .{});
-        const reply = try sendSource(self, &paths, "/v1/observe-command", .{}, body.len, null, body.slice(), null, null, reply_buffer, until).get();
+        const reply = try sendSource(self, paths, "/v1/observe-command", .{}, body.len, null, body.slice(), null, null, reply_buffer, until).get();
         return protocol_reply.ObservationReply.parse(reply, key, since);
     }
 
@@ -1296,6 +1301,14 @@ pub fn waitCommand(
 ) !WaitResult {
     const policy = @import("request_wait.zig");
     if (timeout_seconds == 0 or timeout_seconds > policy.max_timeout_seconds) return error.InvalidArguments;
+    if (cancellation.stopped.load(.acquire)) return .{ .observed = .{ .disposition = .later, .observation = null } };
+    const paths = try resolveClientPaths(io, store_path);
+    return waitCommandAt(io, &paths, key, timeout_seconds, cancellation);
+}
+
+pub fn waitCommandAt(io: std.Io, paths: *const platform.Paths, key: []const u8, timeout_seconds: u32, cancellation: *const Cancellation) !WaitResult {
+    const policy = @import("request_wait.zig");
+    if (timeout_seconds == 0 or timeout_seconds > policy.max_timeout_seconds) return error.InvalidArguments;
     const requests: Requests = .{ .io = io, .cancellation = cancellation };
     const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + @as(i128, timeout_seconds) * std.time.ns_per_s;
     var buffer: ObservationBuffer = .{};
@@ -1306,7 +1319,7 @@ pub fn waitCommand(
         if (cancellation.stopped.load(.acquire) or std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= until) {
             return .{ .observed = .{ .disposition = .later, .observation = latest } };
         }
-        const reply = requests.observeCommandUntil(store_path, key, since, &buffer, until) catch |err| {
+        const reply = requests.observeCommandAt(paths, key, since, &buffer, until) catch |err| {
             if (err == error.Cancelled or
                 ((err == error.TransferInactive or err == error.ResponseInactive) and
                     std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= until))
@@ -1380,14 +1393,20 @@ fn readResultWithSink(
     sink: anytype,
     reply_buffer: *ReplyBuffer,
 ) !protocol_reply.ResultReadReply {
+    try requests.check();
+    if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
+    const paths = try resolveClientPaths(requests.io, store_path);
+    return readResultAt(requests, &paths, key, sink, reply_buffer);
+}
+
+pub fn readResultAt(requests: Requests, paths: *const platform.Paths, key: []const u8, sink: anytype, reply_buffer: *ReplyBuffer) !protocol_reply.ResultReadReply {
     const io = requests.io;
     reply_buffer.len = 0;
     try requests.check();
     if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
-    const paths = try resolveClientPaths(io, store_path);
     var body: protocol.RequestBuffer = .{};
     try body.appendShape(protocol.read_result_request, .{ paths.store_identity.slice(), key });
-    const fd = try openRead(requests, &paths, "/v1/read-result", body.slice());
+    const fd = try openRead(requests, paths, "/v1/read-result", body.slice());
     defer closeSocket(io, fd);
     return switch (try readResultResponseSink(requests, fd, sink, reply_buffer)) {
         .answer => |answer| .{ .answer = .{ .bytes = answer.bytes } },
@@ -1539,6 +1558,62 @@ pub const Replay = union(enum) {
     explicit: []const u8,
 };
 
+// Local routing is deliberately outside the immutable wire request. Both
+// generated and explicit captures publish this private companion first.
+const CaptureRouting = struct {
+    const Path = @import("host_settings.zig").OsBytes(protocol.max_store_bytes);
+    const Runtime = @import("host_settings.zig").OsBytes(@import("host_settings.zig").max_runtime_dir_bytes);
+    const format = 1;
+    host_directory: Path = .{},
+    runtime_hint: Runtime = .{},
+
+    fn fromPaths(paths: *const platform.Paths) !CaptureRouting {
+        var result: CaptureRouting = .{ .host_directory = paths.host_directory };
+        if (result.host_directory.len == 0) {
+            if (paths.runtimeHint()) |runtime| try result.runtime_hint.set(runtime);
+        }
+        return result;
+    }
+
+    fn resolve(self: *const CaptureRouting, io: std.Io, store_identity: []const u8) !platform.Paths {
+        if (self.host_directory.len != 0) return resolveClientPaths(io, self.host_directory.slice());
+        if (self.runtime_hint.len != 0) return platform.mysqlClientPaths(io, store_identity, self.runtime_hint.slice());
+        return error.InvalidRequestRouting;
+    }
+
+    fn name(record_name: []const u8, buffer: []u8) ![]const u8 {
+        return std.fmt.bufPrint(buffer, "{s}.routing", .{record_name});
+    }
+
+    fn read(io: std.Io, record_path: []const u8) !?CaptureRouting {
+        var parent = std.Io.Dir.cwd().openDir(io, std.fs.path.dirname(record_path) orelse ".", .{ .iterate = true, .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => return err,
+        };
+        defer parent.close(io);
+        var name_buffer: [std.Io.Dir.max_name_bytes]u8 = undefined;
+        const route_name = try name(std.fs.path.basename(record_path), &name_buffer);
+        var bytes: [6 * (Path.max_bytes + Runtime.max_bytes) + 128]u8 = undefined;
+        defer std.crypto.secureZero(u8, &bytes);
+        const text = @import("private_file.zig").readAt(io, parent, route_name, &bytes) catch |err| switch (err) {
+            error.FileNotFound => return null, // old raw-request records
+            else => return err,
+        };
+        try @import("private_file.zig").validateDirectory(io, parent);
+        const Fields = struct { format: u8, host_directory: []const u8, runtime_hint: []const u8 };
+        var storage: [2048]u8 = undefined;
+        defer std.crypto.secureZero(u8, &storage);
+        var fixed = std.heap.FixedBufferAllocator.init(&storage);
+        const value = std.json.parseFromSliceLeaky(Fields, fixed.allocator(), text, .{}) catch return error.InvalidRequestRouting;
+        if (value.format != format or (value.host_directory.len == 0) == (value.runtime_hint.len == 0)) return error.InvalidRequestRouting;
+        if (!std.fs.path.isAbsolute(if (value.host_directory.len != 0) value.host_directory else value.runtime_hint)) return error.InvalidRequestRouting;
+        var result: CaptureRouting = .{};
+        result.host_directory.set(value.host_directory) catch return error.InvalidRequestRouting;
+        result.runtime_hint.set(value.runtime_hint) catch return error.InvalidRequestRouting;
+        return result;
+    }
+};
+
 pub const CapturedRecord = struct {
     file: std.Io.File,
     length: u64,
@@ -1546,6 +1621,16 @@ pub const CapturedRecord = struct {
     target: protocol_reply.MutationTarget,
     replay: Replay,
     paths: ?platform.Paths = null,
+    routing: ?CaptureRouting = null,
+
+    pub fn resolvePaths(self: *const CapturedRecord, io: std.Io) !platform.Paths {
+        const paths = self.paths orelse if (self.routing) |route|
+            try route.resolve(io, self.saved.store.slice())
+        else
+            try resolveClientPaths(io, self.saved.store.slice());
+        if (!paths.store_identity.eql(self.saved.store.slice())) return error.RequestBindingMismatch;
+        return paths;
+    }
 
     pub fn identity(self: *const CapturedRecord) *const protocol_reply.MutationIdentity {
         return &self.saved;
@@ -1596,6 +1681,7 @@ pub fn openCaptured(io: std.Io, saved: SavedRecord) !CapturedRecord {
     var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     errdefer file.close(io);
     const binding = try readCapturedBinding(io, &file);
+    const routing = try CaptureRouting.read(io, path);
     if (!expected.matches(&binding.saved, binding.target)) return switch (saved) {
         .generated => error.InvalidRequestRecord,
         .explicit => error.RequestBindingMismatch,
@@ -1604,7 +1690,7 @@ pub fn openCaptured(io: std.Io, saved: SavedRecord) !CapturedRecord {
         .generated => .generated,
         .explicit => |explicit| .{ .explicit = explicit.record },
     };
-    return .{ .file = file, .length = try file.length(io), .saved = binding.saved, .target = binding.target, .replay = replay, .paths = if (saved == .explicit) paths else null };
+    return .{ .file = file, .length = try file.length(io), .saved = binding.saved, .target = binding.target, .replay = replay, .paths = if (saved == .explicit and routing == null) paths else null, .routing = routing };
 }
 
 pub fn inspectCaptured(io: std.Io, directory: []const u8, handle: []const u8) !protocol_reply.MutationIdentity {
@@ -1812,6 +1898,7 @@ fn runCapture(
     capture.input_failure = input_failure;
     errdefer capture.abort();
     try @call(.auto, write, .{&capture} ++ args);
+    try capture.writeRouting(paths);
     var record = try finishCapture(io, &capture, location, paths.store_identity.slice(), session, kind);
     record.paths = paths.*;
     return record;
@@ -1920,11 +2007,12 @@ const Capture = struct {
     active: bool = true,
     file_open: bool = true,
     published: bool = false,
+    routing_published: bool = false,
 
     fn open(io: std.Io, record_path: []const u8, buffer: []u8) !Capture {
         const parent_path = std.fs.path.dirname(record_path) orelse ".";
         const final_name = std.fs.path.basename(record_path);
-        if (final_name.len == 0) return error.InvalidRecordPath;
+        if (final_name.len == 0 or final_name.len + ".routing.tmp".len + 1 > std.Io.Dir.max_name_bytes) return error.InvalidRecordPath;
         var parent = try std.Io.Dir.cwd().createDirPathOpen(io, parent_path, .{
             // Linux opens non-iterable directories with O_PATH, which cannot
             // be fsynced after publishing the record.
@@ -1974,9 +2062,47 @@ const Capture = struct {
         if (!self.published) self.parent.deleteFile(self.io, self.temporary_name.slice()) catch |err| {
             @import("stderr.zig").diagnostic("rui: retained caller capture after cleanup failure: {s}\n", .{@errorName(err)});
         };
+        if (!self.published and self.routing_published) {
+            var name_buffer: [std.Io.Dir.max_name_bytes]u8 = undefined;
+            const name = CaptureRouting.name(self.final_name.slice(), &name_buffer) catch unreachable;
+            self.parent.deleteFile(self.io, name) catch |err| {
+                @import("stderr.zig").diagnostic("rui: retained caller routing after cleanup failure: {s}\n", .{@errorName(err)});
+            };
+        }
         self.lock_file.close(self.io);
         self.parent.close(self.io);
         self.active = false;
+    }
+
+    fn writeRouting(self: *Capture, paths: *const platform.Paths) !void {
+        const route = try CaptureRouting.fromPaths(paths);
+        var name_buffer: [std.Io.Dir.max_name_bytes]u8 = undefined;
+        const name = try CaptureRouting.name(self.final_name.slice(), &name_buffer);
+        var temporary_buffer: [std.Io.Dir.max_name_bytes]u8 = undefined;
+        const temporary = try std.fmt.bufPrint(&temporary_buffer, ".{s}.routing.tmp", .{self.final_name.slice()});
+        // The existing request lock is held and its final request is absent.
+        // Only an orphan from an interrupted capture can be replaced here.
+        for ([_][]const u8{ temporary, name }) |orphan| self.parent.deleteFile(self.io, orphan) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+        const file = try self.parent.createFile(self.io, temporary, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+        defer self.parent.deleteFile(self.io, temporary) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => @import("stderr.zig").diagnostic("rui: retained caller routing temporary after cleanup failure: {s}\n", .{@errorName(err)}),
+        };
+        {
+            defer file.close(self.io);
+            var buffer: [1024]u8 = undefined;
+            var writer = file.writerStreaming(self.io, &buffer);
+            try std.json.Stringify.value(.{ .format = CaptureRouting.format, .host_directory = route.host_directory.slice(), .runtime_hint = route.runtime_hint.slice() }, .{}, &writer.interface);
+            try writer.flush();
+            try file.sync(self.io);
+        }
+        try self.parent.renamePreserve(temporary, self.parent, name, self.io);
+        self.routing_published = true;
+        // Routing must be durable before the request marker can become visible.
+        if (std.c.fsync(self.parent.handle) != 0) return error.RecordDirectorySyncFailed;
     }
 
     fn commit(self: *Capture) !void {
@@ -2206,7 +2332,7 @@ fn openRead(requests: Requests, paths: *const platform.Paths, comptime route: []
 }
 
 pub const SendError = ErrorOf(std.Io.net.UnixAddress.init) || ErrorOf(connectRequest) || ErrorOf(uploadRequest) || ErrorOf(readCommandResponse);
-pub const MutationSendError = SendError || ErrorOf(resolveClientPaths) || error{ Cancelled, EnvironmentTooLarge, RequestBindingMismatch };
+pub const MutationSendError = SendError || ErrorOf(CapturedRecord.resolvePaths) || error{ Cancelled, EnvironmentTooLarge, RequestBindingMismatch };
 
 pub const Environment = struct {
     map: *const std.process.Environ.Map,

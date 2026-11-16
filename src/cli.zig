@@ -3129,7 +3129,7 @@ fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const identity = try requestIdentity(init, parsed);
     const target = identity.key.slice();
     var reply_buffer: client.ObservationBuffer = .{};
-    const reply = client.observeCommand(io, identity.store.slice(), target, null, &reply_buffer) catch |err| return readTransportFailure(io, identity.store.slice(), err);
+    const reply = (client.Requests{ .io = io }).observeCommandAt(&identity.paths, target, null, &reply_buffer, null) catch |err| return readTransportFailure(io, identity.paths.selector(), err);
     const observation = try checkedObservation(io, reply, target);
     try writeObservation(io, &observation, observationTime(io));
 }
@@ -3181,8 +3181,8 @@ fn waitRequest(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const identity = try requestIdentity(init, parsed);
     var interrupt = WaitInterrupt.init();
     defer interrupt.deinit();
-    const result = client.waitCommand(init.io, identity.store.slice(), identity.key.slice(), (try parsed.number(u32, "timeout-seconds")) orelse @import("request_wait.zig").default_timeout_seconds, &wait_cancellation) catch |err| {
-        const failure = readTransportFailure(init.io, identity.store.slice(), err);
+    const result = client.waitCommandAt(init.io, &identity.paths, identity.key.slice(), (try parsed.number(u32, "timeout-seconds")) orelse @import("request_wait.zig").default_timeout_seconds, &wait_cancellation) catch |err| {
+        const failure = readTransportFailure(init.io, identity.paths.selector(), err);
         if (client.hostUnreachable(err)) {
             var read_failure: protocol_reply.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
             try read_failure.diagnostic.type.set("invocation_error");
@@ -3295,13 +3295,13 @@ fn readResult(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const identity = try requestIdentity(init, parsed);
     const target = identity.key.slice();
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = client.readResult(
-        io,
-        identity.store.slice(),
+    const reply = client.readResultAt(
+        .{ .io = io },
+        &identity.paths,
         target,
         std.Io.File.stdout(),
         &reply_buffer,
-    ) catch |err| return readTransportFailure(io, identity.store.slice(), err);
+    ) catch |err| return readTransportFailure(io, identity.paths.selector(), err);
     switch (reply) {
         .answer => {},
         .failure => |failure| {
@@ -3847,19 +3847,20 @@ fn savedRequest(init: std.process.Init, handle: []const u8) !SavedRequest {
 }
 
 const RequestIdentity = struct {
-    store: protocol.Bounded(protocol.max_store_bytes) = .{},
+    paths: platform.Paths,
     key: protocol.Bounded(protocol.max_key_bytes) = .{},
 };
 
 fn requestIdentity(init: std.process.Init, parsed: *const cli_args.Parsed) !RequestIdentity {
     if (parsed.positional) |handle| {
-        const saved = try savedRequest(init, handle);
-        return .{ .store = saved.store, .key = saved.key };
+        var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var captured = try client.openCaptured(init.io, .{ .generated = .{ .directory = try requestDirectory(init, &directory_buffer), .handle = handle } });
+        defer captured.close(init.io);
+        return .{ .paths = try captured.resolvePaths(init.io), .key = captured.saved.key };
     }
-    var identity: RequestIdentity = .{};
-    try identity.key.set(parsed.get("key").?);
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    try identity.store.set(try selectedStore(init, parsed.get("store"), &selected_buffer));
+    var identity: RequestIdentity = .{ .paths = try client.resolveClientPaths(init.io, try selectedStore(init, parsed.get("store"), &selected_buffer)) };
+    try identity.key.set(parsed.get("key").?);
     return identity;
 }
 
