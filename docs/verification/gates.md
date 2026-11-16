@@ -94,6 +94,10 @@ Long, churn, full Debug and H2 targets follow their mappings, not an uncondition
 
 `test-logic` compiles `src/logic_tests.zig`, which includes answer-rendering tests absent from `src/tests.zig`.
 Neither composed gate covers that root, so run it with a selected composed gate.
+
+The verify-rui feature map is policy input: `test_verify_rui_map.py` checks that every named frame belongs to one linked feature recipe with the required sections.
+Changes under `.claude/skills/verify-rui/features/` use the normal policy lane so documentation classification cannot skip this check; local feedback also selects it for those files and `scripts/frames.json`.
+
 The compiler and dependency setup action is bootstrap, not CI policy.
 An unavailable selection base is an error.
 PR selection uses its recorded base and immutable merge candidate.

@@ -82,6 +82,17 @@ class PrepushTest(unittest.TestCase):
         self.assertNotIn("tests/ci", commands)
         self.assertNotIn("development selection", commands)
 
+    def test_verify_rui_map_inputs_select_the_map_test(self):
+        for path in (".claude/skills/verify-rui/scripts/frames.json",
+                     ".claude/skills/verify-rui/features/README.md",
+                     ".claude/skills/verify-rui/features/frames.md",
+                     ".claude/skills/verify-rui/features/new-feature.md"):
+            for deleted in ((), (path,)):
+                with self.subTest(path=path, deleted=deleted):
+                    commands = self.commands([path], deleted=deleted)
+                    self.assertIn("tests/ci: test_verify_rui_map.py", commands)
+                    self.assertIn("test_verify_rui_map.py", commands["tests/ci: test_verify_rui_map.py"])
+
     def test_docs_only_select_whitespace(self):
         self.assertEqual(self.commands(["AGENTS.md"]), {"whitespace": WHITESPACE})
 

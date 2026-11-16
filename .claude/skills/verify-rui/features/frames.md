@@ -6,6 +6,8 @@ Output defaults to `RUN/evidence/frames/`: `.txt`, `.ansi`, `.html`, `.png`, ord
 
 ## Scenario
 
+List each new frame state in exactly one feature file's `Frame states:` line; `python3 -m unittest tests/ci/test_verify_rui_map.py` enforces this map.
+
 A scenario has `sizes` and ordered `states`. Each state has `name`, `open` (`overview` or an earlier cast label), `steps`, optional `cast`, `sizes`, `first_frame`, `expect_next`, `expect_dim`, `expect_background`, `expect_last`, `theme` (`night`, `day`, `mist`), `env`, `expect`, `absent`, `absent_regex`, `record` and one-line `note`. Themes configure the terminal's real background, foreground and dark/light query response. Cast entries have `label`, HOME-relative `workspace`, `mode`, `messages`, optional `sender` (an earlier cast label; admission runs through that live Session’s Bash relay; settlement is `answered` or `pending`), `model`, `effort`, `settle` (`answered`, `pending`, `stop`), and `count` with `{n}` labels. `run.json` maps labels to Session IDs.
 
 Steps:
