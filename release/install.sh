@@ -1,7 +1,4 @@
 #!/bin/sh
-# Install a published Rui release in ~/.local without building it.
-# Release publication replaces the version and archive digests below; the
-# repository copy is a template, not an installer.
 set -eu
 
 version='@VERSION@'
@@ -89,13 +86,10 @@ esac
 test -f "$release/THIRD_PARTY_NOTICES.md"
 
 @PUBLISH@
-# Keep each complete build: running processes may still use its files.
 published=1
 format=${version#0.}
 rui_publish "$prefix" "$release" "${format%%.*}" released-install
 
-# Restart through the selected command, never a PATH-shadowing older binary.
-# Activation failure does not undo a complete, successfully published install.
 if ! "$prefix/bin/rui" host restart --all; then
     printf '%s\n' 'Rui was installed, but some Hosts could not be restarted; follow the instructions above and retry rui host restart --all.' >&2
 fi

@@ -1,5 +1,3 @@
-/* Disposable collector control: stop/flush heaptrack after confirmed Host drain,
- * before the existing fixture kills the Host. Never call it from a signal handler. */
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <fcntl.h>

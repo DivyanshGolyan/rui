@@ -1,5 +1,3 @@
-/* Backing allocations, including overlapping old/new blocks during forced
- * moving realloc. Every comparison uses the same allocator. No hidden ledger. */
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>

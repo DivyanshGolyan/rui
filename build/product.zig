@@ -32,8 +32,6 @@ const BuildIdentity = struct { version: []const u8, revision: []const u8 };
 
 var identity_memo: ?struct { owner: *std.Build, identity: BuildIdentity } = null;
 
-/// The built commit's version and revision, read from git once per build
-/// graph however many artifacts and unit roots take it.
 pub fn buildIdentity(b: *std.Build) BuildIdentity {
     if (identity_memo) |memo| if (memo.owner == b) return memo.identity;
     const identity: BuildIdentity = .{ .version = buildVersion(b), .revision = buildRevision(b) };
@@ -76,7 +74,6 @@ pub fn addPinnedTransport(b: *std.Build, target: std.Build.ResolvedTarget) Pinne
     const nghttp2 = b.dependency("nghttp2", .{});
     const build_transport = b.addSystemCommand(&.{"sh"});
     build_transport.addFileArg(b.path("src/build_transport.sh"));
-    // Configure scripts change cwd and embed the installation prefix in Makefiles.
     build_transport.addDirectoryArg2(openssl.path("."), .{ .make_absolute = true });
     build_transport.addDirectoryArg2(nghttp2.path("."), .{ .make_absolute = true });
     const target_name = b.fmt("{s}-{s}", .{
@@ -93,8 +90,6 @@ fn buildRevision(b: *std.Build) []const u8 {
     return gitHead(b, &.{ "rev-parse", "HEAD" }) orelse "unknown";
 }
 
-/// The release version from a `vMAJOR.MINOR.PATCH` tag on the built commit.
-/// Release publication tags the commit before building it.
 fn buildVersion(b: *std.Build) []const u8 {
     const tag = gitHead(b, &.{ "describe", "--tags", "--exact-match", "--match", "v[0-9]*.[0-9]*.[0-9]*", "HEAD" }) orelse
         return "unreleased";
@@ -102,9 +97,7 @@ fn buildVersion(b: *std.Build) []const u8 {
 }
 
 fn gitHead(b: *std.Build, query: []const []const u8) ?[]const u8 {
-    // Git refs can change without any build input changing.
     b.graph.poisonCache();
-    // An archive nested in another checkout must not inherit that checkout's revision.
     _ = b.root.statFile(b.graph.io, ".git") catch return null;
     const root = b.root.toString(b.allocator) catch @panic("OOM");
     const argv = std.mem.concat(b.allocator, []const u8, &.{ &.{ "git", "-C", root }, query }) catch @panic("OOM");
@@ -118,7 +111,6 @@ fn configureTransport(
     b: *std.Build,
     compile: *std.Build.Step.Compile,
     target: std.Build.ResolvedTarget,
-    /// Null type-checks without the built transport: headers only, no link.
     maybe_pinned: ?PinnedTransport,
 ) void {
     configureTransportWithIdentity(b, compile, target, maybe_pinned, buildIdentity(b));
@@ -146,21 +138,14 @@ fn configureTransportWithIdentity(
     compile.root_module.addImport("h2", addH2(b, target, optimize, maybe_pinned, test_poll, tls_client));
 }
 
-/// The one helper Rui's and h2's tests poll through. A module, so both
-/// share one copy of the file.
 pub fn addTestPoll(b: *std.Build) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("src/testing/poll.zig") });
 }
 
-/// Pure URL values shared by a root and its transport modules.
 pub fn addUrl(b: *std.Build) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("src/url.zig") });
 }
 
-/// TLS client settings, host naming and trust loading, linked against the
-/// pinned OpenSSL, or null where the pinned transport is not built. The one
-/// module that links OpenSSL: h2 and the Store's wire import it. With only
-/// headers it type-checks and links nothing.
 pub fn addTlsClient(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -192,9 +177,6 @@ pub fn addTlsClient(
     return module;
 }
 
-/// The HTTP/2 client module, linked against the pinned nghttp2, on
-/// `tls_client`'s OpenSSL. With only headers it type-checks and links
-/// nothing.
 pub fn addH2(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -222,15 +204,12 @@ pub fn addH2(
     };
     addPinnedPaths(b, target, pinned, module, bindings);
     module.addObjectFile(pinned.output.path(b, "lib/libnghttp2.a"));
-    // SecTrust verifies h2's sessions under system trust on macOS.
     if (target.result.os.tag == .macos) {
         darwin.linkTrust(module);
     }
     return module;
 }
 
-/// The pinned headers and the system libraries a module on the pinned
-/// transport compiles and links against: the bundled SDK on macOS.
 fn addPinnedPaths(b: *std.Build, target: std.Build.ResolvedTarget, pinned: PinnedTransport, module: *std.Build.Module, bindings: Translator) void {
     bindings.addIncludePath(pinned.output.path(b, "include"));
     if (target.result.os.tag == .macos) {
@@ -241,7 +220,6 @@ fn addPinnedPaths(b: *std.Build, target: std.Build.ResolvedTarget, pinned: Pinne
     }
 }
 
-/// The Store's Postgres wire client, on `tls_client`'s OpenSSL.
 pub fn addPg(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, tls_client: *std.Build.Module) *std.Build.Module {
     const module = b.createModule(.{
         .root_source_file = b.path("src/store/wire/pg.zig"),
@@ -253,8 +231,6 @@ pub fn addPg(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     return module;
 }
 
-/// The pinned OpenSSL and nghttp2 headers for `target`, generated without
-/// building either library.
 fn addTransportHeaders(b: *std.Build, target: std.Build.ResolvedTarget) std.Build.LazyPath {
     const generate = b.addSystemCommand(&.{"sh"});
     generate.addFileArg(b.path("src/build_transport_headers.sh"));
@@ -322,9 +298,6 @@ fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
     module.addCMacro("SQLITE_DEFAULT_WORKER_THREADS", "0");
     module.addCMacro("SQLITE_MAX_WORKER_THREADS", "0");
     module.addCMacro("SQLITE_TEMP_STORE", "1");
-    // Every page cache, each ephemeral table's (IN lists, RETURNING) included,
-    // otherwise bulk-allocates 20 pages on first fetch: they fault in, then
-    // free returns them to the kernel. Per-page allocation skips that churn.
     module.addCMacro("SQLITE_DEFAULT_PCACHE_INITSZ", "0");
     module.addCMacro("SQLITE_USE_URI", "0");
     module.addCMacro("SQLITE_ENABLE_API_ARMOR", "1");
@@ -359,8 +332,6 @@ fn configureVaxis(b: *std.Build, module: *std.Build.Module) void {
         .target = module.resolved_target.?,
         .optimize = module.optimize.?,
     });
-    // Layout can import only the dependency's value-only Unicode modules,
-    // without acquiring its TTY, process or event-loop capabilities.
     module.addImport("terminal_unicode", dependency.module("unicode"));
     module.addImport("terminal_width", dependency.module("gwidth"));
     module.addImport("vaxis", dependency.module("vaxis"));
@@ -379,7 +350,6 @@ fn addBindings(b: *std.Build, module: *std.Build.Module, name: []const u8, heade
 
 pub fn configurePosix(b: *std.Build, module: *std.Build.Module) void {
     _ = addBindings(b, module, "posix",
-        // Fortified variadic open wrappers are not needed by these bindings.
         \\#undef _FORTIFY_SOURCE
         \\#include <unistd.h>
         \\#include <sys/stat.h>
@@ -416,8 +386,6 @@ pub fn addSqliteShell(
     return executable;
 }
 
-/// The checked-in wire contract, which a unit test compares with what the
-/// wire types emit.
 fn configureOpenApi(b: *std.Build, compile: *std.Build.Step.Compile) void {
     compile.root_module.addAnonymousImport("openapi.json", .{ .root_source_file = b.path("openapi.json") });
 }

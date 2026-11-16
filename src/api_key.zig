@@ -1,18 +1,13 @@
-//! The OpenAI API key a Host presents as `authorization: Bearer KEY`: one
-//! owner-only file, read once when a Host starts.
 const std = @import("std");
 const codex_credentials = @import("codex_credentials.zig");
 
 pub const max_key_bytes = @import("secret_value.zig").max_key_bytes;
 
-/// The environment variable that names the OpenAI key file in place of
-/// `HOME/.config/rui/openai.key`.
 pub const path_variable = "RUI_OPENAI_KEY_FILE";
 
 pub const Key = @import("secret_value.zig").Key;
 pub const valid = @import("secret_value.zig").valid;
 
-/// The key file's absolute path: `RUI_OPENAI_KEY_FILE`, else under HOME.
 pub fn path(environ: *const std.process.Environ.Map, buffer: []u8) ![]const u8 {
     if (environ.get(path_variable)) |named| {
         if (!std.fs.path.isAbsolute(named)) return error.InvalidCredentialPath;
@@ -23,8 +18,6 @@ pub fn path(environ: *const std.process.Environ.Map, buffer: []u8) ![]const u8 {
     return std.fmt.bufPrint(buffer, "{s}/.config/rui/openai.key", .{home});
 }
 
-/// Loads the key at `file` into `key`: false when there is none. A file that
-/// holds anything but one key, with at most one trailing newline, is an error.
 pub fn read(file: []const u8, key: *Key) !bool {
     var buffer: [max_key_bytes + 2]u8 = undefined;
     defer std.crypto.secureZero(u8, &buffer);
@@ -36,15 +29,12 @@ pub fn read(file: []const u8, key: *Key) !bool {
     return true;
 }
 
-/// Whether `file` holds a usable key, by the same reading a Host does at
-/// startup; the key read to check it is wiped.
 pub fn present(file: []const u8) !bool {
     var key: Key = .{ .len = 0 };
     defer key.wipe();
     return try read(file, &key);
 }
 
-/// Replaces the key at `file`; its directory must already be private.
 pub fn install(file: []const u8, key: []const u8) !void {
     if (!valid(key)) return error.InvalidApiKey;
     var buffer: [max_key_bytes + 1]u8 = undefined;
@@ -54,8 +44,6 @@ pub fn install(file: []const u8, key: []const u8) !void {
     try codex_credentials.publishPrivate(file, buffer[0 .. key.len + 1]);
 }
 
-/// Publishes a new immutable key only when this path does not exist.
-/// Existing files, including user-authored keys, are never replaced.
 pub fn create(file: []const u8, key: []const u8, published: *bool, fault: ?codex_credentials.PrivateFault) !bool {
     if (!valid(key)) return error.InvalidApiKey;
     var bytes: [max_key_bytes + 1]u8 = undefined;
@@ -67,7 +55,6 @@ pub fn create(file: []const u8, key: []const u8, published: *bool, fault: ?codex
     return codex_credentials.createPrivateObserved(file, bytes[0 .. key.len + 1], &previous, published, fault);
 }
 
-/// One trailing "\n" or "\r\n" is how a pasted line ends, not key bytes.
 pub fn trimNewline(bytes: []const u8) []const u8 {
     const without_lf = if (std.mem.endsWith(u8, bytes, "\n")) bytes[0 .. bytes.len - 1] else bytes;
     return if (std.mem.endsWith(u8, without_lf, "\r")) without_lf[0 .. without_lf.len - 1] else without_lf;
@@ -97,7 +84,6 @@ test "an installed key reads back, an absent one is not there, and an open file 
     try std.testing.expect(try read(file, &key));
     try std.testing.expectEqualStrings("sk-test-1", key.slice());
     try std.testing.expectError(error.InvalidApiKey, install(file, "two words"));
-    // Readiness reads the key as a Host would: a private file holding no key is not one.
     try private.writeFile(io, .{ .sub_path = "openai.key", .data = "two words\n" });
     try std.testing.expectError(error.InvalidApiKey, present(file));
     try install(file, "sk-test-1");

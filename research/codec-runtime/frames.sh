@@ -1,6 +1,4 @@
 #!/bin/sh
-# Native stack frames of WAMR's call path in a ReleaseSafe x86-64 binary that
-# links it: frames.sh BINARY (e.g. zig-out of `zig build codec-runtime-bench`).
 set -eu
 for fn in wasm_runtime_call_wasm wasm_interp_call_wasm wasm_interp_call_func_bytecode \
     wasm_runtime_load_ex load_from_sections wasm_loader_prepare_bytecode wasm_instantiate; do

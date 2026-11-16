@@ -1,4 +1,3 @@
-//! Pure provider endpoint syntax and credential transport admission.
 const std = @import("std");
 const url = @import("url");
 
@@ -31,7 +30,6 @@ pub fn fixtureEndpoint(target: []const u8, ca_file: ?[]const u8) bool {
         (std.mem.startsWith(u8, target, "https://localhost:") and ca_file != null);
 }
 
-/// An API key goes over https, or to a loopback fixture when `fixture`.
 pub fn validateKeyEndpoint(target: []const u8, ca_file: ?[]const u8, fixture: bool) !void {
     if (fixture) {
         if (!fixtureEndpoint(target, ca_file)) return error.InvalidKeyFixtureEndpoint;
@@ -39,8 +37,6 @@ pub fn validateKeyEndpoint(target: []const u8, ca_file: ?[]const u8, fixture: bo
 }
 
 pub fn endpointUnder(allocator: std.mem.Allocator, base: []const u8) ![]const u8 {
-    // `/responses` is appended to the path: with no host the path would
-    // become one, and a query would swallow it.
     const uri = std.Uri.parse(base) catch return error.InvalidBaseUrl;
     if (uri.host == null or uri.host.?.isEmpty() or uri.query != null) return error.InvalidBaseUrl;
     const trimmed = std.mem.trimEnd(u8, base, "/");
@@ -65,7 +61,6 @@ test "endpoint validation permits TLS and loopback fixture HTTP only" {
     );
     try std.testing.expectError(error.InvalidProviderEndpoint, validateEndpoint("https://user@example.com/fail"));
     try std.testing.expectError(error.InsecureProviderEndpoint, validateEndpoint("http://[::1]evil:80/fail"));
-    // Accepted by the URI grammar but not by h2's: a query with no path.
     try std.testing.expectError(error.InvalidProviderEndpoint, validateEndpoint("https://example.com?q=1"));
 }
 

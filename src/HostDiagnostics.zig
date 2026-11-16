@@ -17,10 +17,6 @@ length: u64 = 0,
 file_cap: u64,
 failure: ?anyerror = null,
 
-/// The Store lease is held by the caller. Only this writer mutates diagnostic
-/// files; a failure disables further writes without changing Host work.
-/// Called once at startup; noinline keeps its directory listing and tail
-/// buffer off the caller's frame, which lives as long as the Host.
 pub noinline fn open(io: std.Io, store_dir: std.Io.Dir, cap_bytes: u64) !Self {
     const file_cap = cap_bytes / max_files;
     if (file_cap < max_record_bytes) return error.InvalidDiagnosticCap;
@@ -70,7 +66,6 @@ pub fn record(self: *Self, phase: []const u8, detail: []const u8) void {
     };
 }
 
-/// Retain the failure when readiness exclusion drops the initial notice.
 pub fn reportFailure(self: *Self) void {
     if (self.failure) |err|
         stderr.print("rui: diagnostic writer unavailable ({s}); no Host work was changed\n", .{@errorName(err)});
@@ -79,22 +74,18 @@ pub fn reportFailure(self: *Self) void {
 fn write(self: *Self, phase: []const u8, detail: []const u8) !void {
     var bytes: [max_record_bytes]u8 = undefined;
     const time = std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds;
-    // The caller supplies only trusted phase and error names, never payloads.
     const record_bytes = std.fmt.bufPrint(&bytes, "{{\"time_ns\":{d},\"classification\":\"startup\",\"phase\":\"{s}\",\"detail\":\"{s}\"}}\n", .{ time, phase, detail }) catch return error.DiagnosticRecordTooLong;
     if (self.file == null or self.length + record_bytes.len > self.file_cap) try self.rotate();
     try self.file.?.writePositionalAll(self.io, record_bytes, self.length);
     self.length += record_bytes.len;
 }
 
-/// noinline: rotation is rare, and its name buffers and directory iterator
-/// would otherwise sit in every record's frame beside the record buffer.
 noinline fn rotate(self: *Self) !void {
     if (self.file) |file| {
         file.close(self.io);
         self.file = null;
     }
     if (self.count == max_files) {
-        // Delete before growth; a failed deletion never claims reclaimed space.
         var name: [64]u8 = undefined;
         try self.dir.deleteFile(self.io, try nameFor(&name, self.oldest));
         self.count -= 1;

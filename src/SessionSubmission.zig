@@ -1,5 +1,3 @@
-//! One invocation's original intent and Admission borrower. Initialize in final
-//! storage; neither this owner nor its input may move until the borrower joins.
 const std = @import("std");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
@@ -11,10 +9,6 @@ const Self = @This();
 
 pub const Intent = union(enum) {
     message: Input.Ticket,
-    /// A Message sent as the reason `action` is denied. The Message goes
-    /// first and its acceptance names the denial to begin next: the Host
-    /// holds the Message until the denial settles the call group, so the
-    /// model reads both in one request.
     message_then_deny: struct { ticket: Input.Ticket, action: u64 },
     decision: struct { action: u64, decision: protocol.PermissionDecision },
 
@@ -25,7 +19,6 @@ pub const Intent = union(enum) {
         };
     }
 
-    /// The Message's sealed text; null for a decision.
     pub fn ticket(self: Intent) ?Input.Ticket {
         return switch (self) {
             .message => |message| message,
@@ -42,8 +35,6 @@ pub const View = struct { kind: Kind, state: State, key: [36]u8, last_error: ?an
 pub const Recovery = original_state.Recovery;
 pub const End = union(enum) {
     absent,
-    // A Message's admission orders it among delivered ones. An accepted
-    // reason names the Action whose denial the caller begins next.
     accepted: struct { kind: Kind, confirmed: bool, admission: ?u64 = null, denies: ?u64 = null },
     rejected: struct { kind: Kind, code: protocol.Bounded(protocol.max_code_bytes) },
     failed: struct { err: anyerror },
@@ -58,7 +49,6 @@ store: []const u8,
 session: []const u8,
 directory: []const u8,
 input: *Input,
-/// The terminal's environment, carried by each Message for its Bash.
 environment: client.Environment,
 intent: ?Intent = null,
 state: State = .not_started,
@@ -69,7 +59,6 @@ target: client.CaptureTarget = undefined,
 captured: ?client.CapturedRecord = null,
 reply_buffer: client.ReplyBuffer = .{},
 reply: ?protocol_reply.MutationReply = null,
-// These capture facts are worker-owned until join, independent of Admission.
 publication: Publication = .not_sent,
 last_error: ?anyerror = null,
 accepted: ?Accepted = null,
@@ -80,13 +69,10 @@ pub fn view(self: *const Self) ?View {
     return .{ .kind = intent.kind(), .state = self.state, .key = self.key, .last_error = self.last_error };
 }
 
-/// Whether the original's request is published, so a saved copy outlives
-/// this frontend. False while a worker runs: it owns publication until join.
 pub fn published(self: *const Self) bool {
     return self.task.thread == null and self.publication == .published;
 }
 
-/// Recovery guidance is read only after both frontend borrowers have joined.
 pub fn recovery(self: *const Self) Recovery {
     std.debug.assert(self.task.thread == null);
     const original: ?original_state.Original = if (self.intent) |intent| .{ .kind = intent.kind(), .state = self.state, .publication = self.publication, .key = self.key } else null;
@@ -95,7 +81,6 @@ pub fn recovery(self: *const Self) Recovery {
 
 pub fn begin(self: *Self, intent: Intent) !void {
     std.debug.assert(self.intent == null and self.task.thread == null);
-    // Retain intent before randomness, path reservation or launch can fail.
     self.intent = intent;
     self.state = .not_started;
     self.reply = null;
@@ -106,24 +91,19 @@ pub fn begin(self: *Self, intent: Intent) !void {
     self.state = .submitting;
 }
 
-/// A deferred gesture is bound to this original, never the next intent.
-/// A supplied key is checked here, not by the terminal adapter.
 pub fn requestRecovery(self: *Self, key: ?[]const u8) !void {
     if (self.intent == null) return;
     if (key) |requested| if (!std.mem.eql(u8, requested, &self.key)) return error.OriginalBindingMismatch;
     self.retry = if (self.canRetry(self.key)) self.key else null;
 }
 
-/// Join a completed Admission before scheduling a pending same-original retry.
 pub fn advance(self: *Self) !End {
     return self.advanceWithLaunch(launchRetry);
 }
 
-// The launch seam changes only the effect, not thread/completion authority.
 fn advanceWithLaunch(self: *Self, launch: *const fn (*Self) anyerror!void) !End {
     if (self.task.thread != null and self.task.completed()) return self.join();
     if (self.task.thread == null) if (self.retry) |requested| {
-        // Consume before launch: a failed start needs another explicit gesture.
         self.retry = null;
         if (self.canRetry(requested)) try launch(self);
     };
@@ -135,14 +115,10 @@ fn canRetry(self: *const Self, requested: [36]u8) bool {
     return std.mem.eql(u8, &requested, key);
 }
 
-/// The original's key while a retry of it may go: it is not rejected.
 fn retryable(self: *const Self) ?*const [36]u8 {
     return if (self.intent != null and original_state.retries(self.state)) &self.key else null;
 }
 
-/// The original a retry would send now and could only send as a Message:
-/// a plain Message whose Admission is unconfirmed, with nothing in flight.
-/// Never a decision, or a Message that carries one.
 pub fn unconfirmedMessage(self: *const Self) ?*const [36]u8 {
     const key = self.retryable() orelse return null;
     return if (original_state.retriesAsMessage(self.state, self.intent.? == .message, self.task.thread != null)) key else null;
@@ -152,10 +128,6 @@ fn launchRetry(self: *Self) !void {
     try self.startWorker(resend);
 }
 
-// ClientTask's pthread entry is shared with frontend readers. Let the native
-// fixture identify this spawn's purpose, without guessing from thread order or
-// opaque std.Thread arguments. The optional preload hook only scopes identity;
-// pthread_create still owns the injected failure and its normal error mapping.
 fn startWorker(self: *Self, run: Task.Run) !void {
     const image = if (std.c.getenv("RUI_TEST_SUBMISSION_START") != null)
         std.c.dlopen(null, .{ .LAZY = true })
@@ -186,7 +158,6 @@ test "submission bounded gestures consume only the original and do not requeue f
             var input: Input = undefined;
             input.init();
             var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty };
-            // An idle gesture has no authority over a future original.
             try self.requestRecovery(null);
             self.intent = if (kind == 0) .{ .message = input.submitText("B") } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
             self.key = @splat('B');
@@ -200,8 +171,6 @@ test "submission bounded gestures consume only the original and do not requeue f
             try std.testing.expectError(error.LaunchFailed, self.advanceWithLaunch(Launch.fail));
             try std.testing.expect(try self.advanceWithLaunch(Launch.fail) == .absent);
             try std.testing.expectEqual(State.unconfirmed, self.view().?.state);
-            // A stale queued B must not select replacement C, even if C is
-            // otherwise eligible. This injects stale authority, not a worker.
             try self.requestRecovery(null);
             self.key = @splat('C');
             try std.testing.expect(try self.advanceWithLaunch(Launch.fail) == .absent);
@@ -266,7 +235,6 @@ test "submission bounded joined outcomes precede retry and retire original autho
                     if (std.Io.Clock.awake.now(self.io).nanoseconds >= deadline) return error.TestCompletionDeadline;
                     std.Thread.yield() catch {};
                 }
-                // advance must return the joined outcome, never launch first.
                 const end = try self.advanceWithLaunch(Worker.forbidden);
                 try std.testing.expect(self.task.thread == null);
                 try std.testing.expect(self.join() == .absent);
@@ -279,8 +247,6 @@ test "submission bounded joined outcomes precede retry and retire original autho
                     },
                     .rejected, .conflict => {
                         try std.testing.expect(end == .rejected);
-                        // Rejection may retain the gesture until advance, but
-                        // must never launch or silently discard the original.
                         try std.testing.expect(self.recovery().saved.rejected);
                         try std.testing.expect(try self.advanceWithLaunch(Worker.forbidden) == .absent);
                         try self.requestRecovery(null);
@@ -294,14 +260,10 @@ test "submission bounded joined outcomes precede retry and retire original autho
                         try std.testing.expect(self.retry != null);
                         try std.testing.expectError(error.SubmissionUnresolved, self.discardRejected());
                         try std.testing.expectError(error.UnexpectedRetry, self.advanceWithLaunch(Worker.forbidden));
-                        // Explicitly settle for replacement; failure itself is
-                        // not nonadmission and cannot release this original.
                         self.state = .rejected;
                         try self.discardRejected();
                     },
                 }
-                // Release then replacement C: neither history nor B's gesture
-                // can cause a launch; fresh C recovery is still available.
                 self.intent = if (kind == 0) .{ .message = input.submitText("replacement C") } else .{ .decision = .{ .action = 20, .decision = if (kind == 1) .allow_once else .deny } };
                 self.key = @splat('C');
                 self.state = .unconfirmed;
@@ -318,7 +280,6 @@ test "submission bounded joined outcomes precede retry and retire original autho
     }
 }
 
-/// Local cancellation never sends a Host control or releases original intent.
 pub fn cancel(self: *Self) void {
     self.task.cancel();
 }
@@ -372,8 +333,6 @@ fn release(self: *Self) void {
     self.retry = null;
 }
 
-/// Final invocation disposal, not command handoff. Join does not close the
-/// pinned saved reader: subsequent recovery must keep using its original inode.
 pub fn close(self: *Self) void {
     std.debug.assert(self.task.thread == null);
     if (self.captured) |*capture| capture.close(self.io);
@@ -465,8 +424,6 @@ test "an accepted reason names its Action's denial; a rejected one denies nothin
             .rejected => {
                 try std.testing.expect(end == .rejected);
                 try std.testing.expectEqual(Kind.message, self.view().?.kind);
-                // Ctrl-R never retries a rejected original, and /discard
-                // drops the denial with it.
                 try self.requestRecovery(null);
                 try std.testing.expect(try self.advanceWithLaunch(Worker.forbidden) == .absent);
                 try self.discardRejected();
@@ -477,8 +434,6 @@ test "an accepted reason names its Action's denial; a rejected one denies nothin
                 try std.testing.expectEqual(error.ConnectionResetByPeer, end.failed.err);
                 try std.testing.expectEqual(State.unconfirmed, self.view().?.state);
                 try std.testing.expectEqual(@as(u64, 19), self.intent.?.message_then_deny.action);
-                // Ctrl-R retries the Message, and its acceptance brings the
-                // denial.
                 try self.requestRecovery(null);
                 try std.testing.expect(try self.advanceWithLaunch(Worker.accept) == .absent);
                 end = try Worker.settle(&self, Worker.forbidden);
@@ -487,7 +442,6 @@ test "an accepted reason names its Action's denial; a rejected one denies nothin
         try std.testing.expectEqual(Kind.message, end.accepted.kind);
         try std.testing.expectEqual(@as(?u64, 37), end.accepted.admission);
         try std.testing.expectEqual(@as(?u64, 19), end.accepted.denies);
-        // The Message is released; the caller begins the denial.
         try std.testing.expect(self.view() == null);
     }
 }
@@ -591,8 +545,6 @@ test "submission recovery validates reopened originals and pins the saved reader
             try std.testing.expectEqual("newer té".len, input.composition().cursor);
             try std.testing.expectError(error.SubmissionUnresolved, self.discardRejected());
             if (matching) {
-                // Cancel/join is handoff, not final close. Replacing the public
-                // path must not make the next retry select a different inode.
                 self.cancel();
                 try std.testing.expect(self.join() == .absent);
                 try std.Io.Dir.cwd().deleteFile(io, self.target.reserved.record);
@@ -611,7 +563,6 @@ fn resend(raw: *anyopaque, task: *Task) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (task.cancellation.stopped.load(.acquire)) return error.Cancelled;
     if (self.captured == null) {
-        // Only absent publication permits capture of the SAME reserved intent.
         self.captured = client.openCaptured(task.io, .{ .generated = .{ .directory = self.directory, .handle = &self.key } }) catch |err| switch (err) {
             error.FileNotFound => return submit(raw, task),
             else => return err,
@@ -665,7 +616,6 @@ test "submission settles wire Admission only after join and releases only accept
             try body.writeAll("}");
             if (kind == 0) {
                 try body.writeAll(",\"execution\":{\"status\":\"queued\"}");
-                // SHA-256 of length-prefixed rui/content/v1 then original café!.
                 if (!conflict) try body.writeAll(",\"input\":{\"type\":\"text\",\"bytes\":\"15\",\"sha256\":\"d02342cf8f590cb32eff9b3d74fffa781a3caa7ea94c4145612c09244fd25d00\"}");
                 if (accepted) try body.writeAll(",\"queue\":{\"status\":\"queued\",\"admission\":\"37\"}");
             }
@@ -686,14 +636,12 @@ test "submission settles wire Admission only after join and releases only accept
             defer peer.close(io);
             const file: std.Io.File = .{ .handle = peer.socket.handle, .flags = .{ .nonblocking = false } };
             try file.writeStreamingAll(io, response);
-            // Even a fully received reply cannot release a loan before join.
             try std.testing.expectEqual(.submitting, self.view().?.state);
             try std.testing.expectError(error.SubmissionUnresolved, self.discardRejected());
             try self.requestRecovery(null);
             _ = input.typed("next té!\x1b[D");
             const key = self.view().?.key;
             const end = self.join();
-            // Acceptance releases the record; an unresolved one keeps its route.
             if (!accepted) try std.testing.expect(self.captured.?.replay == .generated);
             if (accepted) {
                 try std.testing.expect(end == .accepted);

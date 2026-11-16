@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Compile and run a short native custody-bookkeeping probe, with raw repetitions."""
 import hashlib
 import json
 import os
@@ -27,8 +26,6 @@ def main():
         for capacity in [1, 10, 50, 100, 1000]:
             for percent in [0, 10, 50, 100]:
                 for mode, name in enumerate(MODES):
-                    # An untimed native warmup precedes every measurement. Increase
-                    # calibration size until its measured region exceeds 0.5 ms.
                     iterations = 1
                     while True:
                         trial = json.loads(command(binary, str(capacity), str(percent), str(mode), str(iterations), "1"))

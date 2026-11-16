@@ -1,12 +1,3 @@
-//! Value transitions for one launched Bash Attempt.
-//!
-//! The lifecycle owns process phases, pipe terminal reasons, the stop
-//! reason, signaling facts and the resolution they imply. It performs no
-//! syscalls and reads no clock: callers supply each service-time
-//! observation and native result, then perform any returned `Signal`.
-//! `bash.Execution` holds the child, process group and descriptors and keeps
-//! them aligned with these transitions. See docs/contracts/execution.md, "Bash lifecycle
-//! and capture".
 const std = @import("std");
 const deadline = @import("deadline.zig");
 
@@ -27,13 +18,8 @@ pub const StopReason = enum { none, stopped, timed_out, infrastructure_shutdown,
 pub const CaptureFailure = enum { none, read, write, exhausted, seal };
 pub const PipeClose = enum { eof, incomplete, failed };
 
-/// Saved meaning of a retired execution. Tags match
-/// `store.ActionResolutionCode`, which the owner maps by name.
 pub const Resolution = enum { succeeded, failed, cancelled, timed_out, infrastructure_shutdown, storage_failed };
 
-/// Signals the owner must send after a transition. Every entry into grace
-/// terminates the anchored original group; grace expiry kills that group,
-/// and also the direct child while its exit remains unobserved.
 pub const Signal = enum { terminate_group, kill_group, kill_group_and_leader };
 
 pub const SignalResult = enum { delivered, failed, group_permission_denied };
@@ -61,7 +47,6 @@ pub const Process = union(enum) {
 
 pub const Pipe = union(enum) {
     reading,
-    /// Finite tail snapshotted at capture cutoff: bytes still owed.
     tail: u64,
     closed: PipeClose,
 };
@@ -69,16 +54,9 @@ pub const Pipe = union(enum) {
 pub const Stream = enum(u1) { stdout, stderr };
 pub const Pipes = std.enums.EnumArray(Stream, Pipe);
 
-/// One bounded, non-blocking read reported by the owner. The lifecycle
-/// decides what it means for the pipe's current phase.
 pub const PipeRead = union(enum) {
-    /// Nothing was ready.
     empty,
-    /// Bytes read. During a tail with nothing owed, these are writer
-    /// output past the snapshot; the owner reads them only as a one-byte
-    /// probe and does not retain them.
     bytes: u64,
-    /// A zero-byte read: every writer closed.
     end,
     failed: CaptureFailure,
 };
@@ -89,9 +67,7 @@ pub const Expiry = struct {
 };
 
 pub const Cutoff = struct {
-    /// Pipes still reading at cutoff; each needs a queued-byte snapshot.
     snapshot: std.enums.EnumSet(Stream),
-    /// The cleanup watchdog expired before original-group absence.
     unconfirmed: bool,
 };
 
@@ -106,15 +82,12 @@ pub fn start(started: Timestamp, timeout_ms: u64) Self {
     return .{ .process = .{ .running = .{ .deadline = deadline.after(started, timeout_ms) } } };
 }
 
-/// Records why termination began. The first reason and the first grace
-/// deadlines stand; repeated requests extend neither.
 pub fn requestTermination(self: *Self, reason: StopReason, now: Timestamp) ?Signal {
     std.debug.assert(reason != .none);
     if (self.stop_reason == .none) self.stop_reason = reason;
     return self.beginGrace(now);
 }
 
-/// Starts termination when the total budget elapsed by `now`.
 pub fn expireDeadline(self: *Self, now: Timestamp) ?Expiry {
     if (self.process != .running or !deadline.reached(now, self.process.running.deadline)) return null;
     const expired = self.process.running.deadline;
@@ -122,7 +95,6 @@ pub fn expireDeadline(self: *Self, now: Timestamp) ?Expiry {
     return .{ .deadline = expired, .signal = self.beginGrace(now).? };
 }
 
-/// True while the direct child's terminal status is still unobserved.
 pub fn awaitsLeader(self: *const Self) bool {
     return switch (self.process) {
         .running => |value| value.observed == null,
@@ -131,8 +103,6 @@ pub fn awaitsLeader(self: *const Self) bool {
     };
 }
 
-/// Records a non-consuming child observation. Natural leader exit still
-/// retires the original group, so a running process enters grace.
 pub fn observeLeader(self: *Self, term: Term, now: Timestamp) ?Signal {
     std.debug.assert(self.awaitsLeader());
     switch (self.process) {
@@ -145,7 +115,6 @@ pub fn observeLeader(self: *Self, term: Term, now: Timestamp) ?Signal {
 
 fn beginGrace(self: *Self, now: Timestamp) ?Signal {
     if (self.process != .running) return null;
-    // Copy before assigning: the new union is constructed in place.
     const observed = self.process.running.observed;
     self.process = .{ .grace = .{
         .kill_at = deadline.after(now, termination_grace_ms),
@@ -165,7 +134,6 @@ pub fn expireGrace(self: *Self, now: Timestamp) ?Signal {
     return if (grace.observed == null) .kill_group_and_leader else .kill_group;
 }
 
-/// Any signaling observation the saved result must qualify.
 pub fn signalFailed(self: *const Self) bool {
     return self.signal_failure or self.group_permission_denied;
 }
@@ -178,14 +146,11 @@ pub fn recordSignal(self: *Self, result: SignalResult) void {
     }
 }
 
-/// The reap found no exited child. Unconfirmed after the watchdog.
 pub fn reapPending(self: *const Self, now: Timestamp) error{BashCleanupUnconfirmed}!void {
     std.debug.assert(self.process == .reaping);
     if (deadline.reached(now, self.process.reaping.cleanup_deadline)) return error.BashCleanupUnconfirmed;
 }
 
-/// Consumes the direct child's status. An earlier observation remains the
-/// recorded status; disagreement is reported after the reap is retired.
 pub fn reaped(self: *Self, term: Term) error{BashStatusChanged}!void {
     std.debug.assert(self.process == .reaping);
     const reaping = self.process.reaping;
@@ -204,10 +169,6 @@ pub fn groupAbsent(self: *Self) void {
     self.process = .{ .gone = term };
 }
 
-/// Capture cutoff: after original-group absence, or when the cleanup
-/// watchdog expires first, every reading pipe drains one finite tail.
-/// `unconfirmed` persists on every later observation until group absence:
-/// the watchdog expiry remains a fact, not a one-time event.
 pub fn cutoff(self: *const Self, now: Timestamp) ?Cutoff {
     const expired = switch (self.process) {
         .grace => |value| deadline.reached(now, value.cleanup_deadline),
@@ -223,8 +184,6 @@ pub fn cutoff(self: *const Self, now: Timestamp) ?Cutoff {
     return .{ .snapshot = snapshot, .unconfirmed = expired };
 }
 
-/// Starts a finite tail of `queued` bytes, or ends capture when the queued
-/// size cannot be observed.
 pub fn beginTail(self: *Self, stream: Stream, queued: ?u64) void {
     const pipe = self.pipes.getPtr(stream);
     std.debug.assert(pipe.* == .reading);
@@ -236,12 +195,6 @@ pub fn beginTail(self: *Self, stream: Stream, queued: ?u64) void {
     }
 }
 
-/// Applies one read. A live pipe ends at EOF; a tail ends complete only at
-/// EOF after its owed bytes, and incomplete when a writer still has the pipe
-/// open. A failure while the pipe is live requests termination: output can
-/// no longer be complete. A finite tail begins only after cutoff, so its
-/// failure is capture evidence alone and leaves a later stop or shutdown
-/// free to supply the stop reason.
 pub fn observePipe(self: *Self, stream: Stream, read: PipeRead, now: Timestamp) ?Signal {
     const pipe = self.pipes.getPtr(stream);
     switch (pipe.*) {
@@ -264,7 +217,6 @@ pub fn observePipe(self: *Self, stream: Stream, read: PipeRead, now: Timestamp) 
                 std.debug.assert(bytes != 0 and bytes <= owed);
                 pipe.* = .{ .tail = owed - bytes };
             },
-            // Writers cannot close before delivering bytes already queued.
             .end => if (owed == 0) {
                 pipe.* = .{ .closed = .eof };
             } else self.failPipe(pipe, .read),
@@ -280,7 +232,6 @@ fn failPipe(self: *Self, pipe: *Pipe, failure: CaptureFailure) void {
     self.capture_failure = failure;
 }
 
-/// Sealing failure is discovered after retirement and only affects meaning.
 pub fn recordSealFailure(self: *Self) void {
     self.capture_failure = .seal;
 }
@@ -293,7 +244,6 @@ pub fn retired(self: *const Self) bool {
     return self.process == .gone and self.pipesClosed();
 }
 
-/// Writers outlived group termination: a pipe closed without EOF.
 pub fn captureIncomplete(self: *const Self) bool {
     for (self.pipes.values) |pipe| switch (pipe) {
         .closed => |reason| if (reason != .eof) return true,
@@ -342,7 +292,6 @@ fn retire(self: *Self, term: Term, now: Timestamp) !void {
 test "natural exit terminates the original group before reaping" {
     var lifecycle = Self.start(at(0), 1_000);
     try std.testing.expect(lifecycle.awaitsLeader());
-    // Closed pipes never substitute for process retirement.
     lifecycle.pipes = .initFill(.{ .closed = .eof });
     try std.testing.expect(!lifecycle.retired());
     lifecycle.pipes = .initFill(.reading);
@@ -350,13 +299,11 @@ test "natural exit terminates the original group before reaping" {
     try std.testing.expect(!lifecycle.awaitsLeader());
     try std.testing.expectEqual(StopReason.none, lifecycle.stop_reason);
     try std.testing.expect(lifecycle.expireGrace(at(109)) == null);
-    // The observed child is not signaled individually.
     try std.testing.expectEqual(Signal.kill_group, lifecycle.expireGrace(at(110)).?);
     try lifecycle.reaped(.{ .exited = 0 });
     try std.testing.expect(!lifecycle.retired());
     lifecycle.groupAbsent();
     try std.testing.expect(!lifecycle.retired());
-    // Output bytes on a live pipe change nothing; EOF closes it complete.
     try std.testing.expect(lifecycle.observePipe(.stdout, .{ .bytes = 7 }, at(111)) == null);
     try std.testing.expect(lifecycle.observePipe(.stdout, .empty, at(111)) == null);
     try std.testing.expectEqual(Pipe.reading, lifecycle.pipes.get(.stdout));
@@ -377,9 +324,7 @@ test "deadline expiry fixes grace from the service-time observation" {
     try std.testing.expectEqual(StopReason.timed_out, lifecycle.stop_reason);
     try std.testing.expectEqual(at(230).raw.nanoseconds, lifecycle.process.grace.kill_at.raw.nanoseconds);
     try std.testing.expectEqual(at(5_130).raw.nanoseconds, lifecycle.process.grace.cleanup_deadline.raw.nanoseconds);
-    // Expiry happens once.
     try std.testing.expect(lifecycle.expireDeadline(at(131)) == null);
-    // The unobserved leader is killed individually as well as its group.
     try std.testing.expectEqual(Signal.kill_group_and_leader, lifecycle.expireGrace(at(230)).?);
 }
 
@@ -394,7 +339,6 @@ test "the first termination fixes reason and deadlines" {
     try std.testing.expectEqual(StopReason.infrastructure_shutdown, lifecycle.stop_reason);
     try std.testing.expectEqual(grace.kill_at.raw.nanoseconds, lifecycle.process.grace.kill_at.raw.nanoseconds);
     try std.testing.expectEqual(grace.cleanup_deadline.raw.nanoseconds, lifecycle.process.grace.cleanup_deadline.raw.nanoseconds);
-    // An observation during grace changes only the leader-kill decision.
     try std.testing.expect(lifecycle.observeLeader(.{ .signal = 15 }, at(60)) == null);
     try std.testing.expectEqual(Signal.kill_group, lifecycle.expireGrace(at(101)).?);
 }
@@ -437,7 +381,6 @@ test "capture cutoff waits for group absence or the cleanup watchdog" {
             try std.testing.expectEqual(watchdog, result.?.unconfirmed);
             try std.testing.expect(result.?.snapshot.eql(.initOne(.stdout)));
             lifecycle.beginTail(.stdout, 2);
-            // A tail is never snapshotted twice.
             try std.testing.expectEqual(@as(usize, 0), lifecycle.cutoff(at(now_ms)).?.snapshot.count());
         } else {
             try std.testing.expect(result == null);
@@ -453,8 +396,6 @@ test "a finite tail closes complete only on EOF after its owed bytes" {
         .{ .owed = 3, .read = .{ .bytes = 3 }, .expected = .{ .owed = 0 } },
         .{ .owed = 3, .read = .end, .expected = .{ .closed = .failed }, .failure = .read },
         .{ .owed = 3, .read = .{ .failed = .exhausted }, .expected = .{ .closed = .failed }, .failure = .exhausted },
-        // Nothing owed: an idle open pipe or extra output means a writer
-        // outlived the group; only EOF is complete.
         .{ .owed = 0, .read = .empty, .expected = .{ .closed = .incomplete } },
         .{ .owed = 0, .read = .{ .bytes = 1 }, .expected = .{ .closed = .incomplete } },
         .{ .owed = 0, .read = .end, .expected = .{ .closed = .eof } },
@@ -485,12 +426,10 @@ test "a finite tail closes complete only on EOF after its owed bytes" {
     lifecycle.beginTail(.stderr, 0);
     _ = lifecycle.observePipe(.stdout, .{ .bytes = 3 }, at(101));
     _ = lifecycle.observePipe(.stdout, .end, at(102));
-    // An open tail is not yet complete capture.
     try std.testing.expect(lifecycle.captureIncomplete());
     _ = lifecycle.observePipe(.stderr, .empty, at(102));
     try std.testing.expect(lifecycle.retired());
     try std.testing.expect(lifecycle.captureIncomplete());
-    // Incomplete capture from an escaped writer does not change meaning.
     try std.testing.expectEqual(Resolution.succeeded, lifecycle.resolution());
 }
 
@@ -506,7 +445,6 @@ test "capture failure stops a running Attempt and saves storage failure" {
         try std.testing.expectEqual(Resolution.storage_failed, lifecycle.resolution());
     }
 
-    // A live pipe that fails after natural exit still supplies the reason.
     var live = Self.start(at(0), 100);
     _ = live.observeLeader(.{ .exited = 0 }, at(1));
     try std.testing.expect(live.observePipe(.stdout, .{ .failed = .read }, at(2)) == null);
@@ -524,7 +462,6 @@ test "finite-tail capture failure leaves the stop reason to a later request" {
         _ = lifecycle.expireGrace(at(101)).?;
         try lifecycle.reaped(.{ .exited = 0 });
         lifecycle.groupAbsent();
-        // stderr still owes a tail, so the Attempt is not yet retired.
         lifecycle.beginTail(.stderr, 32 * 1024);
         switch (failure) {
             .snapshot => lifecycle.beginTail(.stdout, null),

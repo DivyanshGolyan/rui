@@ -1,5 +1,3 @@
-/* Fault controls for the fixture's ownership boundary; not production faults.
- */
 #include <assert.h>
 #include <errno.h>
 #include <pthread.h>
@@ -19,7 +17,6 @@ static void *callback(void *p) {
   Owner *o = p;
   char byte;
   assert(read(o->gate[0], &byte, 1) == 1);
-  /* Completion may still reference its input after cancellation. */
   assert(o->window[0] == 'a');
   assert(o->occupied && o->pending);
   if (!o->sealed)
@@ -62,7 +59,6 @@ int main(int argc, char **argv) {
   assert(cleanup(&o) == 0);
   close(o.gate[0]);
   close(o.gate[1]);
-  /* A saved result can outlive a delayed callback's physical cleanup. */
   Owner settled = {
       .occupied = 1, .pending = 1, .fenced = 1, .sealed = 1, .published = 1};
   char second[] = "/tmp/rui-lifetime-settled-XXXXXX";
@@ -84,7 +80,6 @@ int main(int argc, char **argv) {
   assert(cleanup(&settled) == 0);
   close(settled.gate[0]);
   close(settled.gate[1]);
-  /* A real failed syscall cannot become a complete capture or success. */
   char name[] = "/tmp/rui-lifetime-fault-XXXXXX";
   int fd = mkstemp(name);
   assert(fd >= 0);

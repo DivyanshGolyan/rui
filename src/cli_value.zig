@@ -1,4 +1,3 @@
-//! Value-only enums shared by protocol and invocation parsing.
 const std = @import("std");
 const model_capability = @import("model_capability.zig");
 
@@ -7,7 +6,6 @@ pub const Notification = enum { on, off };
 pub const ReportProfile = enum { current, full };
 pub const FailedResponsePart = enum { body, metadata };
 
-/// A reset is CLI syntax, not a model reasoning effort.
 pub const ReasoningChoice = blk: {
     const tags = @typeInfo(model_capability.ReasoningEffort).@"enum".field_names ++ .{"default"};
     var values: [tags.len]u8 = undefined;
@@ -39,8 +37,6 @@ pub const CommandKind = enum {
     }
 };
 
-/// Recovery uses hyphens where the protocol's tags use underscores. Derive
-/// this spelling enum, too: adding a command cannot silently omit recovery.
 pub const RecoveryKind = blk: {
     const source = @typeInfo(CommandKind).@"enum";
     var tags: [source.field_names.len][]const u8 = undefined;

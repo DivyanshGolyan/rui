@@ -1,14 +1,3 @@
-//! Codex credential values and the decisions made about them.
-//!
-//! Records, their file format, decoded routing claims, the refresh, launch
-//! and replacement decisions and the user-facing failure class live here as
-//! values and pure functions. One record serves both sign-ins: a Codex
-//! device login, whose client is fixed, and a ChatGPT plan sign-in
-//! (`chatgpt_plan_wire.zig`), which also keeps the client id it was issued.
-//! The caller supplies the clock reading and the record it read. File
-//! ownership, the cross-process lock, publication and the token exchange
-//! stay in `codex_credentials.zig` and `codex_auth.zig`. See docs/contracts/model-io.md,
-//! "Authentication and transport lifetime".
 const std = @import("std");
 const json_scalar = @import("json_scalar.zig");
 const failure_class = @import("failure_class.zig");
@@ -18,23 +7,13 @@ pub const max_client_id_bytes = 256;
 pub const max_token_bytes = 16 * 1024;
 pub const max_file_bytes = 64 * 1024;
 
-/// Runtime refreshes a compact token this long before its encoded expiry so
-/// an acquired lease is not already stale at launch. Local status reports
-/// renewal only once the token has expired.
 pub const launch_refresh_margin_seconds: i64 = 300;
-/// Opaque access tokens carry no expiry; refresh this long after the last
-/// successful exchange.
 pub const opaque_refresh_seconds: i64 = 8 * 24 * 60 * 60;
 
-// The fixture token cannot originate from Rui login. Only the explicit
-// test-only managed endpoint may receive this exact canary.
 pub const fixture_access_token = "e30.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln";
 pub const fixture_id_token = "e30.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJydWktdGVzdC1hY2NvdW50In0.c2ln";
 pub const fixture_fedramp_id_token = "e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoicnVpLXRlc3QtYWNjb3VudCIsImNoYXRncHRfYWNjb3VudF9pc19mZWRyYW1wIjp0cnVlfX0.c2ln";
 pub const fixture_account_id = "rui-test-account";
-// The client a plan fixture's record names. A plan sign-in's client is the
-// one the issuer registered, so no Rui login records this one, and only a
-// test-only fixture endpoint accepts it.
 pub const fixture_client_id = "rui-test-plan-client";
 
 pub fn isFixtureId(id_token: []const u8) bool {
@@ -42,8 +21,6 @@ pub fn isFixtureId(id_token: []const u8) bool {
         std.mem.eql(u8, id_token, fixture_fedramp_id_token);
 }
 
-/// Bounded storage for a credential record field; empty values are allowed
-/// here and rejected by record validation.
 pub fn Bounded(comptime capacity: usize) type {
     return struct {
         bytes: [capacity]u8 = undefined,
@@ -59,8 +36,6 @@ pub fn Bounded(comptime capacity: usize) type {
             return self.bytes[0..self.len];
         }
 
-        /// Zeroes the bytes `set` wrote and leaves the rest untouched, so
-        /// pages a value never reached stay out of Private_Dirty.
         pub fn wipe(self: *@This()) void {
             std.crypto.secureZero(u8, self.bytes[0..self.len]);
             self.len = 0;
@@ -68,7 +43,6 @@ pub fn Bounded(comptime capacity: usize) type {
     };
 }
 
-/// Bounded storage for a token-exchange value, which must be nonempty.
 pub fn Required(comptime capacity: usize) type {
     return struct {
         bytes: [capacity]u8 = undefined,
@@ -87,29 +61,17 @@ pub fn Required(comptime capacity: usize) type {
     };
 }
 
-/// `signed_out` is either ChatGPT login after `rui auth logout chatgpt`: its
-/// tokens are gone, and it keeps only the account and, for the browser
-/// sign-in, the client id the issuer registered, which the next sign-in
-/// reuses (`signOut`).
 pub const State = enum { ready, refresh_pending, signed_out };
 
-/// Room to decode one compact token's claims: its payload and the JSON parse
-/// arena. Its owner keeps it off the stack. Each parse wipes what it wrote.
 pub const ClaimScratch = struct {
     decoded: [max_token_bytes]u8 = undefined,
     arena: [16 * 1024]u8 = undefined,
 };
 
-/// A complete credential value. It owns every returned slice; no pathname or
-/// file buffer is borrowed. Callers should overwrite it after the final header
-/// consumer releases its borrow. Decisions borrow records rather than copy
-/// token bytes.
 pub const Record = struct {
     version: u32 = 3,
     generation: u64,
     account_id: Bounded(max_account_id_bytes),
-    /// The client id a ChatGPT plan sign-in was issued; empty for a Codex
-    /// login, whose client is fixed. A refresh keeps it.
     client_id: Bounded(max_client_id_bytes) = .{},
     fedramp: bool = false,
     id_token: Bounded(max_token_bytes),
@@ -119,7 +81,6 @@ pub const Record = struct {
     refreshed_at: i64,
     state: State = .ready,
 
-    /// Zeroes the account and token bytes the record holds.
     pub fn wipe(self: *Record) void {
         self.account_id.wipe();
         self.client_id.wipe();
@@ -133,16 +94,11 @@ pub fn opaqueRefreshDue(refreshed_at: i64, now_seconds: i64) bool {
     return now_seconds -| refreshed_at >= opaque_refresh_seconds;
 }
 
-/// A compact access token refreshes `margin_seconds` before its expiry; an
-/// opaque Codex token refreshes eight days after the last successful
-/// exchange. A plan record always has an expiry (`expiryOf`).
 pub fn refreshDue(record: *const Record, now_seconds: i64, margin_seconds: i64) bool {
     if (record.expires_at != 0) return record.expires_at <= now_seconds +| margin_seconds;
     return opaqueRefreshDue(record.refreshed_at, now_seconds);
 }
 
-/// The record's decoded claims must agree with its stored routing binding
-/// and expiry. A fixture selection accepts only the synthetic credential.
 pub fn validateSelected(record: *const Record, fixture: bool, scratch: *ClaimScratch) !void {
     if (fixture and
         (!std.mem.eql(u8, record.access_token.slice(), fixture_access_token) or
@@ -156,23 +112,15 @@ pub fn validateSelected(record: *const Record, fixture: bool, scratch: *ClaimScr
     if (try expiryOf(record, scratch) != record.expires_at) return error.InvalidCredentialExpiry;
 }
 
-/// A fixture whose token endpoint is a loopback accepts only a record issued
-/// to `fixture_client_id`, so no real refresh token or access token reaches it.
 pub fn requireFixtureClient(record: *const Record) !void {
     if (!std.mem.eql(u8, record.client_id.slice(), fixture_client_id)) return error.FixtureRequiresSyntheticCredential;
 }
 
-/// The account `id_token` names for a record of `record`'s kind. A Codex
-/// login's account is its ChatGPT account claim (`parseAccount`); a plan
-/// sign-in, the record with an issued client id, carries no such claim and is
-/// the token's subject (`parseSubject`), never FedRAMP.
 pub fn accountOf(record: *const Record, id_token: []const u8, scratch: *ClaimScratch, account: *Account) !void {
     if (record.client_id.len == 0) return parseAccount(id_token, scratch, account);
     return parseSubject(id_token, scratch, account);
 }
 
-/// Sets a record's account, routing and expiry from its own tokens, as
-/// `validateSelected` reads them. The issued client id, if any, is set first.
 pub fn deriveClaims(record: *Record, scratch: *ClaimScratch) !void {
     var account: Account = undefined;
     try accountOf(record, record.id_token.slice(), scratch, &account);
@@ -181,17 +129,12 @@ pub fn deriveClaims(record: *Record, scratch: *ClaimScratch) !void {
     record.expires_at = try expiryOf(record, scratch);
 }
 
-/// The expiry a record's access token carries. An opaque Codex token has
-/// none (0); a plan sign-in's token must carry one, since nothing says how
-/// long an opaque plan token lasts.
 pub fn expiryOf(record: *const Record, scratch: *ClaimScratch) !i64 {
     const expiry = try parseExpiry(record.access_token.slice(), scratch);
     if (record.client_id.len != 0) return expiry orelse error.InvalidCredentialExpiry;
     return expiry orelse 0;
 }
 
-/// A pending record means an earlier claimant may have consumed the refresh
-/// token, so only explicit login can recover it.
 pub fn requireReady(record: *const Record) !void {
     switch (record.state) {
         .ready => {},
@@ -200,11 +143,6 @@ pub fn requireReady(record: *const Record) !void {
     }
 }
 
-/// Signs a record out in place: its tokens are wiped and only its account
-/// and issued client id, if any, remain, for the next sign-in to name. A
-/// device-code (Codex) record has no issued client, so only its account
-/// remains. The generation advances, as a login's does, so no lease of the
-/// old tokens outlives it.
 pub fn signOut(record: *Record) !void {
     const generation = std.math.add(u64, record.generation, 1) catch return error.GenerationExhausted;
     record.id_token.wipe();
@@ -218,14 +156,12 @@ pub fn signOut(record: *Record) !void {
 
 pub const Selection = enum { use, refresh };
 
-/// Chooses how a Host acquisition proceeds from the record it loaded.
 pub fn select(record: *const Record, fixture: bool, now_seconds: i64, scratch: *ClaimScratch) !Selection {
     try requireReady(record);
     try validateSelected(record, fixture, scratch);
     return if (refreshDue(record, now_seconds, launch_refresh_margin_seconds)) .refresh else .use;
 }
 
-/// The final check on the leased record before a model launch.
 pub fn launchCheck(record: *const Record, fixture: bool, now_seconds: i64, scratch: *ClaimScratch) !void {
     try validateSelected(record, fixture, scratch);
     if (record.expires_at != 0 and record.expires_at <= now_seconds) return error.ExpiredCredential;
@@ -242,23 +178,16 @@ pub const LocalStatus = enum {
     }
 };
 
-/// Ready and renewal-due are locally usable, not remotely accepted. Applies
-/// the runtime's routing and expiry checks to a read-only snapshot.
 pub fn localStatus(record: *const Record, now_seconds: i64, scratch: *ClaimScratch) !LocalStatus {
     switch (record.state) {
         .ready => {},
         .refresh_pending => return .refresh_required,
-        // A signed-out record holds no tokens: there is no sign-in to use.
         .signed_out => return .missing,
     }
     try validateSelected(record, false, scratch);
     return if (refreshDue(record, now_seconds, 0)) .renewal_due else .configured;
 }
 
-/// Credential failures the user can resolve by logging in again save a
-/// sign-in code (`failure_class.sign_in_prefix`), naming the refresh
-/// token's fate when the backend gave one, or that the account has not let
-/// this app use its ChatGPT plan; everything else is a backend failure.
 pub fn failureCode(err: anyerror) []const u8 {
     const sign_in = failure_class.sign_in_prefix;
     switch (err) {
@@ -274,15 +203,10 @@ pub fn failureCode(err: anyerror) []const u8 {
     return "provider_authentication_backend_failed";
 }
 
-/// Credential failures that only a new login resolves. `PlanScopeMissing`
-/// first needs the account to let this app use its plan.
 pub const LoginRequired = error{ RefreshRejected, RefreshTokenExpired, RefreshTokenReused, RefreshTokenInvalidated, RefreshRequiresLogin, SignedOut, ExpiredCredential, AccountMismatch, AccountChanged, InvalidCredentialExpiry, PlanScopeMissing };
 
 pub const Claim = enum { claimed, superseded };
 
-/// Claims a refresh under the exclusive lock by marking the record pending.
-/// Another claimant that already advanced the generation supersedes this one;
-/// a pending record requires explicit login rather than another exchange.
 pub fn claimRefresh(record: *Record, expected_generation: u64) !Claim {
     if (record.generation != expected_generation) return .superseded;
     try requireReady(record);
@@ -290,17 +214,11 @@ pub fn claimRefresh(record: *Record, expected_generation: u64) !Claim {
     return .claimed;
 }
 
-/// A replacement must be a complete, ready record.
 pub fn validateReplacement(record: *const Record) !void {
     try validateRecord(record);
     if (record.state != .ready) return error.InstallMustBeReady;
 }
 
-/// Returns the generation a replacement publishes with.
-/// `expected_generation == null` is an explicit login: it may replace any
-/// existing record, including another account, and advances its generation.
-/// A non-null value completes the pending refresh at that generation and must
-/// preserve the account ID, the issued client id and the FedRAMP routing claim.
 pub fn admitReplacement(current: ?*const Record, replacement: *const Record, expected_generation: ?u64) !u64 {
     try validateReplacement(replacement);
     const expected = expected_generation orelse {
@@ -325,8 +243,6 @@ pub fn validateRecord(record: *const Record) !void {
     if (record.version != 3) return error.UnsupportedCredentialVersion;
     try validateText(record.account_id.slice(), false);
     try validateText(record.client_id.slice(), true);
-    // A signed-out record is exactly what `signOut` leaves: an account, the
-    // issued client a plan record has, no tokens and no expiry.
     if (record.state == .signed_out) {
         if (record.id_token.len != 0 or record.access_token.len != 0 or record.refresh_token.len != 0 or record.fedramp)
             return error.SignedOutHoldsTokens;
@@ -347,8 +263,6 @@ pub fn validateRecord(record: *const Record) !void {
     if (count != 1 and count != 3) return error.InvalidAccessToken;
 }
 
-/// A `client_id=` line follows `account_id=` only when the record has one, so
-/// a Codex record keeps the bytes it always had.
 pub fn encode(record: *const Record, destination: []u8) ![]const u8 {
     try validateRecord(record);
     var writer = std.Io.Writer.fixed(destination);
@@ -370,7 +284,6 @@ pub fn parseInto(bytes: []const u8, record: *Record) !void {
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(record));
     try record.account_id.set(try field(lines.next(), "account_id="));
     if (lines.peek()) |line| if (std.mem.startsWith(u8, line, "client_id=")) {
-        // An empty client id is written as no line, so this spelling is not one.
         const client_id = try field(lines.next(), "client_id=");
         if (client_id.len == 0) return error.InvalidCredentialFile;
         try record.client_id.set(client_id);
@@ -417,8 +330,6 @@ fn validBase64Url(bytes: []const u8) bool {
     const decoder = std.base64.url_safe_no_pad.Decoder;
     const size = decoder.calcSizeForSlice(bytes) catch return false;
     if (size > max_token_bytes) return false;
-    // Whole 4-character groups decode independently, so decoding the text
-    // in chunks of whole groups accepts exactly what one decode would.
     var decoded: [768]u8 = undefined;
     defer std.crypto.secureZero(u8, &decoded);
     var rest = bytes;
@@ -437,7 +348,6 @@ test "chunked base64url validation agrees with one decode at every length" {
     for (&text, 0..) |*c, i| c.* = alphabet[(i * 37 + 11) % alphabet.len];
     const decoder = std.base64.url_safe_no_pad.Decoder;
     for (0..text.len) |len| {
-        // The last character decides whether the unused trailing bits are zero.
         for ([_]u8{ 'A', 'B', '_', '=' }) |last| {
             var sample = text;
             if (len > 0) sample[len - 1] = last;
@@ -450,8 +360,6 @@ test "chunked base64url validation agrees with one decode at every length" {
     }
 }
 
-/// Decodes the payload into a prefix of `destination` and returns it. On
-/// failure nothing decoded remains there.
 pub fn tokenPayload(token: []const u8, destination: []u8) ![]u8 {
     var parts = std.mem.splitScalar(u8, token, '.');
     const header = parts.next() orelse return error.InvalidCompactToken;
@@ -476,8 +384,6 @@ pub fn tokenPayload(token: []const u8, destination: []u8) ![]u8 {
 
 pub const Account = struct { id: Required(max_account_id_bytes), fedramp: bool };
 
-/// A token's claims decoded as `T`, not a verified JWT. `value` borrows
-/// `scratch`; `wipe` clears the decoded payload and the parsed claims.
 fn ReadClaims(comptime T: type) type {
     return struct {
         value: T,
@@ -491,8 +397,6 @@ fn ReadClaims(comptime T: type) type {
     };
 }
 
-/// Decodes `token`'s payload and its claims as `T` in `scratch`. On failure
-/// nothing decoded is left in `scratch`.
 fn readClaims(comptime T: type, token: []const u8, scratch: *ClaimScratch) !ReadClaims(T) {
     const payload = try tokenPayload(token, &scratch.decoded);
     errdefer std.crypto.secureZero(u8, payload);
@@ -504,7 +408,6 @@ fn readClaims(comptime T: type, token: []const u8, scratch: *ClaimScratch) !Read
     return .{ .value = parsed.value, .payload = payload, .scratch = scratch };
 }
 
-/// Decoded routing claims from the TLS peer's ID token, not a verified JWT.
 pub fn parseAccount(id_token: []const u8, scratch: *ClaimScratch, account: *Account) !void {
     const parsed = try readClaims(Claims, id_token, scratch);
     defer parsed.wipe();
@@ -521,8 +424,6 @@ pub fn parseAccount(id_token: []const u8, scratch: *ClaimScratch, account: *Acco
     try account.id.set(id);
 }
 
-/// A plan sign-in's account: the ID token's top-level `sub`, as the issuer's
-/// sign-in guide directs. Its other claims are checked at the exchange.
 fn parseSubject(id_token: []const u8, scratch: *ClaimScratch, account: *Account) !void {
     const parsed = try readClaims(struct { sub: ?json_scalar.Text = null }, id_token, scratch);
     defer parsed.wipe();
@@ -535,9 +436,6 @@ fn parseSubject(id_token: []const u8, scratch: *ClaimScratch, account: *Account)
 pub const max_email_bytes = 320;
 pub const Email = Bounded(max_email_bytes);
 
-/// The email an ID token names, for a person to recognize their account;
-/// empty when it names none or none that prints as one line. It routes and
-/// decides nothing.
 pub fn emailOf(id_token: []const u8, scratch: *ClaimScratch, email: *Email) !void {
     email.* = .{};
     const parsed = try readClaims(struct { email: ?json_scalar.Text = null }, id_token, scratch);
@@ -547,8 +445,6 @@ pub fn emailOf(id_token: []const u8, scratch: *ClaimScratch, email: *Email) !voi
     email.set(named) catch unreachable;
 }
 
-/// A compact access token may carry an expiry. The issuer also returns opaque
-/// access tokens; their lifetime is tracked from the last successful exchange.
 pub fn parseExpiry(access_token: []const u8, scratch: *ClaimScratch) !?i64 {
     if (!safeAscii(access_token)) return error.InvalidAccessToken;
     if (std.mem.indexOfScalar(u8, access_token, '.') == null) return null;
@@ -559,7 +455,6 @@ pub fn parseExpiry(access_token: []const u8, scratch: *ClaimScratch) !?i64 {
     return expiry;
 }
 
-/// Fixture expiry encoded in `fixture_access_token`.
 const fixture_expires_at: i64 = 4_102_444_800;
 
 fn expectSameRecord(expected: *const Record, actual: *const Record) !void {
@@ -604,7 +499,6 @@ test "format is bounded and strictly consumed" {
     const encoded = try encode(&record, &bytes);
     try parseInto(encoded, &decoded);
     try expectSameRecord(&record, &decoded);
-    // Unknown versions, routing values and states are refused.
     var edited: [max_file_bytes]u8 = undefined;
     for ([_][3][]const u8{
         .{ "version=3", "version=2", "UnsupportedCredentialVersion" },
@@ -627,7 +521,6 @@ test "format is bounded and strictly consumed" {
     @memcpy(extra[0..opaque_encoded.len], opaque_encoded);
     @memcpy(extra[opaque_encoded.len..][0..4], "junk");
     try std.testing.expectError(error.TrailingCredentialData, parseInto(extra[0 .. opaque_encoded.len + 4], &decoded));
-    // Empty fields, nonpositive refresh time and malformed compact tokens fail.
     record.refreshed_at = 0;
     try std.testing.expectError(error.InvalidCredentialTime, encode(&record, &bytes));
     record.refreshed_at = 100;
@@ -638,7 +531,6 @@ test "format is bounded and strictly consumed" {
 }
 
 test "a Codex file keeps its bytes and an issued client id adds one line" {
-    // The file a Codex login has always written, spelled out rather than encoded.
     const codex = "version=3\ngeneration=5\naccount_id=" ++ fixture_account_id ++ "\nfedramp=0\nid_token=" ++ fixture_id_token ++
         "\naccess_token=" ++ fixture_access_token ++ "\nrefresh_token=synthetic-refresh\nexpires_at=4102444800\nrefreshed_at=100\nstate=ready\n";
     var decoded: Record = undefined;
@@ -649,7 +541,6 @@ test "a Codex file keeps its bytes and an issued client id adds one line" {
     var bytes: [max_file_bytes]u8 = undefined;
     try std.testing.expectEqualStrings(codex, try encode(&decoded, &bytes));
 
-    // A plan sign-in's record carries its issued client id after the account.
     try expected.client_id.set("oaiapp_test_client");
     const plan = try encode(&expected, &bytes);
     const at = comptime std.mem.indexOf(u8, codex, "fedramp=").?;
@@ -657,7 +548,6 @@ test "a Codex file keeps its bytes and an issued client id adds one line" {
     try parseInto(plan, &decoded);
     try expectSameRecord(&expected, &decoded);
 
-    // An empty or late client id line is not a spelling of any record.
     try std.testing.expectError(error.InvalidCredentialFile, parseInto(codex[0..at] ++ "client_id=\n" ++ codex[at..], &decoded));
     try std.testing.expectError(error.TrailingCredentialData, parseInto(codex ++ "client_id=x\n", &decoded));
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&decoded), 0));
@@ -685,7 +575,6 @@ test "signing out keeps the account and issued client, and nothing selects the r
     var claims: ClaimScratch = undefined;
     var record: Record = undefined;
     try fixtureRecord(&record);
-    // A Codex record has no issued client to keep: only its account stays.
     var device = record;
     try signOut(&device);
     try std.testing.expectEqual(State.signed_out, device.state);
@@ -711,7 +600,6 @@ test "signing out keeps the account and issued client, and nothing selects the r
     try std.testing.expectEqual(@as(usize, 0), record.id_token.len + record.access_token.len + record.refresh_token.len);
     try std.testing.expectEqual(@as(i64, 0), record.expires_at);
 
-    // It round-trips through the file with empty token lines.
     var bytes: [max_file_bytes]u8 = undefined;
     const encoded = try encode(&record, &bytes);
     try std.testing.expectEqualStrings("version=3\ngeneration=6\naccount_id=" ++ fixture_account_id ++ "\nclient_id=" ++ fixture_client_id ++
@@ -720,8 +608,6 @@ test "signing out keeps the account and issued client, and nothing selects the r
     try parseInto(encoded, &decoded);
     try expectSameRecord(&record, &decoded);
 
-    // Every reader treats it as no sign-in: no lease, no refresh claim, and
-    // local status reports none; only a login replaces it.
     try std.testing.expectError(error.SignedOut, select(&record, false, 0, &claims));
     try std.testing.expectError(error.SignedOut, claimRefresh(&record, 6));
     try std.testing.expectEqual(LocalStatus.missing, try localStatus(&record, 0, &claims));
@@ -733,10 +619,8 @@ test "signing out keeps the account and issued client, and nothing selects the r
     try replacement.id_token.set("e30.eyJzdWIiOiJwbGFuLXN1YmplY3QifQ.c2ln");
     try std.testing.expectError(error.GenerationMismatch, admitReplacement(&record, &replacement, 6));
     try std.testing.expectEqual(@as(u64, 7), try admitReplacement(&record, &replacement, null));
-    // A signed-out record cannot itself be installed as a login.
     try std.testing.expectError(error.InstallMustBeReady, validateReplacement(&record));
 
-    // Its file holds no token, no expiry and no FedRAMP routing.
     for ([_][2][]const u8{
         .{ "id_token=\n", "id_token=x\n" },
         .{ "access_token=\n", "access_token=a.b.c\n" },
@@ -754,12 +638,10 @@ test "signing out keeps the account and issued client, and nothing selects the r
 test "an ID token's email is shown only as one printable line" {
     var claims: ClaimScratch = undefined;
     var email: Email = .{};
-    // {"sub":"s","email":"someone@example.com"}
     try emailOf("e30.eyJzdWIiOiJzIiwiZW1haWwiOiJzb21lb25lQGV4YW1wbGUuY29tIn0.c2ln", &claims, &email);
     try std.testing.expectEqualStrings("someone@example.com", email.slice());
     try emailOf(fixture_id_token, &claims, &email);
     try std.testing.expectEqual(@as(usize, 0), email.len);
-    // {"email":"a b\n"}
     try emailOf("e30.eyJlbWFpbCI6ImEgYlxuIn0.c2ln", &claims, &email);
     try std.testing.expectEqual(@as(usize, 0), email.len);
     try std.testing.expectError(error.InvalidCompactToken, emailOf("a..c", &claims, &email));
@@ -792,9 +674,7 @@ test "refresh is due at the expiry margin or eight days after an opaque exchange
     try std.testing.expect(refreshDue(&record, 700, launch_refresh_margin_seconds));
     try std.testing.expect(!refreshDue(&record, 999, 0));
     try std.testing.expect(refreshDue(&record, 1_000, 0));
-    // The margin saturates rather than overflowing at the end of time.
     try std.testing.expect(refreshDue(&record, std.math.maxInt(i64), launch_refresh_margin_seconds));
-    // Opaque tokens ignore the margin.
     record.expires_at = 0;
     for ([_]i64{ 0, launch_refresh_margin_seconds }) |margin| {
         try std.testing.expect(!refreshDue(&record, 100 + opaque_refresh_seconds - 1, margin));
@@ -810,11 +690,9 @@ test "selection refreshes inside the launch margin and rejects unusable records"
     try std.testing.expectEqual(Selection.refresh, try select(&record, true, fixture_expires_at - 300, &claims));
     try std.testing.expectEqual(Selection.use, try select(&record, false, 0, &claims));
 
-    // A refresh left pending by a crashed claimant requires login.
     record.state = .refresh_pending;
     try std.testing.expectError(error.RefreshRequiresLogin, select(&record, false, 0, &claims));
     record.state = .ready;
-    // Stored routing must match the ID token in both FedRAMP directions.
     record.fedramp = true;
     try std.testing.expectError(error.AccountMismatch, select(&record, false, 0, &claims));
     record.fedramp = false;
@@ -822,7 +700,6 @@ test "selection refreshes inside the launch margin and rejects unusable records"
     try std.testing.expectError(error.AccountMismatch, select(&record, false, 0, &claims));
     record.fedramp = true;
     try std.testing.expectEqual(Selection.use, try select(&record, true, 0, &claims));
-    // A fixture launch accepts only the synthetic tokens, even for its account.
     try fixtureRecord(&record);
     try record.id_token.set("e30.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJydWktdGVzdC1hY2NvdW50Iiwic3ViIjoieCJ9.c2ln");
     try std.testing.expectEqual(Selection.use, try select(&record, false, 0, &claims));
@@ -834,7 +711,6 @@ test "selection refreshes inside the launch margin and rejects unusable records"
     try record.account_id.set("foreign-account");
     try std.testing.expectError(error.FixtureRequiresSyntheticCredential, select(&record, true, 0, &claims));
     try std.testing.expectError(error.AccountMismatch, select(&record, false, 0, &claims));
-    // Stored expiry must match the access token's encoded expiry.
     try fixtureRecord(&record);
     record.expires_at = 1234;
     try std.testing.expectError(error.InvalidCredentialExpiry, select(&record, false, 0, &claims));
@@ -849,14 +725,11 @@ test "a plan record refreshes inside the launch margin of its token's expiry, ne
     try record.id_token.set("e30.eyJzdWIiOiJwbGFuLXN1YmplY3QifQ.c2ln");
     try std.testing.expectEqual(Selection.use, try select(&record, false, fixture_expires_at - 301, &claims));
     try std.testing.expectEqual(Selection.refresh, try select(&record, false, fixture_expires_at - 300, &claims));
-    // An opaque plan token has no expiry to refresh by: no file holds one,
-    // and no login or refresh derives one.
     try record.access_token.set("opaque-access");
     record.expires_at = 0;
     try std.testing.expectError(error.InvalidCredentialExpiry, select(&record, false, 0, &claims));
     try std.testing.expectError(error.InvalidCredentialExpiry, deriveClaims(&record, &claims));
     try std.testing.expectError(error.InvalidCredentialExpiry, validateRecord(&record));
-    // A Codex record keeps its opaque clock.
     record.client_id = .{};
     try record.account_id.set(fixture_account_id);
     try record.id_token.set(fixture_id_token);
@@ -881,7 +754,6 @@ test "launch rejects a leased token that expired after selection" {
     try fixtureRecord(&record);
     try launchCheck(&record, true, fixture_expires_at - 1, &claims);
     try std.testing.expectError(error.ExpiredCredential, launchCheck(&record, true, fixture_expires_at, &claims));
-    // Opaque tokens have no launch expiry; their refresh clock governs.
     try record.access_token.set("opaque-access");
     record.expires_at = 0;
     try launchCheck(&record, false, std.math.maxInt(i32), &claims);
@@ -894,7 +766,6 @@ test "local status reports renewal only at expiry, without the launch margin" {
     try fixtureRecord(&record);
     try std.testing.expectEqual(LocalStatus.configured, try localStatus(&record, fixture_expires_at - 1, &claims));
     try std.testing.expectEqual(LocalStatus.renewal_due, try localStatus(&record, fixture_expires_at, &claims));
-    // Inside the launch margin, the runtime refreshes but local status is configured.
     try std.testing.expectEqual(Selection.refresh, try select(&record, false, fixture_expires_at - 1, &claims));
     try std.testing.expect((try localStatus(&record, fixture_expires_at, &claims)).usable());
     try std.testing.expect(!LocalStatus.missing.usable() and !LocalStatus.refresh_required.usable());
@@ -915,8 +786,6 @@ test "a refresh claim marks the current generation pending once" {
     try std.testing.expectEqual(State.refresh_pending, record.state);
     try std.testing.expectEqual(@as(u64, 5), record.generation);
     try std.testing.expectError(error.RefreshRequiresLogin, claimRefresh(&record, 5));
-    // A different generation supersedes this claimant even when its owner
-    // left it pending. It must not become this claimant's login failure.
     try std.testing.expectEqual(Claim.superseded, try claimRefresh(&record, 4));
     try std.testing.expectEqual(Claim.superseded, try claimRefresh(&record, 6));
     try std.testing.expectEqual(State.refresh_pending, record.state);
@@ -929,14 +798,12 @@ test "replacement admission advances generations and preserves refresh routing" 
     var replacement: Record = undefined;
     try fixtureRecord(&replacement);
 
-    // Login creates generation 1 or advances any existing record.
     try std.testing.expectEqual(@as(u64, 1), try admitReplacement(null, &replacement, null));
     try std.testing.expectEqual(@as(u64, 6), try admitReplacement(&current, &replacement, null));
     try replacement.account_id.set("foreign-account");
     current.state = .refresh_pending;
     try std.testing.expectEqual(@as(u64, 6), try admitReplacement(&current, &replacement, null));
 
-    // Refresh completion requires the same pending generation and binding.
     try std.testing.expectError(error.AccountMismatch, admitReplacement(&current, &replacement, 5));
     try replacement.account_id.set(fixture_account_id);
     try std.testing.expectEqual(@as(u64, 6), try admitReplacement(&current, &replacement, 5));
@@ -954,7 +821,6 @@ test "replacement admission advances generations and preserves refresh routing" 
     current.fedramp = false;
     replacement.fedramp = false;
 
-    // Admission itself refuses a replacement that is not ready.
     replacement.state = .refresh_pending;
     try std.testing.expectError(error.InstallMustBeReady, admitReplacement(null, &replacement, null));
     replacement.state = .ready;

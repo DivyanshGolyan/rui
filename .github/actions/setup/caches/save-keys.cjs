@@ -1,7 +1,5 @@
 const {appendFileSync} = require('node:fs');
 
-// Exact keys assert completed work. Only compilation may preserve unfinished
-// progress, under a non-exact key matched by the existing restore prefixes.
 function saveKey({kind, key, setupOutcome, workOutcome,
   compilerReady = false, successful = false, runId, runAttempt}) {
   if (!key) return '';

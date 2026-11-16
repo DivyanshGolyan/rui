@@ -1,6 +1,3 @@
-// Packs the release tarballs, installs them into a fresh project and starts a
-// real Rui from the installed platform package. RUI_BINARY names the
-// executable to pack; the test needs `npm` and the TypeScript compiler.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -43,7 +40,6 @@ test("the packed tarballs install and start a Host from the platform package", {
 		execFileSync("npm", ["install", "--offline", "--no-audit", "--no-fund", "--ignore-scripts", join(packs, "rui-0.0.1.tgz"), join(packs, `rui${(platform as string).slice("ruicode".length)}-0.0.1.tgz`)], { cwd: app, stdio: "inherit" });
 		const installed = JSON.parse(readFileSync(join(app, "node_modules", "ruicode", "package.json"), "utf8"));
 		assert.deepEqual(Object.keys(installed.optionalDependencies).sort(), ["ruicode-darwin-arm64", "ruicode-linux-arm64", "ruicode-linux-x64"]);
-		// Plain node, no type stripping, a PATH with no rui on it: the executable can only come from the platform package.
 		writeFileSync(
 			join(app, "run.mjs"),
 			`import { readlinkSync } from "node:fs";

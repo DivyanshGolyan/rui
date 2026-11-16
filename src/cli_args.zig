@@ -1,5 +1,3 @@
-//! Installed command grammar. Help and pre-effect syntax validation use the
-//! same definitions; model/state-dependent values remain with the Store.
 const std = @import("std");
 const session_settings = @import("session_settings.zig");
 const model_capability = @import("model_capability.zig");
@@ -67,7 +65,6 @@ pub const Command = enum {
     store_schema,
 
     pub fn definition(self: Command) Definition {
-        // Option arrays have static storage, not a returned stack literal.
         return switch (self) {
             inline else => |command| comptime command.definitionValue(),
         };
@@ -118,7 +115,6 @@ pub const Command = enum {
     }
 };
 
-/// Shared by this help and the interactive /configure usage.
 pub const compaction_policy =
     \\--compaction-trigger TOKENS|default sets a positive estimated context pressure threshold.
     \\--output-reservation TOKENS|default sets nonnegative extra compaction headroom, not a guaranteed output budget.
@@ -127,7 +123,6 @@ pub const compaction_policy =
     \\
 ++ std.fmt.comptimePrint("A model Rui does not list is assumed to have a {d}-token context.", .{product_defaults.unlisted_context_window});
 
-/// Shared by `session configure`, `session start` and the interactive /configure.
 pub const label_help =
     \\--label TEXT names, renames or titles the Session, shown in lists and chat info: one line of at most 100 bytes. --label "" clears it.
     \\A Label is display text only; it never addresses or selects a Session.
@@ -157,13 +152,11 @@ const session = &[_]Option{value("session", "ID")};
 const key = &[_]Option{ value("key", "KEY"), hex("key-hex", "key", 128) };
 const capture = &[_]Option{ value("record", "FILE"), value("key", "KEY"), hex("key-hex", "key", 128), hiddenValue("test-drop-reply") };
 const binding = settingOptions(.binding, false);
-/// Test only: a loopback that answers as the ChatGPT plan's issuer.
 const plan_fixture = &[_]Option{hiddenValue("test-chatgpt-fixture-endpoint")};
 const notifications = choice("notifications", cli_value.Notification);
 const action = &[_]Option{value("action", "ID")};
 const need_session = &[_][]const []const u8{&.{"session"}};
 const need_action = need_session ++ &[_][]const []const u8{&.{"action"}};
-/// A saved request HANDLE names its own Store and key.
 const saved_identity = &[_]PositionalConflict{
     .{ .code = .handle_names_store_and_key, .option = "store" },
     .{ .code = .handle_names_store_and_key, .option = "store-hex" },
@@ -177,7 +170,6 @@ const tool_choices = blk: {
     }
     break :blk text ++ "|none";
 };
-/// Session settings shared by `session configure` and the live /configure.
 const settings = settingOptions(.settings, false);
 const start_settings = settingOptions(.settings, true);
 
@@ -187,13 +179,11 @@ fn settingOptions(comptime group: @FieldType(session_settings.Cli, "group"), com
         const cli = entry.cli orelse continue;
         if (cli.group != group or (on_start and !cli.on_start)) continue;
         options = options ++ .{settingOption(entry.field)};
-        // A CLI-only clearing alias, beside the content option it clears.
         if (std.mem.eql(u8, entry.field, "output_schema")) options = options ++ .{flag("text-output")};
     }
     return options;
 }
 
-/// Argument shapes and aliases belong to the CLI, not to a Session setting.
 fn settingOption(comptime field: []const u8) Option {
     for (session_settings.entries) |entry| {
         if (!std.mem.eql(u8, entry.field, field)) continue;
@@ -210,14 +200,10 @@ fn settingOption(comptime field: []const u8) Option {
 }
 
 const settings_conflicts = &[_]Conflict{.{ .code = .output_schema_excludes_text_output, .a = "output-schema", .b = "text-output" }};
-/// The bare `rui` entry, which has no resource help of its own.
 pub const fresh_session: Definition = .{ .resource = .session, .name = "", .description = "", .options = &.{ value("store", "PATH"), settingOption("provider"), settingOption("model") } };
-/// The live Session's /configure: settings only; the Session is its address.
 pub const live_configure: Definition = .{ .resource = .session, .name = "/configure", .description = "", .options = binding ++ settings ++ &[_]Option{flag("reload-skills")}, .conflicts = settings_conflicts };
-/// The live Session's /setup: the defaults grammar, where none means inspect.
 pub const live_setup: Definition = .{ .resource = .defaults, .name = "/setup", .description = "", .options = &.{ value("store", "PATH"), settingOption("provider"), settingOption("model"), flag("clear-model"), notifications, settingOption("reasoning_effort"), settingOption("permission_mode") }, .conflicts = &.{.{ .code = .model_excludes_clear_model, .a = "model", .b = "clear-model" }} };
 
-/// Every grammar contributes its options, including hex spellings and hidden flags.
 const option_names = blk: {
     @setEvalBranchQuota(100_000);
     var grammars: []const Definition = &.{ fresh_session, live_configure, live_setup };
@@ -259,9 +245,6 @@ pub fn resourceHelp(resource: Resource, writer: *std.Io.Writer) !void {
     try writer.print("Use rui {s} COMMAND --help for options.\n", .{@tagName(resource)});
 }
 
-/// Former commands and their replacements: top-level names, refused rather
-/// than read as a fresh conversation's prompt, and `RESOURCE OPERATION` pairs.
-/// `host stop` became `host pause` because the next Host resumes its work.
 const retired_names = [_][2][]const u8{
     .{ "exec", "session configure|send" },                 .{ "follow", "request inspect" },                      .{ "wait-session", "session inspect" },
     .{ "result", "request read-result" },                  .{ "setup", "defaults inspect|configure" },            .{ "serve", "host serve" },
@@ -293,7 +276,6 @@ fn testParse(definition: Definition, args: []const []const u8, storage: []u8) De
     return definition.parse(args, fixed.allocator(), &problem);
 }
 
-/// `expected` is the help request of a valid invocation.
 fn expectValidation(command: Command, args: []const []const u8, expected: anyerror!bool) !void {
     var storage: [1024]u8 = undefined;
     const parsed = testParse(command.definition(), args, &storage);
@@ -331,12 +313,10 @@ test "grammar rejects ambiguous invocations before any effect" {
     try expectValidation(.defaults_configure, &.{ "--model", "m", "--clear-model" }, error.ConflictingArguments);
     try expectValidation(.request_inspect, &.{ "--key", "k", "HANDLE" }, error.ConflictingArguments);
     try expectValidation(.request_wait, &.{ "--key", "k", "HANDLE" }, error.ConflictingArguments);
-    // --all stops every busy Session, each under its own generated capture.
     try expectValidation(.session_stop, &.{ "--store", "/s", "--all" }, false);
     for ([_][]const u8{ "--session", "--record", "--key", "--key-hex" }) |single|
         try expectValidation(.session_stop, &.{ "--all", single, "6b" }, error.ConflictingArguments);
     try expectValidation(.session_list, &.{"--json"}, error.UnknownArgument);
-    // Values are data, but Message text has no argv spelling.
     try expectValidation(.session_send, &.{ "--to", "--help" }, false);
     try expectValidation(.session_send, &.{ "--to", "a", "--", "-" }, error.InvalidArguments);
     try expectValidation(.session_send, &.{ "--to", "a", "-" }, error.InvalidArguments);
@@ -348,7 +328,6 @@ test "grammar rejects ambiguous invocations before any effect" {
     try expectValidation(.session_send, &.{ "--to", "a", "--help" }, true);
     try expectValidation(.session_resume, &.{ "--store", "/s", "REF" }, false);
     try expectValidation(.session_resume, &.{ "--session", "a", "REF" }, error.ConflictingArguments);
-    // Resume is exact; there is no newest-Session guess.
     try expectValidation(.session_resume, &.{ "--store", "/s", "--last" }, error.UnknownArgument);
     try expectValidation(.host_serve, &.{ "--test-phase-trace", "--fault", "before-commit", "--set", "example=value" }, false);
     try expectValidation(.session_list, &.{"--test-drop-reply"}, error.UnknownArgument);
@@ -389,7 +368,6 @@ test "a hex spelling fills its named option and conflicts with it" {
     try std.testing.expect(spelled.has("store-hex") and !spelled.has("store"));
     try expectValidation(.session_inspect, &.{ "--store", "a", "--store-hex", "61" }, error.ConflictingArguments);
     try expectValidation(.session_inspect, &.{ "--store-hex", "61", "--store", "a" }, error.ConflictingArguments);
-    // Odd, non-hex, over-bound and non-UTF-8 spellings all fail; help wins.
     const store_over: [2 * 493]u8 = @splat('6');
     inline for (.{ "6", "zz", "ff", &store_over }) |bad| try expectValidation(.session_inspect, &.{ "--store-hex", bad, "--session", "k7m2qx" }, error.InvalidHexIdentity);
     try expectValidation(.session_inspect, &.{ "--store-hex", &store_over, "--session", "a" }, error.InvalidHexIdentity);
@@ -403,7 +381,6 @@ test "hidden test options belong to their operation and stay out of help" {
     const serve = try testParse(Command.host_serve.definition(), &.{ "--fault", "before-commit", "--test-phase-trace", "--fault", "content-read", "--test-retry-waits-ms", "1,1,1" }, &storage);
     try std.testing.expectEqual(@as(usize, 2), serve.all("fault").len);
     try std.testing.expectEqualStrings("content-read", serve.all("fault")[1]);
-    // Two repeatable options keep their own values, in order.
     var mixed_storage: [1024]u8 = undefined;
     const mixed = try testParse(Command.host_serve.definition(), &.{ "--fault", "a", "--set", "a=1", "--fault", "b", "--set", "a=2" }, &mixed_storage);
     try std.testing.expectEqualSlices([]const u8, &.{ "a", "b" }, mixed.all("fault"));
@@ -424,7 +401,6 @@ test "hidden test options belong to their operation and stay out of help" {
 }
 
 test "live /configure and /setup share the one-shot grammar" {
-    // Every live setting is the same option, with the same value shape.
     for (live_configure.options) |option| {
         const shared = Command.session_configure.definition().optionNamed(option.name).?;
         try std.testing.expectEqual(option.argument == null, shared.argument == null);
@@ -545,7 +521,6 @@ test "every declared conflict emits its own catalog code" {
         for (definition.conflicts) |conflict| {
             var storage: [6][]const u8 = undefined;
             var tokens: usize = 0;
-            // Format the two trusted flag names in bounded local storage.
             var first: [128]u8 = undefined;
             var second: [128]u8 = undefined;
             storage[tokens] = try std.fmt.bufPrint(&first, "--{s}", .{conflict.a});
@@ -666,8 +641,6 @@ test "parser refusal golden lines cover the three invocation regressions" {
     }
 }
 
-// Literal lines pin each declared conflict's accepted grammar independently
-// of the production catalog and table, including aliases and both orders.
 test "conflict golden lines name every incompatible spelling and complete repair" {
     const Case = struct { command: Command, args: []const []const u8, code: caller_error.Code, token: []const u8, expected: []const u8 };
     const cases = [_]Case{
@@ -750,7 +723,6 @@ test "archive list visibility is independent of all Workspaces" {
     _ = try expectRefusal(.session_list, &.{ "--archived", "--include-archived" }, .archive_visibility_conflict, "archived");
 }
 
-// Pinned from the pre-table grammar: these expectations must not be derived.
 test "Session settings CLI membership and order preserve configure and start" {
     inline for (.{
         .{ settings, &[_][]const u8{ "workspace", "instructions", "tools", "loaded-tools", "permission-mode", "output-schema", "text-output", "compaction-trigger", "output-reservation", "reasoning-effort", "label" } },

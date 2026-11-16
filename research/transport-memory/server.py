@@ -1,4 +1,3 @@
-"""Bounded local TLS fixture; reads complete staged requests before the response barrier."""
 import asyncio, hashlib, json, ssl, sys
 from h2.connection import H2Connection
 from h2.config import H2Configuration
@@ -33,7 +32,6 @@ async def accept(reader,writer):
             writer.write(f'HTTP/1.1 200 OK\r\nContent-Length: {outbytes}\r\nConnection: keep-alive\r\n\r\n'.encode())
             for off in range(0,outbytes,16384):
                 writer.write(b'x'*min(16384,outbytes-off));await writer.drain()
-            # Keep the server side alive through cache-retention snapshots.
             await reader.read()
         else:
             h=H2Connection(H2Configuration(client_side=False));h.initiate_connection();h.update_settings({SettingCodes.MAX_CONCURRENT_STREAMS:1000})

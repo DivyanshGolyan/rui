@@ -1,13 +1,9 @@
-//! The codecs this Host serves, by the codec name a Session pins. A codec is
-//! plain functions over values its caller stores, dispatched at comptime.
 const std = @import("std");
 const codec_abi = @import("codec_abi.zig");
 const protocol = @import("protocol.zig");
 const json = @import("codecs/json.zig");
 const responses = @import("codecs/responses.zig");
 
-/// The module of each codec this Host serves, the one place a codec is
-/// added: everything below is derived from it.
 fn module(comptime codec: protocol.Codec) type {
     return switch (codec) {
         .@"openai-responses/1" => Responses(.one),
@@ -16,8 +12,6 @@ fn module(comptime codec: protocol.Codec) type {
     };
 }
 
-/// A version of the Responses codec: one grammar, read the same way, whose
-/// versions differ only in the requests they write.
 fn Responses(comptime version: responses.Version) type {
     return struct {
         pub const manifest = responses.manifest;
@@ -49,8 +43,6 @@ fn Responses(comptime version: responses.Version) type {
     };
 }
 
-/// Whether the codec declares function tools inside the history, at each
-/// Operation boundary, instead of in the tools stage.
 pub fn declaresTools(codec: protocol.Codec) bool {
     return switch (codec) {
         inline else => |tag| module(tag).declaresTools(),
@@ -71,24 +63,17 @@ comptime {
         if (headers.len > codec_abi.max_request_headers) @compileError("codec " ++ name ++ " names more request headers than a request holds");
         for (headers) |header| if (!codec_abi.lowercaseToken(header)) @compileError("codec " ++ name ++ " names a request header that is not a lowercase token");
     }
-    // The Responses classifier accepts exactly the bodies the Host's own
-    // JSON reading did.
     std.debug.assert(json.max_depth == protocol.max_json_depth);
 }
 
-/// A pinned codec's request encoder state, which its caller stores. Each
-/// codec's `Encoder` holds its `Carry` as `carry`, and its other fields'
-/// defaults are its state at a history-element boundary.
 pub const Encoder = PerCodec("Encoder");
 
-/// A pinned codec's encoder state at a history-element boundary.
 pub const Carry = PerCodec("Carry");
 
 const codec_names = @typeInfo(protocol.Codec).@"enum".field_names;
 
 const CodecFields = struct { names: [codec_names.len][]const u8, types: [codec_names.len]type };
 
-/// Each codec's name and the type its module declares as `name`.
 fn codecFields(comptime name: []const u8) CodecFields {
     var fields: CodecFields = undefined;
     for (codec_names, &fields.names, &fields.types) |codec, *field, *T| {
@@ -98,22 +83,16 @@ fn codecFields(comptime name: []const u8) CodecFields {
     return fields;
 }
 
-/// The union over every codec of the type each declares as `name`.
 fn PerCodec(comptime name: []const u8) type {
     const fields = codecFields(name);
     return @Union(.auto, protocol.Codec, &fields.names, &fields.types, &@splat(.{}));
 }
 
-/// Every codec's `name` type side by side, for scratch a caller lends: each
-/// call writes its own codec's field before it reads it, so no tag says
-/// which one was last used.
 fn EachCodec(comptime name: []const u8) type {
     const fields = codecFields(name);
     return @Struct(.auto, null, &fields.names, &fields.types, &@splat(.{}));
 }
 
-/// The carry before a request's first history element, for a Session
-/// whose first Operation froze `starting_effort`.
 pub fn initialCarry(codec: protocol.Codec, starting_effort: ?codec_abi.Effort) Carry {
     return switch (codec) {
         inline else => |tag| @unionInit(Carry, @tagName(tag), module(tag).initial(starting_effort)),
@@ -132,88 +111,66 @@ pub fn carryOf(encoder: *const Encoder) Carry {
     };
 }
 
-/// Write the item's pieces into `out`. `error.Declined` is the codec
-/// declining a request it cannot encode.
 pub fn encodeItem(encoder: *Encoder, header: *const codec_abi.ItemHeader, out: *codec_abi.Pieces) error{Declined}!void {
     return switch (encoder.*) {
         inline else => |*state| state.encodeItem(header, out),
     };
 }
 
-/// The pinned codec's request headers for `settings`, written over `out`.
 pub fn requestHeaders(codec: protocol.Codec, settings: *const codec_abi.Settings, out: *codec_abi.Headers) void {
     switch (codec) {
         inline else => |tag| module(tag).requestHeaders(settings, out),
     }
 }
 
-/// The name `codec` gives the request header `Headers.names` holds as
-/// `name`.
 pub fn headerName(codec: protocol.Codec, name: u8) []const u8 {
     return switch (codec) {
         inline else => |tag| @tagName(@as(module(tag).RequestHeader, @fromBackingInt(@intCast(name)))),
     };
 }
 
-/// A pinned codec's error classifier scratch, which its caller lends for
-/// each `classify`.
 pub const ClassifyScratch = EachCodec("ClassifyScratch");
 
-/// Writes into `out` what the pinned codec reads in the HTTP error body
-/// `body`, naming report text by range of `body`.
 pub fn classify(codec: protocol.Codec, scratch: *ClassifyScratch, body: []const u8, out: *codec_abi.ErrorBody) void {
     switch (codec) {
         inline else => |tag| module(tag).classify(&@field(scratch, @tagName(tag)), body, out),
     }
 }
 
-/// The pinned codec owns whether status and error body refused an effort update.
 pub fn effortChangeRefused(codec: protocol.Codec, scratch: *const ClassifyScratch, status: u16, body: []const u8) bool {
     return switch (codec) {
         inline else => |tag| module(tag).effortChangeRefused(&@field(scratch, @tagName(tag)), status, body),
     };
 }
 
-/// A pinned codec's response stream state between events, which its
-/// caller stores.
 pub const Stream = PerCodec("Stream");
 
-/// A pinned codec's interpreter scratch, which its caller lends for each
-/// `interpretEvent`.
 pub const InterpretScratch = EachCodec("InterpretScratch");
 
-/// The state before a response's first event.
 pub fn begin(codec: protocol.Codec, operation: codec_abi.Operation) Stream {
     return switch (codec) {
         inline else => |tag| @unionInit(Stream, @tagName(tag), module(tag).begin(operation)),
     };
 }
 
-/// The codec's verdict on one event's data, `data`, naming bytes by range
-/// of it. Never inlined, like `nextMember`: the codec's frames stay apart
-/// from the shell's, which hold the Host's rules across items.
 pub noinline fn interpretEvent(stream: *Stream, scratch: *InterpretScratch, data: []const u8) codec_abi.Event {
     switch (stream.*) {
         inline else => |*state, tag| return module(tag).interpretEvent(state, &@field(scratch, @tagName(tag)), data),
     }
 }
 
-/// The next step of a walk over an event `interpretEvent` accepted, from
-/// a cursor its answer gave.
 pub noinline fn nextMember(codec: protocol.Codec, data: []const u8, cursor: *codec_abi.Cursor) ?codec_abi.Member {
     return switch (codec) {
         inline else => |tag| module(tag).nextMember(data, cursor),
     };
 }
 
-/// What an accepted hosted tool call item did, read from its bytes.
 pub fn hostedCall(codec: protocol.Codec, data: []const u8, item: *const codec_abi.OutputItem) codec_abi.HostedCall {
     return switch (codec) {
         inline else => |tag| module(tag).hostedCall(data, item),
     };
 }
 
-/// The stream ended between events: its verdict, if it fails.
 pub fn finish(stream: *const Stream) ?codec_abi.Reason {
     return switch (stream.*) {
         inline else => |*state, tag| module(tag).finish(state),
@@ -225,9 +182,6 @@ const TestItem = struct {
     handles: []const ?[]const u8 = &.{},
 };
 
-/// Encode `items` into `out` as the Host does, resuming `encoder` from
-/// `carry` before each item that resumes when `carry` is given, with
-/// std.json's string escaping standing in for the Host's cursors.
 fn encodeForTesting(encoder: *Encoder, carry: ?*Carry, items: []const TestItem, out: *std.Io.Writer) !void {
     var pieces: codec_abi.Pieces = .{ .len = 0 };
     for (items) |item| {
@@ -308,15 +262,11 @@ test "a resumed encoder writes what an uninterrupted one writes" {
         .{ .item = .{ .message = .instruction }, .handles = &.{ "two", "from peer" } },
     };
     const tail = [_]TestItem{ .{ .item = .history_end }, .{ .item = .compaction_trigger }, .{ .item = .tools_start }, .{ .item = .text_format }, .{ .item = .request_end } };
-    // One encoder over the whole request, never resumed: the bytes a
-    // carry that held less than the codec needs would change.
     var whole_buffer: [2048]u8 = undefined;
     var whole: std.Io.Writer = .fixed(&whole_buffer);
     var uninterrupted = resumeFrom(responses_initial);
     try encodeForTesting(&uninterrupted, null, &history, &whole);
     try encodeForTesting(&uninterrupted, null, &tail, &whole);
-    // Cut before the first element and after every one: a fresh encoder
-    // given only the carry writes the same remaining bytes.
     for (0..history.len + 1) |cut| {
         if (cut != 0) {
             const kind: codec_abi.ItemKind = history[cut - 1].item;
@@ -336,9 +286,6 @@ test "a resumed encoder writes what an uninterrupted one writes" {
     try std.testing.expectStringEndsWith(whole.buffered(), "{\"type\":\"compaction_trigger\"}],\"tools\":[],\"text\":{\"verbosity\":\"low\"}}");
 }
 
-/// A whole `openai-responses/3` request for a Session whose first
-/// Operation froze low effort, as the Host encodes it: resumed from the
-/// carry before each element.
 fn versionThreeForTesting(items: []const TestItem, out: *std.Io.Writer) !void {
     var carry = initialCarry(.@"openai-responses/3", .low);
     var encoder = resumeFrom(carry);
@@ -370,8 +317,6 @@ const version_three_end = "],\"tools\":[{\"type\":\"web_search\",\"external_web_
 test "version three sends a changed effort at the top of the request, never as an input item" {
     var buffer: [2048]u8 = undefined;
     var out: std.Io.Writer = .fixed(&buffer);
-    // The first Operation froze low and this one high: both boundaries
-    // write nothing.
     try versionThreeForTesting(&(version_three_first_operation ++ [_]TestItem{.{ .item = .{ .operation = .high } }} ++ version_three_tools), &out);
     try std.testing.expectEqualStrings(version_three_top ++ version_three_history ++ version_three_end ++ "}", out.buffered());
 }
@@ -402,9 +347,6 @@ test "a version three compaction request asks for compaction at the top, never w
 }
 
 test "the codec's JSON reader names each syntax error as validation did" {
-    // The digest of each document's error name, or `ok`, one per line, as
-    // validation's own parser named them before the codec's reader
-    // replaced it.
     const expected = "76669bb7f8a5561499c529d7bf886895e7e4371f76d2820a7d06cf53e08b73f0";
     const Names = struct {
         hash: std.crypto.hash.sha2.Sha256 = protocol.contentHasher(),
@@ -423,8 +365,6 @@ test "the codec's JSON reader names each syntax error as validation did" {
     };
     var names: Names = .{};
     const sample = "{\"type\":\"x\", \"a\":[1,-2.5e+3,0,true,null,{\"b\":\"\\u00e9\\n\xc3\xa9\\ud83d\\ude00\"}],\"c\":{}}";
-    // Every prefix, and every byte replaced by each byte the grammar
-    // treats apart.
     for (0..sample.len + 1) |cut| names.add(sample[0..cut]);
     const alphabet = "{}[]:,\"\\ 0-.eE+tfnux\x01\x7f\xc3\xe2\xf0\xff";
     var document: [sample.len]u8 = undefined;

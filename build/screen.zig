@@ -5,13 +5,9 @@ const CiArtifacts = @import("ci.zig").CiArtifacts;
 pub const ScreenEmulator = struct {
     library: std.Build.LazyPath,
     name: []const u8,
-    /// The child build; null in a CI consumer, whose producer ran it.
     child: ?*std.Build.Step.Run,
 };
 
-/// libghostty-vt's shared library for the PTY screen observer, which a child
-/// `zig build` of screen-emulator builds from its pinned release tarball.
-/// A CI producer builds it for the baseline CPU, as its executables are.
 pub fn addScreenEmulator(b: *std.Build, ci: CiArtifacts, baseline: bool) ScreenEmulator {
     const name = darwin.screenLibraryName(b.graph.host.result.os.tag);
     if (ci.directory) |directory|
@@ -30,7 +26,6 @@ pub fn addScreenEmulator(b: *std.Build, ci: CiArtifacts, baseline: bool) ScreenE
     return .{ .library = prefix.path(b, b.pathJoin(&.{ "lib", name })), .name = name, .child = child };
 }
 
-/// A fixture command whose environment names the screen observer's library.
 pub fn screenCommand(b: *std.Build, screen: std.Build.LazyPath, argv: []const []const u8) *std.Build.Step.Run {
     const run = b.addSystemCommand(&.{"env"});
     run.addPrefixedFileArg("RUI_TEST_GHOSTTY_VT=", screen);
@@ -38,8 +33,6 @@ pub fn screenCommand(b: *std.Build, screen: std.Build.LazyPath, argv: []const []
     return run;
 }
 
-/// Runs a direct-PTY harness against the build-owned ReleaseSafe Rui; callers
-/// pass the harness's own options, including a fresh --output, after `--`.
 pub fn addPtyHarness(b: *std.Build, screen: std.Build.LazyPath, harness: []const u8, rui: std.Build.LazyPath) *std.Build.Step.Run {
     const run = screenCommand(b, screen, &.{"python3"});
     run.addFileArg(b.path(harness));

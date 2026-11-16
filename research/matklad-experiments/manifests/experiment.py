@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""SQLite representation experiment; deliberately not a Rui implementation."""
 import argparse, hashlib, json, os, sqlite3, subprocess, sys, tempfile, time
 from pathlib import Path
 
@@ -66,7 +65,6 @@ def base_start(db, base):
     return row[2]
 
 def sources(db, base, frontier):
-    """No new ordered log: use existing Conversation projections as round anchors."""
     lower = base_start(db,base)
     if lower > frontier: raise Rejected('base beyond frontier')
     if base is not None: yield ('base',base)
@@ -84,7 +82,6 @@ def sources(db, base, frontier):
         else: raise Rejected('unknown conversation kind')
 
 def atom(db, kind, source):
-    """Yield bounded output items, preserving opaque private bytes and item order."""
     if kind == 'host':
         r = db.execute('SELECT kind,content,resolution FROM conversation WHERE seq=?',(source,)).fetchone()
         if r is None or r[0] not in HOST or r[2] is not None: raise Rejected('invalid host reference')
@@ -93,7 +90,7 @@ def atom(db, kind, source):
     r = db.execute('SELECT o.kind,r.outcome,r.completion FROM resolutions r JOIN operations o ON o.id=r.operation WHERE r.id=?',(source,)).fetchone()
     if r is None or r[1] != 'accepted': raise Rejected('missing/unaccepted resolution')
     if (kind == 'base') != (r[0] == 'compaction'): raise Rejected('wrong protocol operation')
-    semantic = []  # Bound by fixture's two-call output; production must bound catalog/output items.
+    semantic = []
     seen = 0
     for ordinal, item_kind, cid in rows(db,'SELECT ordinal,kind,content FROM output_items WHERE completion=? ORDER BY ordinal',(r[2],)):
         if ordinal != seen: raise Rejected('output ordinal hole')
@@ -114,8 +111,6 @@ def digest_part(d, record):
         d.update(len(b).to_bytes(8,'big')); d.update(b)
 
 def prepare(db, mode, base=None, operation_kind='model'):
-    # No ordering position is invented for accepted ordinary output without a
-    # semantic projection. The selected contract must guarantee this anchor.
     if db.execute("SELECT 1 FROM resolutions r JOIN operations o ON o.id=r.operation WHERE o.kind='model' AND r.outcome='accepted' AND NOT EXISTS (SELECT 1 FROM conversation c WHERE c.resolution=r.id) LIMIT 1").fetchone():
         raise Rejected('unanchored accepted model round')
     revision,instruction = db.execute('SELECT id,instruction FROM context_revisions ORDER BY id DESC LIMIT 1').fetchone()
@@ -168,7 +163,6 @@ def fixture(path, mode):
         raise AssertionError('admitted while tools pending')
     except Rejected as e:
         assert str(e)=='pending/misordered tool results'
-    # Physical completion order reverses; Conversation order remains call order.
     a0,a1=op(db,'action'),op(db,'action')
     result(db,a1,[('assistant','second tool finished first')],project=False)
     result(db,a0,[('assistant','first tool finished second')],project=False)
@@ -185,7 +179,6 @@ def fixture(path, mode):
     db.execute('UPDATE conversation SET call_ordinal=0 WHERE seq=4')
     b,m2=prepare(db,mode)
     result(db,b,[('opaque','private round2'),('assistant','answer round2')])
-    # Failed/interrupted/unresolved model effects supply no accepted replay round.
     result(db,op(db),[('opaque','failed bytes')],outcome='failed',project=False)
     db.execute('INSERT INTO resolutions(operation,outcome) VALUES(?,?)',(op(db),'interrupted'))
     db.execute('INSERT INTO attempts(operation) VALUES(?)',(op(db),))
@@ -198,7 +191,6 @@ def fixture(path, mode):
     ids=[m1,m2,mc,m3]
     assert list(sources(db,base,8)) == [('base',base),('host',8)]
     before=[replay(db,mode,x) for x in ids]
-    # Later ambient configuration/input/result must not alter old requests.
     db.execute('INSERT INTO context_revisions(instruction) VALUES(?)',(content(db,'changed future config'),))
     host(db,'system','later system'); host(db,'user','later input')
     e,m4=prepare(db,mode,base)
@@ -243,8 +235,6 @@ def adversarial(path,mode,meta):
             answers[name]='accepted'
         except Rejected as e: answers[name]='rejected: '+str(e)
         finally: db.rollback(); db.close()
-    # Enumerator does not consume frontier metadata; its exact explicit recipe
-    # is unchanged by that mutation. Range must reject its selected split.
     assert all(v.startswith('rejected') for k,v in answers.items() if k!='split_round_frontier')
     assert mode != 'range' or answers['split_round_frontier'].startswith('rejected')
     return answers

@@ -1,4 +1,3 @@
-"""Run isolated protocol scenarios and require each deliberately unsafe variant to fail."""
 import json
 import os
 from pathlib import Path
@@ -40,7 +39,6 @@ def main():
                         passed = (completed.returncode == 2 and expected_failure in completed.stderr) if broken else (
                             completed.returncode == 0 and lines[1:] == [f"PASS {case}"])
                         passed = passed and observed == {"journal_mode": "delete", "synchronous": 3}
-                        # A sanitizer report must never count as an expected negative-control failure.
                         passed = passed and not any(x in completed.stderr for x in
                             ("AddressSanitizer", "UndefinedBehaviorSanitizer", "runtime error:"))
                         result["runs"].append({"scenario": case, "broken": broken,

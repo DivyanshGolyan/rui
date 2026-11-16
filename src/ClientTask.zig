@@ -1,5 +1,3 @@
-//! One joined Client borrower. Its worker writes only its own context; the UI
-//! reads that after join.
 const std = @import("std");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
@@ -13,15 +11,12 @@ run: Run = undefined,
 thread: ?std.Thread = null,
 cancellation: client.Cancellation = .{},
 mutex: std.Io.Mutex = .init,
-/// One joined outcome. Its origin is written only by this worker's borrower;
-/// reset before launch and read by the shell only after join.
 result: struct {
     outcome: ?anyerror!void = null,
     failure_origin: client.FailureOrigin = .local,
 } = .{},
 read_failure: ?protocol_reply.ReadFailure = null,
 
-/// All arguments and this owner stay in final storage through join.
 pub fn start(self: *Self, io: std.Io, context: *anyopaque, run: Run) !void {
     std.debug.assert(self.thread == null);
     self.io = io;
@@ -59,8 +54,6 @@ pub fn cancel(self: *Self) void {
     self.cancellation.requestStop();
 }
 
-/// Reap before exposing completion, closing captures or reusing arguments.
-/// A repeated join does no I/O and cannot report the result twice.
 pub fn join(self: *Self) !void {
     const thread = self.thread orelse return;
     thread.join();
@@ -91,7 +84,6 @@ test "ClientTask read diagnostic survives join with isolated borrowers and reset
     try second.start(std.testing.io, @ptrCast(&second_code), Worker.run);
     try std.testing.expectError(error.CanonicalStoreFailure, first.join());
     try std.testing.expectError(error.CanonicalStoreFailure, second.join());
-    // Each task keeps its own first failure, not the later canonical one.
     for ([_]*const Self{ &first, &second }, [_][]const u8{ first_code, second_code }) |task, code| {
         const failure = task.read_failure.?;
         try std.testing.expectEqual(@as(u16, 503), failure.status);
