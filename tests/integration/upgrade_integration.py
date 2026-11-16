@@ -820,7 +820,9 @@ def refused_source_cases(root, binary, releases):
                     old.stdin.write(settings_fixture.frame(document))
                     old.stdin.flush()
                 settings_fixture.wait_for_host(runtime / "rui.sock", c.store, old)
-                c.ready = json.loads(old.stdout.readline())
+                # Framed foreground serve owns a text startup line, not a
+                # public-status JSON envelope. Control already proved ready.
+                c.ready = {"socket": str(runtime / "rui.sock")}
                 previous = c.status()
             c.select(c.build("selected-target"))
             c.binary = c.link
@@ -950,6 +952,36 @@ def adopted_replacement_case(root, binary, releases):
                 print("upgrade native: adopted same-target-version owner verified (different managed executable)", flush=True)
                 return
     raise AssertionError("no external starter won the Store-lock race; adoption witness was not reached")
+
+
+def known_target_case(root, binary, releases, baseline, known_bad):
+    """Downloaded real releases, verified by the caller, never stand-in Hosts."""
+    with case(root, binary, releases, "old-target-precondition") as c:
+        retained = c.build("running-baseline")
+        shutil.copy2(baseline, retained / "bin/rui")
+        old_binary = retained / "bin/rui"
+        old, ready = start_ready_process([old_binary, "host", "serve", "--store", c.store, "--active-capacity", "2"],
+                                         env=c.env, isolate_providers=False)
+        c.hosts.append(old)
+        c.ready = ready
+
+        def old_status():
+            return json.loads(subprocess.check_output([old_binary, "host", "status", "--store", c.store], env=c.env, text=True, timeout=15))
+
+        previous = old_status()
+        try:
+            for name, target, reason in (("known-bad-check", known_bad, "target build cannot safely check"),
+                                         ("no-settings-check", baseline, "launch configuration cannot be safely reconstructed")):
+                build = c.build(name)
+                shutil.copy2(target, build / "bin/rui")
+                c.select(build)
+                output = c.run("host", "restart", "--all", timeout=60)
+                assert "left running" in output and reason in output, output
+                assert old.poll() is None and old_status()["instance"] == previous["instance"], output
+            print("upgrade native: actual known-bad check and pre-check release targets refused before stop; old PID/instance unchanged", flush=True)
+        finally:
+            # Its owning historical client retains cleanup authority.
+            c.binary = old_binary
 
 
 def future_target_case(root, binary, releases):
@@ -1819,11 +1851,11 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
 
 
 def main():
-    modes = ("restart-all", "lifecycle", "custody", "terminal", "startup", "future-target")
-    if len(sys.argv) not in (2, 3, 4) or (len(sys.argv) >= 3 and sys.argv[2] not in modes):
-        sys.exit("usage: python3 tests/integration/upgrade_integration.py REAL_RUI [restart-all|lifecycle|custody|terminal|startup|future-target FUTURE_REAL_RUI]")
+    modes = ("restart-all", "lifecycle", "custody", "terminal", "startup", "future-target", "known-target")
+    if len(sys.argv) not in (2, 3, 4, 5) or (len(sys.argv) >= 3 and sys.argv[2] not in modes):
+        sys.exit("usage: python3 tests/integration/upgrade_integration.py REAL_RUI [restart-all|lifecycle|custody|terminal|startup|future-target FUTURE_REAL_RUI|known-target BASELINE_RUI KNOWN_BAD_RUI]")
     selection = sys.argv[2] if len(sys.argv) >= 3 else "all"
-    assert (len(sys.argv) == 4) == (selection == "future-target"), "future-target requires a second native build"
+    assert len(sys.argv) == (4 if selection == "future-target" else 5 if selection == "known-target" else 2 if selection == "all" else 3), "supply the native binaries required by this mode"
     binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
     target_binary = pathlib.Path(sys.argv[3]).resolve(strict=True) if selection == "future-target" else binary
     root = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-upgrade-"))
@@ -1844,6 +1876,8 @@ def main():
     try:
         if selection == "future-target":
             future_target_case(root, binary, releases)
+        if selection == "known-target":
+            known_target_case(root, binary, releases, pathlib.Path(sys.argv[3]).resolve(strict=True), pathlib.Path(sys.argv[4]).resolve(strict=True))
         if selection in ("restart-all", "lifecycle"):
             suite = {"restart-all": restart_all_cases, "lifecycle": lifecycle_cases}[selection]
             suite(root, binary, releases)
