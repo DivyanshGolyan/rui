@@ -5401,6 +5401,7 @@ test "Host selection round trips every Store placement and interface through def
         for ([_]bool{ false, true }) |ready| {
             errdefer std.debug.print("resume ready={}\n", .{ready});
             const preflight = preflightExistingOverview(io, saved.store.slice());
+            if (preflight) |_| {} else |err| std.debug.print("placement-only resume preflight unexpectedly required readiness: {s}\n", .{@errorName(err)});
             try std.testing.expect(!std.meta.isError(preflight));
             const admitted = try preflight;
             try std.testing.expectEqualStrings(dir, admitted.selector());
