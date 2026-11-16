@@ -4404,9 +4404,12 @@ test "a click on a Session row, as a terminal sends it, opens the row under it a
         const line = try shown.line(@intCast(at));
         if (std.mem.indexOf(u8, line, "Fix the flaky test") != null and std.mem.endsWith(u8, line, "13s")) break @intCast(at);
     } else return error.TestExpectedRow;
-    const rule = view.layout(&rig.overview.state).settings.start;
-    try std.testing.expectEqualStrings("────────────────────────────────────────────────────────────", try shown.line(rule));
-    try std.testing.expect(try rig.click(10, rule, 60, 13) == null);
+    const quiet_row = view.layout(&rig.overview.state).settings.start + 1;
+    const quiet = try shown.line(quiet_row);
+    try std.testing.expectEqualStrings(@import("transport_options").version, std.mem.trim(u8, quiet, " "));
+    try std.testing.expect(quiet.len > 10 and quiet[10] == ' ');
+    try std.testing.expect(try rig.click(10, quiet_row, 60, 13) == null);
+    try std.testing.expect(!rig.overview.root.input.layer.settingsOpen());
     try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
     try std.testing.expect(try rig.click(10, row, 60, 13) == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.conversations);
