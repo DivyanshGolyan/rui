@@ -1,6 +1,6 @@
 # Overview and session list
 
-Overview lists saved chats under **Sessions**, with **+ New Session**, **Archived** and **Settings** always within reach. A wide chat keeps the same list beside its messages. The list shows names, work marks and elapsed times.
+Overview lists saved chats under **Sessions**, with **+ New Session**, **Archived** and **Settings** always within reach. At wide launch the list sits beside a focused empty chat; at narrow launch the full overview opens. A wide chat keeps the same list beside its messages. The list shows names, work marks and elapsed times.
 
 ## Sub-features
 
@@ -17,13 +17,13 @@ Run `rui` in a project. Press Esc from a chat at its latest messages to return t
 
 ## Driving it with verify-rui
 
-Capture the states listed below with `$V frames FULLSHA --only quiet-person,quiet-overview,quiet-sidebar,start-empty,start,list-hover,settings-hover,start-busy,overview-printable-ignored,long-labels,many-sessions,many-sessions-middle,many-sessions-end,many-sessions-pinned-end,chat-no-new-session,chat-sidebar-rows,focus-chat,left-to-list,focus-list-A,list-to-chat`.
+Capture the states listed below with `$V frames FULLSHA --only wide-launch,narrow-launch,quiet-person,quiet-overview,quiet-sidebar,start-empty,start,list-hover,settings-hover,start-busy,overview-printable-ignored,long-labels,many-sessions,many-sessions-middle,many-sessions-end,many-sessions-pinned-end,chat-no-new-session,chat-sidebar-rows,focus-chat,left-to-list,focus-list-A,list-to-chat`.
 
-Frame states: `quiet-person`, `quiet-overview`, `quiet-sidebar`, `start-empty`, `start`, `list-hover`, `settings-hover`, `start-busy`, `overview-printable-ignored`, `long-labels`, `many-sessions`, `many-sessions-middle`, `many-sessions-end`, `many-sessions-pinned-end`, `chat-no-new-session`, `chat-sidebar-rows`, `focus-chat`, `left-to-list`, `focus-list-A`, `list-to-chat`
+Frame states: `wide-launch`, `narrow-launch`, `quiet-person`, `quiet-overview`, `quiet-sidebar`, `start-empty`, `start`, `list-hover`, `settings-hover`, `start-busy`, `overview-printable-ignored`, `long-labels`, `many-sessions`, `many-sessions-middle`, `many-sessions-end`, `many-sessions-pinned-end`, `chat-no-new-session`, `chat-sidebar-rows`, `focus-chat`, `left-to-list`, `focus-list-A`, `list-to-chat`
 
 Compare 140×40 with 46×30. Check pinned actions at the middle and end of a long list. Compare the caret and selected row before Left and after Right; the open chat's messages must stay in place. Hover must leave the selected row unchanged.
 
-Run the ordered browsing fixture with `$V frames FULLSHA --only focus-seed-earlier,focus-browse-wide,focus-browse-narrow`. The seed finishes the alternate chat earlier so newest-first ordering is deterministic. Wide Down settles on the alternate chat's feed; narrow Down shows its selected list row and **enter open**, with neither chat's feed visible.
+Run the ordered browsing fixture with `$V frames FULLSHA --only focus-seed-earlier,focus-browse-wide,focus-browse-narrow`. The seed finishes the alternate chat earlier so newest-first ordering is deterministic. Wide Down settles on the alternate chat's feed; narrow Down shows its selected list row, with neither chat's feed nor an **enter open** hint visible.
 
 Frame states: `focus-seed-earlier`, `focus-browse-wide`, `focus-browse-narrow`
 

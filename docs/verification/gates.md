@@ -205,6 +205,11 @@ Where the measured save window cannot fit, including short-budget unit/typecheck
 Partial Zig compilation caches are safe to restore: [Zig's content-addressed cache validates hashed inputs and manifests, treating incomplete manifests as misses](https://github.com/ziglang/zig/blob/0.17.1/lib/std/Build/Cache.zig).
 That safety argument is source inspection, not a claim of native interrupted-build qualification; cached output never substitutes for test execution.
 
+Linux x86_64 pull requests use `-Dpr-ci=true`: both `rui-pr-check` and the synthetic-release `rui-upgrade-release-fixture` are ReleaseSafe integration products built without LLVM through `product.addIntegrationRui`.
+The upgrade fixture uses the same production sources with a synthetic release identity; its archive size and checksum are derived from the supplied binary.
+In PR mode only, that fixture also strips debug data, matching shipped Linux archive packaging and avoiding unnecessary checksum and extraction work in native publication tests.
+Promotion, release and default local builds retain Zig's default backend, as does the production binary used by `stack-frames`.
+
 Each platform builds its target closure once with `ci-build -Dci-targets=...`.
 On Linux and macOS, when the selection compiles the single-threaded unit test binary alongside other gates, one producer builds only that binary (`-Dci-part=unit`) and another builds the rest (`-Dci-part=rest`); build.zig refuses a split whose selection never reaches the unit compile.
 [build_artifact.py](../../tests/ci/build_artifact.py) transfers the executables and pinned package sources through immutable same-run artifacts that expire after one day.

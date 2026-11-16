@@ -7,7 +7,6 @@ const Key = keymap.Key;
 const Editor = @This();
 
 area: TextArea,
-completion: ?Completion = null,
 rejected: ?keymap.Refusal = null,
 edits: u32 = 0,
 paste_appends: bool = false,
@@ -165,7 +164,7 @@ fn key(self: *Editor, value: vaxis.Key) KeyOutcome {
     return switch (press) {
         .key, .enter => unreachable,
         .edit => |command| switch (command) {
-            .tab => self.tab(),
+            .tab => self.insert("\t", false),
             .newline => self.insert("\n", true),
             .left => self.act(.left),
             .right => self.act(.right),
@@ -234,27 +233,11 @@ pub fn insertMultiline(self: *Editor, gpa: std.mem.Allocator, bytes: []const u8)
     return .redraw;
 }
 
-pub const Completion = struct {
-    context: *const anyopaque,
-    add: *const fn (context: *const anyopaque, draft: []const u8, caret: usize) ?Replacement,
-};
-
 pub const Replacement = struct {
     start: usize,
     end: usize,
     text: []const u8,
-
-    pub fn append(draft: []const u8, text_: []const u8) Replacement {
-        return .{ .start = draft.len, .end = draft.len, .text = text_ };
-    }
 };
-
-fn tab(self: *Editor) KeyOutcome {
-    const completion = self.completion orelse return self.insert("\t", false);
-    if (self.area.partial_length != 0 or self.rejected != null) return self.insert("\t", false);
-    const completed = completion.add(completion.context, self.text(), self.cursor()) orelse return self.insert("\t", false);
-    return self.replace(completed);
-}
 
 pub fn replace(self: *Editor, change: Replacement) KeyOutcome {
     const length = self.text().len;
@@ -471,53 +454,67 @@ test "an append that overflows the draft is refused, not cut short" {
     try std.testing.expectEqual(KeyOutcome{ .refused = .overflow }, editor.append("x"));
 }
 
-test "Tab puts a completion's completed in place of its range, the caret after it, or refuses it whole" {
-    const Complete = struct {
-        fn add(_: *const anyopaque, draft: []const u8, caret: usize) ?Replacement {
-            const start = std.mem.lastIndexOfScalar(u8, draft[0..caret], '/') orelse return null;
-            return .{ .start = start, .end = caret, .text = "/review " };
-        }
-        const review: Completion = .{ .context = &{}, .add = add };
-    };
-    const keys: keymap.Keymap(void) = comptime .{ .meanings = .initFill(null) };
-    const press_tab: vaxis.vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.tab } };
+test "replacement puts text in its range, the caret after it, or refuses it whole" {
     var storage: [24]u8 = undefined;
     var editor: Editor = .initText(&storage, "use /re on it", "use /re".len);
-    editor.completion = Complete.review;
-    try std.testing.expectEqual(.redraw, editor.appEvent(keys, press_tab, false));
+    try std.testing.expectEqual(KeyOutcome.redraw, editor.replace(.{ .start = "use ".len, .end = "use /re".len, .text = "/review " }));
     try std.testing.expectEqualStrings("use /review  on it", editor.text());
     try std.testing.expectEqual("use /review ".len, editor.cursor());
     var small: [12]u8 = undefined;
     var full: Editor = .initText(&small, "go /re now", "go /re".len);
-    full.completion = Complete.review;
-    try std.testing.expectEqual(keymap.Outcome(void){ .refused = .overflow }, full.appEvent(keys, press_tab, false));
+    try std.testing.expectEqual(KeyOutcome{ .refused = .overflow }, full.replace(.{ .start = "go ".len, .end = "go /re".len, .text = "/review " }));
     try std.testing.expectEqualStrings("go /re now", full.text());
     try std.testing.expectEqual("go /re".len, full.cursor());
     try std.testing.expectEqual(@as(?keymap.Refusal, null), full.rejected);
 }
 
-test "Tab over a partial character or a rejected draft does what it did before completion" {
-    const Complete = struct {
-        fn add(_: *const anyopaque, draft: []const u8, _: usize) ?Replacement {
-            return .append(draft, "atus");
-        }
-        const status: Completion = .{ .context = &{}, .add = add };
-    };
+test "Tab inserts a literal tab at the caret and refuses overflow" {
+    for ([_][]const u8{ "\t", "\x1b[9u", "\x1b[9;1u" }) |tab| {
+        var storage: [9]u8 = undefined;
+        var editor: Editor = .initText(&storage, "aéZ", "aé".len);
+        var stream: Typing = .{};
+        try std.testing.expectEqual(KeyOutcome.redraw, stream.send(&editor, tab));
+        try std.testing.expectEqualStrings("aé\tZ", editor.text());
+        try std.testing.expectEqual("aé\t".len, editor.cursor());
+        editor.setCursor(editor.text().len);
+        try std.testing.expectEqual(KeyOutcome.append, stream.send(&editor, tab));
+        try std.testing.expectEqualStrings("aé\tZ\t", editor.text());
+        try std.testing.expectEqual(editor.text().len, editor.cursor());
+
+        var small: [4]u8 = undefined;
+        var full: Editor = .initText(&small, "aéZ", "aé".len);
+        try std.testing.expectEqual(KeyOutcome.none, stream.send(&full, tab));
+        try std.testing.expectEqualStrings("aéZ", full.text());
+        try std.testing.expectEqual("aé".len, full.cursor());
+        try std.testing.expectEqual(@as(?keymap.Refusal, .overflow), full.rejected);
+        try std.testing.expectEqual(KeyOutcome{ .refused = .overflow }, stream.send(&full, "\r"));
+        full.release();
+        try std.testing.expectEqual(KeyOutcome.redraw, stream.send(&full, "\x7f"));
+        try std.testing.expectEqual(KeyOutcome.redraw, stream.send(&full, tab));
+        try std.testing.expectEqualStrings("a\tZ", full.text());
+        try std.testing.expectEqual(KeyOutcome.submit, stream.send(&full, "\r"));
+    }
+}
+
+test "Tab rejects a partial character and preserves a rejected draft" {
     for ([_][]const u8{ "\xc3", "\xff" }) |state| {
         errdefer std.debug.print("state={any}\n", .{state});
-        var storage: [2][64]u8 = undefined;
-        var editors = [_]Editor{ .init(&storage[0]), .init(&storage[1]) };
-        editors[1].completion = Complete.status;
-        for (&editors) |*editor| {
-            var stream: Typing = .{};
-            _ = stream.send(editor, "/st");
-            if (state[0] == 0xff) _ = stream.send(editor, &.{0xff}) else _ = editor.settle(editor.area.apply(.{ .insert = .{ .bytes = state, .origin = .typed } }), false);
-            try std.testing.expect(editor.area.partial_length != 0 or editor.rejected != null);
-            _ = stream.send(editor, "\t");
-        }
-        try std.testing.expectEqualStrings(editors[0].text(), editors[1].text());
-        try std.testing.expectEqual(editors[0].area.partial_length, editors[1].area.partial_length);
-        try std.testing.expectEqual(editors[0].rejected, editors[1].rejected);
+        var storage: [64]u8 = undefined;
+        var editor: Editor = .init(&storage);
+        var stream: Typing = .{};
+        _ = stream.send(&editor, "/st");
+        if (state[0] == 0xff) _ = stream.send(&editor, state) else _ = editor.settle(editor.area.apply(.{ .insert = .{ .bytes = state, .origin = .typed } }), false);
+        try std.testing.expect(editor.area.partial_length != 0 or editor.rejected != null);
+        try std.testing.expectEqual(KeyOutcome.none, stream.send(&editor, "\t"));
+        try std.testing.expectEqualStrings("/st", editor.text());
+        try std.testing.expectEqual(@as(usize, 3), editor.cursor());
+        try std.testing.expectEqual(@as(u3, 0), editor.area.partial_length);
+        try std.testing.expectEqual(@as(?keymap.Refusal, .invalid), editor.rejected);
+        try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, stream.send(&editor, "\r"));
+        editor.release();
+        try std.testing.expectEqual(KeyOutcome.append, stream.send(&editor, "\t"));
+        try std.testing.expectEqualStrings("/st\t", editor.text());
+        try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "\r"));
     }
 }
 

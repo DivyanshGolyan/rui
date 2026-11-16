@@ -128,7 +128,7 @@ def leave(tty):
 
 def escaped_overview(tty, conversation):
     tty.wait(lambda: all(marker in tty.screen.completed for marker in
-                         ("+ New Session", conversation, "Settings", "enter open")),
+                         ("+ New Session", conversation, "Settings")),
              label="overview after expired standalone Esc")
     assert "Type a task" not in tty.screen.completed, ("overview has an editor", tty.screen.completed)
     assert not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", tty.screen.completed), \

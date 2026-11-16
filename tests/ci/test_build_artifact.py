@@ -15,6 +15,7 @@ from unittest.mock import patch
 import zipfile
 
 import build_artifact
+import build_files
 import run_selected
 
 
@@ -450,6 +451,33 @@ else:
             build_artifact.package(['test'], self.root / 'refused')
 
 class PrModeTest(unittest.TestCase):
+    def test_integration_products_share_the_pr_backend_owner(self):
+        build = build_files.source()
+        integration = build.split("pub fn addIntegrationRui(", 1)[1]
+        integration = integration.split("\n}", 1)[0]
+        self.assertIn("addRuiWithIdentity(b, target, .ReleaseSafe, name, pinned_transport, identity)", integration)
+        self.assertIn("if (pr_ci) executable.use_llvm = false;", integration)
+        self.assertEqual(build.count("use_llvm = false;"), 1)
+        self.assertNotIn("release_safe.use_llvm", build)
+        self.assertNotIn("pub fn addRuiWithIdentity", build)
+        for name in ("rui-pr-check", "rui-upgrade-release-fixture"):
+            with self.subTest(product=name):
+                self.assertIn(f'product.addIntegrationRui(b, target, "{name}", pinned_transport, pr_ci,', build)
+        self.assertIn('product.addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport)', build)
+        ordinary = build.split("pub fn addRui(", 1)[1].split("\n}", 1)[0]
+        self.assertIn("addRuiWithIdentity(b, target, optimize, name, pinned_transport, buildIdentity(b))", ordinary)
+        identity = build.split("fn addRuiWithIdentity(", 1)[1].split("\n}", 1)[0]
+        self.assertNotIn("use_llvm", identity)
+
+    def test_only_the_pr_upgrade_fixture_strips_its_debug_payload(self):
+        build = build_files.source()
+        fixture = build.split("    const upgrade_release =", 1)[1].split("    const upgrade_integration =", 1)[0]
+        self.assertIn("if (pr_ci) upgrade_release.root_module.strip = true;", fixture)
+        integration = build.split("pub fn addIntegrationRui(", 1)[1].split("\n}", 1)[0]
+        ordinary = build.split("fn addRuiWithIdentity(", 1)[1].split("\n}", 1)[0]
+        for constructor in (integration, ordinary):
+            self.assertNotIn(".strip", constructor)
+
     def test_only_linux_x64_pull_requests_use_the_fast_artifact(self):
         for event, system, machine, fast in (
                 ("pull_request", "Linux", "x86_64", True),
