@@ -962,3 +962,32 @@ test "historical context selection work excludes nonmatching Operation populatio
         }
     }.run);
 }
+
+test "a request page keeps a failed question after its row scratch was decoded" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const attempt = try TestingAttempt.admit(&storage, &tmp);
+            var page: historical_domain.RequestPage = undefined;
+            page.open(attempt.binding);
+            defer page.close();
+            try storage.settleModelAttemptFailure(attempt.binding, .{ .uncorrelated = "provider_failure" }, .ordinary, .{});
+            var settings: HistoricalSettings = undefined;
+            const rounds = ViewRounds.start(&storage);
+            for (0..2) |index| {
+                try std.testing.expectError(error.PageRead, page.settings(&settings));
+                // The settings row decodes before settle refuses the stale
+                // Attempt. Its scratch must then hold the unanswered question.
+                try std.testing.expectError(error.StaleAttemptBinding, storage.readRequestPage(&page));
+                try std.testing.expect(page.read.?.question.settings == &settings);
+                try std.testing.expect(page.read.?.answer == null);
+                try std.testing.expectEqual(@as(u16, @intCast(index + 1)), rounds.taken().rounds);
+                try std.testing.expect(!storage.isFenced());
+            }
+        }
+    }.run);
+}

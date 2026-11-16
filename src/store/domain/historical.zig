@@ -164,8 +164,9 @@ pub const HistoricalToolResult = struct {
 /// made again takes the answer.
 pub const RequestPage = struct {
     binding: AttemptBinding,
-    /// What the page asks its Store to read, and the answer once read.
-    read: ?Read = null,
+    /// The exchange borrows the page's row scratch between Store reads.
+    /// The Store keeps its question off that scratch while decoding rows.
+    read: ?*Read = null,
     active: bool = true,
     readers: usize = 0,
     tool_group_initialized: bool = false,
@@ -347,15 +348,24 @@ pub const RequestPage = struct {
 
     /// The answer to `question`, once the Store has read it; until then
     /// the page keeps the question and the call is `PageRead`.
-    fn ask(self: *RequestPage, question: Question) error{PageRead}!Answer {
+    fn ask(self: *RequestPage, question: Question) !Answer {
+        try self.allocatePage();
         if (self.read) |read| if (read.answer) |answer| {
             // Its caller asks again exactly what it asked.
             std.debug.assert(std.meta.eql(read.question, question));
             self.read = null;
             return answer;
         };
-        self.read = .{ .question = question };
+        self.keepRead(.{ .question = question });
         return error.PageRead;
+    }
+
+    /// Row decoding and the exchange have disjoint lifetimes: the Store
+    /// snapshots the question before a read and keeps its answer afterwards.
+    fn keepRead(self: *RequestPage, read: Read) void {
+        const exchange = self.page.?.exchange();
+        exchange.* = read;
+        self.read = exchange;
     }
 
     /// Whether the Store has answered what the page asked, whose caller
@@ -367,7 +377,7 @@ pub const RequestPage = struct {
 
     /// The history the page holds is corrupt: its Store fences.
     fn corrupt(self: *RequestPage) error{PageRead} {
-        self.read = .{ .question = .corrupt };
+        self.keepRead(.{ .question = .corrupt });
         return error.PageRead;
     }
 
@@ -424,7 +434,7 @@ pub const RequestPage = struct {
         try self.allocatePage();
         const page = self.page.?;
         if (!page.toolsReach(walk, ordinal)) {
-            self.read = .{ .question = .{ .tools = .{ .walk = walk, .ordinal = ordinal } } };
+            self.keepRead(.{ .question = .{ .tools = .{ .walk = walk, .ordinal = ordinal } } });
             return error.PageRead;
         }
         return page.toolAt(ordinal);
@@ -580,7 +590,7 @@ pub const RequestPage = struct {
     pub fn nextOutputPart(self: *RequestPage) !?HistoricalPart {
         std.debug.assert(self.active and self.output_parts != null);
         if (partsExhausted(self)) {
-            self.read = .{ .question = .parts };
+            self.keepRead(.{ .question = .parts });
             return error.PageRead;
         }
         return nextPart(self) catch self.corrupt();
@@ -1068,7 +1078,7 @@ pub const SettingsRead = struct {
     /// read then answers as it always did.
     pub fn followed(read: *SettingsRead) void {
         read.settle() catch return;
-        read.view.read = .{ .question = .{ .settings = read.out }, .answer = .settings };
+        read.view.keepRead(.{ .question = .{ .settings = read.out }, .answer = .settings });
     }
 
     pub fn visit(read: *SettingsRead, row: *const historical_settings.Row) bool {
@@ -1143,10 +1153,16 @@ pub const SettingsRead = struct {
 /// Reads what `page` asked for (`RequestPage.read`) through the entry
 /// point that reads it, and keeps the answer in the page; a read that
 /// fills the page answers as its contents. A failed read answers nothing.
-pub fn readPage(self: *Store, page: *RequestPage) !void {
-    const read = &page.read.?;
+// The exchange snapshot and read dispatch belong to this call, not to
+// the engine turn that will later launch or settle a request.
+pub noinline fn readPage(self: *Store, page: *RequestPage) !void {
+    const read = page.read.?;
     std.debug.assert(read.answer == null);
-    const answer: RequestPage.Answer = switch (read.question) {
+    // A read decodes into the scratch the exchange borrowed. Keep only its
+    // question here, and restore it unanswered even if decoding fails.
+    const question = read.question;
+    errdefer page.keepRead(.{ .question = question });
+    const answer: RequestPage.Answer = switch (question) {
         .settings => |out| answer: {
             try readHistoricalSettings(self, page, out);
             break :answer .settings;
@@ -1179,7 +1195,7 @@ pub fn readPage(self: *Store, page: *RequestPage) !void {
         .content => |content| .{ .content = try content_domain.readContent(self, &content.reader.window, content.start, content.destination) },
         .corrupt => return store_core.fence(self, error.CorruptStore),
     };
-    read.answer = answer;
+    page.keepRead(.{ .question = question, .answer = answer });
 }
 
 fn readHistoricalEntry(self: *Store, view: *RequestPage, after_position: u64) !RequestPage.EntryProgress {
@@ -1909,6 +1925,7 @@ const page_parts = rsql.Read(.{
 /// is plain values; content rows never change either, so bytes kept under
 /// an id are that content's whichever row brought them.
 const Page = struct {
+    /// Between reads, the request's question and answer borrow this scratch.
     /// Where every read decodes its row, bytes and all
     /// (`Access.readEach`): one row at a time, each copied out by its
     /// visitor before the next.
@@ -1972,6 +1989,12 @@ const Page = struct {
         }
         break :bytes most;
     };
+
+    /// The exchange uses no resident storage beyond today's decode row.
+    fn exchange(page: *Page) *RequestPage.Read {
+        comptime std.debug.assert(@sizeOf(RequestPage.Read) <= row_bytes and @alignOf(RequestPage.Read) <= row_align);
+        return @ptrCast(&page.row);
+    }
 
     /// The memory a read of `Row` decodes into.
     fn decoded(page: *Page, comptime Row: type) *Row {
