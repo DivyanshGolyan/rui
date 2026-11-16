@@ -395,7 +395,7 @@ const Intake = struct {
                         .host_info => protocol.max_host_info_request_bytes,
                         .host_stop => protocol.max_host_stop_request_bytes,
                         .host_pause => protocol.max_host_pause_request_bytes,
-                        inline else => |route| if (comptime std.meta.stringToEnum(protocol.CommandKind, @tagName(route))) |kind|
+                        inline else => |route| if (comptime route.commandKind()) |kind|
                             if (command_spec.spec(kind).is_control) command_spec.spec(kind).Request.maxBytes(protocol).? else std.math.maxInt(u64)
                         else
                             std.math.maxInt(u64),
@@ -1487,10 +1487,17 @@ const Route = enum {
     model_list,
     unsupported_control,
 
+    fn commandKind(comptime self: Route) ?protocol.CommandKind {
+        inline for (comptime std.enums.values(protocol.CommandKind)) |command_kind| {
+            if (self == @field(Route, @tagName(command_kind))) return command_kind;
+        }
+        return null;
+    }
+
     fn isControl(self: Route) bool {
         return switch (self) {
             .host_stop, .host_pause, .unsupported_control => true,
-            inline else => |route| if (comptime std.meta.stringToEnum(protocol.CommandKind, @tagName(route))) |command_kind|
+            inline else => |route| if (comptime route.commandKind()) |command_kind|
                 command_spec.spec(command_kind).is_control
             else
                 false,
@@ -1510,6 +1517,28 @@ const Route = enum {
         };
     }
 };
+test "command route projection preserves control classification" {
+    inline for (comptime std.enums.values(Route)) |route| {
+        const expected: ?protocol.CommandKind = switch (route) {
+            .configure => .configure,
+            .message => .message,
+            .session_stop => .session_stop,
+            .session_archive => .session_archive,
+            .session_pin => .session_pin,
+            .model_interruption => .model_interruption,
+            .permission_decision => .permission_decision,
+            .action_background => .action_background,
+            else => null,
+        };
+        try std.testing.expectEqual(expected, comptime route.commandKind());
+        const expected_control = switch (route) {
+            .host_stop, .host_pause, .unsupported_control, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background => true,
+            else => false,
+        };
+        try std.testing.expectEqual(expected_control, route.isControl());
+    }
+}
+
 const DropMode = enum { none, before_admission, during_admission, after_commit };
 
 const Header = struct {

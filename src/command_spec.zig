@@ -55,18 +55,12 @@ pub const Spec = struct {
     summary: []const u8,
     Request: type,
     Observation: type,
-    subject_name: ?[]const u8 = null,
     observation_fields: ObservationFields = .{},
-    fence_message: []const u8,
     is_control: bool = true,
 
     pub fn Reply(comptime self: Spec, comptime Wire: type) type {
         const name = self.reply_type;
         return @field(Wire, name);
-    }
-
-    pub fn Subject(comptime self: Spec, comptime Subjects: type) type {
-        return if (self.subject_name) |name| @field(Subjects, name) else []const u8;
     }
 
     pub fn replyShapes(comptime self: Spec, comptime Wire: type) type {
@@ -184,7 +178,6 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .Request = ConfigureRequest,
             .Observation = Observation("revision"),
             .observation_fields = .{ .accepted = &.{ .revision, .created } },
-            .fence_message = "configuration save",
             .is_control = false,
         },
         .message => .{
@@ -197,7 +190,6 @@ pub fn spec(comptime kind: CommandKind) Spec {
                 .always = &.{.state},
                 .conditional = &.{ .input, .queue, .binding, .result, .work, .recovery },
             },
-            .fence_message = "message save",
             .is_control = false,
         },
         .session_stop => .{
@@ -207,7 +199,6 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .Request = Request("session_stop_request", null),
             .Observation = Observation("session_stop"),
             .observation_fields = .{ .accepted = &.{ .selection, .completion } },
-            .fence_message = "Session stop save",
         },
         .session_archive => .{
             .route = "/v1/control/session-archive",
@@ -216,7 +207,6 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .Request = ArchiveRequest,
             .Observation = Observation("session_archive"),
             .observation_fields = .{ .accepted = &.{ .archived, .completion } },
-            .fence_message = "Session archive save",
         },
         .session_pin => .{
             .route = "/v1/control/session-pin",
@@ -225,7 +215,6 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .Request = Request("session_pin_request", "all"),
             .Observation = Observation("session_pin"),
             .observation_fields = .{ .accepted = &.{.pinned} },
-            .fence_message = "Session pin save",
         },
         .model_interruption => .{
             .route = "/v1/control/model-interruption",
@@ -233,9 +222,7 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .summary = "Interrupts one model Operation. Retried by its key.",
             .Request = Request("model_interruption_request", null),
             .Observation = Observation("model_interruption"),
-            .subject_name = "ModelInterruptionTarget",
             .observation_fields = .{ .always = &.{.interruption_target} },
-            .fence_message = "model interruption save",
         },
         .permission_decision => .{
             .route = "/v1/control/permission-decision",
@@ -243,9 +230,7 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .summary = "Allows or denies one Action that waits for permission. Retried by its key.",
             .Request = Request("permission_decision_request", null),
             .Observation = Observation("permission_decision"),
-            .subject_name = "PermissionTarget",
             .observation_fields = .{ .always = &.{.permission_target} },
-            .fence_message = "permission decision save",
         },
         .action_background => .{
             .route = "/v1/control/action-background",
@@ -253,25 +238,13 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .summary = "Promotes the same Action to Session-owned background work and returns its immutable call receipt selection. Completion is read explicitly with read-action; no final input or model wake is delivered. Retried by its key.",
             .Request = Request("action_background_request", null),
             .Observation = ActionObservation,
-            .subject_name = "ActionBackgroundTarget",
             .observation_fields = .{ .always = &.{.action_target}, .accepted = &.{.action_selection} },
-            .fence_message = "Action background save",
         },
     };
 }
 
 test "command_spec covers every kind and preserves routes and request limits" {
     const protocol = @import("protocol.zig");
-    const host_reply = @import("host_reply.zig");
-    const Subjects = struct {
-        pub const ModelInterruptionTarget = @import("command_reply.zig").ModelInterruptionTarget;
-        pub const PermissionTarget = host_reply.PermissionTarget;
-        pub const ActionBackgroundTarget = host_reply.ActionBackgroundTarget;
-    };
-    const expected_subjects = .{
-        []const u8,                       []const u8,                []const u8, []const u8,
-        Subjects.ModelInterruptionTarget, Subjects.PermissionTarget, []const u8, Subjects.ActionBackgroundTarget,
-    };
     const expected = .{
         .{ "/v1/configure", "configuration_reply", @as(?usize, null) },
         .{ "/v1/message", "message_reply", @as(?usize, null) },
@@ -288,9 +261,8 @@ test "command_spec covers every kind and preserves routes and request limits" {
         try std.testing.expectEqualStrings(original[1], facts.reply_type);
         try std.testing.expectEqual(@as(?usize, original[2]), facts.Request.maxBytes(protocol));
         try std.testing.expectEqual(index >= 2, facts.is_control);
-        try std.testing.expect(facts.Subject(Subjects) == expected_subjects[index]);
         _ = facts.Reply(protocol).max_bytes;
         _ = facts.Observation.shapes(protocol).values;
-        try std.testing.expect(facts.summary.len != 0 and facts.fence_message.len != 0);
+        try std.testing.expect(facts.summary.len != 0);
     }
 }
