@@ -15,6 +15,7 @@ import json
 import os
 import pathlib
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -25,6 +26,10 @@ import sys
 import tarfile
 import tempfile
 import threading
+from urllib.parse import quote
+
+import live_engines
+import settings_fixture
 
 import host_process
 import os_semantics
@@ -500,8 +505,8 @@ def lifecycle_cases(root, binary, releases):
         c.old_selection()
         relative_bash = os.path.relpath("/bin/bash", pathlib.Path.cwd())
         old_host, previous = c.start_host(extra=("--set", "tools.bash.path=" + str(relative_bash)))
-        output = c.finish_upgrade(c.spawn_upgrade())
-        assert "Installed Rui" in output and "failed at checking" in output and '"code":"settings_invalid"' in output, output
+        output = c.finish_upgrade(c.spawn_upgrade(), success=False)
+        assert "Installed Rui" in output and "refused at checking" in output and '"code":"settings_invalid"' in output, output
         assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
         assert os_semantics.process_executable(old_host.pid) != c.link.resolve()
 
@@ -780,7 +785,190 @@ class TerminalScreen:
             (destination / f"{name}.txt").write_text(self.capture.completed + "\n")
 
 
+def refused_source_cases(root, binary, releases):
+    for source in ("saved-relative", "file-relative", "relative-file-name", "invalid-document", "stdin-file", "stdin-lifetime"):
+        with case(root, binary, releases, f"refused-source-{source}") as c:
+            c.root.chmod(0o700)
+            c.store.mkdir(mode=0o700)
+            runtime = c.root / "run"
+            runtime.mkdir(mode=0o700)
+            document = {"interface": {"dir": str(runtime)}, "providers": {}}
+            saved = c.store / "host.json"
+            saved.write_text(json.dumps(document))
+            saved.chmod(0o600)
+            extra = ()
+            if source in ("saved-relative", "file-relative", "relative-file-name", "invalid-document"):
+                path = saved if source == "saved-relative" else c.root / "settings.json"
+                relative = os.path.relpath("/bin/bash", pathlib.Path.cwd())
+                settings = dict(document)
+                if source not in ("invalid-document", "relative-file-name"):
+                    settings["tools"] = {"bash": {"path": relative}}
+                path.write_text(json.dumps(settings))
+                path.chmod(0o600)
+                if path != saved:
+                    extra = ("--settings", os.path.relpath(path, pathlib.Path.cwd()) if source == "relative-file-name" else path)
+                old, previous = c.start_host(extra=extra)
+                if source == "invalid-document":
+                    path.write_text('{"unknownFutureGroup":{}}')
+            else:
+                build = c.build("retained-stdin-source")
+                extra = ("--settings", "-") if source == "stdin-file" else ("--set", "interface.lifetime=stdin", "--set", "providers={}")
+                old = subprocess.Popen([str(build / "bin/rui"), "host", "serve", "--store", str(c.store), *extra],
+                                       env=c.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                c.hosts.append(old)
+                if source == "stdin-file":
+                    old.stdin.write(settings_fixture.frame(document))
+                    old.stdin.flush()
+                settings_fixture.wait_for_host(runtime / "rui.sock", c.store, old)
+                c.ready = json.loads(old.stdout.readline())
+                previous = c.status()
+            c.select(c.build("selected-target"))
+            c.binary = c.link
+            output = c.run("host", "restart", "--all", expect=6, timeout=60)
+            assert "refused at checking" in output and '"code":"settings_invalid"' in output, (source, output)
+            assert old.poll() is None and c.status()["instance"] == previous["instance"], (source, output)
+    print("upgrade native: stdin, relative layers and invalid document refused before stop", flush=True)
+
+
+def mysql_restart_cases(root, binary, releases):
+    socket_path = os.environ.get(live_engines.MYSQL_SOCKET)
+    password = os.environ.get(live_engines.MYSQL_ROOT_PASSWORD)
+    if not socket_path or not password:
+        assert "mysql" not in os.environ.get(live_engines.REQUIRE, "").split(","), "required MySQL restart fixture has no server"
+        print("MySQL upgrade restart: skipped (no RUI_TEST_MYSQL_* server)", flush=True)
+        return
+    admin = pathlib.Path(os.environ["RUI_TEST_MYSQL_ADMIN"]).resolve()
+
+    def sql(text):
+        return subprocess.run([admin], input=text, text=True, capture_output=True, check=True, timeout=40).stdout.strip()
+
+    for placement in ("default", "external", "contended"):
+        database = "rui_upgrade_" + secrets.token_hex(6)
+        runtime = None
+        waiter = None
+        try:
+            sql(f"CREATE DATABASE {database} CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin")
+            ddl = subprocess.check_output([binary, "store", "schema", "--engine", "mysql"], text=True, timeout=20)
+            sql(f"USE {database};" + ddl)
+            with case(root, binary, releases, "mysql-" + placement) as c, case(root, binary, releases, "mysql-later-" + placement) as later:
+                c.store.mkdir(mode=0o700)
+                c.env["PR6_PRIVATE_DATABASE_URL"] = f"mysql://root:{quote(password, safe='')}@{quote(socket_path, safe='')}/{database}"
+                document = {"store": {"mysql": {"url": {"env": "PR6_PRIVATE_DATABASE_URL"}}}, "providers": {}}
+                if placement != "default":
+                    runtime = c.root / "run"
+                    runtime.mkdir(mode=0o700)
+                    document["interface"] = {"dir": str(runtime)}
+                saved = c.store / "host.json"
+                saved.write_text(json.dumps(document))
+                saved.chmod(0o600)
+                old, previous = c.start_host(sources_only=True)
+                runtime = pathlib.Path(c.ready["socket"]).parent
+                # Only the captured Host has this credential variable. Both
+                # target check and start must use its environment, not caller's.
+                c.env = dict(c.env)
+                del c.env["PR6_PRIVATE_DATABASE_URL"]
+                if placement == "contended":
+                    later.home, later.env, later.link = c.home, c.env, c.link
+                    later.store.mkdir(mode=0o700)
+                    later_runtime = later.root / "run"
+                    later_runtime.mkdir(mode=0o700)
+                    later_saved = later.store / "host.json"
+                    later_saved.write_text(json.dumps({"interface": {"dir": str(later_runtime)}, "providers": {}}))
+                    later_saved.chmod(0o600)
+                    later_old, later_previous = later.start_host(sources_only=True)
+                    waiter = subprocess.Popen([admin], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    waiter.stdin.write(f"SELECT GET_LOCK('{database}',30); SELECT SLEEP(15)")
+                    host_process.close_stdin(waiter)
+                    # Queue before old stop. MySQL grants the waiting session
+                    # the lock when old retires; the new Host must NOT bypass it.
+                    wait_for(lambda: sql(f"SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE STATE='User lock' AND INFO LIKE '%{database}%' AND ID<>CONNECTION_ID()") != "0", "queued competing Store lock", timeout=10)
+                c.select(c.build("selected-target"))
+                c.binary = c.link
+                output = c.run("host", "restart", "--all", expect=6 if placement == "contended" else 0, timeout=60)
+                if placement == "contended":
+                    assert "refused at starting" in output and '"code":"store_locked"' in output, output
+                    assert "1 restarted" in output and "1 failed" in output, output
+                    proof_ready(later, later_previous, later_old)
+                    assert old.poll() is not None and c.status()["status"] != "ready", output
+                else:
+                    assert "1 restarted" in output, output
+                    current = proof_ready(c, previous, old)
+                    assert current["store"] == previous["store"] and current["store"] != str(c.store), current
+        finally:
+            if waiter is not None:
+                # Let its bounded SQL finish and close its OWN connection;
+                # coordinator never polls or manipulates the database lock.
+                waiter.communicate(timeout=40)
+            sql(f"DROP DATABASE IF EXISTS {database}")
+            if runtime is not None and runtime.exists():
+                shutil.rmtree(runtime)
+    print("MySQL upgrade restart passed: default/moved interface, captured environment, typed DB-lock contention and later Host", flush=True)
+
+
+def adopted_replacement_case(root, binary, releases):
+    """A different retained installation of the target VERSION may win start."""
+    for attempt in range(6):
+        with case(root, binary, releases, f"adopted-replacement-{attempt}") as c:
+            old, previous = c.start_host()
+            alternate = c.build("concurrent-same-version")
+            c.select(c.build("selected-target"))
+            c.binary = c.link
+            external, failures = [], []
+
+            def compete():
+                try:
+                    old.wait(timeout=20)
+                    child, ready = start_ready_process(
+                        [alternate / "bin/rui", "host", "serve", "--store", c.store,
+                         "--set", "providers={}", "--set", "execution.activeCapacity=" + previous["active_capacity"]],
+                        env=c.env, isolate_providers=False)
+                    c.hosts.append(child)
+                    external.append((child, ready))
+                except host_process.HostStartError as err:
+                    # Losing this real Store-lock race is expected. Other
+                    # startup failures are not evidence that adoption worked.
+                    if '"code":"store_locked"' not in str(err):
+                        failures.append(err)
+                except Exception as err:
+                    failures.append(err)
+
+            competitor = threading.Thread(target=compete)
+            competitor.start()
+            try:
+                output = c.run("host", "restart", "--all", timeout=60)
+            finally:
+                competitor.join(timeout=25)
+            assert not competitor.is_alive() and not failures, failures
+            assert "1 restarted" in output, output
+            if external:
+                child, ready = external[0]
+                current = c.status()
+                assert current["instance"] == ready["instance"] != previous["instance"], (current, previous)
+                assert peer_pid(c.ready["socket"]) == child.pid
+                assert os_semantics.process_executable(child.pid) == alternate / "bin/rui"
+                assert os_semantics.process_executable(child.pid) != c.link.resolve()
+                print("upgrade native: adopted same-target-version owner verified (different managed executable)", flush=True)
+                return
+    raise AssertionError("no external starter won the Store-lock race; adoption witness was not reached")
+
+
+def future_target_case(root, binary, releases):
+    """Two real native builds: target has a deliberately different wire owner."""
+    with case(root, binary, releases, "future-wire-target") as c:
+        c.old_selection()
+        old, previous = c.start_host()
+        output = c.upgrade()
+        assert "different Host protocol; inspect with the selected Rui client" in output, output
+        c.binary = c.link
+        current = proof_ready(c, previous, old)
+        assert current["version"] != previous["version"], (current, previous)
+        print("upgrade native: target-public status proved future-wire new instance and actual installed release", flush=True)
+
+
 def restart_all_cases(root, binary, releases):
+    adopted_replacement_case(root, binary, releases)
+    refused_source_cases(root, binary, releases)
+    mysql_restart_cases(root, binary, releases)
     for source in ("bare", "saved", "file", "set"):
         with case(root, binary, releases, f"restart-sources-{source}") as c:
             extra = ()
@@ -1631,14 +1819,17 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
 
 
 def main():
-    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] not in ("restart-all", "lifecycle", "custody", "terminal", "startup")):
-        sys.exit("usage: python3 tests/integration/upgrade_integration.py PATH_TO_REAL_RUI [restart-all|lifecycle|custody|terminal|startup]")
-    selection = sys.argv[2] if len(sys.argv) == 3 else "all"
+    modes = ("restart-all", "lifecycle", "custody", "terminal", "startup", "future-target")
+    if len(sys.argv) not in (2, 3, 4) or (len(sys.argv) >= 3 and sys.argv[2] not in modes):
+        sys.exit("usage: python3 tests/integration/upgrade_integration.py REAL_RUI [restart-all|lifecycle|custody|terminal|startup|future-target FUTURE_REAL_RUI]")
+    selection = sys.argv[2] if len(sys.argv) >= 3 else "all"
+    assert (len(sys.argv) == 4) == (selection == "future-target"), "future-target requires a second native build"
     binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
+    target_binary = pathlib.Path(sys.argv[3]).resolve(strict=True) if selection == "future-target" else binary
     root = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-upgrade-"))
     version_home = root / "version-home"
     version_home.mkdir()
-    version_output = subprocess.check_output([str(binary), "--version"],
+    version_output = subprocess.check_output([str(target_binary), "--version"],
         env={**os.environ, "HOME": str(version_home)}, text=True, timeout=5)
     match = re.match(r"rui (0\.[0-9]+\.[0-9]+) \(", version_output)
     assert match, "supply a native release-identity actor (production owners), not an unreleased build"
@@ -1648,9 +1839,11 @@ def main():
     if artifacts is not None:
         artifacts.mkdir(parents=True, exist_ok=True)
         assert not artifacts.is_relative_to(root), "artifacts must outlive fixture root"
-    releases = Releases(binary, version)
+    releases = Releases(target_binary, version)
     complete = False
     try:
+        if selection == "future-target":
+            future_target_case(root, binary, releases)
         if selection in ("restart-all", "lifecycle"):
             suite = {"restart-all": restart_all_cases, "lifecycle": lifecycle_cases}[selection]
             suite(root, binary, releases)
