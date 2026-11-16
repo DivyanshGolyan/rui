@@ -105,7 +105,7 @@ def raw_message(socket_path, store, key, session, header, entries):
     return int(head.split(b" ")[1]), json.loads(reply)
 
 
-def main():
+def main(placement="default"):
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-bash-environment."))
     host = endpoint = thread = None
     completed = False
@@ -122,6 +122,10 @@ def main():
         endpoint = Model()
         thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
         thread.start()
+        if placement != "default":
+            run(terminal(home), "host", "set", "--store", store, "store.sqlite.dir", state / "data")
+            if placement == "moved-interface":
+                run(terminal(home), "host", "set", "--store", store, "interface.dir", state / "interface")
         host, fields = start_ready_process(
             fixture.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
             env={"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": "", "HOST_SECRET": HOST_SECRET},
@@ -186,7 +190,7 @@ def main():
             assert absent["observation"]["status"] == "absent", absent
         assert len(endpoint.results[session]) == 4, endpoint.results
         completed = True
-        print("bash environment passed: first Bash, later terminal, peer rank and fill, size refusal and recovery, Host refusals", flush=True)
+        print(f"bash environment {placement} passed: first Bash, later terminal, peer rank and fill, size refusal and recovery, Host refusals", flush=True)
     finally:
         incoming = sys.exc_info()[1]
         cleanups = []
@@ -205,4 +209,7 @@ def main():
 
 if __name__ == "__main__":
     host_process.enter()
-    main()
+    original_rui = fixture.RUI
+    for placement in ("default", "moved-store", "moved-interface"):
+        fixture.RUI = original_rui
+        main(placement)

@@ -79,11 +79,14 @@ validates its saved id and canonical directory selector.
 An initial MySQL
 `host_info` probe may send an empty `store` to discover that id; every other
 request must match it.
-Bash gets `RUI_STORE` as this id and the non-secret
-`RUI_RUNTIME_DIR` as a socket-routing hint.
-CLI peers use the same hint;
-an opaque id cannot launch a replacement Host without the stdin login.
-SQLite keeps its canonical directory selector and existing filesystem layout.
+Bash gets `RUI_STORE` as the selected Host directory when its saved placement
+reaches this endpoint. CLI peers resolve that local route separately from the
+wire Store identity used in sender Addresses and captures. Saved placement is
+read again by later clients; pause the Host before changing Store or interface
+placement. An unsaved foreground placement retains its legacy Store-identity
+route and, for MySQL, the non-secret `RUI_RUNTIME_DIR` socket hint. An opaque id
+alone cannot launch a replacement Host; a saved Host directory can.
+SQLite's database layout and wire identity remain unchanged.
 
 MySQL readiness and `host_status` also report `innodb_doublewrite`, including
 `OFF` (D200).
