@@ -259,9 +259,9 @@ fn run(case: Case) !void {
     }
     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try std.testing.expectEqual(binding.turn_id, continuation.turn_id);
-    const view = try allocator.create(store.HistoricalView);
+    const view = try allocator.create(store.testing.TestingPage);
     defer allocator.destroy(view);
-    storage.openHistoricalView(continuation, view);
+    view.open(storage, continuation);
     defer if (view.isActive()) view.close();
     var position: u64 = 0;
     var found: usize = 0;
@@ -269,7 +269,7 @@ fn run(case: Case) !void {
         position = entry.position;
         if (entry.kind != .tool_results) continue;
         while (try view.nextToolResult()) |result| {
-            var reader: store.HistoricalReader = undefined;
+            var reader: store.testing.TestingReader = undefined;
             try view.openContent(result.output, &reader);
             defer reader.close();
             const bytes = try allocator.alloc(u8, @intCast(result.output.length));
@@ -300,7 +300,7 @@ fn expectNextRequest(storage: *store.Store, tmp: *std.testing.TmpDir, binding: s
     defer if (retained) |*owner| {
         _ = owner.reclaim(root) catch unreachable;
     };
-    storage.openHistoricalView(binding, &preparation.view);
+    preparation.page.open(binding);
     try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
     // A runaway guard on bounded nonblocking work, not a scheduler wait.
@@ -308,7 +308,14 @@ fn expectNextRequest(storage: *store.Store, tmp: *std.testing.TmpDir, binding: s
     while (true) {
         advances += 1;
         try expectHere(@src(), advances < 16384);
-        switch (preparation.advance(16384, 64)) {
+        var progress = preparation.advance(16384, 64);
+        // As the shell does: the Store reads what the request's page asks.
+        while (progress == .read) {
+            try storage.readRequestPage(&preparation.page);
+            progress = preparation.proceed();
+        }
+        switch (progress) {
+            .read => unreachable,
             .pending => {},
             .failed => |err| return err,
             .prepared => |request| {

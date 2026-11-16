@@ -9,8 +9,8 @@ const historical_domain = @import("../domain/historical.zig");
 const reads_domain = @import("../domain/reads.zig");
 const store_testing = @import("../testing.zig");
 const HistoricalEntryKind = historical_domain.HistoricalEntryKind;
-const HistoricalReader = historical_domain.HistoricalReader;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingReader = store_testing.TestingReader;
+const TestingPage = store_testing.TestingPage;
 const TestingAnswerPart = store_testing.TestingAnswerPart;
 const answerTestTurn = store_testing.answerTestTurn;
 const canonicalCwd = store_testing.canonicalCwd;
@@ -417,8 +417,8 @@ test "completed tool labels trust admission while model replay authenticates pay
             try std.testing.expectEqual(@as(usize, 2), results);
             try submitTestMessage(&storage, &tmp, "replay-next", "replay-next", session.slice(), "continue");
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(next, &view);
+            var view: TestingPage = undefined;
+            view.open(&storage, next);
             defer view.close();
             // Discovery trusts the labels; the first call's name fences when it is
             // read for replay.
@@ -427,7 +427,7 @@ test "completed tool labels trust admission while model replay authenticates pay
             const call = (try nextTestingItem(&view, first.position)).?;
             try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT min(session_position) FROM model_output_item WHERE item_kind=3", .{}), call.position);
             const name = (try view.openOutput(call.position)).call.?[0];
-            var reader: HistoricalReader = undefined;
+            var reader: TestingReader = undefined;
             try view.openContent(name, &reader);
             defer reader.close();
             var buffer: [4096]u8 = undefined;

@@ -31,6 +31,16 @@ pub const max_link_bytes = 2048;
 /// click and never sends it to the terminal as a hyperlink.
 pub const session_link = "rui-session:";
 
+/// Trusted renderer-only provenance in the retained conversation stream.
+/// Plain terminal sinks receive only the displayed bytes.
+pub const body_on = "\x1b[200m";
+pub const body_off = "\x1b[201m";
+pub fn writeBody(sink: anytype, bytes: []const u8) !void {
+    if (comptime std.meta.hasMethod(@TypeOf(sink), "body")) {
+        try sink.body(bytes);
+    } else try sink.feed(bytes);
+}
+
 /// The most bytes Rui sets the clipboard to (OSC 52): hterm's osc52.sh
 /// sends at most 100,000 base64 bytes, the smallest limit a terminal's own
 /// tooling documents.

@@ -1,5 +1,7 @@
-//! The historical view a model request reads: settings, conversation entries,
-//! outputs, parts, tool results and prefix seals.
+//! The page a model request reads its history from: settings, conversation
+//! entries, outputs, parts, tool results and prefix seals. The page holds
+//! values; what it lacks it asks for (`RequestPage.read`), and its Store
+//! reads that (`readPage`).
 
 const replay_recipe = @import("../../replay_recipe.zig");
 const std = @import("std");
@@ -33,9 +35,7 @@ pub const ReadAccess = reads_domain.ReadAccess;
 const content_metadata = content_domain.content_metadata;
 const store_schema = @import("../schema.zig");
 const AttemptBinding = store_core.AttemptBinding;
-const ContentLocation = content_domain.ContentLocation;
-const ContentReader = content_domain.ContentReader;
-const ContentReference = content_domain.ContentReference;
+const ContentWindow = content_domain.ContentWindow;
 const Ordinary = store_core.Ordinary;
 const accepted_resolutions = store_schema.accepted_resolutions;
 
@@ -45,9 +45,9 @@ pub const PrefixSeal = prefix_seal.PrefixSeal;
 /// `content_metadata.Row` names them so typed rows decode them.
 const historical_content_columns_sql = "content.byte_length,content.digest,content.private";
 
-/// Borrowed from one pointer-stable preparation view. Invalid after it closes.
+/// Borrowed from one pointer-stable request page. Invalid after it closes.
 pub const HistoricalContent = struct {
-    view: *HistoricalView,
+    view: *RequestPage,
     // Resolved once with the metadata, so opening needs no digest lookup.
     content_id: i64,
     length: u64,
@@ -60,7 +60,7 @@ pub const HistoricalContent = struct {
     /// text's digest when the last of them reaches its end.
     text_start: ?u64 = null,
 
-    pub fn belongsTo(self: HistoricalContent, view: *HistoricalView) bool {
+    pub fn belongsTo(self: HistoricalContent, view: *RequestPage) bool {
         return self.view == view and view.active;
     }
 };
@@ -120,7 +120,7 @@ pub const HistoricalEntry = struct {
     /// An Operation entry's frozen effort.
     effort: ?model_capability.ReasoningEffort = null,
     /// An Operation entry's frozen tool set, and whether its boundary
-    /// declares any function tool (`HistoricalView.nextDeclaredTool`).
+    /// declares any function tool (`RequestPage.nextDeclaredTool`).
     tool_set_id: u64 = 0,
     declares: bool = false,
 };
@@ -135,7 +135,7 @@ pub const Declaration = struct {
 
 /// One saved output item in Rui's own form, as a request writer reads it:
 /// what Rui knows, plus the provider bag of the rest. Its parts follow
-/// through `HistoricalView.nextOutputPart`.
+/// through `RequestPage.nextOutputPart`.
 pub const HistoricalOutput = struct {
     kind: OutputItemKind,
     phase: output_format.NeutralPhase,
@@ -159,10 +159,15 @@ pub const HistoricalToolResult = struct {
 };
 
 /// The preparation owner keeps this value at one address until every borrowed
-/// handle/reader is discarded. Readers must close before the view closes.
-pub const HistoricalView = struct {
-    store: *Store,
+/// handle/reader is discarded. Readers must close before the page closes.
+/// A call that needs what the page does not hold names that read in `read`
+/// and is `PageRead`; once its Store reads it (`readPage`), the same call
+/// made again takes the answer.
+pub const RequestPage = struct {
     binding: AttemptBinding,
+    /// The exchange borrows the page's row scratch between Store reads.
+    /// The Store keeps its question off that scratch while decoding rows.
+    read: ?*Read = null,
     active: bool = true,
     readers: usize = 0,
     tool_group_initialized: bool = false,
@@ -222,9 +227,6 @@ pub const HistoricalView = struct {
     /// What the entry batch holds beyond its entries, on the heap for the
     /// view's life; its first read allocates it.
     page: ?*Page = null,
-    /// The settings an admission's commit already read for this view
-    /// (`Start`); `settings` then answers them without a round.
-    settled: ?*const HistoricalSettings = null,
     /// Open readers that borrow the page's bytes, which are then only
     /// added to.
     inline_readers: usize = 0,
@@ -307,41 +309,119 @@ pub const HistoricalView = struct {
     /// A ready entry lives in the view until its next step.
     pub const EntryProgress = union(enum) { pending, ready: ?*const HistoricalEntry };
 
+    /// A read the page asks its Store for. `tools` and `parts` fill the
+    /// page; `corrupt` is history the page found corrupt, which the Store
+    /// answers by fencing.
+    pub const Question = union(enum) {
+        settings: *HistoricalSettings,
+        outputs_step,
+        entry: u64,
+        parts,
+        tool_result,
+        tools: struct { walk: Page.ToolWalk, ordinal: u64 },
+        provider_tool: *HistoricalTool,
+        prefix_seal,
+        /// The seal is the page's own copy while the Store records it.
+        record_seal: PrefixSeal,
+        /// Bytes of the content `reader` reads that the page does not hold.
+        content: struct { reader: *HistoricalReader, start: u64, destination: []u8 },
+        corrupt,
+    };
+
+    pub const Answer = union(std.meta.Tag(Question)) {
+        settings,
+        outputs_step: bool,
+        entry: EntryProgress,
+        parts,
+        tool_result: ?HistoricalToolResult,
+        tools,
+        provider_tool,
+        prefix_seal: ?PrefixSeal,
+        record_seal,
+        content: usize,
+        corrupt,
+    };
+
+    pub const Read = struct {
+        question: Question,
+        answer: ?Answer = null,
+    };
+
+    /// The answer to `question`, once the Store has read it; until then
+    /// the page keeps the question and the call is `PageRead`.
+    fn ask(self: *RequestPage, question: Question) !Answer {
+        try self.allocatePage();
+        if (self.read) |read| if (read.answer) |answer| {
+            // Its caller asks again exactly what it asked.
+            std.debug.assert(std.meta.eql(read.question, question));
+            self.read = null;
+            return answer;
+        };
+        self.keepRead(.{ .question = question });
+        return error.PageRead;
+    }
+
+    /// Row decoding and the exchange have disjoint lifetimes: the Store
+    /// snapshots the question before a read and keeps its answer afterwards.
+    fn keepRead(self: *RequestPage, read: Read) void {
+        const exchange = self.page.?.exchange();
+        exchange.* = read;
+        self.read = exchange;
+    }
+
+    /// Whether the Store has answered what the page asked, whose caller
+    /// takes the answer when it asks again.
+    fn answered(self: *const RequestPage) bool {
+        const read = self.read orelse return false;
+        return read.answer != null;
+    }
+
+    /// The history the page holds is corrupt: its Store fences.
+    fn corrupt(self: *RequestPage) error{PageRead} {
+        self.keepRead(.{ .question = .corrupt });
+        return error.PageRead;
+    }
+
+    /// Opens the page for `binding` where it stays until it closes: a
+    /// page borrows its own buffers, so it never moves. Opening reads
+    /// nothing: the settings read checks that the binding is current.
+    pub fn open(self: *RequestPage, binding: AttemptBinding) void {
+        self.* = .{ .binding = binding };
+    }
+
     /// Charge discovery/classification items and private authentication bytes
     /// to the same caller allowance. Pending exposes no storage-level state.
-    pub fn nextEntryStep(self: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !EntryProgress {
-        std.debug.assert(self.active and self.outputs_validated and self.active_tool_group_source_id == null);
+    /// No tool group may be active (`entryAfter`).
+    pub fn nextEntryStep(self: *RequestPage, after_position: u64, bytes_left: *usize, items_left: *usize) !EntryProgress {
+        std.debug.assert(self.active and self.outputs_validated);
         if (bytes_left.* == 0 or items_left.* == 0) return .pending;
         items_left.* -= 1;
         try self.allocatePage();
         // An Operation entry's declaration depends on the selected base.
         _ = try self.coverage();
-        return readHistoricalEntry(self.store, self, after_position) catch |err| switch (err) {
-            error.HistoricalPending => .pending,
-            else => return err,
-        };
+        return (try self.ask(.{ .entry = after_position })).entry;
     }
 
     /// Fills `out` with the next function tool `declaration` declares, in
     /// set order, and says whether there was one. `coverage` must have run.
-    pub fn nextDeclaredTool(self: *HistoricalView, declaration: *Declaration, out: *HistoricalTool) !bool {
+    pub fn nextDeclaredTool(self: *RequestPage, declaration: *Declaration, out: *HistoricalTool) !bool {
         std.debug.assert(self.active and self.output_frontier != null);
         const walk: Page.ToolWalk = .{ .set = declaration.tool_set_id, .position = declaration.position };
         const row = try self.toolFrom(walk, declaration.next_ordinal) orelse return false;
-        if (row.owner == .provider) return store_core.fence(self.store, error.CorruptStore);
+        if (row.owner == .provider) return self.corrupt();
         declaration.next_ordinal = row.ordinal + 1;
         return self.serveTool(row, out);
     }
 
     /// Says which tools the request ends with, so their first page rides
     /// the first history round. `settings` must have run.
-    pub fn expectTools(self: *HistoricalView, ahead: ToolsAhead) void {
+    pub fn expectTools(self: *RequestPage, ahead: ToolsAhead) void {
         std.debug.assert(self.active and self.tool_set_id != 0);
         self.ahead = ahead;
     }
 
     /// The walk `ahead` names, once its arguments are known.
-    fn aheadWalk(self: *const HistoricalView) ?Page.ToolWalk {
+    fn aheadWalk(self: *const RequestPage) ?Page.ToolWalk {
         return switch (self.ahead) {
             .none => null,
             .declared => if (self.output_frontier == null) null else .{ .set = self.tool_set_id, .position = self.output_boundary },
@@ -351,16 +431,19 @@ pub const HistoricalView = struct {
 
     /// The walk's member at or after `ordinal`, from the page; a page
     /// that does not reach it is read in a round of its own.
-    fn toolFrom(self: *HistoricalView, walk: Page.ToolWalk, ordinal: u64) !?*const Page.Tool {
+    fn toolFrom(self: *RequestPage, walk: Page.ToolWalk, ordinal: u64) !?*const Page.Tool {
         try self.allocatePage();
         const page = self.page.?;
-        if (!page.toolsReach(walk, ordinal)) try readTools(self.store, self, walk, ordinal);
+        if (!page.toolsReach(walk, ordinal)) {
+            self.keepRead(.{ .question = .{ .tools = .{ .walk = walk, .ordinal = ordinal } } });
+            return error.PageRead;
+        }
         return page.toolAt(ordinal);
     }
 
     /// Fills `out` from a page row; private text is `CorruptStore`.
-    fn serveTool(self: *HistoricalView, row: *const Page.Tool, out: *HistoricalTool) !bool {
-        if (row.description_private or row.schema_private) return store_core.fence(self.store, error.CorruptStore);
+    fn serveTool(self: *RequestPage, row: *const Page.Tool, out: *HistoricalTool) !bool {
+        if (row.description_private or row.schema_private) return self.corrupt();
         out.name = row.name;
         out.owner = row.owner;
         out.description = .{ .view = self, .content_id = @intCast(row.description_content_id.get()), .length = row.description_length, .digest = row.description_digest };
@@ -370,7 +453,7 @@ pub const HistoricalView = struct {
 
     /// The current Operation's declaration: its frozen set at its
     /// admission. `settings` and `coverage` must have run.
-    pub fn currentDeclaration(self: *const HistoricalView) Declaration {
+    pub fn currentDeclaration(self: *const RequestPage) Declaration {
         std.debug.assert(self.tool_set_id != 0 and self.output_boundary != 0);
         return .{ .tool_set_id = self.tool_set_id, .position = self.output_boundary };
     }
@@ -379,23 +462,23 @@ pub const HistoricalView = struct {
     /// order, and says whether there was one: the tools stage of a codec
     /// that declares function tools in the history. `settings` must have
     /// run, and `nextTool` not.
-    pub fn nextProviderTool(self: *HistoricalView, out: *HistoricalTool) !bool {
+    pub fn nextProviderTool(self: *RequestPage, out: *HistoricalTool) !bool {
         std.debug.assert(self.active and self.tool_set_id != 0);
         if (self.provider_tools_read == self.provider_tool_count) return false;
-        try readProviderTool(self.store, self, out);
+        _ = try self.ask(.{ .provider_tool = out });
         self.provider_tools_read += 1;
         return true;
     }
 
     /// Fills `out` with the frozen settings' next tool, in set order, and
     /// says whether there was one. `settings` must have run.
-    pub fn nextTool(self: *HistoricalView, out: *HistoricalTool) !bool {
+    pub fn nextTool(self: *RequestPage, out: *HistoricalTool) !bool {
         std.debug.assert(self.active and self.tool_set_id != 0);
         if (self.next_tool == self.tool_count) return false;
         // The settings counted this member: a missing one is `CorruptStore`.
         const row = try self.toolFrom(.{ .set = self.tool_set_id, .position = 0 }, self.next_tool) orelse
-            return store_core.fence(self.store, error.CorruptStore);
-        if (row.ordinal != self.next_tool) return store_core.fence(self.store, error.CorruptStore);
+            return self.corrupt();
+        if (row.ordinal != self.next_tool) return self.corrupt();
         self.next_tool += 1;
         return self.serveTool(row, out);
     }
@@ -403,71 +486,55 @@ pub const HistoricalView = struct {
     /// Fills `out`; on error its bytes mean nothing.
     /// The round also checks that the binding is current, as opening the
     /// view once did, and reads the first page of the output check.
-    pub fn settings(self: *HistoricalView, out: *HistoricalSettings) !void {
+    /// An admission's commit read the settings (`Start`) as this read.
+    pub fn settings(self: *RequestPage, out: *HistoricalSettings) !void {
         std.debug.assert(self.active);
-        if (self.settled == out) {
-            self.settled = null;
-            return;
-        }
         try self.allocatePage();
-        return readHistoricalSettings(self.store, self, out);
+        _ = try self.ask(.{ .settings = out });
     }
 
     /// Validate at most one producing Operation and its output items,
     /// releasing Store custody between steps. Returns true after the
-    /// complete population.
-    pub fn validateOutputsStep(self: *HistoricalView) !bool {
+    /// complete population, which asks for nothing more.
+    pub fn validateOutputsStep(self: *RequestPage) !bool {
         std.debug.assert(self.active);
-        return validateHistoricalOutputsStep(self.store, self);
-    }
-
-    pub fn nextEntry(self: *HistoricalView, after_position: u64) !?HistoricalEntry {
-        std.debug.assert(self.active);
-        std.debug.assert(self.active_tool_group_source_id == null);
-        while (!try self.validateOutputsStep()) {}
-        while (true) {
-            var bytes: usize = 64 * 1024;
-            var items: usize = 1024;
-            switch (try self.nextEntryStep(after_position, &bytes, &items)) {
-                .pending => {},
-                .ready => |entry| return if (entry) |value| value.* else null,
-            }
-        }
+        // The step that asked takes its answer: its read may have validated.
+        if (self.outputs_validated and !self.answered()) return true;
+        return (try self.ask(.outputs_step)).outputs_step;
     }
 
     /// The validated selected base, which the first validation step
     /// found with its anchor. A base has exactly one compaction item, with
-    /// its bag: any other is `CorruptStore`.
-    pub fn coverage(self: *HistoricalView) !Coverage {
-        std.debug.assert(self.active);
-        while (!try self.validateOutputsStep()) {}
-        if (self.selected_base != 0 and self.anchor == null) return store_core.fence(self.store, error.CorruptStore);
+    /// its bag: any other is `CorruptStore`. Once outputs are validated.
+    pub fn coverage(self: *RequestPage) !Coverage {
+        std.debug.assert(self.active and self.outputs_validated);
+        if (self.selected_base != 0 and self.anchor == null) return self.corrupt();
         return .{ .frontier = self.output_frontier.?, .anchor = self.anchor, .floor = self.floor };
     }
 
     /// The Session's prefix seal, if a full rebuild has recorded one.
-    pub fn prefixSeal(self: *HistoricalView) !?PrefixSeal {
+    pub fn prefixSeal(self: *RequestPage) !?PrefixSeal {
         std.debug.assert(self.active);
-        return readPrefixSeal(self.store, self.binding);
+        return (try self.ask(.prefix_seal)).prefix_seal;
     }
 
-    /// Record this view's fully rebuilt span as the Session's seal, while
+    /// Record this page's fully rebuilt span as the Session's seal, while
     /// the Attempt is still current.
-    pub fn recordPrefixSeal(self: *HistoricalView, seal: *const PrefixSeal) !void {
+    pub fn recordPrefixSeal(self: *RequestPage, seal: *const PrefixSeal) !void {
         std.debug.assert(self.active);
-        return self.store.recordPrefixSeal(self.binding, seal);
+        _ = try self.ask(.{ .record_seal = seal.* });
     }
 
     /// The Operation's admission position, the exclusive upper bound of this
     /// view's history. Known once output validation completes.
-    pub fn admissionPosition(self: *const HistoricalView) u64 {
+    pub fn admissionPosition(self: *const RequestPage) u64 {
         std.debug.assert(self.active and self.outputs_validated);
         return self.output_boundary;
     }
 
     /// The last producing Operation the tool-group scan has examined. After
     /// the final entry, every earlier Operation of this view is examined.
-    pub fn toolGroupCursor(self: *const HistoricalView) u64 {
+    pub fn toolGroupCursor(self: *const RequestPage) u64 {
         std.debug.assert(self.active);
         return self.tool_group_source_cursor;
     }
@@ -483,7 +550,7 @@ pub const HistoricalView = struct {
     /// all lie at or before the covered position and the scan would only skip
     /// them. The earlier view's own Operation, whose results land after its
     /// admission position, is above the cursor and is scanned.
-    pub fn resumeToolGroups(self: *HistoricalView, cursor: u64) void {
+    pub fn resumeToolGroups(self: *RequestPage, cursor: u64) void {
         std.debug.assert(self.active and self.outputs_validated and !self.tool_group_initialized);
         if (self.read_ahead == .unclaimed) {
             if (self.tool_group_source_cursor == cursor) {
@@ -498,7 +565,7 @@ pub const HistoricalView = struct {
     /// What the next request of this view's Session can resume its
     /// history read from (`Resume`), for a caller that remembers it.
     /// `coverage` must have run.
-    pub fn resumeKeys(self: *const HistoricalView) Keys {
+    pub fn resumeKeys(self: *const RequestPage) Keys {
         std.debug.assert(self.active and self.output_frontier != null);
         return keysOf(self);
     }
@@ -507,46 +574,51 @@ pub const HistoricalView = struct {
     /// before requesting the next historical entry.
     /// The output item served at `position`, in Rui's own form. Its parts
     /// follow from `nextOutputPart` until it returns null.
-    pub fn openOutput(self: *HistoricalView, position: u64) !HistoricalOutput {
+    pub fn openOutput(self: *RequestPage, position: u64) !HistoricalOutput {
         std.debug.assert(self.active and self.output_parts == null);
-        return outputAt(self, position) catch |err| store_core.fence(self.store, err);
+        return outputAt(self, position) catch self.corrupt();
     }
 
     /// Open only the items replayable to this request's model. A skipped
     /// opaque item owns no content reader or message digest to finish.
-    pub fn replayOutput(self: *HistoricalView, entry: *const HistoricalEntry, model: []const u8) !?HistoricalOutput {
+    pub fn replayOutput(self: *RequestPage, entry: *const HistoricalEntry, model: []const u8) !?HistoricalOutput {
         const output = try self.openOutput(entry.position);
         if (output.kind.replayableTo(entry.requested_model.?.slice(), model, if (self.anchor == entry.position) .selected_base else .history)) return output;
         self.output_parts = null;
         return null;
     }
 
-    pub fn nextOutputPart(self: *HistoricalView) !?HistoricalPart {
+    pub fn nextOutputPart(self: *RequestPage) !?HistoricalPart {
         std.debug.assert(self.active and self.output_parts != null);
-        if (partsExhausted(self)) try readHistoricalParts(self.store, self);
-        return nextPart(self) catch |err| store_core.fence(self.store, err);
+        if (partsExhausted(self)) {
+            self.keepRead(.{ .question = .parts });
+            return error.PageRead;
+        }
+        return nextPart(self) catch self.corrupt();
     }
 
-    pub fn nextToolResult(self: *HistoricalView) !?HistoricalToolResult {
-        std.debug.assert(self.active and self.active_tool_group_source_id != null);
-        return readHistoricalToolResult(self.store, self);
+    /// A tool group must be active (`nextGroupResult`).
+    pub fn nextToolResult(self: *RequestPage) !?HistoricalToolResult {
+        std.debug.assert(self.active);
+        return (try self.ask(.tool_result)).tool_result;
     }
 
     /// Opens `out` where it lives. `out` is valid only when this returns
     /// without error.
-    pub fn openContent(self: *HistoricalView, reference: HistoricalContent, out: *HistoricalReader) !void {
+    pub fn openContent(self: *RequestPage, reference: HistoricalContent, out: *HistoricalReader) !void {
         std.debug.assert(reference.belongsTo(self));
         // A part's reader reads the message text row only within its range,
         // and the view, not this reader, checks the text's digest.
         const first = reference.text_start orelse 0;
-        const identity: ContentReference = .{ .length = first + reference.length, .digest = reference.digest };
-        const location: ContentLocation = .{ .store = self.store, .reference = identity, .content_id = reference.content_id };
-        out.* = .{ .view = self, .reference = reference };
-        out.reader.open(location);
-        out.reader.first = first;
-        out.reader.check.verified = reference.verified or reference.text_start != null;
+        out.* = .{
+            .view = self,
+            .reference = reference,
+            .window = .of(reference.content_id, .{ .length = first + reference.length, .digest = reference.digest }),
+        };
+        out.window.first = first;
+        out.window.check.verified = reference.verified or reference.text_start != null;
         if (self.pageBytes(reference)) |bytes| {
-            out.reader.inline_bytes = bytes;
+            out.window.inline_bytes = bytes;
             self.inline_readers += 1;
         }
         self.readers += 1;
@@ -555,7 +627,7 @@ pub const HistoricalView = struct {
     /// Once, outside Store access. Raw: a read fills what it serves
     /// before any of it is used; create would first write 0xAA over all
     /// of it in ReleaseSafe.
-    fn allocatePage(self: *HistoricalView) error{OutOfMemory}!void {
+    fn allocatePage(self: *RequestPage) error{OutOfMemory}!void {
         if (self.page != null) return;
         const bytes = std.heap.c_allocator.rawAlloc(@sizeOf(Page), .of(Page), @returnAddress()) orelse return error.OutOfMemory;
         const page: *Page = @ptrCast(@alignCast(bytes));
@@ -578,13 +650,14 @@ pub const HistoricalView = struct {
     }
 
     /// The whole bytes of `reference`'s content when the page holds them.
-    fn pageBytes(self: *HistoricalView, reference: HistoricalContent) ?[]const u8 {
+    fn pageBytes(self: *RequestPage, reference: HistoricalContent) ?[]const u8 {
         const page = self.page orelse return null;
         const whole = if (reference.text_start != null) self.output_parts.?.text.?.length else reference.length;
         return page.find(@intCast(reference.content_id), whole);
     }
 
-    pub fn close(self: *HistoricalView) void {
+    /// Drops a read it asked for, answered or not.
+    pub fn close(self: *RequestPage) void {
         std.debug.assert(self.active and self.readers == 0);
         if (self.page) |page| std.heap.c_allocator.rawFree(std.mem.asBytes(page), .of(Page), @returnAddress());
         self.page = null;
@@ -595,35 +668,35 @@ pub const HistoricalView = struct {
     /// Legal checkpoint is between synchronous preparation advances, while
     /// the preparation owner remains in final storage under the existing
     /// single-owner discipline. No new state is maintained.
-    pub fn outstandingReaders(self: *const HistoricalView) usize {
+    pub fn outstandingReaders(self: *const RequestPage) usize {
         return self.readers;
     }
 
     /// Test/slow-check aid: the view has not been closed. Reader closure
     /// before view closure is enforced by the close-path asserts; this
     /// exposes the committed fact for integrity checks.
-    pub fn isActive(self: *const HistoricalView) bool {
+    pub fn isActive(self: *const RequestPage) bool {
         return self.active;
     }
 
     /// Test/slow-check aid: borrowed content belongs to this live view.
     /// References are validated at open; this re-checks the committed fact
     /// without treating notifications or hints as authority.
-    pub fn ownsContent(self: *HistoricalView, content: HistoricalContent) bool {
+    pub fn ownsContent(self: *RequestPage, content: HistoricalContent) bool {
         return content.belongsTo(self);
     }
 
     /// Test/slow-check aid: this view owns the admitted Attempt binding.
     /// Lets preparation checks verify owner correspondence without exposing
     /// storage rows or a generic query language.
-    pub fn bindingMatches(self: *const HistoricalView, expected: AttemptBinding) bool {
+    pub fn bindingMatches(self: *const RequestPage, expected: AttemptBinding) bool {
         return self.binding.turn_id == expected.turn_id and
             self.binding.operation_id == expected.operation_id and
             self.binding.attempt_ordinal == expected.attempt_ordinal;
     }
 
     /// Test/slow-check aid: frozen settings references belong to this view.
-    pub fn ownsSettings(self: *HistoricalView, frozen: *const HistoricalSettings) bool {
+    pub fn ownsSettings(self: *RequestPage, frozen: *const HistoricalSettings) bool {
         if (!self.ownsContent(frozen.baseline_instructions)) return false;
         if (frozen.output_schema) |schema| {
             if (!self.ownsContent(schema)) return false;
@@ -633,8 +706,8 @@ pub const HistoricalView = struct {
 };
 
 pub const HistoricalReader = struct {
-    reader: ContentReader = undefined,
-    view: *HistoricalView,
+    window: ContentWindow = undefined,
+    view: *RequestPage,
     reference: HistoricalContent,
     active: bool = true,
 
@@ -645,30 +718,42 @@ pub const HistoricalReader = struct {
     /// Test/slow-check aid: this live reader is owned by the given view.
     /// Reuses the same active/borrowed-view facts as the production read
     /// path; introduces no registry or additional state.
-    pub fn ownedBy(self: *const HistoricalReader, view: *HistoricalView) bool {
+    pub fn ownedBy(self: *const HistoricalReader, view: *RequestPage) bool {
         return self.view == view and self.usable();
     }
 
     /// Replay reads in order, so its content reader checks every value's
     /// digest at its end.
     pub fn read(self: *HistoricalReader, start: u64, destination: []u8) !usize {
-        std.debug.assert(self.usable() and (self.reader.check.verified or start == self.reader.check.position));
-        const base = self.reference.text_start orelse return self.reader.read(start, destination);
+        // In order, as it was when this read was asked.
+        std.debug.assert(self.usable() and (self.view.answered() or self.window.check.verified or start == self.window.check.position));
+        const base = self.reference.text_start orelse return self.readWindow(start, destination);
         const text = &self.view.output_parts.?.text.?;
         std.debug.assert(start <= self.reference.length and base + start == text.read);
         const wanted: usize = @intCast(@min(destination.len, self.reference.length - start));
-        const count = try self.reader.read(base + start, destination[0..wanted]);
+        const count = try self.readWindow(base + start, destination[0..wanted]);
         text.hash.update(destination[0..count]);
         text.read += count;
         if (count != 0 and text.read == text.length and !std.mem.eql(u8, &text.hash.finalResult(), &text.digest))
-            return store_core.fence(self.view.store, error.CorruptStore);
+            return self.view.corrupt();
+        return count;
+    }
+
+    /// Bytes the page holds are copied here; any other read is the
+    /// Store's (`content_domain.readContent`). Either checks the digest
+    /// of the bytes read in order.
+    fn readWindow(self: *HistoricalReader, start: u64, destination: []u8) !usize {
+        const count = try self.window.fills(start, destination);
+        if (!self.window.copyInline(start, destination, count))
+            return (try self.view.ask(.{ .content = .{ .reader = self, .start = start, .destination = destination } })).content;
+        if (!self.window.absorb(start, destination[0..count])) return self.view.corrupt();
         return count;
     }
 
     pub fn close(self: *HistoricalReader) void {
         std.debug.assert(self.usable());
-        if (self.reader.inline_bytes != null) self.view.inline_readers -= 1;
-        self.reader.close();
+        if (self.window.inline_bytes != null) self.view.inline_readers -= 1;
+        self.window.release();
         self.view.readers -= 1;
         self.active = false;
     }
@@ -722,11 +807,11 @@ const declared_tools = rsql.Read(.{
     .cardinality = .each,
 });
 
-fn readTools(self: *Store, view: *HistoricalView, walk: Page.ToolWalk, ordinal: u64) !void {
+fn readTools(self: *Store, view: *RequestPage, walk: Page.ToolWalk, ordinal: u64) !void {
     return self.queue().run(readToolsHeld, .{ self, view, walk, ordinal });
 }
 
-fn readToolsHeld(self: *Store, view: *HistoricalView, walk: Page.ToolWalk, ordinal: u64) !void {
+fn readToolsHeld(self: *Store, view: *RequestPage, walk: Page.ToolWalk, ordinal: u64) !void {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     var access: ReadAccess = .open(&entry);
@@ -736,7 +821,7 @@ fn readToolsHeld(self: *Store, view: *HistoricalView, walk: Page.ToolWalk, ordin
 
 /// One round reads a page of the walk's members from `ordinal`. A failed
 /// step is `CorruptStore`, main's answer for a tool's read.
-fn toolsFrom(a: *ReadAccess, view: *HistoricalView, walk: Page.ToolWalk, ordinal: u64) !void {
+fn toolsFrom(a: *ReadAccess, view: *RequestPage, walk: Page.ToolWalk, ordinal: u64) !void {
     const page = view.page.?;
     var tools: Page.Tools = undefined;
     page.queueTools(a, view, keysOf(view), &tools, walk, ordinal);
@@ -757,11 +842,11 @@ const historical_provider_tool = rsql.Read(.{
     .cardinality = .optional,
 });
 
-fn readProviderTool(self: *Store, view: *HistoricalView, out: *HistoricalTool) !void {
+fn readProviderTool(self: *Store, view: *RequestPage, out: *HistoricalTool) !void {
     return self.queue().run(readProviderToolHeld, .{ self, view, out });
 }
 
-fn readProviderToolHeld(self: *Store, view: *HistoricalView, out: *HistoricalTool) !void {
+fn readProviderToolHeld(self: *Store, view: *RequestPage, out: *HistoricalTool) !void {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     var access: ReadAccess = .open(&entry);
@@ -771,7 +856,7 @@ fn readProviderToolHeld(self: *Store, view: *HistoricalView, out: *HistoricalToo
 
 /// One round reads the next provider-run member; a missing one is
 /// `CorruptStore`, since the settings counted it.
-fn providerToolOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalTool) !void {
+fn providerToolOf(a: *ReadAccess, view: *RequestPage, out: *HistoricalTool) !void {
     var row: historical_provider_tool.Row = undefined;
     row.name = &out.name;
     var found: store_access.Found = undefined;
@@ -782,11 +867,11 @@ fn providerToolOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalTool) !
     out.owner = .provider;
 }
 
-fn readHistoricalSettings(self: *Store, view: *HistoricalView, out: *HistoricalSettings) !void {
+fn readHistoricalSettings(self: *Store, view: *RequestPage, out: *HistoricalSettings) !void {
     return self.queue().run(readHistoricalSettingsHeld, .{ self, view, out });
 }
 
-fn readHistoricalSettingsHeld(self: *Store, view: *HistoricalView, out: *HistoricalSettings) !void {
+fn readHistoricalSettingsHeld(self: *Store, view: *RequestPage, out: *HistoricalSettings) !void {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     var access: ReadAccess = .open(&entry);
@@ -848,8 +933,8 @@ const historical_settings = rsql.Read(.{
 /// failed step is `OperationReadFailed` for the binding and
 /// `CorruptStore` for the rest, main's answer for each; so is a content
 /// row the settings name and the Store lacks.
-fn settingsOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !void {
-    var read: SettingsRead = .init(view, out);
+fn settingsOf(a: *ReadAccess, view: *RequestPage, out: *HistoricalSettings) !void {
+    var read: SettingsRead = .init(view, out, &a.store.selector);
     read.queue(a);
     try store_access.runNamed(a, .{.{ model_settlement_domain.attempt_standing, error.OperationReadFailed }}, error.CorruptStore);
     return read.settle();
@@ -858,7 +943,7 @@ fn settingsOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !
 /// Where an admission starts the request of the Attempt it admits: the
 /// preparation's view and settings, which stay where they are.
 pub const Start = struct {
-    view: *HistoricalView,
+    view: *RequestPage,
     settings: *HistoricalSettings,
     /// Where the caller remembers each Session's history resuming, if it
     /// does: the admitted Session's first history round then rides the
@@ -873,8 +958,8 @@ pub const Start = struct {
 
     /// Opens the view for `binding` with its page; false when there is no
     /// memory for one, and the view is then not open.
-    pub fn open(start: Start, store: *Store, binding: AttemptBinding) bool {
-        start.view.* = .{ .store = store, .binding = binding };
+    pub fn open(start: Start, binding: AttemptBinding) bool {
+        start.view.open(binding);
         start.view.allocatePage() catch return false;
         return true;
     }
@@ -892,7 +977,7 @@ pub const Resume = struct {
     group_cursor: u64,
     keys: Keys,
     tool_set: u64,
-    tools: HistoricalView.ToolsAhead,
+    tools: RequestPage.ToolsAhead,
 };
 
 /// The first history round, read ahead from a `Resume`.
@@ -901,7 +986,7 @@ const ReadAhead = struct {
     groups: GroupRead = undefined,
     batch: BatchRead = undefined,
 
-    fn queue(ahead: *ReadAhead, a: anytype, view: *HistoricalView, admission_position: u64) void {
+    fn queue(ahead: *ReadAhead, a: anytype, view: *RequestPage, admission_position: u64) void {
         const from = &ahead.from;
         view.tool_group_source_cursor = from.group_cursor;
         ahead.groups.queue(a, view, from.keys);
@@ -915,7 +1000,7 @@ const ReadAhead = struct {
 
     /// After the round, and after the view's boundary was kept: the view
     /// holds the round as one of its own, unclaimed, or nothing of it.
-    fn settle(ahead: *const ReadAhead, view: *HistoricalView) void {
+    fn settle(ahead: *const ReadAhead, view: *RequestPage) void {
         view.read_ahead = .unclaimed;
         const from = &ahead.from;
         const kept = std.meta.eql(from.keys, keysOf(view)) and kept: {
@@ -937,8 +1022,10 @@ const ReadAhead = struct {
 /// once they ran. `settingsOf` runs it in a round of its own; an admission
 /// queues it behind its COMMIT (`Start`), where it costs no round trip.
 pub const SettingsRead = struct {
-    view: *HistoricalView,
+    view: *RequestPage,
     out: *HistoricalSettings,
+    /// The selector of the Store that reads it.
+    selector: *const Bounded(store_path.max_bytes),
     standing: model_settlement_domain.attempt_standing.Result = undefined,
     /// The settings' row, which decodes into the page's row and is kept
     /// (`keep`) as it is stepped: later reads of the round decode there.
@@ -952,8 +1039,8 @@ pub const SettingsRead = struct {
     /// The Operation's admission position, where `ahead` is set.
     admission_position: u64 = 0,
 
-    pub fn init(view: *HistoricalView, out: *HistoricalSettings) SettingsRead {
-        return .{ .view = view, .out = out, .first = view.output_frontier == null, .sources = .{ .view = view } };
+    pub fn init(view: *RequestPage, out: *HistoricalSettings, selector: *const Bounded(store_path.max_bytes)) SettingsRead {
+        return .{ .view = view, .out = out, .selector = selector, .first = view.output_frontier == null, .sources = .{ .view = view } };
     }
 
     /// Reads the first history round with the settings, from where
@@ -986,12 +1073,13 @@ pub const SettingsRead = struct {
     }
 
     /// As the reads an admission's commit carries after COMMIT
-    /// (`Access.commitFollowed`), after the message that ran `queue`: a
-    /// round whose answers do not settle leaves the view unsettled, and
-    /// its owner's own `settings` round then answers as it always did.
+    /// (`Access.commitFollowed`), after the message that ran `queue`: the
+    /// page holds them as its settings read, answered. A round whose
+    /// answers do not settle answers nothing, and the page's own settings
+    /// read then answers as it always did.
     pub fn followed(read: *SettingsRead) void {
         read.settle() catch return;
-        read.view.settled = read.out;
+        read.view.keepRead(.{ .question = .{ .settings = read.out }, .answer = .settings });
     }
 
     pub fn visit(read: *SettingsRead, row: *const historical_settings.Row) bool {
@@ -1021,14 +1109,14 @@ pub const SettingsRead = struct {
             };
             break :schema try viewContent(view, id.get(), &output_schema, false);
         } else null;
-        out.store = view.store.selector;
+        out.store = read.selector.*;
         out.parent = row.parent_ref;
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
         hash.update("rui/session-affinity/v1");
         var length: [8]u8 = undefined;
-        std.mem.writeInt(u64, &length, view.store.selector.len, .big);
+        std.mem.writeInt(u64, &length, read.selector.len, .big);
         hash.update(&length);
-        hash.update(view.store.selector.slice());
+        hash.update(read.selector.slice());
         std.mem.writeInt(u64, &length, out.session.len, .big);
         hash.update(&length);
         hash.update(out.session.slice());
@@ -1063,11 +1151,59 @@ pub const SettingsRead = struct {
     }
 };
 
-fn readHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64) !HistoricalView.EntryProgress {
+/// Reads what `page` asked for (`RequestPage.read`) through the entry
+/// point that reads it, and keeps the answer in the page; a read that
+/// fills the page answers as its contents. A failed read answers nothing.
+// The exchange snapshot and read dispatch belong to this call, not to
+// the engine turn that will later launch or settle a request.
+pub noinline fn readPage(self: *Store, page: *RequestPage) !void {
+    const read = page.read.?;
+    std.debug.assert(read.answer == null);
+    // A read decodes into the scratch the exchange borrowed. Keep only its
+    // question here, and restore it unanswered even if decoding fails.
+    const question = read.question;
+    errdefer page.keepRead(.{ .question = question });
+    const answer: RequestPage.Answer = switch (question) {
+        .settings => |out| answer: {
+            try readHistoricalSettings(self, page, out);
+            break :answer .settings;
+        },
+        .outputs_step => .{ .outputs_step = try validateHistoricalOutputsStep(self, page) },
+        .entry => |after_position| .{ .entry = readHistoricalEntry(self, page, after_position) catch |err| switch (err) {
+            error.HistoricalPending => .pending,
+            else => return err,
+        } },
+        .parts => {
+            try readHistoricalParts(self, page);
+            page.read = null;
+            return;
+        },
+        .tool_result => .{ .tool_result = try readHistoricalToolResult(self, page) },
+        .tools => |tools| {
+            try readTools(self, page, tools.walk, tools.ordinal);
+            page.read = null;
+            return;
+        },
+        .provider_tool => |out| answer: {
+            try readProviderTool(self, page, out);
+            break :answer .provider_tool;
+        },
+        .prefix_seal => .{ .prefix_seal = try readPrefixSeal(self, page.binding) },
+        .record_seal => |*seal| answer: {
+            try self.recordPrefixSeal(page.binding, seal);
+            break :answer .record_seal;
+        },
+        .content => |content| .{ .content = try content_domain.readContent(self, &content.reader.window, content.start, content.destination) },
+        .corrupt => return store_core.fence(self, error.CorruptStore),
+    };
+    page.keepRead(.{ .question = question, .answer = answer });
+}
+
+fn readHistoricalEntry(self: *Store, view: *RequestPage, after_position: u64) !RequestPage.EntryProgress {
     return self.queue().run(readHistoricalEntryHeld, .{ self, view, after_position });
 }
 
-fn readHistoricalEntryHeld(self: *Store, view: *HistoricalView, after_position: u64) !HistoricalView.EntryProgress {
+fn readHistoricalEntryHeld(self: *Store, view: *RequestPage, after_position: u64) !RequestPage.EntryProgress {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     var access: ReadAccess = .open(&entry);
@@ -1075,11 +1211,11 @@ fn readHistoricalEntryHeld(self: *Store, view: *HistoricalView, after_position: 
     return .{ .ready = try entry.finish(Ordinary.historical_entry, entryAfter(&access, view, after_position)) };
 }
 
-fn validateHistoricalOutputsStep(self: *Store, view: *HistoricalView) !bool {
+fn validateHistoricalOutputsStep(self: *Store, view: *RequestPage) !bool {
     return self.queue().run(validateHistoricalOutputsStepHeld, .{ self, view });
 }
 
-fn validateHistoricalOutputsStepHeld(self: *Store, view: *HistoricalView) !bool {
+fn validateHistoricalOutputsStepHeld(self: *Store, view: *RequestPage) !bool {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     var access: ReadAccess = .open(&entry);
@@ -1292,7 +1428,7 @@ const output_source_page = 256;
 
 /// Checks a page of producing Operations and keeps the last as the cursor.
 const OutputSources = struct {
-    view: *HistoricalView,
+    view: *RequestPage,
     rows: u16 = 0,
     corrupt: bool = false,
 
@@ -1315,7 +1451,7 @@ const OutputSources = struct {
     }
 };
 
-fn keepOutputBoundary(view: *HistoricalView, row: *const output_boundary.Row) error{CorruptStore}!void {
+fn keepOutputBoundary(view: *RequestPage, row: *const output_boundary.Row) error{CorruptStore}!void {
     view.output_boundary = row.admission_position.get();
     view.selected_base = if (row.operation_id) |id| id.get() else 0;
     view.output_frontier = row.frontier;
@@ -1357,7 +1493,7 @@ fn keepOutputBoundary(view: *HistoricalView, row: *const output_boundary.Row) er
 // statement. Its own item count detects even a completely missing output.
 // No statement or lock survives this one step. A failed step is
 // `CorruptStore`, main's answer for it.
-fn checkOutputsStep(a: *ReadAccess, view: *HistoricalView) !bool {
+fn checkOutputsStep(a: *ReadAccess, view: *RequestPage) !bool {
     if (view.outputs_validated) return true;
     if (view.output_frontier == null) {
         var first: reads_domain.First(output_boundary.Row) = .{};
@@ -1384,8 +1520,8 @@ fn checkOutputsStep(a: *ReadAccess, view: *HistoricalView) !bool {
 
 /// The served entry lives in the view: in its read-ahead, its next tool
 /// group or its output check.
-fn entryAfter(a: *ReadAccess, view: *HistoricalView, after_position: u64) !?*const HistoricalEntry {
-    std.debug.assert(view.outputs_validated);
+fn entryAfter(a: *ReadAccess, view: *RequestPage, after_position: u64) !?*const HistoricalEntry {
+    std.debug.assert(view.outputs_validated and view.active_tool_group_source_id == null);
     if (view.read_ahead != .none) {
         // The round an admission read ahead is this read's only when it
         // scanned from this view's cursor and read after this position.
@@ -1429,7 +1565,7 @@ fn entryAfter(a: *ReadAccess, view: *HistoricalView, after_position: u64) !?*con
 }
 
 /// The host inputs and output items after ?2 below the Operation's
-/// admission, the first `HistoricalView.entry_batch` of them in position
+/// admission, the first `RequestPage.entry_batch` of them in position
 /// order.
 const historical_entries = rsql.Read(.{
     .sql = "SELECT e.session_position,CASE WHEN e.entry_kind=4 THEN 5 ELSE e.entry_kind END AS entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,(e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ") AS consistent," ++
@@ -1462,7 +1598,7 @@ const historical_entries = rsql.Read(.{
         "JOIN session_revision revision ON revision.session_ref=earlier.session_ref AND revision.revision=earlier.settings_revision " ++
         "WHERE current.operation_id=?1 AND earlier.admission_position>?2 AND earlier.admission_position<current.admission_position " ++
         "AND (earlier.admission_position>?3 OR earlier.operation_id=?5) " ++
-        std.fmt.comptimePrint("ORDER BY 1 LIMIT {d}", .{HistoricalView.entry_batch}),
+        std.fmt.comptimePrint("ORDER BY 1 LIMIT {d}", .{RequestPage.entry_batch}),
     .Args = struct { operation: u64, after: u64, floor: u64, first_message: u64, base: u64, anchor: u64 },
     .Row = struct {
         session_position: rsql.Positive,
@@ -1504,13 +1640,13 @@ pub const Keys = struct {
     anchor: ?u64 = null,
 };
 
-fn keysOf(view: *const HistoricalView) Keys {
+fn keysOf(view: *const RequestPage) Keys {
     return .{ .floor = view.floor.position, .first_message = view.floor.first_message, .base = view.selected_base, .anchor = view.anchor };
 }
 
 /// The claim on a read-ahead history round ends: the view holds none of
 /// it, and scans from the start unless its caller resumed elsewhere.
-fn dropReadAhead(view: *HistoricalView) void {
+fn dropReadAhead(view: *RequestPage) void {
     if (view.read_ahead == .unclaimed) view.tool_group_source_cursor = 0;
     view.read_ahead = .none;
     view.group_scan = .{};
@@ -1538,7 +1674,7 @@ fn declared_members_where(comptime set: []const u8, comptime position: []const u
 /// steps, as its entry. The first row that is not one stops the read, and
 /// its failure is the round's answer.
 const EntryBatch = struct {
-    view: *HistoricalView,
+    view: *RequestPage,
     /// The page's row, which the read decodes into.
     decoded: *historical_entries.Row,
     failure: ?error{CorruptStore} = null,
@@ -1564,7 +1700,7 @@ const historical_catalog_sources = rsql.Read(.{
 });
 
 /// The buffered entry after `after_position`, if the read-ahead holds one.
-fn bufferedEntry(view: *HistoricalView, after_position: u64) ?*const HistoricalEntry {
+fn bufferedEntry(view: *RequestPage, after_position: u64) ?*const HistoricalEntry {
     while (view.entries_next < view.entries_end) : (view.entries_next += 1) {
         if (view.entries[view.entries_next].position > after_position) return &view.entries[view.entries_next];
     }
@@ -1573,15 +1709,15 @@ fn bufferedEntry(view: *HistoricalView, after_position: u64) ?*const HistoricalE
 
 /// Whether the entry after `after_position` needs a read: the read-ahead
 /// holds none, and the walk has not ended at or before it.
-fn needsBatch(view: *HistoricalView, after_position: u64) bool {
+fn needsBatch(view: *RequestPage, after_position: u64) bool {
     if (bufferedEntry(view, after_position) != null) return false;
     return if (view.entries_done_after) |last| after_position < last else true;
 }
 
 /// The batch's last position when the batch is full, past which a row
 /// belongs to a later batch; a short batch reaches the walk's end.
-fn batchLast(view: *const HistoricalView) u64 {
-    return if (view.entries_end == HistoricalView.entry_batch) view.entries[view.entries_end - 1].position else std.math.maxInt(u64);
+fn batchLast(view: *const RequestPage) u64 {
+    return if (view.entries_end == RequestPage.entry_batch) view.entries[view.entries_end - 1].position else std.math.maxInt(u64);
 }
 
 /// One history round's reads: the entries after a position, a batch of
@@ -1608,7 +1744,7 @@ const BatchRead = struct {
     };
 
     /// Queues the round's reads. `read` stays where it is until `finish`.
-    fn queue(read: *BatchRead, a: anytype, view: *HistoricalView, keys: Keys, walk: ?Page.ToolWalk, after_position: u64) void {
+    fn queue(read: *BatchRead, a: anytype, view: *RequestPage, keys: Keys, walk: ?Page.ToolWalk, after_position: u64) void {
         const page = view.page.?;
         view.entries_next = 0;
         view.entries_end = 0;
@@ -1626,27 +1762,27 @@ const BatchRead = struct {
             .first_message = keys.first_message,
             .base = keys.base,
             .anchor = declarationAnchor(keys),
-        }, HistoricalView.entry_batch, &read.entries);
+        }, RequestPage.entry_batch, &read.entries);
         read.items = .{ .view = view, .decoded = page.decoded(page_items.Row) };
-        a.readEach(page_items, .{ .operation = operation, .after = after_position, .floor = keys.floor, .base = keys.base }, HistoricalView.entry_batch, &read.items);
+        a.readEach(page_items, .{ .operation = operation, .after = after_position, .floor = keys.floor, .base = keys.base }, RequestPage.entry_batch, &read.items);
         page.queueParts(a, view, keys, &read.parts, after_position + 1, 0);
         read.ahead = if (walk) |wanted| !page.toolsReach(wanted, 0) else false;
         if (read.ahead) page.queueTools(a, view, keys, &read.tools, walk.?, 0);
     }
 
     /// The round failed: the page holds nothing of it.
-    fn discard(read: *const BatchRead, view: *HistoricalView) void {
+    fn discard(read: *const BatchRead, view: *RequestPage) void {
         view.entries_end = 0;
         if (read.ahead) view.page.?.tools_walk = .{};
     }
 
     /// After the round: the batch is the view's, or its failure.
-    fn finish(read: *const BatchRead, view: *HistoricalView, after_position: u64) error{CorruptStore}!void {
+    fn finish(read: *const BatchRead, view: *RequestPage, after_position: u64) error{CorruptStore}!void {
         errdefer read.discard(view);
         const page = view.page.?;
         if (!read.sources.consistent) return error.CorruptStore;
         if (read.entries.failure) |err| return err;
-        if (view.entries_end < HistoricalView.entry_batch)
+        if (view.entries_end < RequestPage.entry_batch)
             view.entries_done_after = if (view.entries_end == 0) after_position else view.entries[view.entries_end - 1].position;
         page.parts_complete = read.parts.past or page.parts_end < Page.part_batch;
         if (read.ahead) page.tools_complete = page.tools_end < Page.tool_batch;
@@ -1655,7 +1791,7 @@ const BatchRead = struct {
 
 /// The next host input or output item after `after_position`, served from
 /// the view's read-ahead and refilled by one round (`BatchRead`).
-fn nextOrdinaryHistoricalEntry(a: *ReadAccess, view: *HistoricalView, after_position: u64) !?*const HistoricalEntry {
+fn nextOrdinaryHistoricalEntry(a: *ReadAccess, view: *RequestPage, after_position: u64) !?*const HistoricalEntry {
     if (!needsBatch(view, after_position)) return bufferedEntry(view, after_position);
     var read: BatchRead = undefined;
     read.queue(a, view, keysOf(view), view.aheadWalk(), after_position);
@@ -1706,7 +1842,7 @@ const page_items = rsql.Read(.{
         "LEFT JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
         "LEFT JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
         "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position AND " ++
-        servedItemSql("?3", "?4") ++ " ORDER BY item.session_position " ++ std.fmt.comptimePrint("LIMIT {d}", .{HistoricalView.entry_batch}),
+        servedItemSql("?3", "?4") ++ " ORDER BY item.session_position " ++ std.fmt.comptimePrint("LIMIT {d}", .{RequestPage.entry_batch}),
     .Args = struct { operation: u64, after: u64, floor: u64, base: u64 },
     .Row = struct {
         session_position: rsql.Positive,
@@ -1754,7 +1890,7 @@ const page_parts = rsql.Read(.{
         "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
         "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
         "WHERE current.operation_id=?1 AND item.session_position>=?2 AND item.session_position<current.admission_position AND " ++
-        servedItemSql("?4", "?5") ++ " ORDER BY item.session_position " ++ std.fmt.comptimePrint("LIMIT {d}", .{HistoricalView.entry_batch}) ++ ") " ++
+        servedItemSql("?4", "?5") ++ " ORDER BY item.session_position " ++ std.fmt.comptimePrint("LIMIT {d}", .{RequestPage.entry_batch}) ++ ") " ++
         "SELECT batch.session_position,part.part_ordinal,part.part_array,part.part_kind,part.text_length,part.text_content_id," ++
         pageContentSql("own", "own") ++ ",part.extras_content_id," ++ pageContentSql("bag", "bag") ++ " " ++
         "FROM batch JOIN model_output_part part ON part.operation_id=batch.operation_id AND part.item_ordinal=batch.item_ordinal " ++
@@ -1790,11 +1926,12 @@ const page_parts = rsql.Read(.{
 /// is plain values; content rows never change either, so bytes kept under
 /// an id are that content's whichever row brought them.
 const Page = struct {
+    /// Between reads, the request's question and answer borrow this scratch.
     /// Where every read decodes its row, bytes and all
     /// (`Access.readEach`): one row at a time, each copied out by its
     /// visitor before the next.
     row: [row_bytes]u8 align(row_align),
-    items: [HistoricalView.entry_batch]Item,
+    items: [RequestPage.entry_batch]Item,
     items_end: usize,
     parts: [part_batch]Part,
     parts_next: usize,
@@ -1824,7 +1961,7 @@ const Page = struct {
     /// until the next batch; and the contents the tools page names, kept
     /// from its end until the next tools page. Each lists its contents'
     /// ids and where each one's bytes stop, toward the other.
-    batch: Shelf(HistoricalView.entry_batch * 6 + part_batch * 2 + 1),
+    batch: Shelf(RequestPage.entry_batch * 6 + part_batch * 2 + 1),
     held: Shelf(tool_batch * 2),
     bytes: [arena_bytes]u8,
 
@@ -1853,6 +1990,12 @@ const Page = struct {
         }
         break :bytes most;
     };
+
+    /// The exchange uses no resident storage beyond today's decode row.
+    fn exchange(page: *Page) *RequestPage.Read {
+        comptime std.debug.assert(@sizeOf(RequestPage.Read) <= row_bytes and @alignOf(RequestPage.Read) <= row_align);
+        return @ptrCast(&page.row);
+    }
 
     /// The memory a read of `Row` decodes into.
     fn decoded(page: *Page, comptime Row: type) *Row {
@@ -2012,7 +2155,7 @@ const Page = struct {
     }
 
     pub const Items = struct {
-        view: *HistoricalView,
+        view: *RequestPage,
         decoded: *page_items.Row,
         pub fn visit(items: *Items, row: *const page_items.Row) bool {
             const page = items.view.page.?;
@@ -2024,7 +2167,7 @@ const Page = struct {
     };
 
     pub const Parts = struct {
-        view: *HistoricalView,
+        view: *RequestPage,
         decoded: *page_parts.Row,
         /// The read reached a part past the batch.
         past: bool = false,
@@ -2065,7 +2208,7 @@ const Page = struct {
 
     /// Queues the read of the active group's results after the page's
     /// last; `results_complete` follows its round.
-    fn queueResults(page: *Page, a: *ReadAccess, view: *HistoricalView, visitor: *Results) void {
+    fn queueResults(page: *Page, a: *ReadAccess, view: *RequestPage, visitor: *Results) void {
         page.results_end = 0;
         page.results_next = 0;
         visitor.* = .{ .page = page, .decoded = page.decoded(group_results.Row) };
@@ -2078,7 +2221,7 @@ const Page = struct {
 
     /// Queues the parts read from part `part` of the item at `first`;
     /// `parts_complete` follows its round.
-    fn queueParts(page: *Page, a: anytype, view: *HistoricalView, keys: Keys, visitor: *Parts, first: u64, part: u64) void {
+    fn queueParts(page: *Page, a: anytype, view: *RequestPage, keys: Keys, visitor: *Parts, first: u64, part: u64) void {
         page.parts_next = 0;
         page.parts_end = 0;
         page.parts_complete = false;
@@ -2088,7 +2231,7 @@ const Page = struct {
 
     /// Queues the read of `walk`'s members from `ordinal`;
     /// `tools_complete` follows its round.
-    fn queueTools(page: *Page, a: anytype, view: *HistoricalView, keys: Keys, visitor: *Tools, walk: ToolWalk, ordinal: u64) void {
+    fn queueTools(page: *Page, a: anytype, view: *RequestPage, keys: Keys, visitor: *Tools, walk: ToolWalk, ordinal: u64) void {
         // A reader that borrows the page's bytes keeps them where they are.
         if (view.inline_readers == 0) page.held.count = 0;
         page.tools_end = 0;
@@ -2123,7 +2266,7 @@ const Page = struct {
     }
 };
 
-fn historicalEntry(view: *HistoricalView, row: *const historical_entries.Row) error{CorruptStore}!HistoricalEntry {
+fn historicalEntry(view: *RequestPage, row: *const historical_entries.Row) error{CorruptStore}!HistoricalEntry {
     const kind: HistoricalEntryKind = switch (row.entry_kind) {
         1 => .user,
         2 => .instruction,
@@ -2173,7 +2316,7 @@ fn historicalEntry(view: *HistoricalView, row: *const historical_entries.Row) er
     };
 }
 
-fn activateHistoricalToolGroup(view: *HistoricalView) !?*const HistoricalEntry {
+fn activateHistoricalToolGroup(view: *RequestPage) !?*const HistoricalEntry {
     const entry = if (view.next_tool_group) |*value| value else return null;
     view.active_tool_group_source_id = view.next_tool_group_source_id orelse return error.CorruptStore;
     view.active_tool_group_count = 0;
@@ -2297,7 +2440,7 @@ const GroupRead = struct {
     calls: Calls,
 
     const Sources = struct {
-        view: *HistoricalView,
+        view: *RequestPage,
         rows: usize = 0,
 
         pub fn visit(sources: *Sources, row: *const group_sources.Row) bool {
@@ -2321,7 +2464,7 @@ const GroupRead = struct {
     };
 
     const Calls = struct {
-        view: *HistoricalView,
+        view: *RequestPage,
         decoded: *GroupCallRow,
         index: usize = 0,
         rows: usize = 0,
@@ -2367,7 +2510,7 @@ const GroupRead = struct {
     };
 
     /// Queues the round's reads. `read` stays where it is until `finish`.
-    fn queue(read: *GroupRead, a: anytype, view: *HistoricalView, keys: Keys) void {
+    fn queue(read: *GroupRead, a: anytype, view: *RequestPage, keys: Keys) void {
         const page = view.page.?;
         const scan = &view.group_scan;
         page.groups_end = 0;
@@ -2383,14 +2526,14 @@ const GroupRead = struct {
     }
 
     /// The round failed: the page holds no group of it.
-    fn discard(view: *HistoricalView) void {
+    fn discard(view: *RequestPage) void {
         view.page.?.groups_end = 0;
     }
 
     /// After the round: the page holds the sources whose calls it read
     /// whole, in order; the scan holds the one a full page cut short, or
     /// that the sources ended.
-    fn finish(read: *const GroupRead, view: *HistoricalView) error{CorruptStore}!void {
+    fn finish(read: *const GroupRead, view: *RequestPage) error{CorruptStore}!void {
         errdefer discard(view);
         const page = view.page.?;
         const scan = &view.group_scan;
@@ -2428,7 +2571,7 @@ const GroupRead = struct {
 /// `HistoricalPending`. A failed step is main's name: `CorruptStore` for
 /// the sources' and calls' reads and `HistoricalEntryReadFailed` for the
 /// bounds'.
-fn readNextHistoricalToolGroup(a: *ReadAccess, view: *HistoricalView, after_position: u64) !?HistoricalToolGroup {
+fn readNextHistoricalToolGroup(a: *ReadAccess, view: *RequestPage, after_position: u64) !?HistoricalToolGroup {
     const page = view.page.?;
     const scan = &view.group_scan;
     if (page.groups_next == page.groups_end and !scan.done) {
@@ -2471,7 +2614,7 @@ fn pageMetadata(length: ?u64, digest: ?[32]u8, private: ?bool) error{CorruptStor
 
 /// The output item at `position`, from the batch's page: its entry came
 /// from the same batch, so a missing row is `CorruptStore`.
-fn outputAt(view: *HistoricalView, position: u64) error{CorruptStore}!HistoricalOutput {
+fn outputAt(view: *RequestPage, position: u64) error{CorruptStore}!HistoricalOutput {
     const page = view.page orelse return error.CorruptStore;
     const row = for (page.items[0..page.items_end]) |*item| {
         if (item.session_position.get() == position) break item;
@@ -2482,7 +2625,7 @@ fn outputAt(view: *HistoricalView, position: u64) error{CorruptStore}!Historical
     const has_call = row.name_content_id != null;
     if (has_call != (kind == .function_call)) return error.CorruptStore;
     if ((row.message_content_id != null) != (kind == .message)) return error.CorruptStore;
-    var text: ?HistoricalView.MessageText = null;
+    var text: ?RequestPage.MessageText = null;
     if (row.message_content_id) |id| {
         const content = try viewContent(view, id.get(), &try pageMetadata(row.message_length, row.message_digest, row.message_private), false);
         // Its parts' reads check a nonempty text; an empty one is
@@ -2510,18 +2653,18 @@ fn outputAt(view: *HistoricalView, position: u64) error{CorruptStore}!Historical
 /// Whether the open item's next part may lie past what `parts` holds:
 /// the page's parts are in item order, and items the request leaves out
 /// are passed over here.
-fn partsExhausted(view: *HistoricalView) bool {
+fn partsExhausted(view: *RequestPage) bool {
     const position = view.output_parts.?.position;
     const page = view.page.?;
     while (page.parts_next < page.parts_end and page.parts[page.parts_next].session_position.get() < position) page.parts_next += 1;
     return page.parts_next == page.parts_end and !page.parts_complete;
 }
 
-fn readHistoricalParts(self: *Store, view: *HistoricalView) !void {
+fn readHistoricalParts(self: *Store, view: *RequestPage) !void {
     return self.queue().run(readHistoricalPartsHeld, .{ self, view });
 }
 
-fn readHistoricalPartsHeld(self: *Store, view: *HistoricalView) !void {
+fn readHistoricalPartsHeld(self: *Store, view: *RequestPage) !void {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     var access: ReadAccess = .open(&entry);
@@ -2531,7 +2674,7 @@ fn readHistoricalPartsHeld(self: *Store, view: *HistoricalView) !void {
 
 /// Refills `parts` from the open item's next part, in a round of its
 /// own. A failed step is `HistoricalEntryReadFailed`, main's name.
-fn partsFrom(a: *ReadAccess, view: *HistoricalView) !void {
+fn partsFrom(a: *ReadAccess, view: *RequestPage) !void {
     const cursor = &view.output_parts.?;
     const page = view.page.?;
     var parts: Page.Parts = undefined;
@@ -2541,7 +2684,7 @@ fn partsFrom(a: *ReadAccess, view: *HistoricalView) !void {
 }
 
 /// The open item's next part, from the page (`partsExhausted` is false).
-fn nextPart(view: *HistoricalView) error{CorruptStore}!?HistoricalPart {
+fn nextPart(view: *RequestPage) error{CorruptStore}!?HistoricalPart {
     const cursor = &view.output_parts.?;
     const page = view.page.?;
     const row = if (page.parts_next < page.parts_end and page.parts[page.parts_next].session_position.get() == cursor.position)
@@ -2604,21 +2747,21 @@ fn partFits(item: OutputItemKind, array: output_format.PartArray, kind: output_f
 }
 
 /// A saved bag, or null when it is empty: the writer adds nothing for it.
-fn viewBag(view: *HistoricalView, content_id: u64, row: *const content_metadata.Row) !?HistoricalContent {
+fn viewBag(view: *RequestPage, content_id: u64, row: *const content_metadata.Row) !?HistoricalContent {
     const bag = try viewContent(view, content_id, row, true);
     return if (bag.length == 0) null else bag;
 }
 
 fn readHistoricalToolResult(
     self: *Store,
-    view: *HistoricalView,
+    view: *RequestPage,
 ) !?HistoricalToolResult {
     return self.queue().run(readHistoricalToolResultHeld, .{ self, view });
 }
 
 fn readHistoricalToolResultHeld(
     self: *Store,
-    view: *HistoricalView,
+    view: *RequestPage,
 ) !?HistoricalToolResult {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
@@ -2665,7 +2808,7 @@ const group_results = rsql.Read(.{
 /// more is read in one round, from the call after the last one served. A
 /// failed step is `HistoricalEntryReadFailed`, main's name for the call's
 /// read; a result that lacks a content row is `CorruptStore`.
-fn nextGroupResult(a: *ReadAccess, view: *HistoricalView) !?HistoricalToolResult {
+fn nextGroupResult(a: *ReadAccess, view: *RequestPage) !?HistoricalToolResult {
     std.debug.assert(view.active_tool_group_source_id != null);
     const page = view.page.?;
     if (page.results_next == page.results_end and !page.results_complete) {
@@ -2692,7 +2835,7 @@ fn nextGroupResult(a: *ReadAccess, view: *HistoricalView) !?HistoricalToolResult
 
 /// Content as a view handle, only when its privacy is `private`: like a
 /// digest lookup of public content, a private row cannot stand in.
-fn viewContent(view: *HistoricalView, content_id: u64, row: *const content_metadata.Row, private: bool) error{CorruptStore}!HistoricalContent {
+fn viewContent(view: *RequestPage, content_id: u64, row: *const content_metadata.Row, private: bool) error{CorruptStore}!HistoricalContent {
     if (row.private != private) return error.CorruptStore;
     return .{ .view = view, .content_id = @intCast(content_id), .length = row.byte_length, .digest = row.digest };
 }

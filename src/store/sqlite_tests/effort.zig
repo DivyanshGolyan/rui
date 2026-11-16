@@ -12,7 +12,7 @@ const sqlite = @import("../sqlite.zig");
 const store_testing = @import("../testing.zig");
 const c = sqlite.c;
 const ConfigureReply = configuration_domain.ConfigureReply;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const answerTestTurn = store_testing.answerTestTurn;
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
@@ -82,8 +82,8 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
     const retry = (try admitRetryForTesting(&storage)).?.permit.binding;
     try std.testing.expectEqual(first.operation_id, retry.operation_id);
     {
-        var view: HistoricalView = undefined;
-        storage.openHistoricalView(retry, &view);
+        var view: TestingPage = undefined;
+        view.open(&storage, retry);
         defer view.close();
         try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .high), (try testSettings(&view)).reasoning_effort);
     }
@@ -137,8 +137,8 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
     var reopened: Store = undefined;
     try testingStore(&reopened, &tmp, std.testing.io);
     defer reopened.close() catch unreachable;
-    var view: HistoricalView = undefined;
-    reopened.openHistoricalView(second, &view);
+    var view: TestingPage = undefined;
+    view.open(&reopened, second);
     defer view.close();
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .medium), (try testSettings(&view)).reasoning_effort);
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .xhigh), (try reopened.inspectSessionForTesting(session.slice())).reasoning_effort);
@@ -176,8 +176,8 @@ test "an exhausted Attempt still retains its effort refusal for the next Operati
     try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND resolution_code='retry_exhausted' AND latency_ms=37 AND first_event_ms=7", .{binding.operation_id}));
     try submitTestMessage(&storage, &tmp, "exhausted-effort-next-input", "exhausted-effort-next", session.slice(), "next Operation");
     const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    var view: historical_domain.HistoricalView = undefined;
-    storage.openHistoricalView(next, &view);
+    var view: TestingPage = undefined;
+    view.open(&storage, next);
     defer view.close();
     var settings: historical_domain.HistoricalSettings = undefined;
     try view.settings(&settings);

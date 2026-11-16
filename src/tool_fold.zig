@@ -92,8 +92,8 @@ pub const Output = struct {
             text.finish(&writer) catch break;
             try sink.feed(output_marker);
             try sink.feed("    ");
-            try sink.feed(writer.buffered());
-            try sink.feed("\n");
+            try Text.writeBody(sink, writer.buffered());
+            try Text.writeBody(sink, "\n");
             budget -= writer.buffered().len;
             shown += 1;
             at = end + 1;

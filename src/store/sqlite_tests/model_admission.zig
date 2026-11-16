@@ -19,9 +19,9 @@ const store_testing = @import("../testing.zig");
 const c = sqlite.c;
 const ContentReader = content_domain.ContentReader;
 const HistoricalEntryKind = historical_domain.HistoricalEntryKind;
-const HistoricalReader = historical_domain.HistoricalReader;
+const TestingReader = store_testing.TestingReader;
 const HistoricalSettings = historical_domain.HistoricalSettings;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const ModelOperationKind = historical_domain.ModelOperationKind;
 const OutputMetadataWriter = store_testing.OutputMetadataWriter;
 const ValidatedOutput = model_settlement_domain.ValidatedOutput;
@@ -99,8 +99,8 @@ test "complete call outcomes continue once in call order ahead of pending input"
     try std.testing.expect(stale_reply == .rejected);
     try std.testing.expectEqual(protocol.PermissionDecisionRejection.action_not_pending, stale_reply.rejected.code);
 
-    var view: HistoricalView = undefined;
-    storage.openHistoricalView(continuation, &view);
+    var view: TestingPage = undefined;
+    view.open(&storage, continuation);
     defer view.close();
     var position: u64 = 0;
     try std.testing.expectEqual(HistoricalEntryKind.user, (try view.nextEntry(position)).?.kind);
@@ -128,9 +128,9 @@ test "complete call outcomes continue once in call order ahead of pending input"
     for (expected_call_ids, expected_outputs, 0..) |expected_call_id, expected_output, ordinal| {
         _ = ordinal;
         const result = (try view.nextToolResult()).?;
-        var call_id: HistoricalReader = undefined;
+        var call_id: TestingReader = undefined;
         try view.openContent(result.call_id, &call_id);
-        var output: HistoricalReader = undefined;
+        var output: TestingReader = undefined;
         try view.openContent(result.output, &output);
         var buffer: [128]u8 = undefined;
         const call_id_count = try call_id.read(0, &buffer);
@@ -296,9 +296,9 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expectEqualStrings("model-b", (try storage.inspectSessionForTesting(created_session_0.slice())).model.slice());
     try expectModelRevisions(&storage, created_session_0.slice(), "during-work");
 
-    var view: HistoricalView = undefined;
-    storage.openHistoricalView(binding, &view);
-    defer if (view.active) view.close();
+    var view: TestingPage = undefined;
+    view.open(&storage, binding);
+    defer if (view.page.active) view.close();
     var settings: HistoricalSettings = undefined;
     try view.settings(&settings);
     try std.testing.expectEqual(protocol.Provider.codex, settings.provider);
@@ -319,23 +319,23 @@ test "one committed selection freezes its settings and input prefix" {
     const instruction = (try view.nextEntry(second_input.position)).?;
     try std.testing.expect(instruction.kind == .instruction);
     try std.testing.expect((try view.nextEntry(instruction.position)) == null);
-    var first_reader: HistoricalReader = undefined;
+    var first_reader: TestingReader = undefined;
     try view.openContent(first_input.content.?, &first_reader);
-    defer if (first_reader.active) first_reader.close();
+    defer if (first_reader.reader.active) first_reader.close();
     var actual: [5]u8 = undefined;
     try std.testing.expectEqual(actual.len, try first_reader.read(0, &actual));
     try std.testing.expectEqualStrings("first", &actual);
 
-    var foreign_view: HistoricalView = undefined;
-    storage.openHistoricalView(binding, &foreign_view);
-    try std.testing.expect(first_input.content.?.belongsTo(&view));
-    try std.testing.expect(!first_input.content.?.belongsTo(&foreign_view));
+    var foreign_view: TestingPage = undefined;
+    foreign_view.open(&storage, binding);
+    try std.testing.expect(first_input.content.?.belongsTo(&view.page));
+    try std.testing.expect(!first_input.content.?.belongsTo(&foreign_view.page));
     foreign_view.close();
-    try std.testing.expectEqual(@as(usize, 1), view.readers);
+    try std.testing.expectEqual(@as(usize, 1), view.page.readers);
     first_reader.close();
-    try std.testing.expectEqual(@as(usize, 0), view.readers);
+    try std.testing.expectEqual(@as(usize, 0), view.page.readers);
     view.close();
-    try std.testing.expect(!first_input.content.?.belongsTo(&view));
+    try std.testing.expect(!first_input.content.?.belongsTo(&view.page));
     try std.testing.expect(!first_reader.usable());
 
     try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
@@ -365,8 +365,8 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expect(try storage.configure(&tools_update, .{}) == .accepted);
 
     const later = (try storage.admitNextModelAttempt(.{})).?;
-    var later_view: HistoricalView = undefined;
-    storage.openHistoricalView(later.permit.binding, &later_view);
+    var later_view: TestingPage = undefined;
+    later_view.open(&storage, later.permit.binding);
     defer later_view.close();
     var later_settings: HistoricalSettings = undefined;
     try later_view.settings(&later_settings);
@@ -475,7 +475,7 @@ test "continued accepted output allows model revisions and keeps public text rea
             "JOIN content text ON text.content_id=item.message_content_id " ++
             "JOIN content bag ON bag.content_id=item.extras_content_id WHERE item.message_content_id=?1");
         defer _ = c.sqlite3_finalize(backing);
-        try sqlite.bindI64(backing, 1, public_reader.content_id);
+        try sqlite.bindI64(backing, 1, public_reader.window.content_id);
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(backing));
         try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_column_int(backing, 0));
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_column_int(backing, 1));

@@ -11,7 +11,7 @@ const Store = store_core.Store;
 const historical_domain = @import("../domain/historical.zig");
 const store_testing = @import("../testing.zig");
 const AttemptBinding = store_core.AttemptBinding;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
 const configureTestSession = store_testing.configureTestSession;
@@ -138,7 +138,7 @@ fn expectFrozenFloor(storage: *Store, binding: AttemptBinding, level: u64, oldes
     try std.testing.expectEqual(position - 1, try store_testing.queryU64(storage, "SELECT history_floor FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
     try std.testing.expectEqual(level, try store_testing.queryU64(storage, "SELECT history_level FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
     try std.testing.expectEqual(dropped, try store_testing.queryU64(storage, "SELECT history_dropped FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
-    var view: HistoricalView = undefined;
+    var view: TestingPage = undefined;
     try openCheckedView(storage, binding, &view);
     defer view.close();
     var cursor: TestingHistoryCursor = .{};
@@ -236,7 +236,7 @@ test "frozen context window covers all levels reservation exhaustion and inherit
                     const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                     try expectFrozenContextWindow(&storage, successor, 100);
                     {
-                        var view: HistoricalView = undefined;
+                        var view: TestingPage = undefined;
                         try openCheckedView(&storage, successor, &view);
                         defer view.close();
                         const coverage = try view.coverage();
@@ -258,7 +258,7 @@ test "frozen context window covers all levels reservation exhaustion and inherit
                     try submitTestMessage(&storage, &tmp, "window-new-model", "window-new-model", session.slice(), "new");
                     const switched = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                     try expectFrozenContextWindow(&storage, switched, 700);
-                    var view: HistoricalView = undefined;
+                    var view: TestingPage = undefined;
                     try openCheckedView(&storage, switched, &view);
                     defer view.close();
                     const coverage = try view.coverage();

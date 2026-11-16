@@ -14,9 +14,9 @@ const model_settlement_domain = @import("../domain/model_settlement.zig");
 const store_testing = @import("../testing.zig");
 const AttemptBinding = store_core.AttemptBinding;
 const HistoricalEntryKind = historical_domain.HistoricalEntryKind;
-const HistoricalReader = historical_domain.HistoricalReader;
+const TestingReader = store_testing.TestingReader;
 const HistoricalSettings = historical_domain.HistoricalSettings;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const ModelFailure = model_settlement_domain.ModelFailure;
 const ModelOperationKind = historical_domain.ModelOperationKind;
 const canonicalCwd = store_testing.canonicalCwd;
@@ -72,8 +72,8 @@ test "compaction pressure uses provider usage appended input and complete call r
                 const purpose: ModelOperationKind = if (scenario == 1) .assistant_response else .compaction;
                 try std.testing.expectEqual(purpose, try storage.modelOperationKind(next));
                 {
-                    var view: HistoricalView = undefined;
-                    storage.openHistoricalView(next, &view);
+                    var view: TestingPage = undefined;
+                    view.open(&storage, next);
                     defer view.close();
                     var cursor: TestingHistoryCursor = .{};
                     try std.testing.expect((try view.coverage()).anchor == null);
@@ -82,7 +82,7 @@ test "compaction pressure uses provider usage appended input and complete call r
                     try std.testing.expectEqual(HistoricalEntryKind.tool_results, (try cursor.next(&view)).?.kind);
                     for ([_][]const u8{ "call-a", "call-b" }) |expected| {
                         const result = (try view.nextToolResult()).?;
-                        var reader: HistoricalReader = undefined;
+                        var reader: TestingReader = undefined;
                         try view.openContent(result.call_id, &reader);
                         defer reader.close();
                         var bytes: [64]u8 = undefined;
@@ -97,8 +97,8 @@ test "compaction pressure uses provider usage appended input and complete call r
                     try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSessionForTesting(session.slice())).pending_messages);
                     try settleCompactionForTesting(&storage, &tmp, next, &.{.compaction});
                     const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-                    var view: HistoricalView = undefined;
-                    storage.openHistoricalView(successor, &view);
+                    var view: TestingPage = undefined;
+                    view.open(&storage, successor);
                     defer view.close();
                     var cursor: TestingHistoryCursor = .{};
                     const anchor = (try view.coverage()).anchor.?;
@@ -143,8 +143,8 @@ test "compaction overflow admits a new Operation without losing applied input" {
             try std.testing.expect(next.permit.binding.operation_id != original.operation_id);
             try std.testing.expectEqual(original.turn_id, next.permit.binding.turn_id);
             try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(next.permit.binding));
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(next.permit.binding, &view);
+            var view: TestingPage = undefined;
+            view.open(&storage, next.permit.binding);
             defer view.close();
             try std.testing.expectEqual(ModelOperationKind.compaction, (try testSettings(&view)).operation);
             try std.testing.expect((try view.coverage()).anchor == null);
@@ -209,8 +209,8 @@ test "compaction success retains host inputs and ordered anchor suffix across re
             try std.testing.expectEqual(compact.turn_id, successor.turn_id);
             try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(successor));
             {
-                var view: HistoricalView = undefined;
-                storage.openHistoricalView(successor, &view);
+                var view: TestingPage = undefined;
+                view.open(&storage, successor);
                 defer view.close();
                 var cursor: TestingHistoryCursor = .{};
                 const anchor = (try view.coverage()).anchor.?;
@@ -235,8 +235,8 @@ test "compaction success retains host inputs and ordered anchor suffix across re
             try settleCompactionForTesting(&storage, &tmp, second_base, &.{.compaction});
             const exhausted = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             {
-                var view: HistoricalView = undefined;
-                storage.openHistoricalView(exhausted, &view);
+                var view: TestingPage = undefined;
+                view.open(&storage, exhausted);
                 defer view.close();
                 var cursor: TestingHistoryCursor = .{};
                 const anchor = (try view.coverage()).anchor.?;
@@ -298,8 +298,8 @@ test "explicit compaction thresholds and frozen retry survive reopen" {
                 const retry = (try admitRetryForTesting(&storage)).?.permit.binding;
                 try std.testing.expectEqual(first.operation_id, retry.operation_id);
                 {
-                    var view: HistoricalView = undefined;
-                    storage.openHistoricalView(retry, &view);
+                    var view: TestingPage = undefined;
+                    view.open(&storage, retry);
                     defer view.close();
                     var frozen: HistoricalSettings = undefined;
                     try view.settings(&frozen);
@@ -536,8 +536,8 @@ test "compaction pressure anchors only usage of the selected replay recipe acros
                         try std.testing.expectEqual(compacts, estimate >= 1000);
                         const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                         try std.testing.expectEqual(if (compacts) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(next));
-                        var view: HistoricalView = undefined;
-                        storage.openHistoricalView(next, &view);
+                        var view: TestingPage = undefined;
+                        view.open(&storage, next);
                         defer view.close();
                         try std.testing.expectEqual(base == .compatible, (try view.coverage()).anchor != null);
                     }
@@ -643,8 +643,8 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
             try storage.settleModelAttemptFailure(first, .{ .uncorrelated = "provider_failure" }, .ordinary, .{});
             try submitTestMessage(&storage, &tmp, "two", "two", session.slice(), "pending");
             const compact = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(compact, &view);
+            var view: TestingPage = undefined;
+            view.open(&storage, compact);
             defer view.close();
             var frozen: HistoricalSettings = undefined;
             try view.settings(&frozen);
@@ -666,8 +666,8 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
             try submitTestMessage(&storage, &tmp, "three", "three", session.slice(), "arrival");
             try settleCompactionForTesting(&storage, &tmp, compact, &.{.compaction});
             const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            var later: HistoricalView = undefined;
-            storage.openHistoricalView(successor, &later);
+            var later: TestingPage = undefined;
+            later.open(&storage, successor);
             defer later.close();
             var settings: HistoricalSettings = undefined;
             try later.settings(&settings);
@@ -741,8 +741,8 @@ test "compaction failed and unresolved candidates preserve the accepted base" {
             try storage.settleModelAttemptFailure(assistant, .{ .uncorrelated = "overflow" }, .context_overflow, .{});
             const candidate = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             {
-                var view: HistoricalView = undefined;
-                storage.openHistoricalView(candidate, &view);
+                var view: TestingPage = undefined;
+                view.open(&storage, candidate);
                 defer view.close();
                 var cursor: TestingHistoryCursor = .{};
                 const anchor = (try view.coverage()).anchor.?;
@@ -759,8 +759,8 @@ test "compaction failed and unresolved candidates preserve the accepted base" {
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             try submitTestMessage(&storage, &tmp, "three", "three", session.slice(), "new turn");
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(next, &view);
+            var view: TestingPage = undefined;
+            view.open(&storage, next);
             defer view.close();
             var cursor: TestingHistoryCursor = .{};
             const anchor = (try view.coverage()).anchor.?;
@@ -801,8 +801,8 @@ test "compaction selected newest base corruption fences rather than using an old
                     .tail => try store_testing.exec(&storage, "DELETE FROM model_output_item WHERE operation_id=?1 AND item_kind=2", .{newest_operation}),
                     .payload => try store_testing.zeroContent(&storage, "SELECT extras_content_id FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_output_item) AND item_kind=4"),
                 }
-                var view: HistoricalView = undefined;
-                storage.openHistoricalView(next, &view);
+                var view: TestingPage = undefined;
+                view.open(&storage, next);
                 defer view.close();
                 if (corruption != .payload) {
                     try std.testing.expectError(error.CorruptStore, view.coverage());
@@ -810,7 +810,7 @@ test "compaction selected newest base corruption fences rather than using an old
                     const anchor = (try view.coverage()).anchor.?;
                     const selected = (try nextTestingItem(&view, anchor - 1)).?;
                     try std.testing.expectEqual(anchor, selected.position);
-                    var reader: HistoricalReader = undefined;
+                    var reader: TestingReader = undefined;
                     try view.openContent((try view.openOutput(selected.position)).bag.?, &reader);
                     defer reader.close();
                     var bytes: [4096]u8 = undefined;

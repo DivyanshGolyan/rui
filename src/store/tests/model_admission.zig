@@ -18,7 +18,7 @@ const ActiveOperationFilter = action_domain.ActiveOperationFilter;
 const AttemptBinding = store_core.AttemptBinding;
 const Faults = store_core.Faults;
 const HistoricalSettings = historical_domain.HistoricalSettings;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const ModelAdmissionKind = model_admission_domain.ModelAdmissionKind;
 const ModelFailure = model_settlement_domain.ModelFailure;
 const ModelOperationKind = historical_domain.ModelOperationKind;
@@ -767,21 +767,21 @@ test "an admission's commit reads the request's settings where its message carri
             const session = try configureTestSession(&storage, "config");
             {
                 try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "one");
-                var view: HistoricalView = undefined;
+                var view: TestingPage = undefined;
                 var settings: HistoricalSettings = undefined;
-                const admitted = (try storage.admitModelAttemptInto(.message, .{}, .{ .view = &view, .settings = &settings })).?;
+                const admitted = (try storage.admitModelAttemptInto(.message, .{}, .{ .view = view.pageFor(&storage), .settings = &settings })).?;
                 const binding = admitted.permit.binding;
                 // A lone write's COMMIT rides its message only on MySQL.
                 if (!case.rerun) try std.testing.expectEqual(case.engine == .mysql, admitted.request_started);
-                if (!admitted.request_started) storage.openHistoricalView(binding, &view);
+                if (!admitted.request_started) view.open(&storage, binding);
                 defer view.close();
                 const before = storage.testing_content_work.rounds;
                 try view.settings(&settings);
                 try std.testing.expectEqual(before + @intFromBool(!admitted.request_started), storage.testing_content_work.rounds);
                 // The settings a round of their own reads.
-                var plain_view: HistoricalView = undefined;
+                var plain_view: TestingPage = undefined;
                 var plain: HistoricalSettings = undefined;
-                storage.openHistoricalView(binding, &plain_view);
+                plain_view.open(&storage, binding);
                 defer plain_view.close();
                 try plain_view.settings(&plain);
                 inline for (.{ "operation", "compaction_trigger", "output_reservation", "reasoning_effort", "starting_effort", "codec", "provider", "session_affinity", "tool_count" }) |field|
@@ -790,9 +790,9 @@ test "an admission's commit reads the request's settings where its message carri
                     try std.testing.expectEqualStrings(@field(plain, field).slice(), @field(settings, field).slice());
                 try std.testing.expectEqual(plain.baseline_instructions.content_id, settings.baseline_instructions.content_id);
                 try std.testing.expectEqual(plain.baseline_instructions.length, settings.baseline_instructions.length);
-                try std.testing.expectEqual(plain_view.output_boundary, view.output_boundary);
-                try std.testing.expectEqual(plain_view.output_frontier, view.output_frontier);
-                try std.testing.expectEqual(plain_view.tool_set_id, view.tool_set_id);
+                try std.testing.expectEqual(plain_view.page.output_boundary, view.page.output_boundary);
+                try std.testing.expectEqual(plain_view.page.output_frontier, view.page.output_frontier);
+                try std.testing.expectEqual(plain_view.page.tool_set_id, view.page.tool_set_id);
             }
         }
     }.run);
@@ -815,7 +815,7 @@ test "an admission's commit reads the first history round from where its caller 
 
         /// The entries after `after` and every tool of the set, as a
         /// request that resumes its tool groups at `cursor` reads them.
-        fn walk(view: *HistoricalView, after: u64, cursor: u64, buffer: []u8) ![]const u8 {
+        fn walk(view: *TestingPage, after: u64, cursor: u64, buffer: []u8) ![]const u8 {
             while (!try view.validateOutputsStep()) {}
             _ = try view.coverage();
             view.expectTools(.all);
@@ -842,9 +842,9 @@ test "an admission's commit reads the first history round from where its caller 
             var names: [std.enums.values(Variant).len][32]u8 = undefined;
             for (std.enums.values(Variant), &names) |variant, *name| {
                 // What the last request's view ended with, as a caller keeps it.
-                var last: HistoricalView = undefined;
+                var last: TestingPage = undefined;
                 var last_settings: HistoricalSettings = undefined;
-                storage.openHistoricalView(binding, &last);
+                last.open(&storage, binding);
                 try last.settings(&last_settings);
                 var scratch: [8 * 1024]u8 = undefined;
                 _ = try walk(&last, 0, 0, &scratch);
@@ -871,16 +871,16 @@ test "an admission's commit reads the first history round from where its caller 
                     .other_tools => remembered.tool_set += 1,
                 }
                 var memory: Memory = .{ .session = session.slice(), .resume_from = if (variant == .no_memory) null else remembered };
-                var view: HistoricalView = undefined;
+                var view: TestingPage = undefined;
                 var settings: HistoricalSettings = undefined;
                 const admitted = (try storage.admitModelAttemptInto(.message, .{}, .{
-                    .view = &view,
+                    .view = view.pageFor(&storage),
                     .settings = &settings,
                     .remembered = .{ .context = &memory, .of = Memory.of },
                 })).?;
                 binding = admitted.permit.binding;
                 if (!case.rerun) try std.testing.expectEqual(case.engine == .mysql, admitted.request_started);
-                if (!admitted.request_started) storage.openHistoricalView(binding, &view);
+                if (!admitted.request_started) view.open(&storage, binding);
                 defer view.close();
                 // The request reads on from where its caller's memo ended,
                 // or, its memo lost, from the start.
@@ -894,9 +894,9 @@ test "an admission's commit reads the first history round from where its caller 
                 const ahead: u16 = if (!admitted.request_started) 2 else if (variant == .right) 0 else 1;
                 try std.testing.expectEqual(ahead, rounds.taken().rounds);
 
-                var plain_view: HistoricalView = undefined;
+                var plain_view: TestingPage = undefined;
                 var plain_settings: HistoricalSettings = undefined;
-                storage.openHistoricalView(binding, &plain_view);
+                plain_view.open(&storage, binding);
                 defer plain_view.close();
                 try plain_view.settings(&plain_settings);
                 var plain_buffer: [8 * 1024]u8 = undefined;

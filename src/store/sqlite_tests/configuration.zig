@@ -13,7 +13,7 @@ const sqlite = @import("../sqlite.zig");
 const store_testing = @import("../testing.zig");
 const c = sqlite.c;
 const HistoricalSettings = historical_domain.HistoricalSettings;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
 const completeMessage = store_testing.completeMessage;
@@ -101,8 +101,8 @@ test "a Session's tools are saved once and read back as saved, not as today's bu
     try submitTestMessage(&storage, &tmp, "saved-tools-message", "saved-tools-message", second.slice(), reworded);
     try sqlite.exec(storage.sqliteDatabase(), "UPDATE tool_record SET description_content_id=(SELECT content_id FROM content WHERE CAST(payload AS TEXT)='Reworded description.') WHERE name='bash'");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    var view: HistoricalView = undefined;
-    storage.openHistoricalView(binding, &view);
+    var view: TestingPage = undefined;
+    view.open(&storage, binding);
     defer view.close();
     var settings: HistoricalSettings = undefined;
     try view.settings(&settings);
@@ -152,8 +152,8 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try store_testing.sqlite_only.exec(&storage, "UPDATE session_revision SET provider='other' WHERE session_ref=?1", .{created_session_0.slice()});
-    var view: HistoricalView = undefined;
-    storage.openHistoricalView(binding, &view);
+    var view: TestingPage = undefined;
+    view.open(&storage, binding);
     try std.testing.expectError(error.CorruptStore, testSettings(&view));
     view.close();
     try store_testing.sqlite_only.exec(&storage, "UPDATE session_revision SET provider='codex' WHERE session_ref=?1", .{created_session_0.slice()});
@@ -189,8 +189,8 @@ test "a Session pinned to a codec this Host cannot build fences its settings" {
         try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "text");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         if (fault) |sql| try store_testing.sqliteExec(storage.sqliteDatabase(), sql, .{session.slice()});
-        var view: HistoricalView = undefined;
-        storage.openHistoricalView(binding, &view);
+        var view: TestingPage = undefined;
+        view.open(&storage, binding);
         defer view.close();
         if (fault == null) _ = try testSettings(&view) else try std.testing.expectError(error.CorruptStore, testSettings(&view));
     }

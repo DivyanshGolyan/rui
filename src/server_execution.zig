@@ -1907,7 +1907,7 @@ fn admitNewAttempt(
     const token = host.custody.reserve() orelse return .no_work;
     // The slot's preparation is free (`modelPreparationOpen`), so the
     // admission starts the request in it: the settings ride its commit.
-    var admission = host.store.admitModelAttemptInto(kind, host.hooks.storeFaults(.attempt_admission), .{ .view = &preparation.view, .settings = &preparation.settings, .remembered = model_adapter.remembered(&host.history_memos) }) catch |err| {
+    var admission = host.store.admitModelAttemptInto(kind, host.hooks.storeFaults(.attempt_admission), .{ .view = &preparation.page, .settings = &preparation.settings, .remembered = model_adapter.remembered(&host.history_memos) }) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "Attempt admission", err);
         return .retry_later;
@@ -1947,19 +1947,19 @@ fn beginAdmittedAttempt(
     token: execution.CustodyToken,
     permit: *store_module.DispatchPermit,
     preparation: *model_adapter.Preparation,
-    /// The admission already opened the preparation's view and read its
+    /// The admission already opened the preparation's page and read its
     /// settings (`Store.admitModelAttemptInto`).
     started: bool,
 ) AdmissionProgress {
     const binding = attachSlot(host, slot, token, permit) catch |err| {
-        if (started) preparation.view.close();
+        if (started) preparation.page.close();
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "custody attachment", err);
         return .admitted;
     };
-    // The view opens where it lives for the whole preparation; it never
+    // The page opens where it lives for the whole preparation; it never
     // moves.
-    if (!started) host.store.openHistoricalView(binding, &preparation.view);
+    if (!started) preparation.page.open(binding);
     var retained_scratch: ?named_scratch.Owner = null;
     preparation.init(
         host.io,
@@ -2002,9 +2002,18 @@ fn advanceModelPreparation(
         return true;
     }
     traceOperation(host, "preparation_advance_started", owner.binding);
-    const progress = preparation.advance(byte_allowance, item_allowance);
+    var progress = preparation.advance(byte_allowance, item_allowance);
+    // The Store reads what the request's page asks, and the advance goes on.
+    while (progress == .read) {
+        host.store.readRequestPage(&preparation.page) catch |err| {
+            progress = .{ .failed = err };
+            break;
+        };
+        progress = preparation.proceed();
+    }
     const stats = preparation.advanceStats();
     switch (progress) {
+        .read => unreachable,
         .pending => {
             tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
             pause(host, .preparation_advanced);
@@ -3899,7 +3908,7 @@ test "preparing slots belong to their live preparations" {
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: model_adapter.Preparation = undefined;
-    storage.openHistoricalView(binding_a, &preparation.view);
+    preparation.page.open(binding_a);
     try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     var preparation_active = true;
     defer if (preparation_active) preparation.cancel();
@@ -4142,7 +4151,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
         const binding = try host.custody.attach(token, &permit);
         var preparation: model_adapter.Preparation = undefined;
         var retained: ?named_scratch.Owner = null;
-        preparation.view = .{ .store = undefined, .binding = binding };
+        preparation.page = .{ .binding = binding };
         try preparation.init(
             std.testing.io,
             root,
@@ -4169,7 +4178,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
             host.limits.request_preparation_byte_allowance,
             host.limits.request_preparation_item_allowance,
         ));
-        try std.testing.expect(!preparation.state.active and !preparation.view.active);
+        try std.testing.expect(!preparation.state.active and !preparation.page.active);
         try std.testing.expect(slots[0] == .free);
         try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
         try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
@@ -4235,7 +4244,7 @@ test "an encode failure settles unanswered and releases request scratch" {
     var slots = [_]ExecutionSlot{.{ .model_preparing = .{ .token = token, .binding = binding } }};
     var preparation: model_adapter.Preparation = undefined;
     var retained: ?named_scratch.Owner = null;
-    storage.openHistoricalView(binding, &preparation.view);
+    preparation.page.open(binding);
     try preparation.init(
         std.testing.io,
         root,
@@ -4255,7 +4264,7 @@ test "an encode failure settles unanswered and releases request scratch" {
         try std.testing.expect(advanceModelPreparation(&host, null, &slots, &preparation, &listings, 64, 4));
     }
     try std.testing.expect(advances > 1);
-    try std.testing.expect(!preparation.state.active and !preparation.view.active);
+    try std.testing.expect(!preparation.state.active and !preparation.page.active);
     try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
     try std.testing.expect(!storage.isFenced() and host.launchAllowed());

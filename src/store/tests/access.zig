@@ -13,7 +13,7 @@ const historical_domain = @import("../domain/historical.zig");
 const reads_domain = @import("../domain/reads.zig");
 const store_schema = @import("../schema.zig");
 const store_testing = @import("../testing.zig");
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const completeConfiguration = store_testing.completeConfiguration;
 const configureTestSession = store_testing.configureTestSession;
 const submitTestMessage = store_testing.submitTestMessage;
@@ -511,7 +511,7 @@ test "canonical step faults fence rather than reading as ordinary misses" {
                     },
                     .view, .purpose, .handoff, .failure => blk: {
                         try store_testing.failReadsOf(&storage, "model_operation");
-                        var view: HistoricalView = undefined;
+                        var view: TestingPage = undefined;
                         break :blk switch (route) {
                             .view => openCheckedView(&storage, binding, &view),
                             .purpose => if (storage.modelOperationKind(binding)) |_| {} else |err| err,

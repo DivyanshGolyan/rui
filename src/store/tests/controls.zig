@@ -8,7 +8,7 @@ const Store = store_core.Store;
 const command_domain = @import("../domain/command.zig");
 const historical_domain = @import("../domain/historical.zig");
 const store_testing = @import("../testing.zig");
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const ModelInterruptionReply = command_domain.ModelInterruptionReply;
 const configureTestSession = store_testing.configureTestSession;
 const submitTestMessage = store_testing.submitTestMessage;
@@ -146,7 +146,7 @@ test "Session stop freezes its selection and excludes only the admitted prefix" 
             try std.testing.expectEqual(binding.turn_id, accepted.accepted.selection.selected_turn_id.?);
             try std.testing.expectEqual(@as(u64, 1), accepted.accepted.selection.admission_cutoff);
             try std.testing.expectEqual(binding.operation_id, accepted.accepted.interrupted_operation_id.?);
-            var view: HistoricalView = undefined;
+            var view: TestingPage = undefined;
             try std.testing.expectError(error.SupersededByControl, openCheckedView(&storage, binding, &view));
 
             const cancelled = (try store_testing.observeCommandForTesting(&storage, "message-a")).kind.message.?.queue.?;
@@ -305,7 +305,7 @@ test "exact model interruption continues only with applicable pending input" {
             var interrupt = try completeModelInterruption("interrupt", session.slice(), binding);
             const accepted = storage.interruptModel(&interrupt, .{});
             try std.testing.expect(accepted == .accepted);
-            var view: HistoricalView = undefined;
+            var view: TestingPage = undefined;
             try std.testing.expectError(error.SupersededByControl, openCheckedView(&storage, binding, &view));
             const successor = (try storage.admitNextModelAttempt(.{})).?;
             try std.testing.expectEqual(binding.turn_id, successor.permit.binding.turn_id);
