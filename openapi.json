@@ -1611,6 +1611,16 @@
                           }
                         ]
                       },
+                      "source_action": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "content": {
                         "$ref": "#/components/schemas/ActivityItemContent"
                       }
@@ -1622,6 +1632,7 @@
                       "state",
                       "admitted_at",
                       "sender",
+                      "source_action",
                       "content"
                     ],
                     "additionalProperties": false
@@ -1698,6 +1709,16 @@
                           }
                         ]
                       },
+                      "source_action": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "content": {
                         "$ref": "#/components/schemas/ActivityItemContent"
                       }
@@ -1709,6 +1730,7 @@
                       "state",
                       "admitted_at",
                       "sender",
+                      "source_action",
                       "content"
                     ],
                     "additionalProperties": false
@@ -2308,6 +2330,16 @@
                           }
                         ]
                       },
+                      "source_action": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "content": {
                         "$ref": "#/components/schemas/ActivityItemContent"
                       }
@@ -2319,6 +2351,7 @@
                       "state",
                       "admitted_at",
                       "sender",
+                      "source_action",
                       "content"
                     ],
                     "additionalProperties": false
@@ -3842,6 +3875,16 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "source_action": {
+                          "anyOf": [
+                            {
+                              "$ref": "#/components/schemas/Decimal"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -3850,7 +3893,8 @@
                         "kind",
                         "content",
                         "admitted_at",
-                        "sender"
+                        "sender",
+                        "source_action"
                       ],
                       "additionalProperties": false
                     },
@@ -4151,6 +4195,16 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "source_action": {
+                          "anyOf": [
+                            {
+                              "$ref": "#/components/schemas/Decimal"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -4159,7 +4213,8 @@
                         "kind",
                         "content",
                         "admitted_at",
-                        "sender"
+                        "sender",
+                        "source_action"
                       ],
                       "additionalProperties": false
                     },

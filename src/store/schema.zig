@@ -55,7 +55,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 74, .digest = 0xda8e267adbfcef45 },
     .{ .schema_version = 75, .digest = 0xcea5bf4db0d3978d },
     .{ .schema_version = 76, .digest = 0x0d2cb1706af6379c },
-    .{ .schema_version = 77, .digest = 0xfe55eb1052c6bd9a },
+    .{ .schema_version = 77, .digest = 0x180d1a249b979d56 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -689,12 +689,12 @@ pub const migrations = [_]Migration{
             "CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id)",
             "CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL",
             "CREATE INDEX message_admission_session_pending ON message_admission(session_ref,admission_id) WHERE turn_id IS NULL",
-            "CREATE INDEX message_admission_person ON message_admission(session_ref,admission_position) WHERE sender_session_ref IS NULL",
+            "CREATE INDEX message_admission_person ON message_admission(session_ref,admission_position) WHERE sender_session_ref IS NULL AND source_action_id IS NULL",
             "CREATE INDEX message_admission_unpositioned ON message_admission(session_ref) WHERE admission_position IS NULL",
             "CREATE INDEX message_admission_position ON message_admission(session_ref,admission_position)",
         },
         .mysql = &.{
-            "ALTER TABLE message_admission ADD COLUMN source_action_id BIGINT AFTER sender_position, ADD UNIQUE(source_action_id), ADD FOREIGN KEY(source_action_id) REFERENCES action_operation(action_id), ADD CHECK(source_action_id IS NULL OR sender_session_ref IS NULL)",
+            "ALTER TABLE message_admission ADD COLUMN source_action_id BIGINT AFTER sender_position, ADD UNIQUE(source_action_id), ADD FOREIGN KEY(source_action_id) REFERENCES action_operation(action_id), ADD CHECK(source_action_id IS NULL OR sender_session_ref IS NULL), MODIFY COLUMN message_admission_person_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN sender_session_ref IS NULL AND source_action_id IS NULL THEN session_ref END) STORED",
         },
     },
 };
@@ -1648,7 +1648,7 @@ pub const indexes = [_]Index{
     .{ .name = "message_admission_session_order", .table = "message_admission", .columns = &.{ "session_ref", "turn_id", "admission_id" } },
     .{ .name = "message_admission_pending", .table = "message_admission", .columns = &.{ "admission_id", "session_ref" }, .where = "turn_id IS NULL" },
     .{ .name = "message_admission_session_pending", .table = "message_admission", .columns = &.{ "session_ref", "admission_id" }, .where = "turn_id IS NULL" },
-    .{ .name = "message_admission_person", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" }, .where = "sender_session_ref IS NULL" },
+    .{ .name = "message_admission_person", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" }, .where = "sender_session_ref IS NULL AND source_action_id IS NULL" },
     .{ .name = "message_admission_unpositioned", .table = "message_admission", .columns = &.{"session_ref"}, .where = "admission_position IS NULL" },
     .{ .name = "message_admission_position", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" } },
     .{ .name = "core_command_target_order", .table = "core_command", .columns = &.{ "target", "kind", "command_seq" } },

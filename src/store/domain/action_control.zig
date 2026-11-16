@@ -21,7 +21,7 @@ const target = rsql.Read(.{
 const facts = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,action.parent_operation_id,operation.turn_id," ++
         "action.background_position,action.acceptance_position," ++ action_domain.coreCallSql(2) ++ " AS core_tool," ++
-        action_domain.actionStopPositionSql("action", "operation") ++ " AS stop_position " ++
+        action_domain.actionStoppedSql("action", "operation") ++ " AS stopped " ++
         "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN session s ON s.session_ref=action.session_ref WHERE action.action_id=?1",
     .Args = action_domain.CoreNames.Args(struct { action_id: u64 }),
     .Row = struct {
@@ -31,14 +31,14 @@ const facts = rsql.Read(.{
         background_position: ?rsql.Positive,
         acceptance_position: ?rsql.Positive,
         core_tool: bool,
-        stop_position: ?rsql.Positive,
+        stopped: bool,
 
         fn selected(row: @This()) control.Facts {
             return .{
                 .core_tool = row.core_tool,
                 .background = if (row.background_position) |position| position.get() else null,
                 .final = if (row.acceptance_position) |position| position.get() else null,
-                .stopped = if (row.stop_position) |position| position.get() else null,
+                .stopped = row.stopped,
             };
         }
     },

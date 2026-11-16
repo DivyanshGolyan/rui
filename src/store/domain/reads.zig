@@ -181,9 +181,9 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
     const on = Kinds.on;
     return .{
         "SELECT admission_position AS position,0 AS ordinal,1 AS kind,admission_id AS id FROM message_admission @index(message_admission_person) " ++
-            "WHERE session_ref=?1 AND sender_session_ref IS NULL AND " ++ on(1) ++ " AND " ++ Kinds.off(11) ++ " AND " ++ range("admission_position", "0") ++
-            " UNION ALL SELECT admission_position,0,CASE WHEN sender_session_ref IS NULL THEN 1 ELSE 11 END,admission_id FROM message_admission @index(message_admission_position) " ++
-            "WHERE session_ref=?1 AND " ++ on(11) ++ " AND (sender_session_ref IS NOT NULL OR " ++ on(1) ++ ") AND " ++ range("admission_position", "0") ++
+            "WHERE session_ref=?1 AND sender_session_ref IS NULL AND source_action_id IS NULL AND " ++ on(1) ++ " AND " ++ Kinds.off(11) ++ " AND " ++ range("admission_position", "0") ++
+            " UNION ALL SELECT admission_position,0,CASE WHEN sender_session_ref IS NULL AND source_action_id IS NULL THEN 1 ELSE 11 END,admission_id FROM message_admission @index(message_admission_position) " ++
+            "WHERE session_ref=?1 AND " ++ on(11) ++ " AND (sender_session_ref IS NOT NULL OR source_action_id IS NOT NULL OR " ++ on(1) ++ ") AND " ++ range("admission_position", "0") ++
             " UNION ALL SELECT session_position,0,CASE entry_kind WHEN 1 THEN 2 ELSE 3 END,source_admission_id FROM conversation_entry " ++
             "WHERE session_ref=?1 AND (entry_kind=1 AND " ++ on(2) ++ " OR entry_kind=3 AND " ++ on(3) ++ ") AND " ++ range("session_position", "0") ++
             " UNION ALL SELECT session_position,0,4,NULL FROM model_output_item @index(model_output_call_history) " ++
@@ -504,6 +504,7 @@ noinline fn readPublicRows(a: *ReadAccess, session: []const u8, rows: []const pu
             const found = &content.content;
             if (@as(u64, @intCast(found.id)) != row.content_id.? or (row.kind == 1) != (found.admitted_at != null)) return error.CorruptStore;
             item.admitted_at = found.admitted_at;
+            item.source_action = found.source_action;
             content.queueMetadata(a);
             contents = true;
             if (item.sender) |*sender| {
@@ -602,9 +603,9 @@ pub const public_entry_joins = "LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
 
 const public_entry = rsql.Read(.{
     .sql = publicEntryRead("e.content_id,CASE WHEN e.entry_kind=1 THEN m.admitted_at END AS admitted_at," ++
-        "CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END AS sender,e.recorded_at", "", "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)"),
+        "CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END AS sender,CASE WHEN e.entry_kind=1 THEN m.source_action_id END AS source_action,e.recorded_at", "", "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)"),
     .Args = struct { session: []const u8, position: u64 },
-    .Row = struct { content_id: rsql.Positive, admitted_at: ?rsql.Positive, sender: ?SessionText, recorded_at: rsql.Positive, consistent: bool },
+    .Row = struct { content_id: rsql.Positive, admitted_at: ?rsql.Positive, sender: ?SessionText, source_action: ?rsql.Positive, recorded_at: rsql.Positive, consistent: bool },
     .cardinality = .each,
 });
 
@@ -638,7 +639,7 @@ const public_tool_result = rsql.Read(.{
     .compound = true,
 });
 
-pub const PublicContent = struct { id: i64, metadata: ContentMetadata, tool_operation: ?u64, admitted_at: ?u64, at: u64 };
+pub const PublicContent = struct { id: i64, metadata: ContentMetadata, tool_operation: ?u64, admitted_at: ?u64, at: u64, source_action: ?u64 = null };
 
 const PublicContentRead = struct {
     position: u64,
@@ -665,7 +666,7 @@ const PublicContentRead = struct {
     fn keep(read: *PublicContentRead, row: anytype) error{CorruptStore}!void {
         if (!row.consistent) return error.CorruptStore;
         if (@TypeOf(row.*) == public_entry.Row) {
-            read.content = .{ .id = @intCast(row.content_id.get()), .metadata = undefined, .tool_operation = null, .admitted_at = if (row.admitted_at) |second| second.get() else null, .at = row.recorded_at.get() };
+            read.content = .{ .id = @intCast(row.content_id.get()), .metadata = undefined, .tool_operation = null, .admitted_at = if (row.admitted_at) |second| second.get() else null, .at = row.recorded_at.get(), .source_action = if (row.source_action) |action| action.get() else null };
             if (read.sender) |sender| sender.* = if (row.sender) |session| .{ .session = session } else null;
         } else {
             read.content = .{ .id = @intCast(row.content_id.get()), .metadata = undefined, .tool_operation = row.operation_id.get(), .admitted_at = null, .at = row.at.get() };
@@ -1137,7 +1138,7 @@ const activity_message = rsql.Read(.{
         sourced_input.consistentSql("m", "c") ++ " " ++
         "AND (m.turn_id IS NULL OR (t.session_ref=m.session_ref AND EXISTS(SELECT 1 FROM conversation_entry e " ++
         "WHERE e.source_admission_id=m.admission_id AND e.session_ref=m.session_ref AND e.turn_id=m.turn_id AND e.content_id=m.content_id))) AS consistent," ++
-        "m.admitted_at,m.sender_session_ref FROM message_admission m " ++
+        "m.admitted_at,m.sender_session_ref,m.source_action_id FROM message_admission m " ++
         "LEFT JOIN core_command c ON c.command_key=m.command_key LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
         "WHERE m.session_ref=?1 AND m.admission_id=?3",
     .Args = struct { session: []const u8, end: u64, admission: u64 },
@@ -1150,6 +1151,7 @@ const activity_message = rsql.Read(.{
         consistent: bool,
         admitted_at: rsql.Positive,
         sender_session_ref: ?SessionText,
+        source_action_id: ?rsql.Positive,
     },
     .cardinality = .each,
 });
@@ -1351,6 +1353,7 @@ const MessageRead = struct {
         message.state = if (row.applied) .applied else if (row.excluded) .excluded else .queued;
         message.admitted_at = row.admitted_at.get();
         message.sender = if (row.sender_session_ref) |sender| .{ .session = sender } else null;
+        message.source_action = if (row.source_action_id) |action| action.get() else null;
         if (row.applied) message.turn = (row.turn_id orelse return error.CorruptStore).get();
         read.content_id = row.content_id.get();
     }
@@ -1584,7 +1587,7 @@ const ItemRead = struct {
                 const message = &read.state.message;
                 if (read.round == 1) {
                     if (!try message.read.count.found()) return error.CorruptStore;
-                    if (kind != 2 and (kind == 11) != (message.read.message.sender != null)) return error.CorruptStore;
+                    if (kind != 2 and (kind == 11) != (message.read.message.sender != null or message.read.message.source_action != null)) return error.CorruptStore;
                     if (kind == 2) try message.entry.found();
                     return;
                 }

@@ -546,3 +546,36 @@ test "a page of approval requests costs the same however many calls ran without 
     try std.testing.expect(thousand - few <= 1);
     try std.testing.expectEqual(thousand, many);
 }
+
+test "a one-row page of a person's Messages costs the same steps after 10 or 10,000 background final inputs" {
+    var steps: [2]i64 = undefined;
+    for ([_]usize{ 10, 10_000 }, &steps) |history, *cost| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "recall-config");
+        try submitTestMessage(&storage, &tmp, "recall-first", "first", session.slice(), "first");
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+        const insert = try std.testing.allocator.printSentinel(
+            "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "SELECT value,next_position+value-1 AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,source_action_id) " ++
+                "SELECT 1000+value,'{1s}',printf('received-%d',value),content,position,1,1000+value FROM history; " ++
+                "UPDATE session SET next_position=next_position+{0} WHERE session_ref='{1s}'; DROP TABLE history",
+            .{ history, session.slice() },
+            0,
+        );
+        defer std.testing.allocator.free(insert);
+        try sqlite.exec(storage.sqliteDatabase(), insert);
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
+        try store_core.reloadIdentitiesForTesting(&storage);
+        var request: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.admission), .limit = 1 };
+        try request.session.set(session.slice());
+        cost.* = try activityPageSteps(&storage, request);
+        const page = try store_core.activityPageForTesting(&storage, request);
+        try std.testing.expect(page.count == 1 and page.items[0].value == .admission and !page.more);
+    }
+    try std.testing.expectEqual(steps[0], steps[1]);
+}
