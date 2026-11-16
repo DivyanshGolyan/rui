@@ -60,6 +60,23 @@ class UpgradeEmptyChatTest(unittest.TestCase):
         with self.assertRaises(NotReady):
             self.observe("alt+i info", model="wrong-model")
 
+    def test_quiet_version_is_below_settings_not_a_version_elsewhere(self):
+        version = "0.76.0"
+        valid = [f"Settings\n  38 MB    {version} ", f"Settings │ chat\n {version} │ model"]
+        invalid = [f"Settings {version}\n footer", f"Settings\nUpdate to {version}",
+                   f"Settings\nrui 38 MB {version}", f"Settings\n38 MB tools 12 MB {version}",
+                   f"Settings\n{version}\nUpgraded to {version}",
+                   f"Settings\n{version}\n · upgraded to {version}",
+                   f"Settings\n0.76.1\n{version}", f"Settings\n38 MB\n{version}"]
+        for frame in valid:
+            self.screen.observe = lambda: frame
+            with self.subTest(frame=frame):
+                self.assertEqual(frame, self.screen.quiet_version(version))
+        for frame in invalid:
+            self.screen.observe = lambda: frame
+            with self.subTest(frame=frame), self.assertRaises(NotReady):
+                self.screen.quiet_version(version)
+
     def test_public_identity_and_zero_messages_remain_required(self):
         footer = "alt+i info"
         self.case.json.reset_mock()

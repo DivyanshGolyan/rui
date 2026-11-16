@@ -815,6 +815,20 @@ class TerminalScreen:
                          and "Upgraded to " not in screen and " · upgraded to " not in screen)
         return frame
 
+    def quiet_version(self, version):
+        pattern = re.compile(rf"\s*(?:\d+(?:\.\d+)? (?:MB|GB)\s+)?{re.escape(version)}\s*")
+
+        def ready(frame):
+            if "Upgraded to " in frame or " · upgraded to " in frame:
+                return False
+            rows = frame.splitlines()
+            return any(row.split("│", 1)[0].strip() == "Settings"
+                       and index + 1 < len(rows)
+                       and pattern.fullmatch(rows[index + 1].split("│", 1)[0])
+                       for index, row in enumerate(rows))
+
+        return wait_for(self.observe, "quiet version below Settings without upgrade notices", timeout=15, ready=ready)
+
     def leave_empty_chat(self, case, session):
         self.send("\x1b")
         self.until(lambda: "Copy last answer" not in self.capture.completed,
@@ -1077,8 +1091,7 @@ def proof_relaunched(c, screen, process):
 
     wait_for(observed, "selected release replaced the original TUI PID after terminal restoration",
              timeout=15, ready=lambda value: value[:3] == (installed, 2, 1))
-    frame = screen.contains("Settings")
-    assert "Upgraded to " not in frame and " · upgraded to " not in frame, frame
+    screen.quiet_version(c.releases.version)
     assert screen.capture.alternate
 
 
@@ -1146,7 +1159,7 @@ def terminal_cases(root, binary, releases, artifacts):
             screen.start_upgrade()
             screen.contains(" · up to date")
             screen.close_settings()
-            screen.contains(releases.version)
+            screen.quiet_version(releases.version)
             assert os_semantics.process_executable(process.pid) == c.link.resolve()
             screen.ignored_overview_input("unchanged δ ignored", "unchanged δ ignored")
             screen.save(artifacts, "overview-unchanged")
@@ -1267,8 +1280,7 @@ def terminal_download_recovery(root, binary, releases, artifacts):
             screen.contains(f" · upgraded to {releases.version}")
             screen.save(artifacts, "download-recovered-settings")
             screen.close_settings()
-            frame = screen.contains(releases.version)
-            assert "Upgraded to " not in frame, frame
+            screen.quiet_version(releases.version)
             proof_ready(c, previous, old_host)
             screen.save(artifacts, "download-recovered")
             curl.assert_attempts([("/releases/latest", "normal", 6),
@@ -1330,8 +1342,7 @@ def terminal_cancellation_guidance(root, binary, releases, artifacts):
             screen.start_upgrade()
             screen.contains(f" · upgraded to {releases.version}")
             screen.close_settings()
-            frame = screen.contains(releases.version)
-            assert "Upgraded to " not in frame, frame
+            screen.quiet_version(releases.version)
             proof_ready(c, previous, old_host)
             assert os_semantics.process_executable(process.pid) == binary
             screen.save(artifacts, "cancellation-guidance-installed")
@@ -1355,8 +1366,7 @@ def terminal_path_guidance(root, binary, releases, artifacts):
             screen.start_upgrade()
             screen.contains(f" · upgraded to {releases.version}")
             screen.close_settings()
-            frame = screen.contains(releases.version)
-            assert "Upgraded to " not in frame, frame
+            screen.quiet_version(releases.version)
             proof_ready(c, previous, old_host)
             screen.ignored_overview_input("guidance ε ignored", "guidance ε ignored")
             assert os_semantics.process_executable(process.pid) == binary
