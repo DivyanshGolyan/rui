@@ -5565,7 +5565,7 @@ test "capture routing round trips six placements without conflating selector and
     const gpa = std.testing.allocator;
     const Peer = struct {
         fn serve(listener: *std.Io.net.Server, expected_store: []const u8) anyerror!void {
-            for (0..3) |_| {
+            for (0..4) |index| {
                 const connection = try listener.accept(std.testing.io);
                 defer connection.close(std.testing.io);
                 const deadline = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 5 * std.time.ns_per_s;
@@ -5586,7 +5586,7 @@ test "capture routing round trips six placements without conflating selector and
                 }
                 try std.testing.expectEqualStrings(expected, request[0..body_used]);
                 var body: protocol.ResponseBuffer = .{};
-                const info: @import("host_reply.zig").HostInfo = .{ .store = expected_store, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .routes = protocol.routesAll(.unserved), .doublewrite = null };
+                const info: @import("host_reply.zig").HostInfo = .{ .store = if (index == 3) "fedcba9876543210fedcba9876543210" else expected_store, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .routes = protocol.routesAll(.unserved), .doublewrite = null };
                 try body.render(@import("host_reply.zig").renderHostInfo, .{info});
                 var head_buffer: [512]u8 = undefined;
                 const head = try std.fmt.bufPrint(&head_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\nConnection: close\r\n\r\n", .{body.len});
@@ -5652,6 +5652,7 @@ test "capture routing round trips six placements without conflating selector and
         var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = saved.key.slice() } });
         defer recovered.close(io);
         try std.testing.expect(recovered.paths == null);
+        try std.testing.expect(recovered.routing != null);
         try std.testing.expectEqualStrings(directory, recovered.routing.?.host_directory.slice());
         const rediscovered = try recovered.resolvePaths(io);
         try std.testing.expectEqualStrings(directory, rediscovered.selector());
@@ -5665,6 +5666,7 @@ test "capture routing round trips six placements without conflating selector and
         const count = try recovered.file.readPositionalAll(io, &after, 0);
         try std.testing.expectEqualStrings(before, after[0..count]);
         if (future) |*pending| {
+            try std.testing.expectError(error.RequestBindingMismatch, recovered.resolvePaths(io));
             try pending.await(io);
             future = null;
         }

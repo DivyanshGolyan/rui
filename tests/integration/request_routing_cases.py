@@ -27,7 +27,9 @@ def capture_routing(binary, directory, root, env, *, message=None):
     metadata = json.loads(routing)
     assert metadata["host_directory"] == str(directory.resolve()) and not metadata["runtime_hint"], metadata
     saved = json.loads(original)
-    changed = invoke("defaults", "configure", "--store", root / "different-default")
+    different = root / "different-default"
+    different.mkdir(mode=0o700, exist_ok=True)
+    changed = invoke("defaults", "configure", "--store", different)
     assert changed.returncode == 0, changed
     recovered = invoke("request", "recover", handle)
     assert recovered.returncode == 0, recovered
