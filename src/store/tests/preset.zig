@@ -1,5 +1,3 @@
-//! Preset Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -96,8 +94,6 @@ test "preset unknown rejection survives reopen and later resolution" {
                 var reopened: Store = undefined;
                 try store_testing.testingStore(case, &reopened, &tmp, std.testing.io);
                 defer reopened.close() catch unreachable;
-                // The restarted Host now knows review, but the same original
-                // request must replay its rejection, not admit this full spec.
                 var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
                 const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
                 var resolved = try completeConfiguration(request.key.slice(), "", workspace, "model-a");
@@ -107,8 +103,6 @@ test "preset unknown rejection survives reopen and later resolution" {
                 try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_preset, replay.rejected.code);
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&reopened, "SELECT count(*) FROM session", .{}));
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&reopened, "SELECT count(*) FROM core_command", .{}));
-                // Neither a different name nor different overrides share that
-                // rejection's identity, even if they resolve to the same spec.
                 try request.preset.?.set("other");
                 try std.testing.expect(try reopened.configureWithPreset(&resolved, &.{ .request_digest = request.presetRequestDigest() }, .{}) == .conflict);
                 try request.preset.?.set("review");

@@ -1,5 +1,3 @@
-//! Round budget Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -43,14 +41,8 @@ const testingHostToolRecords = shared_fixtures.testingHostToolRecords;
 const testingSessionList = shared_fixtures.testingSessionList;
 const testingSessionReport = shared_fixtures.testingSessionReport;
 
-/// Each entry point's content rounds (`readRaw` windows, counted in
-/// `Store.testing_content_work.content_rounds`) on the same path, per
-/// engine: how many windows a blob read takes depends on the engine's
-/// blob access, so each engine states its own. An entry point left out
-/// takes none.
 fn contentRoundBudget(engine: store_testing.Engine, point: EntryPoint) u16 {
     return switch (engine) {
-        // One window holds the driven content.
         .sqlite, .mysql => switch (point) {
             .readOwnedContent, .readHostToolSetText, .searchActivity, .findTools, .readSkills => 1,
             else => 0,
@@ -58,13 +50,9 @@ fn contentRoundBudget(engine: store_testing.Engine, point: EntryPoint) u16 {
     };
 }
 
-/// The functions that enter the Store only to serve tests, so they take
-/// no round budget.
 const entering_fixtures = [_][]const u8{ "prefixSealForTesting", "readSessionForTesting" };
 
 test "every function that enters the Store has a round budget" {
-    // Every Store file but its test files and wire clients;
-    // import_architecture.py checks this list against src/store/.
     const sources = .{
         @embedFile("../Store.zig"),
         @embedFile("../access.zig"),
@@ -113,9 +101,6 @@ test "every function that enters the Store has a round budget" {
     };
     var found: std.EnumSet(EntryPoint) = .empty;
     var fixtures: [entering_fixtures.len]bool = @splat(false);
-    // `transition.apply` enters for the entry point that calls it, so a
-    // call to it enters as `enter` does, and its own `enter` is its callers'.
-    // transition.zig, listed last.
     const runner = sources[sources.len - 1];
     try std.testing.expect(std.mem.indexOf(u8, runner, "pub fn apply" ++ "(self: *Store") != null);
     inline for (sources) |source| inline for (.{ "enter", "transition.apply" }) |callee| {
@@ -123,7 +108,6 @@ test "every function that enters the Store has a round budget" {
         while (std.mem.indexOfPos(u8, source, at, callee ++ "(")) |index| : (at = index + 1) {
             if (index > 0 and (std.ascii.isAlphanumeric(source[index - 1]) or source[index - 1] == '_')) continue;
             if (std.mem.endsWith(u8, source[0..index], "fn ")) continue;
-            // Every call enters with the Store it is a method of.
             if (!std.mem.startsWith(u8, source[index..], callee ++ "(self, ")) {
                 std.debug.print("an {s} call takes another first argument: {s}\n", .{ callee, source[index..][0..@min(40, source.len - index)] });
                 return error.EnterWithoutSelf;
@@ -133,8 +117,6 @@ test "every function that enters the Store has a round budget" {
             var end = fn_at;
             while (std.ascii.isAlphanumeric(source[end]) or source[end] == '_') end += 1;
             if (source.ptr == runner.ptr and std.mem.eql(u8, source[fn_at..end], "apply")) continue;
-            // The body a public entry point queues; only a test fixture
-            // enters outside one, holding the Store for itself.
             const held = std.mem.endsWith(u8, source[fn_at..end], "Held");
             const name = if (held) source[fn_at .. end - "Held".len] else source[fn_at..end];
             if (!held and !std.mem.endsWith(u8, name, "ForTesting")) {
@@ -181,7 +163,6 @@ test "MySQL round shape subtracts the entry baseline from every component" {
 test "each Store entry point takes its round budget on its common path" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            // A rerun repeats the rounds this counts.
             if (case.rerun) return;
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
@@ -280,8 +261,6 @@ test "each Store entry point takes its round budget on its common path" {
             fn run(_: void) !void {}
         };
 
-        /// A Message answered with text, its result read back, a second
-        /// Message interrupted, and a stop.
         fn plainTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
             meter.start();
             const session = try configureTestSession(storage, "budget-plain");
@@ -372,8 +351,6 @@ test "each Store entry point takes its round budget on its common path" {
             meter.stop(.pinSession);
         }
 
-        /// Drive MCP through an actual frozen tool set offer, without changing
-        /// the built-in tool set used by the other entry points' fixtures.
         fn mcpTurn(case: *store_testing.Case, meter: *RoundMeter) !void {
             const records = comptime testingHostToolRecords(&.{
                 .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a docs page.", .input_schema = "{\"type\":\"object\"}" },
@@ -427,8 +404,6 @@ test "each Store entry point takes its round budget on its common path" {
             try std.testing.expect((try storage.admitNextModelAttempt(.{})) != null);
         }
 
-        /// Replay preflight, captured catalog read and bound ordinary skill
-        /// settlement use their public entries, with real public metadata.
         fn skillTurn(case: *store_testing.Case, meter: *RoundMeter) !void {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
@@ -473,8 +448,6 @@ test "each Store entry point takes its round budget on its common path" {
             try std.testing.expect(!storage.isFenced());
         }
 
-        /// SQL narrows one unloaded tool; eight matchers share one description
-        /// window. A no-match call still writes no revision.
         fn findTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
             var path: [protocol.max_workspace_bytes]u8 = undefined;
             var configuration = try completeConfiguration("budget-find", "", try canonicalCwd(std.testing.io, &path), "model-a");
@@ -494,9 +467,6 @@ test "each Store entry point takes its round budget on its common path" {
             meter.stop(.findTools);
         }
 
-        /// Three core calls: a Message delivered, an agent started, and a
-        /// start whose arguments the Host refused; then the stop the started
-        /// child owes once its parent stops.
         fn coreTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -532,8 +502,6 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try std.testing.expect(try storage.failCoreCall(refused.binding, "Rui could not start the agent: task is required. Nothing was started.", .{}));
             meter.stop(.resolveCoreCall);
-            // A Tool Result's identity comes from its original call, not the
-            // group's position. Drive the public read on the last ordinal.
             const result_page = try store_core.activityPageForTesting(storage, .{ .session = session, .direction = .backward, .kinds = .initOne(.tool_result), .limit = 1 });
             const result = result_page.items[0];
             try std.testing.expectEqual(@as(u64, 3), result.ordinal);
@@ -542,7 +510,6 @@ test "each Store entry point takes its round budget on its common path" {
             meter.stop(.activityTool);
             try std.testing.expect(tool.presentation.code == .failed);
             try expectContent(storage, .{ .length = tool.name.length, .digest = tool.name.digest }, "start_agent");
-            // Admit the child task so stopping it closes a Turn.
             while (try storage.admitNextModelAttempt(.{})) |_| {}
             var stop = try completeSessionStop("budget-core-stop", session.slice());
             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
@@ -562,9 +529,6 @@ test "each Store entry point takes its round budget on its common path" {
             meter.stop(.deliverSessionForward);
         }
 
-        /// Two Bash calls under ask: one allowed, run and settled, one
-        /// denied; then the continuation's history, its failure, and the
-        /// Session's reads.
         fn toolTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
             const session = try configureTestSessionAsk(storage, "budget-tools");
             try submitTestMessage(storage, tmp, "budget-tools-input", "budget-tools-key", session.slice(), "run");
@@ -625,8 +589,6 @@ test "each Store entry point takes its round budget on its common path" {
             try std.testing.expect(!try storage.recoverOneUncertainAction(ActiveOperationFilter.empty()));
             meter.stop(.recoverOneUncertainAction);
 
-            // The continuation also offers web search, so its tools stage
-            // reads a provider-run member.
             var add_search: wire_request.ConfigureCommand = .{};
             try add_search.key.set("budget-add-search");
             try add_search.session.set(session.slice());
@@ -650,12 +612,9 @@ test "each Store entry point takes its round budget on its common path" {
                 meter.start();
                 try std.testing.expect(try view.nextTool(&tool));
                 meter.stop(.readTools);
-                // Web search, past Bash.
                 meter.start();
                 try std.testing.expect(try view.nextProviderTool(&tool));
                 meter.stop(.readProviderTool);
-                // Bash was declared at the first Operation already, so the
-                // one read finds nothing to declare.
                 _ = try view.coverage();
                 var declaration = view.currentDeclaration();
                 const declared = ViewRounds.start(storage);
@@ -719,8 +678,6 @@ test "each Store entry point takes its round budget on its common path" {
             try std.testing.expectEqualDeep(continuation, binding);
         }
 
-        /// A Turn over the compaction trigger, compacted, so its
-        /// successor's history starts at an anchor.
         fn compactedTurn(storage: *Store, tmp: *std.testing.TmpDir) !void {
             const session = try configureTestSession(storage, "budget-compacted");
             var patch: wire_request.ConfigureCommand = .{};
@@ -745,7 +702,6 @@ test "each Store entry point takes its round budget on its common path" {
             var view: TestingPage = undefined;
             view.open(storage, successor);
             defer view.close();
-            // The boundary's round brought the base's anchor.
             while (!try view.validateOutputsStep()) {}
             const rounds = ViewRounds.start(storage);
             try std.testing.expect((try view.coverage()).anchor != null);

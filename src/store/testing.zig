@@ -1,8 +1,3 @@
-//! Store fixtures that tests outside src/store/ use too: a configured Session,
-//! a submitted message, a settled answer and a settled compaction. Also the
-//! engine seam of the Store's conformance tests (`forEachEngine`), and the
-//! fixtures they arrange and read rows through.
-
 const std = @import("std");
 const platform = @import("../store_path.zig");
 const tool_defs = @import("../tools.zig");
@@ -27,9 +22,6 @@ const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 
 pub const OutputMetadataWriter = output_format.OutputMetadataWriter;
 
-/// A request page with the Store that reads what it asks, for a test that
-/// reads a page itself: each call the page answers with `PageRead` is made
-/// again once the Store has read it, as a preparation's shell does.
 pub const TestingPage = struct {
     page: historical_domain.RequestPage,
     store: *Store,
@@ -41,14 +33,11 @@ pub const TestingPage = struct {
         self.page.open(binding);
     }
 
-    /// The page an admission opens (`historical.Start.view`), read through
-    /// `store`.
     pub fn pageFor(self: *TestingPage, store: *Store) *RequestPage {
         self.store = store;
         return &self.page;
     }
 
-    /// `err` itself, or nothing once the Store read what the page asked.
     fn answer(self: *TestingPage, err: anytype) !void {
         if (err != error.PageRead) return err;
         return self.store.readRequestPage(&self.page);
@@ -68,7 +57,6 @@ pub const TestingPage = struct {
         };
     }
 
-    /// Validates the outputs first, as the request's validation stage does.
     pub fn coverage(self: *TestingPage) !RequestPage.Coverage {
         while (!try self.validateOutputsStep()) {}
         while (true) return self.page.coverage() catch |err| {
@@ -82,15 +70,12 @@ pub const TestingPage = struct {
         const items = items_left.*;
         while (true) return self.page.nextEntryStep(after_position, bytes_left, items_left) catch |err| {
             try self.answer(err);
-            // As a preparation's step that asked: its charges are taken again.
             bytes_left.* = bytes;
             items_left.* = items;
             continue;
         };
     }
 
-    /// The entry after `after_position`, outputs validated first, under an
-    /// allowance no entry runs out of.
     pub fn nextEntry(self: *TestingPage, after_position: u64) !?historical_domain.HistoricalEntry {
         while (!try self.validateOutputsStep()) {}
         while (true) {
@@ -220,8 +205,6 @@ pub const TestingPage = struct {
     }
 };
 
-/// A request page's content reader with the Store that reads its bytes
-/// (`TestingPage`).
 pub const TestingReader = struct {
     reader: historical_domain.HistoricalReader,
     store: *Store,
@@ -246,10 +229,8 @@ pub const TestingReader = struct {
         self.reader.close();
     }
 };
-/// The domain's offered-set expression for portable fixture queries.
 pub const offeredSetSql = @import("domain/tool_set.zig").offeredSetSql;
 
-/// Compose fixture records with the canonical required runners.
 pub fn hostToolRecordsWith(comptime extra: []const tool_defs.Record) [tool_defs.built_in_tool_set.records.len + extra.len]tool_defs.Record {
     var records: [tool_defs.built_in_tool_set.records.len + extra.len]tool_defs.Record = undefined;
     @memcpy(records[0..tool_defs.built_in_tool_set.records.len], tool_defs.built_in_tool_set.records);
@@ -279,10 +260,6 @@ pub fn testingSqliteStore(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io)
     return openSqlite(storage, tmp, io, .{});
 }
 
-/// Opens the SQLite Store in `tmp`. A new Store with the default tool set and
-/// providers starts as a copy of one built once per process, with its own
-/// selector and Store id: building one runs the whole schema bootstrap,
-/// about five times the cost of writing and reopening a copy.
 fn openSqlite(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: TestingStoreOptions) !void {
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(io, &root_buffer);
@@ -304,7 +281,7 @@ fn openSqlite(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: Te
 }
 
 const Template = struct {
-    var state = std.atomic.Value(u8).init(0); // 0 none, 1 building, 2 built
+    var state = std.atomic.Value(u8).init(0);
     var bytes: []const u8 = &.{};
 
     fn get(io: std.Io) ![]const u8 {
@@ -344,24 +321,16 @@ fn copyTemplate(tmp: *std.testing.TmpDir, io: std.Io, database: []const u8, sele
         return error.SqliteExecFailed;
 }
 
-/// The engines a conformance test runs on, each in this one process.
 pub const Engine = enum { sqlite, mysql };
 
-/// One run of a conformance test's body, on one engine.
 pub const Case = struct {
     engine: Engine,
-    /// MySQL's second run: every queued write batch loses its connection
-    /// before its COMMIT, so the Queue runs each one twice (`queue.zig`).
-    /// A test that counts work the rerun repeats, such as rounds or
-    /// reads, returns before counting on it.
     rerun: bool = false,
 };
 
 pub const EngineName = required_engines.EngineName;
 pub const parseRequiredEngines = required_engines.parse;
 
-/// The names `RUI_TEST_REQUIRE_ENGINES` lists, parsed once per process;
-/// none when it is unset.
 pub fn requiredEngines() !std.EnumSet(EngineName) {
     const Parsed = struct {
         var names: ?std.EnumSet(EngineName) = null;
@@ -374,11 +343,8 @@ pub fn requiredEngines() !std.EnumSet(EngineName) {
     return names;
 }
 
-/// Engines reached outside Store conformance: Postgres wire tests.
 pub const checked_elsewhere: std.EnumSet(EngineName) = .initMany(&.{.postgres});
 
-/// The first of `names` that no test reaches, neither an `Engine` nor
-/// one of `elsewhere`, or null.
 pub fn unbuiltEngine(names: std.EnumSet(EngineName), elsewhere: std.EnumSet(EngineName)) ?EngineName {
     var listed = names.iterator();
     while (listed.next()) |name| {
@@ -388,10 +354,6 @@ pub fn unbuiltEngine(names: std.EnumSet(EngineName), elsewhere: std.EnumSet(Engi
     return null;
 }
 
-/// Runs `run(case)` once for each `Engine`, in order, and on a failure
-/// prints the engine's name and returns the error. It first checks
-/// `requiredEngines`: an unknown name, or a listed engine no test reaches
-/// (`unbuiltEngine`), fails every conformance test.
 pub fn forEachEngine(comptime run: anytype) !void {
     if (unbuiltEngine(try requiredEngines(), checked_elsewhere)) |name| {
         std.debug.print("RUI_TEST_REQUIRE_ENGINES lists {s}, an engine not built into these tests\n", .{@tagName(name)});
@@ -416,25 +378,16 @@ pub fn forEachEngine(comptime run: anytype) !void {
     }
 }
 
-/// Opens `storage` on `case`'s engine for the directory `tmp`, so opening
-/// the same `tmp` again reopens the same Store. On SQLite the database is
-/// the file store.sqlite3 in `tmp`.
 pub fn testingStore(case: *const Case, storage: *Store, tmp: *std.testing.TmpDir, io: std.Io) !void {
     return testingStoreWith(case, storage, tmp, io, .{});
 }
 
-/// How `testingStoreWith` opens a Store beyond `testingStore`'s defaults.
 pub const TestingStoreOptions = struct {
-    /// The tools the Host offers.
     host_tool_set: *const tool_defs.HostToolSet = &tool_defs.built_in_tool_set,
-    /// The canonical identity the Store is opened under, when not `tmp`'s
-    /// real path.
     identity: ?[]const u8 = null,
-    /// The providers whose Sessions get model Attempts.
     served: protocol.Routes = protocol.routesAll(.endpoint),
 };
 
-/// `testingStore` with `options`.
 pub fn testingStoreWith(case: *const Case, storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: TestingStoreOptions) !void {
     switch (case.engine) {
         .mysql => {
@@ -445,9 +398,6 @@ pub fn testingStoreWith(case: *const Case, storage: *Store, tmp: *std.testing.Tm
     }
 }
 
-/// Reconstruct format 66's ending queues from production-created Turns,
-/// then perform the operator-run MySQL upgrade. SQLite upgrades at the
-/// next production open. Kept here because this fixture intentionally uses DDL.
 pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !void {
     const schema = @import("schema.zig");
     const Native = struct {
@@ -456,13 +406,9 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
             return sqlite.exec(store.sqliteDatabase(), sql);
         }
     };
-    // K10 is the 66 -> 67 transition, even after later formats append steps.
     const from: u32 = 66;
     try dropPinOrganization(storage);
     try dropObligationFrontier(storage);
-    // Reconstruct the historical row width from its owning CREATE, not a
-    // hand-maintained list of every column later formats append. Both engines
-    // must replay the pending chain from format 66's actual Operation shape.
     const old_model = comptime blk: {
         for (schema.migrations[(from - 1) - schema.migration_baseline].sqlite) |sql| {
             if (std.mem.startsWith(u8, sql, "CREATE TABLE model_operation(")) break :blk sql;
@@ -485,7 +431,6 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
     }
     const old = schema.migrations[53 - schema.migration_baseline];
     const suppress = schema.migrations[56 - schema.migration_baseline];
-    // Use the historical definitions, not a second handwritten old format.
     for (if (storage.engine == .mysql) old.mysql else old.sqlite) |sql| {
         if (std.mem.startsWith(u8, sql, "CREATE TABLE session_ending_owed(")) try Native.exec(storage, sql);
     }
@@ -494,7 +439,6 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
             if (std.mem.startsWith(u8, sql, "ALTER TABLE session_ending_owed ")) try Native.exec(storage, sql);
         }
     } else {
-        // SQLite's historical step rebuilds this table with the suppression flag.
         for (suppress.sqlite) |sql| {
             if (std.mem.indexOf(u8, sql, "session_ending_owed") != null or std.mem.startsWith(u8, sql, "CREATE INDEX session_ending_open ")) try Native.exec(storage, sql);
         }
@@ -524,8 +468,6 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
     }
 }
 
-/// Retire only empty format-76 representations in disposable upgrade fixtures.
-/// All loss checks and MySQL catalog assertions precede the first DDL.
 fn dropBackgroundUpgradeShape(storage: *Store) !void {
     const schema = @import("schema.zig");
     const Native = struct {
@@ -602,7 +544,6 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
     }
 }
 
-/// Rewind pin-free upgrade fixtures before replaying the format-75 step.
 fn dropPinOrganization(storage: *Store) !void {
     const schema = @import("schema.zig");
     const Native = struct {
@@ -631,8 +572,6 @@ fn dropPinOrganization(storage: *Store) !void {
     }
 }
 
-/// Remove only format 73's derived representation; keep canonical input and
-/// forwarding facts so the production migration must reconstruct the frontier.
 fn dropObligationFrontier(storage: *Store) !void {
     const Native = struct {
         fn exec(store: *Store, sql: [:0]const u8) !void {
@@ -650,9 +589,6 @@ fn dropObligationFrontier(storage: *Store) !void {
     }
 }
 
-/// Reopen SQLite through its production upgrader; MySQL's operator applies the
-/// text `rui store schema --engine mysql --from 72` prints, every step to the
-/// current format, before the runtime opens its SELECT/INSERT/UPDATE Store.
 pub fn stageObligationUpgrade(storage: *Store) !void {
     const schema = @import("schema.zig");
     try dropPinOrganization(storage);
@@ -666,27 +602,13 @@ pub fn stageObligationUpgrade(storage: *Store) !void {
     }
 }
 
-/// Words a fixture's SQL may not hold outside string literals, matched
-/// whole and ignoring case: each names a SQLite setting, schema change,
-/// transaction or connection mechanism. A test that needs one belongs in
-/// the SQLite test files under sqlite_tests/. Shared SQLite helpers stay in
-/// sqlite_tests.zig. tests/ci/store_conformance.py reads this list.
 pub const fixture_sqlite_words = [_][]const u8{
     "PRAGMA", "temp",      "CREATE", "ALTER",  "DROP",     "TRIGGER", "VIEW",
     "ATTACH", "SAVEPOINT", "BEGIN",  "COMMIT", "ROLLBACK", "VACUUM",
 };
 
-/// Word prefixes a fixture's SQL may not hold outside string literals,
-/// ignoring case: SQLite's own tables (`sqlite_schema`) and its PRAGMA
-/// table functions (`pragma_table_info()`). tests/ci/store_conformance.py
-/// reads this list.
 pub const fixture_sqlite_prefixes = [_][]const u8{ "sqlite_", "pragma_" };
 
-/// Why `text` cannot be a fixture's SQL, or null: it fails
-/// `rsql.portabilityError`; or, outside its string literals, it holds a
-/// word of `fixture_sqlite_words`, a word starting with one of
-/// `fixture_sqlite_prefixes`, or `AS TEXT` (MySQL casts only to CHAR).
-/// It does not check that `text` parses.
 pub fn fixtureTextError(comptime text: []const u8) ?[]const u8 {
     comptime {
         @setEvalBranchQuota(1000 * text.len + 10000);
@@ -695,7 +617,6 @@ pub fn fixtureTextError(comptime text: []const u8) ?[]const u8 {
         var previous: []const u8 = "";
         while (index < text.len) {
             if (text[index] == '\'') {
-                // A literal ends at a quote not doubled.
                 index += 1;
                 while (index < text.len) : (index += 1) {
                     if (text[index] != '\'') continue;
@@ -732,22 +653,10 @@ pub fn fixtureTextError(comptime text: []const u8) ?[]const u8 {
     }
 }
 
-/// The Store at `schema.migration_baseline`, which the migration tests of
-/// each engine move to the current schema: its DDL as SQLite and MySQL ran
-/// it then, and rows a Store at the baseline held, written as fixture text
-/// for both engines. They never change; `schema.migrations` grows instead.
 pub const baseline_sqlite_ddl: [:0]const u8 = @embedFile("migration_baseline.sqlite.sql");
 pub const baseline_mysql_ddl: [:0]const u8 = @embedFile("migration_baseline.mysql.sql");
 pub const baseline_rows: [:0]const u8 = @embedFile("migration_baseline_rows.sql");
-/// The rows a Store at the current schema holds once every migration ran
-/// on `baseline_rows`: the oracle each engine's migration test compares a
-/// migrated Store with. Written by hand from what each step should do, never
-/// read back from a migrated Store; each format change edits it, and its
-/// diff against `baseline_rows` shows every row the chain changes.
 pub const expected_rows: [:0]const u8 = @embedFile("migration_expected_rows.sql");
-/// `expected_rows` on MySQL, whose content rows hold no payload: its
-/// first statement, the content rows, gives way to
-/// migration_expected_content.mysql.sql's content and content_chunk rows.
 pub const expected_mysql_rows: [:0]const u8 = blk: {
     @setEvalBranchQuota(4 * expected_rows.len);
     const first = std.mem.indexOf(u8, expected_rows, ";\n").? + 2;
@@ -764,10 +673,6 @@ fn isWordByte(byte: u8) bool {
     return std.ascii.isAlphanumeric(byte) or byte == '_';
 }
 
-/// Texts `fixtureTextError` refuses or takes, one of each rule and of
-/// each way past it. A test checks each verdict, and
-/// tests/ci/store_conformance.py reads these to check its own verdicts
-/// agree.
 pub const fixture_text_cases = [_]struct { text: []const u8, refused: bool }{
     .{ .text = "SELECT count(*) FROM turn", .refused = false },
     .{ .text = "PRAGMA foreign_keys=OFF", .refused = true },
@@ -786,11 +691,6 @@ pub const fixture_text_cases = [_]struct { text: []const u8, refused: bool }{
     .{ .text = "SELECT unixepoch() FROM turn", .refused = true },
 };
 
-/// `text` when it passes `fixtureTextError` and the grammar and rules of
-/// the Store's own statements (`rsql.fixtureError`), and MySQL rendering
-/// takes it, else a failed build. Each call also hands its MySQL spelling
-/// to the live MySQL check (`mysql_dialect_check.shadowPrepareFixture`),
-/// which should then find nothing the build missed.
 fn fixtureText(comptime text: [:0]const u8) [:0]const u8 {
     if (comptime fixtureTextError(text)) |message| @compileError(message ++ ": " ++ text);
     if (comptime rsql.fixtureError(text)) |message| @compileError("fixture: " ++ message ++ ": " ++ text);
@@ -802,37 +702,24 @@ fn fixtureText(comptime text: [:0]const u8) [:0]const u8 {
     return text;
 }
 
-/// Runs `sql` on `storage`'s SQLite database outside any entry point, so no entry
-/// point touches what it changes. With empty `args`, `sql` may hold several
-/// statements; otherwise it is one statement whose `?1`, `?2`... take
-/// `args` in order: integers, `Blob`s as blobs, and byte slices as text.
-/// MySQL fixtures use the root connection; application grants stay restricted.
 pub fn exec(storage: *Store, comptime sql: [:0]const u8, args: anytype) !void {
     _ = fixtureText(sql);
     if (storage.engine == .mysql) return mysql_testing.exec(storage, sql, args);
     return sqliteExec(storage.sqliteDatabase(), sql, args);
 }
 
-/// Seeds a loaded subset for visibility tests before find_tools exists.
-/// `source` supplies its configured set; `session` and all its revisions
-/// load that set. Only fixtures bypass configure's reachability check.
 pub fn setLoadedToolsForTesting(storage: *Store, session: []const u8, source: []const u8) !void {
-    // MySQL refuses an UPDATE that reads its own target table, so read first.
     const set = try queryU64(storage, "SELECT tool_set_id FROM session WHERE session_ref=?1", .{source});
     try exec(storage, "UPDATE session SET loaded_tool_set_id=?1 WHERE session_ref=?2", .{ set, session });
     try exec(storage, "UPDATE session_revision SET loaded_tool_set_id=(SELECT loaded_tool_set_id FROM session WHERE session_ref=?1) WHERE session_ref=?1", .{session});
 }
 
-/// Pre-D111 population: null Session settings while earlier Operations retain
-/// the concrete effort they froze. Only the fixture bypasses fresh-spec admission.
 pub fn setLegacyNullEffortForTesting(storage: *Store, session: []const u8) !void {
     try exec(storage, "UPDATE session SET reasoning_effort=NULL WHERE session_ref=?1", .{session});
     try exec(storage, "UPDATE session_revision SET reasoning_effort=NULL WHERE session_ref=?1", .{session});
     try exec(storage, "UPDATE model_operation SET previous_effort_override=NULL WHERE session_ref=?1", .{session});
 }
 
-/// The first column of `sql`'s first row: `QueryFailed` with no row, and
-/// `CorruptStore` when it is negative. `args` binds as in `exec`.
 pub fn queryU64(storage: *Store, comptime sql: [:0]const u8, args: anytype) !u64 {
     _ = fixtureText(sql);
     if (storage.engine == .mysql) return mysql_testing.queryU64(storage, sql, args);
@@ -884,8 +771,6 @@ pub fn expectSqliteObligationProjection(comptime sql: [:0]const u8, comptime ddl
     }
 }
 
-/// `exec` on a SQLite connection, for any SQLite text: the raw SQL of
-/// sqlite_tests.zig and sqlite_tests/.
 pub fn sqliteExec(database: *sqlite.c.sqlite3, sql: [:0]const u8, args: anytype) !void {
     if (args.len == 0) return sqlite.exec(database, sql);
     const statement = try sqlite.prepare(database, sql);
@@ -894,8 +779,6 @@ pub fn sqliteExec(database: *sqlite.c.sqlite3, sql: [:0]const u8, args: anytype)
     try sqlite.expectDone(statement);
 }
 
-/// `queryU64` on a SQLite connection, for any SQLite text: the raw SQL
-/// of sqlite_tests.zig and sqlite_tests/.
 pub fn sqliteQueryU64(database: *sqlite.c.sqlite3, sql: [:0]const u8, args: anytype) !u64 {
     const statement = try sqlite.prepare(database, sql);
     defer _ = sqlite.c.sqlite3_finalize(statement);
@@ -906,9 +789,6 @@ pub fn sqliteQueryU64(database: *sqlite.c.sqlite3, sql: [:0]const u8, args: anyt
     return @intCast(value);
 }
 
-/// Zeroes the bytes of each content row whose id `ids`, a SELECT,
-/// returns, keeping their lengths: SQLite's payload, and in the MySQL
-/// check's spelling the rows' chunks (`schema` content_chunk).
 pub fn zeroContent(storage: *Store, comptime ids: [:0]const u8) !void {
     _ = fixtureText("UPDATE content_chunk SET bytes=zeroblob(length(bytes)) WHERE content_id IN (" ++ ids ++ ")");
     const sql = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id IN (" ++ ids ++ ")";
@@ -917,7 +797,6 @@ pub fn zeroContent(storage: *Store, comptime ids: [:0]const u8) !void {
     return sqliteExec(storage.sqliteDatabase(), sql, .{});
 }
 
-/// `exec` with foreign keys unchecked for `sql` alone, restored on failure.
 pub fn withoutForeignKeys(storage: *Store, comptime sql: [:0]const u8, args: anytype) !void {
     if (storage.engine == .mysql) {
         try mysql_testing.rawExec(storage, "SET foreign_key_checks=0");
@@ -929,9 +808,6 @@ pub fn withoutForeignKeys(storage: *Store, comptime sql: [:0]const u8, args: any
     try exec(storage, sql, args);
 }
 
-/// The same fixtures for tests that run only on SQLite
-/// (sqlite_tests.zig and sqlite_tests/): `sql` is SQLite's text, held to no portability
-/// rule and never handed to the live MySQL check.
 pub const sqlite_only = struct {
     pub fn exec(storage: *Store, sql: [:0]const u8, args: anytype) !void {
         return sqliteExec(storage.sqliteDatabase(), sql, args);
@@ -948,8 +824,6 @@ pub const sqlite_only = struct {
     }
 };
 
-/// Interrupts the one statement whose text is `sql` as it steps, the way an
-/// I/O fault fails a read. No schema changes, so no cached plan expires.
 pub const TestingStatementFault = struct {
     const c = sqlite.c;
 
@@ -981,10 +855,6 @@ pub const TestingStatementFault = struct {
     }
 };
 
-/// For unhinted statements, leaves `table` preparing normally but failing at the first step of a
-/// statement that reads it, the shape of an I/O or corruption fault after
-/// a statement compiled: a renamed table and an overflowing view. SQLite
-/// indexed statements use TestingStatementFault: a view cannot retain indexes.
 pub fn failReadsOf(storage: *Store, comptime table: []const u8) !void {
     if (storage.engine == .mysql) return mysql_testing.rawExec(storage, "RENAME TABLE " ++ table ++ " TO " ++ table ++ "_unreadable;CREATE VIEW " ++ table ++ " AS SELECT * FROM " ++ table ++ "_unreadable WHERE abs(-9223372036854775808) IS NOT NULL");
     try sqlite.exec(storage.sqliteDatabase(), "ALTER TABLE " ++ table ++ " RENAME TO " ++ table ++ "_unreadable");
@@ -992,7 +862,6 @@ pub fn failReadsOf(storage: *Store, comptime table: []const u8) !void {
         "WHERE abs(-9223372036854775808) IS NOT NULL");
 }
 
-/// Bytes a fixture binds as a blob, not as text.
 pub const Blob = struct { bytes: []const u8 };
 
 fn bindFixtureArgs(statement: *sqlite.c.sqlite3_stmt, args: anytype) !void {
@@ -1017,13 +886,11 @@ pub fn completeConfiguration(key: []const u8, session_ref: []const u8, workspace
     command.configuration.model.state = .value;
     try command.configuration.model.value.set(model);
     if (session_ref.len == 0) {
-        // D104/D111/D113: test creations supply a complete agent spec.
         command.configuration.tools = try .of(&.{ "bash", "web_search" });
         command.configuration.permission_mode.state = .value;
         try command.configuration.permission_mode.value.set("bypass");
         command.configuration.compaction_trigger.state = .value;
         try command.configuration.compaction_trigger.value.set("115200");
-        // These fixture models use low; the other fixture bindings state null.
         const low_models = [_][]const u8{ "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5" };
         const effort: ?[]const u8 = for (low_models) |name| {
             if (std.mem.eql(u8, model, name)) break "low";
@@ -1108,7 +975,6 @@ pub fn testingPublicProjection(
     return .{ .session = session, .position = page.items[0].position };
 }
 
-/// One Turn: a message named by `name`, its admission and an answer of `parts`.
 pub fn answerTestTurn(
     storage: *Store,
     tmp: *std.testing.TmpDir,
@@ -1118,7 +984,6 @@ pub fn answerTestTurn(
 ) !void {
     try submitTestMessage(storage, tmp, name ++ "-input", name ++ "-key", session, "input");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    // A real message item whose output_text blocks hold the parts.
     var capacity: usize = 128;
     for (parts) |part| capacity += part.encoded.len + 32;
     const source_buffer = try std.testing.allocator.alloc(u8, capacity);
@@ -1163,9 +1028,6 @@ pub fn answerTestTurn(
     try storage.settleModelSuccess(binding, &output, .{});
 }
 
-/// Gives compaction Operation `operation` the floor at the position of
-/// the conversation entry of its Session whose text is `text`, at `level`,
-/// as admission would for a compaction that makes room (D217).
 pub fn setHistoryFloorForTesting(storage: *Store, operation: u64, text: []const u8, level: u64) !void {
     if (!@import("builtin").is_test) @compileError("test-only Store fixture");
     const digest = protocol.contentDigest(text);
@@ -1173,7 +1035,6 @@ pub fn setHistoryFloorForTesting(storage: *Store, operation: u64, text: []const 
         "WHERE e.session_ref=model_operation.session_ref AND c.digest=?2 AND c.private=0),history_level=?3,history_dropped=0 WHERE operation_id=?1", .{ operation, Blob{ .bytes = &digest }, level });
 }
 
-/// Whether Turn `turn` ended with `outcome`.
 pub fn turnEndedForTesting(storage: *Store, turn: u64, outcome: []const u8) !bool {
     if (!@import("builtin").is_test) @compileError("test-only Store fixture");
     return try queryU64(storage, "SELECT count(*) FROM turn WHERE turn_id=?1 AND outcome_code=?2", .{ turn, outcome }) == 1;
@@ -1206,8 +1067,6 @@ pub fn settleCompactionForTesting(storage: *Store, tmp: *std.testing.TmpDir, bin
         if (kind == .function_call) calls += 1;
         try source.writeStreamingAll(std.testing.io, bytes);
         try source.sync(std.testing.io);
-        // Each item is judged under the Operation that accepts its kind, so
-        // the Store's own Operation check is what rejects a misplaced item.
         const operation: output_format.ModelOperationKind = if (kind == .compaction) .compaction else .assistant_response;
         _ = try output_decode.recordItemForTesting(&metadata, source, offset, bytes.len, ordinal, operation);
         offset += bytes.len;
@@ -1219,7 +1078,6 @@ pub fn settleCompactionForTesting(storage: *Store, tmp: *std.testing.TmpDir, bin
         .metadata = metadata.file,
         .item_count = kinds.len,
         .call_count = calls,
-        // Deliberately present: compaction must not project visible messages.
         .answer_length = if (try storage.modelOperationKind(binding) == .compaction) 6 else 0,
         .answer_digest = protocol.contentDigest("answer"),
         .response_id = .{},
@@ -1228,15 +1086,10 @@ pub fn settleCompactionForTesting(storage: *Store, tmp: *std.testing.TmpDir, bin
     }, .{});
 }
 
-/// Settles `binding` with `items`, raw provider items judged in order, of
-/// which the last message's whole text is `answer`; its function calls
-/// count as the output's calls.
 pub fn settleItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, items: []const []const u8, answer: []const u8) !void {
     return settleSelectedItemsForTesting(storage, tmp, binding, items, null, answer);
 }
 
-/// `settleItemsForTesting` with the answer the message at `selected`, when
-/// given, as phase selection picks one before later messages.
 pub fn settleSelectedItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, items: []const []const u8, selected: ?u64, answer: []const u8) !void {
     if (!@import("builtin").is_test) @compileError("test-only Store fixture");
     const source = try tmp.dir.createFile(std.testing.io, "items-output", .{ .read = true, .truncate = true });
@@ -1274,22 +1127,16 @@ pub fn settleSelectedItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, 
     }, .{});
 }
 
-/// Counts the content rows besides those only tool records name: every
-/// Session saves its tool set's texts once, beside what a test imports,
-/// and a Session's instructions may share one of them (the empty text).
 pub const content_beside_tools = "SELECT count(*) FROM content WHERE (content_id NOT IN (SELECT description_content_id FROM tool_record) " ++
     "AND content_id NOT IN (SELECT input_schema_content_id FROM tool_record)) OR content_id IN (SELECT instructions_content_id FROM session_revision) " ++
     "OR content_id IN (SELECT output_schema_content_id FROM session_revision WHERE output_schema_content_id IS NOT NULL)";
 
-/// Tests may own the large observation value; the Store entry returns only void.
 pub fn observeCommandForTesting(storage: *Store, key: []const u8) !command_domain.CommandObservation {
     var out: store_core.Observed = undefined;
     try storage.observeCommand(key, null, &out);
     return out.full.observation;
 }
 
-/// A format-64 Session whose latest loaded subset differs from its first
-/// Operation's full offer. Shared by the SQLite and live MySQL migration tests.
 pub const operation_offer_migration_seed: [:0]const u8 =
     "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) " ++
     "SELECT 'offer-migration-update',1,'d8mv7p',input_digest,1,'',2,0,100 FROM core_command WHERE command_key='fixture-answer-config';" ++
@@ -1299,12 +1146,9 @@ pub const operation_offer_migration_seed: [:0]const u8 =
     "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
     "VALUES(99,1,'d8mv7p',2,1,99,0,1,'failed',1)";
 
-/// Format-65 request history: low, high, a high compaction, and its first
-/// successor. Tests vary the last choice/codec before applying pending 66.
 pub const operation_effort_migration_seed: [:0]const u8 =
     "UPDATE session SET codec='openai-responses/2',revision=3,reasoning_effort='high',next_position=16,label='unrelated' WHERE session_ref='d8mv7p';" ++
     "UPDATE model_operation SET reasoning_effort='low' WHERE operation_id=1;" ++
-    // Revision one remains a legacy null spec with a concrete frozen value.
     "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) SELECT 'effort-migration-high',1,'d8mv7p',input_digest,1,'',2,0,100 FROM core_command WHERE command_key='fixture-answer-config';" ++
     "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) SELECT 'effort-migration-last',1,'d8mv7p',input_digest,1,'',3,0,101 FROM core_command WHERE command_key='fixture-answer-config';" ++
     "INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,model,instructions_content_id,instructions_updated,tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label) " ++
@@ -1335,8 +1179,6 @@ pub const EffortMigrationChoice = enum {
     }
 };
 
-/// Synthetic duration fixture for existing settlement tests. Production always
-/// installs the custody registry; owner-boundary timing tests use live Attempts.
 pub fn timingSource(values: *@import("../model_timing.zig").Values) @import("../model_timing.zig").Source {
     return .{ .context = values, .read = struct {
         fn read(raw: *anyopaque, _: u64, _: std.Io) @import("../model_timing.zig").Values {

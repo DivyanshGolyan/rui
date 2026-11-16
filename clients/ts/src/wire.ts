@@ -478,7 +478,7 @@ export interface components {
                 session: string;
                 action: components["schemas"]["Decimal"];
                 /** @enum {string} */
-                code: "invalid_session_reference" | "invalid_target" | "unknown_session" | "unknown_action" | "target_mismatch" | "source_stopped" | "background_unavailable";
+                code: "invalid_session_reference" | "invalid_target" | "unknown_session" | "unknown_action" | "target_mismatch" | "source_stopped" | "action_not_backgroundable" | "background_unavailable";
             };
         };
         ActionBackgroundRequest: {

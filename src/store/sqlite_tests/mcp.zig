@@ -1,5 +1,3 @@
-//! Mcp SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
@@ -45,7 +43,6 @@ test "MCP Actions follow ask and bypass permission and continue after resolution
         const session = reply.accepted.session;
         try submitTestMessage(&storage, &tmp, "mcp-permission-message", "mcp-permission-message", session.slice(), "fetch");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        // The Operation's offer, not a later Session revision, owns this call.
         var update: wire_request.ConfigureCommand = .{};
         try update.key.set("mcp-permission-remove");
         update.session = session;
@@ -79,7 +76,6 @@ test "MCP Actions follow ask and bypass permission and continue after resolution
         try std.testing.expect((try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})) == null);
         try storage.resolveAction(action, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", .{});
         try std.testing.expect((try storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true })) == null);
-        // A selected Action that was resolved before dispatch is a harmless no-op.
         try storage.resolveAction(action, .spawn_failed, "not used", .{});
         try std.testing.expect(!storage.isFenced());
         const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -177,7 +173,6 @@ test "MCP invalid and removed calls share their batch rejection lookup rounds" {
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation", .{}));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(DISTINCT rejection_content_id) FROM model_tool_call", .{}));
         }
-        // Cold rejection content is looked up once per batch, not per call.
         try std.testing.expect(rounds[1] <= rounds[0] + 1);
         try std.testing.expect(rounds[1] <= 5);
     }
@@ -262,7 +257,6 @@ test "MCP work selected before its parent stops yields to the owed child stop" {
     const selected = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.mcp;
     var stop = try completeSessionStop("mcp-parent-stop", parent.slice());
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-    // A selection is not authority: the parent's stop committed first.
     try storage.resolveAction(selected, .spawn_failed, "must not resolve", .{});
     try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code IS NOT NULL", .{}));
     try std.testing.expect((try storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true })) == null);
@@ -272,12 +266,10 @@ test "MCP work selected before its parent stops yields to the owed child stop" {
     const ending = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.ending;
     try std.testing.expect(ending.quiet);
     try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
-    // Even a quiet ending is forwarded to the ancestor Activity feed.
     const forward = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.forward;
     try std.testing.expect(try storage.deliverSessionForward(forward, .{}));
     try std.testing.expect((try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })) == null);
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'", .{}));
-    // The settled stop stays as history; the resumed child's MCP work runs.
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE child_ref=?1 AND settled=1", .{child.slice()}));
     try submitTestMessage(&storage, &tmp, "mcp-child-again", "mcp-child-again", child.slice(), "fetch again");
     const resumed = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -351,8 +343,6 @@ test "MCP selection cost does not grow with earlier Operations of an open Turn" 
             if (index == 0) turn_id = model.turn_id;
             try std.testing.expectEqual(turn_id, model.turn_id);
             if (index + 1 < count) {
-                // Queued input keeps the answer's Turn open for another Operation,
-                // without adding historical Actions to MCP serialization's work.
                 var key_buffer: [64]u8 = undefined;
                 const key = try std.fmt.bufPrint(&key_buffer, "mcp-history-input-{d}", .{index});
                 try submitTestMessage(&storage, &tmp, key, key, session.slice(), "continue");
@@ -363,7 +353,6 @@ test "MCP selection cost does not grow with earlier Operations of an open Turn" 
                 });
             }
         }
-        // Read the durable population through production selection before measuring.
         const selected = (try storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true })).?;
         try std.testing.expectEqual(count, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE turn_id=?1", .{turn_id}));
         try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM turn WHERE turn_id=?1 AND outcome_code IS NULL", .{turn_id}));
@@ -417,7 +406,6 @@ test "MCP attempts serialize Sessions and recover without replay" {
     const replacement_tool_set: tool_defs.HostToolSet = .{ .records = &replacement_records, .digests = &replacement_digests };
     try storage.saveHostToolSet(&replacement_tool_set);
     const first = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.mcp.action_id;
-    // Selection repeats until admission: later calls cannot overtake it.
     try std.testing.expectEqual(first, (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.mcp.action_id);
     const binding = (try storage.admitActionAttempt(.{ .action_id = first, .runner = .mcp }, 1234, .{})).?.permit.binding;
     try std.testing.expect((try storage.admitActionAttempt(.{ .action_id = first + 1, .runner = .mcp }, 600_000, .{})) == null);
@@ -432,7 +420,6 @@ test "MCP attempts serialize Sessions and recover without replay" {
     try std.testing.expectEqualStrings("docs", input.runner.mcp.server.slice());
     try std.testing.expectEqual(@as(u64, mcp_record.input_schema.len), input.runner.mcp.input_schema.length);
     try std.testing.expectEqualSlices(u8, &protocol.contentDigest(mcp_record.input_schema), &input.runner.mcp.input_schema.digest);
-    // Full MCP slots must not hide a later slot-free core call.
     const core = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = false })).?.action;
     try std.testing.expectEqual(first + 2, core.binding.action_id);
     try std.testing.expect(try storage.failCoreCall(core.binding, "Invalid arguments: missing target.", .{}));
@@ -444,13 +431,11 @@ test "MCP attempts serialize Sessions and recover without replay" {
     const unsent = (try storage.admitActionAttempt(.{ .action_id = first + 1, .runner = .mcp }, 600_000, .{})).?.permit.binding;
     var stop = try completeSessionStop("mcp-unsent-stop", sessions[0].slice());
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-    // Store stop must not replace the adapter's definite not-run evidence.
     _ = try storage.settleActionAttempt(unsent, .spawn_failed, "not available", .{});
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='spawn_failed' AND CAST(c.payload AS TEXT) LIKE ?2", .{ unsent.action_id, "%not available%" }));
     const sent = (try storage.admitActionAttempt(.{ .action_id = other, .runner = .mcp }, 5_000, .{})).?.permit.binding;
     var sent_stop = try completeSessionStop("mcp-sent-stop", sessions[1].slice());
     try std.testing.expect(storage.stopSession(&sent_stop, .{}) == .accepted);
-    // A definite remote answer also remains definite when settlement races stop.
     _ = try storage.settleActionAttempt(sent, .succeeded, "terminal result raced stop", .{});
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='succeeded' AND CAST(c.payload AS TEXT) LIKE ?2", .{ sent.action_id, "%terminal result raced stop%" }));
 }

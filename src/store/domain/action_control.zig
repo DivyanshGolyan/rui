@@ -20,20 +20,22 @@ const target = rsql.Read(.{
 });
 const facts = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,action.parent_operation_id,operation.turn_id," ++
-        "action.background_position,action.acceptance_position," ++
+        "action.background_position,action.acceptance_position," ++ action_domain.coreCallSql(2) ++ " AS core_tool," ++
         action_domain.actionStopPositionSql("action", "operation") ++ " AS stop_position " ++
         "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN session s ON s.session_ref=action.session_ref WHERE action.action_id=?1",
-    .Args = struct { action_id: u64 },
+    .Args = action_domain.CoreNames.Args(struct { action_id: u64 }),
     .Row = struct {
         session: rsql.SessionHead,
         parent_operation_id: rsql.Positive,
         turn_id: rsql.Positive,
         background_position: ?rsql.Positive,
         acceptance_position: ?rsql.Positive,
+        core_tool: bool,
         stop_position: ?rsql.Positive,
 
         fn selected(row: @This()) control.Facts {
             return .{
+                .core_tool = row.core_tool,
                 .background = if (row.background_position) |position| position.get() else null,
                 .final = if (row.acceptance_position) |position| position.get() else null,
                 .stopped = if (row.stop_position) |position| position.get() else null,
@@ -109,7 +111,7 @@ pub const Control = struct {
             command_domain.lookupCommand(r, request.key.slice(), &t.saved);
             if (session_id.valid(request.session.slice())) r.read(target, .{ .session = request.session.slice() }, &t.receiver);
             if (validId(request.action_id)) {
-                r.read(facts, .{ .action_id = request.action_id }, &t.action);
+                r.read(facts, action_domain.CoreNames.of().args(.{ .action_id = request.action_id }), &t.action);
                 t.text = action_receipt.format(request.action_id, &t.input.scratch.receipt);
                 t.content = .ofBytes(t.text, false);
                 content_domain.lookup(r, &t.content);

@@ -1,12 +1,3 @@
-//! The MySQL session layer against a live MySQL 8.4 server: every Args
-//! type as a literal (`mysql_literal.zig`), INSERTed and SELECTed back
-//! through the connection (`wire/mysql_connection.zig`) into every Row type
-//! (`mysql_row.zig`), extremes included, and compared.
-//!
-//! The server is the one `mysql_dialect_check.zig` uses, named the same way
-//! (`RUI_TEST_MYSQL_SOCKET`, `RUI_TEST_MYSQL_ROOT_PASSWORD`). Without it each
-//! test skips, unless `RUI_TEST_REQUIRE_ENGINES` lists `mysql`; then it fails.
-//! The tests work in their own database, `rui_session_check`.
 const std = @import("std");
 const Bounded = @import("../bounded.zig").Bounded;
 const protocol = @import("../protocol.zig");
@@ -20,7 +11,6 @@ const Connection = mysql_connection.Connection;
 
 const database = "rui_session_check";
 
-/// A root connection on the check's fresh database, or null to skip.
 fn open(connection: *Connection) !?void {
     const config = try mysql_dialect_check.rootConfig() orelse return null;
     var refusal: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -39,7 +29,6 @@ fn open(connection: *Connection) !?void {
     return {};
 }
 
-/// Runs `text`, whose statements each answer OK; returns the last count.
 fn expectOks(connection: *Connection, text: []const u8) !u64 {
     try connection.query(text);
     return okUntilReady(connection);
@@ -68,16 +57,13 @@ fn bound(now: i64) literal.Bound {
     return .{ .now = now, .served = &served_routes };
 }
 
-/// Sends `template` with `args` as one streamed COM_QUERY.
 fn send(connection: *Connection, comptime template: rsql.Template, comptime Args: type, args: *const Args, now: i64) !void {
     const len = try literal.length(template, Args, args, bound(now));
     const w = try connection.beginQuery(len);
-    // A failed write's cause comes from endQuery.
     literal.write(template, Args, args, bound(now), w) catch {};
     try connection.endQuery();
 }
 
-/// Reads the one row of the result of the query just sent.
 fn readOne(comptime Row: type, connection: *Connection, row: *Row) !void {
     const count = switch (try connection.next()) {
         .columns => |count| count,
@@ -176,7 +162,6 @@ test "every Args type round-trips through a literal into its Row type, extremes 
     const bytes = try allocator.create(rsql.Blob(long_bytes));
     defer allocator.destroy(bytes);
 
-    // Every byte value; UTF-8 of each width, a quote, a backslash and NUL.
     var all_bytes: [256]u8 = undefined;
     for (&all_bytes, 0..) |*byte, i| byte.* = @intCast(i);
     var label: Bounded(64) = .{ .len = 0 };
@@ -199,7 +184,6 @@ test "every Args type round-trips through a literal into its Row type, extremes 
     };
     try roundTrip(connection, &small, text, bytes);
 
-    // The smallest values, and empty text and bytes, which stay non-NULL.
     var empty = small;
     empty.id = .of(std.math.maxInt(i64));
     empty.text = "";
@@ -211,11 +195,8 @@ test "every Args type round-trips through a literal into its Row type, extremes 
     empty.label = .{ .len = 0 };
     try roundTrip(connection, &empty, text, bytes);
 
-    // Values longer than a batch and than the receive buffer: the INSERT
-    // streams through the send buffer, the row through the receive buffer.
     const long_value = try allocator.alloc(u8, long_text);
     defer allocator.free(long_value);
-    // Whole characters: the length is a multiple of the pattern's 5 bytes.
     for (long_value, 0..) |*byte, i| byte.* = "é€"[i % 5];
     const long_blob = try allocator.alloc(u8, long_bytes);
     defer allocator.free(long_blob);
@@ -333,7 +314,6 @@ test "text literals compare binary and without padding, and text that is not UTF
         try std.testing.expectEqual(!case[1], row.distinct);
     }
 
-    // Two statements in one batch: the second never runs after the first fails.
     const insert = comptime rendered("INSERT INTO value_check(id,text_value) VALUES(?1,?2)");
     const Text = struct { id: rsql.Positive, text: []const u8 };
     const w = connection.batch();
@@ -346,8 +326,6 @@ test "text literals compare binary and without padding, and text that is not UTF
     try connection.sendBatch();
     const refused = try connection.next();
     try std.testing.expect(refused == .err);
-    // 1300: the parser refuses an _utf8mb4 literal that is not UTF-8,
-    // whatever sql_mode says.
     try std.testing.expectEqual(1300, refused.err.code);
     try std.testing.expect(connection.isReady());
     try connection.query("SELECT count(*) FROM value_check WHERE id IN (20,21)");
@@ -357,9 +335,6 @@ test "text literals compare binary and without padding, and text that is not UTF
     try std.testing.expectEqual(0, count.count);
 }
 
-// MySQL's Store engine is not implemented yet. Exercise its durable chunk
-// layout, literal writer and wire reader here; feed binary result windows
-// directly to the production matcher, never concatenate chunks in SQL or Zig.
 test "word search streams across MySQL content chunk edges including split UTF-8" {
     const Matcher = @import("../word_search.zig").Matcher;
     const allocator = std.testing.allocator;
@@ -380,8 +355,6 @@ test "word search streams across MySQL content chunk edges including split UTF-8
     const select_chunks = comptime rendered("SELECT content_chunk.bytes FROM content_chunk JOIN content ON content.content_id=content_chunk.content_id WHERE content.content_id=?1 AND content.private=0 ORDER BY content_chunk.chunk_index");
     const cases = [_]struct { query: []const u8, stored: []const u8, left: usize }{
         .{ .query = "start_agent", .stored = "StArT_AgEnT", .left = 5 },
-        // The first chunk ends with C3, the second begins with A9. Text
-        // conversion of either chunk would lose the value; binary reads do not.
         .{ .query = "café", .stored = "CaFé", .left = 4 },
     };
     const bytes = try allocator.alloc(u8, schema.content_chunk_bytes + 180);

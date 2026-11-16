@@ -1,5 +1,3 @@
-//! Action Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -89,7 +87,6 @@ test "allow once survives mode changes and reopen without granting another Attem
             const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
             try std.testing.expectEqual(action_id, action.action_id);
             try std.testing.expect(storage.decidePermission(&allow, .{}).accepted.replayed);
-            // The admitted Action cannot be reissued; its unapproved sibling remains pending.
             try std.testing.expect((try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})) == null);
         }
     }.run);
@@ -182,14 +179,13 @@ test "earlier Action settlement remains authoritative after Session stop" {
     }.run);
 }
 
-test "core tool table routes every built-in to its sole action selector" {
+test "core tool table routes every built-in and promotion excludes the full core domain" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             const records = @import("../../tool_record.zig");
             for (std.enums.values(records.Tool)) |tool| {
                 errdefer std.debug.print("table routing failed for {s}\n", .{@tagName(tool)});
                 const row = records.built_in_rows.get(tool);
-                // Independent expectations pin the pre-table runner domain.
                 const expected: records.Runner = switch (tool) {
                     .bash => .bash,
                     .web_search => .provider,
@@ -197,8 +193,6 @@ test "core tool table routes every built-in to its sole action selector" {
                 };
                 try std.testing.expectEqual(expected, row.runner);
                 try std.testing.expectEqual(row.runner, records.Runner.of(records.record(tool)));
-                // A provider name sent as a function call is rejected by
-                // classification, so it must reach neither selector.
 
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
@@ -241,8 +235,18 @@ test "core tool table routes every built-in to its sole action selector" {
                     try std.testing.expectEqual(binding.operation_id, call.binding.parent_operation_id);
                     try std.testing.expectEqual(binding.turn_id, call.binding.turn_id);
                     try std.testing.expectEqualStrings(session.slice(), call.session.slice());
-                    // Selection is a read, not an Attempt or a resolution.
                     try std.testing.expectEqual(call.binding.action_id, (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action.binding.action_id);
+                    var promotion = try NativePromotion.command(session.slice(), "core-promotion", call.binding.action_id);
+                    const refused = storage.backgroundAction(&promotion, .{});
+                    try std.testing.expect(refused == .rejected and refused.rejected.code == .action_not_backgroundable);
+                    const replay = storage.backgroundAction(&promotion, .{});
+                    try std.testing.expect(replay == .rejected and replay.rejected.replayed and replay.rejected.code == .action_not_backgroundable);
+                    var stop = try completeSessionStop("core-stop", session.slice());
+                    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                    try promotion.key.set("stopped-core-promotion");
+                    const stopped = storage.backgroundAction(&promotion, .{});
+                    try std.testing.expect(stopped == .rejected and stopped.rejected.code == .action_not_backgroundable);
+                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE background_position IS NOT NULL", .{}));
                 }
                 if (bash) |attempted| {
                     try std.testing.expectEqual(binding.operation_id, attempted.permit.binding.parent_operation_id);
@@ -274,8 +278,6 @@ test "Bash proposals retain exact order permission provenance denial and stop te
             const proposed = try store_core.publicConversationPageForTesting(&storage, public_request);
             try std.testing.expectEqual(@as(usize, 1), proposed.count);
             try std.testing.expect(proposed.items[0].kind == .user);
-            // The provider's complete proposal, including its call arguments, is not
-            // addressable as a public content position.
             try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{
                 .session = public_request.session,
                 .position = proposed.end,
@@ -335,7 +337,6 @@ test "Bash proposals retain exact order permission provenance denial and stop te
                 const presentation = resolved.get("presentation").?.object;
                 try std.testing.expectEqualStrings("Run first command", presentation.get("description").?.string);
                 try std.testing.expectEqualStrings("denied", presentation.get("code").?.string);
-                // A terminal sibling is not a published complete group.
                 try std.testing.expectEqual(std.json.Value.null, std.meta.activeTag(presentation.get("publication_position").?));
                 const second = parsed.value.actions.unresolved[0];
                 try std.testing.expectEqualStrings("1", second.call_ordinal);
@@ -398,7 +399,6 @@ test "Bash proposals retain exact order permission provenance denial and stop te
             try submitTestMessage(&storage, &tmp, "bypass-message", "bypass-message", session.slice(), "bypass proposal");
             const bypass_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, bypass_binding, "bypass-metadata");
-            // The ask-mode pair was never authorized: one denied, one stopped.
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1 AND permission_revision=1", .{}));
             try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1 AND permission_revision=2 AND resolution_code IS NULL", .{}));
 
@@ -429,7 +429,6 @@ test "Action admission never visits an Action waiting for permission, in rounds"
             var storage: Store = undefined;
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            // Each pass adds a Turn with two Actions waiting for permission.
             var rounds: [2]u16 = undefined;
             for (&rounds, 0..) |*cost, pass| {
                 var name_buffer: [32]u8 = undefined;
@@ -463,8 +462,6 @@ test "runner action seam covers selection admission input settlement stop and re
                 break :blk out;
             };
             const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
-            // The replay fixture executes every write transaction twice.
-            // Frontier maintenance shares the two original rounds on both passes.
             const write_rounds: u64 = if (case.rerun) 4 else 2;
             inline for (.{ .bash, .mcp }) |runner| {
                 for (0..4) |scenario| {

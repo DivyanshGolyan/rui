@@ -1,6 +1,3 @@
-//! Session configuration: creating a Session, applying or rejecting a
-//! configuration update, and reading a Session's saved settings.
-
 const std = @import("std");
 const operation_effort = @import("operation_effort.zig");
 const session_settings = @import("../../session_settings.zig");
@@ -36,8 +33,6 @@ pub const AcceptedConfiguration = command_reply.AcceptedConfiguration;
 
 pub const RejectedConfiguration = command_reply.RejectedConfiguration;
 
-/// Host-only preset resolution, carried through the ordinary configure
-/// transaction. The request digest is of the original, unresolved command.
 pub const PresetDecision = struct {
     request_digest: [32]u8,
     rejection: ?Rejection = null,
@@ -47,7 +42,6 @@ pub const PresetDecision = struct {
 
 pub const ConfigureReply = command_reply.ConfigureReply;
 
-/// D104: the spec alone selects tools; an empty list selects none.
 fn requestedNames(requested: *const content_custody.Configuration) *const command_input.ToolsField {
     return &requested.tools;
 }
@@ -58,9 +52,6 @@ fn requestsBash(requested: *const content_custody.Configuration) bool {
     return false;
 }
 
-/// D133: an omitted provider selects the Host's single served provider.
-/// A Host serving several has no default (D221), so a creation must name
-/// one. An idle Host keeps the product's, which its unserved check refuses.
 fn defaultProvider(routes: provider_route.Routes) ?provider_name.Provider {
     var selected: ?provider_name.Provider = null;
     inline for (std.enums.values(provider_name.Provider)) |provider| {
@@ -72,9 +63,6 @@ fn defaultProvider(routes: provider_route.Routes) ?provider_name.Provider {
     return selected orelse std.meta.stringToEnum(provider_name.Provider, product_defaults.provider).?;
 }
 
-/// Why `tools` cannot be saved for a Session of `provider`: a name the
-/// Host tool set lacks, or a tool some provider runs that `provider`
-/// does not.
 fn toolsRejection(host_tool_set: *const tool_defs.HostToolSet, provider: provider_name.Provider, tools: *const command_input.ToolsField) ?configuration_admission.Rejection {
     var names = tools.iterator();
     while (names.next()) |name| {
@@ -88,8 +76,6 @@ fn toolsRejection(host_tool_set: *const tool_defs.HostToolSet, provider: provide
     return null;
 }
 
-/// Rejection codes are durable; this advisory detail describes the current
-/// Host's launch-only MCP configuration, also on replay. No Store read is needed.
 pub fn missingToolMessage(host_tool_set: *const tool_defs.HostToolSet, code: anytype, tools: *const command_input.ToolsField) ?tool_defs.HostToolSet.MissingTool {
     switch (code) {
         .unknown_tool, .mcp_server_unavailable => {},
@@ -102,13 +88,10 @@ pub fn missingToolMessage(host_tool_set: *const tool_defs.HostToolSet, code: any
     return null;
 }
 
-/// Persisted session.permission_mode for a validated mode name.
 fn permissionModeCode(mode: []const u8) u8 {
     return if (std.mem.eql(u8, mode, "ask")) 0 else 1;
 }
 
-/// Decodes a persisted permission_mode: 0 asks, 1 bypasses, and any other
-/// value is `CorruptStore`.
 pub fn permissionMode(code: u8) error{CorruptStore}!cli_value.PermissionMode {
     return switch (code) {
         0 => .ask,
@@ -117,21 +100,16 @@ pub fn permissionMode(code: u8) error{CorruptStore}!cli_value.PermissionMode {
     };
 }
 
-/// Refuses a persisted label that `tool_presentation.validLabel` does not accept.
 pub fn checkLabel(label: []const u8) error{CorruptStore}!void {
     if (!tool_presentation.validLabel(label)) return error.CorruptStore;
 }
 
-/// A Session's saved configuration. Its fields name, in order, the columns
-/// `saved_session` reads, so a read decodes into it in place.
 pub const CurrentConfiguration = struct {
     workspace: Bounded(workspace_path.max_bytes) = .{},
     provider: provider_name.Provider = undefined,
     model: Bounded(model_capability.max_model_bytes) = .{},
     instructions_id: ?i64 = null,
-    /// Configured name intent; 0 until a creation saves its first.
     tool_set_id: u64 = 0,
-    /// Loaded name intent. Null means every configured name.
     loaded_tool_set_id: ?u64 = null,
     permission_mode: u8 = 0,
     output_schema_id: ?i64 = null,
@@ -141,18 +119,12 @@ pub const CurrentConfiguration = struct {
     output_reservation: ?u64 = null,
     reasoning_effort: ?model_capability.ReasoningEffort = null,
     label: ?Bounded(tool_presentation.max_label_bytes) = null,
-    /// Read only: the Store dates a Session when it inserts it.
     created_at: u64 = 0,
-    /// Read only: the change ring's key for the Session's Workspace.
     workspace_key: u64 = 0,
-    /// Read only: the creator of an attached agent; absent for other Sessions.
     parent_ref: ?Bounded(session_id.bytes) = null,
-    /// Read only: the latest Operation's frozen effort, for pre-D111 null specs.
     previous_reasoning_effort: ?model_capability.ReasoningEffort = null,
 };
 
-/// The Session columns turn work, settlement and page cursors read, without
-/// the 4 KB workspace a whole CurrentConfiguration carries.
 pub const SessionFacts = struct {
     provider: provider_name.Provider,
     model: Bounded(model_capability.max_model_bytes) = .{},
@@ -172,8 +144,6 @@ pub const ConfigurationContentAction = enum(u2) {
     clear,
 };
 
-/// A created Session has no output schema by default, so the schema's
-/// plan never imports empty content.
 pub const OutputSchemaAction = enum(u2) {
     preserve,
     import_requested,
@@ -223,8 +193,6 @@ pub fn configurationBeforeWorkspace(
         std.meta.stringToEnum(provider_name.Provider, requested.provider.value.slice()) orelse return .unsupported_provider
     else
         null;
-    // D104/D111/D113: callers of the domain must supply the same complete
-    // creation spec that the wire parser requires.
     if (current == null and
         (requested.model.state != .value or requested.reasoning_effort.state == .omitted or
             requested.compaction_trigger.state != .value or requested.tools.state != .value or
@@ -241,14 +209,10 @@ pub fn configurationBeforeWorkspace(
     if (requested.label.state == .value and !tool_presentation.validLabel(requested.label.value.slice())) return .invalid_label;
     if (requested.tools.state == .value) if (toolsRejection(host_tool_set, provider orelse (if (current) |existing| existing.provider else default_provider.?), &requested.tools)) |rejection| return rejection;
     const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
-    // D166: an unlisted model has no known window to enforce.
     if (compact_at) |tokens| if (model_catalog.find(selected_facts, model)) |known| {
         if (known.context_window) |window| if (tokens > window) return .compact_at_too_large;
     };
     if (compact_at) |tokens| if (tokens > std.math.maxInt(i64)) return .invalid_compaction_trigger;
-    // Resolve the settings once: omission retains the effective historical
-    // effort, while a supplied value (including null) overrides it. Validate
-    // that result even when only the model, or neither setting, was supplied.
     const retained_effort = if (current) |existing| effectiveReasoningEffort(existing) else null;
     const effort = switch (requested.reasoning_effort.state) {
         .omitted => retained_effort,
@@ -256,21 +220,15 @@ pub fn configurationBeforeWorkspace(
         .value => std.meta.stringToEnum(model_capability.ReasoningEffort, requested.reasoning_effort.value.slice()) orelse
             return .unsupported_reasoning_effort,
     };
-    // The codec cannot encode a boundary back to unspecified effort.
     if (requested.reasoning_effort.state == .explicit_null and retained_effort != null) return .unsupported_reasoning_effort;
     if (!model_capability.supportsReasoningEffort(selected_facts, model, effort)) return .unsupported_reasoning_effort;
     return null;
 }
 
-/// D111/D209: an explicit spec wins. A pre-D111 null spec carries forward
-/// its last Operation's frozen effort, never a catalog or product default.
-/// With no earlier concrete effort, null still means unspecified.
 pub fn effectiveReasoningEffort(current: anytype) ?model_capability.ReasoningEffort {
     return current.reasoning_effort orelse current.previous_reasoning_effort;
 }
 
-/// Configure owns intent identity. The immutable revision freezes its source;
-/// admission copies it, and later refusals cannot reinterpret older choices.
 pub fn effortChoiceRevisionSql(comptime revision: []const u8) []const u8 {
     return "(SELECT intent.effort_source_revision FROM session_revision intent WHERE intent.session_ref=" ++ revision ++ ".session_ref AND intent.revision=" ++ revision ++ ".revision)";
 }
@@ -279,26 +237,14 @@ fn hasEffortRefusalSql(comptime revision: []const u8) []const u8 {
     return "EXISTS(SELECT 1 FROM session_change refusal WHERE refusal.session_ref=" ++ revision ++ ".session_ref AND refusal.field='reasoning_effort_refused' AND refusal.revision<=" ++ revision ++ ".revision)";
 }
 
-/// A refused intent maps to the refusing Operation's own admitted fallback,
-/// including null. Never search intervening, possibly unadmitted choices.
 pub fn reasoningEffortOverrideSql(comptime revision: []const u8) []const u8 {
-    // Before any refusal, snapshots already carry the nullable override.
-    // Keep ordinary reports on their existing bounded-work path.
     return "CASE WHEN " ++ hasEffortRefusalSql(revision) ++ " THEN " ++ operation_effort.sourceOverrideSql(revision ++ ".session_ref", effortChoiceRevisionSql(revision)) ++ " ELSE " ++ revision ++ ".reasoning_effort END";
 }
 
-/// Legacy null specs carry the latest Operation's effective admitted value.
-/// Its refusal is keyed to that Operation, not inferred from a later revision.
 pub fn previousReasoningEffortSql(comptime revision: []const u8) []const u8 {
     return "CASE WHEN " ++ revision ++ ".reasoning_effort IS NULL OR " ++ hasEffortRefusalSql(revision) ++ " THEN (SELECT " ++ operation_effort.effectiveSql("legacy") ++ " FROM model_operation legacy @index(model_operation_admission) WHERE legacy.session_ref=" ++ revision ++ ".session_ref AND legacy.settings_revision<=" ++ revision ++ ".revision ORDER BY legacy.admission_position DESC LIMIT 1) END";
 }
 
-/// `next` holds the current configuration's values, or the defaults when
-/// there is none, and may be `current` itself: each field of `current` is
-/// read before `next`'s same field is written. A requested workspace is
-/// canonicalized by the caller, which answers `workspace_matches` (whether
-/// it is the current Session's) and has already written a created
-/// Session's into `next`.
 pub fn planConfigurationUpdate(
     current: ?*const CurrentConfiguration,
     requested: *const content_custody.Configuration,
@@ -350,10 +296,6 @@ pub fn planConfigurationUpdate(
     } };
 }
 
-// A saved preset refusal keeps its original request identity, even when
-// this Host can now resolve it. All other answers bind the resolved spec.
-// noinline: preset resolution and hashing finish before validation,
-// keeping their scratch off the engine thread's deepest chain.
 pub noinline fn configureDigest(
     command: *const content_custody.ConfigureCommand,
     preset: ?*const PresetDecision,
@@ -373,8 +315,6 @@ pub noinline fn configureDigest(
     digest.* = command.semanticDigest();
 }
 
-/// Settings `applyStep` wrote to a Session, whose revision row
-/// `queueConfiguredCommand` records with the command.
 pub const Applied = struct {
     session: Bounded(session_id.max_reference_bytes),
     head: rsql.SessionHead,
@@ -382,12 +322,9 @@ pub const Applied = struct {
     instructions_id: ?u64,
     output_schema_id: ?u64,
     instructions_updated: bool,
-    /// The settings this revision changed; empty for a creation.
     changes: std.EnumSet(session_settings.SessionField) = .empty,
 };
 
-/// The settings a revision can change, as `next` holds them before and
-/// after it applies (the Workspace never changes).
 const Settings = struct {
     provider: provider_name.Provider,
     model: Bounded(model_capability.max_model_bytes),
@@ -417,7 +354,6 @@ const Settings = struct {
         };
     }
 
-    /// Each field whose value differs, by its name in `SessionField`.
     fn changed(before: *const Settings, after: *const CurrentConfiguration) std.EnumSet(session_settings.SessionField) {
         var fields: std.EnumSet(session_settings.SessionField) = .empty;
         inline for (session_settings.entries) |entry| {
@@ -439,7 +375,6 @@ const Settings = struct {
     }
 };
 
-/// SQL names tools by set id; imported content uses a shorter id in reads.
 fn settingsField(comptime entry: session_settings.Entry) []const u8 {
     return switch (entry.kind) {
         .content => entry.field ++ "_id",
@@ -447,8 +382,6 @@ fn settingsField(comptime entry: session_settings.Entry) []const u8 {
     };
 }
 
-/// Skills discovery already asks whether this key exists. Fold its inherited
-/// Workspace into that same read, rather than adding a parent preflight round.
 pub const creation_hint = rsql.Read(.{
     .sql = "SELECT EXISTS(SELECT 1 FROM core_command WHERE command_key=?1) AS replay,coalesce((SELECT workspace FROM session WHERE session_ref=?2),'/') AS workspace",
     .Args = struct { key: []const u8, parent: []const u8 },
@@ -456,9 +389,6 @@ pub const creation_hint = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// Parent inheritance has one admission owner for start_agent and native create.
-/// Its ceiling is configured intent, not loaded intent or an Operation offer;
-/// the ordinary configuration validation still checks Host tool set availability.
 const parent_settings = rsql.Read(.{
     .sql = "SELECT workspace,provider,coalesce(" ++ tool_set.namesSql("session.tool_set_id") ++ ",'') AS tools,permission_mode FROM session WHERE session_ref=?1 " ++
         "AND NOT EXISTS(SELECT 1 FROM session_archive archived WHERE archived.session_ref=session.session_ref AND archived.command_key IS NOT NULL)",
@@ -471,7 +401,6 @@ pub const ParentFailure = struct {
     code: configuration_admission.Rejection,
     tool: ?[]const u8 = null,
 
-    /// Same diagnostic at both doors; only the final effect differs.
     pub fn text(failure: ParentFailure, buffer: []u8, comptime effect: []const u8) []const u8 {
         return switch (failure.code) {
             .tools_not_in_parent => std.fmt.bufPrint(buffer, "spec.tools: {s} is not one of your tools. Nothing was " ++ effect ++ ".", .{failure.tool.?}) catch unreachable,
@@ -489,8 +418,6 @@ fn prepareParent(a: anytype, reference: []const u8, reads: *ConfigurationReads) 
     a.readInto(parent_settings, .{ .session = reference }, &reads.inherited, &reads.parent_found);
 }
 
-/// Consumes the parent read from the existing first round, without a query or
-/// a second path-sized configuration. Nothing is silently intersected.
 pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, configuration: *const content_custody.Configuration, reads: *ConfigurationReads) !?configuration_admission.Rejection {
     if (!reads.inherits_parent) return null;
     if (!reads.parent_found.get()) return .unknown_session;
@@ -498,8 +425,6 @@ pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, configuration:
     const failure: ?ParentFailure = refusal: {
         if (configuration.workspace.state != .omitted) break :refusal .{ .code = .parent_workspace_forbidden };
         if (configuration.provider.state != .omitted) break :refusal .{ .code = .parent_provider_forbidden };
-        // Missing tool names keep the same refusal at both child doors,
-        // before narrowing known tools against the parent's saved selection.
         if (toolsRejection(host_tool_set, reads.inherited.provider, &configuration.tools)) |code| return code;
         var requested = configuration.tools.iterator();
         while (requested.next()) |name| {
@@ -522,33 +447,15 @@ pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, configuration:
     return null;
 }
 
-/// What `prepareConfiguration` reads in a round, and where the round
-/// leaves it; its owner keeps it until the transaction ends. Declared with
-/// a literal that names `next`'s big fields' lengths, so their bytes stay
-/// unwritten.
 pub const ConfigurationReads = struct {
-    /// Configure's saved command and answer live with its other reads until
-    /// settlement; creating Messages leave these unused fields unwritten.
     saved_command: command_domain.saved_command.Result = undefined,
     command_digest: [32]u8 = undefined,
     command_answer: StoredAnswer = undefined,
-    /// Creating Message reads share this owner's lifetime; Configure leaves
-    /// the unused slot unwritten, and plain Messages use no creation scratch.
     message: command_domain.MessageReads = undefined,
-    /// The Session's saved configuration, which the plan then updates in
-    /// place: one 4.6 KB value, not a copy of it.
     next: CurrentConfiguration,
-    /// The validation-only phase and application borrow this same plan until
-    /// settlement; keep its saved Settings off the Host's import call chain.
     validated: ValidatedConfiguration = undefined,
-    /// What validation, then application, keeps between its rounds
-    /// (`validateStep`, `applyStep`): one storage, as validation ends
-    /// before application starts. Tagged, so its size is the same in every
-    /// build mode: a bare union carries a safety tag only in safe builds.
     step: union(enum) { validating: Validating, applying: ApplyState } = undefined,
-    /// What application answers.
     applied: Applied = undefined,
-    /// Whether the Session exists: `.missing` for a creation, which reads none.
     found: store_access.Found = .missing,
     reference: [session_id.bytes]u8 = undefined,
     workspace_digest: [32]u8 = undefined,
@@ -556,19 +463,11 @@ pub const ConfigurationReads = struct {
     instructions: content_domain.Import = undefined,
     output_schema: content_domain.Import = undefined,
     empty: content_domain.Import = content_domain.empty_content,
-    /// The rows `lookupPair` found, when round 1 needed two lookups.
     pair: ?content_domain.Pair = null,
-    /// The tool set a creation or a `tools` change saves, when it does;
-    /// null too when the Host tool set lacks a name, which the configure refuses.
     tools: ?tool_set.Selection = null,
     loaded_tools: ?tool_set.Selection = null,
-    /// Saved names for narrowing an existing loaded subset. A child creation
-    /// instead borrows saved_tools.names for its caller's configured names,
-    /// consumed before applying its configuration; creations never read the
-    /// saved tools here. Keep these in Store scratch, not a frame.
     saved_tools: command_input.ToolsField = undefined,
     saved_loaded: command_input.ToolsField = undefined,
-    /// The Session a creation starts as the child of, when it has one.
     parent: ?[session_id.bytes]u8 = null,
     inherits_parent: bool = false,
     attach_parent: bool = true,
@@ -577,15 +476,11 @@ pub const ConfigurationReads = struct {
     parent_checked: bool = false,
     parent_failure: ?ParentFailure = null,
 
-    /// The value the instructions import through: the requested content,
-    /// or the empty default a creation imports.
     fn instructionsValue(reads: *ConfigurationReads, configuration: *const content_custody.Configuration) *content_domain.Import {
         return if (configuration.instructions.state == .value) &reads.instructions else &reads.empty;
     }
 };
 
-/// A Session's saved configuration, decoded into a CurrentConfiguration in
-/// place; `checkSaved` holds it to its types.
 const saved_session = rsql.Read(.{
     .sql = "SELECT workspace,provider,model,instructions_content_id AS instructions_id,tool_set_id,loaded_tool_set_id,permission_mode," ++
         "output_schema_content_id AS output_schema_id,revision,next_position,compaction_trigger,output_reservation," ++
@@ -595,8 +490,6 @@ const saved_session = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// Where a new Session would go: the key of another Session's same
-/// Workspace, when there is one, and whether its new reference is taken.
 const creation_facts = rsql.Read(.{
     .sql = "SELECT (SELECT workspace_key FROM session WHERE workspace_digest=?1 AND workspace=?2 LIMIT 1) AS workspace_key," ++
         "EXISTS(SELECT 1 FROM session WHERE session_ref=?3) AS taken",
@@ -605,8 +498,6 @@ const creation_facts = rsql.Read(.{
     .cardinality = .one,
 });
 
-/// A new Session starts at revision 1 and position 1. A Workspace's key is
-/// the `created_seq` of its first Session.
 const insert_session = rsql.Write(.{
     .sql = "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,next_position," ++
         "provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at,created_seq,workspace_key,parent_ref,loaded_tool_set_id) " ++
@@ -631,13 +522,9 @@ const insert_session = rsql.Write(.{
         parent: ?Bounded(session_id.bytes),
         loaded_tool_set_id: ?u64,
     },
-    // Its round read the reference free, under the single writer.
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// Queues inserting the created Session `head` with the settings `next`,
-/// as the child of `parent` when one is named. `configure` calls it, and a
-/// test drives it with references the schema refuses.
 pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentConfiguration, workspace_digest: *const [32]u8, created_seq: u64, parent: ?*const [session_id.bytes]u8) void {
     var parent_ref: ?Bounded(session_id.bytes) = null;
     if (parent) |reference| {
@@ -687,12 +574,8 @@ const update_session = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.SessionUpdateFailed } },
 });
 
-/// The UPDATE a configure of an existing Session runs once it has touched
-/// that Session, which a test faults.
 pub const update_session_sql = update_session.sql;
 
-/// The one writer of session_revision: it copies the Session row as
-/// written under `command_key`, which an earlier write of the round saved.
 const insert_revision = rsql.Write(.{
     .sql = "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tool_set_id,loaded_tool_set_id," ++
         "permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation,reasoning_effort,label,effort_source_revision) " ++
@@ -702,17 +585,10 @@ const insert_revision = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// Queues reading `session_ref`'s saved configuration into `current` in
-/// place; `found` says whether it exists. A missing one leaves `current`
-/// as the caller declared it, which `configure` declares with
-/// `CurrentConfiguration`'s field defaults: the settings a creation
-/// starts from.
-/// `checkSaved` follows the round.
 pub fn readSaved(a: anytype, session_ref: []const u8, current: *CurrentConfiguration, found: *store_access.Found) void {
     a.readInto(saved_session, .{ .session = session_ref }, current, found);
 }
 
-/// Refuses a saved configuration that breaks what its columns may hold.
 pub fn checkSaved(current: *const CurrentConfiguration) error{CorruptStore}!void {
     const instructions = current.instructions_id orelse return error.CorruptStore;
     if (instructions == 0 or current.output_schema_id == @as(?i64, 0) or current.revision == 0 or current.next_position == 0 or
@@ -721,20 +597,11 @@ pub fn checkSaved(current: *const CurrentConfiguration) error{CorruptStore}!void
     if (current.label) |*label| try checkLabel(label.slice());
 }
 
-/// A fresh Session reference: 32 symbols divide 256 exactly, so six
-/// independent five-bit draws give 30 bits, without modulo bias or a weak
-/// PRNG.
 fn newReference(io: std.Io, reference: *[session_id.bytes]u8) !void {
     try std.Io.randomSecure(io, reference);
     for (reference) |*byte| byte.* = session_id.alphabet[byte.* & 31];
 }
 
-/// Queues what applying `configuration` to `session` reads (an empty
-/// `session` creates one) into `reads`: one content lookup, or one pair of
-/// them when both the instructions and an output schema need one and name
-/// different rows. When they name one row, the schema shares the
-/// instructions' value, so the first import's insert is the second's row.
-/// noinline, as `queueConfiguredCommand`.
 pub noinline fn prepareConfiguration(a: anytype, host_tool_set: *const tool_defs.HostToolSet, session: []const u8, configuration: *const content_custody.Configuration, reads: *ConfigurationReads) void {
     const creating = session.len == 0;
     if (!creating) readSaved(a, session, &reads.next, &reads.found);
@@ -757,8 +624,6 @@ pub noinline fn prepareConfiguration(a: anytype, host_tool_set: *const tool_defs
     } else if (instructions orelse output_schema) |value| content_domain.lookup(a, value);
 }
 
-/// Sorted saved names, streamed into the configure's Store scratch. The
-/// optional filter implements preserving a loaded subset across a tools change.
 const selected_names = rsql.Read(.{
     .sql = "SELECT tool.name FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE member.tool_set_id=?1 ORDER BY tool.name",
@@ -788,8 +653,6 @@ const NameSelection = struct {
     }
 };
 
-/// A strict loaded set must retain the built-in loader, so every configured
-/// tool remains reachable. Membership always refers to the selected saved set.
 fn loadedToolsRejection(tools: *const command_input.ToolsField, loaded: *const command_input.ToolsField) ?configuration_admission.Rejection {
     var names = loaded.iterator();
     while (names.next()) |name| if (!containsName(tools, name)) return .loaded_tools_not_in_tools;
@@ -797,11 +660,6 @@ fn loadedToolsRejection(tools: *const command_input.ToolsField, loaded: *const c
     return null;
 }
 
-/// Resolves the loaded set before importing content or changing the Session.
-/// Omitted loaded_tools follows the entire tools set unless it was already a
-/// strict subset; that subset is intersected with a newly requested tools set.
-/// After `.model`: the saved configured names, when a request without
-/// tools changes the loaded set, are read in `.saved_tools`.
 fn loadedTools(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
     const requested = request.configuration;
     const creating = request.session.len == 0;
@@ -820,8 +678,6 @@ fn loadedTools(a: anytype, request: *const Request, reads: *ConfigurationReads) 
     return .{ .round = .saved_tools };
 }
 
-/// Once the configured names are known: the saved loaded names an omitted
-/// `loaded_tools` keeps, narrowed to them, are read in `.saved_loaded`.
 fn loadedNames(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
     const v = &reads.step.validating;
     if (request.configuration.loaded_tools.state == .value) {
@@ -836,9 +692,6 @@ fn loadedNames(a: anytype, request: *const Request, reads: *ConfigurationReads) 
     return .{ .round = .saved_loaded };
 }
 
-/// Once both name lists are known: a strict subset is selected from the
-/// Host tool set, or from the saved set in `.loaded_source`, and looked
-/// up in `.loaded`.
 fn selectLoaded(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
     const v = &reads.step.validating;
     if (loadedToolsRejection(v.tools, v.loaded)) |rejection| return .{ .rejected = rejection };
@@ -853,8 +706,6 @@ fn selectLoaded(a: anytype, request: *const Request, reads: *ConfigurationReads)
     return .{ .round = .loaded_source };
 }
 
-/// After a round that read saved names: refuses a list the Store could
-/// not hold.
 fn savedNames(reads: *const ConfigurationReads) error{CorruptStore}!void {
     if (reads.step.validating.names.invalid) return error.CorruptStore;
 }
@@ -863,82 +714,48 @@ fn readCreation(a: anytype, reads: *ConfigurationReads) void {
     a.read(creation_facts, .{ .digest = reads.workspace_digest, .workspace = reads.next.workspace.slice(), .session = &reads.reference }, &reads.creation);
 }
 
-/// D133: only a spec with Bash needs a directory, and the parser and
-/// configurationBeforeWorkspace refused one without it. The Workspace column
-/// stays nonempty, so a spec without one saves the root. noinline: the
-/// digest's hash state stays off `validateStep`'s frame, which sits on
-/// the engine thread's deepest chain.
 noinline fn saveUnusedWorkspace(configuration: *const content_custody.Configuration, next: *CurrentConfiguration, reads: *ConfigurationReads) void {
     std.debug.assert(!requestsBash(configuration));
     next.workspace.set("/") catch unreachable;
     reads.workspace_digest = store_core.workspaceDigest(next.workspace.slice());
 }
 
-// Both mutation branches validate after keyed replay and Configure's existing
-// preset/capability precedence. Empty targets retain creation semantics;
-// creating Messages share this check through `validateStep`.
 pub fn targetRejection(session: []const u8) ?configuration_admission.Rejection {
     return if (session.len != 0 and !session_id.valid(session)) .invalid_session_reference else null;
 }
 
-/// After `prepareConfiguration`'s round: decides the configuration, and
-/// queues its content and the Session's insert or update. Creation and its
-/// first Message can share this owner without an intermediate commit. The
-/// answer names the Session either way; the caller records an accepted
-/// one with `queueConfiguredCommand`.
 pub const ValidatedConfiguration = struct {
     content_actions: @FieldType(ConfigurationUpdatePlan, "update"),
     before: ?Settings,
 };
 
-/// What applying a configuration reads besides the Store's rows: the
-/// request, and the Host values its shell passes in. Each is the caller's,
-/// which outlives the transaction.
 pub const Request = struct {
     io: std.Io,
     tools: *const store_core.HostTools,
     served: provider_route.Routes,
-    /// Empty for a creation.
     session: []const u8,
     configuration: *const content_custody.Configuration,
     initial_skills: ?*const skills_domain.Initial,
-    /// The visitor of a `.loaded_source` round, the caller's, which
-    /// outlives the round: its hash state is aligned beyond the Store's
-    /// scratch, so `ConfigurationReads` cannot hold it.
     saved: *tool_set.SavedSelection,
 };
 
-/// The rounds validating a configuration may ask for after
-/// `prepareConfiguration`'s, in the order they run: the model's facts on
-/// every path that gets that far, then, only when the loaded set changes,
-/// the saved configured names, the saved loaded names, the saved set a
-/// strict subset is selected from, and the lookup of that subset.
 pub const ValidationRound = enum { model, saved_tools, saved_loaded, loaded_source, loaded };
 
-/// What `validateStep` asks for next: a round, or its answer.
 pub const Validation = union(enum) {
     round: ValidationRound,
     rejected: configuration_admission.Rejection,
     ready: *const ValidatedConfiguration,
 };
 
-/// What validation keeps between its rounds, in `ConfigurationReads`.
 const Validating = struct {
     model: model_facts.Model,
     default_provider: ?provider_name.Provider,
     workspace_matches: ?bool,
-    /// The configured and loaded names the loaded set is checked against:
-    /// requested ones, or the saved ones read into `ConfigurationReads`.
     tools: *const command_input.ToolsField,
     loaded: *const command_input.ToolsField,
-    /// The visitor of the round reading saved names.
     names: NameSelection,
 };
 
-/// Validates without queuing content, tool-set or Session writes, one
-/// round at a time: `ran` is the round that just ran, null right after
-/// `prepareConfiguration`'s. The plan it readies borrows the same
-/// transaction's reads and is applied exactly once.
 pub fn validateStep(a: anytype, request: *const Request, reads: *ConfigurationReads, ran: ?ValidationRound) !Validation {
     const at = ran orelse return validateRequest(a, request, reads);
     switch (at) {
@@ -962,7 +779,6 @@ pub fn validateStep(a: anytype, request: *const Request, reads: *ConfigurationRe
     }
 }
 
-/// What the request and round 1 decide, then the model's facts read.
 fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
     const session = request.session;
     const configuration = request.configuration;
@@ -1000,7 +816,6 @@ fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationRea
     return .{ .round = .model };
 }
 
-/// After `.model`: the checks the model's facts decide, and the Workspace.
 fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
     const io = request.io;
     const configuration = request.configuration;
@@ -1012,13 +827,9 @@ fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads
         return .{ .rejected = rejection };
     }
 
-    // A stated provider is saved by the update plan; configurationBeforeWorkspace
-    // refused a creation with neither.
     if (creating) if (v.default_provider) |provider| {
         next.provider = provider;
     };
-    // An existing Session's Workspace is only compared, in sameWorkspace's
-    // own frame; a created one's was canonicalized into `next`.
     v.workspace_matches = if (creating and reads.inherits_parent) inherited: {
         validateWorkspace(io, next.workspace.slice(), &next.workspace) catch return .{ .rejected = .invalid_workspace };
         reads.workspace_digest = store_core.workspaceDigest(next.workspace.slice());
@@ -1040,7 +851,6 @@ fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads
     return loadedTools(a, request, reads);
 }
 
-/// Once the loaded set is resolved: the update plan.
 fn finishValidation(request: *const Request, reads: *ConfigurationReads) Validation {
     const configuration = request.configuration;
     const next = &reads.next;
@@ -1057,37 +867,24 @@ fn finishValidation(request: *const Request, reads: *ConfigurationReads) Validat
         .update => |actions| actions,
     };
 
-    // Preserve ordinary configuration refusals before considering a failed
-    // discovery capture, but reject it before any content or Session writes.
     if (request.session.len == 0) if (request.initial_skills) |captured| if (captured.* == .unavailable) return .{ .rejected = .skills_unavailable };
 
     reads.validated.content_actions = content_actions;
     return .{ .ready = &reads.validated };
 }
 
-/// The rounds applying a validated configuration may ask for, in order:
-/// whether a created Session's drawn reference is free, once for each
-/// draw, then the lookups its first skill catalog needs.
 pub const ApplyRound = enum { creation, catalog };
 
-/// What `applyStep` asks for next: a round, or the settings it applied.
 pub const Applying = union(enum) {
     round: ApplyRound,
     accepted: *const Applied,
 };
 
-/// What application keeps between its rounds, in `ConfigurationReads`.
 const ApplyState = struct {
     created_seq: u64,
     catalog: skills_domain.Appending,
 };
 
-/// Applies the plan `validateStep` readied, one round at a time: queues
-/// its content and the Session's insert or update. `ran` is the round
-/// that just ran, null for the first step. The answer, in
-/// `ConfigurationReads`, names the Session; the caller records it with
-/// `queueConfiguredCommand`. Creation and its first Message can share
-/// this owner without an intermediate commit.
 pub fn applyStep(a: anytype, request: *const Request, faults: Faults, reads: *ConfigurationReads, ran: ?ApplyRound) !Applying {
     const at = ran orelse return applyContent(a, request, faults, reads);
     switch (at) {
@@ -1102,8 +899,6 @@ pub fn applyStep(a: anytype, request: *const Request, faults: Faults, reads: *Co
     }
 }
 
-/// The content, the tool sets and an existing Session's update; a
-/// creation draws its reference.
 fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *ConfigurationReads) !Applying {
     const io = request.io;
     const session = request.session;
@@ -1134,7 +929,6 @@ fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *Con
         .clear => next.output_schema_id = null,
     }
     if (creating or configuration.tools.state == .value) {
-        // configurationBeforeWorkspace refused a name the Host tool set lacks.
         const tools = &(reads.tools orelse return error.CorruptStore);
         next.tool_set_id = try tool_set.finishSelection(a, tools, request.tools.set_id);
     }
@@ -1168,16 +962,12 @@ fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *Con
     return .{ .accepted = applied };
 }
 
-/// Each drawn reference is checked free in a round of its own, after the
-/// replay check, so a replay draws none; a taken one draws again.
 fn drawReference(a: anytype, io: std.Io, reads: *ConfigurationReads) !Applying {
     try newReference(io, &reads.reference);
     readCreation(a, reads);
     return .{ .round = .creation };
 }
 
-/// Once a drawn reference is free: the Session's insert, then its first
-/// skill catalog, when it starts with one.
 fn insertCreated(a: anytype, request: *const Request, reads: *ConfigurationReads) !Applying {
     const created_seq = reads.step.applying.created_seq;
     const head: rsql.SessionHead = .{
@@ -1195,7 +985,6 @@ fn insertCreated(a: anytype, request: *const Request, reads: *ConfigurationReads
     return .{ .accepted = &reads.applied };
 }
 
-/// The answer: the Session `head` names, as `target`, with what changed.
 fn accept(request: *const Request, reads: *ConfigurationReads, head: rsql.SessionHead, target: []const u8) !void {
     const applied = &reads.applied;
     const created = !reads.found.get();
@@ -1207,9 +996,6 @@ fn accept(request: *const Request, reads: *ConfigurationReads, head: rsql.Sessio
     applied.changes = if (reads.validated.before) |*saved| saved.changed(&reads.next) else .empty;
 }
 
-/// Whether the Host serves the provider of the Session `configuration`
-/// sets or the Session already has (`saved`). An unknown provider or
-/// Session counts as served, so its own rejection answers.
 pub fn servesProviderOf(served: anytype, configuration: ?*const content_custody.Configuration, saved: ?provider_name.Provider) bool {
     const provider = if (configuration != null and configuration.?.provider.state == .value)
         std.meta.stringToEnum(provider_name.Provider, configuration.?.provider.value.slice()) orelse return true
@@ -1218,10 +1004,6 @@ pub fn servesProviderOf(served: anytype, configuration: ?*const content_custody.
     return provider_route.of(served, provider) != .unserved;
 }
 
-/// Queues saving the command that carries `applied`, then the Session's
-/// revision row, which references it. Every argument outlives the round.
-/// noinline: its locals stay off configure's frame on the engine's
-/// deepest chain.
 pub noinline fn queueConfiguredCommand(
     a: anytype,
     applied: *const Applied,
@@ -1247,24 +1029,18 @@ pub noinline fn queueConfiguredCommand(
     });
 }
 
-/// One setting the revision just inserted changed (`session_change`).
 const insert_change = rsql.Write(.{
     .sql = "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at) VALUES(@session(?1),?2,?3,?4,?5,@now)",
     .Args = struct { session: rsql.SessionHead, position: u64, ordinal: u64, revision: u64, field: []const u8 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// Whether `supplied` canonicalizes to `existing`. Its canonical path
-/// buffer lives in this call's frame only, never in the configure frame
-/// that holds the whole next configuration.
 noinline fn sameWorkspace(io: std.Io, supplied: []const u8, existing: []const u8) !bool {
     var canonical: Bounded(workspace_path.max_bytes) = .{ .len = 0 };
     try validateWorkspace(io, supplied, &canonical);
     return canonical.eql(existing);
 }
 
-/// Canonicalizes `supplied` straight into `destination`'s own bytes, with
-/// the UTF-8 check `Bounded.set` applies; no second path buffer.
 fn validateWorkspace(io: std.Io, supplied: []const u8, destination: *Bounded(workspace_path.max_bytes)) !void {
     if (!std.fs.path.isAbsolute(supplied)) return error.WorkspaceMustBeAbsolute;
     if (std.mem.indexOfScalar(u8, supplied, 0) != null) return error.InvalidWorkspace;
@@ -1276,7 +1052,6 @@ fn validateWorkspace(io: std.Io, supplied: []const u8, destination: *Bounded(wor
     destination.len = length;
 }
 
-/// Match SQL identifiers, not substrings (tools must not hide loaded_tools).
 fn columnMentions(sql: []const u8, column: []const u8) usize {
     var tokens = std.mem.tokenizeAny(u8, sql, " (),=\n\t");
     var count: usize = 0;
@@ -1309,7 +1084,6 @@ test "Session settings cover every hand-written Store SQL and schema projection"
             if (columnMentions(site[1], entry.column) < site[2])
                 try missing.print("{s}: {s}.{s}\n", .{ entry.field, site[0], entry.column });
         }
-        // Workspace never appears in UPDATE: admission keeps it immutable.
         if (comptime !std.mem.eql(u8, entry.field, "workspace")) {
             if (columnMentions(update_session.sql, entry.column) == 0)
                 try missing.print("{s}: update_session.{s}\n", .{ entry.field, entry.column });

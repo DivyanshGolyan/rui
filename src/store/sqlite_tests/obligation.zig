@@ -1,5 +1,3 @@
-//! Obligation SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
@@ -32,9 +30,6 @@ fn expectDescendantHistoryCost(kind: DescendantHistory) !void {
         const root = try configureTestSession(&storage, "descendant-cost-root");
         const child = try configureTestSession(&storage, "descendant-cost-child");
         try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ root.slice(), child.slice() });
-        // Excluded admissions deliberately remain unbound, just as model
-        // admission leaves them. A later eligible admission must seek past
-        // this history, rather than visit each row and reject it by cutoff.
         try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
         const seed = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
@@ -47,8 +42,6 @@ fn expectDescendantHistoryCost(kind: DescendantHistory) !void {
         );
         defer std.testing.allocator.free(seed);
         try sqlite.exec(storage.sqliteDatabase(), seed);
-        // Reopen before canonical admission: its identity survey must see
-        // the fixture's historical IDs and the normal foreign-key setting.
         try storage.close();
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
@@ -56,8 +49,6 @@ fn expectDescendantHistoryCost(kind: DescendantHistory) !void {
         if (kind != .settled) {
             try submitTestMessage(&storage, &tmp, "descendant-eligible-file", "descendant-eligible", child.slice(), "live work");
             try submitTestMessage(&storage, &tmp, "descendant-later-file", "descendant-later", child.slice(), "later input");
-            // ID order is not time order. Preserve the original minimum over
-            // eligible admissions even when a later admission's clock went back.
             try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=17 WHERE command_key='descendant-eligible'", .{});
             try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=9 WHERE command_key='descendant-later'", .{});
             expected_since = if (kind == .active) 17 else 9;
@@ -113,8 +104,6 @@ test "obligation frontier read cost is flat in finished children" {
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const root = try configureTestSession(&storage, "finished-frontier-root");
-        // Native VM fixture: terminal children have no owed rows or input.
-        // As in the other cost fixtures, unrelated FK contents are omitted.
         try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
         const seed = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
@@ -129,7 +118,6 @@ test "obligation frontier read cost is flat in finished children" {
         );
         defer std.testing.allocator.free(seed);
         try sqlite.exec(storage.sqliteDatabase(), seed);
-        // Also drive the write owner against the large finished population.
         _ = statementWorkSince(storage.sqliteDatabase());
         try tests.refreshFrontierForTesting(&storage, root.slice());
         var statement = c.sqlite3_next_stmt(storage.sqliteDatabase(), null);
@@ -188,9 +176,6 @@ test "obligation reconciliation cost is flat in completed background Actions" {
         try denyForTesting(&storage, root.slice(), "background-cost-deny-last", last);
         const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try store_testing.settleItemsForTesting(&storage, &tmp, continuation, &.{"{\"type\":\"message\",\"id\":\"background-cost-answer\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done.\"}]}"}, "Done.");
-        // Native VM fixture: completed background Actions owe no work. Retain
-        // their real causal Operation, Turn and Message so the lookup runs.
-        // Unrelated tool-call FK contents are omitted, as in other VM fixtures.
         try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
         const seed = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
@@ -203,7 +188,6 @@ test "obligation reconciliation cost is flat in completed background Actions" {
         defer std.testing.allocator.free(seed);
         try sqlite.exec(storage.sqliteDatabase(), seed);
         try std.testing.expectEqual(history, try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE background_position IS NOT NULL AND resolution_code IS NOT NULL", .{}));
-        // Production reads must accept the population before the measured write.
         for (0..2) |pass| {
             {
                 const entry = try store_core.enter(&storage, .none);
@@ -216,7 +200,6 @@ test "obligation reconciliation cost is flat in completed background Actions" {
                 try std.testing.expect((try work[0].work(1, 1)).state == .finished);
             }
             if (pass == 1) break;
-            // Scope the actual writer independently of the read's counters.
             _ = statementWorkSince(storage.sqliteDatabase());
             try tests.refreshFrontierForTesting(&storage, root.slice());
             var statement = c.sqlite3_next_stmt(storage.sqliteDatabase(), null);
@@ -242,9 +225,6 @@ test "Session work dates a tool group by its last acceptance, even when the cloc
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
-    // Ask: denying one Action leaves the other awaiting, so the Session
-    // awaits approval from that denial, though the clock read earlier than
-    // at the proposal.
     const ask = try configureTestSessionAsk(&storage, "stepped-ask");
     try submitTestMessage(&storage, &tmp, "stepped-ask-input", "stepped-ask-input", ask.slice(), "propose");
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "stepped-ask-calls");
@@ -252,16 +232,11 @@ test "Session work dates a tool group by its last acceptance, even when the cloc
     try denyForTesting(&storage, ask.slice(), "stepped-deny-first", first);
     try store_testing.sqlite_only.exec(&storage, "UPDATE model_operation SET resolved_at=300;UPDATE action_operation SET resolved_at=100 WHERE resolution_code IS NOT NULL", .{});
     try std.testing.expectEqual(@as(u64, 100), try expectOneWork(&storage, &tmp, ask.slice(), "approval"));
-    // Denying the other settles the group: pending from the later denial,
-    // whose clock read earlier still.
     try denyForTesting(&storage, ask.slice(), "stepped-deny-second", try store_testing.sqlite_only.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{}));
     try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET resolved_at=" ++
         "CASE WHEN acceptance_position=(SELECT max(acceptance_position) FROM action_operation) THEN 50 ELSE 100 END", .{});
     try std.testing.expectEqual(@as(u64, 50), try expectOneWork(&storage, &tmp, ask.slice(), "pending"));
 
-    // Bypass: both Actions are authorized with the proposal. Once one has
-    // run, the other waits for a slot from that run's resolution, not from
-    // its own authorization, whatever the clock read.
     const bypass = try configureTestSessionAsk(&storage, "stepped-bypass");
     var update: wire_request.ConfigureCommand = .{};
     try update.key.set("stepped-bypass-mode");

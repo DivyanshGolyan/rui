@@ -1454,6 +1454,7 @@
                       "unknown_action",
                       "target_mismatch",
                       "source_stopped",
+                      "action_not_backgroundable",
                       "background_unavailable"
                     ]
                   }

@@ -1,11 +1,6 @@
-//! Stack overflow witness for signal_stack.zig: the main thread and a spawned
-//! thread each overflow in a child process, which must die with a segfault
-//! trace printed from the alternate stack. Without one, the kernel kills the
-//! child silently because the handler cannot run on the exhausted stack.
 const std = @import("std");
 const signal_stack = @import("signal_stack.zig");
 
-// As in cli.zig: Zig reserves no signal stack, so only signal_stack.zig can.
 pub const std_options: std.Options = .{ .signal_stack_size = null };
 
 pub fn main(init: std.process.Init) !void {
@@ -40,7 +35,6 @@ fn guardFault(stderr: []const u8) bool {
 }
 
 fn overflow(depth: usize) void {
-    // Under one page, so no stack probe frame (which has no unwind table) is on top.
     var frame: [2048]u8 = undefined;
     frame[depth % frame.len] = @truncate(depth);
     std.mem.doNotOptimizeAway(&frame);

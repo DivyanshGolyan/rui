@@ -148,6 +148,72 @@ class Releases:
         assert not self.errors, self.errors
 
 
+class CurlAttempts:
+    """Inject transport failures; real curl still owns every successful HTTP transfer."""
+
+    def __init__(self, c, failures):
+        actual = shutil.which("curl")
+        assert actual, "Upgrade integration requires curl"
+        self.root = c.root / "curl-fixture"
+        self.root.mkdir()
+        self.log = self.root / "attempts.jsonl"
+        (self.root / "plan.json").write_text(json.dumps({
+            "curl": actual, "origin": c.releases.origin, "failures": failures,
+        }))
+        wrapper = self.root / "curl"
+        wrapper.write_text(f"#!{sys.executable}\n" + r'''
+import json
+import os
+import pathlib
+import signal
+import sys
+import urllib.parse
+
+root = pathlib.Path(__file__).parent
+plan = json.loads((root / "plan.json").read_text())
+log = root / "attempts.jsonl"
+args = sys.argv[1:]
+url = args[-1]
+assert url.startswith(plan["origin"] + "/"), ("non-fixture download", url)
+path = urllib.parse.urlsplit(url).path
+# Configuration and protocol confinement remain mandatory on every attempt.
+assert args[0] == "--disable", args
+assert args[args.index("--proto") + 1] == "=http", args
+assert args[args.index("--proto-redir") + 1] == ("=http" if path == "/releases/latest" else "=https"), args
+previous = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+number = sum(row["path"] == path for row in previous)
+failures = plan["failures"].get(path, [])
+code = failures[number] if number < len(failures) else 0
+family = "ipv4" if "--ipv4" in args or "-4" in args else "normal"
+with log.open("a") as output:
+    output.write(json.dumps({"url": url, "path": path, "family": family, "code": code, "args": args}) + "\n")
+if code:
+    if "--output" in args:
+        destination = args[args.index("--output") + 1]
+        if destination != "/dev/null":
+            pathlib.Path(destination).write_bytes(b"partial failed archive must not survive retry\n")
+    else:
+        sys.stdout.write("partial failed response must not survive retry\n")
+    sys.stdout.flush()
+    sys.stderr.write("curl fixture: discarded earlier diagnostic\n")
+    sys.stderr.write(f"curl fixture final: {path} attempt {number + 1} exit {code}\n")
+    sys.stderr.flush()
+    if code == "signal":
+        os.kill(os.getpid(), signal.SIGTERM)
+    sys.exit(code)
+os.execv(plan["curl"], [plan["curl"], *args])
+''')
+        wrapper.chmod(0o755)
+        c.env["PATH"] = f"{self.root}:{c.env['PATH']}"
+
+    def observed(self):
+        return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+    def assert_attempts(self, expected):
+        observed = [(row["path"], row["family"], row["code"]) for row in self.observed()]
+        assert observed == expected, ("curl attempts", observed, expected)
+
+
 class Case:
     def __init__(self, root, binary, releases, name):
         self.root = root / name
@@ -390,6 +456,74 @@ def discovery_cases(root, binary, releases):
             assert "upgrade_download_failed" in output and "curl: (" in output, output
         c.assert_unchanged()
         c.assert_no_host()
+
+
+def download_cases(root, binary, releases):
+    latest, sums, archive = "/releases/latest", releases.sums_path, releases.archive_path
+    paths = (latest, sums, archive)
+    for failed_path in paths:
+        stage = paths.index(failed_path)
+        for code in (6, 28):
+            with case(root, binary, releases, f"download-recover-{stage}-{code}") as c:
+                c.old_selection()
+                curl = CurlAttempts(c, {failed_path: [code]})
+                # A failed archive attempt writes junk to the real output file.
+                # Installation and its checksum prove the retry replaced it.
+                output = c.upgrade()
+                assert "Installed Rui" in output, output
+                selected = c.link.resolve()
+                assert selected != c.original and c.original.exists()
+                assert subprocess.check_output([str(c.link), "--version"], env=c.env,
+                                               text=True, timeout=5).startswith("rui " + releases.version)
+                expected = [(path, "normal", 0) for path in paths[:stage]]
+                expected += [(failed_path, "normal", code), (failed_path, "ipv4", 0)]
+                expected += [(path, "ipv4", 0) for path in paths[stage + 1:]]
+                curl.assert_attempts(expected)
+                c.assert_no_host()
+                # A separate invocation starts with ordinary address selection.
+                output = c.upgrade("--check")
+                assert f"Latest published stable: {releases.version}" in output, output
+                curl.assert_attempts(expected + [(latest, "normal", 0), (sums, "normal", 0)])
+                assert c.link.resolve() == selected
+                c.assert_no_host()
+
+    for stage, failed_path in enumerate(paths):
+        for first, final in ((6, 28), (28, 6)):
+            with case(root, binary, releases, f"download-both-fail-{stage}-{first}") as c:
+                c.old_selection()
+                curl = CurlAttempts(c, {failed_path: [first, final]})
+                output = c.upgrade(expect=6)
+                assert "upgrade_download_failed" in output, output
+                assert f"curl fixture final: {failed_path} attempt 2 exit {final}" in output, output
+                assert f"curl fixture final: {failed_path} attempt 1" not in output, output
+                assert "discarded earlier diagnostic" not in output, output
+                curl.assert_attempts([(path, "normal", 0) for path in paths[:stage]] +
+                                     [(failed_path, "normal", first), (failed_path, "ipv4", final)])
+                c.assert_unchanged()
+                c.assert_no_host()
+
+        for code in (22, 60, 7, 23, "signal"):
+            with case(root, binary, releases, f"download-no-retry-{stage}-{code}") as c:
+                c.old_selection()
+                curl = CurlAttempts(c, {failed_path: [code]})
+                output = c.finish_upgrade(c.spawn_upgrade(), success=False)
+                assert "upgrade_download_failed" in output, output
+                curl.assert_attempts([(path, "normal", 0) for path in paths[:stage]] +
+                                     [(failed_path, "normal", code)])
+                c.assert_unchanged()
+                c.assert_no_host()
+
+    for stage, failed_path in enumerate((sums, archive), 1):
+        with case(root, binary, releases, f"download-sticky-no-extra-retry-{stage}") as c:
+            c.old_selection()
+            curl = CurlAttempts(c, {latest: [6], failed_path: [6]})
+            output = c.upgrade(expect=6)
+            assert "upgrade_download_failed" in output, output
+            curl.assert_attempts([(latest, "normal", 6), (latest, "ipv4", 0)] +
+                                 [(path, "ipv4", 0) for path in paths[1:stage]] +
+                                 [(failed_path, "ipv4", 6)])
+            c.assert_unchanged()
+            c.assert_no_host()
 
 
 def install_cases(root, binary, releases):
@@ -1226,6 +1360,49 @@ def escape_after_publication(root, binary, releases, artifacts):
             assert (c.home / ".config/rui/codex.json").read_bytes() == credential
 
 
+def terminal_download_recovery(root, binary, releases, artifacts):
+    """Settings > Version recovers DNS failure through the same download owner."""
+    with case(root, binary, releases, "terminal-download-recovery") as c:
+        c.old_selection()
+        old_host, previous = c.start_host()
+        _, credential = terminal_setup(c)
+        # Retain the report rather than exec so this journey is independent
+        # of any other application-owned Hosts discovered for the fixture uid.
+        shadow = c.build("recovery-shadowing-path", "0.1.0", managed=False) / "bin/rui"
+        c.env["PATH"] = f"{shadow.parent}:{c.env['PATH']}"
+        curl = CurlAttempts(c, {"/releases/latest": [6]})
+        gate = releases.gate_archive()
+        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
+            screen = TerminalScreen(master, process)
+            screen.overview()
+            screen.start_upgrade()
+            screen.until(gate.entered.is_set, "Settings download recovered and reached archive")
+            screen.contains("preparing Upgrade")
+            screen.save(artifacts, "download-recovering-settings")
+            assert c.link.resolve() == c.original
+            gate.release.set()
+            screen.contains(f" · upgraded to {releases.version}")
+            screen.save(artifacts, "download-recovered-settings")
+            screen.close_settings()
+            screen.contains(f"Upgraded to {releases.version}")
+            proof_ready(c, previous, old_host)
+            screen.save(artifacts, "download-recovered")
+            curl.assert_attempts([("/releases/latest", "normal", 6),
+                                 ("/releases/latest", "ipv4", 0),
+                                 (releases.sums_path, "ipv4", 0),
+                                 (releases.archive_path, "ipv4", 0)])
+            receipt = exit_on_sigint(screen, process, "recovered download report after terminal restoration")
+            assert b"Installed Rui" in receipt and b"restarted on " in receipt, receipt.decode()
+            assert b"curl fixture final" not in receipt, receipt.decode()
+            assert os.fsencode(shadow) in receipt, "recovery lost the retained PATH guidance"
+            assert screen.entries == screen.restorations == 1, "retained guidance relaunched the TUI"
+            assert (c.home / ".config/rui/codex.json").read_bytes() == credential
+            if artifacts is not None:
+                (artifacts / "download-recovered.pty-tail.ansi").write_bytes(screen.tail)
+                (artifacts / "download-recovered.receipt.txt").write_bytes(receipt)
+                shutil.copy2(curl.log, artifacts / "download-recovered.curl.jsonl")
+
+
 def terminal_download_failure(root, binary, releases, artifacts):
     """The visible settings field, status line and restored report share the cause."""
     with case(root, binary, releases, "terminal-download-failure") as c:
@@ -1581,8 +1758,8 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
 
 
 def main():
-    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] not in ("restart-all", "lifecycle", "custody", "terminal", "startup")):
-        sys.exit("usage: python3 tests/integration/upgrade_integration.py PATH_TO_REAL_RUI [restart-all|lifecycle|custody|terminal|startup]")
+    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] not in ("restart-all", "lifecycle", "custody", "download", "terminal", "startup")):
+        sys.exit("usage: python3 tests/integration/upgrade_integration.py PATH_TO_REAL_RUI [restart-all|lifecycle|custody|download|terminal|startup]")
     selection = sys.argv[2] if len(sys.argv) == 3 else "all"
     binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
     root = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-upgrade-"))
@@ -1610,15 +1787,20 @@ def main():
             for operation in ("restart", "upgrade"):
                 tool_custody_cases(root, binary, releases, operation)
                 print(f"upgrade native: tool {operation} custody passed", flush=True)
+        if selection == "download":
+            download_cases(root, binary, releases)
+            print("upgrade native: download_cases passed", flush=True)
+            terminal_download_recovery(root, binary, releases, artifacts)
+            print("upgrade native: terminal_download_recovery passed", flush=True)
         if selection == "all":
-            for suite in (discovery_cases, install_cases, lifecycle_cases, restart_all_cases):
+            for suite in (discovery_cases, download_cases, install_cases, lifecycle_cases, restart_all_cases):
                 suite(root, binary, releases)
                 print(f"upgrade native: {suite.__name__} passed", flush=True)
             for operation in ("restart", "upgrade"):
                 tool_custody_cases(root, binary, releases, operation)
                 print(f"upgrade native: tool {operation} custody passed", flush=True)
         if selection in ("all", "terminal"):
-            for suite in (terminal_download_failure, terminal_cases, conversation_case, escape_after_publication,
+            for suite in (terminal_download_recovery, terminal_download_failure, terminal_cases, conversation_case, escape_after_publication,
                           terminal_cancellation_guidance, terminal_path_guidance):
                 suite(root, binary, releases, artifacts)
                 print(f"upgrade native: {suite.__name__} passed", flush=True)

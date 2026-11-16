@@ -1,5 +1,3 @@
-//! Constraints SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
@@ -40,39 +38,28 @@ test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itse
     };
     try settleCallsForTesting(&storage, &tmp, binding, "check-metadata", &calls);
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE call_ordinal=0 AND resolution_code IS NULL AND attempt_ordinal=0", .{}));
-    // This built-in-only Session never offered `other`; it is a rejection,
-    // not an MCP Action. Keep that witness for the rejection CHECK below.
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=1 AND rejection_code='unknown_tool' AND action_kind IS NULL", .{}));
 
-    // Each pair changes only one field, the null-valued one where a NULL could
-    // pass the CHECK. The valid witness shows the row satisfies every
-    // unrelated constraint, so the invalid write can only fail on the
-    // lifecycle CHECK.
     const Case = struct { valid: [:0]const u8, invalid: [:0]const u8 };
     const cases = [_]Case{
-        // An unresolved Operation needs a retry time; zero marks it uncertain.
         .{
             .valid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,retry_due_at_ms=0,attempt_at=1,resolved_at=NULL",
             .invalid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,retry_due_at_ms=NULL,attempt_at=1,resolved_at=NULL",
         },
-        // Interruption linkage requires the interrupted Resolution.
         .{
             .valid = "UPDATE model_operation SET resolution_code='interrupted',retry_due_at_ms=NULL,interrupted_by_command_key=(SELECT min(command_key) FROM core_command)",
             .invalid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,retry_due_at_ms=0,interrupted_by_command_key=(SELECT min(command_key) FROM core_command)",
         },
-        // A call without rejection fields must be an Action call.
         .{
             .valid = "UPDATE model_tool_call SET rejection_code=NULL,rejection_content_id=NULL,acceptance_position=NULL,action_kind=1 WHERE call_ordinal=1",
             .invalid = "UPDATE model_tool_call SET rejection_code=NULL,rejection_content_id=NULL,acceptance_position=NULL,action_kind=NULL WHERE call_ordinal=1",
         },
-        // A denied Action never started an Attempt.
         .{
             .valid = "UPDATE action_operation SET attempt_ordinal=1,attempt_at=1,attempt_timeout_ms=1,resolution_code='failed'," ++
                 "resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1,resolved_at=1 WHERE call_ordinal=0",
             .invalid = "UPDATE action_operation SET attempt_ordinal=1,attempt_at=1,attempt_timeout_ms=1,resolution_code='denied'," ++
                 "resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1,resolved_at=1 WHERE call_ordinal=0",
         },
-        // An authorized Action is never denied.
         .{
             .valid = "UPDATE action_operation SET authorized=1,decided_at=1,resolution_code='failed'," ++
                 "resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1,resolved_at=1 WHERE call_ordinal=0",
@@ -148,7 +135,6 @@ test "claiming Session positions stops at the largest position, and fails when i
     const Claim = struct {
         pub const Guards = error{};
         session: []const u8,
-        /// Claims up to the largest position, or one position.
         to_last: bool,
         loaded: TestingRound.head.Result = undefined,
 
@@ -203,8 +189,6 @@ test "each state-bearing row keeps exactly the time its state owns" {
     };
     try settleCallsForTesting(&storage, &tmp, binding, "time-metadata", &calls);
 
-    // Each pair moves one row to a state. The valid write sets exactly that
-    // state's time; the invalid one forgets it or keeps the old state's time.
     const Case = struct { valid: [:0]const u8, invalid: [:0]const u8 };
     const cases = [_]Case{
         .{
@@ -269,7 +253,6 @@ test "a Workspace is matched by its digest and then its text" {
     const first = (try storage.configure(&first_command, .{})).accepted.session;
     var sibling_command = try completeConfiguration("digest-sibling", "", first_workspace, "model");
     const sibling = (try storage.configure(&sibling_command, .{})).accepted.session;
-    // A digest collision: the first Workspace's Sessions carry the other's digest.
     {
         var sql: [160]u8 = undefined;
         const forged = std.fmt.bytesToHex(store_core.workspaceDigest(other_workspace), .lower);
