@@ -2783,18 +2783,38 @@ pub const Item = union(enum) { new_session, views, gap, row: usize, empty };
 
 const new_session_name = "New Session";
 
-/// A blank line separates the pinned control from Sessions at the scroll origin.
-/// It scrolls away, leaving the above marker immediately under the pinned row.
-pub const first_row_line: usize = 1;
+/// The canonical order puts pins first. A separator exists only where
+/// that pinned prefix meets an unpinned suffix; it owns no selection.
+fn pinGap(state: *const State) ?usize {
+    const order = state.order.items;
+    if (order.len < 2 or state.rows.items[order[0]].pin_order == null or state.rows.items[order[order.len - 1]].pin_order != null) return null;
+    var low: usize = 1;
+    var high = order.len - 1;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (state.rows.items[order[mid]].pin_order != null) low = mid + 1 else high = mid;
+    }
+    return low;
+}
 
 pub fn listLength(state: *const State) usize {
-    return state.order.items.len + first_row_line;
+    return @max(1, state.order.items.len + @intFromBool(pinGap(state) != null));
+}
+
+fn listLine(state: *const State, at: usize) usize {
+    return at + @intFromBool(if (pinGap(state)) |gap| at >= gap else false);
+}
+
+/// Sessions remaining from a rendered line; the separator is never counted.
+pub fn sessionsFrom(state: *const State, line: usize) usize {
+    const before = line -| @intFromBool(if (pinGap(state)) |gap| line > gap else false);
+    return state.order.items.len -| before;
 }
 
 /// Pinned controls have no scrollable list line.
 pub fn selectedLine(state: *const State) ?usize {
     const ref = selectedSession(state) orelse return null;
-    return if (position(state, ref)) |at| at + first_row_line else null;
+    return if (position(state, ref)) |at| listLine(state, at) else null;
 }
 
 /// Keyboard list focus projects its selected row; otherwise the open chat
@@ -2802,7 +2822,7 @@ pub fn selectedLine(state: *const State) ?usize {
 pub fn focusedLine(state: *const State, list_focused: bool) ?usize {
     if (!list_focused) return selectedLine(state);
     return switch (state.selected) {
-        .session => |ref| if (position(state, ref)) |at| at + first_row_line else null,
+        .session => |ref| if (position(state, ref)) |at| listLine(state, at) else null,
         .new_session, .sessions, .archived, .settings => null,
     };
 }
@@ -2822,9 +2842,13 @@ fn rowSelected(state: *const State, row: *const Row) bool {
 }
 
 pub fn listItem(state: *const State, line: usize) ?Item {
-    const first = first_row_line;
-    if (line < first) return .gap;
-    return if (line - first < state.order.items.len) .{ .row = line - first } else null;
+    if (line >= listLength(state)) return null;
+    if (state.order.items.len == 0) return .empty;
+    const at = if (pinGap(state)) |gap| blk: {
+        if (line == gap) return .gap;
+        break :blk line - @intFromBool(line > gap);
+    } else line;
+    return .{ .row = at };
 }
 
 /// One Session line: state mark, primary name, and compact state duration.
@@ -3314,7 +3338,6 @@ test "every work state follows the rules table, in Unicode and ASCII" {
             var lines = std.mem.splitScalar(u8, text, '\n');
             try std.testing.expectEqualStrings("  + New Session", lines.next().?);
             try std.testing.expectEqualStrings("  Sessions  Archived", lines.next().?);
-            try std.testing.expectEqualStrings("", lines.next().?);
             try std.testing.expectEqualStrings(expected, lines.next().?);
         }
         // The mark takes its colour, and the word one only when it needs
@@ -3323,7 +3346,7 @@ test "every work state follows the rules table, in Unicode and ASCII" {
         var unselected = try Frame.of(&state, 80, 24, .{}, 0);
         defer unselected.deinit();
         // The sender/work domain below owns whole-row dim expectations.
-        try std.testing.expectEqual(case.colour, unselected.styleAt(3, 1).?.colour);
+        try std.testing.expectEqual(case.colour, unselected.styleAt(2, 1).?.colour);
     }
 }
 
@@ -3342,7 +3365,7 @@ test "a retry that has fallen due reads as queued in its group, mark and colour"
     var screen = try Frame.of(&state, 80, 24, .{ .depth = .none }, 0);
     defer screen.deinit();
     // The core retains the pending mark's role, even without colour.
-    try std.testing.expectEqual(Style{ .colour = .quiet, .dim = true }, screen.styleAt(3, 1).?);
+    try std.testing.expectEqual(Style{ .colour = .quiet, .dim = true }, screen.styleAt(2, 1).?);
 }
 
 test "overview rows draw a flat order without headings" {
@@ -3352,7 +3375,7 @@ test "overview rows draw a flat order without headings" {
     defer std.testing.allocator.free(text);
     inline for (.{ " Needs you ·", " Yours ·", " Active ·", " Idle ·", " Finished ·", " Stopped or failed ·", " more" }) |heading| try std.testing.expect(std.mem.indexOf(u8, text, heading) == null);
     try std.testing.expect(std.mem.indexOf(u8, text, "+ New Session") != null);
-    try std.testing.expectEqual(mixed.len + first_row_line, listLength(&state));
+    try std.testing.expectEqual(mixed.len, listLength(&state));
 }
 
 fn expectOrder(state: *const State, expected: []const []const u8) !void {
@@ -4112,7 +4135,7 @@ test "a first line arriving titles its unlabelled row" {
     try std.testing.expectEqualStrings("summarize yesterday's CI failures", state.lineOf(state.find("h8q2mz".*).?).?);
     try std.testing.expectEqual(Line.unavailable, state.find("f6g7h8".*).?.line);
     try std.testing.expectEqual(Line.requested, state.find("p3q4r5".*).?.line);
-    try expectScreenLine(&state, position(&state, "h8q2mz".*).? + 3, " ✓ summarize yesterday's CI failures                                        12m");
+    try expectScreenLine(&state, position(&state, "h8q2mz".*).? + 2, " ✓ summarize yesterday's CI failures                                        12m");
     // Lines in flight or unreadable are not asked for again, and a refresh
     // that replaces a row keeps the line of its unchanged first Message.
     try expectEffects(&.{}, try refresh(&state, .changed, testToken(2), &.{session("h8q2mz", .{ .working = ago(0) }, .{ .yours = true })}));
@@ -4213,7 +4236,7 @@ test "the selection stays on its Session when it moves from active to finished" 
     // A selected row remains selected when its age moves it to the end.
     _ = try refresh(&state, .changed, testToken(3), &.{session("m1n2p3", .{ .finished = ago(10 * 86400) }, .{ .label = "Explain provider output parsing" })});
     try expectSelected(&state, "m1n2p3");
-    try std.testing.expectEqual(state.order.items.len + first_row_line, listLength(&state));
+    try std.testing.expectEqual(state.order.items.len, listLength(&state));
 }
 
 /// Takes every program status record waiting for the shell, as sent.
@@ -4312,7 +4335,7 @@ test "overview selection walks both ends and every row without folding" {
     for (state.order.items, 0..) |index, at| {
         _ = try press(&state, .next);
         try expectSelected(&state, &state.rows.items[index].reference);
-        try std.testing.expectEqual(@as(?usize, at + 1), selectedLine(&state));
+        try std.testing.expectEqual(@as(?usize, at), selectedLine(&state));
     }
     _ = try press(&state, .next);
     try std.testing.expectEqual(Selection.settings, state.selected);
@@ -4345,28 +4368,28 @@ test "one click on a row opens it, under Enter's rules" {
     try expectSelected(&state, "g7h8j9");
 }
 
-test "overview scroll rows exclude the pinned New Session and chat omits its gap too" {
+test "overview and sidebar map Session rows without a leading gap" {
     var state = try opened(&mixed);
     defer state.deinit();
-    try std.testing.expectEqual(Item.gap, listItem(&state, 0).?);
-    try std.testing.expectEqual(null, clickOf(&state, .gap));
     for ([_]bool{ false, true }) |chat| {
         state.conversing = if (chat) mixed[0].reference else null;
         for (state.order.items, 0..) |index, at| {
-            const item = listItem(&state, at + 1).?;
+            const item = listItem(&state, at).?;
             try std.testing.expectEqual(Item{ .row = at }, item);
             try std.testing.expectEqualStrings(&state.rows.items[index].reference, &clickOf(&state, item).?.open);
             state.selected = .{ .session = state.rows.items[index].reference };
-            try std.testing.expectEqual(@as(?usize, if (chat) position(&state, mixed[0].reference).? + 1 else at + 1), selectedLine(&state));
+            try std.testing.expectEqual(@as(?usize, if (chat) position(&state, mixed[0].reference).? else at), selectedLine(&state));
         }
         try std.testing.expectEqual(null, listItem(&state, listLength(&state)));
         state.selected = .new_session;
-        try std.testing.expectEqual(if (chat) position(&state, mixed[0].reference).? + 1 else null, selectedLine(&state));
+        try std.testing.expectEqual(if (chat) position(&state, mixed[0].reference).? else null, selectedLine(&state));
     }
     var empty = try opened(&.{});
     defer empty.deinit();
     try std.testing.expectEqual(@as(usize, 1), listLength(&empty));
-    try std.testing.expectEqual(Item.gap, listItem(&empty, 0).?);
+    try std.testing.expectEqual(Item.empty, listItem(&empty, 0).?);
+    try std.testing.expectEqual(null, clickOf(&empty, .empty));
+    try std.testing.expectEqual(@as(usize, 0), sessionsFrom(&empty, 0));
     try std.testing.expectEqual(null, listItem(&empty, 1));
 }
 
@@ -4500,8 +4523,8 @@ test "the overview lists once a second, one listing at a time" {
     try expectScreenLine(&state, 0, "  + New Session");
     var screen = try Frame.of(&state, 80, 24, .{}, 0);
     defer screen.deinit();
-    try expectScreenLine(&state, 3, " ? Review PR 412                                                             3m");
-    try std.testing.expectEqual(Colour.attention, screen.styleAt(3, 1).?.colour);
+    try expectScreenLine(&state, 2, " ? Review PR 412                                                             3m");
+    try std.testing.expectEqual(Colour.attention, screen.styleAt(2, 1).?.colour);
     _ = try refresh(&state, .not_modified, testToken(1), &.{});
     try expectScreenLine(&state, 0, "  + New Session");
 }
@@ -4680,7 +4703,7 @@ test "the overview's rows draw twenty mixed rows" {
     for ([_]u16{ 80, 200 }) |width| {
         var shown = try Frame.of(&state, width, 60, .{}, 0);
         defer shown.deinit();
-        try std.testing.expectEqual(@as(usize, mixed.len + 3), shown.list.len);
+        try std.testing.expectEqual(@as(usize, mixed.len + 2), shown.list.len);
         const text = try shown.text();
         defer std.testing.allocator.free(text);
         for (mixed) |row| if (row.label) |label| try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, label));
@@ -4744,7 +4767,7 @@ test "bidi controls in a title cannot reorder a row" {
 test "untrusted text cannot reach the terminal as control bytes" {
     var state = try opened(&.{session("k7m2qx", .{ .working = ago(5) }, .{ .label = "Bell\x07 and \x1b[31mred" })});
     defer state.deinit();
-    try expectScreenLine(&state, 3, " ⠹ Bell? and ?[31mred                                                        5s");
+    try expectScreenLine(&state, 2, " ⠹ Bell? and ?[31mred                                                        5s");
 }
 
 test "overview idle rows never fold" {
@@ -5994,7 +6017,7 @@ test "empty chat name and selection agree across listing arrival orders and firs
         // choose a different sidebar row from the conversation being shown.
         for ([_]Selection{ .new_session, .settings, .{ .session = "other1".* } }) |navigation| {
             state.selected = navigation;
-            try std.testing.expectEqual(@as(?usize, 1), selectedLine(&state));
+            try std.testing.expectEqual(@as(?usize, 0), selectedLine(&state));
             try std.testing.expectEqualStrings("New Session", title(&state, &state.rows.items[state.order.items[0]]).text);
             for ([_]u16{ 46, 140 }) |width| {
                 var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -6404,5 +6427,59 @@ test "approval rows require no command reads across waiting Action and conversat
         try expectEffects(&.{}, try refresh(&state, .changed, testToken(2), &.{waiting}));
         state.conversing = null;
         try expectEffects(&.{}, try refresh(&state, .not_modified, testToken(2), &.{}));
+    };
+}
+
+test "session list has exactly one noninteractive gap only between both pin groups" {
+    for (0..9) |n| for (0..n + 1) |pins| {
+        var rows: [8]Listed = undefined;
+        for (rows[0..n], 0..) |*row, i| {
+            var ref = "aaaaaa".*;
+            ref[5] += @intCast(i);
+            row.* = session(&ref, .{ .finished = ago(i + 1) }, .{});
+            row.pin_order = if (i < pins) i + 1 else null;
+        }
+        var state = try opened(rows[0..n]);
+        defer state.deinit();
+        const both = pins > 0 and pins < n;
+        try std.testing.expectEqual(@max(1, n + @intFromBool(both)), listLength(&state));
+        var gaps: usize = 0;
+        var seen: usize = 0;
+        for (0..listLength(&state)) |line| {
+            const item = listItem(&state, line).?;
+            switch (item) {
+                .gap => {
+                    gaps += 1;
+                    try std.testing.expectEqual(pins, line);
+                    try std.testing.expect(clickOf(&state, item) == null);
+                    try std.testing.expect(pinClickOf(&state, item) == null);
+                },
+                .row => |at| {
+                    try std.testing.expectEqual(seen, at);
+                    const ref = state.rows.items[state.order.items[at]].reference;
+                    try std.testing.expectEqualStrings(&ref, &clickOf(&state, item).?.open);
+                    state.selected = .{ .session = ref };
+                    try std.testing.expectEqual(@as(?usize, line), focusedLine(&state, true));
+                    try std.testing.expectEqual(@as(?usize, line), selectedLine(&state));
+                    seen += 1;
+                },
+                .empty => try std.testing.expectEqual(@as(usize, 0), n),
+                else => return error.UnexpectedListItem,
+            }
+            const sessions_before = @min(n, line -| @intFromBool(both and line > pins));
+            try std.testing.expectEqual(n - sessions_before, sessionsFrom(&state, line));
+        }
+        try std.testing.expectEqual(@as(usize, @intFromBool(both)), gaps);
+        try std.testing.expectEqual(n, seen);
+        // Keyboard moves through the order, never through the separator.
+        state.selected = .new_session;
+        _ = try press(&state, .next);
+        try std.testing.expectEqual(Selection.sessions, state.selected);
+        for (state.order.items) |index| {
+            _ = try press(&state, .next);
+            try std.testing.expectEqualStrings(&state.rows.items[index].reference, &state.selected.session);
+        }
+        _ = try press(&state, .next);
+        try std.testing.expectEqual(Selection.settings, state.selected);
     };
 }

@@ -302,8 +302,8 @@ pub const WorkProbe = struct {
     selection: CoreSelection = .{},
     bash_action: next_action_attempt.Result = undefined,
 
-    pub fn queue(probe: *WorkProbe, a: anytype) void {
-        probe.selection.queue(a, true);
+    pub fn queue(probe: *WorkProbe, a: anytype, include_mcp: bool) void {
+        probe.selection.queue(a, include_mcp);
         queueNextActionAttempt(a, &probe.bash_action);
     }
 

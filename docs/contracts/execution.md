@@ -49,6 +49,8 @@ Keeping rejected calls outside Action preserves the invariant that every Action 
 No Step/group entity is required.
 Actions run and settle independently, including within one Workspace.
 
+`action read --session ID --action ID [--offset BYTES]` reads an existing Action's permission, queue, attempted or resolved state without waiting, granting permission or consuming output. A resolved Action returns its sole saved Resolution and one bounded UTF-8 output window; the returned byte cursor continues that immutable output. The Session must own the Action. `action inspect` continues to read the exact proposal for permission review.
+
 Bash arguments require `cmd` and `description`; `stdin` and `timeout_ms` are optional.
 Function tools are offered with `"strict": false`, explicitly, since an omitted field lets the provider make the schema strict: the provider does not check a call against its schema, Rui does.
 A call whose arguments fail that check is settled as an `invalid_arguments` rejection whose result tells the model what was wrong (for example "Invalid arguments for tool 'bash': cmd is required."), so the model corrects the call within the Turn; the Turn does not fail.

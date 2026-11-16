@@ -76,12 +76,12 @@ def needs_you():
             lines = frame.split("\n")
             headings = [line for line in lines if re.fullmatch(r" \S.* · \d+", line)]
             assert headings == [], frame
-            assert lines[0] == "  + New Session" and lines[1] == "  Sessions  Archived" and lines[2] == "", frame
+            assert lines[0] == "  + New Session" and lines[1] == "  Sessions  Archived", frame
             asked = row(frame, "Asks before running")
             assert re.fullmatch(r" \? Asks before running {2,}\d+s", asked), asked
             assert len(asked) == 98, asked
             assert "second line" not in frame, frame
-            assert lines.index(asked) == 3, frame
+            assert lines.index(asked) == 2, frame
             assert "echo first line" not in frame and "workspace" not in frame, frame
             assert re.fullmatch(r" ✓ Answered already {2,}\d+s", row(frame, "Answered already")), frame
             mark = cells(screen, "Asks before running")[1]

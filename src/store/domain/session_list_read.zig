@@ -344,9 +344,9 @@ noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, now_ms: u64,
     // A pass stops at a failed step, so a row that failed to be visited
     // did before any later row's step failed: its error is main's first.
     if (read.failure) |err| {
-        // A failed projection leaves the last decoded row in report scratch.
-        // Validate its compound certificate outside the stepping callback.
-        if (read.projection_unsupported) try report_domain.verifyFirstMessage(a, read.decoded);
+        // Later queued statements can overwrite report scratch. Validate the
+        // identity captured when this projection failed, after stepping ends.
+        if (read.unsupported_first) |first| try report_domain.verifyFirstMessage(a, first);
         return err;
     }
     try ran;
@@ -364,7 +364,7 @@ fn RowsRead(comptime Visitor: type) type {
         now_ms: u64,
         visitor: Visitor,
         shown: usize = 0,
-        projection_unsupported: bool = false,
+        unsupported_first: ?struct { first_consistent: ?bool, first_length: ?u64, first_key: ?Bounded(128) } = null,
         failure: ?(ErrorOf(rowValues) || ErrorOf(@typeInfo(Visitor).pointer.child.row)) = null,
 
         pub fn visit(read: *@This(), row: *const ListRow) bool {
@@ -372,7 +372,13 @@ fn RowsRead(comptime Visitor: type) type {
             var sorted: [tool_name.max_tools][]const u8 = undefined;
             var last_text: Bounded(session_list.max_last_line_bytes) = undefined;
             var values = rowValues(read.rows, read.shown, read.now_ms, row, &sorted, &last_text) catch |err| {
-                read.projection_unsupported = err == error.InputPartsNotSupported;
+                if (err == error.InputPartsNotSupported) {
+                    read.unsupported_first = .{
+                        .first_consistent = row.first_consistent,
+                        .first_length = row.first_length,
+                        .first_key = row.first_key,
+                    };
+                }
                 read.failure = err;
                 return false;
             };
