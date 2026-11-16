@@ -714,6 +714,14 @@ const NativeTurn = struct {
     }
 
     pub fn advanceLiveBash(self: *NativeTurn) bool {
+        const observed = std.Io.Clock.Timestamp.now(self.host.io, .awake);
+        while (self.host.custody.nextBackgroundDue(observed, self.host.background_after_ms)) |binding| {
+            const reply = self.host.store.backgroundAction(.{ .live_action = binding.action_id }, self.host.hooks.storeFaults(.action_result));
+            if (reply == .infrastructure_failure or reply == .conflict) {
+                fenceDispatch(self.host, "automatic Action promotion", error.ActionPromotionFailed);
+                break;
+            }
+        }
         const mcp_progress = self.mcp.service(self.host);
         return advanceBash(self.host, self.slots, self.workspace) or mcp_progress;
     }
@@ -1719,7 +1727,7 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
         return;
     };
     defer if (base) |bytes| prepared.allocator.free(bytes);
-    host.custody.consumeLaunchAuthority(token, .{ .action = action_binding }) catch |err| {
+    host.custody.consumeLaunchAuthority(token, .{ .action = action_binding }, std.Io.Clock.Timestamp.now(host.io, .awake)) catch |err| {
         fenceDispatch(host, "Bash launch authority", err);
         discardBashResources(host, slot, prepared.takeCleanup());
         return;
@@ -2270,7 +2278,7 @@ fn launchPreparedRequest(
     // Spent only by a Transfer that started, so a failed start keeps it armed.
     host.hook_progress.response_write_once_spent = host.hooks.fails(.response_write_once);
     pause(host, .{ .model_launch = binding });
-    host.custody.consumeLaunchAuthority(token, .{ .model = binding }) catch |err| {
+    host.custody.consumeLaunchAuthority(token, .{ .model = binding }, std.Io.Clock.Timestamp.now(host.io, .awake)) catch |err| {
         active.transfer.deinit();
         stderr.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         fenceDispatch(host, "dispatch handoff", err);
@@ -4653,8 +4661,8 @@ test "aggregate custody reconciles MCP and slots and rejects tokens shared acros
     var mcp: server_mcp.Calls = .{};
     mcp.entries[0] = &active;
     try checkSlotCustodyAgreement(&slots, &custody, &mcp);
-    try custody.consumeLaunchAuthority(action_token, .{ .action = action_binding });
-    try std.testing.expectError(error.DispatchPermitConsumed, custody.consumeLaunchAuthority(action_token, .{ .action = action_binding }));
+    try custody.consumeLaunchAuthority(action_token, .{ .action = action_binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake));
+    try std.testing.expectError(error.DispatchPermitConsumed, custody.consumeLaunchAuthority(action_token, .{ .action = action_binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake)));
     try std.testing.expect(custody.claimTerminalDelivery(action_token));
     try std.testing.expect(!custody.claimTerminalDelivery(action_token));
     active.token = model_token;

@@ -578,7 +578,7 @@ test "each Store entry point takes its round budget on its common path" {
             try background.key.set("budget-background");
 
             meter.start();
-            const selected_final = storage.backgroundAction(&background, .{});
+            const selected_final = storage.backgroundAction(.{ .command = &background }, .{});
             try std.testing.expect(selected_final == .accepted and selected_final.accepted.selection.kind == .final);
             meter.stop(.backgroundAction);
             var deny: protocol.PermissionDecisionCommand = .{ .action_id = denied, .decision = .deny };

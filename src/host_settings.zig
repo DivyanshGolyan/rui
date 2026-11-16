@@ -27,6 +27,7 @@ pub const socket_name = "rui.sock";
 pub const max_launch_socket_path_bytes = 103;
 pub const max_runtime_dir_bytes = max_launch_socket_path_bytes - "/".len - socket_name.len;
 pub const default_mcp_call_timeout_ms: u32 = 600_000;
+pub const default_background_after_ms: u64 = 30_000;
 pub const default_bash_timeout_ms: u64 = 5 * 60 * 1000;
 pub const default_bash_path = "/bin/bash";
 
@@ -288,8 +289,9 @@ pub const Interface = struct {
 };
 pub const Execution = struct {
     active_capacity: Count(usize, 0, std.math.maxInt(usize), defaults.active_capacity) = .{},
+    background_after_ms: Count(u64, 1, std.math.maxInt(i64), default_background_after_ms) = .{},
     paused: Flag = .{},
-    pub const doc = .{ .active_capacity = "How many Turns may run at once.", .paused = "Open with Turns held, as after host_pause." };
+    pub const doc = .{ .active_capacity = "How many Turns may run at once.", .background_after_ms = "Background a live Host-run Action after this many milliseconds.", .paused = "Open with Turns held, as after host_pause." };
 };
 pub const Presets = struct {
     pub const kind: Kind = .presets;
@@ -2351,4 +2353,19 @@ test "Host settings proof admits the complete provider presence and credential d
         try anchor(settings, "/tmp/host-settings-providers");
         _ = try seal(settings, &failure);
     }
+}
+
+test "Host settings automatic background threshold defaults and document CLI bounds round trip" {
+    const gpa = std.testing.allocator;
+    const settings = try gpa.create(Settings);
+    defer gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var failure: start_report.Failure = undefined;
+    try std.testing.expectEqual(@as(u64, 30_000), settings.execution.background_after_ms.value);
+    try apply(settings, gpa, "{\"execution\":{\"backgroundAfterMs\":1234}}", .file, checkSample, &failure);
+    try std.testing.expectEqual(@as(u64, 1234), settings.execution.background_after_ms.value);
+    try assign(settings, gpa, "execution.backgroundAfterMs", "1", checkSample, &failure);
+    try std.testing.expectEqual(@as(u64, 1), settings.execution.background_after_ms.value);
+    try std.testing.expectError(error.SettingsInvalid, assign(settings, gpa, "execution.backgroundAfterMs", "0", checkSample, &failure));
 }

@@ -284,6 +284,8 @@ pub const CustodyRecord = struct {
     binding: CustodyBinding = undefined,
     timing_operation: std.atomic.Value(u64) = .init(0),
     timing: model_timing.Attempt = .{},
+    action_started: ?std.Io.Clock.Timestamp = null,
+    background_checked: bool = false,
 };
 
 pub const DispatchCapacity = packed struct(u3) {
@@ -321,8 +323,23 @@ pub const CustodyPool = struct {
             const generation = record.generation.fetchAdd(1, .acq_rel) + 1;
             record.timing_operation.store(0, .release);
             record.timing.reset();
+            record.action_started = null;
+            record.background_checked = false;
             record.delivered.store(false, .release);
             return .{ .index = index, .generation = generation };
+        }
+        return null;
+    }
+
+    /// The execution thread owns launch and this scan. A refusal is attempted
+    /// once; neither its receipt nor its original deadline is reset by polling.
+    pub fn nextBackgroundDue(self: *CustodyPool, observed: std.Io.Clock.Timestamp, threshold_ms: u64) ?attempt.ActionAttemptBinding {
+        for (self.records) |*record| {
+            if (record.state.load(.acquire) != .attached or record.binding != .action or record.delivered.load(.acquire) or record.background_checked) continue;
+            const started = record.action_started orelse continue;
+            if (started.durationTo(observed).raw.nanoseconds < @as(i128, threshold_ms) * std.time.ns_per_ms) continue;
+            record.background_checked = true;
+            return record.binding.action;
         }
         return null;
     }
@@ -368,6 +385,7 @@ pub const CustodyPool = struct {
         self: *CustodyPool,
         token: CustodyToken,
         expected: CustodyBinding,
+        observed: std.Io.Clock.Timestamp,
     ) !void {
         const record = try self.current(token);
         if (record.state.load(.acquire) != .attached or !std.meta.eql(record.binding, expected)) {
@@ -376,6 +394,7 @@ pub const CustodyPool = struct {
         if (record.launch_available.cmpxchgStrong(true, false, .acq_rel, .acquire) != null) {
             return error.DispatchPermitConsumed;
         }
+        if (expected == .action) record.action_started = observed;
     }
 
     pub fn binding(self: *CustodyPool, token: CustodyToken) !CustodyBinding {
@@ -497,20 +516,20 @@ test "custody remains occupied through detachment and rejects late delivery afte
     );
     try std.testing.expectError(
         error.ForeignLaunchAuthority,
-        pool.consumeLaunchAuthority(first, .{ .model = .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 1 } }),
+        pool.consumeLaunchAuthority(first, .{ .model = .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 1 } }, std.Io.Clock.Timestamp.now(std.testing.io, .awake)),
     );
     try pool.checkAttached(first, .{ .model = first_binding });
-    try pool.consumeLaunchAuthority(first, .{ .model = first_binding });
+    try pool.consumeLaunchAuthority(first, .{ .model = first_binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake));
     try std.testing.expectError(
         error.DispatchPermitConsumed,
-        pool.consumeLaunchAuthority(first, .{ .model = first_binding }),
+        pool.consumeLaunchAuthority(first, .{ .model = first_binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake)),
     );
     try std.testing.expect(pool.claimTerminalDelivery(first));
     try std.testing.expect(pool.canClaimTerminalDelivery(first) == false);
     try std.testing.expect(!pool.claimTerminalDelivery(first));
     try std.testing.expectError(
         error.DispatchPermitConsumed,
-        pool.consumeLaunchAuthority(first, .{ .model = first_binding }),
+        pool.consumeLaunchAuthority(first, .{ .model = first_binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake)),
     );
     try pool.detach(first);
     try pool.checkDetached(first, null);
@@ -647,11 +666,11 @@ test "model and Action Attempt bindings cannot cross custody paths" {
     );
     try std.testing.expectError(
         error.ForeignLaunchAuthority,
-        pool.consumeLaunchAuthority(action_token, .{ .model = model_binding }),
+        pool.consumeLaunchAuthority(action_token, .{ .model = model_binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake)),
     );
     try std.testing.expectError(
         error.ForeignLaunchAuthority,
-        pool.consumeLaunchAuthority(model_token, .{ .action = action_binding }),
+        pool.consumeLaunchAuthority(model_token, .{ .action = action_binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake)),
     );
     try pool.checkAttached(model_token, .{ .model = model_binding });
     try pool.checkAttached(action_token, .{ .action = action_binding });
@@ -689,12 +708,12 @@ test "model launch authority requires every identity field" {
         .{ .turn_id = 7, .operation_id = 8, .attempt_ordinal = 90 },
     };
     for (variants) |mismatch| {
-        try std.testing.expectError(error.ForeignLaunchAuthority, pool.consumeLaunchAuthority(token, .{ .model = mismatch }));
+        try std.testing.expectError(error.ForeignLaunchAuthority, pool.consumeLaunchAuthority(token, .{ .model = mismatch }, std.Io.Clock.Timestamp.now(std.testing.io, .awake)));
         try std.testing.expectError(error.ForeignLaunchAuthority, pool.checkAttached(token, .{ .model = mismatch }));
     }
     try pool.checkAttached(token, .{ .model = binding });
-    try pool.consumeLaunchAuthority(token, .{ .model = binding });
-    try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(token, .{ .model = binding }));
+    try pool.consumeLaunchAuthority(token, .{ .model = binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake));
+    try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(token, .{ .model = binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake)));
     try pool.checkAttached(token, .{ .model = binding });
     try pool.detach(token);
     try pool.cleanupComplete(token);
@@ -717,12 +736,12 @@ test "action launch authority requires every identity field including turn" {
         .{ .turn_id = 7, .parent_operation_id = 8, .action_id = 90 },
     };
     for (variants) |mismatch| {
-        try std.testing.expectError(error.ForeignLaunchAuthority, pool.consumeLaunchAuthority(token, .{ .action = mismatch }));
+        try std.testing.expectError(error.ForeignLaunchAuthority, pool.consumeLaunchAuthority(token, .{ .action = mismatch }, std.Io.Clock.Timestamp.now(std.testing.io, .awake)));
         try std.testing.expectError(error.ForeignLaunchAuthority, pool.checkAttached(token, .{ .action = mismatch }));
     }
     try pool.checkAttached(token, .{ .action = binding });
-    try pool.consumeLaunchAuthority(token, .{ .action = binding });
-    try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(token, .{ .action = binding }));
+    try pool.consumeLaunchAuthority(token, .{ .action = binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake));
+    try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(token, .{ .action = binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake)));
     try pool.checkAttached(token, .{ .action = binding });
     try pool.detach(token);
     try pool.checkDetached(token, null);
@@ -784,7 +803,7 @@ test "bounded custody sequences preserve invariants after every operation" {
         const binding = try pool.attach(token, &permit);
         try pool.checkAttached(token, .{ .model = binding });
         try std.testing.expect(pool.canClaimTerminalDelivery(token));
-        try pool.consumeLaunchAuthority(token, .{ .model = binding });
+        try pool.consumeLaunchAuthority(token, .{ .model = binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake));
         try pool.checkAttached(token, .{ .model = binding });
         try std.testing.expect(pool.claimTerminalDelivery(token));
         try std.testing.expect(!pool.canClaimTerminalDelivery(token));
@@ -813,8 +832,8 @@ test "bounded custody sequences preserve invariants after every operation" {
         const first = pool.reserve().?;
         var first_permit = attempt.DispatchPermit{ .binding = .{ .turn_id = 3, .operation_id = 3, .attempt_ordinal = 3 } };
         const first_binding = try pool.attach(first, &first_permit);
-        try pool.consumeLaunchAuthority(first, .{ .model = first_binding });
-        try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(first, .{ .model = first_binding }));
+        try pool.consumeLaunchAuthority(first, .{ .model = first_binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake));
+        try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(first, .{ .model = first_binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake)));
         try pool.checkAttached(first, .{ .model = first_binding });
         try std.testing.expect(pool.claimTerminalDelivery(first));
         try std.testing.expect(!pool.claimTerminalDelivery(first));
@@ -845,7 +864,7 @@ test "bounded custody sequences preserve invariants after every operation" {
         try pool.checkAttached(second, .{ .model = second_binding });
         try pool.detach(first);
         try pool.checkDetached(first, null);
-        try std.testing.expectError(error.ForeignLaunchAuthority, pool.consumeLaunchAuthority(first, .{ .model = first_binding }));
+        try std.testing.expectError(error.ForeignLaunchAuthority, pool.consumeLaunchAuthority(first, .{ .model = first_binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake)));
         try pool.checkAttached(second, .{ .model = second_binding });
         try pool.cleanupComplete(first);
         try pool.checkFree(first);
@@ -866,7 +885,7 @@ test "stale tokens after reuse leave the new owner unchanged" {
         .attempt_ordinal = 1,
     } };
     const first_binding = try pool.attach(first, &first_permit);
-    try pool.consumeLaunchAuthority(first, .{ .model = first_binding });
+    try pool.consumeLaunchAuthority(first, .{ .model = first_binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake));
     try std.testing.expect(pool.claimTerminalDelivery(first));
     try pool.detach(first);
     try pool.cleanupComplete(first);
@@ -881,7 +900,7 @@ test "stale tokens after reuse leave the new owner unchanged" {
     } };
     const second_binding = try pool.attach(second, &second_permit);
 
-    try std.testing.expectError(error.StaleCustody, pool.consumeLaunchAuthority(first, .{ .model = first_binding }));
+    try std.testing.expectError(error.StaleCustody, pool.consumeLaunchAuthority(first, .{ .model = first_binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake)));
     try std.testing.expectError(error.StaleCustody, pool.binding(first));
     try std.testing.expect(!pool.claimTerminalDelivery(first));
     try std.testing.expectError(error.StaleCustody, pool.detach(first));
@@ -1000,15 +1019,15 @@ test "model prepared routes preserve one shot handoff across rejection and reuse
                     .result = .ready,
                 } }));
             }
-            try pool.consumeLaunchAuthority(token, .{ .model = binding });
+            try pool.consumeLaunchAuthority(token, .{ .model = binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake));
             try std.testing.expectEqual(if (failure == .unexpected) ModelDecision.fence else .abandon, modelDecision(.{ .handoff_failed = failure }));
-            try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(token, .{ .model = binding }));
+            try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(token, .{ .model = binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake)));
             try pool.detach(token);
             try std.testing.expect(!pool.claimTerminalDelivery(token));
             try std.testing.expect(pool.reserve() == null);
             try pool.cleanupComplete(token);
             const reused = pool.reserve().?;
-            try std.testing.expectError(error.StaleCustody, pool.consumeLaunchAuthority(token, .{ .model = binding }));
+            try std.testing.expectError(error.StaleCustody, pool.consumeLaunchAuthority(token, .{ .model = binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake)));
             try std.testing.expect(!pool.claimTerminalDelivery(token));
             try pool.checkReserved(reused);
             try pool.releaseUnused(reused);
@@ -1040,8 +1059,8 @@ test "background custody capacity one consumes launch authority once" {
     const finite = pool.reserve().?;
     var permit = attempt.ActionDispatchPermit{ .binding = .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 } };
     const binding = try pool.attach(finite, &permit);
-    try pool.consumeLaunchAuthority(finite, .{ .action = binding });
-    try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(finite, .{ .action = binding }));
+    try pool.consumeLaunchAuthority(finite, .{ .action = binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake));
+    try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(finite, .{ .action = binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake)));
     try pool.detach(finite);
     try pool.cleanupComplete(finite);
 }
@@ -1075,4 +1094,40 @@ test "dispatch capacity keeps physical headroom and effective work inputs distin
     }
     try std.testing.expectEqual(DispatchCapacity.fromFree(0, false).workInput(), DispatchCapacity.fromFree(0, true).workInput());
     try std.testing.expect(!std.meta.eql(DispatchCapacity.fromFree(1, false).workInput(), DispatchCapacity.fromFree(2, false).workInput()));
+}
+
+test "automatic background threshold covers launch timing terminal custody and reuse" {
+    const start: std.Io.Clock.Timestamp = .{ .clock = .awake, .raw = .{ .nanoseconds = 0 } };
+    const before: std.Io.Clock.Timestamp = .{ .clock = .awake, .raw = .{ .nanoseconds = 29_999 * std.time.ns_per_ms } };
+    const due: std.Io.Clock.Timestamp = .{ .clock = .awake, .raw = .{ .nanoseconds = 30_000 * std.time.ns_per_ms } };
+    for ([_]enum { unlaunched, running, delivered, detached, model }{ .unlaunched, .running, .delivered, .detached, .model }) |state| {
+        var records: [2]CustodyRecord = @splat(.{});
+        var pool = CustodyPool.initialize(&records);
+        const token = pool.reserve().?;
+        const action: attempt.ActionAttemptBinding = .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 };
+        if (state == .model) {
+            var permit: attempt.DispatchPermit = .{ .binding = .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 1 } };
+            _ = try pool.attach(token, &permit);
+            try pool.consumeLaunchAuthority(token, .{ .model = permit.binding }, start);
+        } else {
+            var permit: attempt.ActionDispatchPermit = .{ .binding = action };
+            _ = try pool.attach(token, &permit);
+            if (state != .unlaunched) try pool.consumeLaunchAuthority(token, .{ .action = action }, start);
+        }
+        if (state == .delivered) try std.testing.expect(pool.claimTerminalDelivery(token));
+        if (state == .detached) try pool.detach(token);
+        try std.testing.expect(pool.nextBackgroundDue(before, 30_000) == null);
+        if (state == .running) {
+            try std.testing.expectEqual(action, pool.nextBackgroundDue(due, 30_000).?);
+        } else try std.testing.expect(pool.nextBackgroundDue(due, 30_000) == null);
+        try std.testing.expect(pool.nextBackgroundDue(due, 30_000) == null);
+        if (state != .detached) try pool.detach(token);
+        try pool.cleanupComplete(token);
+        const reused = pool.reserve().?;
+        var permit: attempt.ActionDispatchPermit = .{ .binding = action };
+        _ = try pool.attach(reused, &permit);
+        try std.testing.expect(pool.nextBackgroundDue(due, 1) == null);
+        try pool.consumeLaunchAuthority(reused, .{ .action = action }, before);
+        try std.testing.expectEqual(action, pool.nextBackgroundDue(due, 1).?);
+    }
 }

@@ -14,7 +14,7 @@ import threading
 import time
 from collections import Counter
 
-from background_action_cases import prove_native_background, prove_model_action_read
+from background_action_cases import prove_native_background, prove_model_action_read, prove_automatic_background
 import model_fixture as fixture
 import host_process
 from host_process import HostDiagnostics, assert_caller_error, ReleaseGate, canonical_fixture_root, dispose_all, retain_failure_state
@@ -798,6 +798,7 @@ def main():
     os.environ["HOME"] = str(fixture_home)
     prove_native_background(state)
     prove_model_action_read(state)
+    prove_automatic_background(state)
     prove_stdin(state)
     prove_reused_session(state)
     responses = []

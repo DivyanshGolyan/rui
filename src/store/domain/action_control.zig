@@ -85,8 +85,9 @@ pub const Control = struct {
     pub const round_budget = 2;
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = .facts;
-    pub const Scratch = struct { receipt: action_receipt.Bytes };
-    pub const Input = struct { command: *const command_input.ActionBackgroundCommand, scratch: *Scratch };
+    pub const Scratch = struct { receipt: action_receipt.Bytes, automatic: command_input.ActionBackgroundCommand };
+    pub const Source = union(enum) { command: *const command_input.ActionBackgroundCommand, live_action: u64 };
+    pub const Input = struct { source: Source, scratch: *Scratch };
     pub const Result = control.Reply;
     pub const Ordinary = store_core.Ordinary.none;
     pub const Guards = error{ActionSelectionChanged};
@@ -104,10 +105,22 @@ pub const Control = struct {
     answer: command_domain.StoredAnswer = undefined,
     reply: Result = undefined,
 
+    fn requestValue(t: *Control) *const command_input.ActionBackgroundCommand {
+        return switch (t.input.source) {
+            .command => |command| command,
+            .live_action => &t.input.scratch.automatic,
+        };
+    }
+
     pub fn step(t: *Control, r: *transition.Round(Control), ran: ?rounds.At) !transition.Next(Control) {
-        const request = t.input.command;
+        if (ran == null) if (t.input.source == .live_action) {
+            const automatic = &t.input.scratch.automatic;
+            automatic.* = .{ .action_id = t.input.source.live_action };
+            const key = try std.fmt.bufPrint(&automatic.key.bytes, "rui.core/action-threshold/{d}", .{automatic.action_id});
+            automatic.key.len = key.len;
+        };
+        const request = t.requestValue();
         const at = ran orelse {
-            t.digest = request.semanticDigest();
             command_domain.lookupCommand(r, request.key.slice(), &t.saved);
             if (session_id.valid(request.session.slice())) r.read(target, .{ .session = request.session.slice() }, &t.receiver);
             if (validId(request.action_id)) {
@@ -122,6 +135,12 @@ pub const Control = struct {
             const old = try observation(t.replay);
             return .{ .done = .{ .accepted = .{ .replayed = true, .action_id = old.action_id, .selection = old.selection orelse return error.CorruptStore } } };
         }
+        if (t.input.source == .live_action) {
+            const found = t.action orelse return error.ActionSelectionChanged;
+            try t.input.scratch.automatic.session.set(&found.session.ref);
+            t.receiver = .{ .session = found.session };
+        }
+        t.digest = request.semanticDigest();
         switch (try command_domain.classify(control.Rejection, &t.saved, .action_background, request.session.slice(), &t.digest)) {
             .fresh => {},
             .conflict => return .{ .done = .conflict },
@@ -156,13 +175,13 @@ pub const Control = struct {
     }
 
     fn save(t: *Control, r: *transition.Round(Control), selection: ?control.Selection) void {
-        const request = t.input.command;
+        const request = t.requestValue();
         const action_id = std.fmt.bufPrint(&t.action_text, "{d}", .{request.action_id}) catch unreachable;
         r.write(save_selection, .{ .key = request.key.slice(), .action_id = action_id, .selected_action_id = if (selection != null) request.action_id else null, .selection = if (selection) |selected| selected.kind else null, .position = if (selection) |selected| selected.position else null });
     }
 
     fn refuse(t: *Control, r: *transition.Round(Control), code: control.Rejection) !transition.Next(Control) {
-        const request = t.input.command;
+        const request = t.requestValue();
         t.answer = .{ .accepted = false };
         try t.answer.code.set(@tagName(code));
         try command_domain.queueCommand(r, request.key.slice(), .action_background, request.session.slice(), &t.digest, null, null, &t.answer);

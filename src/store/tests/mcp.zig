@@ -326,7 +326,7 @@ test "MCP promotion keeps old frozen Operations eligible without hiding finite w
             promote.session = sessions[0];
 
             phase = "promotion";
-            try std.testing.expect(storage.backgroundAction(&promote, .{}) == .accepted);
+            try std.testing.expect(storage.backgroundAction(.{ .command = &promote }, .{}) == .accepted);
             try std.testing.expectEqual(old, (try storage.nextAction(.mcp, .fromFree(2, true))).?.action_id);
             phase = "continuation";
             const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;

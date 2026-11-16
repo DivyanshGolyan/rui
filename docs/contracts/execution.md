@@ -57,6 +57,8 @@ The next model Operation can consume it once every sibling call has a fulfillmen
 Promotion preserves the same Action, Attempt, arguments, authorization, executor and deadline; it grants no permission and launches no replacement invocation.
 The Session owns the promoted Action beyond its original Turn, including approval discovery and Stop propagation through attached descendants.
 
+The Host calls the same promotion owner when a live foreground Action has run for `execution.backgroundAfterMs` (default 30 seconds). Bash, MCP and future Host-run tools use the shared custody launch clock; Core tools and provider-hosted `web_search` do not hold live Action custody. No model intent or per-tool option selects backgrounding. Each launch is checked once, and promotion never resets the original execution deadline. Execution remains live-Host only, with no durable resume or automatic retry after Host death.
+
 Promotion keeps an attempted Action's existing custody credit and never needs a free credit or changes how many credits are held. That credit remains occupied until final Resolution and safe cleanup. An unattempted promoted Action waits for an ordinary credit before dispatch.
 When background Actions hold every credit, new foreground work waits for one as usual. Deadlines bound that starvation; no Action waits on its own continuation to finish.
 A repeated matching command preserves the original selection; an existing background or final selection takes precedence over a later stop. A fresh stop refusal leaves the original call and executor unchanged.

@@ -186,7 +186,7 @@ test "work uses the latest Resolution position across foreground and background 
                     var command: @import("../../command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = actions[index] };
                     try command.key.set("resolution-promote");
 
-                    const accepted = storage.backgroundAction(&command, .{});
+                    const accepted = storage.backgroundAction(.{ .command = &command }, .{});
                     try std.testing.expect(accepted == .accepted);
                     fulfillments[index] = accepted.accepted.selection.position;
                 }

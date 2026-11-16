@@ -300,3 +300,77 @@ def prove_model_action_read(state, *, deadline=None):
             lambda: (case / "provider-requests.json").write_text(json.dumps([json.loads(body) for body in endpoint.requests], ensure_ascii=False, indent=2) + "\n"),
         )
     return evidence
+
+
+def prove_automatic_background(state, *, deadline=None):
+    from bash_fixture import dispose_owner_case
+
+    deadline = time.monotonic() + 150 if deadline is None else deadline
+    outcomes = []
+    for name in ("threshold", "deadline"):
+        case = state / ("auto-background-" + name)
+        case.mkdir(mode=0o700)
+        workspace = case / "workspace"
+        workspace.mkdir()
+        gate = ReleaseGate(workspace / "producer-gate")
+        producer = (
+            "import os,pathlib,time; "
+            "pathlib.Path('launched').write_text(str(os.getpid())); "
+            "time.sleep(0.25); "
+            "pathlib.Path('slept').write_text('past threshold'); "
+            "g=open('producer-gate','rb'); g.read(); g.close(); "
+            "print('automatic final')"
+        )
+        timeout = 1200 if name == "deadline" else 10000
+        responses = []
+        add_exchange(responses, name, "exec " + shlex.join([sys.executable, "-c", producer]), answer="model continued", timeout_ms=timeout)
+        responses.append(fixture.sse_answer(name + "-delivered", name + "-reason", name + "-message", "final woke model")[0])
+        endpoint = fixture.SuccessEndpoint(responses)
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        host = session = pid = None
+        evidence = {"case": name, "capacity": 2, "threshold_ms": 100, "timeout_ms": timeout}
+
+        def wait_for(observe, description):
+            return fixture.wait_for(observe, description, deadline=deadline)
+
+        def command(*args, **options):
+            return fixture.command(*args, timeout=min(15, max(0.1, deadline - time.monotonic())), **options)
+
+        try:
+            thread.start()
+            host = fixture.start_host(case / "store", f"http://127.0.0.1:{endpoint.server_port}/responses", "--set", "execution.backgroundAfterMs=100", active_capacity=2)
+            store = case / "store"
+            session = configure(case, store, "configure", workspace=workspace)
+            fixture.message(case, store, "message", session, "Sleep past the Host threshold")
+            action = wait_for(lambda: action_for(store, session), "foreground Bash Action")
+            identity = action["action"]
+            allow(case, store, "allow", session, identity)
+            wait_for(lambda: (workspace / "slept").exists(), "Bash slept past the threshold")
+            pid = int((workspace / "launched").read_text())
+            gate.assert_held()
+            threshold_key = f"rui.core/action-threshold/{identity}"
+            wait_for(lambda: fixture.observe(store, threshold_key, deadline=deadline), "Host promotion decision")
+            wait_for(lambda: fixture.completed_observation(store, "message"), "model continues while Action runs")
+            assert fixture.read_result(store, "message") == b"model continued"
+            assert process_exists(pid) and len(endpoint.requests) == 2
+            outputs = [item for item in json.loads(endpoint.requests[1])["input"] if item.get("type") == "function_call_output"]
+            assert len(outputs) == 1 and json.loads(outputs[0]["output"]) == {"action": identity, "execution": "background", "accepted": True}, outputs
+            if name != "deadline":
+                gate.release()
+            final = wait_for(lambda: value if (value := command("action", "read", "--store", store, "--session", session, "--action", identity))["state"] == "resolved" else None, "sole final Resolution")
+            assert final["final"]["code"] == ("timed_out" if name == "deadline" else "succeeded"), final
+            if name == "deadline":
+                assert "1200 ms" in final["final"]["window"]["text"], final
+            final_key = f"rui.core/action-final/{identity}"
+            wait_for(lambda: fixture.completed_observation(store, final_key), "final Resolution wakes idle model")
+            assert fixture.read_result(store, final_key) == b"final woke model"
+            delivered = [item for item in json.loads(endpoint.requests[2])["input"] if item.get("role") == "user"][-1]
+            assert delivered["content"][1]["text"] == final["final"]["window"]["text"], delivered
+            wait_for(lambda: not process_exists(pid), "producer retirement")
+            wait_for(lambda: execution_custody_idle(store, session), "all Action and model custody released")
+            assert len(endpoint.requests) == 3
+            evidence.update(action=identity, requests=len(endpoint.requests), final=final["final"])
+            outcomes.append(evidence)
+        finally:
+            dispose_all(gate.release, lambda: dispose_owner_case(host, endpoint, thread), lambda: (case / "witness.json").write_text(json.dumps(evidence, indent=2) + "\n"))
+    return outcomes

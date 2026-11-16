@@ -732,16 +732,16 @@ pub const Store = struct {
         return self.noteControl(transition.apply(self, command_domain.DecidePermission, .{ .command = command }, faults) catch .infrastructure_failure);
     }
 
-    pub fn backgroundAction(self: *Store, command: *const command_input.ActionBackgroundCommand, faults: Faults) @import("../action_control.zig").Reply {
+    pub fn backgroundAction(self: *Store, source: action_control_domain.Control.Source, faults: Faults) @import("../action_control.zig").Reply {
         EntryTrace.fromControl(faults.control_trace).mark(.requested);
-        return self.queue().write(backgroundActionHeld, .{ self, command, faults });
+        return self.queue().write(backgroundActionHeld, .{ self, source, faults });
     }
 
-    fn backgroundActionHeld(self: *Store, command: *const command_input.ActionBackgroundCommand, faults: Faults) @import("../action_control.zig").Reply {
+    fn backgroundActionHeld(self: *Store, source: action_control_domain.Control.Source, faults: Faults) @import("../action_control.zig").Reply {
         const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
         defer entry.release();
         const Control = action_control_domain.Control;
-        var control: Control = .{ .input = .{ .command = command, .scratch = self.reportScratch(Control.Scratch) } };
+        var control: Control = .{ .input = .{ .source = source, .scratch = self.reportScratch(Control.Scratch) } };
         const result = entry.finishTransaction(Control.Ordinary, faults, transition.run(&entry, Control, &control, faults)) catch @import("../action_control.zig").Reply.infrastructure_failure;
         return self.noteControl(result);
     }

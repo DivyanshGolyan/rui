@@ -1308,6 +1308,8 @@ export interface components {
             execution?: {
                 /** @description How many Turns may run at once. */
                 activeCapacity?: number;
+                /** @description Background a live Host-run Action after this many milliseconds. */
+                backgroundAfterMs?: number;
                 /** @description Open with Turns held, as after host_pause. */
                 paused?: boolean;
             };

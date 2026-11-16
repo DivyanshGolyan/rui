@@ -428,6 +428,7 @@ pub const Host = struct {
     /// then starts from the Host facts alone.
     environments: ?*SessionEnvironments = null,
     bash_timeout_ms: u64 = default_bash_timeout_ms,
+    background_after_ms: u64 = @import("host_settings.zig").default_background_after_ms,
     /// MCP settings projection, owned and wiped after execution joins.
     mcp_servers: @import("mcp/servers.zig").Servers = .{},
     retention: *output_retention.Queue = undefined,

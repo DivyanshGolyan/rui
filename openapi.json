@@ -5407,6 +5407,12 @@
                 "maximum": 18446744073709551615,
                 "description": "How many Turns may run at once."
               },
+              "backgroundAfterMs": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9223372036854775807,
+                "description": "Background a live Host-run Action after this many milliseconds."
+              },
               "paused": {
                 "type": "boolean",
                 "description": "Open with Turns held, as after host_pause."

@@ -59,7 +59,7 @@ test "read_action core reads own pending and immutable final windows without cre
             var background: @import("command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = target };
             try background.key.set("read-background");
 
-            try std.testing.expect(database.backgroundAction(&background, .{}) == .accepted);
+            try std.testing.expect(database.backgroundAction(.{ .command = &background }, .{}) == .accepted);
             var own: action_read.Read = undefined;
             try database.readAction(&.{ .session = session, .action_id = target }, &own);
             try std.testing.expect(own.status == .pending and own.status.pending == .waiting_approval);

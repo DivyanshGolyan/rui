@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Focused background Action final delivery on a real Host and scripted provider."""
 import os
+import sys
 import tempfile
 
-from background_action_cases import prove_native_background, prove_model_action_read
+from background_action_cases import prove_native_background, prove_model_action_read, prove_automatic_background
 import host_process
 from host_process import canonical_fixture_root
 
@@ -13,8 +14,12 @@ def main():
     fixture_home = state / "home"
     fixture_home.mkdir()
     os.environ["HOME"] = str(fixture_home)
+    if "--automatic-only" in sys.argv:
+        print(prove_automatic_background(state))
+        return
     print(prove_native_background(state))
     print(prove_model_action_read(state))
+    print(prove_automatic_background(state))
 
 
 if __name__ == "__main__":
