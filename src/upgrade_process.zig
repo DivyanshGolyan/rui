@@ -90,7 +90,7 @@ pub const Download = struct {
     }
 
     pub fn output(self: *Download, allocator: std.mem.Allocator, io: std.Io, request: Request, cancellation: ?*const client.Cancellation, limit: usize) ![]u8 {
-        return self.outputUntil(allocator, io, request, cancellation, limit, "curl", .fromNow(io, .{ .raw = policy.download_timeout, .clock = .awake }));
+        return self.outputUntil(allocator, io, request, cancellation, limit, "curl", .fromNow(io, .{ .raw = .fromNanoseconds(policy.download_timeout_ns), .clock = .awake }));
     }
 
     fn outputUntil(self: *Download, allocator: std.mem.Allocator, io: std.Io, request: Request, cancellation: ?*const client.Cancellation, limit: usize, executable: []const u8, deadline: std.Io.Clock.Timestamp) ![]u8 {
@@ -103,7 +103,7 @@ pub const Download = struct {
             var time_buffer: [32]u8 = undefined;
             const max_time = try std.fmt.bufPrint(&time_buffer, "{d}.{d:0>3}", .{ milliseconds / 1000, milliseconds % 1000 });
             var connect_buffer: [16]u8 = undefined;
-            const connect_time = try std.fmt.bufPrint(&connect_buffer, "{d}", .{@as(u64, @intCast(policy.connect_timeout.toSeconds()))});
+            const connect_time = try std.fmt.bufPrint(&connect_buffer, "{d}", .{@as(u64, @intCast(std.Io.Duration.fromNanoseconds(policy.connect_timeout_ns).toSeconds()))});
             const fixture = std.mem.startsWith(u8, request.url, "http://");
             const discovery = request.output == .effective_url;
             const common = [_][]const u8{
@@ -143,7 +143,7 @@ pub const Download = struct {
                 .exited => |code| code,
                 else => null,
             };
-            if (policy.retry(family, exit_code, deadline.durationFromNow(io).raw)) {
+            if (policy.retry(family, exit_code, deadline.durationFromNow(io).raw.nanoseconds)) {
                 dispose(allocator, result);
                 family = .ipv4;
                 continue;
@@ -169,7 +169,7 @@ fn downloadFixture(allocator: std.mem.Allocator, script: []const u8, download: *
     try temporary.dir.writeFile(io, .{ .sub_path = "curl", .data = script, .flags = .{ .permissions = .fromMode(0o700) } });
     const executable = try temporary.dir.realPathFileAlloc(io, "curl", allocator);
     defer allocator.free(executable);
-    return download.outputUntil(allocator, io, .{ .url = "https://fixture.invalid" }, null, 1024, executable, .fromNow(io, .{ .raw = policy.download_timeout, .clock = .awake }));
+    return download.outputUntil(allocator, io, .{ .url = "https://fixture.invalid" }, null, 1024, executable, .fromNow(io, .{ .raw = .fromNanoseconds(policy.download_timeout_ns), .clock = .awake }));
 }
 
 test "upgrade process download failure retains only the last diagnostic line for reports" {
