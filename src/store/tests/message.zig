@@ -25,6 +25,61 @@ const settleTwoActionsForTesting = shared_fixtures.settleTwoActionsForTesting;
 const testingBytesContent = shared_fixtures.testingBytesContent;
 const testingListRow = shared_fixtures.testingListRow;
 
+test "sourced admission allocates person peer and self-send positions exactly once" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Source = enum { person, peer, self_peer };
+            inline for (std.enums.values(Source)) |source| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace: [protocol.max_workspace_bytes]u8 = undefined;
+                var create = try completeConfiguration("source", "", try canonicalCwd(std.testing.io, &workspace), "model-a");
+                create.configuration.tools = try .of(&.{"bash"});
+                create.configuration.permission_mode.state = .value;
+                try create.configuration.permission_mode.value.set("bypass");
+                const sender = (try storage.configure(&create, .{})).accepted.session;
+                const target = if (source == .self_peer) sender else try configureTestSession(&storage, "target");
+                try submitTestMessage(&storage, &tmp, "seed", "seed", sender.slice(), "send");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleTwoActionsForTesting(&storage, &tmp, model, "calls");
+                const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+                var execution: ActionExecutionInput = undefined;
+                try storage.readActionExecutionInput(.bash, action, &execution);
+                const admission_id = 1 + try store_testing.queryU64(&storage, "SELECT max(admission_id) FROM message_admission", .{});
+                const target_position = try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{target.slice()});
+                const sender_position = try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{sender.slice()});
+                var message: wire_request.MessageCommand = .{};
+                try message.key.set("sourced");
+                try message.session.set(target.slice());
+                message.text = try testingBytesContent(&tmp, "sourced", "input");
+                defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+                if (source != .person) {
+                    message.sender = .{ .store = storage.selector, .session = sender };
+                    message.sender_handle = execution.sender_handle;
+                }
+                const reply = storage.submitMessageWithModel(&message, null, .{});
+                try std.testing.expect(reply == .accepted);
+                try std.testing.expectEqual(admission_id, reply.accepted.admission_id);
+                try std.testing.expectEqual(target_position, try store_testing.queryU64(&storage, "SELECT admission_position FROM message_admission WHERE command_key='sourced'", .{}));
+                if (source == .person) {
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE command_key='sourced' AND sender_session_ref IS NULL AND sender_position IS NULL", .{}));
+                } else {
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE command_key='sourced' AND sender_session_ref=?1 AND sender_position=?2", .{ sender.slice(), sender_position + @intFromBool(source == .self_peer) }));
+                }
+                const replay = storage.submitMessageWithModel(&message, null, .{}).accepted;
+                try std.testing.expect(replay.replayed);
+                try std.testing.expectEqual(admission_id, replay.admission_id);
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE command_key='sourced'", .{}));
+                try std.testing.expectEqual(target_position + 1 + @intFromBool(source == .self_peer), try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{target.slice()}));
+                try std.testing.expectEqual(sender_position + @intFromBool(source != .person) + @intFromBool(source == .self_peer), try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{sender.slice()}));
+            }
+        }
+    }.run);
+}
+
 test "a creating Message with require_model creates nothing without a model" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
