@@ -4,8 +4,6 @@ const darwin = @import("darwin.zig");
 const product = @import("product.zig");
 const CiArtifacts = @import("ci.zig").CiArtifacts;
 
-/// Test executable identities and their filtered runnable owners. Both the build
-/// and tests/ci/build_files.py consume these literal rows; keep each row whole.
 pub const UnitRoot = struct {
     id: Id,
     name: []const u8,
@@ -31,7 +29,6 @@ pub const roots = [_]UnitRoot{
     .{ .id = .mysql, .name = "rui-mysql-wire-test", .source = "tests/integration/mysql_wire_test.zig", .target = "mysql-wire-integration" },
 };
 
-/// A group owns its serial chain and its shell binary order as one item.
 pub const UnitGroup = struct { id: UnitRoot.Id, roots: []const UnitRoot.Id, filtered: UnitRoot.Id };
 pub const groups = [_]UnitGroup{
     .{ .id = .native_pair, .roots = &.{ .native, .store }, .filtered = .filtered },
@@ -87,8 +84,6 @@ pub fn includes(gate: []const u8, part: Part, id: UnitRoot.Id) bool {
 pub const Runs = std.EnumArray(UnitRoot.Id, ?*std.Build.Step);
 pub const Placement = enum { runs, shell };
 
-/// Shell placement hands the grouped native binaries to check.sh instead of
-/// launching their Run steps again. All other dependencies use the same table.
 pub fn attach(gate: []const u8, part: Part, destination: *std.Build.Step, runs: *const Runs, placement: Placement) void {
     for (members(gate, part)) |id| {
         if (placement == .shell and id == .native_pair) continue;
@@ -98,8 +93,6 @@ pub fn attach(gate: []const u8, part: Part, destination: *std.Build.Step, runs: 
 
 const NativeGroup = struct { binaries: []*std.Build.Step.Compile, final: *std.Build.Step.Run };
 
-/// Standalone roots never inherit siblings. The group's declaration alone
-/// determines its serial dependencies and the binary order handed to the shell.
 fn nativeGroup(b: *std.Build, ci: CiArtifacts, identities: []const UnitRoot.Id, tests: []const *std.Build.Step.Compile, filtered: bool) NativeGroup {
     const definition = group(.native_pair);
     const grouped = if (!filtered) definition.roots else &.{definition.filtered};
@@ -127,8 +120,6 @@ pub const Units = struct {
 };
 
 pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pinned_transport: ?product.PinnedTransport, test_filters: []const []const u8) Units {
-    // Filtered developer/mutation runs retain the single aggregate binary and
-    // its filter/global conventions. Unfiltered CI compiles independent roots.
     const native_group = group(.native_pair);
     if (native_group.roots.len == 0) @panic("Native group must contain a unit root");
     const identities = b.allocator.alloc(UnitRoot.Id, if (test_filters.len == 0) unit_partition.roots.len else 1) catch @panic("OOM");
@@ -142,7 +133,6 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         generate.addFileArg(std.Build.LazyPath.zig_lib.path(b, "compiler/test_runner.zig"));
         break :runner generate.addOutputFileArg("unit_test_runner.zig");
     } else null;
-    // A filter that names no test in a unit step fails instead of passing empty.
     const filtered_runner: ?std.Build.Step.Compile.TestRunner = if (test_filters.len != 0) runner: {
         const generate = b.addSystemCommand(&.{ "python3", "-B" });
         generate.addFileArg(b.path("tests/ci/unit_test_runner.py"));
@@ -191,10 +181,6 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
     runs.set(.native_pair, &native.final.step);
     if (test_filters.len != 0) runs.set(native_group.filtered, &native.final.step);
     const test_step = b.step(root(.filtered).target, "Run unit, Store, and protocol tests");
-    // Selection pairs test-full with check or check-full, which already run every
-    // other native test, so this binary contains only the real-time witness.
-    // Like normal units, the x86_64 witness uses the self-hosted backend;
-    // other targets retain LLVM. ReleaseSafe checks stay enabled.
     const deadline_witness = b.addTest(.{
         .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
         .name = root(.deadline).name,
@@ -235,12 +221,6 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
     runs.set(.logic, &run_logic_tests.step);
     const logic_only_step = b.step(root(.logic).target, "Run the logic test binary without auxiliary executables");
 
-    // The fuzz tests of the parsers that read peer bytes. test-logic runs
-    // their seeds, with Zig's runner so a filter for another root's test
-    // passes here; fuzz-parsers owns filtered runs and builds them with
-    // LLVM, whose coverage counters a live campaign (--fuzz) steers by.
-    // Their root links no C: --fuzz instruments every object it links, and
-    // the stock compiler gives C objects no `__sanitizer_cov_trace_*` hooks.
     const parser_fuzz_step = b.step(
         root(.parser_llvm).target,
         "Run the peer-byte parser fuzz tests with LLVM coverage; add --fuzz for a live campaign",
@@ -315,13 +295,6 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
     return .{ .tests = tests, .native_binaries = native.binaries, .runs = runs, .run_renderer_allocation = run_renderer_allocation, .signal_stack_probe = signal_stack_probe };
 }
 
-// Compiler filters are a superset of exact runner ownership. Module-only
-// substrings are too broad: "tests." also matches "store.tests." and recompiles
-// most of the suite. Tokenize declarations so new tests need no second manifest.
-// Compiler filters avoid analyzing/code-generating other roots' named tests.
-// Use module.test. rather than module.: "tests." also matches Store's tests!
-// Anonymous tests bypass Zig filters; the generated runner partitions those.
-// Keep discovery imports in tests.zig eager (not hidden inside a named test).
 fn unitFilters(b: *std.Build) [unit_partition.roots.len][]const []const u8 {
     const io = b.graph.io;
     var lists: [unit_partition.roots.len]std.ArrayList([]const u8) = @splat(.empty);
@@ -350,7 +323,7 @@ fn unitFilters(b: *std.Build) [unit_partition.roots.len][]const []const u8 {
                 .keyword_test => {
                     const name = tokenizer.next();
                     if (name.tag == .l_brace) {
-                        depth += 1; // Anonymous discovery tests bypass compiler filters.
+                        depth += 1;
                         continue;
                     }
                     if (depth == 0 and !std.mem.eql(u8, entry.path, "tests.zig")) {
@@ -367,9 +340,6 @@ fn unitFilters(b: *std.Build) [unit_partition.roots.len][]const []const u8 {
                             spelling,
                         else => @panic("Invalid test declaration"),
                     };
-                    // Nested container names are compiler-owned. Use a literal
-                    // fragment for these rare cases; runner ownership resolves
-                    // overlap. Avoid quotes/backslashes in Zig response files.
                     var fragments = std.mem.tokenizeAny(u8, text, "'\"\\\n\r\t");
                     var fragment: []const u8 = "";
                     while (fragments.next()) |part| if (part.len > fragment.len) {

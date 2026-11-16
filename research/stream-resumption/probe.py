@@ -35,7 +35,6 @@ def main():
     parser.add_argument('--results', type=Path, required=True)
     args = parser.parse_args()
     tokens = json.loads((Path.home() / '.codex/auth.json').read_text())['tokens']
-    # Credentials remain in process memory. Never refresh or change account state.
     headers = {
         'Authorization': 'Bearer ' + tokens['access_token'],
         'ChatGPT-Account-Id': tokens['account_id'],
@@ -55,7 +54,6 @@ def main():
         print(line, flush=True)
 
     def save(row):
-        # This experiment's checkpoint contains identifiers and counters only.
         with args.checkpoint.open('x') as output:
             json.dump(row, output)
             output.flush()
@@ -153,7 +151,6 @@ def main():
                 saved = {'response_id': response_id, 'sequence_number': event['sequence_number'], 'mode': args.mode}
                 save(saved)
                 emit(kind='hard_exit_after_first_text_delta', **saved, events=event_count, exit_code=73)
-                # No HTTP cleanup or cancel request: terminate the connection-owning process.
                 os._exit(73)
             if kind in ('response.completed', 'response.failed', 'response.incomplete', 'error'):
                 emit(kind='terminal', event=kind, response_id=response_id,
@@ -161,7 +158,6 @@ def main():
                      events=event_count, **(safe_error(json.dumps(event).encode()) if kind == 'error' else {}))
                 return
     except Exception as exc:
-        # Exception messages can include credential-bearing request state.
         emit(kind='exception', exception_type=type(exc).__name__)
     finally:
         signal.alarm(0)

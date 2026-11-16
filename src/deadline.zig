@@ -1,5 +1,3 @@
-//! Awake-clock deadlines for value transitions that receive `now` from
-//! their caller instead of reading a clock.
 const std = @import("std");
 
 pub const Timestamp = std.Io.Clock.Timestamp;

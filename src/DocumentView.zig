@@ -1,7 +1,3 @@
-//! File-backed inspection, Action and Message panels. Drawing allocates
-//! cells only for this viewport; the continuous feed is owned by FeedView.
-//! With a `handler`, a drag across its rows copies their text (OSC 52) when
-//! released, and a click on a peer's name opens that Session.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -19,34 +15,20 @@ size: vxfw.Size = .{},
 method: vaxis.gwidth.Method = .unicode,
 colour: bool = true,
 style: vaxis.Style = .{},
-/// The pointer's row or continuation, quieter than the selection background an open tool row keeps.
 hover_style: vaxis.Style = .{ .ul_style = .single },
 hover: Hover = .{},
 colours: viewport.Colours = .{},
-/// Report the rows below this viewport without prescribing input.
 more: bool = false,
-/// What the screen does for this widget's gestures; without it the mouse
-/// does nothing here.
 handler: ?Handler = null,
-/// The drag under way, if any. Nothing of it remains after release.
 selection: ?Selection = null,
-/// The cells last drawn: valid until the next frame, as App's hit testing is.
 drawn: Drawn = .{},
 
 pub const Handler = struct {
     userdata: *anyopaque,
-    /// A click on a peer's name: the ID of the Session it names, which is
-    /// the document's bytes, so copy it before the document changes.
     on_open: ?*const fn (*anyopaque, *vxfw.EventContext, []const u8) anyerror!void = null,
-    /// What a release did: `Copied N lines`, or why nothing was copied.
     on_notice: *const fn (*anyopaque, *vxfw.EventContext, []const u8) anyerror!void,
-    /// A drag held at the top or bottom row moves the view one row, through
-    /// rows already loaded (`up` toward older rows).
     on_scroll: *const fn (*anyopaque, *vxfw.EventContext, up: bool) anyerror!void,
-    /// A click anywhere but a peer's name: the drawn row it landed on, as
-    /// its logical line's origin-relative offset and wrapped row.
     on_click: ?*const fn (*anyopaque, *vxfw.EventContext, viewport.Position) anyerror!void = null,
-    /// Caller-owned eligibility for actionable rows (ordinary prose stays inert).
     action_at: ?*const fn (*anyopaque, viewport.Position) bool = null,
 };
 
@@ -54,27 +36,19 @@ pub const Selection = struct {
     press: Point,
     anchor: Spot,
     head: Spot,
-    /// A press becomes a drag once the pointer reaches another cell.
     dragging: bool = false,
     edge: enum { none, up, down } = .none,
     ticking: bool = false,
-    /// The first row shown when `head` was last set: held at an edge, the
-    /// head moves to the edge row only once the view has scrolled.
     view: viewport.Position = .{},
 };
 
-/// A cell in this widget's coordinates; a forwarded drag may be outside it.
 const Point = struct { row: i32, col: i32 };
 
-/// What the last draw showed, as plain data: events lay out the row under
-/// the pointer again from retained bytes, never from a past frame's cells.
 const Drawn = struct {
-    /// Which text was drawn: a selection in other text is dropped.
     document: ?*const viewport.Document = null,
     replacements: u32 = 0,
     width: u16 = 0,
     height: u16 = 0,
-    /// The first row drawn, its line as an absolute offset.
     line: u64 = 0,
     row: u16 = 0,
     continuation: ?viewport.Position = null,
@@ -84,19 +58,15 @@ pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
 }
 
-/// The first omitted row of this frame, valid only for the same document.
-/// Open gestures use this position, not a second saved preview or fold.
 pub fn continuation(self: *const Self) ?viewport.Position {
     if (self.drawn.document != self.document or self.drawn.replacements != self.document.replacements) return null;
     return self.drawn.continuation;
 }
 
-/// Whether mouse geometry still names this exact retained document frame.
 pub fn drawnNow(self: *const Self) bool {
     return self.drawn.document == self.document and self.drawn.replacements == self.document.replacements and self.drawn.width != 0 and self.drawn.height != 0;
 }
 
-/// Whether a press or drag is under way.
 pub fn dragging(self: *const Self) bool {
     return self.selection != null;
 }
@@ -120,7 +90,6 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!v
             }
             const handler = self.handler orelse return;
             try handler.on_scroll(handler.userdata, ctx, selection.edge == .up);
-            // The next draw extends the selection to the new edge row.
             ctx.redraw = true;
             try ctx.tick(edge_interval_ms, self.widget());
         },
@@ -130,7 +99,6 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!v
 
 const edge_interval_ms = 50;
 
-/// Source-cell peer links, caller-approved rows and the explicit continuation.
 fn drawHover(self: *Self, arena: std.mem.Allocator, surface: vxfw.Surface) !void {
     self.hover.targets = &.{};
     const handler = self.handler orelse return;
@@ -168,7 +136,6 @@ fn hovering(self: *const Self, cells: []vaxis.Cell) void {
     for (cells) |*cell| cell.style = Hover.look(cell.style, self.hover_style);
 }
 
-/// One mouse event in this widget's coordinates.
 fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) anyerror!void {
     const handler = self.handler orelse return;
     if (!self.drawnNow()) {
@@ -202,8 +169,6 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) anyerror!void
             ctx.consumeAndRedraw();
             if (selection.dragging) return copy(ctx, handler, try selecting.copy(ctx.alloc, self.document, .of(selection.anchor, selection.head)));
             if (!std.meta.eql(at, selection.press)) return;
-            // The state row is not the last text row, even when selection's
-            // clamped anchor happens to fall on a link in that text.
             if (at.row == self.drawn.height) if (self.continuation()) |position| {
                 if (handler.on_click) |clicked| try clicked(handler.userdata, ctx, position);
                 return;
@@ -216,9 +181,7 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) anyerror!void
     }
 }
 
-/// Sends what a release copies, once, and says what happened.
 fn copy(ctx: *vxfw.EventContext, handler: Handler, result: selecting.Copy) !void {
-    // App frees the command's bytes once written.
     if (result == .text) try ctx.addCmd(.{ .copy_to_clipboard = result.text.bytes });
     var buffer: [64]u8 = undefined;
     if (selecting.notice(result, &buffer)) |text| try handler.on_notice(handler.userdata, ctx, text);
@@ -228,29 +191,21 @@ fn layout(self: *const Self) viewport.Layout {
     return .{ .width = self.drawn.width, .method = self.method };
 }
 
-/// The first row the last draw showed, in the current text. Once its line
-/// has been evicted the text's first row stands in.
 fn laidFirst(self: *const Self) viewport.Position {
     const offset = selecting.relative(self.document, self.drawn.line) orelse return .{};
     return self.document.clamp(self.layout(), .{ .offset = offset, .row = self.drawn.row });
 }
 
-/// The logical line and wrapped row `row` rows below `first`, or null
-/// below the text.
 fn rowPosition(self: *const Self, first: viewport.Position, row: u16) ?viewport.Position {
     if (self.document.text().len == 0) return null;
     if (self.document.measure(self.layout(), first, row +| 1).rows <= row) return null;
     return self.document.down(self.layout(), first, row);
 }
 
-/// Row `row` of cells laid out from `first`, for the selection core.
 fn rowAt(self: *const Self, cells: []const vaxis.Cell, first: viewport.Position, index: u16) selecting.Row {
     return .{ .document = self.document, .cells = cells, .line = if (self.rowPosition(first, index)) |position| position.offset else null };
 }
 
-/// The spot under a pointer, laying out its row from the retained text at
-/// the position last drawn. A pointer above or below the rows takes the
-/// first row's start or the last row's end.
 fn spotAt(self: *const Self, gpa: std.mem.Allocator, at: Point) !Spot {
     const last_row: i32 = self.drawn.height - 1;
     const index: u16 = @intCast(std.math.clamp(at.row, 0, last_row));
@@ -301,8 +256,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         const remaining = try std.fmt.allocPrint(ctx.arena, "… {d} more lines", .{below - drawn.rows});
         _ = window.child(.{ .y_off = text.height, .height = 1 }).print(&.{.{ .text = remaining, .style = quiet }}, .{ .wrap = .none });
     }
-    // Replaced content (another document, or this one cleared) ends a press
-    // or drag over the old text without copying.
     if (self.drawn.document != self.document or self.drawn.replacements != self.document.replacements) self.selection = null;
     self.drawn = .{
         .document = self.document,
@@ -317,8 +270,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     if (self.selection) |*selection| if (selection.dragging and surface.buffer.len != 0) {
         const width = surface.size.width;
         const height = text.height;
-        // Held at an edge, the selection follows the rows scrolled in; until
-        // the view moves, it keeps the pointer's column.
         if (!std.meta.eql(selection.view, self.first)) switch (selection.edge) {
             .none => {},
             .up => selection.head = self.rowAt(surface.buffer[0..width], self.first, 0).spot(0),
@@ -428,7 +379,6 @@ test "DocumentView draws only the requested rows and retains the first unread ro
     try std.testing.expectEqual(viewport.Position{ .offset = 19 }, transcript.next);
 }
 
-/// A Transcript under test with a screen that records what its gestures did.
 const Harness = struct {
     document: *viewport.Document,
     transcript: Self = undefined,
@@ -479,7 +429,6 @@ const Harness = struct {
         _ = try self.frame();
     }
 
-    /// The clipboard writes queued since the last call, joined by `|`.
     fn copies(self: *Harness, buffer: []u8) []const u8 {
         var length: usize = 0;
         for (self.ctx.cmds.items) |command| switch (command) {
@@ -536,26 +485,20 @@ const Harness = struct {
 };
 
 test "a drag highlights the text it crosses, copies it once on release and clears" {
-    // At 16 columns "› fix the flaky store" wraps after "flaky"; the time
-    // sits in no margin this narrow and copies nowhere.
     const h = try Harness.init("› \x1b[2mfix the flaky store test\x1b[8m14:20\x1b[0m\n\nnext line\n", .{ .width = 16, .height = 4 });
     defer h.deinit();
     var copied: [256]u8 = undefined;
     var row: [16]u8 = undefined;
-    // From "the" on the first row to the "t" of "store" on the wrapped row.
     try h.drag(.{ 6, 0 }, .{ 3, 1 });
     const held = try h.frame();
     try std.testing.expectEqualStrings("......##########", Harness.reversed(held, 0, &row));
     try std.testing.expectEqualStrings("####............", Harness.reversed(held, 1, &row));
     try std.testing.expectEqualStrings("", h.copies(&copied));
     try h.send(.release, 3, 1);
-    // One write: the wrap joins without a newline and the indent is left out.
     try std.testing.expectEqualStrings("the flaky st", h.copies(&copied));
     try std.testing.expectEqualStrings("Copied 1 line", h.notices.items[0]);
     const after = try h.frame();
     for (0..4) |index| try std.testing.expectEqualStrings("................", Harness.reversed(after, @intCast(index), &row));
-    // Upward, across the empty line, to past the last row's text: whole
-    // lines, the empty one included, and the order of the ends doesn't matter.
     try h.drag(.{ 12, 3 }, .{ 0, 0 });
     try h.send(.release, 0, 0);
     try std.testing.expectEqualStrings("› fix the flaky store test\n\nnext line", h.copies(&copied));
@@ -568,22 +511,18 @@ test "a press and release on one cell is a click, and only a peer's name opens" 
     const h = try Harness.init("\x1b[2;8m← Received message from " ++ name ++ "\x1b[0m\nSee " ++ TerminalText.link_open ++ "https://r.dev" ++ TerminalText.link_end ++ "docs" ++ TerminalText.link_close ++ "\n", .{ .width = 40, .height = 3 });
     defer h.deinit();
     var copied: [64]u8 = undefined;
-    // "Plan" is at columns 24 to 27.
     for ([_]i16{ 23, 28, 5 }) |column| {
         try h.send(.press, column, 0);
         try h.send(.release, column, 0);
     }
-    try h.send(.press, 4, 1); // a web link stays the terminal's
+    try h.send(.press, 4, 1);
     try h.send(.release, 4, 1);
     try std.testing.expectEqualStrings("", h.opened.items);
-    // Every other click reports its row: the peer line, then the second.
     try std.testing.expectEqualSlices(viewport.Position, &.{ .{}, .{}, .{}, .{ .offset = h.document.nextLine(0).? } }, h.clicks.items);
     try h.send(.press, 27, 0);
     try h.send(.release, 27, 0);
     try std.testing.expectEqualStrings("k7m2qx", h.opened.items);
     try std.testing.expectEqual(@as(usize, 4), h.clicks.items.len);
-    // Moving off before release cancels the click; back on the same cell
-    // it is a drag over one cluster.
     try h.send(.press, 24, 0);
     try h.send(.drag, 30, 0);
     try h.send(.release, 30, 0);
@@ -596,7 +535,6 @@ test "a press and release on one cell is a click, and only a peer's name opens" 
     try std.testing.expectEqualStrings("k7m2qx", h.opened.items);
     try std.testing.expectEqualStrings("l", h.copies(&copied));
     try std.testing.expectEqual(@as(usize, 4), h.clicks.items.len);
-    // Other buttons and bare motion do nothing.
     try h.transcript.widget().handleEvent(&h.ctx, .{ .mouse = .{ .col = 27, .row = 0, .button = .right, .mods = .{}, .type = .press } });
     try h.send(.motion, 27, 0);
     try std.testing.expect(!h.transcript.dragging());
@@ -641,11 +579,9 @@ test "a drag held at an edge scrolls one row a tick and selects the rows it brin
     try std.testing.expectEqual(@as(i32, -2), h.scrolls);
     try h.send(.release, 2, 0);
     try std.testing.expectEqualStrings("line 2\nline 3\nline 4\nline 5", h.copies(&copied));
-    // Released, a pending tick neither scrolls nor reschedules.
     try h.transcript.widget().handleEvent(&h.ctx, .tick);
     try std.testing.expectEqual(@as(i32, -2), h.scrolls);
     try std.testing.expectEqual(@as(usize, 0), h.ctx.cmds.items.len);
-    // Down past the last row.
     try h.drag(.{ 0, 1 }, .{ 3, 5 });
     try h.transcript.widget().handleEvent(&h.ctx, .tick);
     _ = try h.frame();
@@ -668,9 +604,6 @@ test "DocumentView active edge drag survives zero one and two row resizes with q
         try std.testing.expect(h.transcript.selection.?.ticking);
         const anchor = h.transcript.selection.?.anchor;
 
-        // Keep the same live drag while collapsing and restoring the view.
-        // A previously queued tick is delivered after every resized frame;
-        // its redraw must still have text cells for either selection edge.
         for ([_]u16{ 0, 1, 2, 0, 2, 1 }) |height| {
             h.size.height = height;
             _ = try h.frame();
@@ -708,15 +641,12 @@ test "a drag on an edge row keeps the pointer's column until the view scrolls" {
     const h = try Harness.init("alpha beta\ngamma delta\nepsilon\n", .{ .width = 16, .height = 3 });
     defer h.deinit();
     var copied: [64]u8 = undefined;
-    // On the first row at the document's top, a frame and an edge tick move
-    // nothing, so the selection stays where the pointer is.
     try h.drag(.{ 6, 0 }, .{ 9, 0 });
     try h.transcript.widget().handleEvent(&h.ctx, .tick);
     _ = try h.frame();
     try h.send(.release, 9, 0);
     try std.testing.expectEqualStrings("beta", h.copies(&copied));
     h.clearCommands();
-    // Likewise on the last row at the document's bottom.
     try h.drag(.{ 1, 2 }, .{ 3, 2 });
     try h.transcript.widget().handleEvent(&h.ctx, .tick);
     _ = try h.frame();
@@ -730,7 +660,6 @@ test "a press or drag ends without copying when the pointer leaves or the conten
     defer h.deinit();
     var copied: [64]u8 = undefined;
     var row: [16]u8 = undefined;
-    // Leaving mid-drag: the highlight goes, and a later release copies nothing.
     try h.drag(.{ 0, 0 }, .{ 4, 1 });
     try std.testing.expectEqualStrings("################", Harness.reversed(try h.frame(), 0, &row));
     try h.transcript.widget().handleEvent(&h.ctx, .mouse_leave);
@@ -738,12 +667,10 @@ test "a press or drag ends without copying when the pointer leaves or the conten
     try std.testing.expectEqualStrings("................", Harness.reversed(try h.frame(), 0, &row));
     try h.send(.release, 4, 1);
     try std.testing.expectEqualStrings("", h.copies(&copied));
-    // Leaving after a press: the release back on that cell is no click.
     try h.send(.press, 0, 0);
     try h.transcript.widget().handleEvent(&h.ctx, .mouse_leave);
     try h.send(.release, 0, 0);
     try std.testing.expectEqual(@as(usize, 0), h.clicks.items.len);
-    // The same document cleared and refilled mid-drag.
     try h.drag(.{ 0, 0 }, .{ 4, 1 });
     h.document.clear();
     try h.document.append("other text\nmore\n");
@@ -751,7 +678,6 @@ test "a press or drag ends without copying when the pointer leaves or the conten
     try std.testing.expect(!h.transcript.dragging());
     try h.send(.release, 4, 1);
     try std.testing.expectEqualStrings("", h.copies(&copied));
-    // Another document put in place mid-drag, as a Message page is.
     const page = try std.testing.allocator.create(viewport.Document);
     defer std.testing.allocator.destroy(page);
     page.* = .{};
@@ -770,9 +696,6 @@ test "a drag over cells drawn before the text changed copies the text they showe
     h.document.top = .{ .offset = "first\n".len };
     _ = try h.frame();
     var copied: [64]u8 = undefined;
-    // Between the draw and the gesture, a worker drops the line above the
-    // view and appends another, as eviction and live output do: the rows
-    // drawn keep meaning the text they showed.
     h.document.discardFront(h.document.origin + "first\n".len);
     try h.document.append("fourth\n");
     try h.send(.press, 0, 1);
@@ -857,7 +780,5 @@ test "DocumentView hover and drag highlight measure each visible line a bounded 
         try std.testing.expect(frame.buffer[0].style.reverse);
         count.* = viewport.measured_lines;
     }
-    // Every line is one row, so a linear frame costs at most 32 times as
-    // much for 32 times the rows; the quadratic walk cost about 1000 times.
     try std.testing.expect(measured[1] <= 32 * measured[0]);
 }

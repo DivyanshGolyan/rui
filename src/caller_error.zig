@@ -1,5 +1,3 @@
-//! CLI causes and their repair contract. No wire or Store policy.
-//! Saved-code facts are replay-affecting: do not reinterpret them using live state.
 const std = @import("std");
 const session_settings = @import("session_settings.zig");
 const TerminalText = @import("TerminalText.zig");
@@ -69,7 +67,6 @@ pub const Code = enum {
     home_unavailable,
     session_id_needs_to,
     session_id_needs_session,
-    // Existing saved wire spellings; PR 5 owns splitting and renaming them.
     invalid_session_reference,
     unknown_session,
     archive_pending,
@@ -102,7 +99,6 @@ pub const Code = enum {
     invalid_workspace,
     workspace_is_immutable,
     provider_is_immutable,
-    /// Historical saved rejection only; fresh model revisions are allowed.
     model_is_immutable,
     revision_exhausted,
     skills_unavailable,
@@ -134,8 +130,6 @@ pub const Code = enum {
     request_wire_incompatible,
 };
 
-/// Transitional inventory. An entry is an unclassified internal failure,
-/// never advice guessed from an OS error name. CI permits deletion, not growth.
 pub const pending = .{
     "AccessDenied",
     "ActionReadFailed",
@@ -241,8 +235,6 @@ fn mapped(err: anyerror) ?Code {
         error.OutOfMemory => .memory_exhausted,
         error.SavedRequestWireVersionMismatch => .request_wire_incompatible,
         error.HostNotServing => .host_not_serving,
-        // Replay preflight normally becomes a per-Host unsupported outcome.
-        // If it escapes, keep the same operational restart repair.
         error.HostRestartFailed, error.UnsupportedHostConfiguration => .host_restart_failed,
         error.IncompatibleHost => .host_incompatible,
         error.InvalidHostInfo, error.HostPeerNotServing, error.HostServeArgumentsUnreadable, error.HostServeStoreMissing, error.HostServeStoreRelative, error.HostSocketStoreMismatch, error.HostPeerPidMismatch, error.HostPeerIdentityUnavailable, error.HostProcessSnapshotUnavailable, error.InvalidHostProcessSnapshot => .host_identity_unconfirmed,
@@ -291,12 +283,8 @@ fn mapped(err: anyerror) ?Code {
         error.InteractiveTerminalRequired => .terminal_required,
         error.EmptyMessageInput => .message_empty,
         error.InvalidArguments, error.InvalidPrefix => .invocation_invalid,
-        // Host startup normally consumes this with its leaf-scoped report.
-        // A CLI escape remains a caller refusal, never an internal fault.
         error.InvalidInvocation, error.SettingsInvalid => .invocation_invalid,
         error.CallerFailure => .internal_unexpected,
-        // Directory owners translate this to a contextual Store/preference
-        // cause. An escape without that context retains the internal fallback.
         error.InsecureDirectoryPermissions => .internal_unexpected,
         error.ConnectionSuperseded => .sign_in_connection_changed,
         error.ConnectionNotActive => .sign_in_connection_pending,
@@ -313,9 +301,6 @@ fn mapped(err: anyerror) ?Code {
     };
 }
 
-/// Closed inferred error sets are checked at their use site. Some legacy CLI
-/// owners still widen to anyerror; the shrink-only source gate inventories
-/// those names until those owners can be narrowed in their own lane.
 pub fn of(err: anytype) Code {
     comptime {
         @setEvalBranchQuota(1_000_000);
@@ -366,8 +351,6 @@ pub const Input = enum {
 
     fn spelling(self: Input) ?[]const u8 {
         inline for (session_settings.entries) |entry| {
-            // Instructions failures have always used their contextual witness,
-            // not an option spelling. Keep those diagnostics byte-identical.
             if (comptime !std.mem.eql(u8, entry.field, "instructions")) {
                 if (comptime entry.cli) |cli| {
                     const name = entry.field;
@@ -397,7 +380,6 @@ pub const Accepted = union(enum) {
     none,
 };
 
-/// No defaults: every cause must declare all its static facts.
 pub const Facts = struct {
     act: Remedy,
     input: ?Input,
@@ -559,19 +541,13 @@ pub const Held = struct {
     accepted: ?Accepted = null,
     unchanged: ?[]const u8 = null,
     store: ?[]const u8 = null,
-    // The boundary may run after capture; only the detection owner knows that.
     not_sent: bool = true,
 };
 
-/// Display copies are bounded; the parser's original argv is never changed.
-/// Truncate at UTF-8 boundaries, then let the common terminal escaper render
-/// controls/invalid UTF-8. 96 input bytes cost at most 384 output bytes.
 fn writeHeld(out: *std.Io.Writer, text: []const u8) error{WriteFailed}!void {
     const bound = 96;
     const end = utf8_validation.scalarStart(text, @min(text.len, bound));
     var safe: TerminalText = .{ .mode = .line };
-    // TerminalText's internal fixed hexadecimal buffers always fit their
-    // two/four digit escapes; only the supplied writer can fail here.
     safe.feed(out, text[0..end]) catch |err| switch (err) {
         error.WriteFailed => return error.WriteFailed,
         error.NoSpaceLeft => unreachable,
@@ -600,7 +576,6 @@ pub fn writeLine(out: *std.Io.Writer, code: Code, held: Held) error{WriteFailed}
     return renderLine(out, code, held, false);
 }
 
-/// No current argv/accepted override: replay renders the saved rejection facts.
 pub fn writeSavedLine(out: *std.Io.Writer, code: Code, held: Held) error{WriteFailed}!void {
     return renderLine(out, code, .{ .resource = held.resource, .operation = held.operation }, true);
 }
@@ -640,7 +615,6 @@ fn renderLine(out: *std.Io.Writer, code: Code, held: Held, saved: bool) error{Wr
         .none => {},
         .grammar => |grammar| {
             try out.writeAll(" Accepted: ");
-            // Migration templates are trusted; the rejected argv value is not.
             if (code == .host_option_retired and held.value != null and std.mem.indexOf(u8, grammar, "VALUE") != null) {
                 const at = std.mem.indexOf(u8, grammar, "VALUE").?;
                 try out.writeAll(grammar[0..at]);
@@ -793,7 +767,6 @@ test "fresh CLI argument errors are distinct from saved tool refusals" {
     try std.testing.expectEqualStrings("rui session send: arguments: The tool arguments are invalid. Accepted: arguments satisfying the selected tool schema. Next: Correct the arguments to match the selected tool schema. This rejection was saved and replays as saved; a resend needs a new key. [invalid_arguments]\n", out.buffered());
 }
 
-// Prefixes are native read arguments, not saved tool rejections.
 test "inline skills invalid suggestion prefix has a mapped caller repair" {
     try std.testing.expectEqual(Code.invocation_invalid, of(error.InvalidPrefix));
 }

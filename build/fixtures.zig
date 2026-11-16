@@ -1,19 +1,12 @@
 const std = @import("std");
 const screen_module = @import("screen.zig");
 
-/// A process fixture: one build step that runs one Python script against a
-/// Rui executable. tests/ci/select_tests.py selects the fixture whose row an
-/// edit changes, and every fixture here when an edit changes anything else, so
-/// keep each fixture's whole wiring in its row, on one line.
 pub const Fixture = struct {
     step: []const u8,
     description: []const u8,
     script: []const u8,
-    /// The ReleaseSafe check build, or the Debug build.
     rui: enum { release_safe, debug } = .release_safe,
-    /// Reads the terminal through the PTY screen observer.
     screen: bool = false,
-    /// Arguments after the Rui executable.
     args: []const []const u8 = &.{},
 };
 
@@ -39,11 +32,7 @@ pub const fixtures = [_]Fixture{
     .{ .step = "descriptor-capacity-integration", .description = "Run reduced-limit startup rejection and adequate-limit fill/drain cases", .script = "tests/integration/descriptor_capacity_integration.py" },
     .{ .step = "host-launch-integration", .description = "Run detached Host launch, alias convergence and startup-failure cases", .script = "tests/integration/host_launch_integration.py", .screen = true },
     .{ .step = "installer-integration", .description = "Run source and release installer cases through the production publication owner", .script = "tests/integration/installer_integration.py" },
-    // A bounded Debug subset of the dispatch scenarios: failure provenance
-    // through SQLite. The full dispatch journey stays on ReleaseSafe.
     .{ .step = "dispatch-debug-integration", .description = "Run bounded model failure correlation through SQLite on the Debug artifact", .script = "tests/integration/dispatch_integration.py", .rui = .debug, .args = &.{"failure-correlation"} },
-    // check runs these cases among its process integrations; each step runs
-    // the same case alone, so selection can name only the ones a change reaches.
     .{ .step = "overview-integration", .description = "Run the overview's groups, counts line, memory and clicks as a real terminal shows them", .script = "tests/integration/overview_integration.py", .screen = true },
     .{ .step = "peer-integration", .description = "Run the peer round trip through Rui-launched Bash", .script = "tests/integration/peer_integration.py", .screen = true },
     .{ .step = "sender-identity-integration", .description = "Run Action sender authority through the installed CLI, exit, stop and restart", .script = "tests/integration/sender_identity_integration.py" },

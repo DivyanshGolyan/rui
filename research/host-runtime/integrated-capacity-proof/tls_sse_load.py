@@ -30,7 +30,6 @@ async def write_fragmented(writer, payload: bytes, stream_id: int, sequence: int
         await writer.drain()
         return
 
-    # Deterministic awkward boundaries, including within the SSE field prefix and JSON.
     first = 1 + ((stream_id + sequence) % 7)
     second = min(len(payload), first + 1 + ((stream_id * 3 + sequence) % 19))
     writer.write(payload[:first])

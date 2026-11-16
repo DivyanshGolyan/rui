@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Check keyed result composition in an existing evaluator; no Host or model I/O."""
 import hashlib
 import json
 from pathlib import Path
@@ -121,8 +120,6 @@ def main():
       try { return await agent({key: "draft", task: "Draft"}); }
       catch (error) { return {code: error.code, key: error.turn_key}; }
     }'''
-    # This existing artifact uses Turn names; current source uses Job names.
-    # Deliberately test the recorded artifact protocol, not claim a fresh build.
     for code in ('TurnFailed', 'TurnCancelled'):
         result = evaluate(recover, {'draft': (1, code)})
         assert result == {'completed': {'code': code, 'key': 'draft'}}

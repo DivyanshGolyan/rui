@@ -1,4 +1,3 @@
-//! CLI-only policy: certainty precedes remedy; HTTP and saved answers are unchanged.
 const std = @import("std");
 const caller_error = @import("caller_error.zig");
 
@@ -49,7 +48,6 @@ pub fn forCode(certainty: Certainty, code: caller_error.Code) Status {
     return status(certainty, caller_error.facts(code).act);
 }
 
-/// The catalog classifies known causes; context-free OS errors stay internal.
 pub fn knownError(err: anyerror) Status {
     return forCode(.not_sent, caller_error.of(err));
 }
@@ -76,7 +74,6 @@ test "CLI exits derive from certainty before remedy" {
     try std.testing.expectEqual(Status.environment, knownError(error.StoreIdentityMismatch));
     try std.testing.expectEqual(Status.later, knownError(error.ResultNotReady));
     try std.testing.expectEqual(Status.later, knownError(error.HostReadinessUnconfirmed));
-    // A missing input/capture file is not evidence of a stopped Host.
     try std.testing.expectEqual(Status.unclassified, knownError(error.FileNotFound));
     try std.testing.expectEqual(Status.environment, knownError(error.HostNotServing));
     try std.testing.expectEqual(Status.environment, knownError(error.StoreUnavailable));

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Run with verified nghttp2 headers and a recorded static library snapshot."""
 import argparse
 import fcntl
 import hashlib
@@ -31,7 +30,6 @@ def run(prefix, output):
             include = stage / 'include' / 'nghttp2'
             include.mkdir(parents=True)
             headers = {}
-            # Compile immutable copies of the verified bytes, not a mutable prefix.
             for name, digest in expected.items():
                 original = prefix / 'include' / 'nghttp2' / name
                 copied = include / name
@@ -65,7 +63,6 @@ def run(prefix, output):
                             binary_sha256=sha(binary), compiled_headers=headers,
                             header_pin=pin, api_header_source=api, runtime_version=runtime_version,
                             scope='in-memory HTTP/2 only; no TLS, socket, scratch, memory or latency qualification')
-            # Reject stale dependencies before publishing any successful result directory.
             output.mkdir(parents=True, exist_ok=False)
             (output / 'results.jsonl').write_text(result.stdout)
             (output / 'metadata.json').write_text(json.dumps(metadata, indent=2)+'\n')

@@ -1,6 +1,3 @@
-//! Bounded display text, independent of canonical history and terminal cells.
-//! vaxis lays out and draws rows (`Window.print`); this module keeps retained
-//! bytes, trusted styles and which row of which logical line a view starts at.
 const std = @import("std");
 const utf8_validation = @import("utf8_validation.zig");
 const vaxis = @import("vaxis");
@@ -17,16 +14,12 @@ pub const capacity = 256 * 1024;
 pub const widest_cluster = display_text.widest_cluster;
 pub const longest_cluster = display_text.longest_cluster;
 
-/// A row of laid-out text: the logical line starting at origin-relative byte
-/// `offset`, and the row within that line's wrapping.
 pub const Position = @import("ViewportPosition.zig");
 
-/// The width and width method vaxis lays text out with.
 pub const Layout = struct {
     width: u16,
     method: gwidth.Method,
 
-    /// A window that only measures: print with `commit = false` never writes.
     fn measuring(self: Layout, screen: *vaxis.Screen) vaxis.Window {
         screen.* = .{ .width = self.width, .height = std.math.maxInt(u16), .width_method = self.method };
         return .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = self.width, .height = std.math.maxInt(u16), .screen = screen };
@@ -35,30 +28,16 @@ pub const Layout = struct {
 
 pub const representable = display_text.representable;
 
-/// Shared answer/UI link boundary. Text and URI remain borrowed through the
-/// draw; Vaxis carries the URI on the cells and emits the terminal's OSC 8.
-/// Address validation and text styling stay with the caller.
 pub fn linkedSegment(text: []const u8, style: vaxis.Style, uri: []const u8) vaxis.Cell.Segment {
     return .{ .text = text, .style = style, .link = .{ .uri = uri } };
 }
 
-/// Test builds count every `lineRows` measurement, so cost tests assert
-/// how layout work grows without timing it. Release builds keep no counter.
 pub var measured_lines: if (@import("builtin").is_test) usize else void = if (@import("builtin").is_test) 0 else {};
 
-/// Rows used by a print that ended at `result`. A row is used once text
-/// reaches it; an exact fill leaves the next row unused. Overflow means
-/// that at least one more row remains, even when the last visible row filled.
 fn rowsUsed(result: vaxis.Window.PrintResult) u16 {
     return if (result.col == 0 and result.row != 0 and !result.overflow) result.row else result.row +| 1;
 }
 
-/// Leading spaces and a list or role marker stay in the first row;
-/// continuation rows start under the text after them, up to half the width.
-/// A user line never hangs left of its body column: position alone must
-/// distinguish user text where the terminal shows no attributes. `quoted`:
-/// the marker begins an Action's description (`?`), its command (`$`) or a
-/// later line of it or its stdin (`│`).
 fn hanging(line: []const u8, width: u16, user: bool) struct { bytes: usize, cells: u16, quoted: bool = false } {
     var bytes: usize = 0;
     while (bytes < line.len and line[bytes] == ' ') bytes += 1;
@@ -87,25 +66,15 @@ fn hanging(line: []const u8, width: u16, user: bool) struct { bytes: usize, cell
     return .{ .bytes = bytes, .cells = @intCast(cells), .quoted = quoted };
 }
 
-/// Feed foreground roles resolved by the caller's theme. Unthemed callers
-/// leave every role at the terminal default.
 pub const Colours = struct {
     quiet: vaxis.Color = .default,
     user: vaxis.Color = .default,
     attention: vaxis.Color = .default,
     failure: vaxis.Color = .default,
-    /// One line-level selvedge band for code and tool output.
     band: vaxis.Color = .default,
     selection: vaxis.Color = .default,
 };
 
-/// Retained style and provenance word: bits 0-2 bold, italic and underline,
-/// bits 3-5 a foreground index, bit 6 user text and bit 7 its dim summary.
-/// Bit 7 alone marks a sidenote, drawn in the right margin.
-/// Slot 5 marks code: SGR 40 covers each complete body line, including its
-/// newline, so even an empty line and an evicted prefix need no side storage.
-/// Bit 8 marks renderer-owned body text. Two foreground indexes mark an OSC 8 link: its address,
-/// kept in the text but never drawn, and right after it the text it links.
 pub const RetainedStyle = u16;
 const body_bit: RetainedStyle = 1 << 8;
 const AllText = struct {
@@ -119,7 +88,6 @@ const code_index: u8 = 5;
 const linked_index: u8 = 6;
 const address_index: u8 = 7;
 
-/// End link runs at a document seam while retaining the blank code-line role.
 pub fn seamStyle(value: RetainedStyle) RetainedStyle {
     return (value & body_bit) | (if (foregroundIndex(value) == code_index) @as(RetainedStyle, code_index) << 3 else 0);
 }
@@ -128,16 +96,12 @@ fn foregroundIndex(value: RetainedStyle) u8 {
     return @intCast((value & foreground_mask) >> 3);
 }
 
-// Only links underline, so a coloured, underlined label can retain its ink
-// or quiet foreground without a second style byte. Other labels use slot 6.
 fn isLinked(value: RetainedStyle) bool {
     const index = foregroundIndex(value);
     return index == linked_index or (index >= 1 and index <= 4 and value & 4 != 0);
 }
 const user_bit: RetainedStyle = 1 << 6;
 const summary_bit: RetainedStyle = 1 << 7;
-/// From this width a document with sidenotes keeps a right margin, and the
-/// first sidenote of a line shows at its first row; narrower, none shows.
 pub const sidenote_width = 60;
 const sidenote_margin = 7;
 const sidenote_cells = 5;
@@ -152,8 +116,6 @@ pub const CellStyle = struct {
     underline: bool = false,
     foreground: ?enum { attention, quiet, failure, user } = null,
 };
-/// User text is quiet and italic with colour. Summaries and sidenotes are
-/// quiet but upright; without colour, position alone sets user text apart.
 pub fn cellStyle(value: RetainedStyle, colour: bool) CellStyle {
     const index = foregroundIndex(value);
     const quiet = colour and value & (user_bit | summary_bit) != 0;
@@ -172,7 +134,6 @@ pub fn cellStyle(value: RetainedStyle, colour: bool) CellStyle {
     };
 }
 
-/// Collapsed blocks' summaries in a range of text: see `collapsed`.
 pub const Summaries = struct { count: usize = 0, last: ?usize = null };
 
 pub fn Sized(comptime limit: usize, comptime styled: bool) type {
@@ -183,28 +144,19 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         style: RetainedStyle = 0,
         control: [8]u8 = undefined,
         control_length: usize = 0,
-        /// Where the OSC 8 link being received is: its address or its text.
         link: enum { none, address, text } = .none,
         address_length: usize = 0,
         length: usize = 0,
         origin: u64 = 0,
-        /// The first row in view; null follows the latest rows.
         top: ?Position = null,
         width_method: gwidth.Method = .wcwidth,
         dirty: bool = true,
-        /// Reserve the right margin for sidenotes at `sidenote_width` and wider.
         sidenotes: bool = false,
-        /// An Action: each wrapped row of its description, command or stdin
-        /// starts with `┆`, so no row of that text can pass for a field, nor
-        /// a wrapped row for a new `│` line.
         quotes: bool = false,
-        /// Counts clears: offsets from before one name other text.
         replacements: u32 = 0,
 
         pub fn append(self: *Self, input: []const u8) !void {
             if (!styled) return self.appendText(input);
-            // Only presentation-owned SGR reaches this sink. Source controls have
-            // already been escaped; no cursor, OSC or terminal-emulator state exists.
             var start: usize = 0;
             for (input, 0..) |byte, index| {
                 if (self.control_length != 0 or byte == 0x1b) {
@@ -220,7 +172,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                         }
                         self.control_length = 0;
                     } else if (std.mem.eql(u8, self.control[0..self.control_length], TerminalText.link_open)) {
-                        // An address follows, empty for the closing sequence.
                         self.link = .address;
                         self.address_length = 0;
                         self.control_length = 0;
@@ -246,8 +197,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                         discard = cluster.start;
                         if (discard >= wanted) break;
                     }
-                    // Keep the last cluster and incomplete scalar: the next
-                    // window can extend them with combining, RI or ZWJ bytes.
                     if (discard == 0) return error.DisplayGraphemeTooLarge;
                     std.mem.copyForwards(u8, &self.bytes, self.bytes[discard..self.length]);
                     if (styled) std.mem.copyForwards(RetainedStyle, &self.styles, self.styles[discard..self.length]);
@@ -261,12 +210,9 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 self.length += count;
                 position += count;
             }
-            // Input windows can split UTF-8. Keep the suffix until the next append;
-            // indexing below only visits complete scalars.
             self.dirty = true;
         }
 
-        /// The retained style of text appended now, with any link mark.
         fn cellValue(self: *const Self) RetainedStyle {
             const index: u8 = switch (self.link) {
                 .none => return self.style,
@@ -276,9 +222,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return (self.style & ~foreground_mask) | (@as(RetainedStyle, index) << 3);
         }
 
-        /// The address of the link whose text holds `position`: the hidden
-        /// run right before that text. Empty when the text is not a link or
-        /// its address began before the retained text.
         fn address(self: *const Self, position: usize) []const u8 {
             if (!isLinked(self.styles[position])) return "";
             var end = position;
@@ -289,21 +232,16 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return self.bytes[start..end];
         }
 
-        /// A hidden link address: kept in the text, never drawn or copied.
         fn hidden(self: *const Self, position: usize) bool {
             return styled and foregroundIndex(self.styles[position]) == address_index;
         }
 
-        /// The address the terminal gets for the text at `position`: a
-        /// Session link opens inside Rui, so the terminal gets none.
         fn terminalLink(self: *const Self, position: usize) []const u8 {
             if (!styled) return "";
             const uri = self.address(position);
             return if (std.mem.startsWith(u8, uri, TerminalText.session_link)) "" else uri;
         }
 
-        /// The Session a peer's name at `position` links to, by its ID.
-        /// The slice is this text's: copy it before the text changes.
         pub fn sessionAt(self: *const Self, position: usize) ?[]const u8 {
             comptime std.debug.assert(styled);
             if (position >= self.text().len) return null;
@@ -311,9 +249,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return if (std.mem.startsWith(u8, uri, TerminalText.session_link)) uri[TerminalText.session_link.len..] else null;
         }
 
-        /// Where in the current text a cell laid out from it starts, or
-        /// null for a cell that shows none of it: blank, indent, `…` or
-        /// `┆`. A text cell's grapheme points into the text.
         pub fn cellOffset(self: *const Self, cell: vaxis.Cell) ?usize {
             const at = @intFromPtr(cell.char.grapheme.ptr);
             const base = @intFromPtr(&self.bytes);
@@ -321,15 +256,10 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return at - base;
         }
 
-        /// The text of `[from, to)` as the view shows it, for the clipboard:
-        /// wrapping adds no bytes, so wrapped rows join as the text runs;
-        /// right-margin times and hidden link addresses are left out, and a
-        /// tab, shown as a space, copies as one. Null past `most` bytes.
         pub fn shownText(self: *const Self, gpa: std.mem.Allocator, from: usize, to: usize, most: usize) !?[]u8 {
             return self.shownTextWhere(gpa, from, to, most, AllText{});
         }
 
-        /// The same displayed extraction, restricted by a body provenance owner.
         pub fn shownTextWhere(self: *const Self, gpa: std.mem.Allocator, from: usize, to: usize, most: usize, eligibility: anytype) !?[]u8 {
             comptime std.debug.assert(styled);
             const end = @min(to, self.text().len);
@@ -351,14 +281,10 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return out;
         }
 
-        /// Semantic provenance emitted by the rendering owner, never inferred
-        /// from visible prefixes, style or Activity kind.
         pub fn bodyAt(self: *const Self, position: usize) bool {
             return styled and position < self.text().len and self.styles[position] & body_bit != 0;
         }
 
-        /// Whether a drawn cell's text at `position` belongs to the body:
-        /// right-margin times are apart from the text a drag selects.
         pub fn selectable(self: *const Self, position: usize) bool {
             return position < self.text().len and !(styled and isSidenote(self.styles[position]));
         }
@@ -378,9 +304,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return utf8_validation.completePrefix(self.bytes[0..self.length]);
         }
 
-        /// Output has no canonical byte offsets: escape standalone invisible
-        /// and oversized clusters in this display copy, never in saved content
-        /// or input.
         pub fn prepare(self: *Self) !void {
             if (self.dirty) try self.escape();
             self.dirty = false;
@@ -399,7 +322,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 const complete = self.text().len;
                 const saved_style = self.style;
                 defer self.style = saved_style;
-                // Retained styles already carry their link marks.
                 const saved_link = self.link;
                 const saved_address = self.address_length;
                 self.link = .none;
@@ -418,8 +340,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                             try self.appendText(&.{byte});
                         }
                     } else {
-                        // A displayed escape represents the entire source
-                        // cluster. Mixed body/chrome clusters grant nothing.
                         if (styled) for (styles[value.start..][0..raw.len]) |original| {
                             if (original & body_bit == 0) self.style &= ~body_bit;
                         };
@@ -433,8 +353,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             }
         }
 
-        /// Tool identity uses the same retained, hidden address representation as
-        /// internal Session links, with no new style bytes or closed output cache.
         const LineMarker = struct { marker: tool_fold.Marker, end: usize };
 
         fn lineMarker(self: *const Self, offset: usize) ?LineMarker {
@@ -448,13 +366,10 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return (self.lineMarker(offset) orelse return null).marker;
         }
 
-        /// A tool row's heading line: the row Ctrl-O or a click folds.
         pub fn toolHeading(self: *const Self, offset: usize) bool {
             return self.markerAt(offset) == .heading;
         }
 
-        /// Whether the heading line at `offset` has its output shown on the
-        /// lines after it.
         fn headingOpen(self: *const Self, offset: usize) bool {
             return self.markerAt(self.nextLine(offset) orelse return false) == .output;
         }
@@ -463,7 +378,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return self.toolHeading(offset) and self.headingOpen(offset);
         }
 
-        /// Where the line starting at `offset` ends (its newline or the text end).
         pub fn lineEnd(self: *const Self, offset: usize) usize {
             const bytes = self.text();
             return std.mem.indexOfScalarPos(u8, bytes, offset, '\n') orelse bytes.len;
@@ -498,8 +412,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             }
         };
 
-        /// A line's trusted marker owns its band, never an independent code
-        /// painter or a retained list of byte offsets to repair after edits.
         fn lineKind(self: *const Self, offset: usize, mark: ?LineMarker) Line {
             if (mark) |value| switch (value.marker) {
                 .output => return .output,
@@ -509,9 +421,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return .plain;
         }
 
-        /// Prints one logical line with its first row at window row `row`
-        /// (negative rows are clipped), or only measures it. Returns its rows.
-        /// Measuring and drawing segment identically, so they wrap identically.
         pub fn printLine(self: *const Self, window: vaxis.Window, row: i17, offset: usize, commit: bool, colour: bool, base: vaxis.Style, colours: Colours) u16 {
             const end = self.lineEnd(offset);
             const mark = self.lineMarker(offset);
@@ -519,8 +428,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             const kind = self.lineKind(offset, mark);
             const output = kind == .output;
             const plain = kind.style(colour, base, colours);
-            // Every band (including selection) is painted here, over the
-            // measured logical line's blank cells and wrapped rows alike.
             if (commit and colour and kind != .plain) {
                 const used = self.printLine(window, row, offset, false, colour, base, colours);
                 const first_row: i32 = @max(row, 0);
@@ -531,15 +438,11 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 const line = window.child(.{ .y_off = row });
                 var leading: usize = offset;
                 while (leading < end and (self.bytes[leading] == ' ' or self.bytes[leading] == '\t')) leading += 1;
-                // Code's own indent, not prose/list hanging. Keep one cell
-                // for progress even at the narrowest widths.
                 const indent = @min(display_text.width(self.bytes[offset..leading], .{ .viewport = self.width_method }), line.width -| 1);
                 if (commit) _ = self.printRange(line.child(.{ .width = indent, .height = 1 }), offset, leading, .word, false, true, colour, plain, colours);
                 return rowsUsed(self.printRange(line.child(.{ .x_off = indent }), leading, end, .word, false, commit, colour, plain, colours));
             }
             var user = false;
-            // A line of summary text alone (a peer Message's line) keeps one
-            // row, ending in `…` when it does not fit.
             var single = styled and end != offset;
             var note: ?struct { start: usize, end: usize } = null;
             if (styled) for (self.styles[offset..end], offset..) |value, index| {
@@ -550,11 +453,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 }
                 if (note == null) note = .{ .start = index, .end = index + 1 } else if (note.?.end == index) note.?.end += 1;
             };
-            // Tool output is bounded in screen rows too: long logical lines
-            // keep their prefix and a visible ellipsis rather than wrapping
-            // past the twenty-row fold budget.
             if (output) single = true;
-            // A single row's text ends where its trailing sidenote begins.
             const shown = if (note) |range| (if (range.end == end) range.start else end) else end;
             const margin: u16 = if (styled and self.sidenotes and window.width >= sidenote_width) sidenote_margin else 0;
             const body = window.child(.{ .width = window.width - margin });
@@ -563,9 +462,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             };
             if (single) {
                 if (commit) {
-                    // Whole clusters measured by this view's width method:
-                    // a wide last cluster never crosses the body's edge.
-                    // A Session link's hidden address takes no cells.
                     const line = body.child(.{ .y_off = row, .height = 1 });
                     const text_bytes = self.bytes[offset..shown];
                     var whole: usize = 0;
@@ -601,8 +497,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return rows;
         }
 
-        /// Prints bytes as style runs, a bounded batch of segments at a time:
-        /// sidenotes only, or the text's flow without them.
         fn printRange(self: *const Self, window: vaxis.Window, from: usize, end: usize, wrap: @FieldType(vaxis.PrintOptions, "wrap"), notes: bool, commit: bool, colour: bool, plain: vaxis.Style, colours: Colours) vaxis.Window.PrintResult {
             var segments: [32]vaxis.Segment = undefined;
             var count: usize = 0;
@@ -652,8 +546,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return self.printLine(layout.measuring(&screen), 0, offset, false, false, .{}, .{});
         }
 
-        /// Draws rows from `first` into `window`; returns the rows drawn and
-        /// the first row left undrawn, or `Position.end` when none remain.
         pub fn draw(self: *const Self, window: vaxis.Window, from: Position, commit: bool, colour: bool, plain: vaxis.Style, colours: Colours) struct { rows: usize, next: Position } {
             if (self.text().len == 0) return .{ .rows = 0, .next = .end };
             var row: i32 = -@as(i32, from.row);
@@ -667,23 +559,16 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return .{ .rows = @intCast(row), .next = .end };
         }
 
-        /// Rows from `from` down, in one forward pass that measures each line
-        /// once: the nth `next` is `down(layout, from, n)` while `measure`
-        /// from `from` still counts row n. A frame walks every row through
-        /// this, not through repeated `down`, which would make it quadratic.
         pub fn rowsFrom(self: *const Self, layout: Layout, from: Position) Rows {
             return .{ .document = self, .layout = layout, .position = if (self.text().len == 0) null else self.clamp(layout, from) };
         }
 
-        /// Borrows the document; any edit invalidates it.
         pub const Rows = struct {
             document: *const Self,
             layout: Layout,
             position: ?Position,
-            /// The current line's rows, measured on its first row.
             used: ?u16 = null,
 
-            /// The next row, or null below the text.
             pub fn next(self: *Rows) ?Position {
                 const position = self.position orelse return null;
                 const used = self.used orelse self.document.lineRows(self.layout, position.offset);
@@ -698,7 +583,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             }
         };
 
-        /// Rows from `from` that fit `height`, without drawing.
         pub fn measure(self: *const Self, layout: Layout, from: Position, height: u16) struct { rows: usize, next: Position } {
             var screen: vaxis.Screen = undefined;
             var window = layout.measuring(&screen);
@@ -707,7 +591,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return .{ .rows = result.rows, .next = result.next };
         }
 
-        /// Keeps a position inside the current text and wrapping.
         pub fn clamp(self: *const Self, layout: Layout, position: Position) Position {
             if (position.offset >= self.text().len) return self.lastRow(layout);
             return .{ .offset = position.offset, .row = @min(position.row, self.lineRows(layout, position.offset) - 1) };
@@ -747,7 +630,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return position;
         }
 
-        /// The first row that shows the last `height` rows.
         pub fn bottom(self: *const Self, layout: Layout, height: usize) Position {
             return self.up(layout, self.lastRow(layout), height -| 1);
         }
@@ -757,9 +639,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return if (self.top) |top| self.clamp(layout, top).min(last) else last;
         }
 
-        /// Moves by `rows` (a page is the view height). Key repeat may deliver
-        /// many events before a frame: never skip unread Action rows; only
-        /// delivered frames advance that cap.
         pub fn browse(self: *Self, layout: Layout, down_: bool, rows_: usize, height: usize, first_unseen: ?Position) void {
             const current = self.first(layout, height);
             if (!down_) {
@@ -778,9 +657,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return self.first(layout, height).order(self.bottom(layout, height)) != .lt;
         }
 
-        /// Where each collapsed block's summary starts within text bytes
-        /// `[from, to)`: a user block's `┄` row, drawn dim and quiet. Returns
-        /// their count, and the last one's offset.
         pub fn collapsed(self: *const Self, from: usize, to: usize) Summaries {
             comptime std.debug.assert(styled);
             const run = user_bit | summary_bit;
@@ -797,18 +673,12 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return result;
         }
 
-        /// The collapsed block whose `┄` row is the logical line at `offset`,
-        /// counted from the end as Ctrl-O names one (0 is the last), or null
-        /// when that line is not a collapsed block's row. A click on the row
-        /// opens that Message.
         pub fn summaryAt(self: *const Self, offset: usize) ?usize {
             if (offset >= self.text().len) return null;
             const found = self.collapsed(offset, self.lineEnd(offset)).last orelse return null;
             return self.collapsed(found + 1, self.text().len).count;
         }
 
-        /// Drops retained bytes before `position` (an absolute offset that
-        /// starts a line), as eviction would. Positions are origin-relative.
         pub fn discardFront(self: *Self, position: u64) void {
             if (position <= self.origin) return;
             const count: usize = @intCast(@min(position - self.origin, self.length));
@@ -820,9 +690,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             self.dirty = true;
         }
 
-        /// Places complete older text before this text, keeping the same rows
-        /// in view. Newer bytes beyond capacity leave from the end at a line
-        /// boundary; returns whether any did.
         pub fn prepend(self: *Self, older: anytype, layout: Layout, height: usize) !bool {
             std.debug.assert(older.control_length == 0 and older.length <= limit);
             try self.prepare();
@@ -847,7 +714,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             self.origin = older.origin;
             self.dirty = true;
             try self.prepare();
-            // Older text ends at a line boundary, so its lines precede ours.
             self.top = .{ .offset = anchor.offset + older.length, .row = anchor.row };
             return trimmed;
         }
@@ -887,7 +753,6 @@ test "an Action's wrapped description, command and stdin rows carry a wrap mark,
         try view.append(text);
         try view.prepare();
         var test_screen: TestScreen = undefined;
-        // From the command's second row too, so its first row is above the window.
         for ([_]Position{ .{}, .{ .offset = command, .row = 1 } }) |from| {
             const drawn = view.draw(test_screen.window(24, 20), from, true, false, .{}, .{});
             var storage: [128]u8 = undefined;
@@ -899,9 +764,7 @@ test "an Action's wrapped description, command and stdin rows carry a wrap mark,
                 try std.testing.expect(std.mem.startsWith(u8, row, if (quotes) "  ┆ " else "    "));
             }
             try std.testing.expectEqual(@as(usize, 2), spoofs);
-            // The description's wrapped row cannot pass for the command.
             if (from.offset == 0) try std.testing.expectEqualStrings(if (quotes) "┆ $ rm -rf x" else "  $ rm -rf x", test_screen.row(1, &storage));
-            // The field itself carries no mark.
             var field = false;
             for (0..drawn.rows) |index| field = field or std.mem.eql(u8, test_screen.row(@intCast(index), &storage), "  Time limit: 5 s");
             try std.testing.expect(field);
@@ -938,7 +801,6 @@ test "vaxis wraps reading text at words with hanging indentation" {
         "  four",
         "中中中中中中中中",
         "Z",
-        // An Action's content mark hangs like a list marker.
         "  │ alpha beta",
         "    gamma",
     };
@@ -947,12 +809,10 @@ test "vaxis wraps reading text at words with hanging indentation" {
     var storage: [64]u8 = undefined;
     for (expected, 0..) |text, index| try std.testing.expectEqualStrings(text, test_screen.row(@intCast(index), &storage));
     try std.testing.expectEqual(@as(usize, 14), view.measure(layout, .{}, 99).rows);
-    // A word keeps its punctuation across a style change.
     var styled: Sized(64, true) = .{};
     try styled.append("ab \x1b[4mcd\x1b[0m.");
     _ = styled.draw(test_screen.window(5, 2), .{}, true, false, .{}, .{});
     try std.testing.expectEqualStrings("cd.", test_screen.row(1, &storage));
-    // A wide cluster that would cross the edge starts the next row.
     var wide: Sized(64, false) = .{};
     try wide.append("abc中");
     try std.testing.expectEqual(@as(u16, 2), wide.lineRows(.{ .width = 4, .method = .unicode }, 0));
@@ -976,7 +836,6 @@ test "positions move by laid-out rows and never skip the first unseen row" {
     var view: Sized(256, false) = .{};
     try view.append("one two three four five six\nseven\neight\n");
     const layout: Layout = .{ .width = 10, .method = .unicode };
-    // Rows: "one two" "three four" "five six" | "seven" | "eight".
     try std.testing.expectEqual(@as(u16, 3), view.lineRows(layout, 0));
     try std.testing.expectEqual(Position{ .offset = 0, .row = 2 }, view.bottom(layout, 3));
     try std.testing.expectEqual(Position{ .offset = 28, .row = 0 }, view.down(layout, .{}, 3));
@@ -991,7 +850,6 @@ test "positions move by laid-out rows and never skip the first unseen row" {
     try std.testing.expectEqual(Position{ .offset = 28 }, view.first(layout, 2));
     view.browse(layout, false, 9, 2, null);
     try std.testing.expect(view.atTop(layout, 2));
-    // A wider terminal keeps the line and clamps its row.
     view.top = .{ .offset = 0, .row = 2 };
     try std.testing.expectEqual(Position{}, view.first(.{ .width = 40, .method = .unicode }, 1));
     var empty: Sized(16, false) = .{};
@@ -1008,8 +866,6 @@ test "viewport retention is finite and split Unicode is not rendered early" {
     try view.append("\x98\x80Z");
     try std.testing.expectEqualStrings("A😀Z", view.text());
     const chunk = "0123456789\n";
-    // One append per thousand chunks: each full-document append shifts the
-    // retained bytes, so thirty thousand tiny appends cost seconds.
     const block = comptime block: {
         var bytes: [chunk.len * 1000]u8 = undefined;
         for (0..1000) |index| @memcpy(bytes[index * chunk.len ..][0..chunk.len], chunk);
@@ -1040,7 +896,6 @@ test "trusted renderer styles survive fragmented output retention" {
         try std.testing.expectEqualStrings("xtra words that evict the prefix", view.text());
         for (view.styles[0..view.length]) |style_value| try std.testing.expectEqual(CellStyle{}, cellStyle(style_value, true));
     }
-    // Drawn cells carry the retained style, including a coloured marker.
     var marked: Sized(32, true) = .{};
     try marked.append("\x1b[94m›\x1b[39m hi");
     var test_screen: TestScreen = undefined;
@@ -1075,13 +930,9 @@ test "every foreground slot draws its supplied role colour or the plain foregrou
     };
     const plain: vaxis.Style = .{ .fg = .{ .index = 255 }, .bg = .{ .index = 19 } };
     for (palettes) |colours| {
-        // Independent expectations in the renderer's SGR vocabulary, not
-        // the retained slots or the role decoder being tested.
         const codes = [_][]const u8{ "\x1b[94m", "\x1b[90m", "\x1b[33m", "\x1b[91m" };
         const expected = [_]vaxis.Color{ colours.user, colours.quiet, colours.attention, colours.failure };
         for (codes, expected) |code, foreground| for ([_]bool{ true, false }) |colour| {
-            // Explicit foregrounds take precedence even in quiet user text
-            // and summaries; neither changes the NO_COLOR foreground.
             for ([_][]const u8{ "", "\x1b[2m", "\x1b[2;8m" }) |prefix| {
                 var view: Sized(16, true) = .{};
                 try view.append(prefix);
@@ -1106,7 +957,6 @@ test "user text is quiet italic with colour and keeps its body column without it
         }
     };
     try std.testing.expectEqual(CellStyle{ .foreground = .user }, at.style(&view, "›", true));
-    // A foreground reset never ends user text; only a full reset does.
     for ([_][]const u8{ "hi", "there" }) |word| {
         try std.testing.expectEqual(CellStyle{ .quiet = true, .italic = true }, at.style(&view, word, true));
         try std.testing.expectEqual(CellStyle{}, at.style(&view, word, false));
@@ -1120,8 +970,6 @@ test "user text is quiet italic with colour and keeps its body column without it
     const cell = test_screen.screen.readCell(2, 0).?.style;
     try std.testing.expect(!cell.dim and cell.italic and cell.fg == .index and cell.fg.index == 59);
 
-    // At 12 columns ten leading spaces exceed half the width: agent text
-    // falls back to column 0, user text continues at its body column.
     const body = "          abc defgh ijk";
     var storage: [64]u8 = undefined;
     for ([_]bool{ true, false }) |colour| {
@@ -1138,7 +986,6 @@ test "user text is quiet italic with colour and keeps its body column without it
             }
         }
     }
-    // Below four columns the floor would leave no room for text.
     var narrow: Sized(64, true) = .{};
     try narrow.append("\x1b[2m   abc defg\x1b[0m\n   abc defg");
     const tiny: Layout = .{ .width = 3, .method = .unicode };
@@ -1154,7 +1001,6 @@ test "a sidenote shows in the right margin of its line's first row from 60 colum
     var storage: [96]u8 = undefined;
     const Case = struct { width: u16, sidenotes: bool, rows: []const []const u8 };
     for ([_]Case{
-        // Every row leaves the margin, not only rows with a sidenote.
         .{ .width = 64, .sidenotes = true, .rows = &.{ "› " ++ ys[0..55] ++ "  14:05", "  y", xs[0..57], "xxx" } },
         .{ .width = 60, .sidenotes = true, .rows = &.{ "› " ++ ys[0..51] ++ "  14:05", "  yyyyy", xs[0..53], "xxxxxxx" } },
         .{ .width = 59, .sidenotes = true, .rows = &.{ "› " ++ ys, xs[0..59], "x" } },
@@ -1182,14 +1028,11 @@ test "a peer line keeps one row with its time in the right margin, as a user blo
     var test_screen: TestScreen = undefined;
     var storage: [256]u8 = undefined;
     const Case = struct { width: u16, rows: [2][]const u8 };
-    // `line` is 25 columns; the time takes the last five.
     for ([_]Case{
         .{ .width = 80, .rows = .{ line ++ @as([75 - 25]u8, @splat(' ')) ++ "08:00", outbound } },
         .{ .width = 64, .rows = .{ line ++ @as([59 - 25]u8, @splat(' ')) ++ "08:00", outbound } },
-        // From 60 the margin shows; at 50 the 51-column outbound line clips.
         .{ .width = 60, .rows = .{ line ++ @as([55 - 25]u8, @splat(' ')) ++ "08:00", outbound } },
         .{ .width = 50, .rows = .{ line, "→ 9f8e7d · " ++ @as([38]u8, @splat('x')) ++ "…" } },
-        // Below 60 no margin shows, and a long line ends in `…` on its one row.
         .{ .width = 40, .rows = .{ line, "→ 9f8e7d · " ++ @as([28]u8, @splat('x')) ++ "…" } },
     }) |case| {
         const drawn = view.draw(test_screen.window(case.width, 2), .{}, true, false, .{}, .{});
@@ -1197,12 +1040,9 @@ test "a peer line keeps one row with its time in the right margin, as a user blo
         try std.testing.expectEqual(@as(u16, 2), view.measure(.{ .width = case.width, .method = .unicode }, .{}, 99).rows);
         for (case.rows, 0..) |text, index| try std.testing.expectEqualStrings(text, test_screen.row(@intCast(index), &storage));
     }
-    // Upright: the line is quiet with colour, never italic.
     _ = view.draw(test_screen.window(80, 2), .{}, true, true, .{}, .{ .quiet = .{ .index = 59 } });
     const style = test_screen.screen.readCell(0, 0).?.style;
     try std.testing.expect(!style.dim and !style.italic and style.fg == .index and style.fg.index == 59);
-    // Only a `┄` row is a collapsed block for Ctrl-O: never a peer line, even
-    // one whose name ends in `…`, nor a `┄` within a peer's name.
     var blocks: Sized(512, true) = .{};
     try blocks.append("\x1b[2;8m← Received message from x ┄ y\x1b[8m08:00\x1b[0m\n" ++
         "\x1b[2;8m→ Messaged Plan…\x1b[8m08:00\x1b[0m\n" ++
@@ -1214,8 +1054,6 @@ test "a peer line keeps one row with its time in the right margin, as a user blo
     try std.testing.expectEqual(@as(usize, 2), found.count);
     try std.testing.expectEqual(std.mem.indexOf(u8, text, "┄ 3").?, found.last.?);
     try std.testing.expectEqual(@as(usize, 1), blocks.collapsed(std.mem.indexOf(u8, text, "┄ 2").? + 1, text.len).count);
-    // A click names the clicked row's block, counted from the end; any
-    // other row names none.
     const rows = struct {
         fn start(bytes: []const u8, needle: []const u8) usize {
             const at = std.mem.indexOf(u8, bytes, needle).?;
@@ -1235,16 +1073,12 @@ test "a peer's name links to its Session inside Rui, never through the terminal"
     try view.prepare();
     var test_screen: TestScreen = undefined;
     var storage: [256]u8 = undefined;
-    // The hidden ID takes no cell: the row reads, fits and clips as the
-    // name alone, with its time in the margin.
     _ = view.draw(test_screen.window(60, 1), .{}, true, true, .{}, .{});
     try std.testing.expectEqualStrings("→ Messaged Review the WAL" ++ @as([55 - 25]u8, @splat(' ')) ++ "08:00", test_screen.row(0, &storage));
     _ = view.draw(test_screen.window(20, 1), .{}, true, true, .{}, .{});
     try std.testing.expectEqualStrings("→ Messaged Review t…", test_screen.row(0, &storage));
     _ = view.draw(test_screen.window(25, 1), .{}, true, true, .{}, .{ .quiet = .{ .index = 59 } });
     try std.testing.expectEqualStrings("→ Messaged Review the WAL", test_screen.row(0, &storage));
-    // Only the name is underlined, the row stays quiet, and no cell carries
-    // an OSC 8 address.
     for (0..25) |column| {
         const cell = test_screen.screen.readCell(@intCast(column), 0).?;
         try std.testing.expectEqualStrings("", cell.link.uri);
@@ -1257,7 +1091,6 @@ test "a peer's name links to its Session inside Rui, never through the terminal"
     try std.testing.expectEqualStrings("k7m2qx", view.sessionAt(at + "Review the WA".len).?);
     try std.testing.expectEqual(@as(?[]const u8, null), view.sessionAt(at - 1));
     try std.testing.expectEqual(@as(?[]const u8, null), view.sessionAt(at + "Review the WAL".len));
-    // An answer's web link still reaches the terminal.
     var answer: Sized(256, true) = .{};
     try answer.append(TerminalText.link_open ++ "https://r.dev" ++ TerminalText.link_end ++ "docs" ++ TerminalText.link_close);
     try expectLinks(&answer, .{}, 8, &.{ "https://r.dev", "https://r.dev", "https://r.dev", "https://r.dev", "-" });
@@ -1269,19 +1102,16 @@ test "shown text joins wrapped rows and leaves out margin times and link address
     var view: Sized(512, true) = .{ .sidenotes = true };
     try view.append("› \x1b[2mfix\tthe flaky store test please\x1b[8m14:20\x1b[0m\n\x1b[2;8m← Received message from " ++ name ++ "\x1b[8m08:00\x1b[0m\nlast");
     try view.prepare();
-    // Laid out at 16 columns the first line wraps; its bytes don't.
     try std.testing.expect(view.lineRows(.{ .width = 16, .method = .unicode }, 0) > 1);
     const text = view.text();
     const copied = (try view.shownText(std.testing.allocator, 0, text.len, 1000)).?;
     defer std.testing.allocator.free(copied);
     try std.testing.expectEqualStrings("› fix the flaky store test please\n← Received message from Plan\nlast", copied);
-    // From inside a line to inside a later one.
     const from = std.mem.indexOf(u8, text, "store").?;
     const to = std.mem.indexOf(u8, text, "ast").?;
     const part = (try view.shownText(std.testing.allocator, from, to, 1000)).?;
     defer std.testing.allocator.free(part);
     try std.testing.expectEqualStrings("store test please\n← Received message from Plan\nl", part);
-    // The limit counts copied bytes, not hidden ones.
     const exact = (try view.shownText(std.testing.allocator, from, to, part.len)).?;
     std.testing.allocator.free(exact);
     try std.testing.expectEqual(@as(?[]u8, null), try view.shownText(std.testing.allocator, from, to, part.len - 1));
@@ -1290,7 +1120,6 @@ test "shown text joins wrapped rows and leaves out margin times and link address
 }
 
 test "a peer line's wide last cluster yields to the ellipsis instead of crossing the edge" {
-    // 39 cells of text, then a two-cell cluster that would end at 41.
     const kept = "→ 9f8e7d · " ++ @as([28]u8, @splat('x'));
     var test_screen: TestScreen = undefined;
     var storage: [256]u8 = undefined;
@@ -1342,7 +1171,6 @@ test "invisible and oversized output clusters become visible escapes" {
         }
     }
     try std.testing.expect(representable("🧑‍🧑‍🧑‍🧑‍🧑", .unicode));
-    // "e" and 31 combining acute accents fill 63 bytes; one more passes 64.
     var marks: [1 + 2 * 32]u8 = undefined;
     marks[0] = 'e';
     for (0..32) |index| @memcpy(marks[1 + 2 * index ..][0..2], "\u{301}");
@@ -1354,7 +1182,7 @@ test "older text prepends above the rows in view and trims newer text at capacit
     const layout: Layout = .{ .width = 20, .method = .unicode };
     var view: Sized(64, true) = .{};
     try view.append("live 1\nlive 2\nlive 3\n");
-    view.top = .{ .offset = 7 }; // "live 2" is the first row in view.
+    view.top = .{ .offset = 7 };
     var older: Sized(64, true) = .{};
     try older.append("\x1b[90mold A\x1b[39m\nold B\n");
     try std.testing.expect(!try view.prepend(&older, layout, 2));
@@ -1363,7 +1191,6 @@ test "older text prepends above the rows in view and trims newer text at capacit
     try std.testing.expectEqualStrings("live 2", view.bytes[first.offset..view.lineEnd(first.offset)]);
     try std.testing.expect(cellStyle(view.styles[0], true).foreground == .quiet);
     try std.testing.expect(cellStyle(view.styles[6], true).foreground == null);
-    // Capacity: keep the older page whole and drop newest lines, line-aligned.
     var full: Sized(64, true) = .{};
     for (0..8) |index| {
         var line: [8]u8 = undefined;
@@ -1381,13 +1208,11 @@ test "older text prepends above the rows in view and trims newer text at capacit
     try std.testing.expect(std.mem.endsWith(u8, full.text(), "\n"));
     const kept = full.first(layout, 2);
     try std.testing.expectEqualStrings("new 0", full.bytes[kept.offset..full.lineEnd(kept.offset)]);
-    // Discarding the front keeps later text and offsets absolute.
     full.discardFront(full.origin + 6);
     try std.testing.expect(std.mem.startsWith(u8, full.text(), "old 1\n"));
     try std.testing.expectEqual(@as(u64, 6), full.origin);
 }
 
-/// Each drawn cell's link address in one row, `-` for a cell with none.
 fn expectLinks(view: anytype, from: Position, width: u16, expected: []const []const u8) !void {
     var test_screen: TestScreen = undefined;
     _ = view.draw(test_screen.window(width, 1), from, true, true, .{}, .{});
@@ -1411,7 +1236,6 @@ test "a link's text carries its hidden address to the cells, however its bytes a
         try view.append(input[0..split]);
         try view.append(input[split..]);
         try view.prepare();
-        // The address takes no cell: the row reads as the text alone.
         var test_screen: TestScreen = undefined;
         _ = view.draw(test_screen.window(20, 1), .{}, true, true, .{}, .{});
         var row: [64]u8 = undefined;
@@ -1424,11 +1248,9 @@ test "a link's text carries its hidden address to the cells, however its bytes a
 
 test "a link keeps its address through wrapping, escaping, older pages and eviction" {
     const a = "https://a.dev";
-    // Wrapped rows of one link all open it.
     var wrapped: Sized(256, true) = .{};
     try wrapped.append(comptime linkBytes(a, "one two three"));
     try expectLinks(&wrapped, .{ .offset = 0, .row = 1 }, 8, &.{ a, a, a, a, a });
-    // Escaped text before and inside a link moves with it.
     var escaped: Sized(256, true) = .{};
     try escaped.append("\u{200b}" ++ comptime linkBytes(a, "b\u{200b}c") ++ "d" ++ TerminalText.link_open ++ a ++ TerminalText.link_end ++ "e");
     try escaped.prepare();
@@ -1438,7 +1260,6 @@ test "a link keeps its address through wrapping, escaping, older pages and evict
     try escaped.append("f" ++ TerminalText.link_close ++ "g");
     try escaped.prepare();
     try expectLinks(&escaped, .{}, 24, before ++ inside ++ &[_][]const u8{ "-", a, a, "-" });
-    // An older page placed before keeps both pages' links on their text.
     const b = "https://b.dev";
     var view: Sized(256, true) = .{};
     try view.append("See " ++ comptime linkBytes(a, "docs") ++ "\n");
@@ -1447,8 +1268,6 @@ test "a link keeps its address through wrapping, escaping, older pages and evict
     try std.testing.expect(!try view.prepend(&older, .{ .width = 16, .method = .unicode }, 2));
     try expectLinks(&view, .{}, 16, &.{ b, b, b, "-", "-" });
     try expectLinks(&view, .{ .offset = view.nextLine(0).? }, 16, &.{ "-", "-", "-", "-", a, a, a, a, "-" });
-    // Eviction that cuts into an address leaves its text unlinked, never
-    // linked to part of an address.
     var evicted: Sized(32, true) = .{};
     try evicted.append(comptime linkBytes("https://abcdefghij.dev", "link") ++ " and more words");
     try std.testing.expect(evicted.origin != 0);
@@ -1484,9 +1303,6 @@ test "rendered local path cells carry the file URI but the sentence semicolon do
 }
 
 test "code bands cover blank and wrapped rows at every width and append split without retained metadata" {
-    // SGR 40 is a real terminal background and the viewport's code role.
-    // The newline itself carries it: a completely empty code line still
-    // has a style byte, but no added text byte or per-line allocation.
     const input = "before\n\x1b[40mabcdefghijkl\n\x1b[0m\x1b[40m\n\x1b[0m\x1b[40mz\n\x1b[0mafter\n";
     const plain: vaxis.Style = .{ .fg = .{ .index = 255 }, .bg = .{ .index = 19 } };
     const colours: Colours = .{ .band = .{ .rgb = .{ 28, 29, 35 } } };
@@ -1501,8 +1317,6 @@ test "code bands cover blank and wrapped rows at every width and append split wi
             const width: u16 = @intCast(width_value);
             const wrapped: u16 = @intCast((12 + width_value - 1) / width_value);
             for ([_]bool{ false, true }) |colour| {
-                // Start on every continuation row, including a negative
-                // logical row origin: the band must stop before prose.
                 for (0..wrapped) |skip| {
                     var screen: TestScreen = undefined;
                     const window = screen.window(width, 12);
@@ -1521,8 +1335,6 @@ test "code bands cover blank and wrapped rows at every width and append split wi
             }
         }
     }
-    // Evict into a code line, then prepend it to another page: the retained
-    // style alone still carries the band, with no line-marker repair pass.
     var old: Sized(32, true) = .{};
     try old.append("\x1b[40m0123456789012345678901234567890123456789\n\x1b[0m");
     try old.prepare();
@@ -1601,8 +1413,6 @@ test "one link keeps its address across plain quiet and ink labels without stori
         const text = std.mem.indexOf(u8, view.text(), "pqcn").?;
         try std.testing.expect(cellStyle(view.styles[text + 1], true).foreground == .quiet);
         try std.testing.expect(cellStyle(view.styles[text + 2], true).foreground == .user);
-        // Losing any part of the retained address makes every style of
-        // its label unlinked, rather than pointing to a truncated target.
         view.discardFront(3);
         try expectLinks(&view, .{}, 8, &.{ "-", "-", "-", "-", "-" });
     }
@@ -1696,7 +1506,6 @@ test "one line band owner covers adjacent code, selected tool, output and plain 
                         try std.testing.expectEqual(if (quiet) colours.quiet else plain.fg, cell.style.fg);
                     }
                 };
-                // Neither open nor closed headings gain a second mark or indent.
                 try std.testing.expectEqualStrings("✓", screen.screen.readCell(0, @intCast(selected)).?.char.grapheme);
                 try std.testing.expectEqualStrings("✓", screen.screen.readCell(0, @intCast(plain_start)).?.char.grapheme);
             }
@@ -1722,7 +1531,6 @@ test "Document rows answer down within measure for every row from every first ro
             }
         }
     }
-    // A tall document from its top, and an empty one.
     const tall = try std.testing.allocator.create(Document);
     defer std.testing.allocator.destroy(tall);
     tall.* = .{};
@@ -1730,7 +1538,6 @@ test "Document rows answer down within measure for every row from every first ro
     try tall.prepare();
     const narrow: Layout = .{ .width = 5, .method = .unicode };
     const total = tall.measure(narrow, .{}, std.math.maxInt(u16)).rows;
-    // 75 five-row lines and 225 one-row lines.
     try std.testing.expectEqual(@as(usize, 600), total);
     var rows = tall.rowsFrom(narrow, .{});
     for (0..total) |row| try std.testing.expectEqual(tall.down(narrow, .{}, row), rows.next().?);

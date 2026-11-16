@@ -1,5 +1,3 @@
-// Fails when src/wire.ts is not what openapi-typescript makes from the
-// checked-in openapi.json, then type-checks the package.
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Attribute production density-fixture writes without altering its commits or durability."""
 import datetime, fcntl, hashlib, json, os, pathlib, platform, re, shutil, signal, subprocess, time
 HERE=pathlib.Path(__file__).resolve().parent
 ROOT=HERE.parents[1]
@@ -21,7 +20,6 @@ def replace_once(text,old,new):
     assert text.count(old)==1,(old,text.count(old))
     return text.replace(old,new)
 
-# Build from copies so measurement additions never modify production source.
 shutil.copytree(ROOT/'src',OUT/'src',dirs_exist_ok=True)
 fixture=(ROOT/'src/host_store_density.zig').read_text()
 modified=fixture
@@ -31,7 +29,6 @@ modified=replace_once(modified,'.{ .fault = journal.hook() }','.{ .fault = journ
 modified=replace_once(modified,'    const usage_before = try processUsage();','    write_probe_reset();\n    const usage_before = try processUsage();')
 modified=replace_once(modified,'    try std.Io.File.stdout().writeStreamingAll(io, encoded);\n}\n\nconst TransientSample', '    try std.Io.File.stdout().writeStreamingAll(io, encoded);\n    write_probe_report(population);\n}\n\nconst TransientSample')
 (OUT/'src/host_store_density.zig').write_text(modified)
-# The existing production build populates this pinned dependency directory.
 pkg=re.search(r'\.sqlite = .*?\.hash = "([^"]+)"',(ROOT/'build.zig.zon').read_text(),re.S)[1]
 sqlite=ROOT/'zig-pkg'/pkg/'sqlite3.c'
 if not sqlite.exists(): run(['zig','build','--fetch=all'])

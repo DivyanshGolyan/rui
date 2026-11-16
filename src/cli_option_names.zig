@@ -1,4 +1,3 @@
-//! Names accepted by the option accessors. cli_args checks this against its definitions.
 const std = @import("std");
 
 pub const names = [_][]const u8{

@@ -1,5 +1,3 @@
-// Illustrates replay call order, with all previously blocked calls settled.
-// Uses native ECMAScript promises; does not execute Rui or make model calls.
 import assert from 'node:assert/strict';
 
 async function evaluate(visible) {
@@ -22,7 +20,6 @@ async function evaluate(visible) {
       await operation('B');
     })(),
   ]);
-  // Allow the finite microtask queue to drain, without settling pending work.
   await new Promise(resolve => setImmediate(resolve));
   void workflow;
   return { calls, pending };

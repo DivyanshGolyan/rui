@@ -1,5 +1,3 @@
-/* Reuse the audited allocation/OS instrumentation; this is a separate
- * prototype. */
 #define main baseline_probe_main
 #include "probe.c"
 #undef main
@@ -214,7 +212,6 @@ static void capture_write(struct Capture *t, const void *bytes, size_t length) {
     }
   }
   double duration = now() - begin;
-  /* Only the capture owner updates this; active snapshots use atomic reads. */
   if (duration > max_write)
     max_write = duration;
 }
@@ -226,7 +223,6 @@ static int drain_one(void) {
   }
   struct Chunk *chunk = &sink.chunks[sink.head];
   pthread_mutex_unlock(&sink.mutex);
-  /* This occupied slot cannot be reused while its write is pending. */
   capture_write(chunk->capture, chunk->bytes, chunk->size);
   pthread_mutex_lock(&sink.mutex);
   sink.bytes -= chunk->size;
