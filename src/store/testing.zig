@@ -728,9 +728,43 @@ pub const sqlite_only = struct {
     }
 };
 
-/// Leaves `table` preparing normally but failing at the first step of a
+/// Interrupts the one statement whose text is `sql` as it steps, the way an
+/// I/O fault fails a read. No schema changes, so no cached plan expires.
+pub const TestingStatementFault = struct {
+    const c = sqlite.c;
+
+    sql: [:0]const u8,
+    running: bool = false,
+    failed: u64 = 0,
+
+    pub fn arm(self: *TestingStatementFault, database: *c.sqlite3) void {
+        _ = c.sqlite3_trace_v2(database, c.SQLITE_TRACE_STMT, traced, self);
+        c.sqlite3_progress_handler(database, 1, progress, self);
+    }
+
+    pub fn disarm(_: *const TestingStatementFault, database: *c.sqlite3) void {
+        _ = c.sqlite3_trace_v2(database, 0, null, null);
+        c.sqlite3_progress_handler(database, 0, null, null);
+    }
+
+    pub fn traced(_: c_uint, context: ?*anyopaque, statement: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
+        const self: *TestingStatementFault = @ptrCast(@alignCast(context.?));
+        self.running = std.mem.eql(u8, std.mem.span(c.sqlite3_sql(@ptrCast(statement))), self.sql);
+        return 0;
+    }
+
+    pub fn progress(context: ?*anyopaque) callconv(.c) c_int {
+        const self: *TestingStatementFault = @ptrCast(@alignCast(context.?));
+        if (!self.running) return 0;
+        self.failed += 1;
+        return 1;
+    }
+};
+
+/// For unhinted statements, leaves `table` preparing normally but failing at the first step of a
 /// statement that reads it, the shape of an I/O or corruption fault after
-/// a statement compiled: a renamed table and an overflowing view.
+/// a statement compiled: a renamed table and an overflowing view. SQLite
+/// indexed statements use TestingStatementFault: a view cannot retain indexes.
 pub fn failReadsOf(storage: *Store, comptime table: []const u8) !void {
     if (storage.engine == .mysql) return mysql_testing.rawExec(storage, "RENAME TABLE " ++ table ++ " TO " ++ table ++ "_unreadable;CREATE VIEW " ++ table ++ " AS SELECT * FROM " ++ table ++ "_unreadable WHERE abs(-9223372036854775808) IS NOT NULL");
     try sqlite.exec(storage.sqliteDatabase(), "ALTER TABLE " ++ table ++ " RENAME TO " ++ table ++ "_unreadable");

@@ -648,7 +648,7 @@ test "a list page's rows share their rounds, so eight rows take as many as one" 
     }.run);
 }
 
-test "a list Action table fault names the earliest failed statement and fences" {
+test "a list Action step fault keeps its named error and fences" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -661,13 +661,18 @@ test "a list Action table fault names the earliest failed statement and fences" 
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const call = [_]TestingCall{.{ .item_id = "list-actions-item", .name = "bash", .encoded_call_id = "list-actions-call", .decoded_call_id = "list-actions-call", .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}" }};
             try settleCallsForTesting(&storage, &tmp, binding, "list-actions-output", &call);
-            try store_testing.failReadsOf(&storage, "action_operation");
+            var fault: store_testing.TestingStatementFault = .{ .sql = shared_fixtures.namedStatementForTesting(report_domain.work_failures, null, "SELECT count(*) AS total,") };
+            if (storage.engine == .sqlite) {
+                fault.arm(storage.sqliteDatabase());
+            } else try store_testing.failReadsOf(&storage, "action_operation");
+            defer if (storage.engine == .sqlite) fault.disarm(storage.sqliteDatabase());
             var used = std.atomic.Value(u64).init(0);
             const expected = switch (storage.engine) {
                 .sqlite => error.ActionReadFailed,
                 .mysql => error.SessionReadFailed,
             };
             try std.testing.expectError(expected, testingSessionList(&storage, &tmp, .{}, &used, 5));
+            if (storage.engine == .sqlite) try std.testing.expect(fault.failed > 0);
             try std.testing.expect(storage.isFenced());
         }
     }.run);

@@ -374,14 +374,11 @@ test "canonical observation failure fences later admission" {
     try std.testing.expectError(error.StoreFenced, store_testing.observeCommandForTesting(&storage, "later"));
 }
 
-test "a Current report's step faults answer the name of the earliest round that steps the table" {
-    // Each read keeps main's name; when reads in two rounds fail, the
-    // earlier round's name wins. The Action count steps after the tool
-    // outcome rule in their round, so a faulted action_operation answers
-    // the rule's CallReadFailed. Model-bound compaction facts read the
-    // producing session_revision before Action lists and answer CorruptStore
-    // for that fault. With no Turn or list to read, an idle Session does not
-    // step session_revision.
+test "a Current report's read faults keep the owning error and fence" {
+    // Indexed Action reads use the existing step injector: replacing the
+    // table with a view would invalidate their hints before any read steps.
+    // The tool outcome rule owns the Action check's CallReadFailed; the
+    // independent expected errors below also retain the other read owners.
     inline for (.{
         .{ TestingWorkShape.awaiting, "model_tool_call", error.CallReadFailed },
         .{ TestingWorkShape.awaiting, "action_operation", error.CallReadFailed },
@@ -394,10 +391,19 @@ test "a Current report's step faults answer the name of the earliest round that 
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try case[0].make(&storage, &tmp, "fault-names");
-        try store_testing.failReadsOf(&storage, case[1]);
+        const indexed = comptime std.mem.eql(u8, case[1], "action_operation");
+        var fault: TestingStatementFault = .{ .sql = namedStatementForTesting(report_domain.session_count_failures, null, "SELECT DISTINCT operation.operation_id,") };
+        if (indexed) {
+            fault.arm(storage.sqliteDatabase());
+        } else try store_testing.failReadsOf(&storage, case[1]);
+        defer if (indexed) fault.disarm(storage.sqliteDatabase());
         if (comptime @TypeOf(case[2]) == @TypeOf(null)) {
             std.testing.allocator.free(try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
-        } else try std.testing.expectError(case[2], testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
+        } else {
+            try std.testing.expectError(case[2], testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
+            if (indexed) try std.testing.expect(fault.failed > 0);
+            try std.testing.expect(storage.isFenced());
+        }
     }
 }
 
