@@ -45,6 +45,7 @@ pub const Command = enum {
     request_read_result,
     request_list,
     action_inspect,
+    action_read,
     action_allow,
     action_deny,
     action_read_call_id,
@@ -94,6 +95,7 @@ pub const Command = enum {
             .action_inspect => .{ .resource = .action, .name = "inspect", .description = "Read the exact saved Action proposal before allowing or denying it. Inspection grants nothing.", .options = destination ++ session ++ action, .requires = need_action },
             .action_allow => .{ .resource = .action, .name = "allow", .description = "Admit permission to run this exact inspected Action once; the Host revalidates its target.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
             .action_deny => .{ .resource = .action, .name = "deny", .description = "Admit denial of this exact inspected Action.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
+            .action_read => .{ .resource = .action, .name = "read", .description = "Read an Action's status and one final-result window; --offset continues at a returned byte cursor. Does not wait or consume.", .options = destination ++ session ++ action ++ &[_]Option{numeric("offset", "BYTES", 0, @import("content_string.zig").max_bytes, .count_malformed)}, .requires = need_action },
             .action_read_call_id => .{ .resource = .action, .name = "read-call-id", .description = "Stream the exact saved Action call ID bytes.", .options = destination ++ session ++ action, .requires = need_action },
             .action_read_arguments => .{ .resource = .action, .name = "read-arguments", .description = "Stream the exact saved Action argument bytes.", .options = destination ++ session ++ action, .requires = need_action },
             .host_start => .{ .resource = .host, .name = "start", .description = "Start or connect to a managed Host. An already-running Host keeps its original settings.", .options = serve_grammar.settings_options, .retired_options = serve_grammar.retired_options },
@@ -603,6 +605,7 @@ test "typed choices share enum names with help and refuse unknown values" {
 test "numeric options reject malformed decimals and state their accepted range" {
     const Case = struct { command: Command, name: []const u8, code: caller_error.Code, low: []const u8, high: []const u8 };
     const cases = [_]Case{
+        .{ .command = .action_read, .name = "offset", .code = .count_malformed, .low = "0", .high = std.fmt.comptimePrint("{d}", .{@import("content_string.zig").max_bytes}) },
         .{ .command = .action_inspect, .name = "action", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
         .{ .command = .session_interrupt_model, .name = "turn", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
         .{ .command = .session_interrupt_model, .name = "operation", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },

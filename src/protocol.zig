@@ -145,6 +145,7 @@ pub const Kind = enum {
     permission_decision,
     observe_command,
     read_result,
+    read_action,
     read_action_call_id,
     read_action_arguments,
     inspect_session,
@@ -669,6 +670,7 @@ fn RequestOf(comptime Custody: type) type {
         permission_decision: PermissionDecisionCommand,
         observe_command: ObserveCommand,
         read_result: ReadResult,
+        read_action: @import("action_read.zig").Request,
         read_action_call_id: ReadActionArguments,
         read_action_arguments: ReadActionArguments,
         inspect_session: InspectSession,
@@ -685,7 +687,7 @@ fn RequestOf(comptime Custody: type) type {
             switch (self.*) {
                 .configure => |*command| try command.removeTemporaryContent(io),
                 .message => |*command| try command.removeTemporaryContent(io),
-                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .skill_suggestions, .model_list => {},
+                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .skill_suggestions, .model_list => {},
             }
         }
 
@@ -796,6 +798,10 @@ fn ParserOf(comptime Custody: type) type {
                 .permission_decision => {
                     out.* = .{ .permission_decision = .{ .store = store } };
                     try self.parsePermissionDecision(&out.permission_decision, &members);
+                },
+                .read_action => {
+                    out.* = .{ .read_action = .{ .store = store } };
+                    try self.parseReadAction(&out.read_action, &members);
                 },
                 .observe_command => {
                     out.* = .{ .observe_command = .{ .store = store } };
@@ -1273,6 +1279,17 @@ fn ParserOf(comptime Custody: type) type {
                 },
             };
             try require(Field, seen, &.{ .key, .session, .action, .decision });
+        }
+
+        fn parseReadAction(self: *Parser, out: *@import("action_read.zig").Request, members: *Members) !void {
+            const Field = enum { session, action, offset };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .session => try self.readSmallString(&out.session),
+                .action => out.action_id = try self.readCanonicalU64(),
+                .offset => out.offset = try self.readCanonicalU64(),
+            };
+            try require(Field, seen, &.{ .session, .action });
         }
 
         fn parseReadActionArguments(self: *Parser, out: *ReadActionArguments, members: *Members) !void {
@@ -2055,7 +2072,14 @@ pub const list_sessions_request = struct {
     pub const tail = .{"}"};
     pub const all = head ++ archive ++ cursor ++ since ++ through ++ after_reference ++ tail;
 };
-/// Holes: Store, Session, Action.
+/// Holes: Store, Session, Action, offset.
+pub const read_action_request = struct {
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"" };
+    pub const offset = .{ ",\"offset\":\"", Hole.decimal, "\"" };
+    pub const tail = .{"}"};
+    pub const all = head ++ offset ++ tail;
+};
+
 pub const read_action_arguments_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action_arguments\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
 /// Holes: Store, Session, Action.
 pub const read_action_call_id_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action_call_id\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
@@ -2130,6 +2154,7 @@ pub const max_model_list_request_bytes = shapeBytes(model_list_request);
 pub const max_read_result_request_bytes = shapeBytes(read_result_request);
 pub const max_inspect_session_request_bytes = inspect_session_request.max_bytes;
 pub const max_list_sessions_request_bytes = shapeBytes(list_sessions_request.all);
+pub const max_read_action_request_bytes = shapeBytes(read_action_request.all);
 pub const max_read_action_arguments_request_bytes = shapeBytes(read_action_arguments_request);
 pub const max_read_action_call_id_request_bytes = shapeBytes(read_action_call_id_request);
 pub const max_conversation_content_request_bytes = shapeBytes(conversation_content_request.all);
@@ -2139,12 +2164,12 @@ pub const max_activity_content_request_bytes = shapeBytes(activity_content_reque
 /// Every request the client writes into a `RequestBuffer`. Control requests
 /// are captured to a record file instead.
 pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
-    observe_command_request.all,   host_info_request,                 host_stop_request,
-    host_pause_request,            read_result_request,               list_sessions_request.all,
-    read_action_arguments_request, read_action_call_id_request,       conversation_content_request.all,
-    conversation_page_request,     activity_search_request.all,       activity_page_request.all,
-    activity_content_request,      skill_suggestions_session_request, skill_suggestions_workspace_request,
-    model_list_request,
+    observe_command_request.all,         host_info_request,             host_stop_request,
+    host_pause_request,                  read_result_request,           list_sessions_request.all,
+    read_action_request.all,             read_action_arguments_request, read_action_call_id_request,
+    conversation_content_request.all,    conversation_page_request,     activity_search_request.all,
+    activity_page_request.all,           activity_content_request,      skill_suggestions_session_request,
+    skill_suggestions_workspace_request, model_list_request,
 }));
 
 /// Separated by commas, `count` JSON values of at most `item_bytes` each.
@@ -2236,6 +2261,13 @@ pub const permission_decision_reply = struct {
     /// Holes: Session, Action, decision.
     pub const conflict = .{head ++ "\"conflict\",\"replayed\":false"} ++ target ++ .{",\"code\":\"idempotency_key_conflict\"}}"};
     pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
+};
+
+pub const action_read_reply = struct {
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"action_read\",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"," };
+    pub const pending = .{ "\"state\":\"", Hole{ .tag = @import("action_read.zig").PendingState }, "\",\"final\":null}" };
+    pub const final = .{ "\"state\":\"resolved\",\"final\":{\"position\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":{\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"},\"window\":{\"offset\":\"", Hole.decimal, "\",\"next\":\"", Hole.decimal, "\",\"more\":", Hole.boolean, ",\"text\":", Hole{ .string = content_window_bytes }, "}}}" };
+    pub const max_bytes = maxShapeBytes(.{ head ++ pending, head ++ final });
 };
 
 /// One saved indeterminate Action, newest first within its bound Turn.
@@ -3402,4 +3434,21 @@ test "session pin parser requires an explicit desired value and binds semantic r
     var archive: SessionArchiveCommand = .{};
     try archive.session.set("k7m2qx");
     try std.testing.expect(!std.mem.eql(u8, &digest, &archive.semanticDigest()));
+}
+
+test "Action read request preserves canonical identity and optional cursor" {
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action\",\"store\":\"s\",\"session\":\"k7m2qx\",\"action\":\"42\"";
+    inline for (.{ "}", ",\"offset\":\"0\"}", ",\"offset\":\"16383\"}" }, .{ 0, 0, 16383 }) |tail, offset| {
+        var source: MetadataSource = .{ .input = head ++ tail };
+        var parser = Tested.Parser{ .source = &source };
+        const request = (try parseForTest(&parser)).read_action;
+        try std.testing.expectEqual(@as(u64, 42), request.action_id);
+        try std.testing.expectEqual(@as(u64, offset), request.offset);
+        try std.testing.expectEqualStrings("k7m2qx", request.session.slice());
+    }
+    inline for (.{ ",\"offset\":\"01\"}", ",\"offset\":\"-1\"}", ",\"offset\":\"18446744073709551616\"}" }) |tail| {
+        var source: MetadataSource = .{ .input = head ++ tail };
+        var parser = Tested.Parser{ .source = &source };
+        try std.testing.expectError(error.InvalidIdentity, parseForTest(&parser));
+    }
 }

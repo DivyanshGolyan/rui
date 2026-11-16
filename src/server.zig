@@ -1626,6 +1626,7 @@ const Route = enum {
     permission_decision,
     observe,
     read_result,
+    read_action,
     read_action_call_id,
     read_action_arguments,
     inspect,
@@ -1947,6 +1948,19 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             };
             try fd.setContent(location, 0, true, false);
         },
+        .read_action => |*command| {
+            const value = try createUnfilled(host.allocator, @import("action_read.zig").Read);
+            defer host.allocator.destroy(value);
+            host.store.readAction(command, value) catch |err| switch (err) {
+                error.ActionNotFound => return respondStatic(fd, 404, .action_unavailable, "action_not_found"),
+                error.InvalidCursor => return respondStatic(fd, 400, .action_unavailable, "invalid_cursor"),
+                else => {
+                    fenceDispatch(host, "Action status observation", err);
+                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+                },
+            };
+            try fd.json(200, protocol.action_read_reply.max_bytes, host_reply.renderActionRead, .{value});
+        },
         .read_action_arguments => |*command| deliverActionContent(host, fd, command, false),
         .read_action_call_id => |*command| deliverActionContent(host, fd, command, true),
         .inspect_session => |*request_value| {
@@ -2223,6 +2237,8 @@ const HeaderReader = struct {
             .observe
         else if (std.mem.eql(u8, path, "/v1/read-result"))
             .read_result
+        else if (std.mem.eql(u8, path, "/v1/read-action"))
+            .read_action
         else if (std.mem.eql(u8, path, "/v1/read-action-call-id"))
             .read_action_call_id
         else if (std.mem.eql(u8, path, "/v1/read-action-arguments"))

@@ -77,6 +77,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../engine/mysql_open.zig"),
         @embedFile("../engine/mysql_refusal.zig"),
         @embedFile("../domain/action.zig"),
+        @embedFile("../domain/action_read.zig"),
         @embedFile("../domain/forward.zig"),
         @embedFile("../domain/command.zig"),
         @embedFile("../domain/configuration.zig"),
@@ -590,6 +591,10 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             _ = try storage.actionArguments(session.slice(), allowed);
             meter.stop(.actionContent);
+            var action_read: @import("../../action_read.zig").Read = undefined;
+            meter.start();
+            try storage.readAction(&.{ .session = session, .action_id = allowed }, &action_read);
+            meter.stop(.readAction);
             var allow: protocol.PermissionDecisionCommand = .{ .action_id = allowed, .decision = .allow_once };
             try allow.key.set("budget-allow");
             try allow.session.set(session.slice());
@@ -687,7 +692,7 @@ test "each Store entry point takes its round budget on its common path" {
             try std.testing.expect(try storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{}, null) == null);
             meter.stop(.tryAdmitNextModelRetry);
             meter.start();
-            _ = try storage.dispatchWork(false);
+            _ = try storage.dispatchWork(false, true);
             meter.stop(.dispatchWork);
             meter.start();
             try std.testing.expect(!try storage.recoverOneExhaustedModelAttempt(ActiveOperationFilter.empty()));

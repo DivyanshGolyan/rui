@@ -217,3 +217,18 @@ test("create parent is a create-only relation in the shared wire spec", async ()
     const invalid: SessionUpdate = { parent: "p4rent" };
     void invalid;
 });
+
+
+test("Action reads preserve identity and byte cursor without mutation", async () => {
+	const requests: { path: string; body: unknown }[] = [];
+	const action = "9007199254740993";
+	const link: Link = {
+		async exchange(path, build) {
+			requests.push({ path, body: JSON.parse(build("store")) });
+			return Buffer.from(JSON.stringify({ version: WIRE_VERSION, type: "action_read", session: "session", action, state: "queued", final: null }));
+		},
+	};
+	const session = new Session(link, "session");
+	await session.readAction(action, "16383");
+	assert.deepEqual(requests, [{ path: "/v1/read-action", body: { version: WIRE_VERSION, kind: "read_action", store: "store", session: "session", action, offset: "16383" } }]);
+});

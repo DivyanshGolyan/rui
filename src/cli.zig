@@ -317,6 +317,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .request_recover => try recover(init, parsed),
         .request_read_result => try readResult(init, parsed),
         .request_list => try requests(init),
+        .action_read => try readAction(init, parsed),
         .action_inspect => try inspectAction(init, .{ .io = init.io }, parsed.get("store"), parsed.get("session").?, (try parsed.number(u64, "action")).?),
         .action_allow => try decideAction(init, parsed, .allow_once),
         .action_deny => try decideAction(init, parsed, .deny),
@@ -3330,6 +3331,25 @@ fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecor
         break :blk try takeReply(step, sender.sendCaptured(captured, environment, &reply_buffer), captured.identity().*, captured.replay);
     };
     try writeMutationReply(io, reply, presentation, replay);
+}
+
+fn readAction(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
+    var reply_buffer: client.ReplyBuffer = .{};
+    var output: JsonOutput = undefined;
+    var sink: JsonOutput.Sink = .{ .writer = output.init(init.io, .stdout) };
+    const reply = (client.Requests{ .io = init.io }).readAction(selected, parsed.get("session").?, (try parsed.number(u64, "action")).?, (try parsed.number(u64, "offset")) orelse 0, &sink, &reply_buffer) catch |err| return readTransportFailure(init.io, selected, err);
+    switch (reply) {
+        .report => {
+            try sink.writer.writeByte('\n');
+            try output.finish();
+        },
+        .command => |command_reply| {
+            try writeCommandReply(init.io, command_reply, .stderr);
+            return error.HostInvocationFailed;
+        },
+    }
 }
 
 fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision: @FieldType(client.PermissionDecisionInput, "decision")) !void {

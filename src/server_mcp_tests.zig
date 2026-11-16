@@ -120,12 +120,15 @@ fn run(case: Case) !void {
         else => 5_000,
     };
     var servers = [_]mcp.Server{ .{ .name = @constCast("docs"), .url = url, .token = @constCast("secret"), .target = try @import("http1/request.zig").parseTarget(url), .timeout_ms = timeout_ms }, .{ .name = @constCast("other"), .url = other_url, .token = @constCast("other-secret"), .target = try @import("http1/request.zig").parseTarget(other_url), .timeout_ms = 5_000 } };
-    var custody: [1]execution.CustodyRecord = @splat(.{});
+    var custody: [2]execution.CustodyRecord = @splat(.{});
     const host = try allocator.create(Host);
     defer allocator.destroy(host);
-    host.* = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = storage, .custody = execution.CustodyPool.initialize(&custody), .mcp_servers = .{ .entries = &servers } };
+    host.* = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = storage, .custody = execution.CustodyPool.initialize(custody[0..(if (case == .concurrent) 2 else 1)]), .mcp_servers = .{ .entries = &servers } };
     var active: mcp.Calls = .{};
-    defer active.shutdown(host);
+    defer {
+        _ = host.advance(.stopping);
+        active.shutdown(host);
+    }
     for (0..count) |ordinal| {
         const work = (try storage.nextCoreWork()).?;
         try expectHere(@src(), work == .mcp);
@@ -186,11 +189,13 @@ fn run(case: Case) !void {
             try expectHere(@src(), std.mem.indexOf(u8, other_report, "page payload") != null);
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try std.testing.expectEqual(other_binding.turn_id, next.turn_id);
+            _ = host.advance(.stopping);
             active.shutdown(host);
             try expectHere(@src(), try storage.recoverOneUncertainAction(.empty()));
         }
         if (case == .shutdown) {
             try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(5)), context, Context.sent);
+            _ = host.advance(.stopping);
             active.shutdown(host);
             try expectHere(@src(), try storage.recoverOneUncertainAction(.empty()));
             try expectHere(@src(), !try storage.recoverOneUncertainAction(.empty()));

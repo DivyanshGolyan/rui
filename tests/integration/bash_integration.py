@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import hashlib
 import json
 import os
 import pathlib
@@ -790,6 +791,9 @@ def walkthrough():
 
 def main():
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-bash."))
+    fixture_home = state / "home"
+    fixture_home.mkdir()
+    os.environ["HOME"] = str(fixture_home)
     prove_stdin(state)
     prove_reused_session(state)
     responses = []
@@ -1092,6 +1096,12 @@ def main():
         assert success_action["call_ordinal"] == "0", proposal
         assert success_action["authorization"] == "pending", proposal
         assert success_action["permission_revision"] == "1", proposal
+        pending_read = fixture.command(
+            "action", "read", "--store", store, "--session", session,
+            "--action", success_action["action"],
+        )
+        assert pending_read["session"] == session and pending_read["action"] == success_action["action"], pending_read
+        assert pending_read["state"] == "waiting_approval" and pending_read["final"] is None, pending_read
         assert fixture.read_action(
             store, session, success_action["action"], "call-id"
         ) == b"success-call"
@@ -1170,6 +1180,47 @@ def main():
         assert "�" in output and " bytes left out]" in output, output
         # Only the truncated stream names its full file.
         assert "Full stdout:" in output and "Full stderr:" not in output, output
+        first_read = fixture.command(
+            "action", "read", "--store", store, "--session", session,
+            "--action", success_action["action"],
+        )
+        assert first_read["session"] == session and first_read["action"] == success_action["action"], first_read
+        assert first_read["state"] == "resolved", first_read
+        metadata = {key: first_read["final"][key] for key in ("position", "code", "content")}
+        expected_bytes = output.encode("utf-8")
+        domain = b"rui/content/v1"
+        expected_digest = hashlib.sha256(len(domain).to_bytes(8, "big") + domain + expected_bytes).hexdigest()
+        assert metadata["code"] == "succeeded" and int(metadata["position"]) > 0, metadata
+        assert metadata["content"] == {"bytes": str(len(expected_bytes)), "sha256": expected_digest}, metadata
+        page = first_read
+        assembled = bytearray()
+        while True:
+            assert page["state"] == "resolved", page
+            assert {key: page["final"][key] for key in metadata} == metadata, page
+            window = page["final"]["window"]
+            chunk = window["text"].encode("utf-8")
+            offset, next_offset = int(window["offset"]), int(window["next"])
+            assert offset == len(assembled) and next_offset == offset + len(chunk), window
+            assert 0 < len(chunk) <= 4096 and next_offset <= len(expected_bytes), window
+            assembled.extend(chunk)
+            assert window["more"] is (next_offset < len(expected_bytes)), window
+            if not window["more"]:
+                break
+            page = fixture.command(
+                "action", "read", "--store", store, "--session", session,
+                "--action", success_action["action"], "--offset", window["next"],
+            )
+        assert bytes(assembled) == expected_bytes
+        eof = fixture.command(
+            "action", "read", "--store", store, "--session", session,
+            "--action", success_action["action"], "--offset", str(len(expected_bytes)),
+        )
+        assert {key: eof["final"][key] for key in metadata} == metadata, eof
+        assert eof["final"]["window"] == {"offset": str(len(expected_bytes)), "next": str(len(expected_bytes)), "more": False, "text": ""}, eof
+        assert fixture.command(
+            "action", "read", "--store", store, "--session", session,
+            "--action", success_action["action"],
+        ) == first_read
         answer_report = fixture.command(
             "session", "inspect",
             "--store",
