@@ -563,8 +563,7 @@ pub fn anchorPlacement(init: std.process.Init, settings: *hs.Settings, dir: []co
 }
 
 fn existingPlacement(io: std.Io, dir: []const u8) !platform.Paths {
-    _ = try platform.sqliteClientPaths(io, dir);
-    return savedPlacement(io, dir);
+    return (platform.ClientSelection{ .sqlite = dir }).paths(io);
 }
 
 pub const savedPlacement = platform.savedPlacement;

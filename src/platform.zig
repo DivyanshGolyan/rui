@@ -65,10 +65,7 @@ pub const StoreLease = struct {
     /// owned canonical paths by value; every probe descriptor closes here.
     pub fn observe(io: std.Io, supplied_path: []const u8) Observation {
         const selection = resolveClientSelection(supplied_path);
-        const paths = (switch (selection) {
-            .mysql => selection.paths(io),
-            .sqlite => savedPlacement(io, supplied_path),
-        }) catch return .access_failure;
+        const paths = selection.paths(io) catch return .access_failure;
         const mysql = paths.kind == .mysql;
         var store_dir = std.Io.Dir.cwd().openDir(io, if (mysql) paths.runtimeHint().? else paths.store.slice(), .{}) catch |err| return switch (err) {
             error.FileNotFound => .unowned,
@@ -253,10 +250,7 @@ pub const StoreLease = struct {
     /// its whole content; nothing else reads it.
     pub fn lastStop(io: std.Io, supplied_path: []const u8) LastStop {
         const selected = resolveClientSelection(supplied_path);
-        const paths = (switch (selected) {
-            .mysql => selected.paths(io),
-            .sqlite => savedPlacement(io, supplied_path),
-        }) catch return .unknown;
+        const paths = selected.paths(io) catch return .unknown;
         const directory = if (paths.kind == .mysql) paths.runtimeHint().? else paths.store.slice();
         var dir = std.Io.Dir.cwd().openDir(io, directory, .{}) catch return .unknown;
         defer dir.close(io);
@@ -315,13 +309,19 @@ pub const ClientSelection = union(Kind) {
     sqlite: []const u8,
     mysql: struct { store: []const u8, runtime: []const u8 },
 
-    pub fn paths(self: ClientSelection, io: std.Io) !Paths {
+    pub noinline fn paths(self: ClientSelection, io: std.Io) !Paths {
         return switch (self) {
             .mysql => |value| mysqlClientPaths(io, value.store, value.runtime),
             .sqlite => |path| blk: {
                 // Preserve the directory's admission before reading its saved placement.
                 const host = try sqliteClientPaths(io, path);
-                var result = try savedPlacement(io, host.store.slice());
+                var result = savedPlacement(io, host.store.slice()) catch |err| switch (err) {
+                    // A ready default Host remains attachable if its saved
+                    // startup document was edited to an invalid value. Only a
+                    // new start admits that document; never guess moved paths.
+                    error.SettingsInvalid => break :blk host,
+                    else => return err,
+                };
                 // Until client lookup learns MySQL's opaque identity, retain
                 // its directory selector for consumers saving a selection.
                 if (result.kind == .mysql) result.store = host.store;
@@ -395,7 +395,7 @@ pub fn anchorPlacement(io: std.Io, settings: *hs.Settings, dir: []const u8, fail
 
 /// Read saved placement without a login or a running Host. A MySQL result has
 /// no identity yet; the client learns it through the existing host-info door.
-pub fn savedPlacement(io: std.Io, dir: []const u8) !Paths {
+pub noinline fn savedPlacement(io: std.Io, dir: []const u8) !Paths {
     var wiping: @import("secret_value.zig").WipingAllocator = .{ .backing = std.heap.c_allocator };
     var arena: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer arena.deinit();
@@ -410,7 +410,7 @@ pub fn savedPlacement(io: std.Io, dir: []const u8) !Paths {
     return placementPaths(io, settings);
 }
 
-pub fn placementPaths(io: std.Io, settings: *const @import("host_settings.zig").Settings) !Paths {
+pub noinline fn placementPaths(io: std.Io, settings: *const @import("host_settings.zig").Settings) !Paths {
     if (settings.store == .mysql) return interfacePaths(.mysql, "", settings.interface.dir.slice());
     var canonical: [protocol.max_store_bytes]u8 = undefined;
     var paths = try pathsForCanonicalStore(try canonicalStoreDestination(io, settings.store.sqlite.dir.slice(), &canonical));
@@ -422,7 +422,7 @@ pub fn placementPaths(io: std.Io, settings: *const @import("host_settings.zig").
     return paths;
 }
 
-pub fn sqliteClientPaths(io: std.Io, supplied_path: []const u8) !Paths {
+pub noinline fn sqliteClientPaths(io: std.Io, supplied_path: []const u8) !Paths {
     var store_dir = try std.Io.Dir.cwd().openDir(io, supplied_path, .{});
     defer store_dir.close(io);
     try validatePrivateDirectory(store_dir, io);
