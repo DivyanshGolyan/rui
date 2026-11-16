@@ -2226,6 +2226,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     };
     if (input.reload_skills and named == null) return usage();
     if (named != null and named.?.len == 0) return usage();
+    if (parsed.get("parent")) |reference| input.parent = .{ .present = true, .value = reference };
     if (parsed.get("provider")) |name| input.provider = .{ .present = true, .value = name };
     if (parsed.get("model")) |model| {
         try admitModel(model);
@@ -2251,17 +2252,21 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
             .provider = if (input.provider.present) input.provider.value else null,
             .model = if (input.model.present) input.model.value else null,
         };
-        const reads_binding_defaults = intent.provider == null or intent.model == null;
-        const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (reads_binding_defaults or !input.permission_mode.present) blk: {
-            const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration without explicit binding or permission mode reads saved defaults");
+        const reads = input.creationReads();
+        const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (reads.preferences) blk: {
+            const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration with omitted defaults reads saved preferences");
             break :blk preferences.load(home) catch |err| return preferenceFailure(err);
         } else .{} };
-        saved_effort = if (reads_binding_defaults) snapshot.defaults.reasoning_effort else null;
-        binding = try snapshot.resolveUnprompted();
-        input.provider = .{ .present = true, .value = binding.provider.slice() };
-        input.model = .{ .present = true, .value = binding.model.slice() };
-        input.completeCreation(std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).?, binding.model.slice(), saved_effort, snapshot.defaults.permission_mode, &compaction_buffer);
-        if (!input.workspace.present) {
+        saved_effort = if (reads.saved_effort) snapshot.defaults.reasoning_effort else null;
+        if (reads.binding) binding = try snapshot.resolveUnprompted();
+        input.completeCreation(
+            if (reads.binding) std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).? else null,
+            if (reads.binding) binding.model.slice() else input.model.value,
+            saved_effort,
+            snapshot.defaults.permission_mode,
+            &compaction_buffer,
+        );
+        if (!input.parent.present and !input.workspace.present) {
             var cwd = try std.Io.Dir.cwd().openDir(io, ".", .{});
             defer cwd.close(io);
             const length = try cwd.realPath(io, &workspace_buffer);
@@ -3606,7 +3611,8 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
 }
 
 const StartConfiguration = struct {
-    provider: []const u8,
+    provider: ?[]const u8,
+    parent: ?[]const u8 = null,
     model: []const u8,
     reasoning_effort: ?[]const u8,
     effort_source: enum { flag, saved, model_default },
@@ -3614,7 +3620,8 @@ const StartConfiguration = struct {
     fn resolve(input: configure_input.ConfigureInput, effort_flag: bool, saved_effort: ?model_capability.ReasoningEffort) StartConfiguration {
         const model = input.model.value;
         return .{
-            .provider = input.provider.value,
+            .provider = if (input.parent.present) null else input.provider.value,
+            .parent = if (input.parent.present) input.parent.value else null,
             .model = model,
             .reasoning_effort = input.reasoning_effort.value,
             .effort_source = if (effort_flag) .flag else if (model_capability.startEffort(model_catalog.shipped, saved_effort, model) != null) .saved else .model_default,
@@ -3633,7 +3640,16 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
     if (configuration) |value| {
         std.debug.assert(reply.isAccepted() and reply.target == .message and reply.target.message.creates_session);
         try writer.writeAll(",\"configuration\":");
-        try std.json.Stringify.value(value, .{}, writer);
+        if (value.parent != null) {
+            try std.json.Stringify.value(value, .{}, writer);
+        } else {
+            try std.json.Stringify.value(.{
+                .provider = value.provider,
+                .model = value.model,
+                .reasoning_effort = value.reasoning_effort,
+                .effort_source = value.effort_source,
+            }, .{}, writer);
+        }
     }
     switch (reply.target) {
         .model_interruption => |target| try writer.print(",\"request_target\":{{\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{ target.turn, target.operation }),
@@ -3725,7 +3741,7 @@ test "session start configuration reports resolved effort and its source" {
             .model = .{ .present = true, .value = case.model },
             .reasoning_effort = .{ .present = case.present, .value = case.override },
         }, case.flag, case.saved);
-        try std.testing.expectEqualStrings("openai", value.provider);
+        try std.testing.expectEqualStrings("openai", value.provider.?);
         try std.testing.expectEqualStrings(case.model, value.model);
         try std.testing.expectEqual(case.source, value.effort_source);
         if (case.effort) |effort| {
@@ -3747,6 +3763,18 @@ test "session start mutation receipt adds configuration without changing send" {
     var writer = std.Io.Writer.fixed(&buffer);
     try writeMutationJson(&writer, reply, .{ .provider = "codex", .model = "gpt-6.1-sol", .reasoning_effort = "low", .effort_source = .model_default });
     try std.testing.expectEqualStrings(context ++ ",\"configuration\":{\"provider\":\"codex\",\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\",\"effort_source\":\"model_default\"}" ++ tail, writer.buffered());
+    writer.end = 0;
+    const attached = StartConfiguration.resolve(.{
+        .store = "/store",
+        .session = .create,
+        .parent = .{ .present = true, .value = "09azvw" },
+        .model = .{ .present = true, .value = "unlisted-model" },
+        .reasoning_effort = .{ .present = true, .value = "low" },
+    }, false, null);
+    try std.testing.expect(attached.provider == null);
+    try std.testing.expectEqualStrings("09azvw", attached.parent.?);
+    try writeMutationJson(&writer, reply, attached);
+    try std.testing.expectEqualStrings(context ++ ",\"configuration\":{\"provider\":null,\"parent\":\"09azvw\",\"model\":\"unlisted-model\",\"reasoning_effort\":\"low\",\"effort_source\":\"model_default\"}" ++ tail, writer.buffered());
     writer.end = 0;
     reply.target.message.creates_session = false;
     try writeMutationJson(&writer, reply, null);

@@ -72,8 +72,8 @@ pub const Command = enum {
 
     fn definitionValue(self: Command) Definition {
         return switch (self) {
-            .session_start => .{ .resource = .session, .name = "start", .description = "Read the first Message from stdin, atomically create a Session and admit that Message. Print a JSON mutation receipt with the new ID in .context.session, the request handle in .context.key and the resolved configuration, not a completed answer. Settings use fresh-Session defaults; set instructions separately with session configure --instructions -. Recover the original request as kind message after lost output.", .details = label_help, .options = destination ++ capture ++ binding ++ start_settings, .mutation = true },
-            .session_configure => .{ .resource = .session, .name = "configure", .description = "Capture settings, including the Session's Label (its name or title), then admit configuration only. Omit the Session selector to create a fresh address with concrete defaults; addressed changes preserve omitted settings. --reload-skills only rescans this Session catalog, appends changed catalog instructions, and acknowledges without starting model work. Do not combine it with settings.", .details = compaction_help, .options = destination ++ session ++ capture ++ binding ++ settings ++ &[_]Option{flag("reload-skills")}, .conflicts = settings_conflicts, .mutation = true },
+            .session_start => .{ .resource = .session, .name = "start", .description = "Read the first Message from stdin, atomically create a Session and admit that Message. Print a JSON mutation receipt with the new ID in .context.session, the request handle in .context.key and the resolved configuration, not a completed answer. Settings use fresh-Session defaults; set instructions separately with session configure --instructions -. Recover the original request as kind message after lost output.", .details = label_help ++ parent_help, .options = destination ++ capture ++ parent ++ binding ++ start_settings, .mutation = true },
+            .session_configure => .{ .resource = .session, .name = "configure", .description = "Capture settings, including the Session's Label (its name or title), then admit configuration only. Omit the Session selector to create a fresh address with concrete defaults; addressed changes preserve omitted settings. --reload-skills only rescans this Session catalog, appends changed catalog instructions, and acknowledges without starting model work. Do not combine it with settings.", .details = compaction_help, .options = destination ++ session ++ capture ++ parent ++ binding ++ settings ++ &[_]Option{flag("reload-skills")}, .conflicts = settings_conflicts, .mutation = true },
             .session_send => .{ .resource = .session, .name = "send", .description = "Read exact Message text from stdin and admit it to --to ID, exactly six lowercase Crockford characters (for example k7m2qx). Peers use their sender's Store and reject a conflicting --store. Without a sender, --store or saved Store defaults apply. Returns an admission receipt, before the recipient completes. Each /name word in the text that names one of the recipient's advertised skills appends that skill's complete SKILL.md and absolute path to what the model reads; the text itself is saved as written. Empty stdin sends nothing.", .options = destination ++ capture ++ &[_]Option{value("to", "ID")}, .mutation = true, .requires = &.{&.{"to"}} },
             .session_inspect => .{ .resource = .session, .name = "inspect", .description = "Read saved Session settings and work as JSON, or export exact retained failed-response bytes. Inspection never admits work.", .details = "--failed-response body|metadata requires --operation ID and --attempt N, excludes --profile, and writes only that stored byte stream to stdout. Redirect body output to a file; it can contain binary or private data. Missing records or omitted bodies fail on stderr. Partial bodies export their retained prefix; inspect metadata for status. No Host is started and no provider is contacted.\n", .options = destination ++ session ++ &[_]Option{ choice("profile", cli_value.ReportProfile), choice("failed-response", cli_value.FailedResponsePart), value("operation", "ID"), value("attempt", "N") }, .conflicts = &.{.{ .code = .profile_excludes_failed_response, .a = "profile", .b = "failed-response" }}, .requires = need_session },
             .session_list => .{ .resource = .session, .name = "list", .description = "List active Sessions in the current Workspace, or all Workspaces with --all, as one JSON value. --archived lists only archived Sessions; --include-archived includes both. --since TOKEN, the since of an earlier listing, lists only the Sessions that may have changed since it (delta changed), nothing (not_modified), or every Session (full).", .options = destination ++ &[_]Option{ flag("all"), flag("archived"), flag("include-archived"), value("since", "TOKEN") }, .conflicts = &.{.{ .code = .archive_visibility_conflict, .a = "archived", .b = "include-archived" }} },
@@ -141,7 +141,15 @@ pub const reasoning_help =
     \\
 ;
 
-const compaction_help = label_help ++ reasoning_help ++ compaction_policy ++
+const parent_help =
+    \\--parent ID creates an attached Session that inherits its parent's provider, Workspace and saved Bash environment.
+    \\Omit --provider and --workspace; even equal overrides are refused. Tools must be within the parent's configured set, and an asking parent requires ask.
+    \\Other creation settings use normal CLI defaults. Specify --compaction-trigger TOKENS when the parent's provider needs a different threshold than the CLI default binding.
+    \\Start receipts show provider null and parent ID for inherited binding. Existing Sessions cannot change parent.
+    \\
+;
+
+const compaction_help = label_help ++ parent_help ++ reasoning_help ++ compaction_policy ++
     \\ Inspect settings with rui session inspect.
     \\Omit --session to allocate a new six-character ID. --session ID updates only an existing Session; unknown IDs never create one.
     \\
@@ -149,6 +157,7 @@ const compaction_help = label_help ++ reasoning_help ++ compaction_policy ++
 
 const destination = serve_grammar.destination;
 const session = &[_]Option{value("session", "ID")};
+const parent = &[_]Option{value("parent", "ID")};
 const key = &[_]Option{ value("key", "KEY"), hex("key-hex", "key", 128) };
 const capture = &[_]Option{ value("record", "FILE"), value("key", "KEY"), hex("key-hex", "key", 128), hiddenValue("test-drop-reply") };
 const binding = settingOptions(.binding, false);
@@ -830,4 +839,18 @@ test "every retired Host flag rejects and renders its generated replacement" {
             }
         }
     }
+}
+
+test "parent relation reaches only creating command grammars without hiding canonical refusals" {
+    for ([_]Command{ .session_start, .session_configure }) |command| {
+        var storage: [1024]u8 = undefined;
+        const parsed = try testParse(command.definition(), &.{ "--parent", "k7m2qx", "--provider", "codex", "--workspace", "/same" }, &storage);
+        try std.testing.expectEqualStrings("k7m2qx", parsed.getNamed("parent").?);
+        try std.testing.expectEqualStrings("codex", parsed.getNamed("provider").?);
+        try std.testing.expectEqualStrings("/same", parsed.getNamed("workspace").?);
+        try expectValidation(command, &.{ "--parent", "k7m2qx", "--parent", "k7m2qx" }, error.DuplicateArgument);
+        try expectValidation(command, &.{"--parent"}, error.MissingArgumentValue);
+    }
+    try expectValidation(.session_configure, &.{ "--session", "k7m2qx", "--parent", "09azvw" }, false);
+    try expectValidation(.session_send, &.{ "--to", "k7m2qx", "--parent", "09azvw" }, error.UnknownArgument);
 }

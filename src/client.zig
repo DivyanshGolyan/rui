@@ -2212,7 +2212,7 @@ const Capture = struct {
     fn writeConfiguration(self: *Capture, input: ConfigureInput) !void {
         try self.write("{");
         var separator: []const u8 = "";
-        inline for (@import("session_settings.zig").entries) |entry| {
+        inline for (@import("session_settings.zig").spec_entries) |entry| {
             const value = @field(input, entry.field);
             const present = switch (entry.kind) {
                 .content => value.state != .omitted,
@@ -5928,4 +5928,63 @@ test "read-only capture routing does not eagerly validate a replay body" {
     const observed = try inspectCapturedRequest(io, root, key.slice());
     try std.testing.expectEqualStrings(root, observed.paths.selector());
     try std.testing.expectEqualStrings(key.slice(), observed.identity.key.slice());
+}
+
+test "parent relation survives Configure and creating Message capture through native ingress" {
+    const host_request = @import("wire_request.zig");
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    for ([_]bool{ false, true }) |creating_message| {
+        for ([_]bool{ false, true }) |explicit_overrides| {
+            const input: ConfigureInput = .{
+                .store = root,
+                .session = .create,
+                .parent = .{ .present = true, .value = "k7m2qx" },
+                .provider = if (explicit_overrides) .{ .present = true, .value = "codex" } else .{},
+                .workspace = if (explicit_overrides) .{ .present = true, .value = root } else .{},
+                .model = .{ .present = true, .value = "unlisted-model" },
+                .tools = "bash,find_tools",
+                .loaded_tools = "bash",
+                .permission_mode = .{ .present = true, .value = "ask" },
+                .compaction_trigger = .{ .present = true, .value = "1000" },
+                .reasoning_effort = .{ .present = true, .value = "low" },
+            };
+            var captured = try (if (creating_message)
+                captureMessage(io, .{ .store = root, .session = "", .text = "task\x00\n", .configuration = input }, .{ .generated = root })
+            else
+                captureConfigure(io, input, .{ .generated = root })).get();
+            defer captured.close(io);
+            try std.testing.expectEqual(if (creating_message) protocol.CommandKind.message else .configure, captured.identity().kind);
+            try std.testing.expectEqualStrings("", captured.identity().session.slice());
+            var bytes: [8192]u8 = undefined;
+            const length = try captured.file.readPositionalAll(io, &bytes, 0);
+            const ingress = try std.testing.allocator.create(host_request.Ingress);
+            defer std.testing.allocator.destroy(ingress);
+            var retained: ?@import("named_scratch.zig").Owner = null;
+            ingress.init(std.testing.allocator, .{ .io = io, .content_length = length, .scratch_path = root, .request_number = 1, .retained_scratch = &retained });
+            defer ingress.deinit();
+            try ingress.feed(bytes[0..length]);
+            const request = try ingress.finish();
+            defer request.removeTemporaryContent(io) catch unreachable;
+            const configuration = if (creating_message) &request.message.configuration.? else &request.configure.configuration;
+            try std.testing.expectEqualStrings("k7m2qx", configuration.parent.value.slice());
+            try std.testing.expectEqualStrings("unlisted-model", configuration.model.value.slice());
+            try std.testing.expectEqualStrings("bash find_tools", configuration.tools.names.slice());
+            try std.testing.expectEqualStrings("bash", configuration.loaded_tools.names.slice());
+            try std.testing.expectEqualStrings("ask", configuration.permission_mode.value.slice());
+            try std.testing.expectEqualStrings("1000", configuration.compaction_trigger.value.slice());
+            try std.testing.expectEqualStrings("low", configuration.reasoning_effort.value.slice());
+            if (explicit_overrides) {
+                try std.testing.expectEqualStrings("codex", configuration.provider.value.slice());
+                try std.testing.expectEqualStrings(root, configuration.workspace.value.slice());
+            } else {
+                try std.testing.expect(configuration.provider.state == .omitted);
+                try std.testing.expect(configuration.workspace.state == .omitted);
+            }
+        }
+    }
 }
