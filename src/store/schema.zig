@@ -62,7 +62,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 73, .digest = 0x515b60c7f5df332d },
     .{ .schema_version = 74, .digest = 0xda8e267adbfcef45 },
     .{ .schema_version = 75, .digest = 0xcea5bf4db0d3978d },
-    .{ .schema_version = 76, .digest = 0x3f383106b7b83edd },
+    .{ .schema_version = 76, .digest = 0x0d2cb1706af6379c },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -738,6 +738,7 @@ pub const migrations = [_]Migration{
             "CREATE INDEX action_operation_background ON action_operation(session_ref,background_position)",
             "CREATE INDEX action_operation_background_results ON action_operation(session_ref,parent_operation_id,background_position) WHERE background_position IS NOT NULL",
             "CREATE INDEX action_operation_background_ready ON action_operation(parent_operation_id,action_id) WHERE background_position IS NOT NULL AND authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0",
+            "CREATE INDEX action_operation_awaiting ON action_operation(session_ref,action_id) WHERE authorized=0 AND resolution_code IS NULL",
             "ALTER TABLE session_stop RENAME TO session_stop_before_76",
             "CREATE TABLE session_stop(\n command_key TEXT PRIMARY KEY NOT NULL REFERENCES core_command(command_key),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n selected_turn_id INTEGER REFERENCES turn(turn_id),\n position INTEGER CHECK(position>0),\n admission_cutoff INTEGER NOT NULL CHECK(admission_cutoff>=0),\n stopped_at INTEGER NOT NULL CHECK(stopped_at>0),\n parent_caused INTEGER NOT NULL DEFAULT 0 CHECK(parent_caused IN (0,1)), action_cutoff INTEGER NOT NULL DEFAULT 0 CHECK(action_cutoff>=0)\n) STRICT, WITHOUT ROWID",
             "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused,action_cutoff) SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused,0 FROM session_stop_before_76",
@@ -760,6 +761,7 @@ pub const migrations = [_]Migration{
             "CREATE INDEX action_operation_background ON action_operation(session_ref,background_position)",
             "ALTER TABLE action_operation ADD COLUMN action_operation_background_results_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN background_position IS NOT NULL THEN session_ref END) STORED, ADD INDEX action_operation_background_results(action_operation_background_results_lead,parent_operation_id,background_position)",
             "ALTER TABLE action_operation ADD COLUMN action_operation_background_ready_lead BIGINT GENERATED ALWAYS AS (CASE WHEN background_position IS NOT NULL AND authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0 THEN parent_operation_id END) STORED, ADD INDEX action_operation_background_ready(action_operation_background_ready_lead,action_id)",
+            "ALTER TABLE action_operation ADD COLUMN action_operation_awaiting_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN authorized=0 AND resolution_code IS NULL THEN session_ref END) STORED, ADD INDEX action_operation_awaiting(action_operation_awaiting_lead,action_id)",
             "ALTER TABLE session_stop ADD COLUMN action_cutoff BIGINT NOT NULL DEFAULT 0 CHECK(action_cutoff>=0) AFTER parent_caused",
             "CREATE TABLE action_control_command(\n command_key VARCHAR(128) NOT NULL,\n action_id TEXT NOT NULL,\n selected_action_id BIGINT,\n selection VARCHAR(10),\n selection_position BIGINT,\n PRIMARY KEY(command_key),\n FOREIGN KEY(command_key) REFERENCES core_command(command_key),\n FOREIGN KEY(selected_action_id) REFERENCES action_operation(action_id),\n CHECK(OCTET_LENGTH(action_id) BETWEEN 1 AND 20 AND (NOT REGEXP_LIKE(action_id,'[^0-9]','c'))),\n CHECK(selection IS NULL OR selection IN ('background','final')),\n CHECK(selection_position>0),\n CHECK((selected_action_id IS NULL AND selection IS NULL AND selection_position IS NULL) OR (selected_action_id IS NOT NULL AND selection IS NOT NULL AND selection_position IS NOT NULL))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
         },
@@ -1906,6 +1908,7 @@ pub const indexes = [_]Index{
     .{ .name = "action_operation_background", .table = "action_operation", .columns = &.{ "session_ref", "background_position" } },
     .{ .name = "action_operation_background_results", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "background_position" }, .where = "background_position IS NOT NULL" },
     .{ .name = "action_operation_background_ready", .table = "action_operation", .columns = &.{ "parent_operation_id", "action_id" }, .where = "background_position IS NOT NULL AND authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0" },
+    .{ .name = "action_operation_awaiting", .table = "action_operation", .columns = &.{ "session_ref", "action_id" }, .where = "authorized=0 AND resolution_code IS NULL" },
     .{ .name = "model_operation_turn_history", .table = "model_operation", .columns = &.{ "turn_id", "operation_id" } },
     // Every Operation by admission, whatever its outcome: request history
     // places each earlier Operation's effort boundary (codec /2).
@@ -3101,7 +3104,7 @@ test "schema 76 migration creates canonical promotion objects on SQLite and MySQ
                 return error.NoncanonicalMigrationObject;
             }
         }
-        try std.testing.expectEqual(@as(usize, if (dialect == .sqlite) 12 else 2), matched);
+        try std.testing.expectEqual(@as(usize, if (dialect == .sqlite) 13 else 2), matched);
     }
 }
 
@@ -3247,6 +3250,7 @@ test "schema 57 migration creates the canonical archive objects on SQLite and My
                     "CREATE TABLE core_command(\n command_key TEXT NOT NULL UNIQUE CHECK(length(CAST(command_key AS BLOB))<=128),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 6),\n target TEXT NOT NULL CHECK(length(CAST(target AS BLOB))<=128),\n input_digest BLOB NOT NULL CHECK(length(input_digest)=32),\n primary_content_id INTEGER REFERENCES content(content_id),\n secondary_content_id INTEGER REFERENCES content(content_id),\n accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),\n code TEXT NOT NULL CHECK(length(CAST(code AS BLOB))<=96),\n revision INTEGER NOT NULL CHECK(revision>=0),\n created INTEGER NOT NULL CHECK(created IN (0,1)),\n command_seq INTEGER PRIMARY KEY NOT NULL CHECK(command_seq>0)\n) STRICT",
                     "CREATE TABLE session_ending_owed(\n turn_id INTEGER PRIMARY KEY NOT NULL REFERENCES turn(turn_id) CHECK(turn_id>0),\n delivered INTEGER NOT NULL CHECK(delivered BETWEEN 0 AND 1),\n suppress_message INTEGER NOT NULL DEFAULT 0 CHECK(suppress_message IN (0,1))\n) STRICT, WITHOUT ROWID",
                     "CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)",
+                    "CREATE TABLE session_stop(\n command_key TEXT PRIMARY KEY NOT NULL REFERENCES core_command(command_key),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n selected_turn_id INTEGER REFERENCES turn(turn_id),\n position INTEGER CHECK(position>0),\n admission_cutoff INTEGER NOT NULL CHECK(admission_cutoff>=0),\n stopped_at INTEGER NOT NULL CHECK(stopped_at>0),\n parent_caused INTEGER NOT NULL DEFAULT 0 CHECK(parent_caused IN (0,1))\n) STRICT, WITHOUT ROWID",
                 };
                 for (retired) |object| {
                     if (dialect == .sqlite and std.mem.eql(u8, object, statement)) {
@@ -3470,9 +3474,24 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
     try std.testing.expect(try metaEquals(database, "format", format_text));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'"));
     inline for (.{ "model_output_item", "model_tool_call", "model_output_part", "action_operation", "conversation_entry" }) |name| {
-        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_" ++ name ++ " EXCEPT SELECT * FROM " ++ name ++ ")"));
-        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM " ++ name ++ " EXCEPT SELECT * FROM original_" ++ name ++ ")"));
+        const columns_read = try sqlite.prepare(database, "SELECT group_concat('\"'||replace(name,'\"','\"\"')||'\"',',') FROM pragma_table_info('original_" ++ name ++ "')");
+        defer _ = c.sqlite3_finalize(columns_read);
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(columns_read));
+        const columns = try columnText(columns_read, 0);
+        try std.testing.expect(columns.len > 0);
+        const current_columns = if (comptime std.mem.eql(u8, name, "action_operation")) columns: {
+            try std.testing.expect(std.mem.indexOf(u8, columns, "\"bash_timeout_ms\"") != null);
+            break :columns try std.mem.replaceOwned(u8, std.testing.allocator, columns, "\"bash_timeout_ms\"", "\"attempt_timeout_ms\"");
+        } else try std.testing.allocator.dupe(u8, columns);
+        defer std.testing.allocator.free(current_columns);
+        const forward = try std.fmt.allocPrintSentinel(std.testing.allocator, "SELECT count(*) FROM (SELECT {s} FROM original_{s} EXCEPT SELECT {s} FROM {s})", .{ columns, name, current_columns, name }, 0);
+        defer std.testing.allocator.free(forward);
+        const reverse = try std.fmt.allocPrintSentinel(std.testing.allocator, "SELECT count(*) FROM (SELECT {s} FROM {s} EXCEPT SELECT {s} FROM original_{s})", .{ current_columns, name, columns, name }, 0);
+        defer std.testing.allocator.free(reverse);
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, forward));
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, reverse));
     }
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM action_operation WHERE background_content_id IS NOT NULL OR background_position IS NOT NULL OR background_at IS NOT NULL"));
     inline for (updates) |sql| {
         // Both ASCII and multibyte UTF-8 use byte, not character, bounds.
         for ([_][]const u8{ &ascii_line, &utf8_line }) |line| {

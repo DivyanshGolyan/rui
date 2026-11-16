@@ -240,3 +240,33 @@ test "client decoders retain promoted old Turn approval before and after continu
         try PromotedApproval.expect(&storage, &tmp, session.slice(), action, false);
     }
 }
+
+test "saved invalid Action targets round trip through Store observation and exact replay" {
+    inline for (.{ @as(u64, 0), std.math.maxInt(u64) }) |target| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: store.Store = undefined;
+        try store.testing.testingSqliteStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        var command: @import("command_input.zig").ActionBackgroundCommand = .{ .action_id = target };
+        try command.key.set("invalid-action-target");
+        try command.session.set("k7m2qx");
+        const free: usize = 2;
+        const capacity: store.ActionCapacityView = .{ .total = 2, .context = &free, .freeFn = struct {
+            fn read(context: *const anyopaque) usize {
+                return @as(*const usize, @ptrCast(@alignCast(context))).*;
+            }
+        }.read };
+        const refused = storage.backgroundAction(&command, capacity, .{});
+        try std.testing.expect(refused == .rejected and refused.rejected.code == .invalid_target and !refused.rejected.replayed);
+        const observed = try store.testing.observeCommandForTesting(&storage, command.key.slice());
+        var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer output.deinit();
+        try @import("host_reply.zig").renderFullCommandObservation(.{ .writer = &output.writer }, command.key.slice(), &observed, null);
+        const decoded = try protocol_reply.CommandObservation.parse(.{ .status = 200, .body = output.written() }, command.key.slice());
+        try std.testing.expectEqual(target, decoded.action_target.?);
+        try std.testing.expectEqualStrings("invalid_target", decoded.failureCode().?);
+        const replay = storage.backgroundAction(&command, capacity, .{});
+        try std.testing.expect(replay == .rejected and replay.rejected.code == .invalid_target and replay.rejected.replayed);
+    }
+}

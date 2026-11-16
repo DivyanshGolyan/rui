@@ -377,8 +377,10 @@ fn uncoveredBytesSql(comptime session: []const u8, comptime usage_position: []co
             "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=o.operation_id AND tool_call.session_ref=o.session_ref " ++
             "JOIN content c ON c.content_id=tool_call.rejection_content_id WHERE o.session_ref=" ++ session ++ " AND o.admission_position>=" ++ result_admission ++ " " ++
             "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ " AND tool_call.acceptance_position>" ++ later ++ ")",
-        "(SELECT coalesce(sum(c.byte_length),0) FROM action_operation a JOIN content c ON c.content_id=" ++ tool_fulfillment.actionContentSql("a") ++ " " ++
-            "WHERE a.session_ref=" ++ session ++ " AND " ++ tool_fulfillment.actionPositionSql("a") ++ ">" ++ later ++ ")",
+        "((SELECT coalesce(sum(c.byte_length),0) FROM action_operation a JOIN content c ON c.content_id=a.background_content_id " ++
+            "WHERE a.session_ref=" ++ session ++ " AND a.background_position>" ++ later ++ ") + " ++
+            "(SELECT coalesce(sum(c.byte_length),0) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id " ++
+            "WHERE a.session_ref=" ++ session ++ " AND a.background_position IS NULL AND a.acceptance_position>" ++ later ++ "))",
         "(SELECT coalesce(sum(c.byte_length),0) FROM message_admission m JOIN content c ON c.content_id=m.content_id " ++
             "WHERE m.session_ref=" ++ session ++ " AND " ++ runnable_eligibility_sql ++ ")",
         "(SELECT coalesce(sum(c.byte_length),0) FROM message_admission m JOIN message_skill k ON k.admission_id=m.admission_id " ++

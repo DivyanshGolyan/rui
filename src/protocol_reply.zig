@@ -1837,7 +1837,7 @@ pub const CommandObservation = struct {
         if (facts.completion.value) |value| observed.completion = value.status.value;
         if (facts.interruption_target.value) |value| observed.interruption_target = .{ .session = value.session.value, .turn = try decimalId(value.turn, true), .operation = try decimalId(value.operation, true) };
         if (facts.permission_target.value) |value| observed.permission_target = .{ .action = try decimalId(value.action, true), .decision = value.decision.value };
-        if (facts.action_target.value) |value| observed.action_target = try decimalId(value.action, false);
+        if (facts.action_target.value) |value| observed.action_target = try decimalId(value.action, true);
         if (facts.action_selection.value) |value| observed.action_selection = .{ .kind = value.kind.value, .position = try decimalId(value.position, false) };
         try observed.validate();
         if (since) |token| {
@@ -3320,6 +3320,21 @@ test "keyed observation validates every operation shape and binding" {
     const rejection = try CommandObservation.parse(.{ .status = 200, .body = prefix ++ "\"kind\":\"message\",\"status\":\"rejected\",\"state\":\"rejected\",\"code\":\"unknown_session\"}}" }, "k");
     const other = try MessageAddress.init("/store", "09azvw", "k");
     try std.testing.expectError(error.RequestBindingMismatch, rejection.forMessage(&other));
+}
+
+test "keyed Action observation preserves requested zero and maximum targets but rejects zero selection positions" {
+    inline for (.{ "0", "18446744073709551615" }) |target| {
+        const facts = "{\"status\":\"rejected\",\"kind\":\"action_background\",\"target\":\"k7m2qx\",\"code\":\"invalid_target\",\"action_target\":{\"action\":\"" ++ target ++ "\"}}";
+        const observed = try CommandObservation.parse(.{ .status = 200, .body = testing_observation_prefix ++ facts ++ "}" }, "k");
+        try std.testing.expectEqual(try std.fmt.parseInt(u64, target, 10), observed.action_target.?);
+        try std.testing.expectEqualStrings("invalid_target", observed.failureCode().?);
+        var output: [protocol.command_observation_reply.max_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&output);
+        try observed.writeJson(&writer);
+        try std.testing.expectEqualStrings(facts, writer.buffered());
+    }
+    const selected = testing_observation_prefix ++ "{\"status\":\"accepted\",\"kind\":\"action_background\",\"target\":\"k7m2qx\",\"action_target\":{\"action\":\"29\"},\"action_selection\":{\"kind\":\"background\",\"position\":\"0\"}}}";
+    try std.testing.expectError(error.InvalidResponse, CommandObservation.parse(.{ .status = 200, .body = selected }, "k"));
 }
 
 test "keyed observation distinguishes named statuses and omitted fields from numeric tags and null" {
