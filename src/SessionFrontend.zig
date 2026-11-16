@@ -4849,7 +4849,6 @@ const ArchiveOverview = struct {
     stops: usize = 0,
     host_inputs: usize = 0,
     cancels: usize = 0,
-    said: [256]u8 = undefined,
     archived: ?overview_view.Reference = null,
     requested: bool = true,
 
@@ -4888,7 +4887,7 @@ const ArchiveOverview = struct {
 
     fn line(raw: *anyopaque, work: protocol.session_work.Kind) Lender.Said {
         const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
-        const said = overview_view.conversation(&self.state, "k7m2qx".*, work, .{}, self.said[0..160]);
+        const said = overview_view.conversation(&self.state, "k7m2qx".*, work);
         return .{ .text = said.text, .notice = said.notice, .stoppable = said.stoppable };
     }
 

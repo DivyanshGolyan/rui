@@ -68,8 +68,9 @@ def pinned_settings():
         frame = screen.contains("Settings")
         rows = frame.split("\n")
         settings = next(i for i, line in enumerate(rows) if "Settings" in line)
-        assert settings == len(rows) - 2, frame
-        assert re.fullmatch(r"─+", rows[settings - 1]), frame
+        assert settings == len(rows) - 3, frame
+        assert re.search(r"0\.\d+\.\d+", rows[settings + 1]), frame
+        assert "rui " not in rows[settings + 1] and "tools " not in rows[settings + 1], frame
         assert rows[-1].rstrip().endswith("enter open"), frame
         assert "Type a task" not in frame and "gpt-6-luna" not in frame, frame
         before = requests(w)
@@ -81,7 +82,7 @@ def pinned_settings():
         assert "Type a task" not in frame and "/nope" not in frame and "pasted task" not in frame, frame
         assert "Unknown command" not in frame and requests(w) == before, frame
         assert json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"] == [], frame
-    print("overview drawing: Settings ends the list above one Footer; text and paste create no draft or request", flush=True)
+    print("overview drawing: Settings sits above memory/version and one Footer; text and paste create no draft or request", flush=True)
 
 
 def requests(w):

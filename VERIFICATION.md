@@ -14,6 +14,10 @@ Git history keeps earlier test specifications and dated results.
 - For candidate admission, landing cadence, promotion, or release publication, read [Landing and release evidence](docs/verification/release.md).
 - For native platforms, resource campaigns, or release demonstrations, read [Native qualification and demonstrations](docs/verification/qualification.md).
 
+## Sidebar and upgrade feedback
+
+The [Session UI contract](docs/contracts/session-ui.md#required-evidence) requires owner-domain tests for memory fitting, update-button states and drawn-target admission, and chat-only footer feedback, including narrow widths. Reverting mutations must fail the relevant assertions. Capture current, available, updating and failed sidebar states and the chat after an update in day and night at 140×40 and 46×30 using verify-rui, before and after. Frames are renderer evidence, not physical-input evidence.
+
 ## Contract index
 
 ARCHITECTURE owns behavior; tests own cases.

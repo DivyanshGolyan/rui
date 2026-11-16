@@ -807,13 +807,12 @@ class TerminalScreen:
         self.empty_session(case, session)
         return frame
 
-    def empty_chat(self, case, session, *, expected_notice=None):
+    def empty_chat(self, case, session):
         facts = self.empty_session(case, session)
-        footer = "alt+i info" if expected_notice is None else expected_notice
-        assert footer, "empty chat requires an info action or an exact retained notice"
-        frame = wait_for(self.observe, "empty chat model facts and expected footer", timeout=15,
+        frame = wait_for(self.observe, "empty chat model facts and chat-only footer", timeout=15,
                          ready=lambda screen: shown(f"│ {facts['model']} · ", screen)
-                         and shown(footer, screen))
+                         and shown("alt+i info", screen)
+                         and "Upgraded to " not in screen and " · upgraded to " not in screen)
         return frame
 
     def leave_empty_chat(self, case, session):
@@ -1078,7 +1077,8 @@ def proof_relaunched(c, screen, process):
 
     wait_for(observed, "selected release replaced the original TUI PID after terminal restoration",
              timeout=15, ready=lambda value: value[:3] == (installed, 2, 1))
-    screen.contains(f"Upgraded to {c.releases.version} · Host restarted")
+    frame = screen.contains("Settings")
+    assert "Upgraded to " not in frame and " · upgraded to " not in frame, frame
     assert screen.capture.alternate
 
 
@@ -1146,7 +1146,7 @@ def terminal_cases(root, binary, releases, artifacts):
             screen.start_upgrade()
             screen.contains(" · up to date")
             screen.close_settings()
-            screen.contains(f"Rui is up to date ({releases.version})")
+            screen.contains(releases.version)
             assert os_semantics.process_executable(process.pid) == c.link.resolve()
             screen.ignored_overview_input("unchanged δ ignored", "unchanged δ ignored")
             screen.save(artifacts, "overview-unchanged")
@@ -1191,13 +1191,13 @@ def conversation_case(root, binary, releases, artifacts):
             screen.start_upgrade()
             screen.contains(" · publishing")
             screen.close_settings()
-            screen.contains("Publishing; cancelling no longer rolls back")
+            frame = screen.contains("Updating…")
+            assert "Publishing; cancelling" not in frame, frame
             screen.send("\x01\x0bconversation β draft\x01\x1b[C\x1b[C\x1b[C")
             screen.draft("conversation β draft", 5)
             published.unlink()
             proof_relaunched(c, screen, process)
-            screen.empty_chat(c, session,
-                              expected_notice=f"Upgraded to {c.releases.version} · Host restarted")
+            screen.empty_chat(c, session)
             screen.draft("conversation β draft", 5)
             screen.save(artifacts, "conversation-installed")
             proof_ready(c, previous, old_host)
@@ -1267,7 +1267,8 @@ def terminal_download_recovery(root, binary, releases, artifacts):
             screen.contains(f" · upgraded to {releases.version}")
             screen.save(artifacts, "download-recovered-settings")
             screen.close_settings()
-            screen.contains(f"Upgraded to {releases.version}")
+            frame = screen.contains(releases.version)
+            assert "Upgraded to " not in frame, frame
             proof_ready(c, previous, old_host)
             screen.save(artifacts, "download-recovered")
             curl.assert_attempts([("/releases/latest", "normal", 6),
@@ -1301,7 +1302,7 @@ def terminal_download_failure(root, binary, releases, artifacts):
             assert screen.entries == 1 and screen.restorations == 0, "failed check relaunched"
             screen.save(artifacts, "download-failure-settings")
             screen.close_settings()
-            screen.contains("Couldn't reach GitHub; nothing changed")
+            screen.contains("Update failed")
             receipt = exit_on_sigint(screen, process, "restored curl download failure report")
             assert b"curl: (22)" in receipt and b"403" in receipt, receipt.decode()
             assert b"could not download release information" in receipt, receipt.decode()
@@ -1329,7 +1330,8 @@ def terminal_cancellation_guidance(root, binary, releases, artifacts):
             screen.start_upgrade()
             screen.contains(f" · upgraded to {releases.version}")
             screen.close_settings()
-            screen.contains(f"Upgraded to {releases.version}")
+            frame = screen.contains(releases.version)
+            assert "Upgraded to " not in frame, frame
             proof_ready(c, previous, old_host)
             assert os_semantics.process_executable(process.pid) == binary
             screen.save(artifacts, "cancellation-guidance-installed")
@@ -1353,7 +1355,8 @@ def terminal_path_guidance(root, binary, releases, artifacts):
             screen.start_upgrade()
             screen.contains(f" · upgraded to {releases.version}")
             screen.close_settings()
-            screen.contains(f"Upgraded to {releases.version}")
+            frame = screen.contains(releases.version)
+            assert "Upgraded to " not in frame, frame
             proof_ready(c, previous, old_host)
             screen.ignored_overview_input("guidance ε ignored", "guidance ε ignored")
             assert os_semantics.process_executable(process.pid) == binary
@@ -1407,8 +1410,9 @@ def startup_cases(root, binary, releases, artifacts):
                     screen.start_upgrade()
                     screen.contains(" · publishing")
                     screen.close_settings()
-                    screen.contains("Publishing; cancelling no longer rolls back")
+                    frame = screen.contains("Updating…" if screen_kind == "resume" else "Publishing; cancelling no longer rolls back")
                     if screen_kind == "resume":
+                        assert "Publishing; cancelling" not in frame, frame
                         screen.send("\x01\x0bstartup α draft\x01\x1b[C\x1b[C\x1b[C")
                         screen.draft("startup α draft", 5)
                     else:
@@ -1427,8 +1431,7 @@ def startup_cases(root, binary, releases, artifacts):
                     proof_relaunched(c, screen, process)
                     proof_ready(c, previous, old_host)
                     if screen_kind == "resume":
-                        screen.empty_chat(c, session,
-                                          expected_notice=f"Upgraded to {c.releases.version} · Host restarted")
+                        screen.empty_chat(c, session)
                         screen.draft("startup α draft", 5)
                         screen.send("X")
                         screen.draft("staXrtup α draft", 6)
@@ -1594,7 +1597,7 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
                 gate.release.set()
                 screen.contains(" · upgrade failed")
                 screen.close_settings()
-                screen.contains("Upgrade failed; nothing changed")
+                screen.contains("Update failed")
                 screen.save(artifacts, "dual-failure-status")
                 assert retained.is_dir(), "cleanup receipt did not identify an existing retained stage"
                 assert c.link.resolve() == c.original

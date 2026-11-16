@@ -371,7 +371,6 @@ relaunch_build: ?[]const u8 = null,
 upgrade_guidance: bool = false,
 relaunch_line: [upgrade_status.max_line_bytes]u8 = undefined,
 relaunch_line_len: usize = 0,
-conversation_said: [upgrade_status.max_line_bytes]u8 = undefined,
 title: session_chrome.Title = .{},
 jobs: [max_jobs]Job = undefined,
 job_count: usize = 0,
@@ -509,6 +508,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                     try self.dispatch(.all);
                 }
             }
+            if (!self.state.upgrading()) try self.appDiscoverUpgrade(ctx);
             if (!self.root.input.layer.settingsOpen()) try self.root.settings_page.widget().handleEvent(ctx, .tick);
             if (self.wantsFrame()) ctx.redraw = true;
             const open: ?[]const u8 = if (self.app_session) |shown| if (shown.frontend) |frontend| frontend.titleName() else null else null;
@@ -541,7 +541,8 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery:
 
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click } }));
+    const upgrade_admitted = if (self.app_session) |shown| (if (shown.frontend) |frontend| frontend.admitsUpgrade() else true) else true;
+    try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click, .upgrade_admitted = upgrade_admitted } }));
     ctx.redraw = true;
 }
 
@@ -642,8 +643,27 @@ fn appCopy(raw: *anyopaque, file: std.Io.File, start: u64, length: u64) !void {
     try app.vx.copyToSystemClipboard(app.tty.writer(), bytes, self.init.gpa);
 }
 
+fn appDiscoverUpgrade(self: *Self, ctx: *vxfw.EventContext) !void {
+    const job = &self.upgrade_job;
+    if (!job.started and !job.discovery_attempted) job.discover(self.init) catch {};
+    if (!job.discovering() or !job.started) return;
+    if (try job.advance()) {
+        const available = job.availability();
+        if (!std.meta.eql(available, self.state.upgrade.available)) {
+            _ = try self.event(.{ .available_upgrade = available });
+            ctx.redraw = true;
+        }
+    }
+}
+
 fn appUpgrade(self: *Self, ctx: *vxfw.EventContext) !void {
     const job = &self.upgrade_job;
+    if (job.discovering()) {
+        const cancelled = self.state.upgrade.run.? == .cancelling;
+        if (!try job.retireDiscovery()) return;
+        if (cancelled) job.cancel();
+        _ = try self.event(.{ .available_upgrade = null });
+    }
     if (!job.started and try self.quiesceUpgrade() and self.conversationSettled()) job.begin(self.init, self.options.store) catch {};
     const done = job.started and try job.advance();
     const stands = job.status();
@@ -686,6 +706,10 @@ fn conversationSettled(self: *const Self) bool {
 fn keepUpgrade(self: *Self) !void {
     const job = &self.upgrade_job;
     if (!job.started) return;
+    if (job.discovering()) {
+        job.deinit();
+        return;
+    }
     self.upgrade_guidance = self.upgrade_guidance or job.hasGuidance();
     if (self.relaunch_build) |build| self.init.gpa.free(build);
     self.relaunch_build = null;
@@ -803,10 +827,6 @@ fn restoreRelaunch(self: *Self) !void {
     self.options.restoration = null;
     for (value.drafts) |entry| try self.session_drafts.put(self.init.gpa, entry.id, entry.snapshot);
     if (value.open) |id| self.options.open = id[0..session_id.bytes].*;
-    var notice: view.Notice = .{ .colour = .normal };
-    @memcpy(notice.bytes[0..value.line.len], value.line);
-    notice.len = value.line.len;
-    self.state.notice = notice;
 }
 
 const SessionRows = struct {
@@ -931,6 +951,8 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     self.app_sessions.belowFn = SessionRows.below;
     self.app_settings_line.selected = self.state.selected == .settings;
     self.app_settings_line.memory = self.state.memory;
+    self.app_settings_line.run = self.state.upgrade.run;
+    self.app_settings_line.available = self.state.upgrade.available;
     self.app_settings_line.caps = self.caps;
     self.app_sessions.tail = .{ .widget = self.app_settings_line.widget(), .rows = view.layout(&self.state).settings.len() };
     self.app_sessions.caps = self.caps;
@@ -1153,7 +1175,10 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
         .read_first_lines => |reads| self.queue(.{ .lines = reads }),
         .create => |binding| self.queue(.{ .create = self.creationSnapshot(binding) }),
         .stop => |reference| self.queue(.{ .stop = reference }),
-        .cancel_upgrade => self.upgrade_job.cancel(),
+        .cancel_upgrade => {
+            self.upgrade_job.cancel();
+            if (self.upgrade_job.discovering()) _ = try self.event(.{ .upgrade = .cancelling });
+        },
         .archive => |request| self.queue(.{ .archive = request }),
         .pin => |request| self.queue(.{ .pin = request }),
         .list_models => self.queue(.models),
@@ -1497,7 +1522,7 @@ fn upgradeValue(raw: *anyopaque) session_upgrade.Upgrade {
 
 fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Said {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const said = view.conversation(&self.state, self.opened, kind, self.caps, &self.conversation_said);
+    const said = view.conversation(&self.state, self.opened, kind);
     return .{ .text = said.text, .notice = said.notice, .stoppable = said.stoppable };
 }
 
@@ -5492,7 +5517,7 @@ test "relaunch departure matrix preserves every screen and all unsent drafts" {
     }
 }
 
-test "relaunch startup ignores legacy overview bytes and restores chat drafts open conversation and notice once" {
+test "relaunch startup restores chat drafts and open conversation without upgrade notices" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -5518,7 +5543,7 @@ test "relaunch startup ignores legacy overview bytes and restores chat drafts op
     try rig.overview.restoreRelaunch();
     parsed.deinit();
     try std.testing.expectEqualStrings("bbbbbb", &rig.overview.options.open.?);
-    try std.testing.expectEqualStrings(line, view.footerNotice(&rig.overview.state).?);
+    try std.testing.expect(view.footerNotice(&rig.overview.state) == null);
     var status: view.StatusBuffer = undefined;
     try std.testing.expect(view.statusLine(&rig.overview.state, rig.overview.caps, &status) == null);
     for ([_][]const u8{ "aaaaaa", "bbbbbb" }) |id| {
@@ -7339,10 +7364,10 @@ test "Overview Settings live memory frame uses quiet role in day and night" {
         const row: u16 = for (0..24) |y| {
             if (std.mem.startsWith(u8, try shown.line(@intCast(y)), "  Settings")) break @intCast(y);
         } else return error.TestExpectedSettingsRow;
-        const text = try shown.line(row);
-        const memory = std.mem.indexOf(u8, text, "rui 38 MB · tools 120 MB") orelse return error.TestExpectedMemory;
+        const text = try shown.line(row + 1);
+        const memory = std.mem.indexOf(u8, text, "38 MB") orelse return error.TestExpectedMemory;
         const expected = @import("widget_style.zig").of(caps, .{ .colour = .quiet });
-        for (memory..memory + "rui 38 MB".len) |column| try std.testing.expectEqual(expected, shown.screen.readCell(@intCast(column), row).?.style);
+        for (memory..memory + "38 MB".len) |column| try std.testing.expectEqual(expected, shown.screen.readCell(@intCast(column), row + 1).?.style);
         try std.testing.expectEqual(rig.overview.state.memory, memoryValue(rig.overview));
     }
 }
@@ -7500,7 +7525,7 @@ test "Session pin drawn Root gestures preserve composer focus draft and caret ac
             }, .{ .row = 0, .col = 0 }) orelse return error.TestExpectedDrawnTarget;
             point.col += 4;
             switch (target) {
-                .settings => point.row += 1,
+                .settings => {},
                 .session => {
                     point.row += for (overview.app_sessions.shown_at) |span| {
                         if (span.target) |meaning| {
@@ -7571,5 +7596,70 @@ test "Session pin drawn Root gestures preserve composer focus draft and caret ac
         try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
         try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
         try std.testing.expect(!ctx.quit);
+    }
+}
+
+test "background discovery reaches the production version widget without requesting an upgrade" {
+    for (0..3) |case| {
+        const failed = case == 1;
+        const rig = try openOverview();
+        defer rig.close();
+        const overview = rig.overview;
+        const job = &overview.upgrade_job;
+        job.* = .{ .init = rig.init, .allocator = std.testing.allocator, .started = true, .discovery_attempted = true, .operation = .discover };
+        const Worker = struct {
+            var release: std.atomic.Value(bool) = .init(true);
+            fn run(raw: *anyopaque, _: *ClientTask) !void {
+                const owner: *UpgradeJob = @ptrCast(@alignCast(raw));
+                try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &release, test_poll.isSet);
+                owner.available = .{ .schema = 999, .patch = 2 };
+            }
+        };
+        Worker.release.store(case != 2, .release);
+        defer Worker.release.store(true, .release);
+        try job.task.start(rig.init.io, job, Worker.run);
+        if (case == 2) {
+            var waiting_ctx = rig.context();
+            defer waiting_ctx.cmds.deinit(std.testing.allocator);
+            try overview.startUpgrade();
+            _ = try overview.event(.{ .conversed = .{ .reference = "k7m2qx".*, .work = .idle, .input = .cancel_upgrade } });
+            try overview.appUpgrade(&waiting_ctx);
+            try std.testing.expect(job.discovering() and job.task.thread != null);
+            try std.testing.expectEqual(upgrade_status.Run.cancelling, overview.state.upgrade.run.?);
+            Worker.release.store(true, .release);
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &job.task, ClientTask.completed);
+            try overview.appUpgrade(&waiting_ctx);
+            try std.testing.expectEqual(upgrade_status.Ended.cancelled, overview.state.upgrade.run.?.ended.how);
+            try std.testing.expect(job.discovery_attempted and !job.started and !job.cancelling and !job.discovering());
+            continue;
+        }
+        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &job.task, ClientTask.completed);
+        if (failed) job.failure = error.ConnectionRefused;
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try overview.appDiscoverUpgrade(&ctx);
+        try std.testing.expect(!overview.state.upgrading());
+        try std.testing.expect(overview.state.upgrade.run == null);
+        try std.testing.expectEqual(!failed, overview.state.upgrade.available != null);
+        try std.testing.expect(job.finished and job.task.thread == null and job.result == null and job.checked == null);
+        var shown = try rig.shown(80, 24);
+        defer shown.deinit();
+        try std.testing.expectEqualDeep(overview.state.upgrade.available, overview.app_settings_line.available);
+        const settings_row: u16 = for (0..24) |row| {
+            if (std.mem.startsWith(u8, try shown.line(@intCast(row)), "  Settings")) break @intCast(row);
+        } else return error.TestExpectedSettingsRow;
+        const bottom = try shown.line(settings_row + 1);
+        try std.testing.expectEqual(!failed, std.mem.indexOf(u8, bottom, "Update to 0.999.2") != null);
+        try std.testing.expect(std.mem.indexOf(u8, bottom, "Update failed") == null);
+        try overview.appDiscoverUpgrade(&ctx);
+        try std.testing.expect(job.task.thread == null);
+        try overview.startUpgrade();
+        _ = try overview.event(.{ .conversed = .{ .reference = "k7m2qx".*, .work = .idle, .input = .cancel_upgrade } });
+        try std.testing.expectEqual(upgrade_status.Run.cancelling, overview.state.upgrade.run.?);
+        try overview.appUpgrade(&ctx);
+        try std.testing.expectEqual(upgrade_status.Ended.cancelled, overview.state.upgrade.run.?.ended.how);
+        try std.testing.expect(job.discovery_attempted and !job.started and !job.cancelling and !job.discovering());
+        try overview.appDiscoverUpgrade(&ctx);
+        try std.testing.expect(!job.started);
     }
 }

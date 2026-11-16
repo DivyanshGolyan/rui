@@ -133,14 +133,15 @@ MySQL schema application and backup remain operator-owned.
 
 `rui upgrade` replaces an eligible managed released selection with the latest published stable release, then calls the same restart-all core as `rui host restart --all` for every running same-user Host. The read-only check names the discovered Host count, Stores and unsupported reasons.
 `rui upgrade --check` is read-only and starts no Host.
-The Version row of app settings starts an Upgrade run, available from the overview or with a conversation open. The run stays inline on the status row, without sending a command to the model or adding an updater service.
+The sidebar version button and the Version row of app settings start the same Upgrade run, available from the overview or with a conversation open. The sidebar draws compact progress in place; Settings retains its Version feedback, without sending a command to the model or adding an updater service.
 The overview owns the one run and runs its worker once its own and the conversation's Client work has settled; both screens hand Esc to that run.
+At startup the same UpgradeJob owner performs one read-only release discovery, without a Host census, Host hold or installation. It publishes only the optional newer version to the presentation core. A requested upgrade retires and joins that discovery before beginning the existing check/install path; discovery failure leaves the current version quiet.
 It checks (`Checking for updates…`), then installs a found release at once, with no Enter step even while Sessions work, and its first line says what the restart will do: `Preparing Upgrade · restarts every eligible Host (2 found) · esc cancels`.
 Esc cancels while it checks or prepares, before Esc clears the draft, and not once publishing starts (`Publishing; cancelling no longer rolls back`); the run then says `Restarting Hosts…` and ends `Upgraded to 0.60.0 · Host restarted`, or as a notice when it installs nothing.
 When this run installs a different Rui, compatible or incompatible with the old client, the terminal leaves through its ordinary cancellation, save-flush and restoration path, then the CLI replaces its process image with the published selection's `bin/rui` (same PID and terminal, never PATH or the old executable).
 It reopens the overview or the same conversation (`Overview.Options.open`), pinning the old client's actual canonical Store explicitly and preserving its explicit `--provider` and `--model` selectors, every per-Session chat draft, including the open editor's bytes, caret, recall anchor and rejection state; the overview has no draft.
 A changed saved Store cannot redirect this restart.
-The new screen shows the run's ending line; scroll position resets.
+The new screen shows the installed version quietly in the sidebar, with no upgrade notice in the chat footer; scroll position resets.
 A run that installs nothing does not relaunch, even if it activates an already-selected Host build.
 An unresolved capture or recovery handle, failed save, retained cleanup path, run failure, activation recovery/owner instruction or PATH warning prevents relaunch: ordinary departure guidance remains intact, including the old-client restart instruction when needed.
 Old-client-only protocol/restart holds do not themselves prevent relaunch: a bounded protocol rejection from the exact launched Host (same peer PID, process generation, pinned executable and target version) is distinct from activation failure or uncertainty, and grants no ordinary-request readiness or invented Host facts.
@@ -151,8 +152,8 @@ Shell `rui upgrade` never replaces another terminal's client.
 Divyansh chose in-place TUI restart on 2026-11-12, superseding manual restart after a successful inline installation.
 Esc cancels the check as it cancels an install still preparing, and so does leaving rui.
 The Upgrade worker says where the whole run stands (checking, installing and its step, cancelling, ended) each time that changes, and the overview stores that one value (`session_upgrade.Upgrade`), which both screens read: Host requests wait, Esc is the run's and another Version-row activation is a no-op by it alone.
-A conversation keeps only that its own reading of the Session predates a run: when the old client continues after a run that does not relaunch, it says `Reading this Session again after the Upgrade…` and holds its Host requests until that read settles, then shows the run's ending.
-One pure core, `upgrade_status`, turns that value into the Version field and status bar's line for both screens.
+A conversation keeps only that its own reading of the Session predates a run: when the old client continues after a run that does not relaunch, it says `Reading this Session…` and holds its Host requests until that read settles, then resumes chat-only footer feedback. Upgrade feedback remains in the sidebar and Settings.
+One pure core, `upgrade_status`, turns that value into the Settings Version field, sidebar update button and overview status line. A conversation never projects upgrade progress or completion into its footer.
 `UpgradeJob.ending` alone derives the small failure reason from the run error: a download failure says "couldn't reach GitHub" even while settings hides the status bar. The restored shell report retains curl's last stderr line.
 Divyansh chose this on 2026-11-09 (TUI rework plan, "/upgrade without a page"), replacing the `UpgradePanel` page and its Install step.
 It retains the draft, selected Session and unresolved capture handles through handoff and never replays indeterminate effects.

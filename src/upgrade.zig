@@ -102,13 +102,17 @@ pub const Result = struct {
     }
 };
 
-pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []const u8, cancellation: ?*client.Cancellation, diagnostic: *Download) !Check {
-    const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+pub fn discoverRelease(init: std.process.Init, allocator: std.mem.Allocator, cancellation: ?*client.Cancellation, diagnostic: *Download) !release.ReleaseCandidate {
     const endpoint = if (init.environ_map.get("RUI_TEST_UPGRADE_RELEASES_URL")) |base| try std.fmt.allocPrint(allocator, "{s}/latest", .{base}) else null;
     defer if (endpoint) |url| allocator.free(url);
+    return release.discover(allocator, init.io, endpoint orelse release.default_endpoint, cancellation, diagnostic);
+}
+
+pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []const u8, cancellation: ?*client.Cancellation, diagnostic: *Download) !Check {
+    const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
     var selected = try Installation.inspectCancellable(allocator, init.io, home, cancellation);
     errdefer selected.deinit(allocator);
-    var candidate = try release.discover(allocator, init.io, endpoint orelse release.default_endpoint, cancellation, diagnostic);
+    var candidate = try discoverRelease(init, allocator, cancellation, diagnostic);
     errdefer candidate.deinit(allocator);
     var hosts = try restart_all.discover(init, allocator, home, cancellation);
     errdefer hosts.deinit(allocator);
