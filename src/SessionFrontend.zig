@@ -58,6 +58,7 @@ const work_line = @import("work_line.zig");
 const queued_line = @import("queued_line.zig");
 const status_page = @import("status_page.zig");
 const ChatInfo = @import("chat_info.zig");
+const info_save = @import("chat_info_save.zig");
 const ModelChoice = @import("model_choice.zig");
 pub const Command = reads.Command;
 pub const Requests = reads.Requests;
@@ -90,7 +91,7 @@ app_card: PermissionCard = undefined,
 app_palette: Palette = .{ .shown = undefined },
 app_info: ChatInfo = undefined,
 info_open: bool = false,
-info_effect: enum { idle, configure, refreshing, copy, archive, saved, failed } = .idle,
+info_effect: info_save.Effect = .idle,
 info_edit: ?ChatInfo.Edit = null,
 info_bytes: [@max(status_page.max_label_bytes, status_page.max_model_bytes)]u8 = undefined,
 app_hooks: AppHooks = .{ .root = undefined, .context = undefined, .leave = undefined, .copy = undefined, .on_open = undefined },
@@ -501,34 +502,34 @@ fn infoBackend(self: *Self) ChatInfo.Backend {
                 else => {},
             }
             frontend.info_edit = held;
-            frontend.info_effect = .configure;
+            frontend.info_effect = info_save.step(frontend.info_effect, .{ .started = .edit });
             frontend.dirty = true;
         }
         fn archive(raw: *anyopaque) !overview_view.IntentAdmission {
             const frontend = owner(raw);
             frontend.infoMaySave() catch return .refused;
             const admission = try frontend.archive();
-            if (admission == .admitted) frontend.info_effect = .archive;
+            if (admission == .admitted) frontend.info_effect = info_save.step(frontend.info_effect, .{ .started = .archive });
             return admission;
         }
         fn copy(raw: *anyopaque, _: *vxfw.EventContext) !void {
             const frontend = owner(raw);
             try frontend.infoMaySave();
             try frontend.clickCommand("/copy");
-            frontend.info_effect = .copy;
+            frontend.info_effect = info_save.step(frontend.info_effect, .{ .started = .copy });
         }
         fn state(raw: *anyopaque) ChatInfo.SaveState {
             const frontend = owner(raw);
-            return switch (frontend.info_effect) {
-                .idle => .idle,
-                .configure, .refreshing, .copy => .pending,
+            if (frontend.info_effect == .archive) return if (frontend.lender.archive_state) |read_state| switch (read_state(frontend.lender.context)) {
+                .idle, .pending => .pending,
                 .saved => .saved,
                 .failed => .failed,
-                .archive => if (frontend.lender.archive_state) |read_state| switch (read_state(frontend.lender.context)) {
-                    .idle, .pending => .pending,
-                    .saved => .saved,
-                    .failed => .failed,
-                } else .pending,
+            } else .pending;
+            return switch (info_save.saveState(frontend.info_effect)) {
+                .idle => .idle,
+                .pending => .pending,
+                .saved => .saved,
+                .failed => .failed,
             };
         }
         fn models(raw: *anyopaque) ModelChoice.Snapshot {
@@ -548,15 +549,15 @@ fn infoBackend(self: *Self) ChatInfo.Backend {
 
 pub fn archiveAnswered(self: *Self, result: overview_view.ArchiveResult) void {
     if (self.info_effect != .archive or !std.mem.eql(u8, self.session, &result.request.reference)) return;
-    self.info_effect = switch (result.outcome) {
-        .requested => .saved,
+    self.info_effect = info_save.step(self.info_effect, .{ .archive_answered = switch (result.outcome) {
+        .requested => .requested,
         .failed, .unconfirmed => .failed,
-    };
+    } });
     self.dirty = true;
 }
 
 fn infoMaySave(self: *const Self) !void {
-    if (self.hostHeld() or self.upgradeHeld() or self.reading.opening or self.commandActive() or self.submission.intent != null) return error.Busy;
+    return info_save.maySave(.{ .host = self.hostHeld(), .upgrade = self.upgradeHeld(), .opening = self.reading.opening, .command = self.commandActive(), .intent = self.submission.intent != null });
 }
 
 fn showSubmissionFailure(self: *Self) !void {
@@ -2774,13 +2775,13 @@ fn settleReader(self: *Self) !void {
     const phase = self.reading.phase;
     const panel_copy = phase == .inspection and self.info_effect == .copy;
     if (phase == .inspection and self.info_effect == .configure and self.job.info_edit != null) {
-        self.info_effect = if (end == .complete and self.job.result.info_saved) .refreshing else .failed;
+        self.info_effect = info_save.step(self.info_effect, .{ .worker_done = .{ .kind = .edit, .ok = end == .complete and self.job.result.info_saved } });
         if (self.info_effect == .refreshing) {
             self.inspection.status_requested = true;
             self.poll_at = 0;
         }
     } else if (panel_copy) {
-        self.info_effect = if (end == .complete and self.job.result.copied == .clipboard) .saved else .failed;
+        self.info_effect = info_save.step(self.info_effect, .{ .worker_done = .{ .kind = .copy, .ok = end == .complete and self.job.result.copied == .clipboard } });
     }
     defer if (phase == .retry and end != .absent) {
         self.retry_fence = null;
@@ -3187,7 +3188,7 @@ fn showInspection(self: *Self) !void {
 
 fn showCopy(self: *Self, answers: session_chrome.NoticeAnswers) !void {
     errdefer if (answers == .panel_copy) {
-        self.info_effect = .failed;
+        self.info_effect = info_save.step(self.info_effect, .copy_failed);
     };
     self.dirty = true;
     self.notice = switch (self.job.result.copied) {
@@ -3213,7 +3214,7 @@ fn applyStatus(self: *Self) !void {
     if (!self.job.result.status and self.inspection.status == null) return;
     if (self.job.result.status) self.inspection.status = @intFromBool(self.job.status_taken == &self.inspection.sessions[1]);
     self.inspection.status_requested = false;
-    if (self.info_effect == .refreshing) self.info_effect = .saved;
+    self.info_effect = info_save.step(self.info_effect, .status_refreshed);
     if ((self.info_open or self.footer.pending != null) and !self.app_info.hasChoice() and self.app_info.pending == null) self.app_info.refresh();
     self.dirty = true;
 }
