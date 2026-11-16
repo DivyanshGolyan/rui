@@ -470,7 +470,7 @@ def private_saved_interfaces(root):
         document = directory / "host.json"
         document.write_text(json.dumps({"store": store, "interface": {"dir": str(runtime)}}))
         document.chmod(0o600)
-        with socket.socket(socket.AF_UNIX) as listener:
+        with os_semantics.unix_stream() as listener:
             listener.bind(str(runtime / "rui.sock"))
             listener.listen(2)
             listener.setblocking(False)
