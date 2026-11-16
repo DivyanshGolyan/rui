@@ -140,8 +140,6 @@ pub const list = [_]Reference{
     .{ .key = "⇧tab", .meaning = "previous focus", .keys = &.{.{ .key = .shift_tab }} },
     .{ .key = "ctrl+x", .meaning = "stop", .keys = &.{.{ .key = .ctrl_x }} },
     .{ .key = "↑↓", .meaning = "scroll", .keys = &.{ .{ .key = .up }, .{ .key = .down } }, .aliases = &.{ .shift_up, .shift_down, .page_up, .page_down, .home, .end, .ctrl_end } },
-    // Left (an empty draft back to the list) and the info panel's actions
-    // are handled apart from the screen keymaps, so only Right is checked.
     .{ .key = "←→", .meaning = "list/chat · info actions", .keys = &.{.{ .key = .right }} },
     .{ .key = "ctrl+o", .meaning = "tool output", .keys = &.{.{ .key = .ctrl_o }} },
     .{ .key = "ctrl+p", .meaning = "earlier message", .keys = &.{.{ .key = .ctrl_p }}, .aliases = &.{.ctrl_n} },

@@ -589,7 +589,7 @@ def keys_reference():
     source = (pathlib.Path(__file__).resolve().parents[2] / "src/keymap.zig").read_text()
     body = source.split("pub const list = [_]Reference{", 1)[1].split("\n};", 1)[0]
     rows = tuple(re.findall(r'^    \.\{ \.key = "([^"\\]*)", \.meaning = "([^"\\]*)"', body, re.MULTILINE))
-    assert rows and len(rows) == body.count(".key ="), "src/keymap.zig: teach keys_reference this list"
+    assert rows and len(rows) == len(re.findall(r'^    \.\{ \.key = "', body, re.MULTILINE)), "src/keymap.zig: teach keys_reference this list"
     return rows
 
 
