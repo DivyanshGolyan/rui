@@ -39,7 +39,6 @@ sys.path.insert(0, sys.argv[1])
 from model_fixture import model_instructions
 sys.stdout.buffer.write(model_instructions(sys.argv[2] + "\0", store=sys.argv[3], session=sys.argv[4], model=sys.argv[5]).encode())
 `, fixtures, workspace, store, session, model)
-			// Process arguments cannot carry NUL; cover it inside each oracle instead.
 			want, err := command.Output()
 			if err != nil {
 				var exited *exec.ExitError
@@ -516,7 +515,6 @@ func TestDarwinSampleRejectsTargetRetirementDuringCapture(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() {
-		// Kill is expected to report an already retired process after the probe.
 		_ = child.Process.Kill()
 		_ = child.Wait()
 	}()
@@ -720,15 +718,12 @@ func TestLoopbackProtocolsServeHTTP1AndH2C(t *testing.T) {
 
 var ruiTestBinary = flag.String("rui", "", "current Rui for the configure contract")
 
-// The runners' configure calls against the current CLI and Host: each option
-// set a runner passes, an update of an existing Session, and the wire body.
 func TestConfigureContract(t *testing.T) {
 	if *ruiTestBinary == "" {
 		t.Skip("requires the current Rui (zig build measurement-check)")
 	}
 	binary := *ruiTestBinary
 	if !filepath.IsAbs(binary) {
-		// go test runs from measurement/; Zig renders the path from tests/qualification.
 		binary = filepath.Join("..", binary)
 	}
 	directory, err := os.MkdirTemp("", "rui-configure-")

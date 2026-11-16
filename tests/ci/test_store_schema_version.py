@@ -1,9 +1,3 @@
-"""Each format PR appends its own schema version and forward step (D226).
-
-Main's existing digests and migration steps are immutable, unreleased ones
-included. Released formats also remain checked against their release tag.
-Every step is string literals only, so the source compared is what runs.
-"""
 from pathlib import Path
 import re
 import subprocess
@@ -35,26 +29,20 @@ def baseline_changed_without_bump(candidate_version, reference_version, candidat
 
 
 def non_literal_steps(steps):
-    """The `from` of each step whose statements are not all string literals:
-    a helper call or a `++` would let shared code change a step's text."""
     return sorted(start for start, text in steps.items() if not LITERAL_STEP.fullmatch(STRING.sub('"', text)))
 
 
 def edited_shipped_steps(candidate, shipped, released):
-    """The `from` of each shipped step (from below `released`) that the
-    candidate dropped, added or changed against the release's text."""
     return sorted(start for start in set(candidate) | set(shipped)
                   if start < released and candidate.get(start) != shipped.get(start))
 
 
 def edited_released_rows(candidate, released_rows, released):
-    """The released rows the candidate dropped or changed."""
     return sorted(version for version, digest in released_rows.items()
                   if version <= released and candidate.get(version) != digest)
 
 
 def schema_bump_error(candidate, base):
-    """A format PR may preserve main's format or append exactly one (D226)."""
     if candidate < base:
         return f"schema_version {candidate} goes back below main's {base}"
     if candidate > base + 1:
@@ -122,7 +110,6 @@ class StoreSchemaVersionTest(unittest.TestCase):
         self.assertEqual(sorted(released), [51, 52])
         reformatted = released_source.replace(".{ .from = 52, .sqlite = &.{ ", ".{\n    .from = 52,\n    .sqlite = &.{\n        ")
         self.assertEqual(migration_steps(reformatted), released, "a reformat is no edit")
-        # A shipped step's text edited, with its neighbours and the version moved too.
         candidate = migration_steps(released_source
                                     .replace("a(x INTEGER)", "a(x INTEGER, y INTEGER)")
                                     .replace("SELECT '}'", "SELECT 1")
@@ -157,8 +144,6 @@ class StoreSchemaVersionTest(unittest.TestCase):
         self.assertIsNone(schema_bump_error(55, 54))
         self.assertIsNotNone(schema_bump_error(53, 54))
         self.assertIsNotNone(schema_bump_error(56, 54))
-        # The same prefix checks used below protect unreleased main formats,
-        # not just the rows and steps covered by the last release.
         self.assertEqual(edited_released_rows({53: 1, 54: 3, 55: 4}, {53: 1, 54: 2}, 54), [54])
         self.assertEqual(edited_shipped_steps({53: "changed", 54: "new"}, {53: "original"}, 54), [53])
         self.assertEqual(edited_shipped_steps({53: "original", 54: "new"}, {53: "original"}, 54), [])

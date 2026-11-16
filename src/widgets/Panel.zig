@@ -1,5 +1,3 @@
-//! A bounded field-and-action panel with inline choices. All text, styles and
-//! effects belong to its caller; Escape belongs to the enclosing Layer.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -7,16 +5,13 @@ const Self = @This();
 const Hover = @import("Hover.zig");
 const cell_line = @import("cell_line.zig");
 
-/// Aligned field values start here; callers may fit bounded values to it.
 pub const value_column: u16 = 19;
 
 pub const Field = struct { label: []const u8, value: []const u8, tail: ?[]const u8 = null, selectable: bool = true, visible: bool = true };
 pub const Choice = struct { field: usize, labels: []const []const u8, current: ?usize, selected: usize };
-/// A field's full-width choice. The child owns its selection and scrolling.
 pub const CustomChoice = struct {
     field: usize,
     widget: vxfw.Widget,
-    /// While open, this replaces the field's saved value at its value column.
     value_widget: ?vxfw.Widget = null,
     reset_draw: ?*const fn (*anyopaque) void = null,
     height: u16 = 8,
@@ -26,7 +21,6 @@ const Target = struct { row: u16, start: u16, end: u16, index: usize, choice: bo
 title: []const u8,
 subtitle: ?[]const u8 = null,
 body: struct { top: u16 = 2, height: u16 = 0 } = .{},
-/// Fit hosted content, including one trailing ground row; full pages fill by default.
 natural_height: bool = false,
 unicode: bool = true,
 title_widget: ?vxfw.Widget = null,
@@ -44,14 +38,11 @@ on_activate: ?*const fn (*anyopaque, *vxfw.EventContext, usize) anyerror!void = 
 on_pick: ?*const fn (*anyopaque, *vxfw.EventContext, usize, usize) anyerror!void = null,
 ground: vaxis.Style = .{},
 selection: vaxis.Style = .{ .reverse = true },
-/// The pointer's field, choice or action, quieter than the selection, which wins where both apply.
 hover_style: vaxis.Style = .{ .ul_style = .single },
 title_style: vaxis.Style = .{ .bold = true },
 quiet: vaxis.Style = .{},
 rule_style: vaxis.Style = .{},
 scroll: usize = 0,
-/// Borrowed from the last draw arena, just like the framework's hit surface.
-/// Replaced on every draw; used for mouse hits and drawn-only traversal.
 targets: []const Target = &.{},
 hover: Hover = .{},
 
@@ -104,13 +95,10 @@ fn activate(self: *Self, ctx: *vxfw.EventContext, only: ?usize) !void {
     }
 }
 
-/// The only keys a panel takes; every other key is its caller's.
 pub fn takesKey(key: vaxis.Key) bool {
     return key.matches(vaxis.Key.up, .{}) or key.matches(vaxis.Key.down, .{}) or key.matches(vaxis.Key.enter, .{});
 }
 
-/// The caller derives this field from its current standalone presentation.
-/// No presentation lifetime or mode is retained by Panel.
 pub fn choiceEvent(self: *Self, ctx: *vxfw.EventContext, input: vxfw.Event, field: usize) !void {
     try self.eventFor(ctx, input, field);
 }
@@ -142,7 +130,6 @@ pub fn traverse(self: *Self, ctx: *vxfw.EventContext, reverse: bool, comptime ne
 
 fn eventFor(self: *Self, ctx: *vxfw.EventContext, input: vxfw.Event, only: ?usize) !void {
     if (self.custom_choice) |choice| {
-        // The child owns all input while open, including pointer feedback.
         try self.hover.handleEvent(ctx, .mouse_leave);
         if (input == .key_press and input.key_press.matches(vaxis.Key.escape, .{})) return;
         var local = input;
@@ -194,7 +181,6 @@ fn eventFor(self: *Self, ctx: *vxfw.EventContext, input: vxfw.Event, only: ?usiz
 }
 
 fn rowOf(self: *const Self, field: usize) usize {
-    // Hiding a fact compacts presentation, never its semantic field/action ID.
     var row: usize = 0;
     for (self.fields[0..@min(field, self.fields.len)]) |before| row += @intFromBool(before.visible);
     if (field >= self.fields.len and self.stacked_actions) row += field - self.fields.len;
@@ -223,7 +209,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     self.custom_origin = 0;
     self.custom_height = 0;
     self.hover.targets = &.{};
-    // At tiny heights, content takes precedence over the trailing ground row.
     const bottom_padding: u16 = @intFromBool(self.natural_height and available.height > 3);
     var subtitle_surface: ?vxfw.Surface = null;
     if (self.subtitle) |text| if (available.width > 3 and available.height > 4 + bottom_padding) {
@@ -233,8 +218,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     };
     const header: u16 = 2 + if (subtitle_surface) |surface| surface.size.height + 1 else @as(u16, 0);
     const available_body = available.height -| header -| bottom_padding;
-    // Measure a custom choice once. Its actual result count is also the sole
-    // height used for later rows, scrolling and mouse dispatch this frame.
     var custom_surface: ?vxfw.Surface = null;
     if (available.width > 0) if (self.custom_choice) |choice| if (available_body > 1) {
         custom_surface = try choice.widget.draw(ctx.withConstraints(.{}, .{ .width = available.width, .height = @min(choice.height, available_body - 1) }));
@@ -320,8 +303,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     return surface;
 }
 
-/// Draw a field's value and register exactly the selectable row it occupies.
-/// Full pages and retained standalone outcomes share clipping and hit identity.
 fn drawFieldValue(self: *Self, ctx: vxfw.DrawContext, surface: *vxfw.Surface, index: usize, row: u16, start: u16, style: vaxis.Style, children: *std.array_list.Managed(vxfw.SubSurface), targets: *std.array_list.Managed(Target)) std.mem.Allocator.Error!void {
     const field = self.fields[index];
     const value_widget = if (self.custom_choice) |choice| if (choice.field == index) choice.value_widget else null else null;
@@ -336,7 +317,6 @@ fn drawFieldValue(self: *Self, ctx: vxfw.DrawContext, surface: *vxfw.Surface, in
             }
         }
     } else {
-        // Keep status/failure words visible even beside a long saved value.
         const tail = try displayText(ctx.arena, field.tail orelse "", self.unicode);
         const limit: u16 = @intCast(surface.size.width -| ctx.stringWidth(tail));
         const end = paintTo(ctx, surface.*, try displayText(ctx.arena, field.value, self.unicode), start, row, style, limit);
@@ -358,8 +338,6 @@ fn bindTargets(self: *Self, arena: std.mem.Allocator, targets: []const Target) s
     self.hover.targets = hover_targets;
 }
 
-/// Draw the current owner's field without retaining a standalone mode.
-/// Its wrapper routes events through choiceEvent with the same current field.
 pub fn drawChoice(self: *Self, ctx: vxfw.DrawContext, index: usize) std.mem.Allocator.Error!vxfw.Surface {
     if (self.custom_choice) |choice| if (choice.reset_draw) |reset| reset(choice.widget.userdata);
     self.targets = &.{};
@@ -419,7 +397,6 @@ pub fn drawChoice(self: *Self, ctx: vxfw.DrawContext, index: usize) std.mem.Allo
     return surface;
 }
 
-/// Selection wins over hover; hover wins over the panel ground.
 fn look(self: *const Self, selected: bool, rect: Hover.Rect) vaxis.Style {
     if (selected) return self.selection;
     return if (self.hover.contains(rect)) self.hover_style else self.ground;
@@ -430,7 +407,6 @@ fn visible(self: *const Self, logical: usize) ?u16 {
     return @intCast(logical - self.scroll + self.body.top);
 }
 
-/// The field's row in the last full-panel draw, including noninteractive facts.
 pub fn fieldRow(self: *const Self, index: usize) ?u16 {
     if (index >= self.fields.len or !self.fields[index].visible) return null;
     return self.visible(self.rowOf(index));
@@ -440,9 +416,6 @@ fn fillRow(surface: vxfw.Surface, row: u16, style: vaxis.Style) void {
     for (0..surface.size.width) |col| surface.writeCell(@intCast(col), row, .{ .style = style });
 }
 
-/// Presentation only: keep canonical text unchanged. Unicode and ASCII text
-/// are borrowed; an ASCII fallback for decoration or other scalars lives in
-/// the draw arena. Unknown non-ASCII scalars use the overview's `?` stand-in.
 pub fn displayText(arena: std.mem.Allocator, text: []const u8, unicode: bool) std.mem.Allocator.Error![]const u8 {
     if (unicode) return text;
     for (text) |byte| {
@@ -472,7 +445,6 @@ pub fn displayText(arena: std.mem.Allocator, text: []const u8, unicode: bool) st
     return out[0..used];
 }
 
-/// Single-line, terminal-cell clipping, including labels and quiet tails.
 fn paint(ctx: vxfw.DrawContext, surface: vxfw.Surface, text: []const u8, start: u16, row: u16, style: vaxis.Style) u16 {
     return cell_line.paint(ctx, surface, text, start, row, style, surface.size.width);
 }
@@ -558,7 +530,6 @@ test "Panel key and mouse movement stops at ends and activates distinct actions"
         try std.testing.expectEqual(index, panel.selected);
         try std.testing.expectEqual(@as(?usize, index), fixture.activated);
     }
-    // Clicking whitespace between actions doesn't activate a neighbor.
     fixture.activated = null;
     try panel.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = 4, .col = 10 } });
     try std.testing.expectEqual(@as(?usize, null), fixture.activated);
@@ -586,7 +557,7 @@ test "Panel inline choices open pick cancel and scroll in the same field" {
     try std.testing.expectEqual(@as(?usize, 1), fixture.picked);
     panel.openChoice(&.{ "alpha", "beta" }, 0);
     try pressKey(&panel, &ctx, vaxis.Key.escape);
-    try std.testing.expect(!ctx.consume_event); // Layer, not Panel, owns cancel.
+    try std.testing.expect(!ctx.consume_event);
     try std.testing.expect(panel.choice != null);
     panel.closeChoice();
     try std.testing.expect(panel.choice == null);
@@ -846,8 +817,6 @@ test "Panel natural custom choice measures once shrinks and keeps cursor and mou
     };
 }
 
-/// A read-only reference in fitting columns, without selection or input ownership.
-/// It shares the panel's cell clipping; labels are strong, values are plain.
 pub const KeyList = struct {
     fields: []const Field,
     ground: vaxis.Style = .{},
@@ -903,8 +872,6 @@ test "Panel KeyList fits measured columns and aligns values after the widest key
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const surface = try reference.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 4 }, .cell_size = .{} });
-        // The left key is six terminal cells, the right key two. The
-        // measured widths are 15 + 2 + 10, unrelated to the app's table.
         const columns: usize = if (width == 27) 2 else 1;
         for ([_][]const u8{ "one", "two", "three", "four" }, 0..) |value, index| {
             const start: usize = if (columns == 2 and index % 2 == 1) 23 else 10;
@@ -1015,7 +982,6 @@ test "Panel choice-only outcome navigation never activates hidden fields" {
         try panel.choiceEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, 1);
         try std.testing.expectEqual(@as(?usize, 1), fixture.activated);
     }
-    // Even stale field selection cannot grant Enter authority over a hidden field.
     panel.selected = 2;
     try panel.choiceEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, 1);
     try std.testing.expectEqual(@as(?usize, 1), fixture.activated);
@@ -1042,7 +1008,6 @@ test "Panel retained standalone fields share field targets hover and clipping wi
         const hovered = if (standalone) try panel.drawChoice(draw_ctx, 1) else try panel.widget().draw(draw_ctx);
         try std.testing.expectEqual(if (selectable_field) panel.hover_style.ul_style else panel.ground.ul_style, hovered.readCell(45, row).style.ul_style);
         try std.testing.expectEqual(@as(?usize, null), fixture.activated);
-        // Tail/blank cells belong to the same full-width field action.
         if (standalone) try panel.choiceEvent(&events, .{ .mouse = .{ .col = 45, .row = @intCast(row), .button = .left, .type = .release, .mods = .{} } }, 1) else try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 45, .row = @intCast(row), .button = .left, .type = .release, .mods = .{} } });
         try std.testing.expectEqual(@as(?usize, null), fixture.activated);
         if (standalone) try panel.choiceEvent(&events, .{ .mouse = .{ .col = 45, .row = @intCast(row), .button = .left, .type = .press, .mods = .{} } }, 1) else try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 45, .row = @intCast(row), .button = .left, .type = .press, .mods = .{} } });
@@ -1057,7 +1022,6 @@ test "Panel retained standalone fields share field targets hover and clipping wi
             .userdata = &fixture,
             .on_activate = Fixture.activateRow,
         };
-        // Draw a larger frame first: clipping must replace, not retain, targets.
         _ = try panel.drawChoice(draw_ctx, 1);
         const drawn = try panel.drawChoice(draw_ctx.withConstraints(.{}, .{ .width = width, .height = height }), 1);
         const actionable = width > 0 and height > 1;
@@ -1094,14 +1058,12 @@ test "Panel explicit choice scope never persists into normal page events or draw
     _ = try panel.drawChoice(ctx, 1);
     try panel.choiceEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, 1);
     try std.testing.expectEqual(@as(?usize, 1), fixture.activated);
-    // No mode reset is needed: a later ordinary page draw/event is ordinary.
     const page = try panel.widget().draw(ctx);
     try std.testing.expectEqualStrings("─", page.readCell(0, 0).char.grapheme);
     try std.testing.expectEqualStrings("M", page.readCell(3, 2).char.grapheme);
     try pressKey(&panel, &events, vaxis.Key.up);
     try pressKey(&panel, &events, vaxis.Key.enter);
     try std.testing.expectEqual(@as(?usize, 0), fixture.activated);
-    // The next standalone event likewise carries its own field, not page selection.
     try panel.choiceEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, 1);
     try std.testing.expectEqual(@as(?usize, 1), fixture.activated);
 }

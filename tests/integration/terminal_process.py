@@ -1,5 +1,3 @@
-"""Processes on test PTYs, and the lifecycle for an ordinary conversation with
-all streams on one PTY."""
 
 from contextlib import contextmanager
 import collections
@@ -24,19 +22,12 @@ from host_process import WAIT_HOOKS, dispose_all, stop_process
 from terminal_leader import HEADER, LIMITS, frame
 
 
-# Conversations run full screen; tall enough that a short exchange stays in view.
 COLUMNS, ROWS = 80, 50
-# Screen observers by master descriptor.
 CAPTURES = {}
-# A capture is drained only by the thread that registered its reader.
 PTY_MASTERS = {}
 PTY_LOCK = threading.RLock()
-# The master of each slave open_pty made, and the input master that answers
-# go to for an output master whose process reads another PTY.
 MASTERS = {}
 ANSWERS = {}
-# Live leaders by the PTY device they own. A device number can't name another
-# PTY while its leader lives: the leader holds the slave open.
 LEADERS = {}
 STARTING = threading.Lock()
 
@@ -49,7 +40,6 @@ def register_capture(master, capture):
 
 
 def drain_ready(master, feed):
-    """Feed a bounded batch; return whether the batch limit left more to drain."""
     for _ in range(16):
         if not select.select([master], [], [], 0)[0]:
             return False
@@ -61,12 +51,11 @@ def drain_ready(master, feed):
             return False
         if not chunk:
             return False
-        feed(chunk)  # A consumer failure is not terminal EOF, even for EIO.
+        feed(chunk)
     return True
 
 
 def capture_descriptors():
-    """Only registered masters whose reader belongs to this thread."""
     with PTY_LOCK:
         return [master for master, owner in PTY_MASTERS.items()
                 if owner is threading.current_thread() and master in CAPTURES]
@@ -84,7 +73,6 @@ WAIT_HOOKS.append((drain_captures, capture_descriptors))
 
 
 def open_pty(columns=COLUMNS, rows=ROWS):
-    """A PTY with real geometry, as every interactive terminal reports."""
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
     with PTY_LOCK:
@@ -94,7 +82,6 @@ def open_pty(columns=COLUMNS, rows=ROWS):
 
 
 def close_pty(*fds):
-    """Forget PTY ownership before releasing descriptors for reuse."""
     with PTY_LOCK:
         for fd in fds:
             CAPTURES.pop(fd, None)
@@ -111,13 +98,10 @@ def close_pty(*fds):
 
 
 def answers_to(master):
-    """Where a screen observer of `master` sends the terminal's answers: the
-    PTY the process reads, which `spawn` recorded."""
     def write(data):
         try:
             os.write(ANSWERS.get(master, master), data)
         except OSError as error:
-            # Every slave closed: no process is left to read an answer.
             if error.errno != errno.EIO:
                 raise
     return write
@@ -125,20 +109,10 @@ def answers_to(master):
 
 def spawn(args, *, stdin=None, stdout=None, stderr=None, env=None, cwd=None, pass_fds=(),
           default_signals=(), rlimits=None):
-    """Run `args` as the foreground job of the session leader that owns the PTY
-    among its streams, as a terminal's shell runs a program: /dev/tty is that
-    PTY, and the PTY outlives the job with the job's termios.
-
-    Takes Popen's arguments. The job inherits what a Popen child would: the
-    environment, cwd, umask, resource limits, signal mask, ignored signals and
-    exactly its stdio and `pass_fds` at their numbers. In place of a preexec
-    function, `default_signals` resets signals the fixture ignores and `rlimits`
-    maps limit numbers to (soft, hard)."""
     terminal = next((s for s in (stdin, stdout, stderr) if isinstance(s, int) and s >= 0 and os.isatty(s)), None)
     if terminal is None:
         raise ValueError("spawn runs a process on a PTY; none of its streams is one")
     if isinstance(stdout, int) and stdout in MASTERS:
-        # The process reads its answers from stdin's PTY.
         if isinstance(stdin, int) and stdin in MASTERS and stdin != stdout:
             ANSWERS[MASTERS[stdout]] = MASTERS[stdin]
         else:
@@ -186,8 +160,6 @@ def spawn(args, *, stdin=None, stdout=None, stderr=None, env=None, cwd=None, pas
 
 
 def leader_for(terminal, gone=None):
-    """The leader of the PTY `terminal` names, started on first use. `gone`
-    is a leader found to have ended before it read a request."""
     with STARTING:
         for device, leader in list(LEADERS.items()):
             if leader is gone or leader.process.poll() is not None:
@@ -208,7 +180,6 @@ class LeaderGone(Exception):
 
 
 class Leader:
-    """One PTY's session leader (terminal_leader.py), as the fixture reaches it."""
 
     def __init__(self, terminal):
         ours, theirs = socket.socketpair()
@@ -235,8 +206,6 @@ class Leader:
             raise
 
     def pump(self, deadline):
-        """Take one message, or let another thread take one, by the deadline
-        (None: no limit)."""
         with self.turn:
             if self.reading:
                 self.turn.wait(None if deadline is None else max(0, deadline - time.monotonic()))
@@ -280,14 +249,11 @@ class Leader:
                     self.channel.sendall(frame(message))
                 return self.reply()
             except (BrokenPipeError, ConnectionResetError, RuntimeError):
-                # Exit 0 is only the hangup path, which the leader takes
-                # between requests, never after reading one.
                 if self.process.wait() != 0:
                     raise
                 raise LeaderGone(self.process.pid) from None
 
     def status(self, pid, deadline):
-        """The job's raw wait status, or None once the deadline passes."""
         while pid not in self.statuses:
             if self.ended:
                 raise RuntimeError(f"test PTY leader {self.process.pid} exited ({self.process.wait()}) before reporting {pid}")
@@ -297,14 +263,12 @@ class Leader:
         return self.statuses[pid]
 
     def close(self):
-        """After the leader exited: keep its last statuses, release the socket."""
         while not self.ended:
             self.pump(None)
         self.channel.close()
 
 
 class TerminalProcess:
-    """A job a PTY's leader runs, with the part of Popen fixtures use."""
 
     def __init__(self, leader, pid, args, stdin, stdout, stderr):
         self.leader, self.pid, self.args = leader, pid, args
@@ -336,8 +300,6 @@ class TerminalProcess:
         self.send_signal(signal.SIGKILL)
 
     def communicate(self, timeout=None):
-        """Read the PIPE ends to EOF, then wait; output read before a timeout
-        is kept for the next call, as Popen keeps it."""
         deadline = None if timeout is None else time.monotonic() + timeout
         ends = [end for end in (self.stdout, self.stderr) if end is not None]
         with selectors.DefaultSelector() as selector:
@@ -361,14 +323,6 @@ class TerminalProcess:
 
 
 class TerminalOutput:
-    """Exclusive background collection on a borrowed master, while its slave lives.
-
-    The process owns exit status; collection finishes only after that status and
-    a final drain. This owner retains every collection or callback failure;
-    `check` and scope disposal raise it even when `collected(error)` returns.
-    Neither path retains output bytes. `condition` can also guard a consumer's
-    view, so frame changes and collection completion wake the same readers.
-    """
 
     def __init__(self, process, master, feed, collected=None, condition=None):
         self.process, self.master, self.feed, self.collected = process, master, feed, collected
@@ -383,8 +337,6 @@ class TerminalOutput:
             while self.process.poll() is None:
                 if select.select([self.master], [], [], .05)[0]:
                     drain_ready(self.master, self.feed)
-            # The job has ended, but the owner still holds the slave. Exhaust
-            # all queued output before publishing completion or releasing it.
             while drain_ready(self.master, self.feed):
                 pass
         except BaseException as caught:
@@ -405,7 +357,6 @@ class TerminalOutput:
                 self.condition.notify_all()
 
     def check(self):
-        """Raise the same retained failure for readers and disposal alike."""
         with self.condition:
             if self.error is not None:
                 raise self.error
@@ -419,16 +370,6 @@ class TerminalOutput:
 
 @contextmanager
 def terminal_process(args, *, env, cwd=None, columns=COLUMNS, rows=ROWS, feed=None, collected=None, condition=None):
-    """Borrow (process, master) until scope exit; collect and assert inside it.
-
-    The caller owns response boundaries and explicit exit assertions. This owner
-    only retires the child and descriptors, retaining the slave through collection
-    and reap so Darwin does not discard unread output. Do not close borrowed handles.
-    With `feed`, this owner continuously collects output in a background thread;
-    the caller must not also read the master. `collected(error)` reports the final
-    drain or its failure before disposal releases either descriptor. The process's
-    `output` owns completion and errors; its check() never consumes a failure.
-    """
     master, slave = open_pty(columns, rows)
     process, output = None, None
     try:

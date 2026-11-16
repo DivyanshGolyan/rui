@@ -1,4 +1,3 @@
-"""Record a job's failed steps and bisect each one in a real repository."""
 from pathlib import Path
 import json
 import os
@@ -15,11 +14,6 @@ STEPS = Path(__file__).with_name("steps.py")
 
 
 class BatchRepository:
-    """Seven first-parent commits after `stable`, plus a merged side branch.
-
-    `broken` maps a file to the commit index where its content turns bad; a
-    step `grep -qx good FILE` fails from then on.
-    """
 
     FILES = ("state", "other")
 
@@ -40,7 +34,6 @@ class BatchRepository:
                     (self.repo / name).write_text("bad\n")
             (self.repo / f"file{index}").write_text(f"{index}\n")
             self.commits.append(self.commit(f"change {index}"))
-        # A side branch merged in: its commits are not bisected on their own.
         self.git("checkout", "-q", "-b", "side", self.commits[2])
         (self.repo / "side").write_text("side\n")
         self.side = self.commit("side change")
@@ -60,12 +53,10 @@ class BatchRepository:
         return self.git("rev-parse", "HEAD")
 
     def steps(self, *arguments):
-        """Run steps.py at HEAD, as a job does; returns its exit code."""
         return subprocess.run([sys.executable, "-B", str(STEPS), *arguments], cwd=self.repo, env=self.env,
                               capture_output=True, text=True).returncode
 
     def check(self):
-        """The job's checks: one step per file, each failing once its file turns bad."""
         return self.steps(*(f"{name}=grep -qx good {name}" for name in self.FILES))
 
     def bisect(self):
@@ -97,15 +88,12 @@ class PromotionBisectTest(unittest.TestCase):
                                  ("state", "culprit", repository.commits[broken]))
                 self.assertIn(f"Promotion bisect: state: first fails at {repository.commits[broken]} (change {broken})",
                               stdout)
-                # HEAD, then a binary search over eight commits, then stable only for the first.
                 self.assertLessEqual(len(step["replays"]), 1 + 3 + (broken == 0))
                 self.assertEqual(step["replays"][0], dict(sha=repository.commits[-1], passed=False))
-                # The tree returns to HEAD, and the side branch is never replayed on its own.
                 self.assertEqual(repository.git("rev-parse", "HEAD"), repository.commits[-1])
                 self.assertNotIn(repository.side, [replay["sha"] for replay in step["replays"]])
 
     def test_each_failed_step_gets_its_own_culprit(self):
-        # Two regressions in one job from different commits: each step names its own.
         repository = self.batch(broken=dict(state=1, other=5))
         self.assertEqual(repository.check(), 1)
         verdict, stdout = repository.bisect()
@@ -118,7 +106,6 @@ class PromotionBisectTest(unittest.TestCase):
         repository = self.batch(broken=dict(other=3))
         self.assertEqual(repository.check(), 1)
         recorded = steps.failures(Path(repository.env["RUNNER_TEMP"]) / "rui-failed-steps.jsonl")
-        # The command is recorded unexpanded, exactly as the job listed it.
         self.assertEqual(recorded, [dict(name="other", argv=["bash", "-euc", "grep -qx good other"])])
         verdict, _ = repository.bisect()
         self.assertEqual([step["step"] for step in verdict["steps"]], ["other"])
@@ -130,7 +117,6 @@ class PromotionBisectTest(unittest.TestCase):
         self.assertIn("nothing to replay", stdout)
 
     def test_a_red_that_passes_again_at_head_is_not_blamed_on_a_commit(self):
-        # A red run's record, replayed after the red stopped reproducing.
         repository = self.batch()
         steps_file = Path(repository.env["RUNNER_TEMP"]) / "rui-failed-steps.jsonl"
         steps_file.write_text(json.dumps(dict(name="state", argv=["grep", "-qx", "good", "state"])) + "\n")
@@ -151,7 +137,6 @@ class PromotionBisectTest(unittest.TestCase):
         self.assertIn("fails at", stdout)
 
     def test_every_run_of_a_step_gets_a_fresh_output(self):
-        # Harnesses refuse an output directory that exists: the run and each replay get their own.
         repository = self.batch(broken=dict(state=4))
         output = 'out=test ! -e "$STEP_OUTPUT"; mkdir "$STEP_OUTPUT"; grep -qx good state'
         self.assertEqual(repository.steps("--output-root", str(repository.root / "results"), output), 1)
@@ -169,7 +154,6 @@ class PromotionBisectTest(unittest.TestCase):
         self.assertEqual(repository.steps("same=true", "same=true"), 2)
 
     def test_search_order(self):
-        # Pure: given HEAD fails, the search must find the boundary in log2 steps.
         commits = [f"c{i}" for i in range(22)]
         for broken in (0, 1, 10, 21):
             replays = []

@@ -1,9 +1,6 @@
 const std = @import("std");
 const AnswerRenderer = @import("AnswerRenderer");
 
-// Observe requests through the page-allocator singleton, not libc allocations,
-// direct mappings, or physical footprint. Bypass the override in the backing
-// allocator so the standard accounting wrapper cannot recurse into itself.
 var accounting = std.testing.FailingAllocator.init(.{
     .ptr = undefined,
     .vtable = &std.heap.PageAllocator.vtable,
@@ -29,11 +26,7 @@ pub fn main() !void {
     for (0..4096) |_| try renderer.feed(&chunk);
     try renderer.finish();
 
-    // Forwarding must pass before accounting: a freed full-answer buffer still
-    // violates the allocation-volume assertion even with unchanged live bytes.
     try std.testing.expectEqual(@as(u64, 16 * 1024 * 1024), discard.fullCount());
-    // Bounded table measurement and replay reuse the inline owner without
-    // allocating rendered rows or per-cell payloads; fences allocate none.
     for (0..256) |_| try renderer.feed("\n| `name` | 雪 |\n| --- | --- |\n| **value** | abc |\n\n```zig\ncode\n\n```\n");
     try renderer.finish();
     try std.testing.expectEqual(@as(usize, 0), accounting.allocated_bytes - allocated_before);

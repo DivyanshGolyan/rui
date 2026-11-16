@@ -7,7 +7,6 @@ import (
 	"testing"
 )
 
-// observationFrame encodes one record as src/TestObservation.zig writes it.
 func observationFrame(lost byte, sequence uint64, fields map[byte]string) []byte {
 	frame := make([]byte, observationHeaderBytes)
 	for id := byte(0); int(id) < len(observationFields); id++ {
@@ -24,7 +23,6 @@ func observationFrame(lost byte, sequence uint64, fields map[byte]string) []byte
 	return frame
 }
 
-// testObservations maps fresh state as the Host initializes it.
 func testObservations(t *testing.T) *Observations {
 	state, err := os.CreateTemp(t.TempDir(), "state")
 	if err != nil {
@@ -51,7 +49,6 @@ func TestObservationsExposeOnlyTheCompleteSequencePrefix(t *testing.T) {
 	}
 	observations := testObservations(t)
 	go observations.read(reader)
-	// Field 9 is command_key and field 13 lock_acquired_at_ns.
 	writer.Write(observationFrame(0, 2, map[byte]string{0: "control_timing", 9: "second"}))
 	writer.Write(observationFrame(0, 1, map[byte]string{0: "control_timing", 9: "first", 13: "11"}))
 	writer.Close()
@@ -64,7 +61,6 @@ func TestObservationsExposeOnlyTheCompleteSequencePrefix(t *testing.T) {
 		records[1]["command_key"] != "second" || records[0]["process"] != "42" || records[0]["run"] != "7" {
 		t.Fatalf("records = %v", records)
 	}
-	// Two delivered records, admission sealed and nothing in flight.
 	observations.word(observationCountOffset).Store(2 << 1)
 	observations.word(observationActiveOffset).Store(observationSealed)
 	if err := observations.validateFinal(); err != nil {

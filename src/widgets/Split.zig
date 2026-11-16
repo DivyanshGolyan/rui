@@ -1,4 +1,3 @@
-//! Two bounded panes with a one-cell divider and caller-chosen narrow fallback.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;

@@ -1,4 +1,3 @@
-"""Exercise the compiled handoff through the real restore and gate drivers."""
 import contextlib
 import copy
 import hashlib
@@ -48,14 +47,10 @@ class HandoffTest(unittest.TestCase):
         build_artifact.package(['test'], self.root / 'upload')
         self.receipt = json.loads((self.root / 'upload/compiled.json').read_text())
         self.archive = (self.root / 'upload/compiled.tar.gz').read_bytes()
-        # A later rollout image on the consumer is logged, never compared.
         os.environ['ImageVersion'] = '20261018.339.1'
-        # Local packages come from the hash-pinned fetch, not the download.
         fetch = self.root / 'src/fetch_dependencies.sh'
         fetch.parent.mkdir()
         fetch.write_text('mkdir -p zig-pkg && echo fetched > zig-pkg/pinned-source\n')
-        # A child compiler stand-in emits a distinguishable executable; the real
-        # gate driver executes whichever binary the handoff left in place.
         zig = self.root / 'zig'
         zig.write_text('''#!/usr/bin/env python3
 import os
@@ -250,7 +245,6 @@ else:
                 self.assertEqual(self.gates(), ['consumer'])
 
     def split_downloads(self):
-        # Two producers: both unit roots, and everything else with packages.
         downloads = {}
         unit_root = self.root / 'unit-bin'
         unit_root.mkdir()
@@ -323,8 +317,6 @@ else:
                             output.addfile(member, io.BytesIO(data) if data is not None else None)
                     self.archive = archive.getvalue()
                     self.receipt = copy.deepcopy(original_receipt)
-                    # Keep outer archive/GitHub digests valid, exercising each
-                    # executable's receipt rather than generic ZIP corruption.
                     self.receipt['archive'] = hashlib.sha256(self.archive).hexdigest()
                     self.refresh_download()
                     self.downloads = dict(original_downloads, **{'201': (self.download, self.metadata)})
@@ -360,7 +352,6 @@ else:
             self.archive = unit.read('compiled.tar.gz')
         for foreign in ('system', 'machine', 'targets'):
             with self.subTest(foreign=foreign):
-                # A different platform or selection in either part invalidates the handoff.
                 self.receipt['inputs'][foreign] = 'foreign'
                 self.refresh_download()
                 self.downloads = {'202': rest, '201': (self.download, self.metadata)}
@@ -393,7 +384,6 @@ else:
         rest, rest_archive = read('202')
         unit, unit_archive = read('201')
         publish('203', dict(rest, inputs=dict(rest['inputs'], part='all')), rest_archive)
-        # The unit archive also claiming the rest part's executable.
         publish('204', dict(unit,
                             executables=dict(unit['executables'], **rest['executables'])), unit_archive)
         self.downloads = downloads
@@ -417,22 +407,18 @@ else:
 
     def test_one_retry_only_when_requested(self):
         build_artifact.restore(['101'], ['test'])
-        # A retryable shard reports its failure, reruns once and passes.
         (self.root / 'flaky').touch()
-        # Capture the retry's ::warning so this job does not annotate a fake failure.
         with contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(self.gates('--retry', targets='["test-logic"]'), ['producer'])
         self.assertIn('::warning::test-logic failed (exit 9); one automatic retry', output.getvalue())
         summary = (self.root / 'summary').read_text()
         self.assertIn('test-logic failed (exit 9); one automatic retry', summary)
         self.assertIn('test-logic passed on its automatic retry after failing', summary)
-        # A persistent failure keeps the gate's own exit after one retry.
         with patch.dict(os.environ, GATE_EXIT='23'), self.assertRaises(SystemExit) as failure, \
                 contextlib.redirect_stdout(io.StringIO()):
             self.gates('--retry', targets='["test-logic"]')
         self.assertEqual(failure.exception.code, 23)
         self.assertEqual((self.root / 'gates').read_text().splitlines(), ['producer'] * 2)
-        # Without --retry (strict-path selections) the first failure stands.
         (self.root / 'flaky').touch()
         with self.assertRaises(SystemExit) as failure:
             self.gates(targets='["test-logic"]')

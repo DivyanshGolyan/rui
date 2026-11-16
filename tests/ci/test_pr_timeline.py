@@ -33,7 +33,7 @@ class TimelineTest(unittest.TestCase):
 
     def test_never_draft_uses_opened_not_missing_ready_event(self):
         data = self.snapshot()
-        data["timeline"] = []  # Explicit never-draft variant of the recorded PR.
+        data["timeline"] = []
         row = timeline.stages(**data)
         self.assertEqual(row["stages"]["ready"], row["stages"]["opened"])
         data["timeline"] = [{"event": "convert_to_draft"}]
@@ -62,7 +62,6 @@ class TimelineTest(unittest.TestCase):
         for change in ("running", "findings", "string_false", "untrusted"):
             with self.subTest(change=change):
                 data = self.snapshot(1418)
-                # Without the receipt, the summary alone decides.
                 data["comments"] = [c for c in data["comments"] if "codex-review-receipt:v1" not in c["body"]]
                 summary = next(c for c in data["comments"] if "codex-review-state:v1" in c["body"])
                 state = json.loads(timeline.SUMMARY.search(summary["body"])[1])
@@ -79,8 +78,6 @@ class TimelineTest(unittest.TestCase):
                 self.assertIsNone(timeline.stages(**data)["stages"]["codex_clean"])
 
     def test_clean_on_earlier_head_survives_unreviewed_commits_landing_allows(self):
-        # #1316: clean on 22355cf, then a test-only commit merged unreviewed.
-        # #1322: clean on 230e06b, then "Merge main" merged unreviewed.
         for number, clean_head, clean in ((1316, "22355cf8fe", "2026-11-12T05:05:50.297698Z"),
                                           (1322, "230e06b86e", "2026-11-12T07:10:33.486335Z")):
             with self.subTest(number=number):
@@ -103,13 +100,12 @@ class TimelineTest(unittest.TestCase):
                    "body": "<!-- codex-review-receipt:v1 -->\n**Reviewed commit:** `c98448974d`"}
         data["comments"].append(receipt)
         self.assertEqual(timeline.stages(**data)["stages"]["codex_clean"], "2026-11-12T05:20:00Z")
-        data["comments"].append({**receipt, "created_at": "2026-11-12T06:00:00Z"})  # After merge.
+        data["comments"].append({**receipt, "created_at": "2026-11-12T06:00:00Z"})
         self.assertEqual(timeline.stages(**data)["stages"]["codex_clean"], "2026-11-12T05:20:00Z")
         data["comments"].remove(receipt)
         self.assertIsNone(timeline.stages(**data)["stages"]["codex_clean"])
 
     def interim(self, when, findings=False, association="OWNER", edited="2026-11-13T23:59:00Z"):
-        # Edited later than posted, so the posting time must be the one read.
         state = {"commit_sha": "7ba38bdf89613a8cf19174af1cc3dc840f92bfa9", "has_unresolved_findings": findings}
         return {"user": {"login": "DivyanshGolyan"}, "author_association": association,
                 "created_at": when, "updated_at": edited,
@@ -133,7 +129,7 @@ class TimelineTest(unittest.TestCase):
                 self.assertEqual(row["codex_rounds"], 0 if "association" in change else 1)
 
     def test_interim_edited_after_merge_keeps_its_posting_time(self):
-        data = self.snapshot(1418)  # Merged 11:06:41.
+        data = self.snapshot(1418)
         data["comments"] = [c for c in data["comments"] if c["user"]["login"] != timeline.CODEX]
         data["reviews"] = []
         data["comments"].append(self.interim("2026-11-13T10:51:00Z", edited="2026-11-13T12:00:00Z"))
@@ -143,11 +139,11 @@ class TimelineTest(unittest.TestCase):
         self.assertEqual(row["codex_rounds"], 1)
 
     def test_mixed_codex_and_interim_outcomes_share_one_record(self):
-        data = self.snapshot(1418)  # Codex receipt 10:43:48 and summary 10:45:43 on one head.
+        data = self.snapshot(1418)
         data["comments"].append(self.interim("2026-11-13T10:50:00Z", findings=True))
         row = timeline.stages(**data)
         self.assertEqual(row["stages"]["codex_reviewed"], "2026-11-13T10:43:48Z")
-        self.assertIsNone(row["stages"]["codex_clean"])  # Interim findings revoke Codex clean.
+        self.assertIsNone(row["stages"]["codex_clean"])
         self.assertEqual(row["codex_rounds"], 2)
         data["comments"].append(self.interim("2026-11-13T10:55:00Z"))
         row = timeline.stages(**data)
@@ -158,7 +154,6 @@ class TimelineTest(unittest.TestCase):
         self.assertEqual(sources, ["receipt", "summary", "interim", "interim"])
 
     def test_malformed_marker_is_dropped_with_a_warning_and_the_report_carries_on(self):
-        # Invalid JSON (an unfilled template) and a missing field, in each marker kind.
         bad_interim = ('<!-- opus-review-state:v1 {"commit_sha":"7ba38bd","has_unresolved_findings":<true|false>} -->',
                        '<!-- opus-review-state:v1 {"commit_sha":"7ba38bd"} -->')
         bad_summary = ("<!-- codex-review-state:v1 not-json -->",
@@ -169,7 +164,7 @@ class TimelineTest(unittest.TestCase):
         for kind, bodies in (("interim", bad_interim), ("summary", bad_summary)):
             for body in bodies:
                 with self.subTest(kind=kind, body=body):
-                    data = self.snapshot(1418)  # Clean receipt 10:43:48, clean summary 10:45:43.
+                    data = self.snapshot(1418)
                     if kind == "interim":
                         data["comments"].append({**self.interim("2026-11-13T10:50:00Z"), "body": body, "html_url": url})
                         expected = "2026-11-13T10:45:43.596757Z"
@@ -192,7 +187,7 @@ class TimelineTest(unittest.TestCase):
         row = timeline.stages(**data)
         self.assertEqual(row["codex_rounds"], 1)
         self.assertEqual(row["stages"]["codex_clean"], summary["updated_at"])
-        self.assertIsNone(row["stages"]["codex_requested"])  # Bot boilerplate is not a request.
+        self.assertIsNone(row["stages"]["codex_requested"])
 
     def test_first_successful_admission_on_exact_head(self):
         data = self.snapshot(1418)
@@ -240,7 +235,6 @@ class TimelineTest(unittest.TestCase):
         with patch.object(timeline, "pages", wraps=conflict_alert.pages) as pager:
             result = timeline.collect(api, "2026-11-12", [], lambda repo, ref: data["activity"])
         self.assertEqual(result, [timeline.stages(**data)])
-        # Envelope paging goes through the one shared pager, not a local copy.
         self.assertIn("check_runs", [call.args[2:] and call.args[2] for call in pager.call_args_list])
         self.assertEqual(sum("page=2" in path for path in calls), 5)
         self.assertTrue(all("per_page=100" in path for path in calls))
@@ -304,11 +298,9 @@ class TimelineTest(unittest.TestCase):
         self.assertEqual(days[1]["merged"], 2)
         self.assertEqual(days[1]["median_opened_to_merged_minutes"], 28.62)
         self.assertEqual(days[1]["median_merged_to_released_minutes"], 41.27)
-        # Both days start before main_build.py's record: unknown, not zero.
         self.assertTrue(all(day["red_main_minutes"] is None for day in days))
 
     def issue(self, number, created, *events, body=MARKER, **extra):
-        """A ci-red issue row plus its closed/reopened events as (event, at) pairs."""
         closes = [at for event, at in events if event == "closed"]
         state = "open" if not events or events[-1][0] == "reopened" else "closed"
         row = {"number": number, "created_at": created, "closed_at": closes[-1] if closes else None,
@@ -320,15 +312,12 @@ class TimelineTest(unittest.TestCase):
         events = {row["number"]: history for row, history in issues}
         calls = []
         def api(method, path):
-            # Runs and jobs are never read: a stale rerun of an older SHA or a
-            # failed report job cannot move red; only main_build.py's issue can.
             self.assertEqual(method, "GET")
             calls.append(path)
             if path.startswith(f"repos/{timeline.REPO}/issues?"):
                 return rows
             match = re.fullmatch(rf"repos/{timeline.REPO}/issues/(\d+)/events\?&per_page=100&page=1", path)
             self.assertIsNotNone(match, path)
-            # Unrelated events (labels, mentions) sit beside the transitions.
             return [{"event": "labeled", "created_at": "2026-11-14T00:00:01Z"}, *events[int(match[1])]]
         return api, calls
 
@@ -336,14 +325,11 @@ class TimelineTest(unittest.TestCase):
         api, calls = self.red_main_api([
             self.issue(1, "2026-11-14T23:00:00Z", ("closed", "2026-11-15T01:30:00Z")),
             self.issue(2, "2026-11-15T11:00:00Z"),
-            # Closed, then reopened by hand: green while closed, red again until now.
             self.issue(3, "2026-11-14T02:00:00Z", ("closed", "2026-11-14T03:00:00Z"),
                        ("reopened", "2026-11-14T05:00:00Z")),
-            # report_issue's per-signature ci-red issue: not main's state.
             self.issue(4, "2026-11-14T00:00:00Z", body="<!-- ci-signature: {} -->"),
             self.issue(5, "2026-11-14T00:00:00Z", body=None),
             self.issue(6, "2026-11-14T00:00:00Z", pull_request={"url": "..."})])
-        # Issue 3's reopened span runs to now and covers issues 1 and 2.
         self.assertEqual(timeline.red_main(api, "2026-11-15T12:00:00Z"), [
             ("2026-11-14T02:00:00Z", "2026-11-14T03:00:00Z"), ("2026-11-14T05:00:00Z", "2026-11-15T12:00:00Z")])
         self.assertIn("state=all", calls[0])
@@ -351,8 +337,6 @@ class TimelineTest(unittest.TestCase):
         self.assertEqual(sorted(path.split("/")[4] for path in calls[1:]), ["1", "2", "3"])
 
     def test_red_main_counts_a_reopened_issue_only_while_open(self):
-        # main_build.py opens at 10:00, a green build closes at 11:00, a hand
-        # reopen at 15:00, the next green build closes at 15:30: 90 red minutes.
         api, _ = self.red_main_api([self.issue(
             1, "2026-11-14T10:00:00Z", ("reopened", "2026-11-14T15:00:00Z"),
             ("closed", "2026-11-14T15:30:00Z"), ("closed", "2026-11-14T11:00:00Z"))])
@@ -360,7 +344,6 @@ class TimelineTest(unittest.TestCase):
         self.assertEqual(red, [("2026-11-14T10:00:00Z", "2026-11-14T11:00:00Z"),
                                ("2026-11-14T15:00:00Z", "2026-11-14T15:30:00Z")])
         self.assertEqual(timeline.daily([], "2026-11-14", "2026-11-14T20:00:00Z", red)[0]["red_main_minutes"], 90)
-        # Reopened and still open: red from the reopen until the report.
         api, _ = self.red_main_api([self.issue(
             1, "2026-11-14T10:00:00Z", ("closed", "2026-11-14T11:00:00Z"), ("reopened", "2026-11-14T15:00:00Z"))])
         red = timeline.red_main(api, "2026-11-14T20:00:00Z")
@@ -369,8 +352,6 @@ class TimelineTest(unittest.TestCase):
         self.assertEqual(timeline.daily([], "2026-11-14", "2026-11-14T20:00:00Z", red)[0]["red_main_minutes"], 360)
 
     def test_red_main_is_the_union_of_overlapping_issues(self):
-        # B opens at 10:00; at 11:00 an older closed issue A is reopened by
-        # hand while B is still open. Main was red 10:00-12:00: 120, not 180.
         api, _ = self.red_main_api([
             self.issue(1, "2026-11-13T20:00:00Z", ("closed", "2026-11-13T21:00:00Z"),
                        ("reopened", "2026-11-14T11:00:00Z")),
@@ -379,7 +360,6 @@ class TimelineTest(unittest.TestCase):
         self.assertEqual(red, [("2026-11-13T20:00:00Z", "2026-11-13T21:00:00Z"),
                                ("2026-11-14T10:00:00Z", "2026-11-14T12:00:00Z")])
         self.assertEqual(timeline.daily([], "2026-11-14", "2026-11-14T12:00:00Z", red)[0]["red_main_minutes"], 120)
-        # Closed issues that overlap, one inside another: one span.
         api, _ = self.red_main_api([
             self.issue(1, "2026-11-14T10:00:00Z", ("closed", "2026-11-14T11:30:00Z")),
             self.issue(2, "2026-11-14T11:00:00Z", ("closed", "2026-11-14T12:00:00Z")),
@@ -399,9 +379,9 @@ class TimelineTest(unittest.TestCase):
         self.assertEqual(timeline.daily([], "2026-11-14", "2026-11-14T20:00:00Z", red)[0]["red_main_minutes"], 180)
 
     def test_red_main_minutes_split_midnight_clip_today_and_unknown_before_record(self):
-        red = [("2026-11-12T10:00:00Z", "2026-11-14T00:30:00Z"),  # Spans the record's start.
-               ("2026-11-14T23:00:00Z", "2026-11-15T01:30:00Z"),  # Closed, spans midnight.
-               ("2026-11-15T11:00:00Z", "2026-11-15T12:00:00Z")]  # Still open at report time.
+        red = [("2026-11-12T10:00:00Z", "2026-11-14T00:30:00Z"),
+               ("2026-11-14T23:00:00Z", "2026-11-15T01:30:00Z"),
+               ("2026-11-15T11:00:00Z", "2026-11-15T12:00:00Z")]
         days = timeline.daily([], "2026-11-12", "2026-11-15T12:00:00Z", red)
         self.assertEqual([day["red_main_minutes"] for day in days], [None, None, 90, 150])
         days = timeline.daily([], "2026-11-14", "2026-11-15T12:00:00Z", [])
@@ -421,7 +401,6 @@ class TimelineTest(unittest.TestCase):
                 self.assertIs(github, timeline.github)
                 if fmt == "json":
                     report = json.loads(output.getvalue())
-                    # Still-open spans end at the same instant the report is as of.
                     self.assertEqual(timeline.utc(now), report["as_of"])
                     self.assertEqual(report["prs"], [row])
                     self.assertIn(timeline.RED_MAIN_KNOWN_FROM, report["red_main_source"])

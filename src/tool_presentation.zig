@@ -1,12 +1,8 @@
-//! How a tool call shows to a reader: its saved description, outcome code
-//! and publication position. A Session Label has its own smaller byte bound.
-//! protocol.zig renders it as JSON.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 
 pub const max_description_bytes = @import("mcp/shape.zig").description_max_bytes;
 
-/// A Session Label obeys the saved Bash description rule.
 pub const max_label_bytes = 100;
 
 pub const ToolPresentation = struct {
@@ -15,7 +11,6 @@ pub const ToolPresentation = struct {
     publication_position: ?u64,
     pub const Code = enum { unresolved, pending_permission, background, succeeded, failed, timed_out, indeterminate, storage_failed, spawn_failed, cancelled, infrastructure_shutdown, denied, unknown_tool, invalid_arguments };
 
-    /// One non-blank line of UTF-8 within the description bound.
     pub fn validDescription(bytes: []const u8) bool {
         if (bytes.len == 0 or bytes.len > max_description_bytes or !std.unicode.utf8ValidateSlice(bytes)) return false;
         var nonblank = false;
@@ -34,8 +29,6 @@ pub const ToolPresentation = struct {
     }
 };
 
-/// Whether `bytes` is a Session Label: one non-blank line of UTF-8 within
-/// `max_label_bytes`.
 pub fn validLabel(bytes: []const u8) bool {
     return bytes.len <= max_label_bytes and ToolPresentation.validDescription(bytes);
 }

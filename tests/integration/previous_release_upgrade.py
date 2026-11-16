@@ -57,9 +57,6 @@ def release_version(binary):
 
 
 def build_candidate_release(candidate, root):
-    # Source installs normally report "unreleased", which cannot be used for
-    # verified release activation. Reuse upgrade-integration's production actor:
-    # only its release identity is synthetic, not its Host or installer behavior.
     prefix = root / "candidate"
     subprocess.run(["zig", "build", "upgrade-fixture", "--prefix", prefix, "-j2"],
                    cwd=candidate, check=True, timeout=1200)
@@ -67,8 +64,6 @@ def build_candidate_release(candidate, root):
 
 
 def install_candidate_release(candidate, publisher, root):
-    # Exercise the rendered curl-installer path, including extraction, digest
-    # verification, publication and restart. Only archive transport is local.
     sys.path.insert(0, str(candidate / "tests/ci"))
     import release
 
@@ -120,8 +115,6 @@ def assert_running_upgrade(dialect, binary, store, seed, ready, previous, versio
     current = json.loads(shown)
     assert current["store"] == previous["store"] == str(store), shown
     assert current["instance"] != previous["instance"], "installer left the old Host running"
-    # Status's version is a wire version, not a release version. Bind its socket
-    # to the kernel's exact server image before asking that image for its version.
     with os_semantics.unix_stream() as connection:
         connection.settimeout(5)
         connection.connect(ready["socket"])
@@ -137,7 +130,6 @@ def assert_running_upgrade(dialect, binary, store, seed, ready, previous, versio
 
 
 def supported_format(checkout):
-    # Releases before the Store's split declare the format in src/store.zig.
     path = checkout / "src/store/schema.zig"
     source = (path if path.exists() else checkout / "src/store.zig").read_text()
     return int(re.search(r"pub const schema_version: u32 = (\d+);", source)[1])
@@ -154,7 +146,6 @@ def supported_range(checkout):
 
 
 class Dialect(HostServeDialect):
-    """One installed build's command grammar; the previous build keeps its own."""
 
     def __init__(self, binary):
         super().__init__(binary)
@@ -202,7 +193,6 @@ class Dialect(HostServeDialect):
                                "--store", store, "--key", key, timeout=timeout)["observation"]
 
     def terminal(self, observation):
-        # The previous installed binary keeps its own observation contract.
         return (observation.get("state") in fixture.TERMINAL_MESSAGE_STATES
                 if "state" in observation else bool(observation.get("result")))
 
@@ -269,8 +259,6 @@ def main():
         previous_format = supported_format(previous)
         candidate_minimum, candidate_format = supported_range(candidate)
         supported = candidate_minimum <= previous_format <= candidate_format
-    # Do not use the runner's HOME, default Store or credentials. Keep the
-    # compiler cache outside HOME so both normal installs can reuse compilation.
     os.environ.setdefault("ZIG_GLOBAL_CACHE_DIR", str(pathlib.Path.home() / ".cache/zig"))
     directory = tempfile.mkdtemp(prefix="rui-upgrade-", dir=os.environ.get("RUI_UPGRADE_FAILURES"))
     host_released = True
@@ -302,8 +290,6 @@ def main():
 
         def stop_installed_host():
             nonlocal host_released
-            # The old child is reaped first; a failed install may have left
-            # either it or a detached candidate serving this Store.
             if args.running_host:
                 stop_detached(candidate_cli, publisher, store)
                 host_released = True
@@ -339,13 +325,10 @@ def main():
                 binary, installer_output = install_candidate_release(candidate, publisher, root)
             else:
                 subprocess.run([binary, *dialect.pause, "--store", store], check=True, timeout=10)
-                # Effect-aware shutdown is a nonzero serving exit, not a crash.
                 assert seed.wait(timeout=10) != 0
-                stop_detached(dialect, binary, store)  # Confirm lease release, not just acknowledgement.
+                stop_detached(dialect, binary, store)
                 stop_process(seed)
                 seed = None
-                # The Host has closed and checkpointed. A normal read-only WAL
-                # connection creates sidecars, contaminating the refusal snapshot.
                 with contextlib.closing(sqlite3.connect((store / "rui.sqlite3").as_uri() + "?mode=ro&immutable=1", uri=True)) as database:
                     assert database.execute("PRAGMA user_version").fetchone()[0] == previous_format
                 before_hashes = database_hashes(store)
@@ -360,7 +343,7 @@ def main():
             if args.running_host:
                 assert_running_upgrade(dialect, binary, store, seed, ready, previous_status,
                                        release_version(publisher), installer_output)
-                commands = ()  # No explicit start/restart may repair the installer.
+                commands = ()
             else:
                 commands = ((("host", "start"),) if supported
                             else (("host", "start"), candidate_cli.serve()))
@@ -380,7 +363,6 @@ def main():
                     assert restarted.returncode == 0, "supported upgrade must start without a fresh Store"
                     state, shown = dialect.host_status(binary, store, 5)
                     assert state == "ready", shown
-                    # Restarted from soft 256, the candidate uses its own default.
                     assert json.loads(shown)["active_capacity"] == "100", shown
                     print(shown, flush=True)
                     if previous_format != candidate_format:
@@ -403,8 +385,6 @@ def main():
                     attempted_restart = False
                     print(f"Breaking format {previous_format}→{candidate_format} {' '.join(command)} refused in {elapsed:.3f}s; SQLite hashes unchanged", flush=True)
             if not args.running_host and not supported:
-                # The previous installed artifact must still recover the exact
-                # work at its original Store path. This is not a migration.
                 fixture.RUI = previous_artifact
                 dialect = previous_cli
                 seed, _ = start_ready_process(
@@ -429,8 +409,6 @@ def main():
                 lambda: thread.join(timeout=5),
             )
     except BaseException:
-        # A failed/unknown start may still own this Store. Never delete beneath
-        # it, even when cleanup also failed. Retain the original failure first.
         if args.running_host and host_released and not os.environ.get("RUI_UPGRADE_FAILURES"):
             dispose_all(lambda: shutil.rmtree(directory))
         else:

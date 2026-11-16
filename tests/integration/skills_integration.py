@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""Skills across the real Host wire, durable creation, reload and recovery.
-
-The loopback provider records the actual incoming bytes before replying. No
-provider credentials, caller-side skill expansion or live provider is needed.
-"""
 import hashlib
 import http.server
 import json
@@ -22,7 +17,6 @@ from host_process import canonical_fixture_root, dispose_all, retain_failure_sta
 
 PARENT_INSTRUCTIONS = "Authored parent instructions; never replace with skill metadata."
 CHILD_INSTRUCTIONS = "Unique child instructions for the six-content creation transaction."
-# Its `/child-only` binds the child's own skill, which its parent lacks.
 CHILD_TASK = "Unique child task for the six-content creation transaction, with /child-only."
 CHILD_SCHEMA = {"type": "object", "properties": {"child": {"type": "string"}},
                 "required": ["child"], "additionalProperties": False}
@@ -87,7 +81,6 @@ class SkillsHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers["Content-Length"]))
-        # Capture before responding: fixture disposal cannot manufacture evidence.
         with self.server.lock:
             self.server.requests.append(body)
             number = len(self.server.requests)
@@ -147,8 +140,6 @@ def main():
         home_only = skill(personal, "home-only", "Host HOME metadata", directory="Vendor_Home")
         switching = skill(personal, "switching", "Same description, different winning path")
         skill(personal, "shared", "HOME must lose")
-        # Neither legacy roots, a workspace below the repository, an ancestor,
-        # nor a nested candidate directory is an additional discovery root.
         skill(repo / ".claude" / "skills", "legacy", "Not advertised")
         skill(repo / ".codex" / "skills", "codex", "Not advertised")
         skill(workspace / ".agents" / "skills", "workspace-only", "Not advertised")
@@ -253,8 +244,6 @@ def main():
             assert invoke("session", "list", "--store", store, "--all")["sessions"] == sessions_before
             assert len(endpoint.decoded()) == request_count, "refused creation admitted model work"
 
-        # Ordinary Workspace validation remains authoritative even when the
-        # outer discovery capture also failed. Repair cannot alter keyed refusal.
         missing_workspace = state / "missing-workspace"
         creation_refusal_case("missing-workspace", missing_workspace, "invalid_workspace", missing_workspace.mkdir)
         if os.geteuid() != 0:
@@ -263,8 +252,6 @@ def main():
             inaccessible_root.mkdir(parents=True)
             inaccessible_root.chmod(0)
             try:
-                # A valid Workspace with a genuinely inaccessible skills root
-                # must still fail closed, never become an empty catalog.
                 creation_refusal_case("inaccessible-root", inaccessible_workspace, "skills_unavailable",
                                       lambda: inaccessible_root.chmod(0o700))
             finally:
@@ -281,16 +268,12 @@ def main():
         saved = invoke("session", "inspect", "--store", store, "--session", parent)["session"]
         assert "skill" in saved["tools"], saved
         assert endpoint.decoded() == [], "Configure must not schedule a model turn"
-        # Public parsing accepts bounded UTF-8 strings, so target syntax belongs
-        # to the shared mutation owner, after keyed replay classification.
         targets = ("bad", "abcdefg", "ABCDEF", "iiiiii", "ab/cde", "ab\0cde", "éabcd", "absent", "")
         target_refusals = []
         before_targets = conversation(parent)
         for index, target in enumerate(targets):
             request = dict(reload(f"reload-target-{index}"), session=target)
             if target == "":
-                # Creating syntax still needs the ordinary complete spec. A
-                # reload must reject it, never turn that spec into creation.
                 request["configuration"] = json.loads(create_capture)["configuration"]
             expected = {"status": "rejected", "replayed": False, "session": target,
                         "code": "invalid_session_reference" if index < len(targets) - 2 else "unknown_session",
@@ -337,8 +320,6 @@ def main():
             assert head.startswith(b"HTTP/1.1 200 "), (head, body)
             return body
 
-        # One semantic metadata page works before creation and for the durable
-        # Session catalog. Prefix filtering never changes its revision hint.
         suggestion_base = {"version": host_process.WIRE_VERSION, "kind": "skill_suggestions", "store": str(store), "prefix": ""}
         prospective = post({**suggestion_base, "workspace": str(workspace)})
         existing = post({**suggestion_base, "session": parent})
@@ -352,9 +333,6 @@ def main():
         def invocation(entry):
             return f'Skill file: {json.dumps(entry["path"], ensure_ascii=False, separators=(",", ":"))}\n\n' + pathlib.Path(entry["path"]).read_text()
 
-        # A Message's `/name` words bind the recipient's skills, once each, in
-        # the text's order; other slash words stay text. The model reads the
-        # typed text, then each skill as its own user message.
         typed = "inline prose /demo then /shared, /tmp/x and /month stay text, /demo once, 雪\n"
         inline_record = state / "inline-mixed.json"
         mixed = invoke("session", "send", "--store", store, "--to", parent, "--record", inline_record,
@@ -370,7 +348,6 @@ def main():
         assert row["value"]["admission"]["content"] == content_reference(typed.encode()), row
         assert activity_bytes(parent, row["position"]) == typed.encode()
 
-        # A creating Message binds against the catalog it creates.
         initial_inline = invoke("session", "start", "--store", store, "--workspace", workspace,
                                 "--provider", "codex", "--model", "gpt-6-sol", "--record", state / "inline-first.json",
                                 "--key", "inline-first", text="/shared /demo")
@@ -380,8 +357,6 @@ def main():
         first_row = activity_message(initial_inline_session, "inline-first")
         assert first_row["value"]["admission"]["content"] == content_reference(b"/shared /demo")
 
-        # Body-only edits are deliberately NOT a catalog delta. Invocation must
-        # nevertheless read the full current raw bytes, including frontmatter.
         raw = b'---\r\nname: demo\r\ndescription: Demo metadata\r\n---\r\n# Current body\r\n' + '雪 "quoted" \\ end\r\n\r\n'.encode()
         pathlib.Path(demo["path"]).write_bytes(raw)
         count = len(endpoint.decoded())
@@ -400,15 +375,12 @@ def main():
         assert raw.decode() not in "\n".join(messages(invoked, "developer")), invoked
         pathlib.Path(demo["path"]).unlink()
         before_replay = conversation(parent)
-        # The public Conversation shows the Message as typed, not the skill.
         users = [content for item, content in before_replay if item["kind"] == "user"]
         assert b"/demo" in users and expected_invocation.encode() not in users, before_replay
         restricted_before = conversation(restricted_session)
         stop_process(host)
         host = None
 
-        # The same requests replay their committed capture, not today's missing
-        # file/catalog, including both independently allocated creation routes.
         host = start()
         count = len(endpoint.decoded())
         for request, expected in target_refusals:
@@ -435,9 +407,6 @@ def main():
         assert conversation(parent) == before_replay, "second file failure partially admitted its first file"
         assert len(endpoint.decoded()) == count, "second file failure or recovery scheduled model work"
 
-        # Native refusals bind the caller's own text, fresh and on recovery:
-        # each is a saved refusal (exit 3), never an unconfirmed binding
-        # mismatch (exit 4). demo's file is gone; zzzzzz names no Session.
         for label, to, code in (("unreadable-skill", parent, "skill_file_unavailable"),
                                 ("unknown-session", "zzzzzz", "unknown_session")):
             key = f"inline-refused-{label}"
@@ -465,10 +434,6 @@ def main():
         assert output == expected_invocation, output
         assert raw.decode() not in "\n".join(messages(tool_request, "developer")), tool_request
 
-        # An advertised regular file can become a writerless FIFO. Both public
-        # invocation paths must refuse it without pinning a worker/engine in
-        # blocking open; raw_request's existing five-second deadline bounds the
-        # negative, and the ordinary Host disposer kills/reaps on assertion.
         source = pathlib.Path(demo["path"])
         source.unlink()
         os.mkfifo(source, 0o600)
@@ -492,7 +457,6 @@ def main():
             fifo_tool_request = endpoint.decoded()[-1]
             fifo_output = next(item["output"] for item in fifo_tool_request["input"]
                                if item.get("type") == "function_call_output" and item.get("call_id") == "skill-fifo-call")
-            # Both doors name the same read failure; the tool adds that it kept the catalog.
             assert fifo_result == b"Rui could not read skill demo: InvalidSkillFile.", fifo_result
             assert fifo_output.encode().startswith(fifo_result), fifo_output
             assert metadata(fifo_tool_request, "Available skills") == [initial_catalog]
@@ -505,8 +469,6 @@ def main():
         assert fixture.read_result(store, "fifo-file") == fifo_result
         assert post(reload("fifo-repair"))["answer"]["skills"] == "unchanged"
 
-        # An addition, a removal, a description change and a path-only winner
-        # change produce one append-only system fact, never a full new listing.
         pathlib.Path(removed["path"]).unlink()
         added = skill(project, "added", "Added metadata", directory="Vendor_Added")
         changed_shared = skill(project, "shared", "Changed project description")
@@ -528,7 +490,6 @@ def main():
         assert fixture.read_result(store, "fifo-file") == fifo_result
         replayed = post(reload("metadata"))["answer"]
         assert replayed["replayed"] is True and replayed["skills"] == "reloaded", replayed
-        # This refusal also survives restart and a now-readable skill file.
         replayed_missing = post(dict(native, key="missing-file"))["answer"]
         assert replayed_missing["replayed"] is True and replayed_missing["code"] == "skill_file_unavailable", replayed_missing
         assert fixture.read_result(store, "missing-file") == missing_result
@@ -538,9 +499,6 @@ def main():
         assert metadata(updated, "Available skills") == [initial_catalog], updated
         assert metadata(updated, "Skill catalog changes") == [delta], updated
 
-        # Add a disk skill only now: the child's catalog and instruction cannot
-        # deduplicate against its parent's. Instructions/schema/task are also
-        # unique, exercising the entire six-content start_agent import path.
         skill(project, "added", "Added metadata", directory="Vendor_Added")
         child_only = skill(project, "child-only", "Unique child discovery after parent creation")
         configured = invoke("session", "configure", "--store", store, "--session", parent,
@@ -550,7 +508,6 @@ def main():
         send("spawn", "start the unique child")
         wait_for(lambda: any(CHILD_TASK in messages(request, "user") for request in endpoint.decoded()), "child provider request")
         child_request = next(request for request in endpoint.decoded() if CHILD_TASK in messages(request, "user"))
-        # start_agent binds the task against the catalog the child starts with.
         assert messages(child_request, "user")[-2:] == [CHILD_TASK, invocation(child_only)], child_request
         child = fixture.instructions_session(child_request["instructions"])
         assert child not in (parent, restricted_session), child
@@ -578,9 +535,6 @@ def main():
         child_conversation = conversation(child)
         assert CHILD_TASK.encode() in [content for item, content in child_conversation if item["kind"] == "user"], child_conversation
         if "structured_output" in child_saved["execution"].get("unavailable", []):
-            # The current Host explicitly lacks schema validation. Creation and
-            # all six imports still succeed; the later model response must be
-            # refused with its real capability cause, not mistaken for a hang.
             assert child_saved["work"]["state"]["kind"] == "failed", child_saved
             assert child_saved["recent_messages"][0]["outcome"] == "unsupported_output_schema", child_saved
             assert child_saved["work"]["latest_outcome"]["code"] == "unsupported_output_schema", child_saved

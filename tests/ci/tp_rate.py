@@ -21,7 +21,6 @@ import sys
 
 LABEL = "ci-red"
 PREFIX = "cause:"
-# The classes of the CI report's failure ledgers, in the order its table uses.
 CAUSES = {
     "real": ("B60205", "CI red: the fix changed product behavior (a bug or regression)"),
     "compile": ("D93F0B", "CI red: a compile, type-check or format error"),
@@ -34,20 +33,17 @@ CAUSES = {
 
 
 def week(closed_at):
-    """The ISO week, as 2026-W45, an RFC 3339 UTC time falls in."""
     year, number, _ = datetime.datetime.fromisoformat(closed_at.replace("Z", "+00:00")).isocalendar()
     return f"{year}-W{number:02d}"
 
 
 def cause(issue):
-    """The one cause label's name, or None when it has none or several."""
     found = [label["name"][len(PREFIX):] for label in issue["labels"]
              if label["name"].startswith(PREFIX) and label["name"][len(PREFIX):] in CAUSES]
     return found[0] if len(found) == 1 else None
 
 
 def weeks(issues):
-    """Per-week counts, oldest first, from `gh issue list --json number,closedAt,labels`."""
     rows = defaultdict(lambda: {"closed": 0, "unlabelled": [], **{name: 0 for name in CAUSES}})
     for issue in issues:
         if not issue.get("closedAt"):

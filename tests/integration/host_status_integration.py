@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Native client/Host observation without a CLI status command or SQLite access."""
 
 import fcntl
 import http.server
@@ -28,7 +27,6 @@ PUBLISH = pathlib.Path(__file__).resolve().parents[2] / "release/publish.sh"
 
 
 def installer_view(home):
-    """What the installer's report reads from this build: the selected Store and its Host status."""
     result = subprocess.run(["sh", "-c", '. "$1"; _rui_selected "$2"', "sh", PUBLISH, RUI],
         env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0 and result.stderr == "", result
@@ -36,8 +34,6 @@ def installer_view(home):
 
 
 def cli_status(home, *args):
-    # Metadata is exactly one JSON value on stdout; incompatible and access
-    # failures still report their status there and exit nonzero.
     result = subprocess.run([RUI, "host", "status", *map(str, args)],
         env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10)
     value = json.loads(result.stdout)
@@ -50,8 +46,6 @@ def cli_status(home, *args):
 
 
 def read_request(connection):
-    # Closing with an unread request can reset the connection, replacing the
-    # response classification under test with a transport failure.
     connection.settimeout(5)
     request = b""
     while b"\r\n\r\n" not in request:
@@ -121,7 +115,6 @@ def wait_for_descriptors(pid, expected=None, timeout=5):
         try:
             return {entry.name: os.readlink(entry) for entry in directory.iterdir()}
         except FileNotFoundError:
-            # Retry the whole snapshot if a connection closes during enumeration.
             return None
     return wait_for(snapshot, f"descriptors {expected}", timeout=timeout, interval=.01,
                     ready=lambda observed: observed is not None and (expected is None or observed == expected))
@@ -187,8 +180,6 @@ def protected_saturation(root):
         for index in range(10):
             began_ns = time.monotonic_ns()
             held.append(held_request(store, "message", complete_headers=False))
-            # A full request line, not accept/backlog population, establishes
-            # each ordinary borrower. Each milestone belongs to this issuer.
             records = diagnostics.wait("ordinary_classification_released", count=index + 1,
                                        timeout=2, subject_kind="route", subject="message")
             record = records[index]
@@ -224,8 +215,6 @@ def protected_saturation(root):
             "version": host_process.WIRE_VERSION, "type": "host_stop_reply", "status": "acknowledged"}, ack
         deadline = time.monotonic() + 2
         wait_for(lambda: not socket_path(store).exists(), "stop to close the listener", interval=.01, deadline=deadline)
-        # These peers never handed a complete request to a worker. They must
-        # retire without requiring peer close, unlike an already-owned reply.
         for stream in held:
             remaining = deadline - time.monotonic()
             assert remaining > 0, "unhanded intake did not retire after stop"
@@ -237,9 +226,7 @@ def protected_saturation(root):
                     raise
         host.wait(timeout=5)
         stop_process(host)
-        assert host.returncode != 0, diagnostics.tail()  # EffectAwareShutdown, not a forced kill.
-        # The per-exchange receipt is after physical close; process reap also
-        # establishes that both shared workers have retired before lease reuse.
+        assert host.returncode != 0, diagnostics.tail()
         release = diagnostics.matching("connection_resources_released", subject=pending["subject"])
         assert len(release) == 1 and release[0]["scratch_used_bytes"] == "0", release
         assert release[0]["run"] == pending["run"] and int(release[0]["sequence"]) > int(pending["sequence"]), release
@@ -302,7 +289,6 @@ def discovery_body_deadline(root):
         accepted = time.monotonic()
         began_ns = time.monotonic_ns()
         with held_request(store, "host-info", complete_headers=False) as stream:
-            # Header time is charged to the same original acceptance budget.
             time.sleep(2)
             stream.sendall(b"Host: local\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\nContent-Length: 512\r\n\r\n")
             diagnostics.wait("connection_request_host_info", timeout=2)
@@ -328,8 +314,6 @@ def discovery_body_deadline(root):
                     break
             elapsed = time.monotonic() - accepted
             assert closed and 9 <= elapsed < 11.5, ("body deadline not acceptance-derived 10s", elapsed, bytes(response), diagnostics.tail())
-        # Peer EOF precedes admission retirement; require the owned endpoint
-        # before probing the single discovery place again.
         discovery_released(diagnostics, began_ns)
         began_ns = time.monotonic_ns()
         observed = status(store)
@@ -364,8 +348,6 @@ def mysql_host_info():
             ddl = subprocess.run([RUI, "store", "schema", "--engine", "mysql"], check=True, capture_output=True, text=True, timeout=20).stdout
             sql(f"USE {database};" + ddl)
             url = f"mysql://root:{quote(password, safe='')}@{quote(socket, safe='')}/{database}"
-            # Credentials travel only through the settings document, never argv or
-            # the child's environment. The Host answers with its opaque id.
             child = subprocess.Popen([RUI, "host", "serve", "--settings", "-"], stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      env={key: os.environ[key] for key in ("PATH", "HOME", "TMPDIR") if key in os.environ})
@@ -391,8 +373,6 @@ def mysql_host_info():
             diagnostic = info["innodb_doublewrite"]
             assert isinstance(diagnostic, str) and len(diagnostic.encode()) <= 32, info
             assert diagnostic == sql("SELECT @@global.innodb_doublewrite"), info
-            # The same neutral common fields as SQLite; only this optional
-            # member differs. No engine-specific reply variant is introduced.
             assert set(info) == {"version", "type", "store", "instance", "active_capacity", "intake_capacity",
                                  "descriptor_limit", "started_at", "custody_occupied", "paused", "capabilities", "innodb_doublewrite"}, info
             assert info["type"] == "host_info" and info["version"] == host_process.WIRE_VERSION, info
@@ -406,7 +386,6 @@ def mysql_host_info():
 
 
 def resolved_sqlite_routing(root):
-    """A hex directory is SQLite without a hint; launch routing stays separate."""
     home = pathlib.Path(root) / "routing-home"
     home.mkdir(mode=0o700)
     name = "0123456789abcdef0123456789abcdef"
@@ -440,8 +419,6 @@ def resolved_sqlite_routing(root):
         value = frame_host.host_info(runtime / "rui.sock", str(launched_store))
         assert value["store"] == str(launched_store.resolve()), value
         assert "innodb_doublewrite" not in value and "kind" not in value and "engine" not in value, value
-        # Read-only discovery supplies the canonical identity; a nonempty
-        # wrong identity still cannot address this Host.
         discovered = frame_host.host_info(runtime / "rui.sock", "")
         assert discovered["store"] == str(launched_store.resolve()), discovered
         wrong = frame_host.post(runtime / "rui.sock", "host-info",
@@ -532,10 +509,6 @@ def main():
 
                 peer = threading.Thread(target=incompatible_peer)
                 peer.start()
-                # The CLI's status, exit and `host start` refusal for this peer
-                # are cli.zig's "host status and start classify a Host's reply
-                # however late it comes": the CLI runs on the real 1 s
-                # Host-info deadline, which a loaded runner can miss (#967).
                 assert status(store) == "incompatible"
                 peer.join(timeout=3)
                 assert not peer.is_alive()
@@ -562,8 +535,6 @@ def main():
                 valid_body.replace(b'"bash": true', b'"bash": false, "bash": true'),
                 *(valid_body.replace(b'"capabilities":', f'"{field}": "{value}", "capabilities":'.encode())
                   for field in ("intake_capacity", "descriptor_limit") for value in ("010", "+10", "1_0")),
-                # The start time is a positive canonical second; slots in use
-                # never exceed Active Capacity; both are required.
                 *(valid_body.replace(b'"started_at": "1792918800"', f'"started_at": "{value}"'.encode())
                   for value in ("0", "01792918800", "+1792918800")),
                 valid_body.replace(b'"custody_occupied": "1"', b'"custody_occupied": "2"'),
@@ -603,8 +574,6 @@ def main():
 
                     peer = threading.Thread(target=malformed_peer, daemon=True)
                     peer.start()
-                    # The CLI prints this same classification; cli.zig checks
-                    # its incompatible status and exit against a newer wire.
                     observed = status(store)
                     assert observed == "incompatible", (response, observed)
                     peer.join(timeout=3)
@@ -627,8 +596,6 @@ def main():
 
                     peer = threading.Thread(target=unavailable_peer, daemon=True)
                     peer.start()
-                    # The untimed actor proves the reply was classified, not
-                    # timed out; cli.zig checks the CLI renders a fenced Host.
                     assert status(store) == "owned_unavailable"
                     peer.join(timeout=3)
                     assert not peer.is_alive()
@@ -641,8 +608,6 @@ def main():
         assert cli_status(home, "--store", store)["status"] == "access_failure"
         store.chmod(0o700)
 
-        # A selected managed route is enabled before login; readiness does not
-        # open or refresh its deliberately absent credential file.
         credential = pathlib.Path(root) / "missing-credential.json"
         first = None
         diagnostics = None
@@ -660,7 +625,6 @@ def main():
             assert began_ns <= int(current["at_ns"]) <= began_ns + int(timeout * 1e9), current
             return value
 
-        # start_ready_process inherits this test's environment.
         old = os.environ.get("RUI_CODEX_CREDENTIAL_FILE")
         os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(credential)
         try:
@@ -668,8 +632,6 @@ def main():
             assert fields["execution"] == "enabled"
             diagnostics = HostDiagnostics(first)
             if os_semantics.PROC_FS:
-                # Readiness precedes execution-thread initialization. Its first
-                # boundary proves reactor wake descriptors have been created.
                 diagnostics.wait("lifecycle_boundary")
                 assert b'"type":"host_info"' in exchange("host_info", lambda: raw_info(stale, store.resolve()), 5)
                 before = wait_for_descriptors(first.pid)
@@ -677,7 +639,6 @@ def main():
             first_status = exchange("host_info", lambda: status(store))
             match = re.fullmatch(r"ready ([0-9a-f]{32}) 3 true chatgpt_device ([1-9][0-9]*) 0", first_status)
             assert match, first_status
-            # The Host's start, not the call's: fixed for this Host's life.
             started_at = match.group(2)
             assert int(started_at) <= time.time(), first_status
             alias = store.parent / "alias"
@@ -686,7 +647,6 @@ def main():
             setup = exchange("host_info", lambda: subprocess.run([RUI, "defaults", "configure", "--store", str(alias)],
                 env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10))
             assert setup.returncode == 0, setup.stderr
-            # Configure saves the canonical path, which the installer then shows.
             view = exchange("host_info", lambda: installer_view(home))
             assert view == [str(store.resolve()), "ready"], view
             selected = exchange("host_info", lambda: cli_status(home))
@@ -702,7 +662,6 @@ def main():
             for _ in range(40):
                 assert exchange("host_info", lambda: status(alias)) == first_status
             if before_fd is not None:
-                # Independent FD readback is not admission-retirement authority.
                 after_fd = len(wait_for_descriptors(first.pid, before))
             assert list((store / "scratch").iterdir()) == []
             head, body = exchange("host_info", lambda: raw_info(stale, store.resolve()), 5).split(b"\r\n\r\n", 1)
@@ -717,7 +676,6 @@ def main():
                 "capabilities": {"bash": True, "providers": {"codex": "chatgpt_device", "openai": "unserved", "chatgpt": "unserved"}},
             }
             assert b'"type":"host_info"' in exchange("host_info", lambda: raw_info(stale, store.resolve(), match.group(1)), 5)
-            # Holding new Turns is Host memory: the reply and Host status say it.
             for paused in (True, False):
                 head, body = exchange("host_pause", lambda: raw_info(stale, store.resolve(), kind="host_pause", route="control/host-pause", extra={"paused": paused}), 5).split(b"\r\n\r\n", 1)
                 assert head.startswith(b"HTTP/1.1 200 OK\r\n"), head
@@ -756,7 +714,6 @@ def main():
             second_status = exchange("host_info", lambda: status(store))
             match_second = re.fullmatch(r"ready ([0-9a-f]{32}) 7 true unserved ([1-9][0-9]*) 0", second_status)
             assert match_second, second_status
-            # A replacement Host starts no earlier than the one it replaced.
             assert int(match_second.group(2)) >= int(started_at), (first_status, second_status)
             selected = exchange("host_info", lambda: cli_status(home))
             assert selected["status"] == "ready" and selected["store"] == str(store.resolve()), selected

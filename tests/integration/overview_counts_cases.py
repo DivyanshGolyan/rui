@@ -1,8 +1,3 @@
-"""One-line overview rows, pinned Settings and one Footer through a real PTY.
-
-The historical counts group now checks the replacement presentation. The
-list has no editor or overview command surface.
-"""
 from contextlib import contextmanager
 import json
 import os
@@ -56,8 +51,6 @@ def rows_by_mark():
             assert re.fullmatch(r"◌ q1 +\d+s", lines[queued].strip()), frame
             assert "Queued" not in frame and "workspace" not in frame, frame
             assert "slots " not in frame, frame
-            # Live app memory belongs only on the pinned Settings row, not
-            # the Session rows or a replacement counts/status line.
             for line in lines:
                 if not line.startswith("  Settings"):
                     assert not re.search(r"(?:rui|tools) \d+(?:\.\d+)? (?:MB|GB)\b", line), frame
@@ -80,8 +73,6 @@ def pinned_settings():
         assert rows[-1].rstrip().endswith("enter open"), frame
         assert "Type a task" not in frame and "gpt-6-luna" not in frame, frame
         before = requests(w)
-        # Text and marked paste have no hidden draft. Opening Settings is
-        # the acknowledgement after both inputs, not a timed absence check.
         screen.keys(b"/nope\x1b[200~pasted task\x1b[201~\x1b[F\r")
         screen.contains("Notifications")
         screen.keys(b"\x1b")
@@ -98,10 +89,6 @@ def requests(w):
 
 
 def unconfirmed_status():
-    """A send the conversation could not confirm shows, back in the overview,
-    on the status row above the footer with its saved request's recover key.
-    The Host is stopped (SIGSTOP) while the send uploads, so the send's own
-    inactivity deadline leaves it unconfirmed."""
     with world("counts-unconfirmed", {"first": answer("first"), "lost": answer("lost")}) as w:
         session = w.session("--label", "Talk")
         send(w, session, "first")
@@ -130,7 +117,6 @@ def unconfirmed_status():
             status = next(at for at, row in enumerate(rows) if line in row)
             settings = next(at for at, row in enumerate(rows) if "Settings" in row)
             assert status > settings and "Type a task" not in frame, frame
-            # The whole handle on its own row, the one Footer under it.
             assert rows[status].strip() == line, frame
             assert rows[status + 1].rstrip().endswith("enter open"), frame
             assert screen.style("! Not confirmed").fg is not None, frame

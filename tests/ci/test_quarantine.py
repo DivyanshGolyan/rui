@@ -1,4 +1,3 @@
-"""Listed flakes stop blocking PR admission only while every failure is listed, unexpired and not strict."""
 from contextlib import redirect_stdout
 import io
 import os
@@ -18,7 +17,6 @@ FLAKE = dict(
     signature=f'{CODEX}: assert "transport reactor initialization failure: HttpsProxySchemeUnsupported" '
               'in required.stderr, required raised AssertionError',
     path=CODEX, issue=1093, owner="DivyanshGolyan", added="2026-11-09", expires="2026-11-23")
-# A direct gate's output as zig build prints it (#1093).
 FLAKY_RUN = f"""\
 Traceback (most recent call last):
   File "/home/runner/work/rui/rui/{CODEX}", line 449, in <module>
@@ -37,7 +35,6 @@ AssertionError: 503
 error: process exited with code 1
 failed command: python3 /home/runner/work/rui/rui/tests/integration/transport_h2_integration.py ./rui
 """
-# A gate that exits nonzero without output any parser recognises.
 SILENT_GATE = """\
 error: process exited with code 1
 failed command: ./.zig-cache/o/abc/frame-gate
@@ -121,7 +118,6 @@ class ListedTest(unittest.TestCase):
 
 
 class RunSelectedTest(unittest.TestCase):
-    """run_selected's verdict for a batch whose runs return these results in turn."""
 
     def verdict(self, mode, *runs):
         runs = list(runs)

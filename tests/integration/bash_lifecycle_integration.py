@@ -22,8 +22,6 @@ def prove_pid_publication(root):
     state = root / "PID publication"
     state.mkdir(mode=0o700)
     path = state / "bash-pid"
-    # Bash applies the function's redirection before entering it. Hold that
-    # exact boundary, not a scheduling delay, before allowing the PID write.
     command = (
         "printf() { builtin printf r >&2; "
         "IFS= read -r release || return; builtin printf \"$@\"; }; "
@@ -51,8 +49,6 @@ def prove_pid_publication(root):
             child.kill()
         child.communicate(timeout=8)
 
-    # Preserve the selected identity, including a background child rather than
-    # the publishing shell. Reap that child before publication to own its cleanup.
     for shell in ("bash", "sh"):
         for value in ("$$", "$!", "$child"):
             path.unlink()
@@ -284,8 +280,6 @@ def natural_exit_signaling(root, inherited_ignore=False):
             "natural exit continuation",
         )
         result = bash_fixture.result_text(store, session)
-        # Confirmed retirement is not news, including macOS group-signal EPERM
-        # after the reap: the result is the outcome and the nonempty stream.
         assert result == "Bash succeeded. Exit code: 0.\nstdout:\nfinished", result
         request = json.loads(endpoint.requests[-1])
         outputs = [item["output"] for item in request["input"] if item.get("type") == "function_call_output"]
@@ -355,9 +349,6 @@ def main():
             endpoint.server_close()
             thread.join(timeout=5)
 
-        # Shutdown retires an unhanded upload independently of Bash cleanup.
-        # The lifecycle owner still retains Store and lease until safe cleanup;
-        # the Host-stop fixture separately holds an already-owned reply.
         name = "lifecycle-store-lease-drain"
         state = root / name
         state.mkdir(mode=0o700)
@@ -494,9 +485,6 @@ def main():
                 endpoint.server_close()
                 thread.join(timeout=5)
 
-        # The owner-level deadline table covers every unresolved lifecycle
-        # phase. Keep one native watchdog witness for the production pipe,
-        # FIONREAD snapshot, retained custody, and recovery handoff.
         prove_faulted_cleanup_cuts_off_pipe(root, "cleanup-watchdog")
 
         name = "lifecycle-forced-reap"

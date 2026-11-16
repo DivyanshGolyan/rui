@@ -1,16 +1,3 @@
-//! Postgres frontend/backend protocol 3.0 for the Store's Postgres engine:
-//! startup over TLS with SCRAM-SHA-256(-PLUS), and the extended-query
-//! messages a pipelined round needs.
-//!
-//! No I/O. Encoders append to the caller's `Outbox`, the `Decoder` reads
-//! the caller's received bytes, and `Startup` is the connection's state
-//! machine up to its first ReadyForQuery. Whoever owns the socket moves
-//! the bytes; `tls.zig` encrypts them between caller buffers the same way.
-//!
-//! Memory: nothing allocates. A connection needs one `send_buffer_bytes`
-//! outbox and one `receive_buffer_bytes` inbox. A column value too long
-//! for the inbox arrives in parts (`Event.value_begin`), and a bound value
-//! too long for the outbox is written through it (`beginBindStreamed`).
 const std = @import("std");
 const scram = @import("scram.zig");
 
@@ -18,42 +5,29 @@ pub const tls = @import("tls.zig");
 
 pub const send_buffer_bytes = 16 * 1024;
 pub const receive_buffer_bytes = 16 * 1024;
-/// A column value up to this length arrives whole in one `Event.value`.
 pub const max_inline_value_bytes = receive_buffer_bytes - 4;
-/// Every backend message other than DataRow, ErrorResponse and
-/// NoticeResponse must fit the inbox whole.
 pub const max_message_bytes = receive_buffer_bytes;
 
-/// PG 15 is the oldest release the Store supports.
 pub const minimum_server_major: u32 = 15;
 
 const protocol_version: u32 = 3 << 16;
 const ssl_request_code: u32 = 80877103;
 const format_binary: u16 = 1;
 
-// ------------------------------------------------------------ encoding
-
 pub const Outbox = struct {
     buffer: []u8,
     len: usize = 0,
-    /// Bytes of a streamed Bind value still owed (`beginBindStreamed`).
     streaming_left: u32 = 0,
-    /// Bytes discarded so far: with `written`, tells the owner whether a
-    /// message's bytes (a COMMIT's, say) have left the outbox.
     sent: u64 = 0,
 
-    /// Borrowed until the next append or `discard`.
     pub fn bytes(self: *const Outbox) []const u8 {
         return self.buffer[0..self.len];
     }
 
-    /// Bytes ever appended. Taken after writing a message, it is the
-    /// position `sent` passes once that message's last byte is discarded.
     pub fn written(self: *const Outbox) u64 {
         return self.sent + self.len;
     }
 
-    /// Drops the first `count` bytes, after the owner sent them.
     pub fn discard(self: *Outbox, count: usize) void {
         std.debug.assert(count <= self.len);
         if (count < self.len) std.mem.copyForwards(u8, self.buffer, self.buffer[count..self.len]);
@@ -65,8 +39,6 @@ pub const Outbox = struct {
         return self.buffer.len - self.len;
     }
 
-    /// Appends as much of `data` as fits, never past the value started by
-    /// `beginBindStreamed`, and returns how much did.
     pub fn appendPart(self: *Outbox, data: []const u8) usize {
         const count = @min(data.len, self.free(), self.streaming_left);
         @memcpy(self.buffer[self.len..][0..count], data[0..count]);
@@ -90,9 +62,6 @@ pub const Outbox = struct {
         self.put(&.{0});
     }
 
-    /// Starts a message whose whole length is `body_len` after its length
-    /// word, failing with nothing written when the part written now
-    /// (`now_len` bytes of body) does not fit.
     fn begin(self: *Outbox, tag: ?u8, body_len: usize, now_len: usize) error{NoSpace}!void {
         std.debug.assert(self.streaming_left == 0);
         std.debug.assert(4 + body_len <= std.math.maxInt(i32));
@@ -105,7 +74,6 @@ pub const Outbox = struct {
 
 pub const EncodeError = error{NoSpace};
 
-/// A startup string must hold no NUL; this checks one from outside Rui.
 pub fn validString(text: []const u8) bool {
     return std.mem.indexOfScalar(u8, text, 0) == null;
 }
@@ -115,7 +83,6 @@ pub fn writeSslRequest(out: *Outbox) EncodeError!void {
     out.putInt(u32, ssl_request_code);
 }
 
-/// `settings` are run-time parameters set for the session (GUCs).
 pub fn writeStartup(out: *Outbox, user: []const u8, database: []const u8, settings: []const [2][]const u8) EncodeError!void {
     var body: usize = 4 + "user".len + 1 + user.len + 1 + "database".len + 1 + database.len + 1 + 1;
     for (settings) |pair| body += pair[0].len + 1 + pair[1].len + 1;
@@ -145,7 +112,6 @@ pub fn writeSaslResponse(out: *Outbox, data: []const u8) EncodeError!void {
     out.put(data);
 }
 
-/// A simple Query: several statements in one string, text results.
 pub fn writeQuery(out: *Outbox, sql: []const u8) EncodeError!void {
     std.debug.assert(validString(sql));
     const body = sql.len + 1;
@@ -153,8 +119,6 @@ pub fn writeQuery(out: *Outbox, sql: []const u8) EncodeError!void {
     out.putString(sql);
 }
 
-/// Parse into the named prepared statement. `param_oids` may leave types
-/// for the server to infer with 0.
 pub fn writeParse(out: *Outbox, name: []const u8, sql: []const u8, param_oids: []const u32) EncodeError!void {
     std.debug.assert(validString(name) and validString(sql));
     const body = name.len + 1 + sql.len + 1 + 2 + 4 * param_oids.len;
@@ -165,8 +129,6 @@ pub fn writeParse(out: *Outbox, name: []const u8, sql: []const u8, param_oids: [
     for (param_oids) |oid| out.putInt(u32, oid);
 }
 
-/// Describe a prepared statement: ParameterDescription, then
-/// RowDescription or NoData.
 pub fn writeDescribeStatement(out: *Outbox, name: []const u8) EncodeError!void {
     const body = 1 + name.len + 1;
     try out.begin('D', body, body);
@@ -174,8 +136,6 @@ pub fn writeDescribeStatement(out: *Outbox, name: []const u8) EncodeError!void {
     out.putString(name);
 }
 
-/// Bind the unnamed portal to `statement`, every parameter and result in
-/// binary format. A null parameter is SQL NULL.
 pub fn writeBind(out: *Outbox, statement: []const u8, params: []const ?[]const u8) EncodeError!void {
     const body = bindHeadLen(statement, params) + 4;
     try out.begin('B', body, body);
@@ -183,8 +143,6 @@ pub fn writeBind(out: *Outbox, statement: []const u8, params: []const ?[]const u
     putResultFormats(out);
 }
 
-/// Bind whose last parameter, `streamed_len` bytes long, follows through
-/// `Outbox.appendPart` and is closed by `endBindStreamed`.
 pub fn beginBindStreamed(out: *Outbox, statement: []const u8, params: []const ?[]const u8, streamed_len: u32) EncodeError!void {
     const head = bindHeadLen(statement, params) + 4;
     try out.begin('B', head + streamed_len + 4, head);
@@ -193,7 +151,6 @@ pub fn beginBindStreamed(out: *Outbox, statement: []const u8, params: []const ?[
     out.streaming_left = streamed_len;
 }
 
-/// After exactly the declared bytes went through `appendPart`.
 pub fn endBindStreamed(out: *Outbox) EncodeError!void {
     std.debug.assert(out.streaming_left == 0);
     if (out.free() < 4) return error.NoSpace;
@@ -226,8 +183,6 @@ fn putResultFormats(out: *Outbox) void {
     out.putInt(u16, format_binary);
 }
 
-/// Execute the unnamed portal to completion. Statements bound their own
-/// row counts, so there is no row limit and no PortalSuspended.
 pub fn writeExecute(out: *Outbox) EncodeError!void {
     try out.begin('E', 5, 5);
     out.putString("");
@@ -242,23 +197,18 @@ pub fn writeTerminate(out: *Outbox) EncodeError!void {
     try out.begin('X', 0, 0);
 }
 
-// ------------------------------------------------------------ decoding
-
 pub const DecodeError = error{ProtocolViolation};
 
 pub const TransactionStatus = enum(u8) { idle = 'I', in_transaction = 'T', failed = 'E' };
 
 pub const Authentication = union(enum) {
     ok,
-    /// The mechanisms offered, as the message lists them.
     sasl: Strings,
     sasl_continue: []const u8,
     sasl_final: []const u8,
-    /// Any other request (cleartext, MD5, GSS, SSPI); Rui refuses them.
     other: u32,
 };
 
-/// A list of NUL-terminated strings ended by an empty one.
 pub const Strings = struct {
     body: []const u8,
 
@@ -285,8 +235,6 @@ pub const RowDescription = struct {
     pub const Iterator = struct {
         reader: Reader,
 
-        /// `parseMessage` checked every field's layout before handing the
-        /// description out, so these reads cannot fail.
         pub fn next(self: *Iterator) ?Field {
             if (self.reader.bytes.len == 0) return null;
             const name = self.reader.string() catch unreachable;
@@ -314,8 +262,6 @@ pub const ParameterDescription = struct {
 pub const CommandComplete = struct {
     tag: []const u8,
 
-    /// The row count that ends INSERT, UPDATE, DELETE, SELECT, MERGE,
-    /// MOVE, FETCH and COPY tags; null for any other command.
     pub fn rows(self: CommandComplete) ?u64 {
         const space = std.mem.lastIndexOfScalar(u8, self.tag, ' ') orelse return null;
         const digits = self.tag[space + 1 ..];
@@ -325,8 +271,6 @@ pub const CommandComplete = struct {
     }
 };
 
-/// Messages read whole. Slices point into the caller's input and live
-/// until it discards the consumed bytes.
 pub const Message = union(enum) {
     authentication: Authentication,
     parameter_status: struct { name: []const u8, value: []const u8 },
@@ -341,16 +285,10 @@ pub const Message = union(enum) {
     empty_query,
 };
 
-/// Slices point into the input given to `Decoder.next` and live until the
-/// owner discards or overwrites those bytes.
 pub const Event = union(enum) {
     message: Message,
-    /// A DataRow starts; this many column events follow.
     row: u16,
-    /// A whole column: null for SQL NULL.
     value: ?[]const u8,
-    /// A column of this many bytes, longer than `max_inline_value_bytes`;
-    /// `value_part` events carry exactly that many bytes in order.
     value_begin: u32,
     value_part: []const u8,
     error_response: Diagnostic,
@@ -358,15 +296,11 @@ pub const Event = union(enum) {
 
 pub const Decoded = struct {
     consumed: usize,
-    /// Null: the event needs bytes not received yet. Keep the unconsumed
-    /// bytes at the start of a `receive_buffer_bytes` inbox and read more.
     event: ?Event,
 };
 
 pub const Severity = enum { err, fatal, panic, other };
 
-/// What Rui keeps of an ErrorResponse. Fields read past these sizes are
-/// dropped, so a long message cannot grow it.
 pub const Diagnostic = struct {
     sqlstate: [5]u8 = @splat('0'),
     sqlstate_len: u8 = 0,
@@ -379,7 +313,6 @@ pub const Diagnostic = struct {
         return self.message_buffer[0..self.message_len];
     }
 
-    /// From the non-localized severity field.
     pub fn severity(self: *const Diagnostic) Severity {
         const text = self.severity_buffer[0..self.severity_len];
         if (std.mem.eql(u8, text, "ERROR")) return .err;
@@ -393,10 +326,8 @@ pub const Diagnostic = struct {
     }
 };
 
-/// A streaming decoder of backend messages after startup's SSL answer.
 pub const Decoder = struct {
     state: State = .header,
-    /// Bytes left in the current DataRow or field message.
     left: u32 = 0,
     columns_left: u16 = 0,
     value_left: u32 = 0,
@@ -408,7 +339,6 @@ pub const Decoder = struct {
         notice: bool = false,
         code: ?u8 = null,
         terminated: bool = false,
-        /// Bytes of the current field's value seen so far.
         seen: usize = 0,
         diagnostic: Diagnostic = .{},
 
@@ -516,7 +446,6 @@ pub const Decoder = struct {
                         if (!self.fields.terminated) return error.ProtocolViolation;
                         self.state = .header;
                         if (self.fields.notice) continue;
-                        // A SQLSTATE is exactly five characters; any other is not classified.
                         if (self.fields.diagnostic.sqlstate_len != 5) return error.ProtocolViolation;
                         return .{ .consumed = at, .event = .{ .error_response = self.fields.diagnostic } };
                     }
@@ -531,8 +460,6 @@ pub const Decoder = struct {
     }
 };
 
-/// Keeps the fields Rui reads: SQLSTATE, the non-localized severity, and
-/// the start of the primary message.
 fn keepField(diagnostic: *Diagnostic, code: u8, offset: usize, part: []const u8) void {
     switch (code) {
         'C' => for (part, offset..) |byte, at| {
@@ -645,39 +572,20 @@ fn parseMessage(tag: u8, body: []const u8) DecodeError!Message {
     return message;
 }
 
-// ------------------------------------------------------------ errors
-
-/// What an ErrorResponse means for the Store, from its SQLSTATE class.
 pub const Class = enum {
-    /// Class 08, and 57P01/57P02: the connection is gone or the server is
-    /// ending it.
     connection,
-    /// 57P03 and class 53 but 53100: the server is starting up or out of
-    /// resources.
     unavailable,
-    /// 53100: the disk is full.
     storage_full,
-    /// Class 28: the credential was refused.
     authentication,
-    /// 3D000: the database does not exist.
     missing_database,
-    /// 57014: statement_timeout.
     statement_timeout,
-    /// 55P03: lock_timeout.
     lock_timeout,
-    /// 40001.
     serialization,
-    /// 40P01.
     deadlock,
-    /// Class 23.
     constraint,
-    /// 25006: a read-only transaction or a hot standby.
     read_only,
-    /// RUI01: a Store guard raised by the server-side `rui_expect`.
     guard,
-    /// Class 42 and 0A: a statement the server will never accept.
     statement,
-    /// Classes 58 and XX.
     server_fault,
     other,
 };
@@ -711,55 +619,38 @@ pub fn classify(sqlstate: [5]u8) Class {
     return .other;
 }
 
-// ------------------------------------------------------------ startup
-
 pub const Security = enum {
-    /// SSLRequest first, then the TLS handshake, then SCRAM, with channel
-    /// binding when the server offers it. The only way over TCP.
     tls,
-    /// A Unix socket: no TLS; the server's trust or peer method, or SCRAM.
     local,
 };
 
 pub const Options = struct {
     user: []const u8,
     database: []const u8,
-    /// Printable ASCII: SASLprep is the identity on it, so no Unicode
-    /// tables are needed to match the server's hash.
     password: []const u8,
     security: Security,
     settings: []const [2][]const u8 = &.{},
-    /// Random bytes from the caller: the SCRAM client nonce.
     nonce: [scram.nonce_seed_bytes]u8,
 };
 
 pub const StartupError = EncodeError || DecodeError || scram.Error || error{
-    /// A user, database or setting holds a NUL.
     InvalidStartupValue,
     TlsRefused,
     AuthMethodRefused,
-    /// The server answered with an ErrorResponse; see `Startup.diagnostic`.
     ServerRefused,
     UnsupportedServerVersion,
     UnsupportedServerEncoding,
     UnsupportedServerSetting,
 };
 
-/// What the owner does after `Startup.receive`. Bytes in the outbox are
-/// always sent first.
 pub const Next = enum {
-    /// Read more bytes and call `receive` again.
     read,
-    /// Run the TLS handshake, then call `tlsReady`. No byte after the
-    /// server's answer may have arrived in plaintext.
     start_tls,
-    /// Startup is over: the session is idle and accepts queries.
     ready,
 };
 
 pub const Step = struct { consumed: usize, next: Next };
 
-/// One connection's startup: `begin`, then `receive` until `.ready`.
 pub const Startup = struct {
     options: Options,
     phase: Phase = .initial,
@@ -782,7 +673,6 @@ pub const Startup = struct {
 
         fn record(self: *Parameters, name: []const u8, value: []const u8) void {
             if (std.mem.eql(u8, name, "server_version")) {
-                // "15.4", "16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)", "17beta1".
                 const digits = std.mem.indexOfNone(u8, value, "0123456789") orelse value.len;
                 self.server_major = std.fmt.parseUnsigned(u32, value[0..digits], 10) catch 0;
                 if (digits < value.len and value[digits] == '.') {
@@ -803,7 +693,6 @@ pub const Startup = struct {
 
         fn check(self: *const Parameters) StartupError!void {
             if (self.server_major < minimum_server_major) return error.UnsupportedServerVersion;
-            // SQL_ASCII would store bytes the Store's text checks assume are UTF-8.
             if (!self.server_encoding_utf8) return error.UnsupportedServerEncoding;
             if (!self.client_encoding_utf8 or !self.integer_datetimes or !self.standard_conforming_strings)
                 return error.UnsupportedServerSetting;
@@ -828,8 +717,6 @@ pub const Startup = struct {
         }
     }
 
-    /// After a verified handshake. `binding` is the server certificate's
-    /// tls-server-end-point hash, when it has one.
     pub fn tlsReady(self: *Startup, binding: ?scram.ChannelBinding, out: *Outbox) StartupError!void {
         std.debug.assert(self.phase == .tls_handshake);
         self.channel_binding = binding;
@@ -868,7 +755,6 @@ pub const Startup = struct {
         }
     }
 
-    /// True once ReadyForQuery ends startup.
     fn handle(self: *Startup, message: Message, out: *Outbox) StartupError!bool {
         switch (self.phase) {
             .startup_sent => {

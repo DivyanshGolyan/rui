@@ -15,10 +15,6 @@ import (
 	"rui.local/qualification/model-output/provider"
 )
 
-// A `rui` under a Host shell is a client, never Bash, and so is a `rui
-// session send` that replaced the Host's shell; a Host child that execed
-// another command is Bash. Every process lands in exactly one column, so the
-// columns sum to the total.
 func TestToolSamplerCountsSendOnceAsClient(t *testing.T) {
 	directory := t.TempDir()
 	sleep, err := exec.LookPath("sleep")
@@ -33,8 +29,6 @@ func TestToolSamplerCountsSendOnceAsClient(t *testing.T) {
 	if err := os.WriteFile(send, data, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// The direct send is a `cat` copy named rui; it blocks opening the FIFO
-	// named `session`, so its argv is `./rui session send`.
 	direct := filepath.Join(directory, "direct")
 	cat, err := exec.LookPath("cat")
 	if err != nil {
@@ -81,8 +75,6 @@ func TestToolSamplerCountsSendOnceAsClient(t *testing.T) {
 	}
 }
 
-// Only requests the provider received inside the CPU window count toward
-// its denominator; seeds before it and a late continuation do not.
 func TestToolRequestPhasesUseReceivedTimes(t *testing.T) {
 	facts := []provider.ToolSessionFact{
 		{SeedReceivedNS: 5, MeasuredReceivedNS: 20, ContinuationReceivedNS: 30},
@@ -101,8 +93,6 @@ func TestToolRequestPhasesUseReceivedTimes(t *testing.T) {
 	}
 }
 
-// A Session passes only with its seed and original request completed and the
-// exact saved answer; a failed final result after valid tool outputs fails.
 func TestToolOriginalFailureRequiresCompletedExactAnswer(t *testing.T) {
 	inspection := func(key string, outcome string) map[string]any {
 		return map[string]any{"recent_messages": []any{map[string]any{"message": key, "outcome": outcome}, map[string]any{"message": "seed-002", "outcome": "completed"}}}
@@ -135,8 +125,6 @@ func TestToolOriginalFailureRequiresCompletedExactAnswer(t *testing.T) {
 	}
 }
 
-// Validated counts, request phases and, in barrier mode, release facts for a
-// complete park and N overlapping intervals are each required.
 func TestToolAcceptanceFailsClosed(t *testing.T) {
 	done := provider.ToolSummary{Done: 3, WorkloadCalls: 3, DispatchCalls: 2, SucceededCalls: 5}
 	requests := map[string]int{"seed_in_window": 0, "measured_in_window": 3, "continuation_in_window": 3}
@@ -164,7 +152,6 @@ func TestToolAcceptanceFailsClosed(t *testing.T) {
 	}
 }
 
-// A controller that times out with shells missing records a partial release.
 func TestReleaseBarrierRecordsPartialPark(t *testing.T) {
 	directory := t.TempDir()
 	if err := syscall.Mkfifo(filepath.Join(directory, "release"), 0o600); err != nil {

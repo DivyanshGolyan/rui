@@ -1,8 +1,6 @@
 const std = @import("std");
 const client = @import("rui_client");
 
-// Fixture caller for the public library surface; production CLI presentation
-// is a separate slice. The integration runner accepts only complete JSON.
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(std.heap.c_allocator);
     if (args.len != 5) return error.InvalidArguments;

@@ -1,4 +1,3 @@
-"""Upgrade grammar detection must follow installed help, not checkout layout."""
 from contextlib import ExitStack, redirect_stdout
 import io
 import json
@@ -12,14 +11,12 @@ from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tests/integration"))
-# model_fixture takes the binary argument at import time.
 with patch.object(sys, "argv", [__file__, "rui"]):
     import previous_release_upgrade as upgrade
 
 
 class DialectTest(unittest.TestCase):
     def test_installed_grammars(self):
-        # Usage spellings from the pinned 0e4b222 release and resource-first CLIs.
         legacy = "rui message --store PATH --record FILE --key KEY --session REF --text FILE|-\n"
         for name, send, start, pause, expected in (
             ("previous", None, False, False, (False, False, False, False)),
@@ -53,8 +50,6 @@ class DialectTest(unittest.TestCase):
                         self.assertEqual(argv[-1], "--help")
                         self.assertEqual(kwargs, dict(input="", capture_output=True, text=True, timeout=5))
                         command = tuple(argv[1:-1])
-                        # Legacy usage errors may print the entire global help;
-                        # only successful help identifies an installed operation.
                         return subprocess.CompletedProcess(argv, 0 if command in replies else refused,
                                                            replies.get(command, legacy), "")
 
@@ -87,8 +82,6 @@ class DialectTest(unittest.TestCase):
 
     def test_upgrade_compares_bindings_in_each_installed_reply(self):
         identity = {"turn": "1", "operation": "2", "attempt": "1"}
-        # CLI grammar is probed from installed help; observation shape comes
-        # from each reply, never a checkout's protocol source.
         dialect = upgrade.Dialect.__new__(upgrade.Dialect)
         self.assertEqual(dialect.binding({"state": "processing", "binding": identity}), identity)
         self.assertEqual(dialect.binding({"state": "completed", "binding": identity}), identity)
@@ -157,7 +150,6 @@ class RunningUpgradeTest(unittest.TestCase):
             stack.enter_context(patch.object(upgrade.os_semantics, "process_executable", return_value=executable))
             stack.enter_context(patch.object(upgrade, "release_version", return_value=version))
             stack.enter_context(patch.object(upgrade, "wait_for", side_effect=wait))
-            # Activation evidence may never start or repair the Host itself.
             stack.enter_context(patch.object(upgrade.subprocess, "run", side_effect=AssertionError("no explicit restart")))
             upgrade.assert_running_upgrade(dialect, binary, Path("/store"), seed,
                 {"socket": "/host.sock"}, previous, "0.69.10000", output)

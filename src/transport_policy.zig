@@ -1,7 +1,3 @@
-//! Model transport policy over values: how a finished provider stream is
-//! classified, which outcomes keep the response body, and how a provider's
-//! Retry-After is read. `provider.zig` owns the h2 Client, the capture and
-//! the clock reads, and passes their facts here.
 const std = @import("std");
 const codec_abi = @import("codec_abi.zig");
 
@@ -15,7 +11,6 @@ pub const Disposition = enum {
     invalid_headers,
     unsupported_http_version,
 
-    /// The provider answered with an HTTP error status.
     pub fn answered(self: Disposition) bool {
         return switch (self) {
             .permanent_http, .temporary_http => true,
@@ -23,8 +18,6 @@ pub const Disposition = enum {
         };
     }
 
-    /// An HTTP response is the evidence, so its body is sealed before
-    /// settlement. Every other outcome discards the partial capture.
     pub fn retainsResponse(self: Disposition) bool {
         return self == .success or self.answered();
     }
@@ -37,9 +30,6 @@ pub const Evidence = struct {
     retry_after_deadline_ms: ?i64 = null,
 };
 
-/// What a provider's error code means, as its codec names it. Each saves
-/// `provider_<tag>` whether it arrived in a stream event or an HTTP error
-/// body; the provider's own code stays in the report.
 pub const Refusal = codec_abi.Refusal;
 
 const refusal_prefix = "provider_";
@@ -50,37 +40,28 @@ pub fn refusalCode(refusal: Refusal) []const u8 {
     };
 }
 
-/// The refusal a saved failure code names, if any.
 pub fn refusalOfCode(code: []const u8) ?Refusal {
     if (!std.mem.startsWith(u8, code, refusal_prefix)) return null;
     return std.meta.stringToEnum(Refusal, code[refusal_prefix.len..]);
 }
 
-/// An HTTP 429 that names a quota or plan refusal, not a temporary rate
-/// limit. Only its refusal and a valid reset timestamp enter the saved
-/// diagnostic.
 pub const Quota = struct {
-    /// One that `admits` accepts.
     refusal: Refusal,
     resets_at: ?u64 = null,
 
-    /// Whether `refusal` at HTTP 429 is a quota record.
     pub fn admits(refusal: Refusal) bool {
         return refusal == .quota or refusal == .plan;
     }
 
-    /// The quota refusal a saved failure code names, if any.
     pub fn ofFailureCode(code: []const u8) ?Refusal {
         const refusal = refusalOfCode(code) orelse return null;
         return if (admits(refusal)) refusal else null;
     }
 
-    /// The same code as the stream refusal it is.
     pub fn failureCode(self: Quota) []const u8 {
         return refusalCode(self.refusal);
     }
 
-    /// The most bytes `format` writes.
     pub const max_bytes = 512;
 
     pub fn format(self: Quota, buffer: *[max_bytes]u8) []const u8 {
@@ -89,8 +70,6 @@ pub const Quota = struct {
         }) catch unreachable;
     }
 
-    /// The inverse of `format`, for exactly the bytes it writes. Anything
-    /// else is not a saved quota record.
     pub fn parse(bytes: []const u8) ?Quota {
         const head = "{\"refusal\":\"";
         const middle = "\",\"resets_at\":";
@@ -115,9 +94,6 @@ pub const TransferOutcome = union(enum) {
     transport_finished: Evidence,
 };
 
-/// How an h2 stream ended: `h2.Cause` tag for tag. This file stays free of
-/// the transport build, so `provider.zig` converts by name and fails to
-/// compile if either enum gains a tag the other lacks.
 pub const Cause = enum {
     complete,
     sink_refused,
@@ -143,20 +119,14 @@ pub const Cause = enum {
     local_failure,
 };
 
-/// Facts about one finished h2 stream, gathered by `provider.zig`.
 pub const Finished = struct {
     cause: Cause,
-    /// The final response status, once a final header block arrived.
     status: ?u16,
-    /// The receiver refused a header block for want of memory, not for its
-    /// values.
     headers_local_failure: bool = false,
     retry_after_ms: ?u64 = null,
     retry_after_deadline_ms: ?i64 = null,
 };
 
-/// The priority order is capture failure, then request source, then the
-/// transport's evidence.
 pub fn outcome(finished: Finished) error{InvalidHttpEvidence}!TransferOutcome {
     const disposition: Disposition = switch (finished.cause) {
         .sink_refused => return .{ .response_capture_failed = .scratch_exhausted },
@@ -167,7 +137,6 @@ pub fn outcome(finished: Finished) error{InvalidHttpEvidence}!TransferOutcome {
         .encoded_response => .invalid_headers,
         .h2_refused => .unsupported_http_version,
         .untrusted_peer => .tls_verification_failure,
-        // Proxy credentials or policy: unchanged until its settings are.
         .proxy_auth_required, .proxy_refused => .permanent_transport,
         .proxy_failed,
         .resolve_failed,
@@ -183,7 +152,6 @@ pub fn outcome(finished: Finished) error{InvalidHttpEvidence}!TransferOutcome {
         => .temporary_connection,
         .local_failure => .permanent_transport,
     };
-    // A refused version carries no provider retry constraint.
     if (disposition == .unsupported_http_version) return .{ .transport_finished = .{ .disposition = disposition } };
     return .{ .transport_finished = .{
         .disposition = disposition,
@@ -213,7 +181,6 @@ pub const RetryAfter = union(enum) {
     deadline_ms: i64,
 };
 
-/// Delta-seconds, or an HTTP-date in any of RFC 9110's three forms.
 pub fn parseRetryAfter(value: []const u8, now_seconds: i64) ?RetryAfter {
     if (value.len == 0 or value.len > 128) return null;
     if (std.fmt.parseInt(u64, value, 10)) |seconds| {
@@ -231,11 +198,6 @@ const day_names = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"
 const long_day_names = [_][]const u8{ "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday" };
 const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 
-/// Seconds since the epoch for an IMF-fixdate (`Sun, 06 Nov 1994 08:49:37
-/// GMT`), an RFC 850 date (`Sunday, 06-Nov-94 08:49:37 GMT`) or an asctime
-/// date (`Sun Nov  6 08:49:37 1994`). The weekday is checked against the
-/// date, as RFC 9110 lets a recipient do. `now_seconds` places an RFC 850
-/// two-digit year.
 pub fn parseHttpDate(value: []const u8, now_seconds: i64) ?i64 {
     var day: u8 = undefined;
     var month: u4 = undefined;
@@ -243,7 +205,6 @@ pub fn parseHttpDate(value: []const u8, now_seconds: i64) ?i64 {
     var time: []const u8 = undefined;
     var weekday: usize = undefined;
     if (value.len == 29 and value[3] == ',' and std.mem.endsWith(u8, value, " GMT")) {
-        // IMF-fixdate.
         weekday = indexOf(&day_names, value[0..3]) orelse return null;
         if (value[4] != ' ' or value[7] != ' ' or value[11] != ' ' or value[16] != ' ') return null;
         day = digits(u8, value[5..7]) orelse return null;
@@ -260,7 +221,6 @@ pub fn parseHttpDate(value: []const u8, now_seconds: i64) ?i64 {
         year = rfc850Year(short, now_seconds);
         time = rest[11..19];
     } else if (value.len == 24) {
-        // asctime.
         weekday = indexOf(&day_names, value[0..3]) orelse return null;
         if (value[3] != ' ' or value[7] != ' ' or value[10] != ' ' or value[19] != ' ') return null;
         month = monthOf(value[4..7]) orelse return null;
@@ -278,7 +238,6 @@ pub fn parseHttpDate(value: []const u8, now_seconds: i64) ?i64 {
     var m: u4 = 1;
     while (m < month) : (m += 1) days += daysInMonth(year, m);
     days += day - 1;
-    // 1970-01-01 was a Thursday.
     if (@as(usize, @intCast(@mod(days + 3, 7))) != weekday) return null;
     return days * 86_400 + @as(i64, hour) * 3600 + @as(i64, minute) * 60 + second;
 }
@@ -291,8 +250,6 @@ fn rfc850Year(short: u16, now_seconds: i64) u16 {
     return if (year > current + 50) year - 100 else year;
 }
 
-/// The year holding `days` since 1970-01-01. An estimate from the
-/// 365.2425-day mean year is off by at most one.
 fn yearOf(days: i64) u16 {
     var year: u16 = @intCast(@min(1970 + @divFloor(days * 10_000, 3_652_425), 9998));
     if (daysBeforeYear(year) > days) year -= 1;
@@ -300,12 +257,10 @@ fn yearOf(days: i64) u16 {
     return year;
 }
 
-/// Days from 1970-01-01 to January 1 of `year`.
 fn daysBeforeYear(year: u16) i64 {
     return 365 * (@as(i64, year) - 1970) + leapYearsThrough(year - 1) - leapYearsThrough(1969);
 }
 
-/// Leap years in 1..=year, so a date costs no loop over the years.
 fn leapYearsThrough(year: u16) i64 {
     const y: i64 = year;
     return @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400);
@@ -339,7 +294,6 @@ fn digits(comptime T: type, text: []const u8) ?T {
 
 test "every refusal saves one provider code that reads back to it" {
     for (std.enums.values(Refusal)) |refusal| try std.testing.expectEqual(refusal, refusalOfCode(refusalCode(refusal)).?);
-    // A quota refusal saves the same code from an HTTP 429 as from a stream.
     try std.testing.expectEqualStrings("provider_quota", (Quota{ .refusal = .quota }).failureCode());
     try std.testing.expectEqualStrings("provider_model_unavailable", refusalCode(.model_unavailable));
     try std.testing.expect(refusalOfCode("quota") == null);
@@ -360,7 +314,6 @@ test "a saved quota record reads back exactly what was written" {
         try std.testing.expectEqual(quota.resets_at, parsed.resets_at);
     }
     for ([_]Refusal{ .quota, .plan }) |refusal| try std.testing.expectEqual(refusal, Quota.ofFailureCode((Quota{ .refusal = refusal }).failureCode()).?);
-    // A policy or model refusal is no HTTP 429 quota record.
     try std.testing.expect(Quota.ofFailureCode("provider_policy") == null);
     try std.testing.expect(Quota.ofFailureCode("provider_model_unavailable") == null);
     try std.testing.expect(Quota.ofFailureCode("quota") == null);
@@ -393,8 +346,6 @@ test "h2 endings retry only temporary connection loss and keep their Retry-After
         .{ .cause = .inactive, .expected = .temporary_connection },
         .{ .cause = .untrusted_peer, .expected = .tls_verification_failure },
         .{ .cause = .rejected_headers, .expected = .invalid_headers },
-        // A block refused for want of memory is a local failure, not the
-        // provider's contradiction.
         .{ .cause = .rejected_headers, .local = true, .expected = .permanent_transport },
         .{ .cause = .local_failure, .expected = .permanent_transport },
         .{ .cause = .encoded_response, .expected = .invalid_headers },
@@ -481,7 +432,6 @@ test "Retry-After preserves dates and delays without unchecked arithmetic" {
 }
 
 test "HTTP-dates in all three RFC 9110 forms, and nothing else" {
-    // RFC 9110 section 5.6.7's example instant, 784111777.
     for ([_][]const u8{
         "Sun, 06 Nov 1994 08:49:37 GMT",
         "Sunday, 06-Nov-94 08:49:37 GMT",
@@ -492,7 +442,7 @@ test "HTTP-dates in all three RFC 9110 forms, and nothing else" {
     try std.testing.expectEqual(@as(?i64, 1_700_000_001), parseHttpDate("Tuesday, 14-Nov-23 22:13:21 GMT", 1_700_000_000));
     try std.testing.expectEqual(@as(?i64, 1_700_000_001), parseHttpDate("Tue Nov 14 22:13:21 2023", 1_700_000_000));
     for ([_][]const u8{
-        "Mon, 06 Nov 1994 08:49:37 GMT", // wrong weekday
+        "Mon, 06 Nov 1994 08:49:37 GMT",
         "Sun, 06 Nov 1994 08:49:37 UTC",
         "Sun, 31 Nov 1994 08:49:37 GMT",
         "Thu, 29 Feb 2001 00:00:00 GMT",
@@ -509,7 +459,6 @@ test "HTTP-dates in all three RFC 9110 forms, and nothing else" {
 }
 
 test "an RFC 850 two-digit year is at most 50 years ahead of now" {
-    // Now is 2026: 60 and 76 are ahead by at most 50 years, 77 is not.
     const now = 1_790_000_000;
     try std.testing.expectEqual(@as(?i64, 2_840_140_800), parseHttpDate("Thursday, 01-Jan-60 00:00:00 GMT", now));
     try std.testing.expectEqual(@as(?i64, 3_345_062_400), parseHttpDate("Wednesday, 01-Jan-76 00:00:00 GMT", now));

@@ -340,7 +340,6 @@ func wholeRui(sample measurement.ProcessSample) map[string]any {
 		"measurement_basis":                                  "conservative upper bound of Host lifetime physical-footprint peak",
 	}
 	if sample.SamplingError != "" {
-		// Keep a valid footprint visible even when another required query failed.
 		result["status"], result["sampling_error"] = "unavailable", sample.SamplingError
 	}
 	return result
@@ -422,9 +421,6 @@ func readOutputAudit(deadline measurement.Deadline, store string) (outputAudit, 
 	return rows[0], nil
 }
 
-// Private content is one provider extras row per reasoning item, the
-// message item's and its one part's extras, and the usage row; the answer
-// text is shared with the Turn's result.
 func outputAuditValid(audit outputAudit, reasoning int) bool {
 	return audit.CanonicalOutputItems == reasoning+1 && audit.PrivateContentRows == reasoning+3 && audit.AssistantProjections == 1
 }
@@ -495,8 +491,6 @@ type sqliteDiagnostic struct {
 	JournalMode               *string `json:"journal_mode"`
 }
 
-// sqliteDiagnosticRecords decodes the sqlite_diagnostic records of the Host's
-// lossless observation channel; numeric fields arrive as decimal text.
 func sqliteDiagnosticRecords(records []map[string]any) ([]sqliteDiagnostic, error) {
 	result := []sqliteDiagnostic{}
 	for _, record := range records {
@@ -538,8 +532,6 @@ func productionDiagnosticsStatus(records []sqliteDiagnostic) string {
 	return sqliteDiagnosticsStatus(records, -1024, true)
 }
 
-// The production and spill workloads differ only in cache size and spill mode.
-// Required effective settings and usage have one validation boundary.
 func sqliteDiagnosticsStatus(records []sqliteDiagnostic, cacheSize int64, spillEnabled bool) string {
 	if len(records) == 0 {
 		return "incomplete"
@@ -700,7 +692,6 @@ func measureCase(binary, root string, endpoint *payloadEndpoint, name string, re
 	if err != nil {
 		return nil, err
 	}
-	// The Host holds its Store exclusively; audit offline after reaping it.
 	hostNeedsStop = false
 	if err := host.Stop(measurement.TeardownAllowance); err != nil {
 		return nil, err
@@ -992,7 +983,6 @@ func offlineCapacityAudits(stopHost func() error, requests []capacityAuditReques
 	return results, auditError
 }
 
-// Decode independently of the adapter; nil preserves an absent source.
 func decodeModelEvidence(encoded string) ([3]*string, error) {
 	var sources [3]*string
 	value, err := hex.DecodeString(encoded)
@@ -1117,8 +1107,6 @@ func providerOfferWorkComplete(summary provider.Summary, capacity int, expected 
 		summary.OfferBytes == expected.Bytes
 }
 
-// Qualification establishes concurrent complete work, not a per-event deadline.
-// The provider retains pacing violations for diagnosis and reports actual duration.
 func providerOfferQualified(summary provider.Summary, capacity, eventsPerSecond int, duration time.Duration, expected capacityWork) bool {
 	if duration <= 0 || duration%time.Second != 0 || eventsPerSecond <= 0 {
 		return false
@@ -1339,8 +1327,6 @@ func measureCapacityRound(binary, directory, store, canonicalStore, workspace st
 	if err != nil {
 		return nil, err
 	}
-	// Provider writes completing does not establish that the Host capture worker
-	// has consumed them. Keep terminal output gated until the owner reports it.
 	var heldInspection map[string]any
 	err = measurement.WaitFor(deadline, 10*time.Millisecond, "Host capture of complete provider offer", func() (bool, error) {
 		var inspectError error
@@ -1388,7 +1374,6 @@ func measureCapacityRound(binary, directory, store, canonicalStore, workspace st
 			resultDeliveryComplete = false
 		}
 	}
-	// Durable results precede physical resource release; observe both owners.
 	var finalInspection map[string]any
 	err = measurement.WaitFor(deadline, 10*time.Millisecond, "Host custody and scratch drain", func() (bool, error) {
 		var inspectError error
@@ -1409,8 +1394,6 @@ func measureCapacityRound(binary, directory, store, canonicalStore, workspace st
 	finalScratch, finalScratchOK := measurement.IntStringField(finalInspection, "execution", "scratch_used_bytes")
 	finalCustody, finalCustodyOK := measurement.IntStringField(finalInspection, "execution", "custody_occupied")
 	cleanupComplete := finalScratchOK && finalCustodyOK && finalScratch == 0 && finalCustody == 0
-	// Work and drain are established. Subsequent observation failures must not
-	// erase this round or prevent its independent audit after Host retirement.
 	cpuEnd, cpuEndError := measurement.CPUSeconds(host.Process)
 	factError := facts.Write("host_complete", map[string]any{"round": round, "host_cpu_seconds": cpuEnd, "cpu_available": cpuEndError == nil, "inspection": finalInspection})
 	retained, hostSampleError := measurement.SampleProcess(host.Process, filepath.Join(roundDirectory, "host-footprint-retained.txt"))
@@ -1575,7 +1558,6 @@ func capacityResult(capacity, eventsPerSecond, roundCount int, sameSessions bool
 func measureCapacity(binary, root string, scenario capacityScenario, duration time.Duration, roundCount int, sameSessions, diagnostics bool) (result map[string]any, resultError error) {
 	capacity := scenario.Capacity
 	var rounds []map[string]any
-	// Registered before resource cleanup so it sees every cleanup failure.
 	defer func() {
 		if resultError != nil && result != nil {
 			for _, row := range rounds {
@@ -1662,8 +1644,6 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 		identity := capacityAuditIdentity(sessions, round)
 		row, err := measureCapacityRound(binary, directory, store, canonicalStore, workspace, round, capacity, scenario.EventsPerSecond, duration, sameSessions, deadline, host, fixture, facts, &identity)
 		if row != nil {
-			// Completed work still needs its independent audit when later
-			// resource observations fail and CollectCompletedRounds retains it.
 			sessions = identity.sessions
 			auditRequests = append(auditRequests, identity)
 		}
@@ -1710,8 +1690,6 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 	return capacityResult(capacity, scenario.EventsPerSecond, roundCount, sameSessions, rounds, fixture.cmd.Process.Pid, host.Cmd.Process.Pid), resultError
 }
 
-// These sequential snapshots explain live heap versus allocator-resident pages.
-// They neither add to footprint nor replace its independently sampled peak.
 func memoryComposition(pid int, directory string) map[string]any {
 	result := map[string]any{"status": "unavailable", "scope": "retained idle; sequential external snapshots, not allocation-origin attribution or simultaneous peaks"}
 	if runtime.GOOS == "linux" {
@@ -1769,9 +1747,6 @@ func encodedQualificationResult(result map[string]any) ([]byte, int, error) {
 	return append(encoded, '\n'), qualificationExitCode(result["status"]), nil
 }
 
-// finalizeQualification is the single ownership boundary between collected
-// evidence and process termination. Cleanup failures are evidence too: they
-// cannot erase completed rows or leave a successful verdict behind.
 func finalizeQualification(result map[string]any, runError error, cleanup ...func() error) (map[string]any, error) {
 	for _, close := range cleanup {
 		runError = errors.Join(runError, close())
@@ -1835,8 +1810,6 @@ func sessionMeasurementOptions(sessions int, hold bool, expectation string) erro
 	return nil
 }
 
-// Retain each owned Host thread's raw counters. Voluntary switches are a
-// waiting diagnostic, not distinct wakeups or macOS IDLEW.
 func captureLinuxThreads(pid int, path string) (map[string]any, error) {
 	begin := time.Now()
 	root := fmt.Sprintf("/proc/%d/task", pid)
@@ -1860,9 +1833,6 @@ func captureLinuxThreads(pid int, path string) (map[string]any, error) {
 	return map[string]any{"begin_unix_ns": begin.UnixNano(), "end_unix_ns": end.UnixNano(), "raw_path": path, "threads": len(threads)}, nil
 }
 
-// This is an observation, not the complete-work qualification above: the
-// fixture stays active past a ten-second warmup and sixty-second CPU window.
-// Configure/Message callers are synchronous and reaped before that window.
 func measureSessions(binary, output string, sessions int, hold bool, expectation string) (result map[string]any, resultError error) {
 	result = map[string]any{"format": "rui-session-footprint-v1", "status": "incomplete", "fixture": true, "sessions": sessions, "active_capacity": 100, "hold": hold}
 	if err := measurement.RequireProcessRuntime(); err != nil {
@@ -1914,7 +1884,6 @@ func measureSessions(binary, output string, sessions int, hold bool, expectation
 		return result, err
 	}
 	deadline := measurement.NewDeadline(5 * time.Minute)
-	// Keep the same TLS-capable provider and Host capacity even for idle N=0.
 	var holdOption []string
 	if hold {
 		holdOption = []string{"--provider-hold"}
@@ -1995,7 +1964,6 @@ func measureSessions(binary, output string, sessions int, hold bool, expectation
 	if err != nil {
 		return result, err
 	}
-	// top is diagnostic and kept raw. Failure cannot become zero wakeups.
 	if hold && runtime.GOOS == "darwin" {
 		topContext, cancel, err := deadline.Context()
 		if err != nil {
@@ -2219,7 +2187,6 @@ func measureOutput(binary, output string, capacityOnly int, repeatWork, growthOn
 	capacityRows := []map[string]any{}
 	var repeatWorkRow map[string]any
 	result = map[string]any{"format": "rui-model-output-v8-go", "scope": "assembled model-path capacity and same-Host repeated-work qualification"}
-	// This finalizer runs after every resource owner's deferred cleanup.
 	defer func() {
 		result["answer_byte_growth"], result["item_count_growth"] = byteRows, itemRows
 		result["sqlite_cache_spill_comparison"], result["active_capacity_growth"] = spillRows, capacityRows
