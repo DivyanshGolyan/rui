@@ -1583,19 +1583,6 @@ fn relativeBelow(comptime T: type, value: *const T, name: *LeafName) bool {
     return false;
 }
 
-pub fn replayable(init: std.process.Init, request: Spawn) error{OutOfMemory}!bool {
-    const settings = try init.gpa.create(hs.Settings);
-    defer init.gpa.destroy(settings);
-    settings.* = .{};
-    defer settings.deinit();
-    var failure: start_report.Failure = undefined;
-    _ = readDetached(init, request, settings, &failure) catch |err| {
-        if (err == error.OutOfMemory) return error.OutOfMemory;
-        return false;
-    };
-    return true;
-}
-
 /// Admission before any effect: detached-safe sources and saved placement.
 /// Non-placement overrides are replayable; placement must also be visible to
 /// a later client given only the Host directory.
@@ -1974,7 +1961,7 @@ test "Host start detached launches rebase typed paths and refuse paths with no b
             try std.testing.expectEqual(@as(u8, ':'), failure.message.slice()[kind.leaf.len]);
             try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), if (kind.anchored == null) "no stdin" else "absolute path") != null);
         }
-        try std.testing.expect(!try replayable(init, request));
+        try std.testing.expectError(error.SettingsInvalid, checkStart(init, request, &failure));
     };
     var host = try here_dir.createDirPathOpen(init.io, "host-references", .{ .permissions = .fromMode(0o700) });
     defer host.close(init.io);
@@ -1990,7 +1977,7 @@ test "Host start detached launches rebase typed paths and refuse paths with no b
         var failure: start_report.Failure = undefined;
         var cwd: Cwd = .{ .io = init.io, .path = here };
         try checkStart(init, try anchorTyped(a, &cwd, request, &failure), &failure);
-        try std.testing.expect(!try replayable(init, request));
+        try std.testing.expectError(error.SettingsInvalid, checkStart(init, request, &failure));
     }
     var failure: start_report.Failure = undefined;
     var cwd: Cwd = .{ .io = init.io, .path = here };
