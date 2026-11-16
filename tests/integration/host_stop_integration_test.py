@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Maintained Python synchronization oracle; not native Host qualification."""
 
 import json
 import os
@@ -34,7 +33,6 @@ def check_classification_oracle(run_actor):
         publish(pending)
         diagnostics.wait("connection_request_host_stop", timeout=max(0, deadline - time.monotonic()))
         began_ns = time.monotonic_ns()
-        # A buffered release from an earlier exchange cannot permit the actor.
         publish(dict(pending, rui_test_phase="ordinary_classification_released", subject_kind="route",
                      subject="observe", sequence="2", at_ns=str(began_ns - 1)))
         diagnostics.wait("ordinary_classification_released", timeout=max(0, deadline - time.monotonic()))
@@ -63,7 +61,6 @@ def check_classification_oracle(run_actor):
 
         def run():
             try:
-                # Forward real time unchanged; observe the operand without a native clock seam.
                 clock = SimpleNamespace(monotonic=observed_monotonic, monotonic_ns=time.monotonic_ns)
                 with patch.object(sys.modules[run_actor.__module__], "time", clock):
                     results.append(run_actor(diagnostics, began_ns, deadline, pending,
@@ -78,8 +75,6 @@ def check_classification_oracle(run_actor):
             worker = threading.Thread(target=run)
             worker.start()
             assert boundary.wait(max(0, deadline - time.monotonic())), "oracle boundary not reached"
-            # The controller can acquire this lock only after the actual wait
-            # releases it. Thread startup alone is not evidence of blocking.
             with diagnostics.condition:
                 assert not actor_started.is_set(), "actor launched before classification notification"
                 assert waited and not errors, ("oracle never entered condition wait", errors)

@@ -1,31 +1,4 @@
 #!/usr/bin/env python3
-"""Recheck wire-changing PRs after publication, using the repository's Actions token.
-
-The gate compares committed openapi.json with the newest v0.S.N git tag, and
-reads src/wire_version.zig. Either path (including a rename away) qualifies.
-check.yml's policy job discovers test_wire_version.py; admission directly needs
-policy. POST actions/jobs/ID/rerun reruns policy and its dependents, not the
-native builds. policy's checkout uses fetch-depth: 0, fetching the new tag even
-when the run keeps its original SHA.
-
-Only open, non-draft PRs based on main qualify. Use the latest check.yml PR run
-for the PR's exact current head (SHA and head repository, so fork heads, whose
-runs GitHub lists with no pull_requests, match too), never an older completed
-run. RELEASE_PUBLISHED_AT is the release's published_at; the tag exists by
-then. A latest attempt whose policy job (or, before policy starts, the run)
-started at or after it already reads the new tag: no wait, no rerun. GitHub
-reruns a run only within 30 days of its creation, so an older run's PR is
-given up at once, naming the fix (a push starts a fresh run). Otherwise poll
-an active run every 60 seconds, then rerun policy. One 90-minute budget
-covers all PRs, discovery and API calls. No completed policy job yet is a
-logged skip, not an error. One PR's failure never stops another's recheck: an
-API error stays with that PR, which is retried next poll (given up after 3
-consecutive failures), and invalid data gives that PR up at once. The command
-then fails once, naming every unrechecked PR and why; so does the timeout.
-Errors outside one PR (listing open PRs, a missing RELEASE_PUBLISHED_AT) fail
-at once. Required permissions: actions: write, pull-requests: read,
-contents: read (also at a reusable caller).
-"""
 import os
 import signal
 import subprocess
@@ -55,7 +28,7 @@ class Selection:
     job_id: int | None
     reason: str
     waiting: bool = False
-    failed: bool = False  # nothing this script can do fixes it; the reason says what does
+    failed: bool = False
 
 
 def main_pr(pr):
@@ -68,7 +41,6 @@ def touches_wire(files):
 
 
 def timestamp(value):
-    """GitHub's UTC ISO 8601 time; a missing or malformed one is a ValueError."""
     if not isinstance(value, str):
         raise ValueError(f"expected a GitHub timestamp, got {value!r}")
     moment = datetime.fromisoformat(value)
@@ -78,8 +50,6 @@ def timestamp(value):
 
 
 def latest_run(pr, runs):
-    """Attribute by head SHA and head repository, the same rule for fork and
-    same-repository heads (GitHub lists no pull_requests for fork runs)."""
     head_repo = (pr["head"].get("repo") or {}).get("full_name")
     if head_repo is None:
         return None
@@ -91,16 +61,12 @@ def latest_run(pr, runs):
 
 
 def checked_since(run, policy):
-    """When the latest attempt's policy checkout could first read tags: its
-    start, or the run's start while policy has not started."""
     if policy is not None and policy["status"] in ("in_progress", "completed"):
         return timestamp(policy["started_at"])
     return timestamp(run["run_started_at"])
 
 
 def select_rerun(pr, files, runs, jobs, published, now):
-    """Pure decision over REST snapshots; jobs are from the run's latest
-    execution; published is the release's publication time, now the wall clock."""
     if not main_pr(pr):
         return Selection(None, "not an open, non-draft PR based on main")
     if not touches_wire(files):
@@ -153,14 +119,11 @@ def recheck_one(api, repo, pr, files, published, now):
     selected_pr = current
     runs = check_runs(api, repo, current)
     run = latest_run(current, runs)
-    # Active runs too: policy's start decides whether the run needs a wait.
     jobs = (list(pages(api, f"repos/{repo}/actions/runs/{run['id']}/jobs?filter=latest", "jobs"))
             if run is not None else [])
     selection = select_rerun(current, files, runs, jobs, published, now())
     if selection.job_id is None:
         return selection
-    # Revalidate before POST, including an intervening head change or rerun
-    # of the same workflow run ID. A changed head is selected afresh next poll.
     current = api("GET", f"repos/{repo}/pulls/{number}")
     if not same_pr(selected_pr, current):
         return Selection(None, "PR changed while selecting", waiting=main_pr(current))
@@ -190,9 +153,9 @@ def utc_now():
 def recheck(api, repo, published, *, clock=None, sleep=None, now=None):
     clock, sleep, now = clock or time.monotonic, sleep or time.sleep, now or utc_now
     deadline = clock() + TIMEOUT_SECONDS
-    pending = {}   # number -> (PR snapshot, changed files or None until listed)
-    reasons = {}   # number -> why it is not rechecked yet, or was given up
-    failures = {}  # number -> consecutive API failures
+    pending = {}
+    reasons = {}
+    failures = {}
     listed = False
 
     def check_budget():
@@ -213,8 +176,6 @@ def recheck(api, repo, published, *, clock=None, sleep=None, now=None):
         del pending[number]
 
     def per_pr(number, step):
-        """Run one PR's step; its API or data error stays with that PR.
-        Returns (ok, result). The budget's TimeoutError is not per-PR."""
         try:
             result = step()
         except subprocess.CalledProcessError as error:
@@ -237,8 +198,6 @@ def recheck(api, repo, published, *, clock=None, sleep=None, now=None):
         reasons.pop(number, None)
 
     try:
-        # Inventory before waiting, so timeout can name every unrechecked PR
-        # and one slow run cannot prevent ready PRs from being rechecked.
         for pr in pages(bounded_api, f"repos/{repo}/pulls?state=open&base=main"):
             if main_pr(pr):
                 pending[pr["number"]] = (pr, None)
@@ -247,7 +206,7 @@ def recheck(api, repo, published, *, clock=None, sleep=None, now=None):
         for number, (pr, _) in list(pending.items()):
             ok, files = per_pr(number, lambda: changed_files(bounded_api, repo, number))
             if not ok:
-                continue  # recheck_one lists the files again
+                continue
             if touches_wire(files):
                 pending[number] = (pr, files)
                 reasons[number] = "not rechecked yet"
@@ -281,8 +240,6 @@ def alarm_timeout(_signal, _frame):
 
 
 def main():
-    # The job runs on Ubuntu. A watchdog also interrupts a hung REST subprocess;
-    # monotonic checks in recheck own normal polling and testable timeout policy.
     previous = signal.signal(signal.SIGALRM, alarm_timeout)
     signal.alarm(TIMEOUT_SECONDS)
     try:

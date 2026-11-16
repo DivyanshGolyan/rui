@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 """TD2 recovery equivalence through TD4's real, direct-PTY frontend driver.
 
 Run with a built Rui and --output FRESH_DIRECTORY. TD3 owns Linux CI wiring;
@@ -16,10 +17,6 @@ import host_process
 
 
 def vectors():
-    # Literal control/kitty/modifyOtherKeys vectors. ESC-prefix cannot encode
-    # Ctrl-R without adding Alt; it is not an equivalent recovery gesture.
-    # TD4 independently fixes original="original éZ", edited next draft/caret
-    # and expected next submission="next cafXYé!" for this scenario.
     for encoding, data in (
         ("raw", b"\x12"),
         ("kitty", b"\x1b[114;5u"),
@@ -30,9 +27,6 @@ def vectors():
             "scenario": "recovery",
             "chunks": [{"hex": data.hex(), "delay_before": 0}],
         }
-        # A lone ESC is the Escape key under App: no window joins it to a
-        # later write (decided, audit 4). Splits after the introducer still
-        # decode once the sequence completes.
         for split in range(2, len(data)):
             yield {
                 "name": f"TD2-recovery-{encoding}-split-{split}",
@@ -62,9 +56,6 @@ def main():
     if args.output.exists():
         parser.error(f"output must be fresh: {args.output}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    # Each row owns isolated HOME/Store/processes through TD4. Its manifest
-    # retains vectors and binary/source identity along with exact wire bodies.
-    # Chunk boundaries request separate writes, not separate OS read promises.
     path = args.output.with_name(args.output.name + ".vectors.json")
     if path.exists():
         parser.error(f"vector evidence must be fresh: {path}")
@@ -77,9 +68,6 @@ def main():
         "original and preserve the edited next draft/caret.",
         flush=True,
     )
-    # Transfer process/signal ownership to the shared driver, rather than
-    # letting a wrapper die while its PTY workers continue. Keep vectors beside
-    # the row evidence, including on interruption or assertion failure.
     os.execv(sys.executable, [
         sys.executable, str(args.harness.resolve()), str(args.binary.resolve()),
         "--vectors", str(path.resolve()), "--output", str(args.output.resolve()),

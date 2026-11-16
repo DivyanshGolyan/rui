@@ -1,10 +1,3 @@
-"""Infrastructure failures retry once; every other failure stays a check failure.
-
-Logs and annotations are trimmed from real Selected checks runs: 42582862053
-(GitHub answered 504), 41856442475 (no runner acquired macos_build),
-42267648425 (pip could not resolve its host) and 42644396665 (Codeberg sent
-no bytes before curl's deadline).
-"""
 from pathlib import Path
 import re
 import unittest
@@ -12,7 +5,6 @@ import unittest
 from failure_cause import AGGREGATES, INFRA_ACTIONS, INFRA_STEPS, cause, causes, retry_refusal
 
 ROOT = Path(__file__).resolve().parents[2]
-# Jobs of a Selected checks run come from these workflows.
 WORKFLOWS = [ROOT / ".github/workflows/check.yml", ROOT / ".github/workflows/previous-release-upgrade.yml"]
 
 LINTER_504 = """\
@@ -68,7 +60,6 @@ class CauseTest(unittest.TestCase):
         self.assertEqual(cause(stalled, [], CODEBERG_TIMEOUT)[0], "infra")
 
     def test_the_same_network_text_in_a_test_step_is_a_check_failure(self):
-        # A Host crash resets every suite's connection (#915); that is a product bug.
         suite = job("linux suites (dispatch-integration)",
                     step("Run selected targets", "failure", "2026-11-09T09:00:00Z", "2026-11-09T09:04:01Z"))
         self.assertEqual(cause(suite, [], HOST_CRASH), ("check", "failure at 'Run selected targets'"))
@@ -80,7 +71,6 @@ class CauseTest(unittest.TestCase):
         self.assertEqual(cause(linter, [], None)[0], "check", "an unread log proves no network failure")
 
     def test_only_the_failed_steps_own_log_lines_count(self):
-        # The 504 belongs to the linter step; a later step's failure stays a check failure.
         later = job("policy", step("Install the pinned workflow linter", "success"),
                     step("Install the pinned packages tests/ci imports", "failure",
                          "2026-11-09T08:03:00Z", "2026-11-09T08:03:05Z"))
@@ -105,7 +95,6 @@ class CauseTest(unittest.TestCase):
         self.assertEqual(cause(queued, [], None), ("infra", "no runner took the job"))
 
     def test_a_cancelled_build_or_test_step_is_a_check_failure(self):
-        # A timeout cancels the job; a hang in compilation or a test is not infrastructure.
         for name in ("Compile selected gates once, never test acceptance", "Run selected targets"):
             with self.subTest(step=name):
                 self.assertEqual(cause(job("macos_build", step(name, "cancelled"), conclusion="cancelled"), [], None)[0],

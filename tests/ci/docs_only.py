@@ -1,4 +1,3 @@
-"""Conservative documentation classification from the selector's resolved Git trees."""
 
 from dataclasses import dataclass
 from enum import Enum
@@ -51,10 +50,8 @@ def _documentation_path(path: str) -> bool:
     parts = path.split('/')
     if len(parts) < 2 or any(not p or p.startswith('.') for p in parts[1:]):
         return False
-    # Skills; .claude/ also holds hooks, settings and scripts, which run.
     if parts[0] == '.claude':
         return path.endswith('.md')
-    # Research evidence and prototypes: no build target, workflow or test reads them.
     if parts[0] == 'research':
         return True
     if parts[0] != 'docs':

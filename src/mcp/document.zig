@@ -1,13 +1,8 @@
-//! Walking a JSON message an MCP server sent, as values. `check` runs the
-//! codecs' RFC 8259 reader over the whole message once; after that the
-//! walkers here trust its syntax and hand out slices of it, so no part of a
-//! message is copied or allocated to be read.
 const std = @import("std");
 const json = @import("../codecs/json.zig");
 
 pub const Error = json.Error;
 
-/// Checks that `bytes` are one JSON object.
 pub fn check(bytes: []const u8) Error!void {
     var reader: json.Reader = undefined;
     try reader.read(bytes, Ignore{});
@@ -21,7 +16,6 @@ const Ignore = struct {
 
 pub const Kind = enum { object, array, string, number, true_value, false_value, null_value };
 
-/// The kind of a checked value, from its first byte.
 pub fn kind(value: []const u8) Kind {
     return switch (value[0]) {
         '{' => .object,
@@ -35,13 +29,10 @@ pub fn kind(value: []const u8) Kind {
 }
 
 pub const Member = struct {
-    /// The key's contents as written, escapes and all.
     key: []const u8,
-    /// The whole value, from its first byte to its last.
     value: []const u8,
 };
 
-/// The members of a checked object, in order.
 pub const Members = struct {
     object: []const u8,
     at: usize,
@@ -68,7 +59,6 @@ pub const Members = struct {
     }
 };
 
-/// The items of a checked array, in order.
 pub const Items = struct {
     array: []const u8,
     at: usize,
@@ -95,7 +85,6 @@ fn slice(document: []const u8, range: anytype) []const u8 {
     return document[@intCast(range.start)..][0..@intCast(range.length)];
 }
 
-/// Whether string contents as written decode to `name`.
 pub fn keyIs(written: []const u8, name: []const u8) bool {
     if (std.mem.indexOfScalar(u8, written, '\\') == null) return std.mem.eql(u8, written, name);
     var text: json.Text = .{ .length = 0 };
@@ -103,8 +92,6 @@ pub fn keyIs(written: []const u8, name: []const u8) bool {
     return std.mem.eql(u8, text.slice() orelse return false, name);
 }
 
-/// The value of the member of `object` whose key decodes to `name`; the
-/// first one when a server repeats a key.
 pub fn member(object: []const u8, name: []const u8) ?[]const u8 {
     var members = Members.init(object);
     while (members.next()) |found| {
@@ -113,28 +100,23 @@ pub fn member(object: []const u8, name: []const u8) ?[]const u8 {
     return null;
 }
 
-/// The contents of a checked string value, without its quotes.
 pub fn contents(string: []const u8) []const u8 {
     std.debug.assert(kind(string) == .string);
     return string[1 .. string.len - 1];
 }
 
-/// Writes the decoded text of string contents the reader accepted.
 pub fn writeDecoded(writer: *std.Io.Writer, string_contents: []const u8) std.Io.Writer.Error!void {
     var sink: Sink = .{ .writer = writer };
     json.decodeContents(string_contents, &sink);
     return sink.failure orelse {};
 }
 
-/// How many bytes `writeDecoded` writes.
 pub fn decodedLength(string_contents: []const u8) usize {
     var counter: std.Io.Writer.Discarding = .init(&.{});
     writeDecoded(&counter.writer, string_contents) catch unreachable;
     return @intCast(counter.fullCount());
 }
 
-/// Whether two strings' contents as written decode to the same text, at
-/// any length: unlike `keyIs`, neither side is held in a fixed buffer.
 pub fn sameText(a: []const u8, b: []const u8) bool {
     if (std.mem.indexOfScalar(u8, a, '\\') == null and std.mem.indexOfScalar(u8, b, '\\') == null) return std.mem.eql(u8, a, b);
     if (decodedLength(a) != decodedLength(b)) return false;
@@ -161,8 +143,6 @@ const Sink = struct {
     }
 };
 
-/// Writes `text` as a JSON string, quotes included. Only the quote, the
-/// backslash and control bytes are escaped; `text` must be UTF-8.
 pub fn writeString(writer: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
     std.debug.assert(std.unicode.utf8ValidateSlice(text));
     try writer.writeByte('"');

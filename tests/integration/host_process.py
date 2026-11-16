@@ -1,4 +1,3 @@
-"""Bounded startup and cleanup for Host processes used by integration evidence."""
 
 import os
 import sys
@@ -13,58 +12,29 @@ NON_ROOT_INSTRUCTION = (
     "as an ordinary user, for example a dedicated tester account that owns its own "
     "checkout, Zig caches and Python environment."
 )
-# The only variables a fixture keeps from its caller. Anything else a developer
-# or runner exported, such as RUI_* settings, TLS trust or a proxy, would change
-# what the fixture proves. PYTHONPATH and VIRTUAL_ENV are left out on purpose:
-# PATH selects the interpreter.
 INHERITED = (
-    # Programs, the caller's home and temporary directory, and text decoding.
     "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE",
-    # CI's retention directory for failed fixture roots.
     "RUI_FAILURE_ARTIFACTS",
-    # The terminal notice binary that build.zig and check.sh pass, and the
-    # libghostty-vt for the screen observer, and the build-owned MySQL admin.
     "RUI_TEST_TERMINAL_NOTICE", "RUI_TEST_GHOSTTY_VT", "RUI_TEST_MYSQL_ADMIN",
-    # Opt-in retention and measurement switches that a person or workflow sets.
     "RUI_UPGRADE_FAILURES", "RUI_RENDERER_RETAIN_COMPARISON", "RUI_ACTIVITY_MEASURE", "RUI_ACTIVITY_ITEM_BYTES",
     "RUI_MEASURE_GLIBC_TUNABLES",
-    # The runner's Zig caches and packages: install.sh builds the previous
-    # release with them, and the sequence model builds its overlay against them.
     "ZIG_GLOBAL_CACHE_DIR", "ZIG_LOCAL_CACHE_DIR", "ZIG_LOCAL_PKG_DIR",
-    # The live engine servers CI starts for the unit binary, which check.sh
-    # launches through this boundary (live_engines.py owns the names).
     *live_engines.VARIABLES,
 )
-# Withheld from every fixture; only the opt-in live journey hands them to its Host.
 NETWORK = network_variables.NETWORK
 
 
 def enter():
-    """Admit this process as a fixture, before it starts anything.
-
-    Every fixture entry calls this first: a Python fixture in its main block,
-    anything else through `host_process.py exec COMMAND...`. Root is refused.
-    The environment becomes INHERITED plus TERM=xterm-256color and an empty
-    RUI_TEST_MODELS_DEV_URL. Fixtures drive a cursor-addressing terminal and
-    must not contact models.dev; catalog cases supply their own endpoint.
-    A case about TERM sets its own. Returns the withheld NETWORK variables.
-    """
     if os.geteuid() == 0:
         sys.exit(NON_ROOT_INSTRUCTION)
     network = {name: os.environ[name] for name in NETWORK if name in os.environ}
     kept = {name: os.environ[name] for name in INHERITED if name in os.environ}
     os.environ.clear()
-    # Every descendant (including shell wrappers and detached Hosts) stays
-    # offline by default. Catalog cases opt in with --test-models-dev-url;
-    # inherited RUI_TEST_* settings cannot redirect fixtures to the internet.
     os.environ.update(kept, TERM="xterm-256color", RUI_TEST_MODELS_DEV_URL="")
     return network
 
 
 if __name__ == "__main__":
-    # The entry for fixtures that are not Python modules, such as shell
-    # fixtures, native tests and Go measurements. It runs before the fixture
-    # packages load, since root's Python often lacks them.
     enter()
     if sys.argv[1:2] != ["exec"] or len(sys.argv) < 3:
         sys.exit("usage: host_process.py exec COMMAND [ARGUMENT...]")
@@ -104,9 +74,6 @@ import h2.settings
 
 
 class _ClosingConnection(sqlite3.Connection):
-    """Plain sqlite3 only commits at the end of `with`. A Host cannot open a
-    Store that any other connection holds (docs/contracts/store.md, "Store
-    durability"), so every fixture connection closes with its block."""
 
     def __exit__(self, *failure):
         try:
@@ -119,46 +86,7 @@ sqlite3.connect = functools.partial(sqlite3.connect, factory=_ClosingConnection)
 
 READINESS_LIMIT = 16 * 1024
 STDERR_TAIL_LIMIT = 16 * 1024
-# Ten held inspections can each emit request, capture and gate-wait receipts
-# before their FIFO stops them. Provision this cohort before concurrent writes;
-# this is not whole-plan capacity or a guarantee against reader starvation.
 OBSERVATION_STARTUP_CREDIT = 10 * 3 * 512
-# Explicit finite native populations, not an execution-duration history.
-# list: 102 configuration + 42 list exchanges, two endpoints each. Five list
-# exchanges and one relabel are the `--since` cases.
-# status: 12 simultaneous clients + 40 repeated status calls + at most 20
-# setup/guard probes, three phases per connection, two boundaries and two Bash admissions.
-# stop: at most 321 Action probes (8 seconds / 25ms interval + final probe)
-# plus twenty-three non-poll numbered exchanges, each with a release; five stop
-# issuers, twelve observe classifications, three two-phase cleanup owners,
-# Bash handoff, three Message classification/header pairs and
-# one owned report gate. No release is filtered out by request kind.
-# control: at most 50 inspection attempts (capture + gate), four model owners
-# (ten selected phases), three controls (hint + timing), two boundaries.
-# control_peers: gated contention owns four 8s/25ms observation polls (321 each,
-# conservatively including a boundary probe), fifty total inspections, and six
-# setup/control exchanges. This also covers the smaller capacity and delivery
-# populations and admission's 103 numbered exchanges.
-# Each exchange has start/release and at most two inspection/control phases;
-# four model owners have ten phases, plus two lifecycle boundaries and eight
-# separately issued unnumbered releases. These are test-only retained records.
-# PeerCensus enforces issuance bounds before traffic, not on received records.
-# transport: at most 100 configurations and twenty waves of 100 Messages,
-# 100 result reads, 100 initial result probes plus 1,801 failed probes within
-# the shared 45s/25ms budget, and 801 drain inspections within 20s/25ms.
-# The smaller two-wave held-stream case has a shared 40s result/drain budget.
-# HostRequests enforces issuance before traffic; retain both native endpoints.
-# dispatch: seven routed controls with queued/acquired/released endpoints; the first
-# rollback or preparation advance and one exhausted-recovery hold per separately
-# observed Host, not retry history.
-# interrupt: one exact cancellation. No cleanup or polling history; public
-# drainage remains its separate oracle.
-# recovery: two Bash Attempts with handoff + three cuts, two model proposal handoffs.
-# managed: three preparations/transfers, at most three injected delayed handoffs.
-# bash_cleanup: reuse has four model attempts and two Bash owners, three
-# endpoints each. Inspections: three 8s polls, one 15s drain, one 5s
-# emergency drain (25ms intervals, including final probes), six fixed reads.
-# bash_pipes: one held leader observation, one permission and one Session stop.
 PEER_EXCHANGE_LIMIT = 4 * 321 + 50 + 6
 TRANSPORT_EXCHANGE_LIMIT = 100 + 20 * (3 * 100 + 1801 + 801)
 OBSERVATION_LIMITS = {"list": 2 * (102 + 42), "status": 3 * (12 + 40 + 20) + 2 + 2,
@@ -169,11 +97,9 @@ OBSERVATION_LIMITS = {"list": 2 * (102 + 42), "status": 3 * (12 + 40 + 20) + 2 +
                       "interrupt": 1, "recovery": 2 * 4 + 2, "managed": 9,
                       "bash_cleanup": 6 * 3 + 3 * 321 + 601 + 201 + 6,
                       "bash_pipes": 1 + 2,
-                      # One <=15s wait per Host, >=250ms poll interval, plus four probes.
                       "request_wait": 64}
-OBSERVATION_STATE_BYTES = 5 * 8  # version, pid, run, reserved count/loss, active writers.
+OBSERVATION_STATE_BYTES = 5 * 8
 OBSERVATION_SEALED = 1 << 63
-# Checked against native FieldId and the current schema by test_harness_contracts.py.
 OBSERVATION_FIELDS = {
     0: "rui_test_phase",
     1: "at_ns",
@@ -222,8 +148,6 @@ OBSERVATION_FIELDS = {
 
 @functools.cache
 def _failure_destination(configured):
-    # One bounded allowlisted destination per interpreter, outside disposable
-    # fixture roots. Local runs need the same preservation as hosted runs.
     destination = pathlib.Path(configured or tempfile.mkdtemp(prefix="rui-fixture-failures-"))
     assert not destination.is_symlink(), "failure retention destination is a symlink"
     destination.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -235,11 +159,6 @@ def _failure_destination(configured):
 
 @functools.cache
 def _observation_atomics():
-    """Two native atomics on the existing mapping, not torn Python stores.
-
-    One small library per fixture interpreter; private temporary custody ends
-    at interpreter exit. Built only when observation is enabled, before startup.
-    """
     directory = tempfile.TemporaryDirectory(prefix="rui-observation-atomics-")
     library = pathlib.Path(directory.name) / "atomics.so"
     source = r"""
@@ -268,7 +187,6 @@ uint64_t observation_load(void *p) {
 
 
 class _Observations:
-    """Fixture-owned bounded native channel; arrivals need not be sequence ordered."""
 
     def __init__(self, process, reader, plan, state):
         self.process, self.reader, self.limit = process, reader, OBSERVATION_LIMITS[plan]
@@ -288,7 +206,7 @@ class _Observations:
         pending = bytearray()
         try:
             while chunk := os.read(self.reader, 512):
-                pending.extend(chunk)  # At most one partial frame + one 512-byte read.
+                pending.extend(chunk)
                 while len(pending) >= 2:
                     length = struct.unpack_from("<H", pending)[0]
                     assert 28 <= length <= 512, "invalid observation frame length"
@@ -330,17 +248,11 @@ class _Observations:
             assert all(item["run"] == record["run"] for item in self.records), "mixed observation runs"
             assert all(item["run"] == record["run"] for item in self.pending_records.values()), "mixed observation runs"
             self.pending_records[sequence] = record
-            # Expose only a complete selected prefix, never 'sorted so far'.
             while len(self.records) + 1 in self.pending_records:
                 self.records.append(self.pending_records.pop(len(self.records) + 1))
             self.condition.notify_all()
 
     def wait_for_publication_retirement(self, deadline):
-        """Drain received publication custody without sealing an intentional cut.
-
-        The caller's held workload gate supplies its semantic cut. This sample
-        does not exclude future publishers; immutable post-reap validity does.
-        """
         version, process, run, _, _ = struct.unpack("<QQQQQ", self.state[:])
         assert version == 1 and process == self.process.pid and run > 0, "missing/foreign crash observation state"
         address = ctypes.addressof(ctypes.c_char.from_buffer(self.state))
@@ -359,11 +271,6 @@ class _Observations:
         wait_for(retired, "publication custody to retire within crash budget", interval=.001, deadline=deadline)
 
     def dispose(self, deadline):
-        """Revoke new publications, then drain existing custody before SIGKILL.
-
-        Required owner endpoints/populations remain the caller's independent
-        oracle. This is channel closure, never proof of semantic quiescence.
-        """
         version, process, run, _, _ = struct.unpack("<QQQQQ", self.state[:])
         assert version == 1 and process == self.process.pid and run > 0, "missing/foreign disposal state"
         address = ctypes.addressof(ctypes.c_char.from_buffer(self.state))
@@ -402,8 +309,6 @@ class _Observations:
         assert all(item["run"] == str(run) for item in self.records), "mixed final observation run"
 
     def snapshot(self):
-        # Bounded detached values before kill. Persistence must not spend reap
-        # credit; these sampled facts never claim an atomic owner-state census.
         with self.condition:
             return {
                 "stage": "pre_kill" if self.process.poll() is None else "already_reaped",
@@ -415,7 +320,6 @@ class _Observations:
             }
 
     def preserve_failure(self, snapshot):
-        """Persist sampled facts after reap, before fixture-root deletion."""
         if self.failure_preserved:
             return
         arguments = list(map(str, getattr(self.process, "args", ())))
@@ -432,7 +336,7 @@ class _Observations:
             destination = getattr(self.process, "rui_failure_destination", None)
             if destination is None:
                 destination = _failure_destination(os.environ.get("RUI_FAILURE_ARTIFACTS"))
-            copy_failure_diagnostics(root, destination)  # While root still exists.
+            copy_failure_diagnostics(root, destination)
             print(f"bounded fixture failure destination: {destination}", file=sys.stderr, flush=True)
         except Exception as error:
             try:
@@ -443,11 +347,10 @@ class _Observations:
             try:
                 print(f"retained native observation failure state: {root}", file=sys.stderr, flush=True)
             except Exception:
-                pass  # Optional reporting must never replace teardown failure.
+                pass
 
 
 def preserve_failure_metadata(path, collect):
-    """Best-effort bounded fixture facts, including fallible metadata sampling."""
     try:
         data = (json.dumps(collect(), ensure_ascii=False) + "\n").encode()
         assert len(data) <= 1024 * 1024, "fixture failure metadata exceeds file bound"
@@ -460,7 +363,7 @@ def preserve_failure_metadata(path, collect):
             print(f"Fixture failure metadata unavailable: {type(error).__name__}", file=sys.stderr, flush=True)
         except Exception:
             pass
-        return False  # Evidence is unavailable, not grounds to skip mandatory cleanup.
+        return False
 
 
 def _owned(path, pattern, name):
@@ -471,28 +374,18 @@ def _owned(path, pattern, name):
     return match[1]
 
 
-# The wire version fixtures speak, read from its one owner.
 WIRE_VERSION = _owned("src/wire_version.zig", r'^pub const wire_version = "(\d+)";$', "wire_version")
 
 
-# The Store format fixtures expect, read from its one owner, so a format
-# change needs no fixture edit; tests/ci/test_store_schema_fixtures.py keeps
-# fixtures from pinning the number again.
 STORE_SCHEMA = int(_owned("src/store/schema.zig", r"^pub const schema_version: u32 = (\d+);$", "schema_version"))
 
 
 def assert_caller_error(stderr, context, code, not_sent=True):
-    """One caller-error line: the invocation's own context, the catalog's prose
-    (owned and unit-tested by src/caller_error.zig, so not restated here) and
-    the stable code that names the cause."""
     text = stderr.decode() if isinstance(stderr, bytes) else stderr
     ending = (" Nothing was captured or sent." if not_sent else "") + f" [{code}]\n"
     assert text.startswith(context) and text.endswith(ending) and text.count("\n") == 1, (context, code, text)
 
 
-# Job-wide totals: sixteen roots, each with an equal share of 128 files and
-# 16 MiB. Each root reserves one fixed slot by atomic mkdir, so concurrent
-# fixtures (processes or threads) never overcommit and need no lock.
 MAX_RETAINED_ROOTS = 16
 MAX_RETAINED_FILES_PER_ROOT = 8
 MAX_RETAINED_BYTES_PER_ROOT = 1024 * 1024
@@ -518,14 +411,6 @@ def _reserve_slot(destination):
 
 
 def copy_failure_diagnostics(state, destination):
-    """Copy one fixture root's labelled diagnostics; never open or query a Store.
-
-    Only probe.log, pty-failure.json and observation-failure-N.json, never
-    SQLite, HOME, credentials, request records, provider capture or scratch.
-    Symlinks and special files are not followed. Oversized files are omitted
-    whole, not truncated. Each call copies into its own reserved slot, so
-    concurrent fixtures never share, replace or overcommit one.
-    """
     state = pathlib.Path(state)
     if state.is_symlink() or not state.is_dir():
         return
@@ -554,7 +439,7 @@ def copy_failure_diagnostics(state, destination):
             if target is None:
                 target = _reserve_slot(destination)
                 if target is None:
-                    return  # Every job-wide slot is taken.
+                    return
             output = target / source.relative_to(state)
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_bytes(data)
@@ -563,11 +448,6 @@ def copy_failure_diagnostics(state, destination):
 
 
 def retain_failure_state(label, state):
-    """Report a retained fixture root; in CI also copy its labelled diagnostics.
-
-    Best effort throughout: nothing here may replace the fixture's original
-    failure or skip the caller's later disposal.
-    """
     try:
         print(f"retained {label}: {state}", file=sys.stderr, flush=True)
         if os.environ.get("RUI_FAILURE_ARTIFACTS"):
@@ -580,28 +460,19 @@ def retain_failure_state(label, state):
 
 
 def canonical_fixture_root(path):
-    """Resolve a newly created private root before deriving fixture identities."""
     return pathlib.Path(path).resolve(strict=True)
 
 
-# Darwin's per-user temporary directory once resolved:
-# /private/var/folders/XX/<30 characters>/T.
 DARWIN_TEMPORARY_ROOT_BYTES = len("/private/var/folders/XX/" + "X" * 30 + "/T")
 
 
 def screen_fixture_root(prefix):
-    """A new private root, resolved, at least as long as Darwin's would be.
-
-    Chat info panels show the Workspace, which wraps. Linux's
-    short /tmp would leave those pages rows that a Mac never has.
-    """
     parent = pathlib.Path(tempfile.gettempdir()).resolve(strict=True)
     padding = "t" * max(0, DARWIN_TEMPORARY_ROOT_BYTES - len(str(parent)))
     return canonical_fixture_root(tempfile.mkdtemp(prefix=prefix + padding, dir=parent))
 
 
 def is_peer_disconnect(error):
-    """Classify socket closure; callers decide whether closure is expected."""
     return isinstance(error, (BrokenPipeError, ConnectionResetError)) or (
         isinstance(error, OSError) and error.errno == errno.ENOTCONN)
 
@@ -610,18 +481,10 @@ class WaitTimeout(AssertionError):
     pass
 
 
-# Each hook pairs bounded drainage with a fresh snapshot of the descriptors
-# this thread drains. wait_for owns pacing; hooks own reads and registration.
 WAIT_HOOKS = []
 
 
 def wait_for(observe, description, timeout=8, interval=0.025, *, deadline=None, ready=bool, drain=True):
-    """The one place a test pauses to wait (CODING_STANDARDS.md#evidence).
-
-    Returns the first observation `ready` accepts that finished before the
-    deadline. An inspection can block past its caller's budget, and a clean
-    observation after the deadline is not evidence of timely reclamation.
-    """
     if deadline is None:
         deadline = time.monotonic() + timeout
     value = None
@@ -634,9 +497,6 @@ def wait_for(observe, description, timeout=8, interval=0.025, *, deadline=None, 
             break
         if ready(value):
             return value
-        # Query after observing: the observation may register or close a PTY.
-        # A small PTY can refill just after a drain batch ends; readability
-        # wakes the next bounded drain/observation instead of costing a poll.
         readers = [fd for _hook, descriptors in WAIT_HOOKS for fd in descriptors()] if drain else []
         pause = min(interval, max(0, deadline - time.monotonic()))
         if readers:
@@ -647,13 +507,10 @@ def wait_for(observe, description, timeout=8, interval=0.025, *, deadline=None, 
 
 
 def wait_for_execution_release(inspect, deadline):
-    """Observe both accounting totals in one timely reply, not permanent idleness."""
     def execution():
         remaining = min(15, deadline - time.monotonic())
         assert remaining > 0, "custody drainage exhausted original deadline"
         observed = inspect(remaining)
-        # An inspection can block past its caller's budget. A clean reply after
-        # the deadline is not evidence of timely physical reclamation.
         assert time.monotonic() < deadline, ("custody drainage exceeded original deadline", observed)
         assert observed["dispatch_fenced"] is False, observed
         return observed
@@ -662,28 +519,16 @@ def wait_for_execution_release(inspect, deadline):
 
 
 class TestHTTPServer(http.server.ThreadingHTTPServer):
-    """Stop fixture accept loops promptly; response timing belongs to each case.
 
-    Serves HTTP/1.1 and HTTP/2 by prior knowledge (h2c) on one listener, so
-    every fixture works with Rui's HTTP/2 client. A
-    cleartext connection that opens with the HTTP/2 preface runs each request
-    stream's handler on its own thread through `_H2Connection`; any other
-    connection, TLS included, takes the stock HTTP/1.1 path.
-    """
-
-    #: The SETTINGS_MAX_CONCURRENT_STREAMS an h2c connection advertises.
     h2_max_concurrent_streams = 100
 
     def server_bind(self):
-        # HTTPServer resolves a descriptive hostname after TCP binding. These
-        # numeric loopback fixtures must not depend on the machine's resolver.
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
 
     def serve_forever(self, poll_interval=0.01):
         super().serve_forever(poll_interval=poll_interval)
 
-    #: h2c connections accepted so far.
     h2_connections = 0
 
     def finish_request(self, request, client_address):
@@ -696,17 +541,12 @@ class TestHTTPServer(http.server.ThreadingHTTPServer):
 
 
 def hold(server, release, what):
-    """Wait for a held reply's release. The case releases it by its own
-    deadlines, so the hold keeps no clock of its own (a 10 s one let the
-    reply fail first and Rui retry, on a slow Mac). Closing the endpoint
-    ends it."""
     while not release.wait(0.1):
         if server.closing.is_set():
             raise RuntimeError(f"{what} was never released")
 
 
 class HeldReplies:
-    """An endpoint whose closing ends every held reply."""
 
     def __init__(self, *args, **kwargs):
         self.closing = threading.Event()
@@ -726,9 +566,6 @@ _h2_connection_lock = threading.Lock()
 
 
 def _opens_with_h2_preface(sock, timeout=5):
-    """Peek until the bytes rule the preface in or out, without consuming.
-    A client that stalls inside a prefix of the preface gets the HTTP/1.1
-    path, which answers it as that server would."""
     try:
         head = wait_for(lambda: sock.recv(len(H2_PREFACE), socket.MSG_PEEK), "a decisive preface prefix",
                         timeout=timeout, interval=0.001,
@@ -752,15 +589,9 @@ class _H2Stream:
 
 
 class _H2Connection:
-    """One h2c connection. Its thread reads and decodes; each stream's handler
-    thread writes. python-h2 is not thread-safe, so every use of its state
-    and of the socket holds `cond`. A send that blocks because the client is
-    not reading holds it too, which stalls only this test connection."""
 
     def __init__(self, server, sock, client_address):
         self.server, self.sock, self.client_address = server, sock, client_address
-        # Each frame is its own send. Without TCP_NODELAY, Nagle holds a frame
-        # until the client's delayed ACK, about 40 ms, so a large body crawls.
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.h2 = h2.connection.H2Connection(h2.config.H2Configuration(client_side=False, header_encoding=None))
         self.cond = threading.Condition()
@@ -802,7 +633,6 @@ class _H2Connection:
             self.streams[event.stream_id] = _H2Stream(event.stream_id, event.headers)
         elif isinstance(event, h2.events.DataReceived):
             self.streams[event.stream_id].body += event.data
-            # Fixtures are not the flow-control subject: credit returns at once.
             self.h2.acknowledge_received_data(event.flow_controlled_length, event.stream_id)
         elif isinstance(event, h2.events.StreamEnded):
             handler = threading.Thread(target=self._run_handler, args=(self.streams[event.stream_id],), daemon=True)
@@ -820,7 +650,6 @@ class _H2Connection:
                 self.closed = True
 
     def _run_handler(self, stream):
-        """The subclass's handler, against the request this stream carried."""
         handler = object.__new__(self.server.RequestHandlerClass)
         handler.server = self.server
         handler.client_address = self.client_address
@@ -845,15 +674,11 @@ class _H2Connection:
             if handler.wfile.head_sent:
                 self.end(stream)
             elif not stream.reset:
-                # As an HTTP/1.1 handler that returns without answering.
                 self.close()
         finally:
             with self.cond:
                 self.streams.pop(stream.stream_id, None)
 
-    # Writes from handler threads. A write after the client reset the
-    # stream, or after the connection went, raises BrokenPipeError, as a
-    # closed socket would.
 
     def send_head(self, stream, fields):
         with self.cond:
@@ -862,9 +687,7 @@ class _H2Connection:
             self._flush()
 
     def send_body(self, stream, data):
-        """One DATA frame per call, unless the window or frame size splits it."""
         view = memoryview(data)
-        # An empty write still reports a reset stream or a closed connection.
         with self.cond:
             self._check_open(stream)
         while view:
@@ -904,7 +727,6 @@ class _H2Connection:
             self._flush()
 
     def close(self):
-        """Drop the whole connection."""
         with self.cond:
             self.closed = True
             self.cond.notify_all()
@@ -919,10 +741,6 @@ class _H2Connection:
 
 
 class _H2StreamWriter:
-    """A handler's wfile. The head that send_response, send_header and
-    end_headers write becomes one HEADERS frame (names lowercased,
-    connection-specific fields dropped); each later write is DATA, so a
-    handler's write sizes are its frame sizes."""
 
     CONNECTION_FIELDS = {b"connection", b"keep-alive", b"proxy-connection", b"transfer-encoding", b"upgrade"}
 
@@ -956,7 +774,6 @@ class _H2StreamWriter:
 
 
 class ReleaseGate:
-    """Hold native FIFO readers until release; later arrivals pass the removed name."""
 
     def __init__(self, path):
         self.path = path
@@ -968,7 +785,6 @@ class ReleaseGate:
             raise
 
     def assert_held(self):
-        """Require the owned empty FIFO, not absence of a later effect."""
         assert self.fd is not None, "transition gate was released"
         descriptor, name = os.fstat(self.fd), self.path.lstat()
         assert stat.S_ISFIFO(name.st_mode), "transition gate is not a FIFO"
@@ -984,14 +800,11 @@ class ReleaseGate:
             try:
                 self.path.unlink()
             finally:
-                # Native readers observe persistent EOF; unlink refusal must
-                # still retire the fixture's descriptor, never skip cleanup.
                 descriptor, self.fd = self.fd, None
                 os.close(descriptor)
 
 
 class HostDiagnostics:
-    """Sole stderr owner: retain bounded diagnostics and parse Host milestones."""
 
     def __init__(self, process):
         self.process = process
@@ -1003,7 +816,7 @@ class HostDiagnostics:
         self._read_error = None
         self.thread = threading.Thread(target=self._read, daemon=True)
         self.thread.start()
-        process.rui_diagnostics = self  # Process disposal owns its sole stderr collector.
+        process.rui_diagnostics = self
 
     @property
     def read_error(self):
@@ -1012,12 +825,10 @@ class HostDiagnostics:
     def _read(self):
         try:
             if self.observations:
-                # Do not withhold a short fixture receipt waiting for filler
-                # diagnostics or EOF. There is still exactly one stderr owner.
                 while chunk := self.process.stderr.read1(4096):
                     with self.condition:
                         _tail(self.stderr_tail, chunk, STDERR_TAIL_LIMIT)
-                return  # Optional stderr is never positive native evidence.
+                return
             for raw_line in self.process.stderr:
                 with self.condition:
                     _tail(self.stderr_tail, raw_line, STDERR_TAIL_LIMIT)
@@ -1046,7 +857,6 @@ class HostDiagnostics:
             ]
 
     def claim_inspection(self, limit=50):
-        # Caller-issued attempts, not a native prefix that can still be in flight.
         assert self.inspection_attempts < limit, "custody drainage exhausted inspection population"
         self.inspection_attempts += 1
 
@@ -1063,8 +873,6 @@ class HostDiagnostics:
         return records[0]
 
     def assert_model_cleanup_census(self, *processings):
-        # After reap/drain, reject extra or duplicate owners. Final census
-        # cannot supply an endpoint missing within its original wait budget.
         expected = Counter(
             (value["turn"], value["operation"], value["attempt"], None)
             for value in processings
@@ -1134,11 +942,9 @@ class HostDiagnostics:
             try:
                 print(f"Fixture boundary snapshot unavailable: {type(error).__name__}", file=sys.stderr, flush=True)
             except Exception:
-                pass  # Failure sampling cannot own release/reap or the primary error.
+                pass
 
     def dispose_interrupt(self, collect, *, controls=()):
-        """Stop the Host, then require exactly one native stop receipt per
-        named control and nothing else."""
         incoming_error = sys.exc_info()[1]
         self.snapshot_failure(collect)
         try:
@@ -1173,7 +979,6 @@ class HostDiagnostics:
         return released
 
     def borrower_census(self, deadline, expected_routes):
-        # Fixture-issued exchanges, not received records, define this population.
         with self.condition:
             while sum(record["rui_test_phase"].startswith("connection_request_")
                       for record in self.records) < len(expected_routes):
@@ -1204,7 +1009,6 @@ class HostDiagnostics:
 
 
 class PeerCensus:
-    """Caller-issued exchanges; reply completion never refunds admission."""
 
     def __init__(self, diagnostics):
         assert diagnostics.observations is not None and diagnostics.observations.plan == "control_peers"
@@ -1294,7 +1098,6 @@ class HostStartError(RuntimeError):
 
 
 def cleanup_failure(error):
-    """Bound secondary diagnostics while retaining the failing owner and action."""
     try:
         detail = str(error)
         if len(detail) > 512:
@@ -1311,7 +1114,6 @@ def cleanup_failure(error):
 
 
 def dispose_all(*disposals):
-    """Run ordered fixture disposals without replacing an active body failure."""
     incoming_error = sys.exception()
     errors = []
     for index, dispose in enumerate(disposals, 1):
@@ -1325,19 +1127,12 @@ def dispose_all(*disposals):
             try:
                 primary.add_note(f"Fixture disposal {index} failed: {cleanup_failure(error)}")
             except BaseException:
-                pass  # Secondary reporting cannot replace the primary failure.
+                pass
         if incoming_error is None:
             raise primary
 
 
 def close_stdin(process):
-    """Send `process` end of input and drop its stdin, so a later communicate() still works.
-
-    communicate() flushes the stdin it holds, and a stdin closed by hand makes
-    that fail with "flush of closed file" (#898). Fixtures close a child's
-    stdin only here; tests/ci/test_harness_contracts.py rejects any other
-    `.stdin.close()`.
-    """
     if process.stdin is not None:
         process.stdin.close()
         process.stdin = None
@@ -1351,15 +1146,14 @@ def stop_process(process, timeout=10, *, seal_observations=True):
     observations = getattr(process, "rui_observations", None)
     if seal_observations and process.poll() is None and observations is not None:
         try:
-            # Leave bounded reap credit even when publication retirement fails.
             observations.dispose(deadline - min(1, timeout / 2))
         except BaseException as error:
-            errors.append(error)  # Still kill/reap; failed disposal never becomes acceptance.
+            errors.append(error)
     if observations is not None:
         try:
             snapshot = getattr(process, "rui_failure_snapshot", None) or observations.snapshot()
         except Exception:
-            pass  # Final native validity remains mandatory even if capture fails.
+            pass
     try:
         if process.poll() is None:
             process.kill()
@@ -1387,7 +1181,7 @@ def stop_process(process, timeout=10, *, seal_observations=True):
             try:
                 incoming_error.add_note("Host cleanup failed: " + ", ".join(cleanup_failure(error) for error in errors))
             except BaseException:
-                pass  # Secondary reporting cannot replace the primary failure.
+                pass
     finally:
         if (incoming_error is not None or errors) and observations is not None:
             observations.preserve_failure(snapshot)
@@ -1407,11 +1201,7 @@ def _start_error(reason, process, stdout, stderr_tail):
 
 
 def isolated_host_arguments(args):
-    """Preserve provider-free fixtures without overriding a settings source."""
     args = list(map(str, args))
-    # These fixtures historically launched provider-free Hosts. Production now
-    # selects automatic providers when the document omits the providers key.
-    # Respect explicit settings, saved settings and hidden endpoint fixtures.
     if "--settings" not in args:
         provider_settings = any(value.startswith(("providers=", "providers.")) for value in args)
         fixture_endpoint = any(value.startswith("--test-") and "fixture-endpoint" in value for value in args)
@@ -1423,8 +1213,6 @@ def isolated_host_arguments(args):
 
 
 def start_ready_process(args, *, timeout=10, required_fields=None, env=None, stderr_pipe=None, observations=None, isolate_providers=True):
-    """Start a Host and transfer ownership only after one valid ready line."""
-    # The caller retains the write descriptor; startup and reap own the reader.
     args = list(map(str, args))
     if isolate_providers:
         args = isolated_host_arguments(args)
@@ -1446,7 +1234,7 @@ def start_ready_process(args, *, timeout=10, required_fields=None, env=None, std
     try:
         if observations is not None:
             assert observations in OBSERVATION_LIMITS
-            _observation_atomics()  # Test setup is outside the original readiness deadline.
+            _observation_atomics()
             reader, writer = os.pipe()
             os.set_blocking(writer, False)
             assert os.fpathconf(writer, "PC_PIPE_BUF") >= 512
@@ -1470,8 +1258,8 @@ def start_ready_process(args, *, timeout=10, required_fields=None, env=None, std
         if observations is not None:
             process.rui_failure_destination = destination
             process.rui_observations = _Observations(process, reader, observations, state)
-            reader = None  # Reader custody starts before readiness collection.
-            state = None  # Mapping custody persists through reap, including SIGKILL.
+            reader = None
+            state = None
     finally:
         if state_file is not None:
             state_file.close()

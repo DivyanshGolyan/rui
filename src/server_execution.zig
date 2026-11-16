@@ -73,18 +73,14 @@ const observeUnprocessedCompletions = server_host.observeUnprocessedCompletions;
 const AttemptOwner = struct {
     token: execution.CustodyToken = undefined,
     binding: store_module.AttemptBinding = undefined,
-    /// What the response settles as, read when the view opened.
     purpose: store_module.ModelOperationKind = undefined,
 };
 
 const ProviderSlot = struct {
     owner: AttemptOwner,
-    /// What a 401 means for the credential the transfer presented, which its
-    /// sign-in source said at launch.
     rejection: providers.Credential.Rejection = .settle,
     transfer: provider.Transfer = undefined,
 
-    /// The code a failure saves: a rejected credential may name its remedy.
     fn failureCode(self: *const ProviderSlot, failure: execution.TransferFailure, buffer: *[96]u8) []const u8 {
         if (execution.rejectsCredential(failure)) switch (self.rejection) {
             .key_rejected => return failure_class.api_key_rejected,
@@ -102,7 +98,6 @@ const NamedScratchSlot = struct {
 const BashSlot = struct {
     token: execution.CustodyToken,
     binding: store_module.ActionAttemptBinding,
-    /// In this slot's custody record entry of `Host.bash_work`.
     execution: *bash.Execution,
     stop_accepted: bool = false,
     delivery: union(enum) {
@@ -116,7 +111,6 @@ const BashSlot = struct {
 
 const BashPreparedCleanupSlot = struct {
     token: execution.CustodyToken,
-    /// In this slot's custody record entry of `Host.bash_work`.
     cleanup: *bash.PreparedCleanup,
 };
 
@@ -128,25 +122,17 @@ const BashPreparingSlot = struct {
 const ModelPreparingSlot = struct {
     token: execution.CustodyToken,
     binding: store_module.AttemptBinding,
-    /// Set once the request is prepared, from its settings.
     purpose: ?store_module.ModelOperationKind = null,
 };
 
-/// A prepared request waiting for its credential. The request stays where
-/// it was built, in `Workspace.model_preparation`, which no other Attempt
-/// opens while this slot waits (`modelPreparationOpen`).
 const ModelAuthenticatingSlot = struct {
     owner: ModelPreparingSlot,
-    /// The shared worker accepted this slot's lease job.
     requested: bool = false,
     cancelled: bool = false,
 };
 
-/// A managed Attempt answered 401 whose Operation durably claimed its one
-/// forced refresh. The Attempt stays uncertain until the refresh settles it.
 const ModelRefreshingSlot = struct {
     owner: AttemptOwner,
-    /// The sign-in that leased the rejected token, and its generation.
     refresh: providers.Credential.Refresh,
     request_id: protocol.Bounded(256),
     requested: bool = false,
@@ -165,17 +151,12 @@ pub const ExecutionSlot = union(enum) {
     named_scratch: NamedScratchSlot,
 };
 
-/// The custody a slot's arm holds for its token. A slot is the execution
-/// owner's record of who holds custody; its custody record follows the arm
-/// through `attachSlot` and `moveSlot`, the only writers of either.
 const SlotCustody = enum { free, attached, detached };
 
 fn slotCustody(slot: *const ExecutionSlot) SlotCustody {
     return switch (slot.*) {
         .free => .free,
         .model_preparing, .model_authenticating, .model_refreshing, .provider, .bash_preparing => .attached,
-        // Delivery closure detaches custody while the .bash payload is
-        // retained for reclamation.
         .bash => |*active| switch (active.delivery) {
             .open => .attached,
             .closed => .detached,
@@ -198,8 +179,6 @@ fn slotToken(slot: *const ExecutionSlot) ?execution.CustodyToken {
     };
 }
 
-/// Null for a free slot and for retained cleanup owners, which keep only
-/// their token.
 fn slotBinding(slot: *const ExecutionSlot) ?execution.CustodyBinding {
     return switch (slot.*) {
         .free, .bash_prepared_cleanup, .named_scratch => null,
@@ -212,9 +191,6 @@ fn slotBinding(slot: *const ExecutionSlot) ?execution.CustodyBinding {
     };
 }
 
-/// Attaches a reserved token's Attempt and occupies the free `slot` with its
-/// preparation in one step, so attached custody always has its slot. A Bash
-/// preparation starts after its slot is occupied.
 fn attachSlot(
     host: *Host,
     slot: *ExecutionSlot,
@@ -232,12 +208,6 @@ fn attachSlot(
     return binding;
 }
 
-/// Every later transition of an occupied slot, keeping its token. Custody
-/// moves with the arm: leaving the attached arms detaches it and freeing
-/// the slot completes its cleanup. Custody never returns to attached.
-/// Moves `slot` to its `arm` holding `payload`, written straight into the
-/// slot: a whole ExecutionSlot value is the size of its largest arm, a
-/// provider Transfer, and every move built one in its caller's frame.
 fn moveSlot(
     host: *Host,
     slot: *ExecutionSlot,
@@ -251,10 +221,6 @@ fn moveSlot(
     if (slotToken(slot)) |kept| std.debug.assert(std.meta.eql(kept, token));
     const to = slotCustody(slot);
     if (from == .attached and to != .attached) {
-        // An Action leaves custody unsettled only once dispatch is fenced or
-        // the Host is shutting down, and neither admits work again, so
-        // uncertain Actions come only from an earlier Host and the lifecycle
-        // owner stops scanning for them.
         std.debug.assert(!host.custody.holdsUndeliveredAction(token) or !host.launchAllowed());
         host.custody.detach(token) catch unreachable;
     }
@@ -266,11 +232,6 @@ fn moveSlot(
 }
 
 test "execution slots change only through attachSlot and moveSlot" {
-    // Admission skips its scans while `Host.slot_changes` and the commit
-    // generation stand still, so every slot write must move the count. Zig
-    // has no private fields, so this checks the source: outside tests, only
-    // the two writers assign through a slot pointer and no assignment
-    // spells an ExecutionSlot arm.
     const source = @embedFile("server_execution.zig");
     var production: std.ArrayList(u8) = .empty;
     defer production.deinit(std.testing.allocator);
@@ -291,20 +252,10 @@ test "execution slots change only through attachSlot and moveSlot" {
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, code, "]" ++ " = ."));
 }
 
-/// Execution-owned consistency checks beside ExecutionSlot. Each inspects
-/// current slot and custody facts without mutating them. The legal
-/// checkpoint is after a complete admission, preparation, completion, or
-/// cleanup transition on the execution owner, when no admission
-/// temporaries are outstanding. Payloads match by custody token, never by
-/// array index. Aggregate reconciliation runs only here, not midway
-/// through beginAdmittedAttempt or launchPreparedRequest where partially
-/// established local ownership is legitimate.
 fn checkSlotCustodyAgreement(slots: []const ExecutionSlot, custody: *execution.CustodyPool, mcp: ?*const server_mcp.Calls) !void {
     var represented: usize = 0;
     for (slots, 0..) |*slot, i| {
         const token = slotToken(slot) orelse continue;
-        // Retained cleanup owners keep only their token, so their check is
-        // the token-only detached check.
         switch (slotCustody(slot)) {
             .free => unreachable,
             .attached => try custody.checkAttached(token, slotBinding(slot).?),
@@ -326,20 +277,9 @@ fn checkSlotCustodyAgreement(slots: []const ExecutionSlot, custody: *execution.C
             if (std.meta.eql(active.token, other.token)) return error.DuplicateExecutionToken;
         };
     };
-    // Reverse reconciliation: every occupied custody record must have its
-    // owning slot in the checked population. A missing payload with live
-    // custody is capacity that can neither progress nor clean up.
     if (represented != custody.occupied()) return error.OrphanedExecutionCustody;
 }
 
-/// Execution-owned preparation correspondence. The live preparations stay
-/// in their final storage under the existing single-owner discipline; this
-/// establishes that the preparing slots belong to those live objects, not
-/// merely that the counts agree. A null model preparation must have no
-/// matching slot. A Bash preparation is live exactly while a slot is
-/// `.bash_preparing`, so only that slot is compared, by the facts its
-/// preparation owns (action identity); no second stored identity is
-/// introduced.
 fn checkSharedPreparation(
     slots: []const ExecutionSlot,
     model_preparation: ?*model_adapter.Preparation,
@@ -381,59 +321,31 @@ const LifecycleMeasurement = struct {
 
 const lifecycle_trace_interval_ms = 100;
 
-/// The engine's storage for recurring single-instance work, mapped once
-/// (`pages.Mapped`) for the engine's life: each part becomes resident only
-/// when its work first runs, and none of it stacks under deeper calls. Rare
-/// work maps its own pages for one call instead, and per-request intake work
-/// lives in its exchange's heap objects. Never assign the whole struct.
 const Workspace = struct {
     model_preparation: model_adapter.Preparation,
-    /// Live Bash service and shutdown share this window.
     bash_window: [bash.copy_window_bytes]u8,
-    /// Written only in a Host with managed authentication.
     auth_worker: AuthWorker,
-    /// One Bash Action's state. The slots say which part is live: a
-    /// `.bash_preparing` slot owns `bash_input` and `bash_preparation`,
-    /// `bash_prepared` lives from the last advance to launch, and
-    /// `bash_outcome` from completion to settlement.
     bash_input: store_module.ActionExecutionInput,
     bash_preparation: bash.Preparation,
     bash_prepared: bash.Prepared,
     bash_outcome: bash.Outcome,
-    /// One transfer's response import: the decoded event data, the
-    /// interpretation and the settled output, live from a completed transfer
-    /// to its settlement.
     event_data: output_decode.EventData,
-    /// The codec's interpretation scratch and the Host's grammar state.
     interpret: output_decode.Interpret,
     interpretation: output_decode.Interpretation,
-    /// What the provider said of a failure, from its HTTP error body or
-    /// error event, live from interpretation to settlement.
     provider_failure: output_decode.ProviderFailure,
-    /// An HTTP error body's classification, live while it is classified.
     decode: output_decode.Decode,
     settlement: store_module.ValidatedOutput,
-    /// Independent provider-list and catalog GET ownership.
     listings: std.EnumArray(provider.ListingKind, ListingWork),
 };
 
-/// A listing GET's parts: the Reactor holds its stream, and these its
-/// optional credential use and answer buffer until it ends. Zero bytes are none.
 const ListingWork = struct {
     fetch: provider.ListingFetch,
     credential: ?*provider.SharedCredential,
     response: ?[]u8,
-    /// Where this kind's GET goes, borrowed from `executionMain` for the
-    /// Host's life; null when this Host does not fetch it.
     url: ?[]const u8 = null,
-    /// A listing whose credential is leased waits for the sign-in worker
-    /// before it starts: `waiting` for the worker, `requested` once its lease
-    /// job is the worker's (`advanceCredentialWork`).
     auth: enum { none, waiting, requested } = .none,
 };
 
-/// The codec whose headers the Reactor observes: every codec's, so far,
-/// since each one served observes the same headers.
 const observed_codec = blk: {
     const codec = std.enums.values(protocol.Provider)[0].codec();
     const observed = codecs.manifest(codec).observe;
@@ -454,8 +366,6 @@ pub fn executionMain(host: *Host) void {
     defer mapped_workspace.unmap();
     const workspace = mapped_workspace.value;
     const auth_worker: ?*AuthWorker = if (host.providers.anySignIn()) worker: {
-        // Built in place: a typed literal would be a stack temporary the size of
-        // the worker's credential work.
         workspace.auth_worker = .{ .io = host.io };
         break :worker &workspace.auth_worker;
     } else null;
@@ -471,14 +381,11 @@ pub fn executionMain(host: *Host) void {
         host.auth_worker = null;
         auth_worker.?.stop(thread);
     };
-    // Zero bytes are a free slot and an empty Turn entry, so fresh pages
-    // need no initializing pass and an idle slot never becomes resident.
     const slots = mapZeroed(ExecutionSlot, host.custody.records.len) catch |err| {
         fenceDispatch(host, "execution workspace allocation", err);
         return;
     };
     defer unmapZeroed(slots);
-    // One table per provider, each as large as the slots.
     const turn_states = mapZeroed(turn_states_module.TurnStates.Entry, slots.len * std.enums.values(protocol.Provider).len) catch |err| {
         fenceDispatch(host, "execution workspace allocation", err);
         return;
@@ -510,7 +417,6 @@ pub fn executionMain(host: *Host) void {
     const budget = host.retention.sharedBudget().narrowed(
         if (host.hooks.fails(.request_scratch_acquire)) 0 else host.limits.request_scratch_limit_bytes,
     );
-    // Each live list sits beside its provider's Responses endpoint.
     var listing_urls: std.EnumArray(provider.ListingKind, ?[]const u8) = .initFill(null);
     defer for (listing_urls.values, std.enums.values(provider.ListingKind)) |url, kind| {
         if (kind != .catalog) if (url) |owned| host.allocator.free(owned);
@@ -527,7 +433,6 @@ pub fn executionMain(host: *Host) void {
     listing_urls.set(.catalog, if (catalog_url.len == 0) null else catalog_url);
     for (listing_urls.values, &workspace.listings.values) |url, *work| work.url = url;
     var reactor_storage: provider.Reactor = undefined;
-    // Listings have their own capacity even when no model can run.
     const reactor: ?*provider.Reactor = reactor: {
         const any_listing = for (listing_urls.values) |url| {
             if (url != null) break true;
@@ -550,9 +455,6 @@ pub fn executionMain(host: *Host) void {
             .budget = budget,
             .listing_urls = listing_urls,
         }) catch |err| {
-            // Engine setup precedes endpoint registration (including proxy
-            // validation). With no served provider, only optional discovery
-            // needed this Reactor; report its failure without fencing the Host.
             if (!host.providers.any() and catalog_url.len != 0) {
                 listingFailed(host, .catalog, err);
                 break :reactor null;
@@ -568,12 +470,9 @@ pub fn executionMain(host: *Host) void {
     defer if (reactor) |active| {
         for (std.enums.values(provider.ListingKind)) |kind| endListing(active, kind, workspace.listings.getPtr(kind));
     };
-    // A commit from any thread and a finished stream end this loop's wait.
     if (reactor) |active| active.wake = &host.dispatch_wake;
     host.store.commitWake().store(&host.dispatch_wake, .release);
     defer host.store.commitWake().store(null, .release);
-    // Streams, PING answers and flow control move on their own thread, so a
-    // Store round this thread waits on never holds them up.
     const transport: ?std.Thread = if (reactor) |active|
         signal_stack.spawn(.{}, provider.Reactor.serve, .{active}) catch |err| {
             fenceDispatch(host, "transport thread start", err);
@@ -604,8 +503,6 @@ pub fn executionMain(host: *Host) void {
             .mcp = &mcp_calls,
             .fenced = false,
         };
-        // Reset before the pass reads anything, so a wake set while it
-        // runs ends the wait after it.
         host.dispatch_wake.reset();
         switch (execution_turn.run(&turn_state, &native)) {
             .continue_immediately => heap_release.worked = true,
@@ -648,7 +545,6 @@ const NativeTurn = struct {
     measurement: *LifecycleMeasurement,
     mcp: *server_mcp.Calls,
     fenced: bool,
-    /// What this turn's retry admission scan read, if one ran.
     scheduled_retry: execution_turn.ScheduledRetry = .unknown,
 
     pub fn now(self: *NativeTurn) std.Io.Clock.Timestamp {
@@ -746,8 +642,6 @@ const NativeTurn = struct {
         return @min(countFreeSlots(self.slots), self.host.custody.records.len - self.host.custody.occupied());
     }
 
-    /// Read from the slots, like model preparation, so the slot change count
-    /// covers it. The slots are the only record of a live preparation.
     pub fn bashPreparationOpen(self: *const NativeTurn) bool {
         for (self.slots) |slot| {
             if (slot == .bash_preparing) return false;
@@ -864,14 +758,10 @@ const NativeTurn = struct {
         return self.scheduled_retry;
     }
 
-    /// The wall clock the Store dates retries by, or null when unreadable.
     pub fn unixMilliseconds(self: *const NativeTurn) ?u64 {
         return std.math.cast(u64, store_module.readUnixMilliseconds(self.host.io) catch return null);
     }
 
-    /// While new Turns are held, waiting input only joins open Turns. The
-    /// pause is the snapshot the run's admission key took, so the scan and
-    /// its cached empty result agree.
     pub fn admitNewModel(self: *NativeTurn, paused: bool) execution_turn.Admission {
         return self.admitModel(if (paused) .open_turn_message else .message);
     }
@@ -898,8 +788,6 @@ const NativeTurn = struct {
         };
     }
 
-    /// The transport thread drives the Client; this step fences on the
-    /// failure that ended it and traces the completions waiting.
     pub fn driveTransport(self: *NativeTurn) error{Fence}!void {
         if (self.reactor.?.failed()) |err| {
             fenceDispatch(self.host, "transport reactor", err);
@@ -909,12 +797,8 @@ const NativeTurn = struct {
         observeUnprocessedCompletions(self.host, self.reactor.?);
     }
 
-    // Its frame holds a finished transfer's work; kept out of line so the
-    // admission chain beside it never carries it (stack_frames.json).
     pub noinline fn serviceOneCompletion(self: *NativeTurn) bool {
         if (callServiceOneCompletion(self.host, self.reactor, self.slots, self.workspace)) return true;
-        // nextCompletion marks discovery streams finished without casting
-        // them to model Transfers. Publish one answer per service turn.
         const reactor = self.reactor orelse return false;
         for (std.enums.values(provider.ListingKind)) |kind| {
             if (reactor.finishedListing(kind) == null) continue;
@@ -946,9 +830,6 @@ const NativeTurn = struct {
 
 const max_catalog_response_bytes = 16 * 1024 * 1024;
 
-/// Every discovery GET shares capacity, buffer and completion ownership. A
-/// listing whose credential is leased waits for the sign-in worker instead
-/// of starting here (`advanceCredentialWork`).
 noinline fn startListings(host: *Host, reactor: *provider.Reactor, works: *std.EnumArray(provider.ListingKind, ListingWork)) void {
     for (std.enums.values(provider.ListingKind)) |kind| {
         const work = works.getPtr(kind);
@@ -961,15 +842,11 @@ noinline fn startListings(host: *Host, reactor: *provider.Reactor, works: *std.E
     }
 }
 
-/// The credential `kind`'s GET carries, or null for the catalog's, which
-/// carries none.
 fn listingCredential(host: *Host, kind: provider.ListingKind) ?providers.Credential {
     const name = provider.listedProvider(kind) orelse return null;
     return host.providers.liveList(name).?.credential;
 }
 
-/// Starts `kind`'s GET with `lease` when its credential is leased; a
-/// failure ends it and is reported as its answer.
 fn startLeasedListing(host: *Host, reactor: *provider.Reactor, kind: provider.ListingKind, work: *ListingWork, lease: ?*const providers.Lease) void {
     startListing(host, reactor, kind, work, lease) catch |err| {
         endListing(reactor, kind, work);
@@ -983,7 +860,6 @@ noinline fn startListing(host: *Host, reactor: *provider.Reactor, kind: provider
     var source: ?store_module.ModelCatalogSource = null;
     var fields: [1]h2.Field = undefined;
     const request_fields: []const h2.Field = if (listingCredential(host, kind)) |credential| fields: {
-        // The credential checks the list's own address, where it goes.
         try credential.fields(work.url.?, host.providers.ca_file, lease, &reactor.credentials, &headers);
         work.credential = headers.takeCredential();
         break :fields headers.fields();
@@ -999,8 +875,6 @@ noinline fn startListing(host: *Host, reactor: *provider.Reactor, kind: provider
     try reactor.startListing(kind, &work.fetch, request_fields, work.response.?);
 }
 
-/// A live list's failure settles its provider's list as the catalog
-/// fallback; the catalog's keeps the saved catalog.
 fn listingFailed(host: *Host, kind: provider.ListingKind, err: anyerror) void {
     if (provider.listedProvider(kind)) |name| return host.model_lists.publish(name, err);
     stderr.print("rui: models.dev catalog unavailable ({s}); the saved catalog stands\n", .{@errorName(err)});
@@ -1010,15 +884,12 @@ noinline fn finishListing(host: *Host, reactor: *provider.Reactor, kind: provide
     defer endListing(reactor, kind, work);
     const stream = &reactor.finishedListing(kind).?.stream;
     if (stream.end().?.cause != .complete) return listingFailed(host, kind, error.ListingTransportFailed);
-    // A 401 settles as refused: a listing never forces a refresh.
     if (stream.status() != 200 and !(kind == .catalog and stream.status() == 304)) return listingFailed(host, kind, error.ListingRefused);
     const body = work.response.?[0..@intCast(stream.responseLength())];
     if (provider.listedProvider(kind)) |name| return host.model_lists.publish(name, body);
     saveCatalogAnswer(host.store, work, stream.status().?, body) catch |err| listingFailed(host, kind, err);
 }
 
-/// Scratch and the 16 MiB body live off the Host stack. Release the raw
-/// response as soon as it has been slimmed, before entering the Store queue.
 noinline fn saveCatalogAnswer(store: *store_module.Store, work: *ListingWork, status: u16, body: []const u8) !void {
     if (status == 304) return;
     std.debug.assert(status == 200);
@@ -1046,8 +917,6 @@ const callAdvanceRetainedCleanup = advanceRetainedCleanup;
 const slotsHaveTransport = hasTransport;
 const slotsHaveBash = hasBash;
 
-/// One finished transfer per call, found by address: a Transfer lives
-/// inside exactly one slot.
 fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot, workspace: *Workspace) bool {
     const active_reactor = reactor orelse return false;
     const completion = active_reactor.nextCompletion(host.hooks.fails(.response_seal)) catch |err| {
@@ -1062,8 +931,6 @@ fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []Execu
     return true;
 }
 
-/// O(1). Null for an address outside `slots` or a slot whose Transfer it
-/// is not: a programmer error, never peer input.
 fn slotOfTransfer(slots: []ExecutionSlot, transfer: *provider.Transfer) ?*ExecutionSlot {
     const base = @intFromPtr(slots.ptr);
     const address = @intFromPtr(transfer);
@@ -1073,9 +940,6 @@ fn slotOfTransfer(slots: []ExecutionSlot, transfer: *provider.Transfer) ?*Execut
     return slot;
 }
 
-/// A burst leaves freed heap with the allocator. It goes back once each time
-/// the loop has worked and then waits with every slot free: steady work never
-/// releases, and an idle loop releases once.
 const HeapRelease = struct {
     worked: bool = false,
 
@@ -1101,20 +965,11 @@ test "heap release is due once per return to all slots free" {
     try std.testing.expect(!release.due(&slots, false));
     try std.testing.expect(!release.due(&slots, false));
     release.worked = true;
-    // Discovery is work even with no execution slot. Do not consume the
-    // busy-to-idle edge while its body, parser or connection is still live.
     try std.testing.expect(!release.due(&slots, true));
     try std.testing.expect(release.due(&slots, false));
     try std.testing.expect(!release.due(&slots, false));
 }
 
-/// The Client's wait already ends at socket readiness and at its own
-/// earliest timer, so Transfers need no tick of their own. The loop still
-/// wakes at the idle cadence, which bounds new-work discovery and the control
-/// fallback, unless Bash needs its 25 ms service.
-/// Waits until another thread's commit or a finished stream, or for
-/// `timeout_ms`: what else the loop serves (controls, Bash, shutdown) it
-/// finds at that cadence.
 fn awaitDispatchWake(host: *Host, timeout_ms: u32) void {
     host.dispatch_wake.waitTimeout(host.io, .{ .duration = .{
         .raw = .fromMilliseconds(timeout_ms),
@@ -1139,10 +994,8 @@ test "a completed Transfer finds its own slot and nothing else" {
     var slots = [_]ExecutionSlot{ .free, .{ .provider = .{ .owner = .{} } }, .{ .provider = .{ .owner = .{} } } };
     try std.testing.expectEqual(&slots[1], slotOfTransfer(&slots, &slots[1].provider.transfer).?);
     try std.testing.expectEqual(&slots[2], slotOfTransfer(&slots, &slots[2].provider.transfer).?);
-    // Outside the array, on either side.
     try std.testing.expect(slotOfTransfer(slots[0..1], &slots[1].provider.transfer) == null);
     try std.testing.expect(slotOfTransfer(slots[2..], &slots[1].provider.transfer) == null);
-    // A slot no longer holding a provider transfer.
     const stale = &slots[2].provider.transfer;
     slots[2] = .free;
     try std.testing.expect(slotOfTransfer(&slots, stale) == null);
@@ -1194,8 +1047,6 @@ fn cancelSupersededTransfers(
             const control = superseded orelse continue;
             const owner = active.owner;
             traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), owner.binding);
-            // deinit cancels the stream; nothing of it is outstanding after,
-            // so its slot is free at once and siblings are untouched.
             active.transfer.deinit();
             finishCustodyNow(host, slot);
         },
@@ -1204,12 +1055,6 @@ fn cancelSupersededTransfers(
 }
 
 test "an execution slot is sized for a model Attempt, not for Bash" {
-    // Bash keeps its large state in Host.bash_work, so no arm outgrows the
-    // model arms a held model agent occupies: the provider arm, or an
-    // Attempt waiting for its credential or its forced refresh. A request
-    // waiting for its credential stays in the preparation, so its arm is
-    // small; the provider arm keeps no request headers, so the refresh arm
-    // (its 256-byte request id) is the largest.
     const model = @max(@sizeOf(ProviderSlot), @sizeOf(ModelAuthenticatingSlot), @sizeOf(ModelRefreshingSlot));
     try std.testing.expect(@sizeOf(ExecutionSlot) <= model + @alignOf(ExecutionSlot));
 }
@@ -1219,7 +1064,6 @@ test "zeroed pages are free slots and empty Turn and history memo entries" {
     defer unmapZeroed(slots);
     for (slots) |*slot| try std.testing.expect(slotIsFree(slot));
     try std.testing.expectEqual(slots.len, countFreeSlots(slots));
-    // A value is held at its real length, so an entry is a few words.
     try std.testing.expect(@sizeOf(turn_states_module.TurnStates.Entry) < 64);
     const entries = try mapZeroed(turn_states_module.TurnStates.Entry, 2);
     defer unmapZeroed(entries);
@@ -1280,8 +1124,6 @@ fn activeActionContains(context: *const anyopaque, action_id: u64) bool {
     return false;
 }
 
-/// The Host's Bash io, scratch directory and scratch view. Bash captures sit
-/// in execution slots, so they keep none of it.
 fn bashScratch(host: *Host) bash.Scratch {
     return .{
         .io = host.io,
@@ -1329,13 +1171,6 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
     return made_progress;
 }
 
-/// Runs the next core tool call (D24) to its resolution: it reads the
-/// call's arguments, whose runtime checker may still refuse them, and one Store
-/// command imports the captured result. Filesystem effects finish outside the
-/// Store writer. Nothing is written before that command, so
-/// a call this stops short of is simply run again. The arguments are read
-/// whole onto the heap, so its frame stays small: every Store call may run
-/// other threads' queued writes on this stack.
 noinline fn runNextCoreAction(host: *Host, mcp: *server_mcp.Calls) execution_turn.Admission {
     const work = (host.store.nextCoreWork(host.custody.dispatchCapacity(!mcp.full())) catch |err| {
         fenceDispatch(host, "core tool selection", err);
@@ -1357,14 +1192,10 @@ noinline fn runNextCoreAction(host: *Host, mcp: *server_mcp.Calls) execution_tur
     };
 }
 
-/// Stops an attached child whose parent stopped or ran out of context
-/// (D38), as a client's stop of that child would, and tells the engine,
-/// which interrupts what the stop selected.
 noinline fn runOwedStop(host: *Host, owed: *const store_module.OwedStop) execution_turn.Admission {
     var command: protocol.SessionStopCommand = .{ .key = owed.key };
     command.session.set(owed.session.slice()) catch unreachable;
     switch (host.store.stopOwedSession(&command, host.hooks.storeFaults(.action_result))) {
-        // A command that already held the key settled the owed stop.
         .accepted, .rejected, .conflict => {},
         .infrastructure_failure => {
             fenceDispatch(host, "owed stop", error.CanonicalStoreFailure);
@@ -1375,13 +1206,9 @@ noinline fn runOwedStop(host: *Host, owed: *const store_module.OwedStop) executi
     return .admitted;
 }
 
-/// Delivers an attached child's Turn ending to its parent, or settles one
-/// its parent's stop caused (D39, D139). One Store command does it all.
 noinline fn runOwedEnding(host: *Host, owed: *const store_module.OwedEnding) execution_turn.Admission {
     var arena_state: std.heap.ArenaAllocator = .init(host.allocator);
     defer arena_state.deinit();
-    // A done Turn's answer is the Message; its `/name` words bind the
-    // parent's skills as any Message's do. Other endings are Rui's line.
     const captured: ?store_module.CapturedMessageSkills = if (owed.answer != null and !owed.quiet)
         session_skills.bindTo(arena_state.allocator(), host.io, host.store, owed.parent.slice(), .{ .stored = .{ .store = host.store, .reference = owed.answer.? } }) catch |err| switch (err) {
             error.OutOfMemory => return .retry_later,
@@ -1426,7 +1253,6 @@ noinline fn runMessageAgent(host: *Host, input: *const store_module.CoreActionIn
     var text: Text = .{ .allocator = host.allocator };
     defer text.list.deinit(host.allocator);
     const check = tools.core_tools.checkMessageAgent(&source, &text) catch |err| switch (err) {
-        // Memory comes back; the call is read again next time.
         error.OutOfMemory => return .retry_later,
         else => {
             fenceDispatch(host, "core tool input", err);
@@ -1435,7 +1261,6 @@ noinline fn runMessageAgent(host: *Host, input: *const store_module.CoreActionIn
     };
     const arguments = switch (check) {
         .accepted => |accepted| accepted,
-        // Settlement accepted these exact bytes.
         .rejected => {
             fenceDispatch(host, "core tool input", error.CorruptStore);
             return .retry_later;
@@ -1451,7 +1276,6 @@ noinline fn runMessageAgent(host: *Host, input: *const store_module.CoreActionIn
         },
     };
     _ = host.store.deliverAgentMessageBound(input.binding, arguments.id.slice(), text.list.items, if (captured) |*value| value else null, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
-        // A stop resolved the call first.
         error.StaleActionAttemptBinding => return .admitted,
         else => {
             fenceDispatch(host, "core tool command", err);
@@ -1461,13 +1285,11 @@ noinline fn runMessageAgent(host: *Host, input: *const store_module.CoreActionIn
     return .admitted;
 }
 
-/// Tool loading owns its buffers in a per-call arena, off Host stacks.
 noinline fn runFindTools(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
     var arena: std.heap.ArenaAllocator = .init(host.allocator);
     defer arena.deinit();
     find_tools.run(host.store, arena.allocator(), input, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
         error.OutOfMemory => return .retry_later,
-        // A stop may resolve the call before its command starts.
         error.StaleActionAttemptBinding => return .admitted,
         else => {
             fenceDispatch(host, "find_tools core command", err);
@@ -1477,14 +1299,11 @@ noinline fn runFindTools(host: *Host, input: *const store_module.CoreActionInput
     return .admitted;
 }
 
-/// Rare public-feed reads own their large page and text windows in an arena,
-/// never in the engine's recurring workspace or its dispatch frame.
 noinline fn runReadTranscript(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
     var arena: std.heap.ArenaAllocator = .init(host.allocator);
     defer arena.deinit();
     read_transcript.run(host.store, arena.allocator(), input, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
         error.OutOfMemory => return .retry_later,
-        // A stop resolved the call while the public feed was being read.
         error.StaleActionAttemptBinding => return .admitted,
         else => {
             fenceDispatch(host, "read_transcript core command", err);
@@ -1532,7 +1351,6 @@ noinline fn runSkill(host: *Host, input: *const store_module.CoreActionInput) ex
         };
     _ = host.store.settleSkillTool(input.binding, arena, &captured, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
         error.StaleActionAttemptBinding => return .admitted,
-        // A reload's write rolled back; the call runs again later.
         error.OutOfMemory => return .retry_later,
         else => {
             fenceDispatch(host, "skill core settlement", err);
@@ -1542,15 +1360,10 @@ noinline fn runSkill(host: *Host, input: *const store_module.CoreActionInput) ex
     return .admitted;
 }
 
-/// Runs a `start_agent` call: its arguments are read whole and checked
-/// here, since a refusal is the call's own failed result (D140), and one
-/// Store command starts the agent. An attached or standalone agent starts
-/// from its caller's client environment, installed as the task commits.
 noinline fn runStartAgent(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
     var arena_state: std.heap.ArenaAllocator = .init(host.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    // The spec's Configuration is kilobytes, so it lives in the arena.
     const start = arena.create(tools.core_tools.StartAgent) catch return .retry_later;
     const check: tools.core_tools.StartAgentCheck = if (input.arguments.length > tools.core_tools.start_agent_max_argument_bytes)
         .{ .rejected = std.fmt.comptimePrint("the arguments take more than {d} bytes", .{tools.core_tools.start_agent_max_argument_bytes}) }
@@ -1577,10 +1390,8 @@ noinline fn runStartAgent(host: *Host, input: *const store_module.CoreActionInpu
     defer inheritance.deinit(host.allocator);
     const committed = inheritance.messageCallback();
     const parent_skills = host.store.readSkills(arena, input.session.slice()) catch return .retry_later;
-    // The task binds against the tool set the new Session starts with.
     const prepared = session_skills.prepareCreation(arena, host.allocator, host.io, parent_skills.workspace.slice(), host.bash_facts.home, .{ .bytes = start.task }) catch return .retry_later;
     _ = host.store.startAgentWithInitialSkills(input.binding, input.session.slice(), start.task, start.attached, &start.configuration, committed, prepared.initial, if (prepared.captured) |*value| value else null, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
-        // A stop resolved the call first.
         error.StaleActionAttemptBinding => return .admitted,
         else => {
             fenceDispatch(host, "core tool command", err);
@@ -1643,7 +1454,6 @@ fn admitBashAttempt(
     return .admitted;
 }
 
-/// The one `.bash_preparing` slot owns `workspace.bash_preparation`.
 fn advanceBashPreparation(
     host: *Host,
     slots: []ExecutionSlot,
@@ -1695,8 +1505,6 @@ fn finishBashPreparationFailure(host: *Host, slot: *ExecutionSlot, failure: *bas
     finishCustodyNow(host, slot);
 }
 
-// Discarding an unlaunched effect changes only local custody. In particular,
-// infrastructure suppression is not a user stop or a saved Action result.
 fn discardBashResources(
     host: *Host,
     slot: *ExecutionSlot,
@@ -1719,8 +1527,6 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
         discardBashResources(host, slot, prepared.takeCleanup());
         return;
     }
-    // The Session's client environment, copied outside the Store lock and
-    // `launch_mutex`; none falls back to the Host facts.
     const base = launchBase(host.environments, prepared.session.slice(), prepared.allocator) catch {
         settleActionFailure(host, token, action_binding, .spawn_failed, "Bash was not started: the Host could not copy the Session's environment.");
         discardBashResources(host, slot, prepared.takeCleanup());
@@ -1732,7 +1538,6 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
         discardBashResources(host, slot, prepared.takeCleanup());
         return;
     };
-    // The Execution launches straight into its custody record's entry.
     const work = &host.bash_work[token.index];
     var refused: bash.ArgumentSizes = .{};
     host.store.withActionDispatchHandoff(action_binding, .{
@@ -1772,7 +1577,6 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
     traceActionDeadline(host, "bash_deadline_established", deadline_ns, false, action_binding);
 }
 
-/// A `.bash_preparing` slot owns `preparation`.
 fn stopSupersededBash(
     host: *Host,
     slots: []ExecutionSlot,
@@ -1902,7 +1706,6 @@ fn retainBashPreparedCleanup(
     });
 }
 
-/// Rare, so its message buffer stays off the dispatch frame.
 noinline fn settleArgumentsTooLarge(host: *Host, token: execution.CustodyToken, binding: store_module.ActionAttemptBinding, sizes: bash.ArgumentSizes) void {
     var message: [bash.arguments_message_bytes]u8 = undefined;
     settleActionFailure(host, token, binding, .spawn_failed, bash.argumentsTooLargeMessage(&message, sizes));
@@ -1929,8 +1732,6 @@ fn admitNewAttempt(
     preparation: *model_adapter.Preparation,
 ) AdmissionProgress {
     const token = host.custody.reserve() orelse return .no_work;
-    // The slot's preparation is free (`modelPreparationOpen`), so the
-    // admission starts the request in it: the settings ride its commit.
     var admission = host.store.admitModelAttemptInto(kind, host.hooks.storeFaults(.attempt_admission), .{ .view = &preparation.page, .settings = &preparation.settings, .remembered = model_adapter.remembered(&host.history_memos) }) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "Attempt admission", err);
@@ -1947,8 +1748,6 @@ fn admitRetryAttempt(
     slot: *ExecutionSlot,
     active: store_module.ActiveOperationFilter,
     preparation: *model_adapter.Preparation,
-    /// Set once the Store's scan found no retry to admit, with
-    /// `due_ms` as that scan read it.
     scanned: *bool,
     due_ms: *?u64,
 ) AdmissionProgress {
@@ -1971,8 +1770,6 @@ fn beginAdmittedAttempt(
     token: execution.CustodyToken,
     permit: *store_module.DispatchPermit,
     preparation: *model_adapter.Preparation,
-    /// The admission already opened the preparation's page and read its
-    /// settings (`Store.admitModelAttemptInto`).
     started: bool,
 ) AdmissionProgress {
     const binding = attachSlot(host, slot, token, permit) catch |err| {
@@ -1981,8 +1778,6 @@ fn beginAdmittedAttempt(
         fenceDispatch(host, "custody attachment", err);
         return .admitted;
     };
-    // The page opens where it lives for the whole preparation; it never
-    // moves.
     if (!started) preparation.page.open(binding);
     var retained_scratch: ?named_scratch.Owner = null;
     preparation.init(
@@ -2021,13 +1816,11 @@ fn advanceModelPreparation(
     var owner = slot.model_preparing;
     if (execution.modelDecision(.{ .preparing = .{ .launch_allowed = host.launchAllowed() } }) == .abandon) {
         preparation.cancel();
-        // Infrastructure fencing does not invent a user stop or a Resolution.
         finishCustodyNow(host, slot);
         return true;
     }
     traceOperation(host, "preparation_advance_started", owner.binding);
     var progress = preparation.advance(byte_allowance, item_allowance);
-    // The Store reads what the request's page asks, and the advance goes on.
     while (progress == .read) {
         host.store.readRequestPage(&preparation.page) catch |err| {
             progress = .{ .failed = err };
@@ -2065,11 +1858,6 @@ fn advanceModelPreparation(
     return true;
 }
 
-/// The one worker serves one job at a time: first the requester whose job
-/// it holds, a slot or a listing (at most one holds it), then, once idle,
-/// the next waiting slot's lease or refresh job, and only when no slot
-/// waits, a waiting listing's lease. A listing never outranks a model slot.
-/// `request` is the authenticating slot's prepared request.
 fn advanceCredentialWork(host: *Host, reactor: *provider.Reactor, slots: []ExecutionSlot, worker: *AuthWorker, request: *provider.PreparedRequest, listings: *std.EnumArray(provider.ListingKind, ListingWork)) bool {
     for (slots) |*slot| switch (slot.*) {
         .model_authenticating => |*active| if (active.requested) return advanceAuthentication(host, reactor, slot, request),
@@ -2111,9 +1899,6 @@ fn advanceCredentialWork(host: *Host, reactor: *provider.Reactor, slots: []Execu
     return false;
 }
 
-/// Starts a listing with its lease, which goes back to the worker as soon
-/// as the GET holds its own copy of the token; a failed lease is the
-/// listing's answer.
 noinline fn advanceListingAuthentication(host: *Host, reactor: *provider.Reactor, worker: *AuthWorker, kind: provider.ListingKind, work: *ListingWork) bool {
     const result = worker.take() orelse return false;
     work.auth = .none;
@@ -2128,9 +1913,6 @@ noinline fn advanceListingAuthentication(host: *Host, reactor: *provider.Reactor
     return true;
 }
 
-/// Settles the claimed Attempt from its refresh: a committed refresh grants
-/// the immediate replacement, an advanced generation fails as answered, and
-/// a refresh failure keeps its own authentication code. A stop discards it.
 fn advanceRefresh(host: *Host, slot: *ExecutionSlot) bool {
     const result = host.auth_worker.?.take() orelse return false;
     const active = slot.model_refreshing;
@@ -2146,9 +1928,6 @@ fn advanceRefresh(host: *Host, slot: *ExecutionSlot) bool {
     return true;
 }
 
-/// Durably claims the Operation's one forced refresh for a managed 401.
-/// Returns false when the claim is unavailable and the answer settles as
-/// before; otherwise this owner has disposed the transfer.
 fn beginForcedRefresh(host: *Host, slot: *ExecutionSlot, answered: *const AnsweredAttempt, refresh: providers.Credential.Refresh) bool {
     const owner = answered.owner;
     const claimed = host.store.claimModelAuthRefresh(owner.binding) catch |err| {
@@ -2243,8 +2022,6 @@ fn launchPreparedRequest(
         finishCustodyNow(host, slot);
         return;
     };
-    // h2 holds the Transfer's stream from launch, so construct it in its
-    // final slot and keep that union arm active through completion and deinit.
     moveSlot(host, slot, .provider, .{
         .owner = .{ .token = token, .binding = binding, .purpose = owner.purpose.? },
         .rejection = served.credential.rejection(lease),
@@ -2275,7 +2052,6 @@ fn launchPreparedRequest(
         finishCustodyNow(host, slot);
         return;
     };
-    // Spent only by a Transfer that started, so a failed start keeps it armed.
     host.hook_progress.response_write_once_spent = host.hooks.fails(.response_write_once);
     pause(host, .{ .model_launch = binding });
     host.custody.consumeLaunchAuthority(token, .{ .model = binding }, std.Io.Clock.Timestamp.now(host.io, .awake)) catch |err| {
@@ -2338,8 +2114,6 @@ fn completeTransfer(
         .transport_finished => |evidence| {
             http_status = evidence.http_status;
             if (evidence.disposition.answered()) {
-                // The transport has sealed this HTTP answer. Interpretation
-                // borrows it; this owner still disposes it before settlement.
                 answered_response = active.transfer.takeResponse();
                 const response = &answered_response.?;
                 error_response = model_adapter.interpretErrorResponse(&workspace.decode, active.transfer.codec(), host.io, response.file, response.length, evidence.http_status, &workspace.provider_failure);
@@ -2394,8 +2168,6 @@ fn completeTransfer(
                     answered.fail(code, workspace.provider_failure.report.slice(), disposition);
                 }
             } else {
-                // Writes are synchronous, so the unsealed capture holds every
-                // byte accepted before the transfer or capture failed.
                 const response = active.transfer.partialResponse();
                 if (response.length != 0) retainFailedResponse(host, .{
                     .file = response.file,
@@ -2480,9 +2252,6 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
         return .cleanup;
     };
     defer metadata.deinit();
-    // Transport already unlinked this canonical name and released request/
-    // easy ownership. Reuse the response namespace for decoded SSE scratch;
-    // the original sealed capture remains separate diagnostic evidence.
     var data_name_buffer: [96]u8 = undefined;
     const data_name = named_scratch.NumericName.response.format(&data_name_buffer, owner.binding.operation_id, owner.binding.attempt_ordinal) catch unreachable;
     var retained_data: ?named_scratch.Owner = null;
@@ -2584,8 +2353,6 @@ fn advanceRetainedCleanup(
 }
 
 fn shutdownExecution(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) void {
-    // Initiate every effect's shutdown before waiting for any retirement.
-    // A cancelled transfer has nothing outstanding, so it retires at once.
     for (slots) |*slot| switch (slot.*) {
         .free => {},
         .model_preparing => {
@@ -2596,14 +2363,10 @@ fn shutdownExecution(host: *Host, slots: []ExecutionSlot, workspace: *Workspace)
             workspace.model_preparation.request.deinit(host.io, host.scratch_budget.?);
             finishCustodyNow(host, slot);
         },
-        // Shutdown saves no failure: the claimed Attempt stays uncertain
-        // and its spent claim forbids another refresh after restart.
         .model_refreshing => finishCustodyNow(host, slot),
         .bash_preparing => discardBashResources(host, slot, workspace.bash_preparation.cancel()),
         .bash => |*active| active.execution.requestInfrastructureShutdown(.now(host.io, .awake)),
         .bash_prepared_cleanup, .named_scratch => {},
-        // Shutdown discards transport evidence rather than invoking
-        // ordinary model completion or saving a semantic failure.
         .provider => |*active| {
             active.transfer.deinit();
             finishCustodyNow(host, slot);
@@ -2640,8 +2403,6 @@ fn hasOwnedSlots(slots: []const ExecutionSlot) bool {
     return false;
 }
 
-/// An Attempt the provider answered with an HTTP status. Its failures carry
-/// the provider's own correlation, so no answered path records a code alone.
 const AnsweredAttempt = struct {
     host: *Host,
     owner: AttemptOwner,
@@ -2653,8 +2414,6 @@ const AnsweredAttempt = struct {
         return .{ .host = host, .owner = owner, .request_id = request_id };
     }
 
-    /// `report` is the provider's own words for the failure; empty when it
-    /// sent none.
     fn fail(self: *const AnsweredAttempt, code: []const u8, report: []const u8, disposition: store_module.ModelFailureClass) void {
         settleFailure(self.host, self.owner.token, self.owner.binding, .{ .correlated = .{
             .code = code,
@@ -2667,12 +2426,10 @@ const AnsweredAttempt = struct {
         settleFailure(self.host, self.owner.token, self.owner.binding, self.rejection(code, diagnostic, report), disposition);
     }
 
-    /// For a settlement whose terminal delivery is already claimed.
     fn rejection(self: *const AnsweredAttempt, code: []const u8, diagnostic: []const u8, report: []const u8) store_module.ModelFailure {
         return .{ .rejected = .{ .code = code, .diagnostic = diagnostic, .request_id = self.request_id, .report = report } };
     }
 
-    /// The same failure facts for its optional failed-response record.
     fn retention(self: *const AnsweredAttempt, code: []const u8, diagnostic: ?[]const u8, http_status: u16) failed_responses.Failure {
         return .{
             .binding = self.owner.binding,
@@ -2684,11 +2441,6 @@ const AnsweredAttempt = struct {
     }
 };
 
-/// Best effort, before the owner settles and disposes the capture it just
-/// classified: retains those same bytes as a private local record. Faults
-/// are reported once and never change settlement, custody or cleanup. The
-/// directory and record file are this serial execution transition's only
-/// descriptors, within `descriptor_capacity`'s serial excess.
 fn retainFailedResponse(host: *Host, source: failed_responses.Source, failure: failed_responses.Failure) void {
     if (source.length == 0) return;
     const store_dir = host.failed_response_store orelse return;
@@ -2703,10 +2455,6 @@ fn retainFailedResponse(host: *Host, source: failed_responses.Source, failure: f
     });
 }
 
-/// A failure with no provider answer to correlate. Answered paths settle
-/// through `AnsweredAttempt` instead.
-/// The provider_prepare hook fails a launch as a transport failure before any
-/// header or Transfer exists. Returns whether it did.
 fn failedAtProviderPrepare(
     host: *Host,
     slot: *ExecutionSlot,
@@ -2743,10 +2491,7 @@ fn settleFailure(
         fenceDispatch(host, "model failure save", err);
 }
 
-/// Frees an attached slot whose resources its caller has retired.
 fn finishCustodyNow(host: *Host, slot: *ExecutionSlot) void {
-    // Capture checked identity while attached, but observe only after callers
-    // have retired resources and this owner has released custody and the slot.
     const traced = if (host.hooks.phase_trace) host.custody.binding(slotToken(slot).?) catch unreachable else null;
     moveSlot(host, slot, .free, {});
     if (traced) |binding| switch (binding) {
@@ -2801,14 +2546,10 @@ test "authentication handoff borrows the sole credential lease and releases it o
     try std.testing.expect(worker.state == .idle);
     worker.request(.{ .path = path, .wire = .codex_device });
     try std.testing.expect(worker.state == .requested);
-    // The released lock can be acquired again for the next generation.
     var next: credentials.Lease = undefined;
     try credentials.leaseInto(path, &next, &worker.work.credentials);
     next.release();
 
-    // Exercise the production model owner after cancellation, both before
-    // the worker publishes and with either actual result. No Store or reactor
-    // may be touched; the request and credential lease remain native owners.
     for ([_]bool{ false, true }) |ready| {
         var records: [1]execution.CustodyRecord = @splat(.{});
         var host = Host{
@@ -2900,7 +2641,6 @@ test "a leased model list waits behind every model slot, and its lease always go
     try credentials.install(path, &record, null, &worker.work.credentials);
     defer if (worker.state == .ready or worker.state == .in_use) worker.credential.release();
 
-    // A device sign-in's slots and a plan sign-in's live list, both at loopback.
     const models_url = "http://127.0.0.1:1/v1/models";
     var served: providers.Providers = .{};
     served.table.set(.codex, .{ .endpoint = "http://127.0.0.1:1/responses", .credential = .{ .chatgpt_device = .{ .path = path, .refresh = .synthetic } } });
@@ -2937,34 +2677,26 @@ test "a leased model list waits behind every model slot, and its lease always go
     const kind = provider.providerListing(.chatgpt).?;
     const work = listings.getPtr(kind);
     defer endListing(&reactor, kind, work);
-    // Only a slot's provider is read from its request until it launches.
     var request: provider.PreparedRequest = undefined;
     request.provider = .codex;
     const waiting: ExecutionSlot = .{ .model_authenticating = .{ .owner = .{ .token = undefined, .binding = undefined } } };
     var slots = [_]ExecutionSlot{waiting};
 
-    // A leased list starts nothing until the worker leases its token.
     startListings(&host, &reactor, &listings);
     try std.testing.expect(work.auth == .waiting and !reactor.listingPending());
-    // A waiting slot takes the idle worker first, and the list waits behind it.
     try std.testing.expect(advanceCredentialWork(&host, &reactor, &slots, &worker, &request, &listings));
     try std.testing.expect(slots[0].model_authenticating.requested and work.auth == .waiting);
     try std.testing.expectEqual(device_source, worker.state.requested.acquire);
     try std.testing.expect(!advanceCredentialWork(&host, &reactor, &slots, &worker, &request, &listings));
     try std.testing.expect(work.auth == .waiting);
-    // Once no slot waits, the list's lease is the idle worker's next job.
     worker.state = .idle;
     slots[0] = .free;
     try std.testing.expect(advanceCredentialWork(&host, &reactor, &slots, &worker, &request, &listings));
     try std.testing.expect(work.auth == .requested);
     try std.testing.expectEqual(plan_source, worker.state.requested.acquire);
-    // A slot that comes to wait meanwhile is not flagged while the list
-    // holds the job, and is served next.
     slots[0] = waiting;
     try std.testing.expect(!advanceCredentialWork(&host, &reactor, &slots, &worker, &request, &listings));
     try std.testing.expect(!slots[0].model_authenticating.requested);
-    // A failed lease is the list's answer: the catalog stands in, and the
-    // worker is free for the slot.
     worker.state = .{ .failed = error.FileNotFound };
     try std.testing.expect(host.model_lists.live.get(.chatgpt) == .pending);
     try std.testing.expect(advanceCredentialWork(&host, &reactor, &slots, &worker, &request, &listings));
@@ -2975,7 +2707,6 @@ test "a leased model list waits behind every model slot, and its lease always go
     worker.state = .idle;
     slots[0] = .free;
 
-    // A leased token starts the GET with its own copy, and goes back at once.
     host.model_lists.set(.chatgpt, .pending);
     startListings(&host, &reactor, &listings);
     try std.testing.expect(advanceCredentialWork(&host, &reactor, &slots, &worker, &request, &listings));
@@ -2985,12 +2716,10 @@ test "a leased model list waits behind every model slot, and its lease always go
     try std.testing.expect(worker.state == .idle and work.auth == .none);
     try std.testing.expect(reactor.listings.get(kind) != null and work.credential != null);
     try std.testing.expect(host.model_lists.live.get(.chatgpt) == .pending);
-    // A request to refresh while it runs starts no second one.
     startListings(&host, &reactor, &listings);
     try std.testing.expect(work.auth == .none);
     endListing(&reactor, kind, work);
 
-    // A lease whose GET cannot start still goes back, and the list falls back.
     work.url = "https://api.openai.com/v1/models";
     startListings(&host, &reactor, &listings);
     try std.testing.expect(advanceCredentialWork(&host, &reactor, &slots, &worker, &request, &listings));
@@ -3029,7 +2758,6 @@ test "authentication worker answers each job with that job's result" {
     try record.refresh_token.set("synthetic-refresh");
     var worker = AuthWorker{ .io = io };
     try credentials.install(path, &record, null, &worker.work.credentials);
-    // A second sign-in, two generations on: each job runs for the one it names.
     var other_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const other_path = try std.fmt.bufPrint(&other_buffer, "{s}/other.json", .{std.fs.path.dirname(path).?});
     try credentials.install(other_path, &record, null, &worker.work.credentials);
@@ -3056,15 +2784,12 @@ test "authentication worker answers each job with that job's result" {
     try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), &worker, answered);
     try std.testing.expectEqual(@as(u64, 2), worker.take().?.ready.record.generation);
     worker.finish();
-    // Generation 2 is the other sign-in's alone.
     worker.requestRefresh(.{ .source = source, .generation = 2 });
     try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), &worker, answered);
     try std.testing.expect(!worker.take().?.refreshed);
     worker.requestRefresh(.{ .source = other, .generation = 2 });
     try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), &worker, answered);
     try std.testing.expect(worker.take().?.refreshed);
-    // The installed generation 1 refreshes; the same stale generation then
-    // finds it replaced; a missing file fails. Each answer is taken once.
     worker.requestRefresh(.{ .source = source, .generation = 1 });
     try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), &worker, answered);
     try std.testing.expect(worker.take().?.refreshed);
@@ -3091,8 +2816,6 @@ test "HTTP error capture retires before execution custody" {
 
         fn close(userdata: ?*anyopaque, files: []const std.Io.File) void {
             for (files) |file| if (file.handle == response_fd) {
-                // Observe the real descriptor while close still owns it,
-                // including a close that suspends before retiring the handle.
                 std.debug.assert(slot.* == .provider);
                 std.debug.assert(custody.occupied() == 1);
                 closes += 1;
@@ -3139,9 +2862,6 @@ test "HTTP error capture retires before execution custody" {
             .attempt_ordinal = 2,
         } };
         const binding = try host.custody.attach(token, &permit);
-        // Delivery already claimed: this owner regression exercises physical
-        // retirement without fabricating a Store settlement. Dispatch integration
-        // separately verifies the durable HTTP overflow/failure meanings.
         try std.testing.expect(host.custody.claimTerminalDelivery(token));
         var slot: ExecutionSlot = .{ .provider = .{ .owner = .{ .token = token, .binding = binding } } };
         Boundary.slot = &slot;
@@ -3153,7 +2873,6 @@ test "HTTP error capture retires before execution custody" {
         const request_file = try tmp.dir.createFile(io, "request", .{ .read = true });
         try request_file.writeStreamingAll(io, "{}");
         try std.testing.expect(budget.charge(2));
-        // Prepared, never launched: no socket exists for this endpoint.
         var reactor: provider.Reactor = undefined;
         try reactor.init(std.testing.allocator, io, .{
             .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }),
@@ -3182,8 +2901,6 @@ test "HTTP error capture retires before execution custody" {
         try response.seal(io, false, body.len);
         Boundary.response_fd = response.file.handle;
         if (kind == 1) {
-            // A short sealed read is a real classifier error, not malformed
-            // JSON's negative-overflow result.
             response.length += 1;
             const unreadable = model_adapter.interpretErrorResponse(&workspace.value.decode, slot.provider.transfer.codec(), io, response.file, response.length, 400, &workspace.value.provider_failure);
             try std.testing.expectEqual(execution.ErrorResponse{ .unreadable = error.ShortSealedRead }, unreadable);
@@ -3220,8 +2937,6 @@ test "cleanup publication follows complete execution retirement" {
                 self.releases += 1;
                 return clock.now(std.testing.io);
             }
-            // The completion timestamp is constructed before either native
-            // publication or optional stderr. Inspect actual owner facts here.
             std.debug.assert(self.slot.* == .free);
             self.custody.checkFree(self.token) catch unreachable;
             checkSlotCustodyAgreement(@as([*]const ExecutionSlot, @ptrCast(self.slot))[0..1], self.custody, null) catch unreachable;
@@ -3244,7 +2959,6 @@ test "cleanup publication follows complete execution retirement" {
     var slot: ExecutionSlot = .free;
     boundary.slot = &slot;
     boundary.custody = &host.custody;
-    // Both typed owners, as admission attaches them, share this boundary.
     for (0..2) |kind| {
         const token = host.custody.reserve().?;
         boundary.token = token;
@@ -3266,7 +2980,6 @@ test "cleanup publication follows complete execution retirement" {
             } };
             _ = try attachSlot(&host, &slot, token, &permit);
             try std.testing.expect(slot == .bash_preparing);
-            // An Action leaves custody after its settlement claims delivery.
             try std.testing.expect(host.custody.claimTerminalDelivery(token));
             finishCustodyNow(&host, &slot);
         }
@@ -3274,8 +2987,6 @@ test "cleanup publication follows complete execution retirement" {
         try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
     }
 
-    // Exercise the distinct delayed Bash owner with real process/pipe
-    // retirement and charged capture resources, not a model stand-in.
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
@@ -3303,8 +3014,6 @@ test "cleanup publication follows complete execution retirement" {
     lease.paths = .{};
     try lease.paths.scratch.set(root);
     host.lease = &lease;
-    // This Host's io observes owner facts at each clock read, so the Bash
-    // calls this test drives directly read the plain test clock.
     var scratch = bashScratch(&host);
     scratch.io = std.testing.io;
     var input: store_module.ActionExecutionInput = .{
@@ -3373,14 +3082,11 @@ test "cleanup publication follows complete execution retirement" {
     var outcome: bash.Outcome = undefined;
     try slot.bash.execution.outcome(scratch, false, &outcome);
     try std.testing.expectEqual(store_module.ActionResolutionCode.succeeded, outcome.code);
-    // One captured stdout byte remains owned.
     try std.testing.expectEqual(@as(u64, 1), used.load(.acquire));
     boundary.token = token;
     boundary.observed = false;
     var gate_path_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
     host.hooks.bash_reclaim_gate_path = try std.fmt.bufPrint(&gate_path_buffer, "{s}/released-gate", .{root});
-    // A released gate grants one reclamation transition, even if removal
-    // fails repeatedly. The same charged capture and custody survive retry.
     slot.bash.execution.stdout_capture.cleanup_fault = .persistent;
     boundary.release_expected = true;
     try std.testing.expect(reclaimBash(&host, &slot, deadline));
@@ -3511,7 +3217,6 @@ test "execution slots agree with custody across the complete population" {
     };
     try checkSlotCustodyAgreement(&slots, &custody, null);
 
-    // A foreign binding in one payload is rejected while the other still agrees.
     slots[0] = .{ .provider = .{ .owner = .{
         .token = model_token,
         .binding = .{ .turn_id = 9, .operation_id = 9, .attempt_ordinal = 9 },
@@ -3520,8 +3225,6 @@ test "execution slots agree with custody across the complete population" {
     slots[0] = .{ .provider = .{ .owner = .{ .token = model_token, .binding = model_binding } } };
     try checkSlotCustodyAgreement(&slots, &custody, null);
 
-    // An occupied custody record with no owning slot is orphaned capacity:
-    // attached or detached, it must fail the whole-execution check.
     var orphan = [_]ExecutionSlot{
         .{ .provider = .{ .owner = .{ .token = model_token, .binding = model_binding } } },
         .free,
@@ -3538,7 +3241,6 @@ test "execution slots agree with custody across the complete population" {
     try custody.cleanupComplete(model_token);
     try checkSlotCustodyAgreement(&empty, &custody, null);
 
-    // Two payloads on one token collide instead of sharing it.
     const retoken = custody.reserve().?;
     var repermit = store_module.DispatchPermit{ .binding = .{
         .turn_id = 3,
@@ -3552,7 +3254,6 @@ test "execution slots agree with custody across the complete population" {
     };
     try std.testing.expectError(error.DuplicateExecutionToken, checkSlotCustodyAgreement(&shared, &custody, null));
 
-    // A stale payload after reuse leaves the new owner unchanged.
     try custody.detach(retoken);
     try custody.cleanupComplete(retoken);
     const reused = custody.reserve().?;
@@ -3566,7 +3267,6 @@ test "execution slots agree with custody across the complete population" {
         .{ .provider = .{ .owner = .{ .token = retoken, .binding = rebinding } } },
     };
     try std.testing.expectError(error.StaleCustody, checkSlotCustodyAgreement(&stale, &custody, null));
-    // The complete population names the current owner: no orphan remains.
     var current = [_]ExecutionSlot{
         .{ .provider = .{ .owner = .{ .token = reused, .binding = reused_binding } } },
     };
@@ -3586,8 +3286,6 @@ test "no-work admission restores only its temporary custody reservation" {
     try storage.open(std.testing.io, path, root);
     defer storage.close() catch unreachable;
 
-    // Every call has genuinely free capacity and a real Store with no eligible
-    // work. A represented sibling must survive release of the new reservation.
     const Kind = enum { bash, retry, message, tool_continuation };
     inline for (std.meta.tags(Kind)) |kind| {
         for ([_]bool{ false, true }) |with_sibling| {
@@ -3633,8 +3331,6 @@ test "no-work admission restores only its temporary custody reservation" {
             try checkSlotCustodyAgreement(&slots, &host.custody, null);
             try std.testing.expect(!(try storage.inspectSessionForTesting("direct/no-work")).found);
 
-            // Restored accounting must mean immediately reusable capacity,
-            // not just a corrected counter or accidental sibling release.
             var reused: [records.len]execution.CustodyToken = undefined;
             const free = records.len - baseline;
             for (reused[0..free]) |*token| token.* = host.custody.reserve() orelse return error.TestExpectedCapacity;
@@ -3647,8 +3343,6 @@ test "no-work admission restores only its temporary custody reservation" {
 }
 
 test "failed admission releases its reservation and fences the Store and dispatch" {
-    // Message admission fails its real commit; every other admission meets the
-    // Store that failure fenced. Each catch must release the new reservation.
     const Kind = enum { bash, retry, message, tool_continuation };
     inline for (std.meta.tags(Kind)) |kind| {
         for ([_]bool{ false, true }) |with_sibling| {
@@ -3787,21 +3481,14 @@ test "closed Bash delivery retains its payload with detached custody" {
     };
     try checkSlotCustodyAgreement(&slots, &host.custody, null);
 
-    // The real delivery-close transition detaches custody while retaining
-    // the .bash payload for reclamation: the checker must accept it.
     try std.testing.expect(host.custody.claimTerminalDelivery(token));
     closeBashDelivery(&host, &slots[0]);
     try std.testing.expect(slots[0].bash.delivery == .closed);
     try host.custody.checkDetached(token, .{ .action = binding });
     try checkSlotCustodyAgreement(&slots, &host.custody, null);
-    // The flagged failed-reclamation state is accepted by the checker. This
-    // covers the flag value only: no failing reclaimer runs here and no Bash
-    // resources are retained through retry.
     slots[0].bash.delivery.closed.reclaim_failed = true;
     try checkSlotCustodyAgreement(&slots, &host.custody, null);
 
-    // Closed delivery with still-attached custody is the invalid shape:
-    // it must fail rather than pass as a retained payload.
     const second = host.custody.reserve().?;
     var second_permit = store_module.ActionDispatchPermit{ .binding = .{
         .turn_id = 4,
@@ -3820,9 +3507,6 @@ test "closed Bash delivery retains its payload with detached custody" {
         } },
         .free,
     };
-    // Complete population: the first slot's detached token plus the bad
-    // slot's attached token account for both occupied records, so the
-    // failure below is the custody-state mismatch, not an orphan.
     var both = [_]ExecutionSlot{ slots[0], bad[0] };
     try std.testing.expectError(error.InvalidCustodyTransition, checkSlotCustodyAgreement(&both, &host.custody, null));
     try host.custody.detach(second);
@@ -3927,8 +3611,6 @@ test "preparing slots belong to their live preparations" {
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     const binding_a = try admitted.permit.consume();
 
-    // A live preparation for Attempt A, held in final storage under test
-    // ownership with a guard beside the acquisition.
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: model_adapter.Preparation = undefined;
@@ -3939,8 +3621,6 @@ test "preparing slots belong to their live preparations" {
 
     var records: [1]execution.CustodyRecord = @splat(.{});
     var custody = execution.CustodyPool.initialize(&records);
-    // A valid slot/custody binding for a different Attempt B: internally
-    // consistent, but it does not belong to the live preparation.
     const token = custody.reserve().?;
     var permit_b = store_module.DispatchPermit{ .binding = .{
         .turn_id = binding_a.turn_id + 100,
@@ -3954,11 +3634,9 @@ test "preparing slots belong to their live preparations" {
     try checkSlotCustodyAgreement(&mismatched, &custody, null);
     try std.testing.expectError(error.PreparationBindingMismatch, checkSharedPreparation(&mismatched, &preparation, null));
 
-    // The slot naming Attempt A belongs together with the live preparation.
     var matched = [_]ExecutionSlot{
         .{ .model_preparing = .{ .token = token, .binding = binding_a } },
     };
-    // Re-anchor custody to A so each layer agrees before composing them.
     try custody.detach(token);
     try custody.cleanupComplete(token);
     const retoken = custody.reserve().?;
@@ -3968,13 +3646,11 @@ test "preparing slots belong to their live preparations" {
     try checkSlotCustodyAgreement(&matched, &custody, null);
     try checkSharedPreparation(&matched, &preparation, null);
 
-    // No live preparation with a preparing slot, and vice versa.
     var empty = [_]ExecutionSlot{.free};
     try std.testing.expectError(error.PreparationOwnershipMismatch, checkSharedPreparation(&empty, &preparation, null));
     try std.testing.expectError(error.PreparationOwnershipMismatch, checkSharedPreparation(&matched, null, null));
     try checkSharedPreparation(&empty, null, null);
 
-    // Bash correspondence uses only the facts its preparation owns.
     var bash_preparation = bash.Preparation{
         .scratch = .{ .io = std.testing.io, .path = root, .budget = undefined },
         .allocator = std.testing.allocator,
@@ -3994,8 +3670,6 @@ test "preparing slots belong to their live preparations" {
             .action_id = 7,
         } } },
     };
-    // Note: retoken is model-attached above, so slot/custody agreement is
-    // not asserted for this slice; only preparation correspondence is.
     try checkSharedPreparation(&bash_matched, null, &bash_preparation);
     bash_matched[0].bash_preparing.binding.action_id = 8;
     try std.testing.expectError(error.PreparationOwnershipMismatch, checkSharedPreparation(&bash_matched, null, &bash_preparation));
@@ -4055,9 +3729,6 @@ test "retained named scratch blocks its slot until the same owner reclaims" {
         ),
     } }};
 
-    // Removal blocked: the actual release caller retains the slot, the
-    // detached custody, the reservation, and the pathname. No admission
-    // can reuse that capacity.
     const start = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
     var retry_at = start;
     var reclaimed = false;
@@ -4075,11 +3746,8 @@ test "retained named scratch blocks its slot until the same owner reclaims" {
     try std.testing.expectEqual(@as(u64, 9), scratch_used.load(.acquire));
     _ = try scratch.statFile(std.testing.io, "named-direct.tmp", .{});
 
-    // The same instant is too early for the low-frequency retry.
     try std.testing.expect(!advanceRetainedCleanup(&host, &slots, start, &retry_at));
 
-    // After the fault clears, the same production path reclaims the owner
-    // before completing custody, and the slot becomes reusable.
     removal_gate.store(false, .release);
     try std.testing.expect(advanceRetainedCleanup(&host, &slots, retry_at, &retry_at));
     reclaimed = true;
@@ -4163,7 +3831,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
             .io = std.testing.io,
             .allocator = std.testing.allocator,
             .lease = undefined,
-            .store = undefined, // The suppression path must not query or settle.
+            .store = undefined,
             .custody = execution.CustodyPool.initialize(&records),
         };
         const token = host.custody.reserve().?;
@@ -4185,7 +3853,6 @@ test "Host fences dispose admitted preparation without touching canonical state"
             .{},
             &retained,
         );
-        // Real file aliases and a real reservation are owned before fencing.
         try preparation.writer.write("partial request");
         var slots = [_]ExecutionSlot{.{ .model_preparing = .{
             .token = token,
@@ -4275,8 +3942,6 @@ test "an encode failure settles unanswered and releases request scratch" {
         .{ .used = &host.scratch_used, .limit = 1024 * 1024 },
         protocol.routesAll(.endpoint),
         null,
-        // The codec declines at request_end: every earlier item has already
-        // written request scratch.
         .{ .codec_declines = .request_end },
         &retained,
     );
@@ -4336,7 +4001,7 @@ test "Host fences dispose a sealed request before native transfer construction" 
         };
         const owner = ModelPreparingSlot{ .token = token, .binding = binding };
         var slot = ExecutionSlot{ .model_preparing = owner };
-        var reactor: provider.Reactor = undefined; // Must never be accessed.
+        var reactor: provider.Reactor = undefined;
         _ = host.advance(phase);
         launchPreparedRequest(&host, &reactor, &slot, owner, &request, null);
         try std.testing.expect(slot == .free);
@@ -4365,7 +4030,7 @@ test "Host fences discard prepared Bash without settling and retain failed clean
                 .io = std.testing.io,
                 .allocator = std.testing.allocator,
                 .lease = &lease,
-                .store = undefined, // No canonical query, cancellation, or result.
+                .store = undefined,
                 .custody = execution.CustodyPool.initialize(&records),
             };
             const token = host.custody.reserve().?;
@@ -4392,7 +4057,7 @@ test "Host fences discard prepared Bash without settling and retain failed clean
                 .session = .{},
                 .store_selector = "",
                 .workspace = .{},
-                .bash_path = undefined, // Native construction must not run.
+                .bash_path = undefined,
                 .timeout_ms = 1,
                 .faults = .{},
                 .command = try std.testing.allocator.dupeSentinel(u8, "exit 0", 0),
@@ -4414,7 +4079,6 @@ test "Host fences discard prepared Bash without settling and retain failed clean
             launchPreparedBash(&host, &slots[0], &prepared);
             try std.testing.expect(prepared.stdout_capture == null);
             try std.testing.expect(prepared.command == null);
-            // A retained cleanup fence must not become an effect shutdown.
             try std.testing.expectEqual(phase, host.phase.load(.acquire));
             if (fail_cleanup) {
                 try std.testing.expect(slots[0] == .bash_prepared_cleanup);
@@ -4434,17 +4098,12 @@ test "Host fences discard prepared Bash without settling and retain failed clean
     }
 }
 
-/// The environment a Session's Bash starts from: its client environment,
-/// owned by the caller, or null for the Host facts when the register holds
-/// none, as after a restart or once the register replaced it.
 fn launchBase(environments: ?*SessionEnvironments, session: []const u8, allocator: std.mem.Allocator) error{OutOfMemory}!?[]u8 {
     const table = environments orelse return null;
     return table.copy(session, allocator);
 }
 
 test "a Session the register does not hold launches with the system PATH and the Host's HOME" {
-    // A restarted Host's register is empty; one that replaced the Session
-    // holds others.
     var environments: SessionEnvironments = undefined;
     try environments.init(std.testing.io, std.testing.allocator);
     defer environments.deinit();
@@ -4463,7 +4122,6 @@ test "a Session the register does not hold launches with the system PATH and the
         try std.testing.expectEqualStrings("PATH=/opt/rui/bin:/usr/bin:/bin", std.mem.span(block[0].?));
         try std.testing.expectEqualStrings("HOME=/home/host", std.mem.span(block[1].?));
     }
-    // The Session it holds starts from its client environment.
     const held = (try launchBase(&environments, "n3w5es", std.testing.allocator)).?;
     defer std.testing.allocator.free(held);
     try std.testing.expectEqualStrings("PATH=/client/bin\x00HOME=/client\x00", held);
@@ -4506,8 +4164,6 @@ test "catalog answer slims saves and a 304 keeps its generation and facts" {
 }
 
 test "Host resolves MCP calls without Bash admission and continues the Turn" {
-    // Keep the native tool set complete independently of this Session's
-    // deliberately restricted tools and the MCP behavior asserted below.
     const records = comptime blk: {
         var out = tools.built_in_tool_set.records[0..tools.built_in_tool_set.records.len].* ++ [_]tools.Record{.{
             .name = "fetch_page",
@@ -4579,7 +4235,6 @@ test "Host resolves MCP calls without Bash admission and continues the Turn" {
         .measurement = undefined,
         .fenced = false,
     };
-    // No execution capacity, process environment or transport is available.
     try std.testing.expect(native.runCoreAction() == .admitted);
     try std.testing.expect(native.runCoreAction() == .no_work);
     try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
@@ -4599,8 +4254,6 @@ test "a skill tool reload under heap exhaustion runs again later without fencing
     defer storage.close() catch unreachable;
     var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer memory.deinit();
-    // The workspace's skills are not these 65, so the reload replaces a saved
-    // catalog large enough that reading it allocates inside the held write.
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = workspace_buffer[0..try tmp.dir.realPath(std.testing.io, &workspace_buffer)];
     var entries: [65]skills.Entry = undefined;
@@ -4626,8 +4279,6 @@ test "a skill tool reload under heap exhaustion runs again later without fencing
     }});
     const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
-    // Each allocation in turn fails, the settlement's held write included,
-    // until the call settles: the call waits, and nothing fences.
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
         var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });

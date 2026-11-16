@@ -1,4 +1,3 @@
-"""A move of main comments once per head on each open PR it left conflicting."""
 import subprocess
 import unittest
 from unittest.mock import patch
@@ -11,11 +10,10 @@ MAIN = "a" * 40
 
 
 class FakeGitHub:
-    """PRs as number -> (head, mergeable, test-merge base); stale reads give an old clean answer."""
 
     def __init__(self, prs, comments=None, stale=0, failing=(), failing_after=0):
         self.prs, self.comments, self.failing = prs, comments or {}, set(failing)
-        self.failing_after = failing_after  # Reads of a failing PR that succeed first.
+        self.failing_after = failing_after
         self.stale = dict.fromkeys(prs, stale)
         self.posted, self.listed, self.reads = [], [], dict.fromkeys(prs, 0)
 
@@ -94,8 +92,6 @@ class ConflictAlertTest(unittest.TestCase):
         self.assertEqual(github.reads[1], 2, "a failed PR is not read again")
 
     def test_unjudged_prs_share_one_deadline(self):
-        # GitHub leaves a clean PR's test merge on an older main: such PRs
-        # wait together, not ten sleeps each in turn.
         prs = {number: (f"h{number}", True, "old") for number in range(1, 6)}
         github = FakeGitHub({**prs, 6: ("h6", False, MAIN)}, stale=0)
         github.stale[6] = 4

@@ -413,8 +413,6 @@ func inspectCustodyZero(client measurement.Client, session string) (bool, error)
 	return custodyOK && scratchOK && custody == 0 && scratch == 0, nil
 }
 
-// stopHost stops an observed Host through its observations, which validate
-// the final channel state.
 func stopHost(host *measurement.Host, observations *measurement.Observations) error {
 	if observations != nil {
 		return observations.Stop(host, measurement.TeardownAllowance)
@@ -422,10 +420,6 @@ func stopHost(host *measurement.Host, observations *measurement.Observations) er
 	return host.Stop(measurement.TeardownAllowance)
 }
 
-// The Host refuses ordinary clients only at reduced intake, so scenarios
-// that saturate it restart the Host at the descriptor limit that leaves the
-// ten-client floor. The probe launches the same way, so it inherits the same
-// descriptors the limited Host counts.
 func startTenClientHost(plan, binary, directory, store, url string, capacity int, deadline measurement.Deadline, extra ...string) (*measurement.Host, *measurement.Observations, error) {
 	launch := measurement.Launch{ObservationPlan: plan}
 	probe, observations, err := measurement.StartHostWith(launch, binary, store, url, capacity, filepath.Join(directory, "probe-stderr.log"), deadline, extra...)
@@ -568,8 +562,6 @@ func activeCancellation(binary, root, url string, endpoint *streamEndpoint) (res
 			return nil, err
 		}
 	}
-	// Refill after each measured cancellation, so every sample starts at 100
-	// live transports rather than measuring a steadily declining population.
 	waitFull := func() error {
 		return measurement.WaitFor(deadline, 25*time.Millisecond, "100 live model streams", func() (bool, error) {
 			requests, disconnects := endpoint.counts()
@@ -1081,7 +1073,6 @@ func controlFirst(binary, root string) (result map[string]any, resultError error
 	defer func() {
 		measurement.JoinCleanup(&resultError, func() error { return stopHost(host, observations) })
 	}()
-	// Raw requests must name the Host's Store exactly; Darwin's /tmp is a link.
 	if store, err = host.CanonicalStore(); err != nil {
 		return nil, err
 	}
@@ -1220,8 +1211,6 @@ func openBlockedResults(socketPath, store, key string) ([]net.Conn, error) {
 		closeAll(connections)
 		return nil, err
 	}
-	// Every response has started, yet the rejected 11th ordinary request proves
-	// all ten handlers remain occupied until these readers resume or disconnect.
 	return connections, nil
 }
 
@@ -1243,7 +1232,6 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 	defer func() {
 		measurement.JoinCleanup(&resultError, func() error { return stopHost(host, observations) })
 	}()
-	// Raw requests must name the Host's Store exactly; Darwin's /tmp is a link.
 	if store, err = host.CanonicalStore(); err != nil {
 		return nil, err
 	}

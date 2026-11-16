@@ -1,5 +1,3 @@
-//! A settled Host launch and its reporting policy. Terminal adapters keep
-//! the complete transcript and context; screens borrow one safe semantic line.
 const std = @import("std");
 const start_report = @import("start_report.zig");
 const protocol = @import("protocol.zig");
@@ -8,8 +6,6 @@ const HostStartupWait = @import("HostStartupWait.zig");
 const TerminalText = @import("TerminalText.zig");
 pub const invalid_base_url = "rui: " ++ @import("providers.zig").openai_base_url_variable ++ " must be an https:// URL with a host and no credentials, query or fragment";
 
-/// The screen's semantic projection of the shared launch result. It owns no
-/// terminal receipt or child bytes; kind, words and next action stay together.
 pub const Summary = union(enum) {
     ready: ?Warning,
     failed: Failure,
@@ -27,7 +23,6 @@ pub const Summary = union(enum) {
     };
     pub const Failure = struct {
         kind: Kind,
-        /// Terminal exit classification is retained, never shown as UI text.
         err: anyerror,
         refusal_code: ?start_report.StartError = null,
 
@@ -35,7 +30,6 @@ pub const Summary = union(enum) {
 
         pub fn words(self: Failure) []const u8 {
             return switch (self.kind) {
-                // The person can only retry these three, so they read alike.
                 .setup, .worker, .os_launch => "could not start",
                 .child_refused => "refused to start",
                 .child_closed => "quit on start",
@@ -86,8 +80,6 @@ pub const Result = struct {
     pub const Ready = struct {
         facts: protocol_reply.HostInfoFacts,
         diagnostics_directory: protocol.Bounded(protocol.max_store_bytes) = .{ .len = 0 },
-        /// The serving Host was already running or won a launch race, so it
-        /// did not start with this command's settings.
         adopted: bool = false,
     };
     pub const Failure = struct {
@@ -113,14 +105,9 @@ pub const Result = struct {
     }
 };
 
-/// Enough for a full startup transcript, escaped Store context and guidance.
-/// There is one bounded transcript per launch, not one per screen row.
 pub const max_report_bytes = 4 * protocol.max_store_bytes + Result.max_startup_bytes + 2048;
 
-/// The detailed terminal presentation, shared by shell launch and departure
-/// after screen restoration. No output or terminal custody is acquired here.
 pub fn writeDiagnostics(result: *const Result, writer: *std.Io.Writer, shown: usize) !void {
-    // The child states the same warning in its transcript; show it once.
     if (result.warning != null and std.mem.indexOf(u8, result.startup(), invalid_base_url) == null) try writer.writeAll(invalid_base_url ++ "; this Host starts without OpenAI.\n");
     switch (result.outcome) {
         .ready => {
@@ -154,8 +141,6 @@ pub fn writeDiagnostics(result: *const Result, writer: *std.Io.Writer, shown: us
     }
 }
 
-/// One plain input-row line. Neither child bytes nor paths are screen text.
-/// The same next-action policy supplies the overview and sign-in retry hint.
 pub fn writeSignIn(writer: *std.Io.Writer, summary: Summary, default_failed: bool, retry_hint: bool) !void {
     try writer.writeAll("Sign-in saved");
     if (default_failed) try writer.writeAll("; default not saved");

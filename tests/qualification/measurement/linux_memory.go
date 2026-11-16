@@ -8,12 +8,9 @@ import (
 	"strings"
 )
 
-// LinuxMemory contains sequential /proc observations, not macOS footprint or
-// allocation-live bytes. PSS proportions shared pages; RSS counts them in full.
 type LinuxMemory struct {
 	RollupBytes       map[string]uint64 `json:"smaps_rollup_bytes"`
 	RSSHighWaterBytes uint64            `json:"status_rss_high_water_bytes"`
-	// Linux documents VmHWM as approximate; it is not a PSS high-water mark.
 	RequestedGlibcTunables string `json:"requested_glibc_tunables"`
 	RequestedPreload       string `json:"requested_ld_preload,omitempty"`
 	PreloadMapped          bool   `json:"preload_mapped,omitempty"`
@@ -86,7 +83,6 @@ func sampleLinuxMemory(pid int32, rawPath string) (*LinuxMemory, error) {
 		return nil, err
 	}
 	result := &LinuxMemory{RollupBytes: values, RSSHighWaterBytes: hwm["VmHWM"]}
-	// Never retain the full environment: a managed Host may hold credentials.
 	for _, entry := range strings.Split(string(environ), "\x00") {
 		if value, ok := strings.CutPrefix(entry, "GLIBC_TUNABLES="); ok {
 			result.RequestedGlibcTunables = value
@@ -96,8 +92,6 @@ func sampleLinuxMemory(pid int32, rawPath string) (*LinuxMemory, error) {
 		}
 	}
 	if result.RequestedPreload != "" {
-		// This diagnostic accepts explicit absolute objects, not loader search
-		// tokens: a failed preload must not masquerade as an instrumented run.
 		maps, err := os.ReadFile(root + "maps")
 		if err != nil {
 			return nil, err

@@ -1,4 +1,3 @@
-"""Private fixture schema checks, discovered by the existing CI policy gate."""
 
 import ast
 from collections import Counter
@@ -27,7 +26,6 @@ SPEC = importlib.util.spec_from_file_location("host_process", ROOT / "tests/inte
 HOST = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(HOST)
 
-# Independent current schema, not expectations read from either codec.
 FIELDS = (
     "rui_test_phase", "at_ns", "subject_kind", "subject", "turn", "operation",
     "attempt", "action", "scratch_used_bytes", "command_key", "kind", "control_key",
@@ -60,7 +58,6 @@ class ObservationCodecTest(unittest.TestCase):
 
     def test_frame_decodes_every_id_independent_of_field_order(self):
         values = {name: f"value-{index}" for index, name in enumerate(FIELDS)}
-        # The integer-valued native fields still arrive as decimal text.
         values.update(new_connections="0", replays="902")
         payload = b"".join(
             struct.pack("<BH", index, len(value)) + value
@@ -92,20 +89,12 @@ class ObservationCodecTest(unittest.TestCase):
 
 
 def flushes_closed_stdin(version):
-    """Whether this CPython's communicate() flushes a stdin closed by hand, and so fails.
-
-    CPython 3.13.10 and 3.14.1 skip that flush; 3.12.13, 3.13.0 to 3.13.9 and
-    3.14.0 still fail (each run, #1420). Fixtures run on 3.11 and newer, CI's
-    unpinned 3.12 among them, so the hazard stays theirs.
-    """
     return version[:2] < (3, 13) or version[:2] == (3, 13) and version[2] < 10 or tuple(version[:3]) == (3, 14, 0)
 
 
 class ChildInputTest(unittest.TestCase):
-    """Fixtures end a child's input only through host_process.close_stdin."""
 
     def test_communicate_after_closing_stdin_by_hand_fails_where_python_flushes_it_and_close_stdin_does_not(self):
-        # The settings-document fixture's failure in five PRs before #898.
         child = subprocess.Popen(["cat"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         child.stdin.write(b"by hand")
         child.stdin.close()
@@ -169,8 +158,6 @@ class TemporaryDirectoryTest(unittest.TestCase):
 
 class QualificationEvidenceTest(unittest.TestCase):
     def test_qualification_never_reads_stderr_phase_traces(self):
-        # Stderr traces drop records under contention; qualification reads the
-        # lossless observation channel (CODING_STANDARDS.md#evidence).
         offenders = [
             str(path.relative_to(ROOT))
             for path in sorted((ROOT / "tests/qualification").rglob("*.go"))
@@ -179,8 +166,6 @@ class QualificationEvidenceTest(unittest.TestCase):
         self.assertEqual(offenders, [])
 
 
-# Tests wait through one poll helper per language; every other sleep in test
-# code counts against SLEEP_ORDERED. The helper's own key is the one exemption.
 ZIG_POLL_HELPER = ("src/testing/poll.zig", "waitUntil")
 PYTHON_POLL_HELPER = ("tests/integration/host_process.py", "wait_for")
 ZIG_SLEEP = re.compile(r"\b(?:sleep|nanosleep|usleep)\s*\(|\bpoll\(\s*&\[_\][\w.]*pollfd\{\}\s*,\s*0\s*,")
@@ -193,7 +178,6 @@ ZIG_TEST_ONLY = re.compile(r"(?:^|/)(?:tests|testing)/|tests?\.zig$")
 
 @lru_cache(maxsize=512)
 def zig_blocks(text):
-    """The code with comments and strings blanked, its `test` blocks and its top-level declarations."""
     code = ZIG_SKIPPED.sub(lambda match: " " * len(match[0]), text)
     names = ZIG_SKIPPED.sub(lambda match: match[0] if match[0][0] == '"' else " " * len(match[0]), text)
     tests, declarations, open_blocks, head, top_head = [], [], [], 0, 0
@@ -205,7 +189,6 @@ def zig_blocks(text):
             block_head, start = open_blocks.pop()
             if test := ZIG_TEST.fullmatch(names, block_head, start):
                 tests.append((start, index, test[1] or test[2] or "<unnamed test>"))
-            # `.{` literals and `error{` sets inside a declaration's header do not end it.
             if not open_blocks and not ZIG_EXPRESSION.search(code, top_head, start):
                 if declaration := ZIG_DECLARATION.search(code, top_head, start):
                     declarations.append((start, index, declaration[1]))
@@ -219,7 +202,6 @@ def zig_blocks(text):
 
 
 def zig_sleep_ordering(path, text):
-    """Sleeps in `test` blocks, by test, and elsewhere in a test-only file, by top-level declaration."""
     code, tests, declarations = zig_blocks(text)
     test_only = ZIG_TEST_ONLY.search(path) is not None
     offenses = Counter()
@@ -238,16 +220,10 @@ def zig_sleep_ordering(path, text):
 
 @lru_cache(maxsize=512)
 def sleep_python_tree(text):
-    """Share source parsing across head/base offense and key scans (read-only)."""
     return ast.parse(text)
 
 
 def python_sleep_ordering(path, text):
-    """`time.sleep`/`asyncio.sleep` calls, by top-level function or method.
-
-    Nested functions charge the function that holds them. Sleeps in
-    child-program source strings are not calls.
-    """
     offenses = Counter()
 
     def visit(node, name):
@@ -269,7 +245,6 @@ def python_sleep_ordering(path, text):
 
 
 def sleep_ordering(sources):
-    """Offenses across (path, text) sources: Zig under src/ and tests/, Python fixtures and CI tests."""
     offenses = Counter()
     for path, text in sources:
         if path.endswith(".zig") and path.startswith(("src/", "tests/")):
@@ -280,8 +255,6 @@ def sleep_ordering(sources):
 
 
 def sleep_keys(sources):
-    """Every key a sleep could count against, whether or not it sleeps: Zig tests,
-    top-level declarations of test-only Zig files, and Python functions and methods."""
     keys = set()
     for path, text in sources:
         if path.endswith(".zig") and path.startswith(("src/", "tests/")):
@@ -306,7 +279,6 @@ def tree_sources(root=ROOT):
 
 
 def review_base_sources(root=ROOT):
-    """Sources at the merge base with origin/main, the trusted ceiling for the allowlist."""
     def git(*args, **options):
         return subprocess.run(["git", "-C", str(root), *args], capture_output=True, check=True, **options).stdout
 
@@ -324,8 +296,6 @@ def review_base_sources(root=ROOT):
 
 
 def review_base_ceiling(root=ROOT, sources=None):
-    """Per key, the larger of the rule's count at the review base and that base's own allowance."""
-    # Lets an honest rule change move a sleep between keys without granting new allowance.
     sources = sources or dict(review_base_sources(root))
     ceiling = sleep_ordering(sources.items())
     allowlists = [node.value for node in ast.parse(sources["tests/ci/test_harness_contracts.py"]).body
@@ -338,14 +308,6 @@ def review_base_ceiling(root=ROOT, sources=None):
 
 
 def moved_ceiling(offenses, trusted, present, base):
-    """The review-base ceiling, with each test that moved to another file keeping its count there.
-
-    `present` and `base` are the sleep keys at head and at the review base. A
-    test moved when its old file no longer has a test of that name and exactly
-    one test of that name that did not exist at the review base now sleeps. A
-    deleted test and a new, unrelated test of the same name elsewhere still look
-    like a move: names are all either side has.
-    """
     ceiling = Counter(trusted)
     for (path, name), count in trusted.items():
         if (path, name) in offenses or (path, name) in present:
@@ -371,8 +333,6 @@ def sleep_allowlist_problems(offenses, allowed, trusted):
     return problems
 
 
-# Shrink-only: (count, reason) per test. A fix must lower or remove its entry,
-# and no count may exceed what the review base measures.
 SLEEP_ORDERED = {
     ("src/client.zig", "Host processing wait does not consume response transfer inactivity"):
         (1, "peer sleeps before replying against the client's real inactivity deadline"),
@@ -424,7 +384,6 @@ SLEEP_ORDERED = {
 
 
 class SleepOrderingTest(unittest.TestCase):
-    """CODING_STANDARDS.md#evidence: tests order actors with gates, not sleeps."""
 
     def test_tree_matches_the_shrink_only_allowlist(self):
         tree = list(tree_sources())
@@ -452,10 +411,8 @@ class SleepOrderingTest(unittest.TestCase):
         both = base + Counter({("b.zig", "t"): 1})
         self.assertEqual(moved_ceiling(both, base, set(both), base_keys)[("b.zig", "t")], 0)
         self.assertEqual(moved_ceiling(Counter({("b.zig", "v"): 1}), base, {("b.zig", "v")}, base_keys)[("b.zig", "v")], 0)
-        # The test stayed in a.zig and stopped sleeping: b.zig's new test of that name did not move there.
         stayed = Counter({("b.zig", "t"): 2, ("a.zig", "u"): 1})
         self.assertEqual(moved_ceiling(stayed, base, set(stayed) | {("a.zig", "t")}, base_keys)[("b.zig", "t")], 0)
-        # a.zig's test was deleted; c.zig's test of that name existed at the base and starts sleeping.
         deleted = Counter({("c.zig", "t"): 2, ("a.zig", "u"): 1})
         self.assertEqual(moved_ceiling(deleted, base, set(deleted), base_keys)[("c.zig", "t")], 0)
 
@@ -605,8 +562,6 @@ REFUSAL = "must run as a non-root user"
 
 
 def fixture_entries():
-    """Every script a person or build step can launch: shell scripts, and Python
-    modules with a main block. Modules without one are libraries."""
     for directory in FIXTURE_DIRECTORIES:
         for path in sorted((ROOT / directory).glob("*.sh")):
             yield path.relative_to(ROOT).as_posix()
@@ -616,7 +571,6 @@ def fixture_entries():
                 yield path.relative_to(ROOT).as_posix()
 
 
-# Libraries that also have a command line. Any fixture may import them.
 FIXTURE_LIBRARY_ENTRIES = {
     "tests/integration/host_process.py": "The fixture boundary: every fixture imports it, and its exec entry enters before running a command",
     "tests/integration/mysql_server.py": "Holds the MySQL image pin: check.yml starts the server through its command line, mysql_wire_integration through its functions",
@@ -624,14 +578,6 @@ FIXTURE_LIBRARY_ENTRIES = {
 
 
 def fixture_imports(root):
-    """(importer, fixture) for each tests/integration, qualification or research
-    module, or tests/integration shell script, that imports a Python fixture: a
-    tests/integration module with a main block or a script
-    build.zig or check.sh launches. Imports are the edges select_tests.Graph
-    follows, so a change to one fixture selects only the targets that run it.
-    Harnesses outside tests/integration run only on scheduled or manual jobs,
-    so they too import libraries, never an entry script whose cases may move.
-    tests/ci tests may import a fixture to test its parts."""
     from select_tests import PYTHON_IMPORT
     directory = root / "tests/integration"
     fixtures = {path.relative_to(root).as_posix() for path in directory.glob("*.py")
@@ -672,7 +618,6 @@ class FixtureImportTest(unittest.TestCase):
                 "a_integration.py": "import host_process\n" + main,
                 "b_integration.py": "import host_process, a_integration as a\n" + main,
                 "launched.py": "print('runs at import')\n",
-                # A probe a fixture runs in a child interpreter imports too.
                 "c_fixture.py": 'PROBE = """\nimport launched\n"""\n',
                 "d_integration.sh": "python3 - <<'PY'\nimport a_integration\nPY\n",
             }.items():
@@ -689,11 +634,6 @@ class FixtureImportTest(unittest.TestCase):
 
 class FixtureEntryTest(unittest.TestCase):
     def simulated_user(self, directory, euid):
-        """A PYTHONPATH under which Python reports `euid`, so these run alike as root or not.
-
-        These children get a scratch HOME, which hides a user-site install of
-        the fixture packages (CI's pip defaults to one), so the caller's user
-        site rides along."""
         simulated = Path(directory) / f"simulated-{euid}"
         simulated.mkdir()
         (simulated / "sitecustomize.py").write_text(f"import os\nos.geteuid = lambda: {euid}\n")
@@ -709,8 +649,6 @@ class FixtureEntryTest(unittest.TestCase):
             environment = {"PATH": os.environ["PATH"], "HOME": directory, "TMPDIR": str(scratch),
                            "PYTHONPATH": self.simulated_user(directory, 0)}
 
-            # Launched as a build step would, with Rui and an actor binary, which
-            # some fixture modules read at import.
             binaries = [str(Path(directory) / "absent-rui"), str(Path(directory) / "absent-actor")]
 
             def run(entry):

@@ -92,13 +92,11 @@ class CompilerProbe(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="unit metadata ") as directory:
             root = Path(directory)
             (root / "nested").mkdir()
-            # The monolith initially discovers hidden only through a named body.
             (root / "aggregate.zig").write_text('test { _ = @import("alpha.zig"); _ = @import("nested/beta.zig"); }\ntest "root named" {}\n')
             (root / "alpha.zig").write_text('test "mentions nested.beta.test. prefix" { _ = @import("hidden.zig"); }\nconst Inner = struct { test "nested" {} };\ntest { _ = Inner; }\n')
             (root / "hidden.zig").write_text('test "discovered from named body" {}\n')
             (root / "nested/beta.zig").write_text('test "beta named" {}\ntest {}\n')
             environment = subprocess.check_output([zig, "env"], timeout=20).decode()
-            # Zig 0.17 emits ZON; older versions emitted JSON.
             if environment.lstrip().startswith(".{"):
                 lib = json.loads(re.search(r'\.lib_dir = ("(?:[^"\\]|\\.)*")', environment).group(1))
             else:
@@ -110,9 +108,6 @@ class CompilerProbe(unittest.TestCase):
             (root / "partition.zig").write_text('const std = @import("std"); pub const Root = enum { aggregate, alpha, beta }; pub fn owner(n: []const u8) Root { if (std.mem.startsWith(u8,n,"alpha.")) return .alpha; if (std.mem.startsWith(u8,n,"nested.beta.")) return .beta; return .aggregate; }')
             baseline = root / "before"
             subprocess.run([zig, "test", str(root / "aggregate.zig"), "--test-no-exec", "-fno-llvm", f"-femit-bin={baseline}"], check=True, timeout=60)
-            # Shards need canonical discovery even when alpha's caller body is
-            # compiler-filtered out. Add an import, not another test declaration,
-            # so the stock test names remain exactly unchanged.
             aggregate = root / "aggregate.zig"
             aggregate.write_text(aggregate.read_text().replace(
                 '_ = @import("nested/beta.zig");',

@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
-"""A warm compile cache must never replace execution of selected Zig tests."""
 import subprocess
 
 from run_selected import TEST_TIMEOUT
 
 
 def main():
-    # A fixed seed exposes cached acceptance; changing random seeds can conceal it.
-    # The same small existing tests occur in all three modes; this checks their
-    # separate Run owners without repeating the long inactivity workload.
     for target in ("test-logic", "test", "test-full"):
         for attempt in range(2):
             result = subprocess.run(

@@ -1,15 +1,9 @@
-//! The `list-sessions` reply: the Host writes the page the Store reads
-//! (`store/domain/session_list_read.zig`) as `protocol.session_list_reply`.
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const session_list = @import("session_list.zig");
 const tool_name = @import("tool_name.zig");
 const appendShape = @import("session_report_reply.zig").appendShape;
 
-/// The visitor that writes one list page into `capture`, a Session report
-/// capture the caller created (`store.SessionReportCapture`). Its tools
-/// buffer is over 4 KiB, so a server allocates it and does not hold it on
-/// its stack.
 pub fn Reply(comptime Capture: type) type {
     return struct {
         capture: *Capture,

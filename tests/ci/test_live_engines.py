@@ -31,8 +31,6 @@ class ProxyConfigTest(unittest.TestCase):
 
 class LauncherTest(unittest.TestCase):
     def test_check_launches_the_unit_binary_through_the_fixture_boundary(self):
-        # `check` runs the unit binary here, so what enter() keeps is what
-        # the live dialect check sees (Codex P1 on #873).
         launch = [line for line in (ROOT / "tests/integration/check.sh").read_text().splitlines()
                   if 'run_case execution native ' in line]
         self.assertEqual(len(launch), 1, launch)

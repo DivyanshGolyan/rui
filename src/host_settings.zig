@@ -1,6 +1,3 @@
-//! The Host settings document. Settings and its kinds are the only field table;
-//! readers, help leaves, source-redacting output and schema walk that table.
-//! No I/O or startup caller lives here. Settings is caller-owned, never returned.
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const provider_name = @import("provider_name.zig");
@@ -15,11 +12,10 @@ const endpoint_value = @import("endpoint_value.zig");
 const mysql_value = @import("mysql_url_value.zig");
 const MysqlValue = mysql_value.ValueWith(max_path_bytes);
 
-// Admission capacities retained from the existing Host owners.
 pub const max_document_bytes = 1024 * 1024;
 pub const max_base_url_bytes = endpoint_value.max_endpoint_bytes;
 pub const max_path_bytes = std.posix.PATH_MAX - 1;
-pub const max_ca_file_bytes = max_path_bytes; // MySQL URL parser compatibility bound.
+pub const max_ca_file_bytes = max_path_bytes;
 pub const max_mcp_servers = 8;
 pub const max_mcp_name_bytes = 64;
 pub const max_secret_env_name_bytes = 128;
@@ -33,8 +29,6 @@ pub const default_bash_path = "/bin/bash";
 
 pub const Error = error{ SettingsInvalid, OutOfMemory };
 pub const Origin = enum { pipe, file };
-/// Checks a borrowed spec; diagnostics must contain field names, never values.
-/// The shell adapts core_tools.parseAgentSpec; core tests can supply a pure stub.
 pub const PresetCheck = *const fn (std.mem.Allocator, std.json.ObjectMap) error{OutOfMemory}!?[]const u8;
 const Kind = enum { text, path, url, count, flag, choice, secret, named, providers, presets };
 
@@ -55,7 +49,6 @@ pub fn Text(comptime capacity: usize) type {
     };
 }
 
-/// POSIX path/name storage: bounded non-NUL bytes, not Unicode text.
 pub fn OsBytes(comptime capacity: usize) type {
     return struct {
         pub const max_bytes = capacity;
@@ -75,8 +68,6 @@ pub fn OsBytes(comptime capacity: usize) type {
 pub fn PathWith(comptime capacity: usize) type {
     return PathKind(capacity, .absolute);
 }
-// Adapter paths preserve their existing interpretation: SQLite and TLS use
-// the Host cwd; Bash uses the Session workspace. Other sources are absolute.
 const PathRule = enum { absolute, adapter, trust, interface };
 fn PathKind(comptime capacity: usize, comptime rule: PathRule) type {
     return struct {
@@ -86,8 +77,6 @@ fn PathKind(comptime capacity: usize, comptime rule: PathRule) type {
         pub const allow_empty = rule == .trust;
         pub const max_bytes = capacity;
         text: OsBytes(capacity) = .{},
-        /// Default routing is relative to the Host directory. For interface.dir
-        /// this selects the platform-derived socket, not an explicit runtime dir.
         anchored: bool = false,
         pub fn slice(self: *const @This()) []const u8 {
             return self.text.slice();
@@ -129,9 +118,6 @@ pub fn Choice(comptime E: type, comptime initial: E) type {
     };
 }
 
-/// A MySQL URL has its own grammar and decoded-field bounds, not API-key
-/// bounds. Only this secret allocates. Neither its raw nor parsed bytes ever
-/// borrow the temporary parsing arena.
 pub const MysqlBytes = struct {
     raw: []u8 = &.{},
     parsed: ?*MysqlValue = null,
@@ -308,19 +294,13 @@ fn pathDefault(comptime text: []const u8) OsBytes(max_path_bytes) {
     return result;
 }
 
-/// Structured JSON Schema facts passed to a visitor. Secret objects are a
-/// choice of exactly one source; literals are pipe-only and never written.
 pub const Schema = struct {
-    /// Strict end anchor: unlike $, this also excludes a terminal newline.
     pub const os_bytes_pattern = "^([0-9a-f]{2})*(?![\\s\\S])";
 
     type: enum { string, integer, boolean, object, one_of },
     nullable: bool = false,
     path_accepts_empty: bool = false,
-    /// The byte bound follows the Host OS, not the portable document grammar.
     native_path_limit: bool = false,
-    /// Complete byte-string alternatives; hex is a closed {hex: string}
-    /// object with an even lowercase spelling and no additional properties.
     one_of: []const enum { string, hex_object } = &.{},
     hex_object: ?struct {
         property: []const u8 = "hex",
@@ -515,8 +495,6 @@ fn leafFor(comptime T: type, comptime value: T, comptime pattern: []const u8, co
     if (nullable) row.default = "null";
     return row;
 }
-/// Container facts make the leaf schemas a complete document grammar:
-/// closed objects, exactly-one Adapter unions, and replacing named sets.
 pub const Group = struct {
     pattern: []const u8,
     kind: enum { object, one_adapter, providers, named },
@@ -568,8 +546,6 @@ fn collectGroups(comptime T: type, comptime prefix: []const u8, comptime doc: []
     }
     return result;
 }
-/// A visitor may consume container facts with pub group(Group), then receives
-/// every leaf with leaf(Leaf). No schema or document is buffered at runtime.
 pub fn schema(visitor: anytype) !void {
     const V = switch (@typeInfo(@TypeOf(visitor))) {
         .pointer => |pointer| pointer.child,
@@ -579,22 +555,16 @@ pub fn schema(visitor: anytype) !void {
     for (leaves) |leaf| try visitor.leaf(leaf);
 }
 
-// ---- Strict JSON boundary ----------------------------------------------------
 fn refuse(failure: *start_report.Failure, leaf_path: []const u8, reason: []const u8) error{SettingsInvalid} {
     failure.code = .settings_invalid;
     var out = std.Io.Writer.fixed(&failure.message.bytes);
-    // Diagnostic truncation, never semantic input truncation. Stay on UTF-8.
     const shown = utf8_validation.validPrefix(leaf_path[0..@min(leaf_path.len, failure.message.bytes.len / 2)]);
     out.writeAll(if (leaf_path.len == 0) "$" else shown) catch unreachable;
     out.writeAll(": ") catch unreachable;
-    // A diagnostic may be clipped; no semantic input is ever clipped.
     out.writeAll(if (std.unicode.utf8ValidateSlice(reason)) reason else "invalid value") catch {};
     failure.message.len = utf8_validation.validPrefix(out.buffered()).len;
     return error.SettingsInvalid;
 }
-/// Paths are diagnostics, not semantic keys. Cap the copy before allocating:
-/// a very long unknown key must not multiply into every descendant's path.
-/// Callers supply only their wiping arena; semantic map keys remain intact.
 fn childPath(arena: std.mem.Allocator, prefix: []const u8, name: []const u8) error{OutOfMemory}![]const u8 {
     const separator: usize = @intFromBool(prefix.len != 0);
     const capacity = start_report.max_refusal_message_bytes / 2;
@@ -640,9 +610,6 @@ fn parseJson(read: *const Read, document: []const u8, at: []const u8) Error!std.
     if (document.len > max_document_bytes) return refuse(read.failure, at, "exceeds the document byte bound");
     var json: Json = .{ .scanner = .initCompleteInput(read.arena, document), .read = read };
     defer json.scanner.deinit();
-    // An explicit, arena-owned stack bounds nesting without spending a native
-    // stack frame per untrusted object or array. Keys remain decoded, so escaped
-    // duplicates have exactly the same identity as their unescaped spelling.
     const frames = try read.arena.alloc(JsonFrame, protocol.max_json_depth);
     var depth: usize = 0;
     var root: ?std.json.Value = null;
@@ -700,9 +667,6 @@ fn parseJson(read: *const Read, document: []const u8, at: []const u8) Error!std.
     }
 }
 
-/// Applies one strict JSON object. A supplied set replaces that set; omitted
-/// fields leave defaults or earlier assignments intact. On refusal the caller
-/// must not seal the partially assigned settings; all secret bytes are wiped.
 pub fn apply(settings: *Settings, gpa: std.mem.Allocator, document: []const u8, origin: Origin, check: PresetCheck, failure: *start_report.Failure) Error!void {
     var wiping: secret_value.WipingAllocator = .{ .backing = gpa };
     var memory: std.heap.ArenaAllocator = .init(wiping.allocator());
@@ -908,8 +872,6 @@ fn readPresets(dest: *Presets, value: std.json.Value, at: []const u8, read: *con
         dest.deinit();
         return;
     }
-    // Only presets are retained from the parse tree. MySQL separately owns its
-    // parsed login and raw credential; it never retains the document arena.
     var memory: std.heap.ArenaAllocator = .init(read.gpa);
     errdefer memory.deinit();
     const encoded = try std.json.Stringify.valueAlloc(read.arena, value, .{});
@@ -927,7 +889,6 @@ fn readPresets(dest: *Presets, value: std.json.Value, at: []const u8, read: *con
     dest.* = .{ .specs = retained, .memory = memory };
 }
 
-// ---- CLI assignment: the same kinds, no second setting table ------------------
 pub fn assign(settings: *Settings, gpa: std.mem.Allocator, leaf_path: []const u8, value: []const u8, check: PresetCheck, failure: *start_report.Failure) Error!void {
     var wiping: secret_value.WipingAllocator = .{ .backing = gpa };
     var memory: std.heap.ArenaAllocator = .init(wiping.allocator());
@@ -1045,7 +1006,6 @@ fn unknown(failure: *start_report.Failure, input: []const u8) error{SettingsInva
     return refuse(failure, input, message);
 }
 fn editDistance(a: []const u8, b: []const u8) usize {
-    // Pattern length, not untrusted input, bounds the work storage.
     const max_pattern = comptime blk: {
         var len: usize = 0;
         for (leaves) |leaf| len = @max(len, leaf.pattern.len);
@@ -1065,24 +1025,15 @@ fn editDistance(a: []const u8, b: []const u8) usize {
     return row[b.len];
 }
 
-// ---- Lifetimes, anchoring and the proof --------------------------------------
-/// Reset storage only after its resources have been disposed or transferred.
-/// Defaults may contain undefined bytes: assigning them alone is not erasure.
-/// The replacement is comptime-only, never a by-value resolved credential.
 fn resetVacant(comptime T: type, value: *T, comptime replacement: T) void {
     std.crypto.secureZero(u8, std.mem.asBytes(value));
     value.* = replacement;
-    // Checked builds may poison undefined default Key storage. A vacant
-    // credential buffer still has the existing all-zero wipe guarantee.
     wipeValue(T, value);
 }
-/// The sole destructive replacement path for an owned settings slot.
 fn vacate(comptime T: type, value: *T, comptime replacement: T) void {
     dispose(T, value);
     resetVacant(T, value, replacement);
 }
-/// Move, never clone, a slot. Source handles belong to the destination after
-/// memcpy, so resetting the source must not dispose them a second time.
 fn moveSlot(comptime T: type, dest: *T, source: *T) void {
     std.debug.assert(dest != source);
     vacate(T, dest, .{});
@@ -1111,8 +1062,6 @@ fn wipeValue(comptime T: type, value: *T) void {
         .@"union" => switch (value.*) {
             inline else => |*payload| wipeValue(@TypeOf(payload.*), payload),
         },
-        // Reset helpers also visit raw metadata and empty ownership handles.
-        // Only typed Secret values own bytes; pointers are never followed.
         else => {},
     }
 }
@@ -1179,9 +1128,6 @@ fn anchorValue(comptime T: type, value: *T, host_dir: []const u8) error{Settings
         else => @compileError("not a Host settings kind"),
     }
 }
-/// Borrows Settings until its next mutation or deinit. There is no ordinary
-/// struct-literal route to a proof: its pointer targets an opaque type. As
-/// with every Zig handle, an explicit unsafe pointer cast is outside the API.
 pub const Prepared = struct {
     proof: *const Proof,
     const Proof = opaque {};
@@ -1225,7 +1171,6 @@ pub fn seal(settings: *const Settings, failure: *start_report.Failure) error{Set
     return .{ .proof = @ptrCast(settings) };
 }
 
-// ---- Complete document, streamed without credential bytes --------------------
 pub fn write(settings: *const Settings, out: *std.Io.Writer) std.Io.Writer.Error!void {
     try writeValue(Settings, settings, out);
 }
@@ -1323,7 +1268,6 @@ fn writeValue(comptime T: type, value: *const T, out: *std.Io.Writer) std.Io.Wri
     try out.writeByte('}');
 }
 
-// ---- Whole-domain witnesses --------------------------------------------------
 fn checkSample(_: std.mem.Allocator, _: std.json.ObjectMap) error{OutOfMemory}!?[]const u8 {
     return null;
 }
@@ -1458,8 +1402,6 @@ test "Host settings every derived leaf agrees across JSON CLI writer and schema"
         defer c.deinit();
         var failure: start_report.Failure = undefined;
         errdefer std.debug.print("Host settings leaf: {s}\n", .{at});
-        // Providers are a replacing JSON set, but one CLI leaf preserves
-        // siblings. Start both witnesses from the same explicit empty set.
         try apply(a, gpa, "{\"providers\":{}}", .pipe, checkSample, &failure);
         try apply(b, gpa, "{\"providers\":{}}", .pipe, checkSample, &failure);
         try apply(a, gpa, document, .pipe, checkSample, &failure);
@@ -1540,8 +1482,6 @@ fn validateShape(comptime T: type, value: *const T, at: []const u8, failure: *st
         switch (T.kind) {
             .text => if (value.len > T.max_bytes or !std.unicode.utf8ValidateSlice(value.slice()) or std.mem.indexOfScalar(u8, value.slice(), 0) != null) return refuse(failure, at, "invalid UTF-8 text"),
             .path => {
-                // An anchored interface uses the platform-derived Host socket,
-                // not a literal runtime directory (whose path has a smaller bound).
                 if (T.path_rule == .interface and value.anchored) return;
                 if (value.text.len > T.max_bytes or std.mem.indexOfScalar(u8, value.slice(), 0) != null or value.anchored or (value.slice().len == 0 and !T.allow_empty) or (T.absolute and !std.fs.path.isAbsolute(value.slice()))) return refuse(failure, at, "must be an anchored absolute path");
             },
@@ -1658,8 +1598,6 @@ test "Host settings named sets replace and removed credentials are wiped" {
     try apply(settings, gpa, "{\"tools\":{\"mcp\":{}}}", .pipe, checkSample, &failure);
     try std.testing.expectEqual(@as(usize, 0), settings.tools.mcp.len);
     for (settings.tools.mcp.values[0].bearer_token.bytes.bytes) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
-    // Incremental CLI edits preserve other entries; removing one shifts in
-    // place and leaves no second owner in the vacated slot.
     try assign(settings, gpa, "tools.mcp.first.bearerToken", "env:FIRST", checkSample, &failure);
     try assign(settings, gpa, "tools.mcp.second.bearerToken", "env:SECOND", checkSample, &failure);
     try assign(settings, gpa, "tools.mcp.first", "null", checkSample, &failure);
@@ -1770,7 +1708,6 @@ test "Host settings MySQL literal exceeds API key size but never appears in outp
     defer output.deinit();
     try write(settings, &output.writer);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "mysql://user:") == null);
-    // Switching the one-Adapter Seam disposes the whole login.
     try assign(settings, gpa, "store.sqlite.dir", "/tmp/sqlite", checkSample, &failure);
     try std.testing.expect(settings.store == .sqlite);
 }
@@ -1982,8 +1919,6 @@ test "Host settings retain the legacy empty CA path for transport refusal" {
     try std.testing.expectEqualStrings("", settings.network.ca_file.?.slice());
 }
 
-/// Scan full backing storage, including inactive slots and bytes beyond len.
-/// Released blocks are observed too: a MySQL secret lives outside Settings.
 const VacancyWitness = struct {
     const marker = "HOST_SETTINGS_SECRET_VACANCY_SENTINEL";
     const mysql_login = "mysql://user:" ++ marker ++ "@localhost/database";
@@ -2089,8 +2024,6 @@ const VacancyWitness = struct {
         const is_mysql = comptime std.mem.eql(u8, leaf.json_schema.format.?, "mysql-login-source");
         const literal = if (is_mysql) "{\"value\":\"" ++ mysql_login ++ "\"}" else "{\"value\":\"" ++ marker ++ "\"}";
         var failure: start_report.Failure = undefined;
-        // Secret vacancy must be independent of the new path rules. Seed
-        // relative/empty paths through apply, then an OS-byte path via assign.
         try apply(settings, seed_gpa, "{\"tools\":{\"bash\":{\"path\":\"relative/bash\"}},\"network\":{\"caFile\":\"\"}}", .file, checkSample, &failure);
         try assign(settings, seed_gpa, "tools.bash.path", "relative/bash-\xff", checkSample, &failure);
         try document(settings, seed_gpa, at, literal, &failure);
@@ -2196,7 +2129,6 @@ const VacancyWitness = struct {
                 }
             }
             try std.testing.expectEqual((population - 1) * @as(usize, if (Child == McpServer) 2 else 5), total);
-            // Reuse vacated capacity, then replace and empty the whole set.
             const key_name = if (Child == McpServer) "bearerToken" else "key";
             try assignAt(Set, values, "replacement." ++ key_name, "env:NEW_\xff", "replacement." ++ key_name, &read);
             try std.testing.expectEqual(population, values.len);
@@ -2213,7 +2145,6 @@ test "Host settings every secret vacancy erases all stored copies" {
     var releases: VacancyWitness.Releases = .{ .child = std.testing.allocator };
     try VacancyWitness.runActions(releases.allocator(), releases.allocator());
     try VacancyWitness.namedMoves(McpServer, &releases);
-    // Exercise the generic transfer with resource-owning V as well as MCP.
     try VacancyWitness.namedMoves(struct {
         key: Secret(.required) = .{},
         login: Secret(.mysql) = .{},
@@ -2223,12 +2154,8 @@ test "Host settings every secret vacancy erases all stored copies" {
     try std.testing.expectEqual(@as(usize, 0), releases.stale);
 }
 
-/// Cross-root witnesses only; no testing surface is present in production.
-/// The non-core test root owns the allocation-failure injector.
 pub const testing = if (@import("builtin").is_test) struct {
     pub fn secretVacancyAllocationFailures(gpa: std.mem.Allocator) !void {
-        // Seed outside injection: even operation allocation zero starts with
-        // resolved credentials. Observe both old and new allocation release.
         var seed: VacancyWitness.Releases = .{ .child = std.testing.allocator };
         var operation: VacancyWitness.Releases = .{ .child = gpa };
         const outcome = VacancyWitness.runActions(seed.allocator(), operation.allocator());
@@ -2238,8 +2165,6 @@ pub const testing = if (@import("builtin").is_test) struct {
     }
 } else struct {};
 
-// The generated path domain includes optional provider credential paths, not
-// just the few paths currently exposed as flags.
 test "Host settings every Path leaf round trips OS bytes and allowed path rules" {
     const gpa = std.testing.allocator;
     const a = try gpa.create(Settings);
@@ -2315,8 +2240,6 @@ test "Host settings secret file and environment sources preserve OS bytes" {
     }
 }
 
-// Each provider can be absent, authenticated or credential-free independently.
-// Live-list capacity belongs to the Host's per-provider listing owner, not seal.
 test "Host settings proof admits the complete provider presence and credential domain" {
     const gpa = std.testing.allocator;
     const settings = try gpa.create(Settings);

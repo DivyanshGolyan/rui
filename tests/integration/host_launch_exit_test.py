@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Host-launch fixture oracles; not native Host qualification."""
 
 from contextlib import contextmanager, redirect_stderr
 import errno
@@ -110,7 +109,6 @@ def check_process_discovery(cleanup):
             unrelated: [sys.executable, "-c", "pass"],
             other_store: [*command[:-1], str(store.with_name("store-lookalike"))],
             nested: [*command[:-1], str(store / "not-created/nested-store")],
-            # Named like RUI, but executing another image.
             other_executable: command,
         }
         owned = {int(path.name) for path in (vanished, selected, other_store, nested)}
@@ -132,8 +130,6 @@ def check_process_discovery(cleanup):
                 assert pid in expected and sig == owner.signal.SIGKILL, (pid, sig)
                 killed.add(pid)
 
-            # Model an enumerated process exiting before its cmdline read.
-            # Keep a live match after it, plus unrelated process/Store controls.
             with patch.object(Path, "is_dir", return_value=True), \
                     patch.object(Path, "iterdir", return_value=[vanished, *arguments]), \
                     patch.object(Path, "read_bytes", read), patch.object(owner.os, "kill", kill), \
@@ -176,7 +172,6 @@ def child_pty(source):
 
 @contextmanager
 def child_pipe(source):
-    """A child whose stdout is a pipe the caller reads, as a PTY master."""
     read, write = os.pipe()
     caller = None
     try:
@@ -199,8 +194,6 @@ def check_exit_reader(wait_for_exit):
     from human_cli_fixture import action_ready
     check_action_ready(action_ready)
     owner = sys.modules[wait_for_exit.__module__]
-    # Exercise both platform EOF forms independently of this machine and
-    # ensure unrelated read failures do not become successful EOF/reap.
     for effect in (b"", OSError(errno.EIO, "PTY EOF"), OSError(errno.EBADF, "bad descriptor")):
         caller = SimpleNamespace(args=["adapter"], poll=Mock(return_value=None), wait=Mock(return_value=17))
         output = bytearray(b"entry:")
@@ -219,8 +212,6 @@ def check_exit_reader(wait_for_exit):
                 caller.wait.assert_called_once()
         assert output == b"entry:", "EOF/error changed retained transcript"
 
-    # More than three read windows, asymmetric ends, and a nonzero exit:
-    # neither waiting before reading nor dropping late bytes can pass.
     payload = b"head:" + b"a" * 131072 + b"b" * 65531 + b":tail"
     source = """
 import os
@@ -236,10 +227,6 @@ raise SystemExit(17)
         assert output == b"entry:" + payload, "reader lost or reordered transcript bytes"
         assert caller.returncode == 17, "reader did not reap actual caller outcome"
 
-    # EOF is not child exit. Observe the actual monotonic operand to require
-    # exactly the remaining allowance, not a fresh five seconds at reap. A
-    # terminal's session leader keeps its PTY open, so the master never reads
-    # EOF while the child lives; a pipe gives the reader the same EOF.
     with child_pipe("import os,time; os.close(1); time.sleep(30)") as (caller, master):
         deadline = time.monotonic() + 0.2
         original_wait = caller.wait
@@ -268,8 +255,6 @@ raise SystemExit(17)
                 raise AssertionError("EOF accepted without caller exit")
         assert waited, "reader did not exercise EOF-to-reap boundary"
 
-    # A retained slave is quiet rather than EOF. Silence still cannot count as
-    # child exit, while post-reap collection must preserve all unread bytes.
     with child_pty("import time; time.sleep(30)") as (caller, master):
         try:
             wait_for_exit(caller, master, bytearray(), time.monotonic() + 0.2)
@@ -288,8 +273,6 @@ raise SystemExit(17)
         assert wait_for_exit(caller, master, output, time.monotonic() + 5) == 0
         assert output == b"x" * (1024 * 1024 - 2) + b"z", "below-bound bytes lost"
 
-    # Cross the fixture's strict 1-MiB retained transcript bound with one
-    # actual byte; failure must preserve, not silently truncate, prior bytes.
     with child_pty("import os; os.write(1,b'z')") as (caller, master):
         output = bytearray(b"x" * (1024 * 1024 - 1))
         try:
@@ -304,12 +287,6 @@ raise SystemExit(17)
 
 
 def check_action_ready(action_ready):
-    """Real PTY saturation, followed by the OS drain/flush/notify ordering.
-
-    Linux tcdrain may return with unread master bytes; Darwin can wait there.
-    Saturation makes withheld credit deterministic on either platform without
-    replacing tcdrain with a fixture notification or sleeping writer.
-    """
     master, slave = open_pty()
     ready_read, ready_write = os.pipe()
     held_read, held_write = os.pipe()
@@ -345,7 +322,6 @@ os.read(release, 1)
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         assert select.select([held_read], [], [], 5)[0], "PTY saturation not reached"
         count = int(os.read(held_read, 32))
-        # Execute the old pipe-only implementation at its intended assertion.
         try:
             assert select.select([ready_read], [], [], 0.05)[0], "Action input flush did not finish"
         except AssertionError as error:
@@ -371,7 +347,6 @@ os.read(release, 1)
             close_pty(fd)
 
     owner = sys.modules[action_ready.__module__]
-    # Original deadline, not a fresh budget after each credited output window.
     with patch.object(owner.time, "monotonic", side_effect=[10, 11, 14]), \
             patch.object(owner.select, "select", return_value=([123], [], [])) as waited, \
             patch.object(owner.os, "read", return_value=b"prefix"):

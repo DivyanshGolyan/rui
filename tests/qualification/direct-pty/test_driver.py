@@ -1,4 +1,3 @@
-"""Cheap native controls for byte custody, observation and failure oracles."""
 import json
 import os
 import pathlib
@@ -17,8 +16,6 @@ import host_process
 class NavigationTests(unittest.TestCase):
     @staticmethod
     def check(screen, first, browsing, feed_rows):
-        # Model fixtures read the binary argument at import; these pure screen
-        # checks do not start a fixture or require a terminal emulator.
         with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
             from scenarios import assert_navigation_history
         assert_navigation_history(screen, first, browsing, feed_rows)
@@ -29,9 +26,6 @@ class NavigationTests(unittest.TestCase):
                          + [chip, "─" * 80, " › ", "─" * 80, " ‹ fixture"])
 
     def test_continuous_feed_ranges_and_reserved_chip(self):
-        # Cover both the old and reclaimed-row layouts, plus other pane sizes.
-        # Only the composer boundary supplies capacity; exact content and
-        # anchor/distance checks still reject missing/extra rows and keys.
         for feed_rows in (8, 18, 19, 27):
             live_first = 101 - feed_rows
             self.check(self.screen(live_first, feed_rows - 1, "TD4 history end\n"), live_first, False, feed_rows)
@@ -103,8 +97,6 @@ class NavigationTests(unittest.TestCase):
                  "   Rename     Archive     Copy last answer", "", "─" * 80, " › ", "─" * 80,
                  " ‹ Chat · info       esc close"]
         chat_info_ready(Terminal(lines), "specimen")
-        # Each contract observation must fail independently; the old /status
-        # page and an Unknown-command notice cannot satisfy panel readiness.
         for label in ("Effort", "Permissions", "Tools", "Folder", "Model", "Rename", "Archive", "Copy last answer", " · info", "esc close"):
             with self.subTest(missing=label), self.assertRaisesRegex(AssertionError, "chat info fields and footer"):
                 chat_info_ready(Terminal([line.replace(label, "missing") for line in lines]), "specimen")
@@ -229,8 +221,6 @@ class ExitTests(unittest.TestCase):
 
 class DriverTests(unittest.TestCase):
     def test_master_bytes_and_restoration(self):
-        # Includes NUL, invalid UTF-8, CR, control, escape and paste bytes. A
-        # text encoder, ICRNL, tmux key substitution or short write loses here.
         payload = b"A\x00\xff\r\x12\x1b[D\x1b[200~x\nY\x1b[201~"
         child = r'''
 import os, sys, termios, tty
@@ -267,9 +257,6 @@ finally:
         self.assertTrue(screen.reached("ready"))
 
     def test_restoration_excludes_only_darwin_kernel_bits(self):
-        # Exercise finish's real restoration boundary. Model the Darwin-only
-        # write-history and collector-mark bits even on Linux, but never
-        # excuse NONBLOCK, access mode, APPEND or an unknown bit alongside them.
         import fcntl
         child = "import os; os.write(1, b'\\x1b[?1049l\\x1b[?2004l\\x1b[?25h')"
         for platform, delta, accepted in (
@@ -299,7 +286,6 @@ finally:
                                 tty.finish()
 
     def test_primary_failure_survives_cleanup_and_child_retires(self):
-        # Exercise the actual context-manager owner, not just dispose_all.
         child = "import time; time.sleep(30)"
         with tempfile.TemporaryDirectory() as directory:
             tty = DirectPty([sys.executable, "-c", child], env=os.environ, cwd=directory, output=directory)
@@ -311,8 +297,6 @@ finally:
                 os.fstat(tty.master)
 
     def test_pass_receipt_requires_successful_worker_exit(self):
-        # A real child writes a valid receipt, then exits normally, fails, or
-        # dies by signal. The controller must not turn the last two green.
         launch = subprocess.Popen
         for status in (0, 17, -signal.SIGTERM):
             with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:

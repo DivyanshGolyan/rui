@@ -1,9 +1,6 @@
-//! Borrowed preset values and their name policy.
 const std = @import("std");
 const protocol = @import("protocol.zig");
 
-/// Presets live in their Host settings, never in the Store. The spec's JSON
-/// strings and objects are borrowed for the Host's life, not copied per slot.
 pub const Preset = struct {
     name: []const u8,
     spec: std.json.ObjectMap,

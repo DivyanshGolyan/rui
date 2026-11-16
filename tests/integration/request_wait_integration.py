@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Request wait observes saved work without admitting, resuming or retargeting it."""
 import contextlib
 import json
 import os
@@ -86,7 +85,6 @@ def completion(state):
     release = threading.Event()
     try:
         with running(state, "completion", [(answer("completed answer"), release)]) as (home, store, endpoint, host, diagnostics):
-            # Generated captures exercise HANDLE resolution, not just explicit Store/key.
             started = canonical.invoke(home, "session", "start", "--store", store,
                                        "--workspace", home, "--provider", "codex", "--model", "gpt-6-sol",
                                        input="complete")
@@ -125,8 +123,6 @@ def timeout_and_absent(state):
             latest = fixture.observe(store, "timeout")
             before_wait = int(time.time())
             with waiter(store, "timeout", seconds=2) as process:
-                # This asserts render-clock freshness, not actor ordering: an
-                # unchanged full observation must not retain its first-read time.
                 observation, errors = result(process, 5, "processing", minimum_as_of=before_wait + 1)
             assert observation == latest, (observation, latest)
             assert "[wait_timed_out]" in errors, errors
@@ -151,7 +147,6 @@ def stopped_host(state):
             pending(home, store, endpoint, "stopped")
 
             def hold_full_reply(response):
-                # The Host reply is completely drained before its process dies.
                 value = json.loads(response.split(b"\r\n\r\n", 1)[1])
                 assert value["observation"]["state"] == "processing", value
                 first_reply.set()
@@ -169,9 +164,6 @@ def stopped_host(state):
                         finally:
                             reply_release.set()
 
-                    # Restore the direct socket before releasing the buffered
-                    # reply: every subsequent read must reach the stopped Host,
-                    # never a proxy handler or a partially delivered first read.
                     closing, proxy = proxy, None
                     closing.close(after_restore=stop_before_reply)
                     stdout, stderr = process.communicate(timeout=20)
@@ -196,8 +188,6 @@ def interrupted(state, signum):
         with running(state, name, [(answer(name), release)]) as (home, store, endpoint, host, diagnostics):
             pending(home, store, endpoint, name)
             with waiter(store, name) as process:
-                # A conditional poll proves the first full reply reached the
-                # client and was retained before signal cancellation begins.
                 diagnostics.wait("request_observation_tier1", command_key=name)
                 process.send_signal(signum)
                 observation, _ = result(process, 5, "processing")
@@ -223,8 +213,6 @@ def tier_two(state):
                 observed.append(value)
                 if len(observed) == 1:
                     assert value["delta"] == "full", value
-                    # Record peer observation before replying; sibling commit
-                    # cannot race ahead of the token captured by this reply.
                     first_reply.set()
                     assert reply_release.wait(10), "sibling configuration did not release reply"
                 return response

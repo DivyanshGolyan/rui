@@ -1,5 +1,3 @@
-//! Editing policy for text fields in a Panel. Callers paint failure on the
-//! field's row; neither a refused line nor a rejected paste closes the field.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const Editor = @import("DraftEditor.zig");
@@ -11,9 +9,6 @@ pub fn event(editor: *Editor, input: vaxis.vxfw.Event, pasting: bool, failure: *
         .refused => |why| {
             failure.* = " · text couldn't be entered";
             if (why.endsLine()) {
-                // A refused line is withheld until Enter. A Panel field
-                // keeps its usable text instead of dropping it and edits on;
-                // a rejected paste was already rolled back.
                 editor.release();
             }
         },

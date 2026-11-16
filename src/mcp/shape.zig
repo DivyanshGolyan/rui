@@ -1,29 +1,17 @@
-//! How a listed MCP tool is shaped for the model: its `inputSchema` gains
-//! `rui_call_description`, a required string of at most 200 bytes that the
-//! model fills in with what the call does (D105, D143). The server never
-//! sees it; M3b strips it before the request leaves.
-//!
-//! A functional core: a checked schema in, bytes out.
 const std = @import("std");
 const document = @import("document.zig");
 
-/// The property the model fills in.
 pub const description_property = "rui_call_description";
 pub const description_max_bytes = 200;
 
 pub const Error = std.Io.Writer.Error || error{
-    /// The server's own schema already names `rui_call_description` (D142).
     NameTaken,
-    /// `properties` is not an object, or `required` is not an array.
     Malformed,
 };
 
 const property_text = "\"" ++ description_property ++ "\":{\"type\":\"string\",\"maxLength\":" ++
     std.fmt.comptimePrint("{d}", .{description_max_bytes}) ++ "}";
 
-/// Writes `input_schema`, a checked JSON object, with the description
-/// property added to `properties` and to `required`, creating either that
-/// is absent. Every other member is copied as written.
 pub fn writeSchema(writer: *std.Io.Writer, input_schema: []const u8) Error!void {
     std.debug.assert(document.kind(input_schema) == .object);
     try check(input_schema);
@@ -110,7 +98,6 @@ test "other members are copied as written" {
 test "a schema that already names the property is refused" {
     var buffer: [512]u8 = undefined;
     try std.testing.expectError(error.NameTaken, shaped(&buffer, "{\"properties\":{\"rui_call_description\":{}}}"));
-    // Spelled with an escape, it is the same name.
     try std.testing.expectError(error.NameTaken, shaped(&buffer, "{\"properties\":{\"rui_call_\\u0064escription\":{}}}"));
 }
 

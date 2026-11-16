@@ -1,5 +1,3 @@
-//! The OS's own system PATH, the one a login shell starts from.
-
 const std = @import("std");
 const os = @import("os.zig");
 const path_list = @import("../path_list.zig");
@@ -9,13 +7,11 @@ const stderr = @import("../stderr.zig");
 /// macOS's fallback when its files do not fit.
 pub const fixed = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
-/// The longest system PATH kept; a longer one falls back to `fixed`.
 pub const max_bytes = 4096;
 
 const max_name_bytes = 2048;
 const max_names = 64;
 
-/// Scratch for one `read`; nothing outside macOS needs any.
 pub const Buffer = if (os.tag == .macos) struct {
     line: [max_bytes]u8,
     names: [max_name_bytes]u8,
@@ -33,7 +29,6 @@ pub fn read(io: std.Io, buffer: *Buffer, out: *[max_bytes]u8) error{Canceled}![]
     return readFrom(io, etc, buffer, out);
 }
 
-/// `read` with `etc` in place of /etc, as path_helper's PATH_HELPER_ROOT.
 fn readFrom(io: std.Io, etc: std.Io.Dir, buffer: *Buffer, out: *[max_bytes]u8) error{Canceled}![]const u8 {
     const length = readFiles(io, etc, buffer, out) catch |err| return fallback(err, out);
     return if (length == 0) copyFixed(out) else out[0..length];
@@ -140,8 +135,6 @@ test "read matches path_helper over name order, raw lines, links and subdirector
     try std.testing.expectEqualStrings(want, try readFrom(io, etc, scratch, &out));
 }
 
-/// path_helper's PATH with an empty environment, its ", ' and $ escapes
-/// undone. `root` is its PATH_HELPER_ROOT.
 fn pathHelper(io: std.Io, root: ?[]const u8, out: *[max_bytes]u8) ![]const u8 {
     var environment = std.process.Environ.Map.init(std.testing.allocator);
     defer environment.deinit();

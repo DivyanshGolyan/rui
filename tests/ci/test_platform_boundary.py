@@ -88,9 +88,6 @@ class PlatformBoundaryTest(unittest.TestCase):
                 self.assertEqual(build_violations(portable), [])
 
     def test_scan_reaches_files_in_subdirectories(self):
-        # Before the scan recursed, src/http1 and src/mcp sockets named the
-        # platform unseen, and a listener shutdown that wakes accept only on
-        # Linux sat in src/mcp/test_server.zig.
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
             for path in ("src/mcp/test_server.zig", "src/os/socket.zig"):
@@ -152,7 +149,6 @@ class PlatformBoundaryTest(unittest.TestCase):
                     self.assertLessEqual(total, 8192)
 
     def test_fixture_trust_through_ssl_cert_variables_is_a_platform_site(self):
-        # The feed-host test before #997 trusted its CA this way and failed only on Darwin.
         self.assertEqual(typescript_sites(
             'writeFileSync(wrapper, `#!/bin/sh\\nexport SSL_CERT_FILE=${quote(cert)}\\nexec rui "$@"\\n`);'), 1)
         self.assertEqual(typescript_sites('// SSL_CERT_FILE is ignored on Darwin\n/* SSL_CERT_DIR */ const a = 1;'), 0)
@@ -169,7 +165,6 @@ class PlatformBoundaryTest(unittest.TestCase):
             os_semantics.system_trust(Path("/ca.pem"))
 
     def test_a_bound_socket_that_never_listens_is_refused(self):
-        # server_mcp_tests.zig before #1002: Darwin dropped its SYNs instead of refusing.
         unlistened = textwrap.dedent('''
             test "down" {
                 const fd = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0);
@@ -200,7 +195,6 @@ class PlatformBoundaryTest(unittest.TestCase):
             self.assertTrue(mac_path(path), path)
         for path in ("src/session_view.zig", "src/server.zig", "tests/integration/dispatch_integration.py",
                      ".github/workflows/check.yml", "README.md",
-                     # Build plumbing: Linux runs it and typecheck-macos compiles for Darwin.
                      "build.zig", "build.zig.zon", ".github/actions/setup/action.yml", "tests/ci/qualification.py"):
             self.assertFalse(mac_path(path), path)
 
@@ -210,7 +204,6 @@ class PlatformBoundaryTest(unittest.TestCase):
         self.assertTrue(select(["tests/integration/terminal_restoration_cases.py"], "review", AVAILABLE)["mac_required"])
         self.assertFalse(select(["src/turn_policy.zig"], "review", AVAILABLE)["mac_required"])
         self.assertTrue(select(["tests/integration/terminal_leader.py"], "review", AVAILABLE)["mac_required"])
-        # Local prepush development feedback does not require native Mac.
         self.assertFalse(select(["src/os/socket.zig"], "development", AVAILABLE)["mac_required"])
 
     def test_linux_gate_requires_the_macos_type_check(self):

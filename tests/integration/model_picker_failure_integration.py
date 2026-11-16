@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Model picker narrow-screen and failed-save behavior on a real PTY."""
 import json
 import os
 import shutil
@@ -55,7 +54,6 @@ def main():
         close_pty(slave)
         master = slave = None
 
-        # Keep 120 columns for the compose pane; the notice fits before its keys.
         master, slave = open_pty(columns=161, rows=24)
         catalog = AppModelCatalog(host)
         caller = spawn([str(fixture.RUI), "--store", str(store)], cwd=state,
@@ -70,7 +68,6 @@ def main():
         assert "Model" in failed, failed
         assert preferences.read_bytes() == b"version=1\n"
         preferences.write_bytes(original)
-        # A failed panel save must not change the next Session's defaults.
         overview_frame(master, overview_title, b"\x1b")
         open_new_chat(master)
 

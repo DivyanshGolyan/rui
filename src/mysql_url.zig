@@ -1,6 +1,3 @@
-//! A launch-only MySQL login. TCP always verifies TLS; a Unix socket may
-//! be percent-encoded in the authority, or spelled as an absolute path.
-//! TCP accepts only `ssl-ca=<absolute PEM path>` to replace system trust.
 const std = @import("std");
 pub const Value = @import("mysql_url_value.zig").ValueWith(@import("host_settings.zig").max_ca_file_bytes);
 pub const parseInto = @import("mysql_url_value.zig").parseInto;
@@ -36,9 +33,6 @@ pub fn options(self: *Url) wire.Options {
     };
 }
 
-/// The connection only borrows the password during open. Keep the non-secret
-/// address and CA path alive through open; reconnects use connection-owned
-/// loaded trust, not the path. Never retain the launch password.
 pub fn wipe(self: *Url) void {
     std.crypto.secureZero(u8, &self.password.bytes);
     self.password.len = 0;
@@ -133,8 +127,6 @@ test "mysql launch URLs percent-decode ssl-ca filename punctuation only once" {
     try std.testing.expectEqualStrings("/ca &?#%=.pem", url.options().address.tcp_tls.trust.ca_file);
 }
 
-// The allocating adapter must preserve the core's OS-byte path domain all the
-// way to the transport, including after login credentials have been wiped.
 test "mysql launch URL transport paths preserve every non-NUL decoded byte" {
     inline for (.{ true, false }) |socket| {
         for (1..256) |number| {

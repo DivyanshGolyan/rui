@@ -1,9 +1,3 @@
-"""Overview groups cases; run by overview_integration.py, built on overview_fixture.py.
-
-Each case drives a real Host into a work state, opens bare `rui` on a PTY
-and reads the rows as the terminal shows them: the group headings, each
-row's mark and colour, primary name and state duration.
-"""
 import json
 import pathlib
 import re
@@ -17,10 +11,6 @@ PEER_PREFIX = (pathlib.Path(__file__).resolve().parents[2] / "src" / "peer_messa
 
 
 class Replies(dict):
-    """Model replies by a Message's text, each key a list served in turn and
-    its last reply repeated: a tool call first, then the answer after its
-    result. A peer's Message reads as its sender header, so every key
-    starting with that header shares the "peer" entry."""
 
     def __getitem__(self, text):
         key = "peer" if text.startswith(PEER_PREFIX) else text
@@ -41,14 +31,12 @@ def wait_state(w, session, kind):
 
 
 def row(frame, title):
-    """The one frame row that shows `title`."""
     rows = [line for line in frame.split("\n") if title in line]
     assert len(rows) == 1, (title, frame)
     return rows[0]
 
 
 def cells(screen, title):
-    """The drawn cells of the row showing `title` in the latest frame."""
     for line in screen.capture.completed_cells:
         if title in "".join(cell.data for cell in line):
             return [cell for cell in line if cell.data]
@@ -56,8 +44,6 @@ def cells(screen, title):
 
 
 def needs_you():
-    """A Session waiting on an Action leads, marked `?` in the attention
-    colour, selected, with a compact state duration."""
     bash = json.dumps({"cmd": "echo first line of the command\necho second line", "timeout_ms": None,
                        "description": "Print two lines"})
     with world("groups-needs", {
@@ -70,7 +56,6 @@ def needs_you():
         asking = w.session("--permission-mode", "ask", "--label", "Asks before running")
         send(w, asking, "please run the command")
         wait_state(w, asking, "approval")
-        # Detail/row contracts use the full-screen list below the split threshold.
         with w.overview(columns=99, rows=20) as screen:
             frame = screen.contains("Asks before running")
             lines = frame.split("\n")
@@ -89,18 +74,13 @@ def needs_you():
             assert (mark.data, ordinary.data) == ("?", "✓"), (mark, ordinary)
             assert mark.fg is not None and mark.fg != ordinary.fg, (mark, ordinary)
             assert screen.style("Asks before running").bold, frame
-            # The list opens on the waiting row: Enter opens that Session.
             screen.keys(b"\r")
-            # Its conversation's status line names it; the card may fill
-            # the view before its Message row shows.
             opened = screen.contains("Asks before running · gpt-6-luna")
             assert "Answered already" not in opened, opened
     print("overview groups: an Action's wait leads the flat list, `?` in the attention colour, selected, with compact state duration", flush=True)
 
 
 def queued_in_active():
-    """A peer's Message waiting for a model slot shows a dim `◌` last,
-    after working and done rows; no headings show."""
     hold = threading.Event()
     replies = Replies({"dispatch two Messages": [None, answer("dispatched")],
                        "peer": [(answer("worked"), hold)]})
@@ -143,7 +123,6 @@ def queued_in_active():
 
 
 def detail_column():
-    """Retrying and failed rows show state duration without a detail line."""
     limited = fixture.ResponseSpec(b'{"error":{"message":"slow down"}}', {"Retry-After": "40"}, status=429)
     failing = fixture.ResponseSpec(b'{"error":{"message":"unavailable"}}', {}, status=503)
     with world("groups-detail", {"rate limit me": limited, "fail every time": failing}) as w:
@@ -170,7 +149,6 @@ def detail_column():
 
 
 def narrow():
-    """At 40 columns a row keeps its mark, title and age."""
     with world("groups-narrow", {"short one": answer("ok"), "long one": answer("ok")}) as w:
         short = w.session("--label", "Narrow title")
         send(w, short, "short one")

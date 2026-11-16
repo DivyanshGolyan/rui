@@ -1,4 +1,3 @@
-"""Session-list value and resource assertions shared by native caller fixtures."""
 import os
 import pathlib
 import re
@@ -9,19 +8,12 @@ import os_semantics
 
 
 def assert_empty_full(page):
-    """A first listing of a Store with no Sessions: everything, which is nothing."""
     assert {key: value for key, value in page.items() if key != "since"} == {
         "version": host_process.WIRE_VERSION, "type": "session_list", "sessions": [], "delta": "full", "next": None}, page
     assert re.fullmatch(r"[0-9a-f]{32}\.(0|[1-9][0-9]*)", page["since"]), page
 
 
 def session_values(page):
-    """All per-Session facts, without the Store-wide read freshness stamp.
-
-    A rejected command commits a record without changing any Session. The
-    next read_version can therefore change on every row; it is not a Session
-    mutation. Require its canonical wire form rather than ignoring omissions.
-    """
     result = []
     for incoming in page["sessions"]:
         row = incoming.copy()
@@ -63,7 +55,7 @@ def released_resources(pid, diagnostics, invocation):
                 phase = record["rui_test_phase"]
                 assert isinstance(phase, str), record
                 if phase in ("release_probe_held", "release_probe_leaked"):
-                    continue  # Opt-in native proof records, not Host authority.
+                    continue
                 assert record.get("process") == str(pid) and record.get("clock") == "awake_ns", record
                 assert isinstance(record.get("trace_lost"), bool), record
                 assert not loss_seen or record["trace_lost"], ("trace loss is not sticky", record)
@@ -79,7 +71,7 @@ def released_resources(pid, diagnostics, invocation):
                 trace_u64(record, "subject")
                 subject = record["subject"]
                 if phase == "connection_resources_released":
-                    trace_u64(record, "scratch_used_bytes")  # Every release, not just the selected one.
+                    trace_u64(record, "scratch_used_bytes")
                 namespace = (record["process"], record["run"], record["subject_kind"], subject)
                 target = releases if phase == "connection_resources_released" else starts
                 assert namespace not in target, ("duplicate exchange milestone", record)
@@ -96,8 +88,6 @@ def released_resources(pid, diagnostics, invocation):
                 current_identity, start = current[0]
                 prefix = {key: record for key, record in starts.items()
                           if int(record["sequence"]) <= int(start["sequence"])}
-                # The controlled fresh Host has no unobserved callers. Missing
-                # starts must not conceal an earlier pending cleanup owner.
                 assert len(prefix) == int(current_identity[3]) + 1, prefix
                 assert {int(key[3]) for key in prefix} == set(range(len(prefix))), prefix
                 if prefix.keys() <= releases.keys():
@@ -108,7 +98,7 @@ def released_resources(pid, diagnostics, invocation):
                     assert last_release["scratch_used_bytes"] == "0", ("retained scratch charge", last_release)
                     assert time.monotonic() <= deadline, "release exceeded original command budget"
                     if not os_semantics.PROC_FS:
-                        return None  # Only the /proc resource census is Linux-specific.
+                        return None
                     census = linux_resources(pid)
                     assert census is not None, "Host vanished before resource census"
                     return census

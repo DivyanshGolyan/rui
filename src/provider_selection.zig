@@ -13,7 +13,6 @@ pub const Readiness = enum {
     }
 };
 
-/// Each built-in provider's local credential state.
 pub const Readinesses = std.enums.EnumArray(provider_name.Provider, Readiness);
 
 pub const Capability = struct {
@@ -32,8 +31,6 @@ pub const Selection = union(enum) {
     },
 };
 
-/// Borrowed capability/preference strings. This resolves only a prospective new
-/// Session; callers must never apply its answer to an existing Session binding.
 pub fn resolve(capabilities: []const Capability, explicit_provider: ?[]const u8, explicit_model: ?[]const u8, saved_provider: ?[]const u8, saved_model: ?[]const u8) !Selection {
     var chosen = explicit_provider orelse saved_provider;
     if (chosen == null) {

@@ -1,5 +1,3 @@
-//! Read-only OS observations, never authority to stop a process. A matching
-//! snapshot does not authenticate a release or make mutable argv/env immutable.
 const std = @import("std");
 
 extern "c" fn rui_host_peer_pid(socket: c_int, pid: *c_int) c_int;
@@ -9,11 +7,8 @@ extern "c" fn rui_process_children(pid: c_int, pids: [*]c_int, cap: usize, count
 extern "c" fn rui_process_snapshot(pid: c_int, exe: [*]u8, exe_cap: usize, data: [*]u8, cap: usize, length: *usize, argc: *usize, env_offset: *usize, started: *c_ulonglong) c_int;
 
 const executable_capacity = 4096;
-// One caller-owned observation and one equally bounded C comparison scratch.
 const data_capacity = 2 * 1024 * 1024;
 
-/// All slices borrow this value's private storage. Do not log or persist argv or
-/// environment. The owner must call deinit even when using an arena allocator.
 pub const Snapshot = struct {
     pid: c_int,
     started: u64,
@@ -25,8 +20,6 @@ pub const Snapshot = struct {
 
     pub fn deinit(self: *Snapshot, allocator: std.mem.Allocator) void {
         allocator.free(self.entries);
-        // Preserve the secure wipe through allocators whose free is a no-op
-        // (arenas), rather than replacing it with debug undefined poisoning.
         @import("secret_value.zig").wipeAndFree(allocator, self.storage, .fromByteUnits(@alignOf(u8)), @returnAddress());
         self.* = undefined;
     }
@@ -38,8 +31,6 @@ pub fn generation(pid: c_int) !u64 {
     return started;
 }
 
-/// The live process table `process_memory.read` walks: each answer is
-/// null once the process is gone or unreadable.
 pub const Processes = struct {
     pub fn footprint(_: *Processes, pid: i32) ?u64 {
         var bytes: c_ulonglong = 0;
@@ -58,7 +49,6 @@ pub fn peer(fd: c_int) !c_int {
     return pid;
 }
 
-/// Returns owned bytes. Native failures deliberately expose no argv/env/path.
 pub fn snapshot(allocator: std.mem.Allocator, pid: c_int) !Snapshot {
     const storage = try allocator.alloc(u8, executable_capacity + data_capacity);
     errdefer {
@@ -130,7 +120,6 @@ test "the live process table reads this process's memory and a child it starts" 
     const listed = processes.children(self, &buffer).?;
     try std.testing.expect(std.mem.indexOfScalar(i32, listed, child.id.?) != null);
     try std.testing.expect(processes.footprint(child.id.?) != null);
-    // Walked from this process as a Host, the child counts as a tool.
     const memory = @import("process_memory.zig").read(&processes, self, self);
     try std.testing.expect(memory.tools != null and memory.rui > 0);
 }
@@ -196,12 +185,8 @@ test "host identity native snapshot observes only a gated synthetic child" {
     defer if (child.id != null) {
         if (child.stdin) |input| input.close(io);
         child.stdin = null;
-        // Preserve the body failure if fixture setup failed before the gate.
         _ = child.wait(io) catch {};
     };
-    // The pinned Zig runner's protocol selects this one test even when this
-    // module is imported into a broad root. Never rerun unrelated tests in the
-    // synthetic child (they may own their own native fixtures).
     var read_buffer: [256]u8 = undefined;
     var write_buffer: [64]u8 = undefined;
     var reader = child.stdout.?.readerStreaming(io, &read_buffer);
@@ -237,8 +222,6 @@ test "host identity native snapshot observes only a gated synthetic child" {
     }
     try std.testing.expect(marker);
 
-    // Tiny native output bounds must reject, not truncate, and erase partial
-    // private data. Never ask the adapter to inspect this test's environment.
     var exe: [4096]u8 = undefined;
     var data: [1]u8 = .{255};
     var length: usize = 99;

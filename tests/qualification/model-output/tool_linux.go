@@ -33,7 +33,7 @@ const (
 	toolSeedBytes      = 400 * 1024
 	toolReadBytes      = 100 * 1024
 	toolSampleInterval = 200 * time.Millisecond
-	toolClockTicks     = 100 // Linux USER_HZ on every supported kernel
+	toolClockTicks     = 100
 )
 
 func toolMeasurementOptions(sessions int, workload, expectation string, sampleMS int) error {
@@ -88,8 +88,6 @@ func (f *childFixture) tool(deadline measurement.Deadline, route string) (provid
 	return summary, json.NewDecoder(response.Body).Decode(&summary)
 }
 
-// Deterministic prose-like text; the token figure beside it is bytes/4, an
-// estimate, not a tokenizer count.
 func toolText(header string, size int, seed uint64) []byte {
 	words := []string{"the", "build", "failed", "because", "a", "test", "reads", "stale", "cache", "entries", "from", "disk", "and", "we", "should", "check", "whether", "Host", "retries", "request", "before", "session", "config", "returns", "error", "path", "function", "value", "pointer", "loop", "commit", "branch"}
 	var out bytes.Buffer
@@ -139,7 +137,6 @@ func readToolProc(pid int) (toolProc, error) {
 	return toolProc{pid: pid, ppid: ppid, comm: string(data[open+1 : close]), state: fields[0], start: start, ticks: utime + stime}, nil
 }
 
-// cpuTicks returns own user+system and reaped-children user+system ticks.
 func cpuTicks(pid int) (self, children uint64, err error) {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
@@ -182,11 +179,7 @@ type toolProcessRecord struct {
 	MaxPSS      uint64 `json:"max_pss_bytes"`
 	LastPSS     uint64 `json:"last_pss_bytes"`
 	CPUTicks    uint64 `json:"last_cpu_ticks"`
-	// DispatchShell marks a Bash shell seen with a `rui` send child.
 	DispatchShell bool `json:"dispatch_shell"`
-	// Transitions lists each distinct comm/category this identity showed, in
-	// order: a Host child that execs its final command keeps its PID and
-	// start time but changes from bash/bash_shell to, say, sleep/bash_exec.
 	Transitions []string `json:"transitions"`
 }
 
@@ -199,11 +192,6 @@ type toolSample struct {
 	PSSFailures int               `json:"pss_failures"`
 }
 
-// toolSampler walks /proc and sums smaps_rollup PSS over the Host tree and
-// the TUI tree. One sample reads processes one after another between
-// begin_unix_ns and end_unix_ns, so its sum is a sequential-scan sum, not a
-// simultaneous snapshot, and omits every process whose read failed. Every PID+start time appears once per sample under exactly
-// one category; `rui` processes under a Bash shell are clients, not Bash.
 type toolSampler struct {
 	host, tui int
 	active    time.Duration
@@ -229,9 +217,6 @@ func columns(category string) string {
 	}
 }
 
-// isSend recognizes `rui session send` by argv, whether it runs under a
-// shell or replaced the Host's Bash child; a Host fork before exec has the
-// Host's argv.
 func isSend(pid int) bool {
 	data, _ := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
 	argv := strings.Split(string(data), "\x00")
@@ -264,7 +249,6 @@ func (s *toolSampler) sample() {
 			row := procs[child]
 			next := "bash_child"
 			switch {
-			// An exited, unreaped process has no memory or argv left.
 			case row.state == "Z":
 				next = "unreaped"
 			case category == "host" && row.comm == "bash":
@@ -312,7 +296,6 @@ func (s *toolSampler) sample() {
 		record.DispatchShell = record.DispatchShell || dispatchShells[pid]
 		record.Samples++
 		if category == "unreaped" {
-			// Counted, never read: it has no PSS and is not a live process.
 			s.mu.Unlock()
 			result.Counts[category]++
 			continue
@@ -366,7 +349,6 @@ func startToolSampler(host int, path string, active time.Duration) (*toolSampler
 	return s, nil
 }
 
-// The active phase may sample faster; every other phase keeps the default.
 func (s *toolSampler) interval() time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -385,9 +367,6 @@ func (s *toolSampler) Stop() error {
 	return s.raw.Close()
 }
 
-// summary reports observed sample peaks and per-phase medians; the true
-// peak between samples, and processes that lived shorter than one sample
-// interval, are unobserved.
 func (s *toolSampler) summary() map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -480,7 +459,6 @@ func openPTY(rows, columns uint16) (*os.File, *os.File, error) {
 	return master, slave, nil
 }
 
-// toolTerminal is one real `rui session resume` attached on a PTY.
 type toolTerminal struct {
 	cmd           *exec.Cmd
 	master, slave *os.File
@@ -600,8 +578,6 @@ func storeUsage(store string) map[string]any {
 		return nil
 	})
 	if len(files) != 0 {
-		// fincore reports page-cache residency per file; it is system cache,
-		// not process PSS, and is never added to the PSS columns.
 		output, err := exec.Command("fincore", append([]string{"--bytes", "--noheadings", "--raw", "--output", "RES,SIZE,FILE"}, files...)...).CombinedOutput()
 		result["fincore_raw"] = string(output)
 		if err != nil {
@@ -665,11 +641,6 @@ func tickDelta(points []map[string]any, from, to int, field string) (float64, bo
 	return float64(second-first) / toolClockTicks, true
 }
 
-// measureTools runs one coordinated Bash tool turn. Every Session first gets
-// ~400 KiB of history through an ordinary Message. One real TUI attaches to
-// the coordinator and submits its request; the coordinator's Bash calls run
-// the actual `rui session send` for each worker, and every Session, the
-// coordinator included, runs exactly one workload call.
 func measureTools(binary, output string, sessions int, workload, trace, expectation string, barrier bool, activeInterval time.Duration) (result map[string]any, resultError error) {
 	result = map[string]any{"format": "rui-tool-turn-v1", "status": "incomplete", "fixture": true, "sessions": sessions, "workload": workload, "active_capacity": 100,
 		"topology": map[string]any{"coordinator_tui": 1, "dispatch_calls_expected": sessions - 1, "workload_calls_expected": sessions}, "instrumented": trace != "", "barrier": barrier, "active_sample_interval_ns": activeInterval.Nanoseconds()}
@@ -717,7 +688,6 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 	if err := os.MkdirAll(filepath.Join(home, ".config", "rui"), 0o700); err != nil {
 		return result, err
 	}
-	// Host, Bash tools, TUI and sends share this private HOME, not the user's.
 	if err := os.Setenv("HOME", home); err != nil {
 		return result, err
 	}
@@ -890,7 +860,6 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 		return result, err
 	}
 	result["provider_done_unix_ns"] = time.Now().UnixNano()
-	// A fixed tail lets the Host commit the final answers it was just sent.
 	if err := deadline.SleepUntil(time.Now().Add(3 * time.Second)); err != nil {
 		return result, err
 	}
@@ -901,9 +870,6 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 		result["tracer_exit"] = fmt.Sprint(tracer.Wait())
 		tracer = nil
 	}
-	// Every Session's original request must reach a completed result whose
-	// saved answer is exactly the provider's final text. The provider's
-	// done count only says it received the continuation.
 	originals := make([]map[string]any, sessions)
 	var originalFailures []string
 	for index, name := range names {
@@ -988,12 +954,6 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 	return result, nil
 }
 
-// toolConcurrency derives in-flight counts from in-shell timestamps. A call
-// is known alive over [park or start, start + minimum]: its shell exists from
-// the park marker, and `sleep 5` cannot finish sooner than 5 s after its start
-// marker; other commands get no minimum. The maximum overlap of these
-// intervals is a lower bound on calls simultaneously alive. It also reports
-// the delay from the provider's tool-call response to each shell's start.
 func toolConcurrency(summary provider.ToolSummary, workload string) map[string]any {
 	result := map[string]any{"basis": "bash $EPOCHREALTIME park/start markers inside each shell plus the workload's minimum duration (sleep 5: 5 s; otherwise 0); excludes shell fork/exec; a lower bound, not observed end times"}
 	type event struct {
@@ -1048,11 +1008,6 @@ func toolConcurrency(summary provider.ToolSummary, workload string) map[string]a
 	return result
 }
 
-// releaseBarrier waits until every workload shell has parked, at most wait,
-// then releases one line per Session. The writer stays open until the turn
-// ends so a late shell still finds its line. A partial release is recorded
-// as timed_out and fails toolAcceptance; the turn still runs to the end so
-// its evidence is kept.
 func releaseBarrier(deadline measurement.Deadline, directory string, sessions int, wait time.Duration) (map[string]any, *os.File, error) {
 	begin := time.Now()
 	parked := 0
@@ -1083,8 +1038,6 @@ func releaseBarrier(deadline measurement.Deadline, directory string, sessions in
 	return facts, writer, nil
 }
 
-// toolCoverage compares processes the sampler saw with the processes the
-// turn must have created. Unseen processes have no PSS observation at all.
 func toolCoverage(s *toolSampler, sessions int) map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1127,10 +1080,6 @@ func toolCoverage(s *toolSampler, sessions int) map[string]any {
 	}
 }
 
-// toolRequestPhases classifies each Session's three provider requests by
-// phase and by whether the provider received them inside the CPU window
-// [begin, end]. Seeds precede the window; the measured turn should place
-// every measured request and continuation inside it.
 func toolRequestPhases(facts []provider.ToolSessionFact, begin, end int64) map[string]int {
 	result := map[string]int{"seed_in_window": 0, "measured_in_window": 0, "continuation_in_window": 0}
 	count := func(phase string, at int64) {
@@ -1150,8 +1099,6 @@ func toolRequestPhases(facts []provider.ToolSessionFact, begin, end int64) map[s
 	return result
 }
 
-// toolCoordinatorKey is the coordinator's one non-seed Message: the request
-// the attached TUI submitted.
 func toolCoordinatorKey(inspection map[string]any) string {
 	messages, _ := inspection["recent_messages"].([]any)
 	for _, raw := range messages {
@@ -1163,10 +1110,6 @@ func toolCoordinatorKey(inspection map[string]any) string {
 	return ""
 }
 
-// toolOriginalFailure accepts one Session only when it has exactly its seed
-// and its original request, both completed, the worker request is the
-// coordinator's dispatch key, and the saved result is exactly the fixture's
-// final answer for that Session.
 func toolOriginalFailure(name string, index int, key string, inspection, observation map[string]any, text []byte, readError error) error {
 	messages, _ := inspection["recent_messages"].([]any)
 	outcomes := map[string]any{}
@@ -1190,11 +1133,6 @@ func toolOriginalFailure(name string, index int, key string, inspection, observa
 	return nil
 }
 
-// toolAcceptance lists every provider, phase and barrier reason a run must
-// not pass. Counts come from validated outputs. The configured barrier mode,
-// not the presence of release facts, decides: a barrier run must have
-// release facts showing all N shells parked and must reach N overlapping
-// intervals; a run without a barrier must have no release facts.
 func toolAcceptance(sessions int, done provider.ToolSummary, requests map[string]int, barrier bool, release map[string]any, overlap int) []string {
 	var failures []string
 	failures = append(failures, done.Errors...)

@@ -1,18 +1,3 @@
-"""Only the SQLite engine and its own tests reach the SQLite C binding, and
-src/store/domain reaches neither the engine nor the Queue.
-
-Access and the Store run rounds through `engine.Engine`, so a second engine
-can sit behind it without touching them. A Store file outside `ALLOWED`
-that names a `sqlite3_` function or type, the binding `sqlite.c`, or the C
-module `@import("sqlite")` reaches past the engine.
-
-Outside test blocks, a domain file that imports the engine, the Queue or the
-binding, or reaches them through the Store (`.engine`, `.queue()`, and the
-Store's `enter` and `fence`), counts against `DOMAIN_REACH`.
-
-Comments and strings are inert. Both lists only shrink: an entry above what
-the tree holds must be lowered or removed.
-"""
 from pathlib import Path
 import shutil
 import tempfile
@@ -25,18 +10,13 @@ ROOT = Path(__file__).resolve().parents[2]
 STORE = "src/store"
 
 ALLOWED = {
-    # The C binding itself, and the engine that owns the connection.
     "sqlite.zig",
     "engine/Sqlite.zig",
-    # Schema validation and bootstrap run on the connection at open.
     "schema.zig",
-    # SQLite-only fixtures and tests.
     "testing.zig",
     "sqlite_tests.zig",
-    # A test of `rui_served` against an in-memory database.
     "rsql.zig",
 }
-# The per-domain SQLite mechanism tests: any file there may name the binding.
 ALLOWED_DIRECTORIES = ("sqlite_tests/",)
 
 DOMAIN = "src/store/domain"
@@ -44,7 +24,6 @@ DOMAIN_RULE = "src/store/domain reaches the engine or the Queue only through the
 DOMAIN_IMPORTS = ('"../engine.zig"', '"../queue.zig"', '"../sqlite.zig"')
 STORE_REACH = ("enter", "fence")
 
-# Shrink-only: occurrences per (domain file, reach) today.
 DOMAIN_REACH = {
     ("action.zig", '@import("../sqlite.zig")'): 1,
     ("command.zig", '@import("../sqlite.zig")'): 1,
@@ -85,7 +64,6 @@ def violations(root=ROOT):
 
 
 def domain_reaches(source):
-    """Reaches outside test blocks, counted by the label a violation names."""
     tokens = [token.text for token in production(lex(source))]
     store = {tokens[i - 1] for i in range(1, len(tokens) - 4)
              if tokens[i:i + 5] == ["=", "@import", "(", '"../Store.zig"', ")"]}

@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""Audit the subsystem documentation move against its recorded pre-move tree.
-
-Run `python3 tests/ci/doc_moves.py` at the organization commit. This is a
-historical equivalence audit, not a requirement to freeze future contracts.
-The map records original source spans, heading destinations, and index edits.
-"""
 import hashlib
 import json
 from pathlib import Path
@@ -108,7 +102,6 @@ def audit(root=ROOT):
     for (source, anchor), (output, target) in anchors.items():
         if target not in headings(after[output]):
             errors.append(f"{source}#{anchor}: destination {output} lost its anchor")
-    # Existing research links can be stale. New broken links cannot hide among them.
     old_failures = {(p, destination(t, p, p, anchors), why) for p, t, why in broken_links(before)}
     for path, target, why in sorted(broken_links(after) - old_failures):
         errors.append(f"{path}: {target}: {why}")

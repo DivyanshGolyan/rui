@@ -1,5 +1,3 @@
-//! Fixture setup only: send stdin SQL as the CI server's root user. The
-//! Host under test uses its own independent production Store connection.
 const std = @import("std");
 const wire = @import("mysql_connection");
 
@@ -17,7 +15,6 @@ pub fn main(init: std.process.Init) !void {
     var text: std.ArrayList(u8) = .empty;
     var buffer: [4096]u8 = undefined;
     while (true) {
-        // EOF arrives as error.EndOfStream; a zero-byte read is not EOF.
         const count = std.Io.File.stdin().readStreaming(init.io, &.{&buffer}) catch |err| switch (err) {
             error.EndOfStream => break,
             else => return err,

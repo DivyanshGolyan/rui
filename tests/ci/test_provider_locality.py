@@ -1,4 +1,3 @@
-"""Core names no provider detail: see provider_locality.py."""
 import unittest
 
 from provider_locality import ALLOWED, CODEC_RULES, RULES, SRC, codec_violations, production, violations
@@ -36,7 +35,6 @@ class ProviderLocalityTest(unittest.TestCase):
         hits = [name for name, pattern in RULES if pattern.search(code)]
         self.assertEqual(hits, ["imports a sign-in file", "names a ChatGPT or Codex header",
                                 "names a ChatGPT endpoint", "switches on a provider"])
-        # Blanked tests keep every later line at its own number.
         self.assertEqual(code.count("\n"), 12)
         self.assertIn("x-codex", code.splitlines()[9])
 

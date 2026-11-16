@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""Run the MySQL wire client's live tests against a real MySQL 8.4 server.
-
-The server runs in Docker from mysql_server.py's pinned image, with its Unix
-socket in a directory shared with the host, and serves TLS with a
-certificate made here for 127.0.0.1, which the tests trust as its own CA. A
-missing Docker or openssl fails the run; it never skips.
-"""
 import os
 import secrets
 import shutil
@@ -29,7 +22,6 @@ def main():
         subprocess.run(["openssl", "req", "-new", "-x509", "-days", "1", "-nodes", "-subj", "/CN=127.0.0.1",
                         "-addext", "subjectAltName=IP:127.0.0.1", "-keyout", os.path.join(certs, "server.key"),
                         "-out", os.path.join(certs, "server.crt")], check=True, capture_output=True)
-        # mysqld runs as the image's own user; a one-day test key may be world-readable.
         os.chmod(certs, 0o755)
         os.chmod(os.path.join(certs, "server.key"), 0o644)
         mysql_server.start(name, socket_dir, root_password,
@@ -48,8 +40,6 @@ def main():
             print(docker("logs", name, capture_output=True).stderr[-4000:], file=sys.stderr)
         return result.returncode
     finally:
-        # Unchecked: the tests' own result stays the outcome, and a container
-        # that failed to start leaves nothing to remove.
         subprocess.run(["docker", "rm", "--force", "--volumes", name], capture_output=True)
         shutil.rmtree(socket_dir, ignore_errors=True)
 

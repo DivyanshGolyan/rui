@@ -1,5 +1,3 @@
-//! Restart-all composes discovery, installed selection and the existing exact-instance
-//! lifecycle. No registry, launch policy or activation state is kept here.
 const std = @import("std");
 const client = @import("client.zig");
 const platform = @import("platform.zig");
@@ -62,9 +60,6 @@ const Totals = struct {
 };
 
 pub const Stage = enum { discovery, observation, selection };
-/// Where a Host could not be confirmed, and why. The cause is only the
-/// error's name, never argv, environment or paths read from the peer. It is
-/// owned like the entry's paths, so it survives the coordinator's event pipe.
 pub const Failure = struct {
     stage: Stage,
     cause: []const u8,
@@ -77,13 +72,11 @@ pub const Entry = struct {
     socket: []const u8,
     store: ?[]const u8 = null,
     state: union(enum) {
-        /// Read-only census, never an activation plan. Reobserve before acting.
         observed: client.HostControlObservation,
         outcome: HostLifecycle.ActivationOutcome,
         failed: Failure,
     },
 
-    /// The one release of an entry's owned strings, for every Batch builder.
     pub fn deinit(self: Entry, allocator: std.mem.Allocator) void {
         allocator.free(self.socket);
         if (self.store) |store| allocator.free(store);
@@ -91,8 +84,6 @@ pub const Entry = struct {
     }
 };
 
-/// Owns only routing strings and read-only facts, not private launch snapshots.
-/// A census has observed entries; execution replaces each with its one outcome.
 pub const Batch = struct {
     entries: []Entry = &.{},
     version: ?release.Version = null,
@@ -169,8 +160,6 @@ pub const Batch = struct {
     }
 };
 
-/// One discovery owner for the pre-install warning and post-publication run.
-/// Eligibility is read-only here; no launch snapshot survives the census.
 pub fn discover(init: std.process.Init, allocator: std.mem.Allocator, home: []const u8, cancellation: ?*const client.Cancellation) !Batch {
     const sockets = try platform.listHostSockets(allocator, init.io);
     defer {
@@ -184,7 +173,6 @@ pub fn discover(init: std.process.Init, allocator: std.mem.Allocator, home: []co
     }
     for (sockets) |socket| {
         try process.check(cancellation);
-        // Reserve first: once an entry owns its strings, adding it cannot fail.
         try entries.ensureUnusedCapacity(allocator, 1);
         const facts = client.observeHostForUpgradeAtSocket(allocator, init.io, socket, null) catch |err| {
             const path = try allocator.dupe(u8, socket);
@@ -280,9 +268,6 @@ fn writeEntryFailure(writer: *std.Io.Writer, entry: *const Entry, failure: Failu
     try writer.print("): failed at discovery: Host state is unconfirmed ({s}); inspect this socket and its Store with the owning client, then retry. A refused or missing socket alone does not prove the Host stopped.\n", .{failure.cause});
 }
 
-/// Reports are not custody: a departed tool closes stdout, but all remaining
-/// Stores must still be processed. Retain each failed write at the existing
-/// optional diagnostic boundary, without turning output failure into a stop.
 const OptionalOutput = struct {
     io: std.Io,
     destination: std.Io.File,
@@ -318,8 +303,6 @@ fn field(writer: *std.Io.Writer, text: []const u8) !void {
     try terminal.finish(writer);
 }
 
-/// Pure exit/total policy over the lifecycle's own values, not a mirrored union.
-/// Both entry rendering and aggregation call this one classification.
 fn category(outcome: HostLifecycle.ActivationOutcome) Result {
     return switch (outcome) {
         .ready, .client_incompatible => .restarted,
@@ -337,8 +320,6 @@ fn writeOutcome(writer: *std.Io.Writer, store: []const u8, outcome: HostLifecycl
             try writer.print("restarted on 0.{d}.{d}", .{ version.?.schema, version.?.patch });
         },
         .client_incompatible => {
-            // The lifecycle verified the exact pinned launch and version, not
-            // ordinary readiness. Preserve that certainty and name the limit.
             try writer.print("restarted on 0.{d}.{d}; different Host protocol; inspect with the selected Rui client", .{ version.?.schema, version.?.patch });
         },
         .already_ready => {
@@ -440,7 +421,6 @@ test "restart all counts every outcome even after its output reader closes" {
     _ = std.c.close(fds[0]);
     const destination: std.Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = false } };
     defer destination.close(std.testing.io);
-    // Small enough to drive both buffered flush and direct drain/splat paths.
     var buffer: [16]u8 = undefined;
     var output = OptionalOutput.init(std.testing.io, destination, &buffer);
     var totals: Totals = .{};

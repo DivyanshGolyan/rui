@@ -1,5 +1,3 @@
-//! Owns one call's buffers and deadline until its single resolution. The Host
-//! supplies time and readiness; this owner never waits or retries.
 const std = @import("std");
 const utf8_validation = @import("../utf8_validation.zig");
 const Call = @import("Call.zig");
@@ -12,8 +10,6 @@ const Allocator = std.mem.Allocator;
 const Running = @This();
 
 pub const max_answer_bytes = result_text.max_answer_bytes;
-// post.zig writes _meta and at most sixteen mirrored, bounded header values.
-// Variable arguments have their own allowance; an oversized head fails NoRoom.
 const request_margin = 32 * 1024;
 
 pub const Input = struct {
@@ -26,12 +22,10 @@ pub const Input = struct {
     id: u64,
     server_name: []const u8,
     timeout_ms: u64,
-    /// From the Operation's frozen offer, not the Session's current settings.
     bash_offered: bool,
     retention: ?Retention = null,
 };
 
-/// Borrowed Host queue and the durable attempt identity used for its filename.
 pub const Retention = struct { queue: *output_retention.Queue, action_id: u64, attempt_ordinal: u64 };
 
 const State = union(enum) { active, init_failed: anyerror, done };
@@ -48,9 +42,6 @@ deadline_ms: u64,
 state: State,
 retention: ?Retention,
 
-/// Initialize in place and keep this owner at one address until deinit.
-/// Input strings are borrowed until resolution or deinit. Only OOM escapes;
-/// failures to prepare or connect are reported by the first service call.
 pub fn start(self: *Running, gpa: Allocator, input: Input, now_ms: u64) error{OutOfMemory}!void {
     self.* = .{
         .gpa = gpa,
@@ -81,15 +72,12 @@ pub fn start(self: *Running, gpa: Allocator, input: Input, now_ms: u64) error{Ou
         .request = self.request,
         .answer = self.answer,
     }) catch |err| {
-        // Call.init owns cleanup of a socket it could not initialize. Before
-        // that it only writes borrowed buffers, so no Call exists to deinit.
         self.state = .{ .init_failed = err };
         return;
     };
     self.state = .active;
 }
 
-/// Closing an active Call cancels it. Safe after resolution or failed start.
 pub fn deinit(self: *Running) void {
     if (self.state == .active) self.call.deinit();
     self.state = .done;
@@ -109,7 +97,6 @@ pub fn events(self: *const Running) i16 {
     return if (self.state == .active) self.call.events() else 0;
 }
 
-/// Whether cancellation must report an unknown remote outcome.
 pub fn requestSent(self: *const Running) bool {
     return self.state == .active and self.call.requestSent();
 }
@@ -118,9 +105,6 @@ pub fn deadlineMs(self: *const Running) u64 {
     return self.deadline_ms;
 }
 
-/// A terminal service writes once and releases all per-call storage, including
-/// on writer failure. Further service calls do nothing; a new start may reuse
-/// this owner. The deadline wins over a reply not yet observed at that time.
 pub fn service(self: *Running, now_ms: u64, out: *std.Io.Writer) !?result_text.Code {
     switch (self.state) {
         .done => return null,
@@ -147,7 +131,6 @@ fn finish(self: *Running, out: *std.Io.Writer, ending: result_text.Ending) !resu
     defer self.deinit();
     const ended: result_text.Ended = .{ .server_name = self.server_name, .ended = ending };
     const excerpt = try result_text.writeExcerpt(out, ended);
-    // Without Bash there is no consumer for optional full output or its path.
     if (excerpt.omitted and self.bash_offered) {
         if (self.retention) |retention| {
             var name_buffer: [96]u8 = undefined;
@@ -157,7 +140,6 @@ fn finish(self: *Running, out: *std.Io.Writer, ending: result_text.Ending) !resu
                 return excerpt.code;
             }
         }
-        // Optional scratch loss must never change the MCP call's outcome.
         try out.writeAll("\nFull output was not retained.\n");
     }
     return excerpt.code;
@@ -168,7 +150,6 @@ const http1 = @import("../http1/request.zig");
 const test_poll = @import("test_poll");
 
 fn testInput(port: u16) Input {
-    // Only the port varies; the production target parser is exercised by Call.
     var target = http1.parseTarget("http://127.0.0.1:1/mcp") catch unreachable;
     target.port = port;
     return .{
@@ -357,8 +338,6 @@ test "Running oversized JSON and SSE answers retain evidence and release the cal
 }
 
 fn allocationFailureCase(gpa: Allocator) !void {
-    // Keep the large Call out of the test helper's frame; inject only the
-    // allocations owned by start, not the test's storage for Running itself.
     const running = try std.testing.allocator.create(Running);
     defer std.testing.allocator.destroy(running);
     try running.start(gpa, testInput(1), 0);
@@ -459,7 +438,6 @@ test "Running retains only omitted rendered MCP answers and preserves the excerp
                     try std.testing.expectEqual(@as(u64, full.len), used.load(.acquire));
                     try std.testing.expectEqual(@as(usize, 1), queue.occupied());
                     queue.cleanupAll();
-                    // Losing optional scratch never rewrites the saved resolution.
                     try std.testing.expectEqualStrings(expected.written(), out.written());
                 } else {
                     try std.testing.expectEqual(@as(usize, 0), queue.occupied());

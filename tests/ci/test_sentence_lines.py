@@ -1,4 +1,3 @@
-"""The optional sentence-line formatter preserves rendering and is idempotent."""
 from pathlib import Path
 import subprocess
 import tempfile
@@ -6,7 +5,6 @@ import unittest
 
 from sentence_lines import ROOT, documents, findings, reflow, rendered
 
-# Inputs where a careless split would change the rendered page.
 HAZARDS = (
     "A | B\n--- | ---\nOne. Two | Three. Four",
     "Intro. Name | Value\n--- | ---\nx | y",

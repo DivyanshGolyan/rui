@@ -1,45 +1,26 @@
-//! The conversation's one reader, decided over values its frontend read:
-//! which read an idle reader starts, when the next scan is due, what a
-//! settled read shows or says, and whether a page a read brings still shows.
-//! `SessionFrontend` reads the clock, the screen and the input, and starts,
-//! joins and shows what these decide.
 const std = @import("std");
 const departure = @import("session_departure.zig");
 const ReadPhase = departure.ReadPhase;
 
-/// How long after a read is applied the next scan waits.
 pub const scan_interval_ns: i96 = 250_000_000;
 
-/// When the next scan may start, once a read is applied at `now_ns`: at
-/// once for a chat-info capture asked for during that read, which is the next read's.
 pub fn scanDue(now_ns: i96, status_requested: bool) i96 {
     return if (status_requested) 0 else now_ns + scan_interval_ns;
 }
 
-/// How a joined read's failure counts: a pending inspection, or an Upgrade
-/// asked for, supersedes a silent read it cancelled.
 pub fn settleMode(upgrade_requested: bool, command_queued: bool) departure.Mode {
     return if (upgrade_requested or command_queued) .inspection else .active;
 }
 
-/// The inspection a read ran for, as settling needs it.
 pub const Inspection = enum { copy, command, other };
 
-/// What a completed read shows, by the phase it read.
 pub const Shows = enum {
-    /// Opens the Message page asked for.
     message,
-    /// Lands a recall step on the draft.
     recalled,
-    /// Submits the exact staged Message after retry eligibility is rechecked.
     retried,
-    /// Appends the staged live output.
     staged,
-    /// Sends the answer to /copy's target.
     copy,
-    /// Shows the inspection page.
     page,
-    /// Opens the tool row's output under it.
     tool,
 };
 
@@ -54,15 +35,10 @@ pub fn shows(phase: ReadPhase, inspection: Inspection) Shows {
     };
 }
 
-/// Whether a command's output is settled once its read ends: shown, or
-/// never written by a read that did not complete. Exit then no longer
-/// prints it.
 pub fn commandSettled(completed: bool, phase: ReadPhase) bool {
     return !completed or phase == .inspection;
 }
 
-/// What a read that failed while preparing says, when no diagnostic of its
-/// own is waiting. `copy` stands for /copy's own words for its failure.
 pub const Unavailable = union(enum) { say: []const u8, copy };
 
 pub fn unavailable(phase: ReadPhase, inspection: Inspection) Unavailable {
@@ -76,8 +52,6 @@ pub fn unavailable(phase: ReadPhase, inspection: Inspection) Unavailable {
     };
 }
 
-/// /copy's failure: a file it could not write says so; anything else is
-/// unavailable.
 pub fn copyFailure(to_file: bool, err: anyerror) []const u8 {
     if (to_file) switch (err) {
         error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => return "! This directory is not writable; draft retained.",
@@ -86,16 +60,10 @@ pub fn copyFailure(to_file: bool, err: anyerror) []const u8 {
     return "! Copy unavailable; draft retained.";
 }
 
-/// Where a page is asked from: live output or one transcript. No page is
-/// asked from elsewhere.
 pub const Place = enum { feed, elsewhere };
 
-/// What a Message page was asked over: its place, the Messages sent so
-/// far, and the generation of page requests.
 pub const Asked = struct { place: Place, sent: u64, generation: u64 };
 
-/// A Message page shows only over the unchanged place it was asked from,
-/// before any send, dismissal or newer Ctrl-O.
 pub fn messageShows(asked: Asked, now: Asked) bool {
     return asked.place != .elsewhere and std.meta.eql(asked, now);
 }
@@ -117,7 +85,6 @@ test "a Message page shows only over the place, sends and requests it was asked 
     for (changes) |now| try std.testing.expect(!messageShows(asked, now));
     const live: Asked = .{ .place = .feed, .sent = 0, .generation = 0 };
     try std.testing.expect(messageShows(live, live));
-    // Nothing asked from elsewhere shows, even over itself.
     const elsewhere: Asked = .{ .place = .elsewhere, .sent = 0, .generation = 0 };
     try std.testing.expect(!messageShows(elsewhere, elsewhere));
 }

@@ -1,5 +1,3 @@
-//! Socket calls whose Linux and Darwin results differ.
-
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -9,7 +7,6 @@ pub const send_flags: c_int = if (builtin.os.tag == .linux) std.c.MSG.NOSIGNAL e
 
 pub const ConnectStatus = enum { connected, refused, pending, failed };
 
-/// A null socket error means the corresponding getsockopt failed.
 pub fn connectResult(first: ?c_int, peer: std.posix.E, reread: ?c_int) ConnectStatus {
     const initial = first orelse return .failed;
     if (initial != 0) return .refused;
@@ -43,7 +40,6 @@ test "connect result classifies socket observations" {
         .{ @as(?c_int, 111), std.posix.E.SUCCESS, @as(?c_int, null), ConnectStatus.refused },
         .{ @as(?c_int, 0), std.posix.E.SUCCESS, @as(?c_int, null), ConnectStatus.connected },
         .{ @as(?c_int, 0), std.posix.E.NOTCONN, @as(?c_int, null), ConnectStatus.pending },
-        // Darwin #1106: a reset arrives after the first SO_ERROR read.
         .{ @as(?c_int, 0), std.posix.E.INVAL, @as(?c_int, 61), ConnectStatus.refused },
         .{ @as(?c_int, 0), std.posix.E.INVAL, @as(?c_int, 0), ConnectStatus.failed },
         .{ @as(?c_int, 0), std.posix.E.INVAL, @as(?c_int, null), ConnectStatus.failed },
@@ -51,7 +47,6 @@ test "connect result classifies socket observations" {
     inline for (cases) |case| try std.testing.expectEqual(case[3], connectResult(case[0], case[1], case[2]));
 }
 
-/// Suppress SIGPIPE on Darwin without changing the socket's blocking mode.
 pub fn suppressSigpipe(fd: std.c.fd_t) bool {
     if (builtin.os.tag.isDarwin()) {
         const one: c_int = 1;
@@ -60,8 +55,6 @@ pub fn suppressSigpipe(fd: std.c.fd_t) bool {
     return true;
 }
 
-/// Close-on-exec, non-blocking, over TCP no Nagle delay, and on Darwin no
-/// SIGPIPE when the peer went away.
 pub fn configure(fd: std.c.fd_t, tcp: bool) bool {
     if (std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) < 0) return false;
     const flags = std.c.fcntl(fd, std.c.F.GETFL);
@@ -82,7 +75,6 @@ pub fn shutdown(fd: std.c.fd_t, how: c_int) Shutdown {
 }
 
 test "shutdown of an unconnected socket reports the peer gone" {
-    // TCP: Linux accepts shutdown of an unconnected Unix stream socket.
     const fd = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0);
     try std.testing.expect(fd >= 0);
     defer _ = std.c.close(fd);

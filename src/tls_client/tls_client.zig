@@ -1,30 +1,11 @@
-//! What every Rui TLS client shares, over the pinned OpenSSL: the client
-//! context settings, host naming and trust loading. The HTTP/2 client and
-//! the Store's Postgres and MySQL wire each build their own context and
-//! sessions from these, so `SSL_CERT_FILE`, `SSL_CERT_DIR`, the host's
-//! certificate directory and bundles and `network.caFile` mean the same
-//! everywhere.
-//!
-//! A transport build module, like h2: it shares only the value-only URL
-//! module with Rui and links OpenSSL once per binary. It holds no verification
-//! of its own beyond OpenSSL's: Apple SecTrust, which h2 uses for system
-//! trust on macOS, stays with h2.
-//!
-//! Verification is never off: nothing here sets SSL_VERIFY_NONE.
 const std = @import("std");
 const builtin = @import("builtin");
 
-/// The pinned OpenSSL's declarations. Every module that calls OpenSSL uses
-/// these, so their types are one set.
 pub const c = @import("openssl_c");
 
-/// Socket setup and send flags for the Store's wire clients, which cannot
-/// reach src/os: Linux's MSG_NOSIGNAL per send, Darwin's SO_NOSIGPIPE once.
 pub const socket = struct {
     pub const send_flags: c_int = if (builtin.os.tag == .linux) std.c.MSG.NOSIGNAL else 0;
 
-    /// Close-on-exec, non-blocking, over TCP no Nagle delay, and on Darwin
-    /// no SIGPIPE when the peer went away.
     pub fn configure(fd: std.c.fd_t, tcp: bool) bool {
         if (std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) < 0) return false;
         const flags = std.c.fcntl(fd, std.c.F.GETFL);
@@ -39,22 +20,13 @@ pub const socket = struct {
     }
 };
 
-/// The longest DNS name; IP literals are shorter.
 pub const max_host_bytes = @import("url").max_host_bytes;
 
-/// What a peer's certificate chain is checked against.
 pub const Trust = union(enum) {
-    /// OpenSSL's `SSL_CERT_FILE` (a PEM bundle) and `SSL_CERT_DIR`
-    /// (colon-separated hashed directories) when either is set and not
-    /// empty, read when trust loads; otherwise, on Linux, the host's hashed
-    /// certificate directory when it has one; otherwise the first readable
-    /// bundle among the host's usual CA bundle paths.
     system,
-    /// Only the certificates in this PEM file (`network.caFile`).
     ca_file: []const u8,
 };
 
-/// Why trust would not load.
 pub const TrustError = error{ TrustUnavailable, InvalidCaFile, InvalidSslCertFile, InvalidSslCertDir };
 
 pub const HostKind = enum { dns_name, ip_literal };
@@ -63,18 +35,16 @@ pub const HostKind = enum { dns_name, ip_literal };
 /// bundles. OpenSSL reads a root from one only when a peer's chain names it,
 /// where a bundle is parsed whole when trust loads.
 pub const system_directories = [_][:0]const u8{
-    "/etc/ssl/certs", // Debian, Ubuntu, Arch, openSUSE
-    "/etc/pki/tls/certs", // Fedora's update-ca-trust since 2024
+    "/etc/ssl/certs",
+    "/etc/pki/tls/certs",
 };
 
-/// Linux host CA bundles, probed in this order when trust loads, at run
-/// time so a cross-built or relocated binary still finds the host's bundle.
 pub const system_bundles = [_][:0]const u8{
-    "/etc/ssl/certs/ca-certificates.crt", // Debian, Ubuntu, Arch, Alpine
-    "/etc/pki/tls/certs/ca-bundle.crt", // Fedora, RHEL
-    "/etc/ssl/ca-bundle.pem", // openSUSE
-    "/etc/pki/tls/cacert.pem", // OpenELEC
-    "/etc/ssl/cert.pem", // some minimal images
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/ca-bundle.pem",
+    "/etc/pki/tls/cacert.pem",
+    "/etc/ssl/cert.pem",
 };
 
 /// TLS 1.2 suites, all AEAD with ephemeral keys (RFC 9113 9.2.2). TLS 1.3
@@ -84,11 +54,6 @@ const tls12_ciphers = "ECDHE+AESGCM:ECDHE+CHACHA20";
 const no_ticket: u64 = 1 << 14;
 pub const no_renegotiation: u64 = 1 << 30;
 
-/// A client context with the settings every Rui TLS connection shares:
-/// TLS 1.2 or later with AEAD suites on 1.2, no renegotiation, peer
-/// verification, no session cache or tickets, no record buffers held while
-/// idle, and partial writes from a moving buffer. The caller adds trust and
-/// any ALPN.
 pub fn newContext() ?*c.SSL_CTX {
     const ctx = c.SSL_CTX_new(c.TLS_client_method()) orelse return null;
     if (c.SSL_CTX_set_min_proto_version(ctx, c.TLS1_2_VERSION) != 1 or
@@ -104,16 +69,11 @@ pub fn newContext() ?*c.SSL_CTX {
     return ctx;
 }
 
-/// Sets what `ssl` verifies `host` against: SNI and the name check for a
-/// DNS name, the IP check (and no SNI) for an IP literal. A deferred
-/// session's name is checked after the handshake by its owner (h2's
-/// SecTrust), not OpenSSL.
 pub fn nameHost(ssl: *c.SSL, host_z: [*:0]const u8, kind: HostKind, deferred: bool) bool {
     const named = if (kind == .ip_literal)
         deferred or c.X509_VERIFY_PARAM_set1_ip_asc(c.SSL_get0_param(ssl), host_z) == 1
     else
         c.SSL_set_tlsext_host_name(ssl, host_z) == 1 and (deferred or c.SSL_set1_host(ssl, host_z) == 1);
-    // A wildcard covers a whole label (`*.example.com`), never part of one.
     c.SSL_set_hostflags(ssl, c.X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
     return named;
 }
@@ -127,9 +87,6 @@ pub fn loadTrust(ctx: *c.SSL_CTX, trust: Trust) TrustError!void {
             if (c.SSL_CTX_load_verify_file(ctx, terminated) != 1) return error.InvalidCaFile;
         },
         .system => {
-            // OpenSSL's documented overrides. Either one replaces the probe,
-            // and a path that cannot be loaded fails instead of falling
-            // back, so a wrong setting is never silently ignored.
             const file = opensslTrustVariable("SSL_CERT_FILE");
             const dirs = opensslTrustVariable("SSL_CERT_DIR");
             if (file != null or dirs != null) {
@@ -154,17 +111,11 @@ pub fn loadTrust(ctx: *c.SSL_CTX, trust: Trust) TrustError!void {
     }
 }
 
-/// An OpenSSL trust variable's value, or null when unset or empty.
 fn opensslTrustVariable(name: [*:0]const u8) ?[*:0]const u8 {
     const value = std.c.getenv(name) orelse return null;
     return if (value[0] == 0) null else value;
 }
 
-/// Whether `path` is a directory holding at least one readable certificate
-/// under its subject-hash name. A directory of bundles alone would load as
-/// a store with no roots, so it does not count; neither does one whose
-/// hash entries all dangle, so a missing store still fails when trust loads.
-/// noinline: keeps this path buffer out of loadTrust's frame.
 pub noinline fn hashedDirectory(path: [:0]const u8) bool {
     const directory = std.c.opendir(path) orelse return false;
     defer _ = std.c.closedir(directory);
@@ -191,12 +142,6 @@ pub fn isSubjectHashName(name: []const u8) bool {
     return true;
 }
 
-/// Whether a colon-separated list, as OpenSSL splits SSL_CERT_DIR, names at
-/// least one directory and every element is a directory this process can
-/// search, which is all OpenSSL's lookup needs. Empty elements are skipped,
-/// as OpenSSL skips them.
-/// noinline: trust loads once per context, and this path buffer would
-/// otherwise sit in the caller's frame beside loadTrust's own.
 noinline fn allDirectories(list: []const u8) bool {
     var paths = std.mem.tokenizeScalar(u8, list, ':');
     var count: usize = 0;

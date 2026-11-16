@@ -179,8 +179,6 @@ func initializeTemplate(binary, sqliteBinary, directory, store string, deadline 
 	if work == nil {
 		_, work = client.WaitResult("template-message")
 	}
-	// Allocate all live identities through production configuration. Only the
-	// Message/history population below is synthesized in the stopped Store.
 	create := func(key string) (string, error) {
 		workspace, err := measurement.RepositoryRoot()
 		if err != nil {
@@ -210,16 +208,11 @@ func initializeTemplate(binary, sqliteBinary, directory, store string, deadline 
 	if err := errors.Join(work, host.Stop(measurement.TeardownAllowance), e.server.Close()); err != nil {
 		return nil, err
 	}
-	// turn and message_admission reference each other, so their foreign keys
-	// are checked at COMMIT, once both are gone.
 	_, err = sql(deadline, sqliteBinary, store, "BEGIN; PRAGMA defer_foreign_keys=ON; DELETE FROM conversation_entry; DELETE FROM model_operation; DELETE FROM turn; DELETE FROM message_admission; DELETE FROM core_command WHERE command_key='template-message'; COMMIT;")
 	return eligible, err
 }
 
 func populate(deadline measurement.Deadline, sqliteBinary, store string, p population) error {
-	// Production initialization above owns schema and content creation. This SQL only
-	// expands controlled durable populations while no Host is running. Failed history
-	// never escalates; its synthetic zero capacity makes no catalog/default claim.
 	query := fmt.Sprintf(`PRAGMA foreign_keys=ON; BEGIN;
 CREATE TEMP TABLE q(v INTEGER);
 INSERT INTO q SELECT content_id FROM content WHERE byte_length>0 ORDER BY content_id DESC LIMIT 1;
@@ -262,8 +255,6 @@ DROP TABLE q; COMMIT;`, p.History, p.Ineligible, p.Eligible)
 	if _, err := sql(deadline, sqliteBinary, store, query); err != nil {
 		return err
 	}
-	// Production leaves no Message, stop or settled Turn without its Session
-	// position, and treats one that has none as a corrupt Store.
 	check, err := sql(deadline, sqliteBinary, store, `SELECT 'foreign-key:'||count(*) FROM pragma_foreign_key_check HAVING count(*)!=0
 UNION ALL SELECT 'unpositioned:'||count(*) FROM (SELECT 1 FROM message_admission WHERE admission_position IS NULL UNION ALL SELECT 1 FROM session_stop WHERE position IS NULL UNION ALL SELECT 1 FROM turn WHERE (outcome_code IS NULL)!=(outcome_position IS NULL)) HAVING count(*)!=0
 UNION ALL SELECT 'history:'||count(*) FROM model_operation WHERE session_ref=(SELECT target FROM core_command WHERE command_key='template-configure') HAVING count(*)!=`+strconv.Itoa(p.History)+`
@@ -526,8 +517,6 @@ func runCase(binary, sqliteBinary, root, name string, p population, resources bo
 		recordBehaviorFailure(result, "Host stop after settlement observation: "+stopError.Error())
 	}
 	auditDeadline := measurement.NewDeadline(15 * time.Second)
-	// Enumerate the closure of Messages, Turns and Operations touching the
-	// controlled Sessions so no entity can hide behind another's current pointer.
 	rows, auditQueryError := sql(auditDeadline, sqliteBinary, store, executionAuditSQL)
 	providerRequests := e.Requests()
 	result["provider_request_count"] = providerRequests
