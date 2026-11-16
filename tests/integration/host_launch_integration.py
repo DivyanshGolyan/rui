@@ -693,6 +693,23 @@ def new_host_provider_policy(root, env):
           "no authorization headers or forwarding", flush=True)
 
 
+def resume_saved_host(root, env, directory, reference):
+    with terminal_process([RUI, "session", "resume", "--store", directory, "--", reference], env=env, cwd=root) as (caller, master):
+        output = bytearray()
+        screen = ScreenCapture(COLUMNS, ROWS, reply=answers_to(master))
+        until = time.monotonic() + COMMAND_TIMEOUT
+        while "Type a task" not in screen.completed or "Opening…" in screen.completed:
+            remaining = until - time.monotonic()
+            assert remaining > 0 and select.select([master], [], [], remaining)[0], (caller.poll(), screen.completed, output)
+            chunk = os.read(master, 65536)
+            assert chunk and len(output) + len(chunk) < PTY_OUTPUT_LIMIT, output
+            output.extend(chunk)
+            screen.feed(chunk)
+        assert status(directory, env)["status"] == "ready"
+        os.write(master, b"\x03")
+        assert wait_for_terminal_exit(caller, master, output, time.monotonic() + 5) == 0, output
+
+
 def saved_settings(root, env):
     store = root / "saved-settings"
     for path, value in (("execution.activeCapacity", "3"), ("execution.paused", "true"),
@@ -748,40 +765,70 @@ def saved_settings(root, env):
 
     # Saved placement is shared by foreground intake, the starter and clients.
     # A short interface remains necessary even under CI's long TMPDIR.
-    for relocate_store in (False, True):
-        moved = root / ("saved-moved-store" if relocate_store else "saved-moved")
-        elsewhere = pathlib.Path(tempfile.mkdtemp(prefix="rui-if-", dir="/tmp")).resolve()
+    for relocate_store, explicit in ((data, interface) for data in (False, True) for interface in (False, True)):
+        name = f"saved-placement-{int(relocate_store)}-{int(explicit)}"
+        moved = root / name
+        elsewhere = pathlib.Path(tempfile.mkdtemp(prefix="rui-if-", dir="/tmp")).resolve() if explicit else None
+        home = root / f"{name}-home"
+        home.mkdir(mode=0o700)
+        selected_env = dict(env, HOME=str(home))
         try:
-            host_ok(env, "set", "--store", moved, "interface.dir", elsewhere)
+            host_ok(selected_env, "set", "--store", moved, "execution.paused", "true")
+            if explicit:
+                host_ok(selected_env, "set", "--store", moved, "interface.dir", elsewhere)
             if relocate_store:
-                host_ok(env, "set", "--store", moved, "store.sqlite.dir", moved / "data")
-            too_long = host_command(env, "set", "--store", moved, "interface.dir", "/" + "d" * 94)
+                host_ok(selected_env, "set", "--store", moved, "store.sqlite.dir", moved / "data")
+            too_long = host_command(selected_env, "set", "--store", moved, "interface.dir", "/" + "d" * 94)
             assert too_long.returncode == 2 and "interface.dir: path is longer than 94 bytes" in too_long.stderr, too_long
-            started = run_start(moved, env)
+            defaults = subprocess.run([RUI, "defaults", "configure", "--store", moved], env=selected_env,
+                                      text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
+            assert defaults.returncode == 0, defaults
+            chosen = json.loads(defaults.stdout)
+            assert chosen["store"] == str(moved.resolve()) and chosen["store_available"], chosen
+            assert chosen["host"]["status"] == "unavailable", chosen
+            started = run_start(moved, selected_env)
             assert started.returncode == 0, started
-            info = status(moved, env)
+            info = status(moved, selected_env)
             assert instance(info, DEFAULT_ACTIVE_CAPACITY)
-            assert (elsewhere / "rui.sock").is_socket()
-            record = root / ("moved-store-request.json" if relocate_store else "moved-request.json")
-            command = subprocess.run([RUI, "session", "start", "--store", str(moved),
+            if explicit:
+                assert (elsewhere / "rui.sock").is_socket()
+            defaults = subprocess.run([RUI, "defaults", "show"], env=selected_env,
+                                      text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
+            assert defaults.returncode == 0 and json.loads(defaults.stdout)["host"]["status"] == "ready", defaults
+            retained = run_start(moved, selected_env, "--set", "execution.activeCapacity=3")
+            assert retained.returncode == 0 and instance(json.loads(retained.stdout), DEFAULT_ACTIVE_CAPACITY) == info["instance"], retained
+            assert f"rui host pause --store $'{moved.resolve()}'\n" in retained.stderr, retained
+            record = root / f"{name}-request.json"
+            command = subprocess.run([RUI, "session", "start",
                                       "--record", str(record), "--key", "placement-start",
                                       "--provider", "codex", "--model", "gpt-5.5", "--workspace", str(root)],
-                                     env=env, input="Saved placement evidence", text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
+                                     env=selected_env, input="Saved placement evidence", text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
             assert command.returncode == 0, command
             receipt = json.loads(command.stdout)
             expected_store = (moved / "data" if relocate_store else moved).resolve()
             assert receipt["context"]["store"] == str(expected_store), receipt
             observed = subprocess.run([RUI, "request", "inspect", "--store", str(moved), "--key", "placement-start"],
-                                      env=env, text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
+                                      env=selected_env, text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
             assert observed.returncode == 0, observed
             replay = subprocess.run([RUI, "request", "recover", "--store", str(moved), "--record", str(record), "--kind", "message"],
-                                    env=env, text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
+                                    env=selected_env, text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
             assert replay.returncode == 0, replay
-            paused = host_command(env, "pause", "--store", moved)
+            configured = subprocess.run([RUI, "session", "configure", "--store", moved, "--workspace", root,
+                                         "--provider", "codex", "--model", "gpt-5.5", "--tools", "none"],
+                                        env=selected_env, text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
+            assert configured.returncode == 0, configured
+            reference = json.loads(configured.stdout)["answer"]["session"]
+            resume_saved_host(root, selected_env, moved, reference)
+            paused = host_command(selected_env, "pause", "--store", moved)
+            assert paused.returncode == 0 and json.loads(paused.stdout)["retirement"] == "confirmed", paused
+            resume_saved_host(root, selected_env, moved, reference)
+            assert status(moved, selected_env)["instance"] != info["instance"]
+            paused = host_command(selected_env, "pause", "--store", moved)
             assert paused.returncode == 0 and json.loads(paused.stdout)["retirement"] == "confirmed", paused
         finally:
             forced_crash_cleanup(moved)
-            shutil.rmtree(elsewhere)
+            if elsewhere is not None:
+                shutil.rmtree(elsewhere)
 
     # Placement overrides cannot leave later directory clients guessing.
     unsaved = run_start(root / "unsaved-placement", env, "--set", f"interface.dir={root}")
@@ -1013,6 +1060,9 @@ def main():
         credential = root / "credentials" / "missing.json"
         env = environment(home, credential)
         check_provider_disposal(dispose_provider_case, stop_endpoint)
+        if len(sys.argv) == 3 and sys.argv[2] == "selection":
+            saved_settings(root, env)
+            return
         if len(sys.argv) == 3 and sys.argv[2] == "provider-policy":
             new_host_provider_policy(root, env)
             return
