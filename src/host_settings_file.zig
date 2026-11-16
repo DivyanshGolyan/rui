@@ -4,7 +4,7 @@
 const std = @import("std");
 const hs = @import("host_settings.zig");
 const start_report = @import("start_report.zig");
-const credentials = @import("codex_credentials.zig");
+const private_file = @import("private_file.zig");
 const core_tools = @import("core_tools.zig");
 const wire_request = @import("wire_request.zig");
 
@@ -34,7 +34,7 @@ pub fn read(io: std.Io, settings_gpa: std.mem.Allocator, scratch: std.mem.Alloca
         std.crypto.secureZero(u8, buffer);
         scratch.free(buffer);
     }
-    const bytes = credentials.readPrivate(path, buffer) catch return unreadable(failure);
+    const bytes = private_file.read(io, path, buffer) catch return unreadable(failure);
     if (bytes) |document| {
         try hs.apply(settings, settings_gpa, document, .file, checkPreset, failure);
         return std.json.parseFromSliceLeaky(std.json.Value, scratch, document, .{ .allocate = .alloc_always, .parse_numbers = false }) catch |err| {

@@ -1,5 +1,5 @@
 const std = @import("std");
-const c = @import("posix");
+const private_file = @import("private_file.zig");
 const policy = @import("codex_credential_policy.zig");
 const test_poll = @import("test_poll");
 
@@ -185,15 +185,7 @@ pub fn createPrivateObserved(path: []const u8, bytes: []const u8, buffer: []u8, 
 /// directory, read into `buffer`; null when it does not exist. The caller
 /// wipes the returned bytes.
 pub fn readPrivate(path: []const u8, buffer: []u8) !?[]u8 {
-    var owner = Owner.open(path) catch |err| switch (err) {
-        error.FileNotFound => return null,
-        else => return err,
-    };
-    defer owner.close();
-    return owner.readBytes(buffer) catch |err| switch (err) {
-        error.FileNotFound => null,
-        else => err,
-    };
+    return private_file.read(io, path, buffer);
 }
 
 /// Replaces the owner-only file at `path` with `bytes`, durably and atomically.
@@ -243,18 +235,9 @@ const Owner = struct {
     name_len: usize,
 
     fn open(path: []const u8) !Owner {
-        if (!std.fs.path.isAbsolute(path)) return error.PathMustBeAbsolute;
-        const basename = std.fs.path.basename(path);
-        if (basename.len == 0 or basename.len > std.Io.Dir.max_name_bytes or
-            std.mem.eql(u8, basename, ".") or std.mem.eql(u8, basename, ".."))
-            return error.InvalidCredentialPath;
-        const parent_path = std.fs.path.dirname(path) orelse return error.InvalidCredentialPath;
-        // Symlinks above the parent are followed, as macOS's /var ->
-        // /private/var needs; the parent itself must not be one. Someone able
-        // to change a link above it could move real directories there.
-        var parent = try std.Io.Dir.openDirAbsolute(io, parent_path, .{ .iterate = true, .follow_symlinks = false });
+        var parent = try private_file.openParent(io, path);
         errdefer parent.close(io);
-        try validatePrivate(parent);
+        const basename = std.fs.path.basename(path);
         var result: Owner = .{ .parent = parent, .name = undefined, .name_len = basename.len };
         @memcpy(result.name[0..basename.len], basename);
         return result;
@@ -297,7 +280,7 @@ const Owner = struct {
             };
         };
         errdefer file.close(io);
-        try validatePrivateFile(file);
+        try private_file.validateFile(io, file);
         return file;
     }
 
@@ -310,24 +293,7 @@ const Owner = struct {
     /// The whole file, which must be shorter than `buffer`. The caller wipes
     /// the bytes it returns; on error nothing read stays in `buffer`.
     fn readBytes(self: *Owner, buffer: []u8) ![]u8 {
-        // Reject a private FIFO after opening it without waiting for a writer.
-        const file: std.Io.File = .{ .handle = try std.posix.openat(self.parent.handle, self.finalName(), .{
-            .ACCMODE = .RDONLY,
-            .NONBLOCK = true,
-            .NOFOLLOW = true,
-            .CLOEXEC = true,
-        }, 0), .flags = .{ .nonblocking = true } };
-        defer file.close(io);
-        try validatePrivateFile(file);
-        const stat = try file.stat(io);
-        if (stat.size >= buffer.len) return error.CredentialFileTooLarge;
-        // The read writes at most this prefix; the rest stays untouched.
-        const bytes = buffer[0..@intCast(stat.size + 1)];
-        errdefer std.crypto.secureZero(u8, bytes);
-        const count = try file.readPositionalAll(io, bytes, 0);
-        if (count != stat.size) return error.CredentialFileChanged;
-        std.crypto.secureZero(u8, bytes[count..]);
-        return bytes[0..count];
+        return private_file.readAt(io, self.parent, self.finalName(), buffer);
     }
 
     fn publish(self: *Owner, record: *const Record, buffer: *[max_file_bytes + 1]u8) !void {
@@ -357,7 +323,7 @@ const Owner = struct {
             .follow_symlinks = false,
         })) |old| {
             defer old.close(io);
-            try validatePrivateFile(old);
+            try private_file.validateFile(io, old);
         } else |err| switch (err) {
             error.FileNotFound => {},
             else => return err,
@@ -370,7 +336,7 @@ const Owner = struct {
             .follow_symlinks = false,
         })) |stale| {
             defer stale.close(io);
-            try validatePrivateFile(stale);
+            try private_file.validateFile(io, stale);
             try self.parent.deleteFile(io, temp_name);
         } else |err| switch (err) {
             error.FileNotFound => {},
@@ -411,27 +377,6 @@ const Owner = struct {
         return syncPrivateDirectory(self.parent);
     }
 };
-
-fn validatePrivate(dir: std.Io.Dir) !void {
-    const stat = try dir.stat(io);
-    if (stat.kind != .directory or stat.permissions.toMode() & 0o077 != 0)
-        return error.InsecureCredentialDirectory;
-    try validateOwner(dir.handle);
-}
-
-fn validatePrivateFile(file: std.Io.File) !void {
-    const stat = try file.stat(io);
-    if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0)
-        return error.InsecureCredentialFile;
-    try validateOwner(file.handle);
-}
-
-fn validateOwner(handle: anytype) !void {
-    if (!@import("os/os.zig").supported) return error.UnsupportedPlatform;
-    var stat: c.struct_stat = undefined;
-    if (c.fstat(handle, &stat) != 0) return error.StatFailed;
-    if (stat.st_uid != c.geteuid()) return error.NotOwnedByCurrentUser;
-}
 
 fn testRecord(account: []const u8, generation: u64) !Record {
     var result: Record = .{ .generation = generation, .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 1234, .refreshed_at = 1_750_000_000 };
