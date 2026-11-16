@@ -142,13 +142,13 @@ class OverviewTests(unittest.TestCase):
             def wait(self, predicate, *, label):
                 assert predicate(), label
 
-        frame = "  + New Session\n  ✓ TD4 saved conversation\n  Settings\nenter open"
+        frame = " + New Session\n   TD4 saved conversation\n   Settings\nenter open"
         escaped_overview(Terminal(frame), "TD4 saved conversation")
         for marker in ("+ New Session", "TD4 saved conversation", "Settings", "enter open"):
             with self.subTest(missing=marker), self.assertRaisesRegex(AssertionError, "overview after expired standalone Esc"):
                 escaped_overview(Terminal(frame.replace(marker, "missing")), "TD4 saved conversation")
         with self.assertRaisesRegex(AssertionError, "overview after expired standalone Esc"):
-            escaped_overview(Terminal(frame.replace("✓ TD4 saved conversation", "○ a1b2c3")),
+            escaped_overview(Terminal(frame.replace("  TD4 saved conversation", "○ a1b2c3")),
                              "TD4 saved conversation")
         for editor, failure in (("Type a task", "overview has an editor"),
                                 (" › ab", "overview has a composer"),

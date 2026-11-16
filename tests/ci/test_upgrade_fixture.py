@@ -102,7 +102,7 @@ class UpgradeEmptyChatTest(unittest.TestCase):
                 self.hidden(wrong)
 
     def test_overview_waits_past_sidebar_controls_for_the_full_list(self):
-        sidebar = "  + New Session                Archived │\n  Settings │ gpt-6-luna · low\n"
+        sidebar = " + New Session                Archived │\n   Settings │ gpt-6-luna · low\n"
         frames = [sidebar + "│ › Type a task", sidebar + "│ › unsent draft",
                   "+ New Session                Archived\nSettings\nenter open"]
         self.screen.observe = Mock(side_effect=frames)

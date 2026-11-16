@@ -106,7 +106,7 @@ class TerminalProcessTest(unittest.TestCase):
                     with self.subTest(prefix=prefix, mark=mark, text=text):
                         screen = " › earlier message\n" + prefix + mark + text
                         self.assertEqual(composer_empty(screen, 1), text in ("", " Type a task"))
-        self.assertFalse(composer_empty("  + New Session\n  Settings", 0))
+        self.assertFalse(composer_empty(" + New Session\n   Settings", 0))
 
     def test_command_frame_waits_past_placeholder_for_typed_command_and_reply(self):
         from human_cli_fixture import command_frame
@@ -139,7 +139,7 @@ class TerminalProcessTest(unittest.TestCase):
         with patch("human_cli_fixture.keyed_frame") as keyed:
             overview_frame(17, lambda screen: "Settings" in screen)
         predicate = keyed.call_args.args[2]
-        listed = "  + New Session\n  Settings\nenter open"
+        listed = " + New Session\n   Settings\nenter open"
         self.assertTrue(predicate(listed, 0, 0))
         self.assertFalse(predicate(listed.replace("enter open", ""), 0, 0))
         self.assertFalse(predicate(listed + "\n › Type a task", 3, 3))
@@ -157,7 +157,7 @@ class TerminalProcessTest(unittest.TestCase):
                 with patch("human_cli_fixture.keyed_frame") as keyed:
                     overview_frame(17, accept, ready=False)
                 relaxed = keyed.call_args.args[2]
-                frame = "  + New Session\n  Settings\n" + notice
+                frame = " + New Session\n   Settings\n" + notice
                 self.assertFalse(strict(frame, 0, 0))
                 self.assertTrue(relaxed(frame, 0, 0))
                 self.assertTrue(strict(frame + "\nenter open", 0, 0))

@@ -134,7 +134,7 @@ pub const Settings = struct {
         if (height < 2) return surface;
         const style = widget_style.of(self.caps, .{ .colour = .quiet, .background = ground });
         const version = @import("transport_options").version ++ " ";
-        const label_text = "  Settings";
+        const label_text = "   Settings";
         const memory = try @import("memory_text.zig").fit(ctx.arena, self.memory, self.caps.unicode, size.width -| @as(u16, label_text.len + 2 + 2 + version.len));
         const right = if (memory.len == 0) version else try std.fmt.allocPrint(ctx.arena, "{s}  {s}", .{ memory, version });
         const footer: @import("widgets/Footer.zig") = .{ .left = "", .right = right, .style = style };
@@ -167,7 +167,7 @@ test "session tabs press only separate drawn destinations and clear clipped targ
             try shown.render(window, controls.widget());
             var line: std.ArrayList(u8) = .empty;
             for (0..width) |col| try line.appendSlice(arena.allocator(), screen.readCell(@intCast(col), 0).?.char.grapheme);
-            try std.testing.expect(std.mem.startsWith(u8, line.items, "  + New Session"));
+            try std.testing.expect(std.mem.startsWith(u8, line.items, " + New Session"));
         }
         for (0..3) |row| for (0..@max(1, width)) |col| {
             clicks.got = null;
@@ -189,7 +189,7 @@ test "overview Settings row is pinned selected and opens only on its second line
         try std.testing.expectEqual(@as(u16, 2), surface.size.height);
         try std.testing.expectEqualStrings("─", surface.readCell(0, 0).char.grapheme);
         const text = try cells(arena.allocator(), surface, 1);
-        try std.testing.expect(std.mem.startsWith(u8, text, "  Settings"));
+        try std.testing.expect(std.mem.startsWith(u8, text, "   Settings"));
         try std.testing.expect(std.mem.endsWith(u8, text, @import("transport_options").version ++ " "));
         for ([_]u16{ 0, 3, width - 1 }) |column| try std.testing.expectEqual(widget_style.of(settings.caps, .{ .background = .selection }).bg, surface.readCell(column, 1).style.bg);
     }
@@ -246,8 +246,8 @@ test "overview Settings memory gets the columns between the label and the versio
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const version = @import("transport_options").version ++ " ";
-    const full_width = "  Settings".len + 2 + 24 + 2 + version.len;
-    const rui_width = "  Settings".len + 2 + 9 + 2 + version.len;
+    const full_width = "   Settings".len + 2 + 24 + 2 + version.len;
+    const rui_width = "   Settings".len + 2 + 9 + 2 + version.len;
     for ([_]struct { width: usize, expected: []const u8 }{
         .{ .width = full_width, .expected = "rui 38 MB · tools 120 MB" },
         .{ .width = full_width - 1, .expected = "rui 38 MB" },
@@ -256,7 +256,7 @@ test "overview Settings memory gets the columns between the label and the versio
     }) |case| {
         const surface = try settings.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(case.width), .height = 2 }, .cell_size = .{} });
         const text = try cells(arena.allocator(), surface, 1);
-        try std.testing.expect(std.mem.startsWith(u8, text, "  Settings"));
+        try std.testing.expect(std.mem.startsWith(u8, text, "   Settings"));
         try std.testing.expect(std.mem.endsWith(u8, text, version));
         if (case.expected.len > 0) {
             try std.testing.expect(std.mem.endsWith(u8, text, try std.fmt.allocPrint(arena.allocator(), "{s}  {s}", .{ case.expected, version })));
