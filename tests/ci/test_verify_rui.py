@@ -2509,6 +2509,8 @@ class UpgradeFramesTest(unittest.TestCase):
             self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
             if state["upgrade"] == "chat":
                 self.assertEqual(state["open"], state["cast"][0]["label"])
+                self.assertEqual(state["cast"][0]["messages"], [state["cast"][0]["label"]])
+                self.assertIn(state["cast"][0]["label"], state["expect"])
                 self.assertIn("Upgraded to ", state["absent"])
                 before = state["comparison"]["before"]
                 self.assertIn("Upgraded to {upgrade_version}", before["expect"])
