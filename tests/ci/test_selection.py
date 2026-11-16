@@ -2,7 +2,7 @@ import ast
 import json
 import re
 import os
-from contextlib import ExitStack
+from contextlib import ExitStack, chdir
 from pathlib import Path
 import signal
 import shutil
@@ -45,6 +45,129 @@ def covered(target, targets):
             or any(target in cases and broad in targets for broad, cases in FIXTURE_COVERS.items())
             or target in {"check", "stack-frames"} and "check-full" in targets
             or target == "stack-frames" and "check" in targets)
+
+
+class BinarySourceSelectionTest(unittest.TestCase):
+    """Exercise the production CLI against committed source bytes, without mocks."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        ci = self.root / "tests/ci"
+        ci.mkdir(parents=True)
+        for module in Path(__file__).parent.glob("*.py"):
+            shutil.copyfile(module, ci / module.name)
+        # Only target declarations are needed by the selector's build reader.
+        self.write("build.zig", "".join(f'b.step("{target}", "");\n' for target in sorted(AVAILABLE)))
+        self.write("src/logic_tests.zig", "const cores = .{\n};\n")
+        self.git("init", "-q")
+        self.write(".git/info/exclude", "__pycache__/\n")
+        self.git("config", "user.email", "selector@example.invalid")
+        self.git("config", "user.name", "Selector regression")
+
+    def write(self, name, data):
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data.encode("utf-8", "surrogateescape") if isinstance(data, str) else data)
+
+    def git(self, *args):
+        return subprocess.check_output(["git", "-C", str(self.root), *args])
+
+    def commit(self):
+        self.git("add", "-A")
+        self.git("-c", "core.hooksPath=/dev/null", "commit", "-qm", "Selector fixture")
+        return self.git("rev-parse", "HEAD").decode().strip()
+
+    def plan(self, base, phase="review"):
+        result = subprocess.run([sys.executable, str(self.root / "tests/ci/select_tests.py"),
+                                 "--base", base, "--phase", phase], cwd=self.root,
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        plan = json.loads(result.stdout)
+        del plan["base"], plan["head"]
+        return plan
+
+    def test_binary_add_edit_delete_keep_graph_fallback_and_native_selection(self):
+        names = ["src/codecs/fixtures/image-input/" + name
+                 for name in ("octets.bin", "pixel.png", "raw-\udcfe.bin")]
+        initial = self.commit()
+        for embedded in (False, True):
+            for action in ("add", "edit", "delete"):
+                expected = {}
+                for binary in (False, True):
+                    with self.subTest(embedded=embedded, action=action, binary=binary):
+                        self.git("reset", "--hard", initial)
+                        if embedded:
+                            self.write("src/tests.zig", "".join(
+                                f'const image{index} = @embedFile("{name[4:]}");\n'
+                                for index, name in enumerate(names)))
+                        if action != "add":
+                            for name in names:
+                                self.write(name, b"old\x80\x00" if binary else b"old text")
+                        base = self.commit() if embedded or action != "add" else initial
+                        for name in names:
+                            if action == "delete":
+                                (self.root / name).unlink()
+                            else:
+                                self.write(name, bytes(range(256)) if binary else b"new text")
+                        self.commit()
+                        for phase in ("review", "development"):
+                            plan = self.plan(base, phase)
+                            if not binary:
+                                expected[phase] = plan
+                            self.assertEqual(plan, expected[phase])
+                            if phase == "review":
+                                targets = ["test-native"] if embedded else ["check"]
+                                self.assertEqual(plan["targets"],
+                                                 ["stack-frames", *targets] if embedded else targets)
+                                self.assertEqual(plan["native_targets"], targets)
+
+    def test_graph_reads_invalid_utf8_source_without_losing_embed_edges(self):
+        path = "src/image-\udcfe.bin"
+        self.write("src/tests.zig", b'// invalid byte: \x80\r\nconst image = @embedFile("image-\xfe.bin");\r')
+        self.write(path, b"old")
+        base = self.commit()
+        self.write(path, b"new")
+        self.commit()
+        plan = self.plan(base)
+        self.assertEqual(plan["targets"], ["stack-frames", "test-native"])
+        self.assertEqual(plan["native_targets"], ["test-native"])
+
+    def test_unchanged_binary_keeps_asserted_text_prevalence(self):
+        text = "A fixture waits for this message"
+        self.write("tests/integration/host_launch_integration.py", f"expected = {text!r}\n")
+        self.write("src/logic_tests.zig", 'const cores = .{ .{ "render.zig", @import("render.zig") },\n};\n')
+        initial = self.commit()
+        for copies in (0, 1, 2):
+            with self.subTest(binary_prose_copies=copies):
+                self.git("reset", "--hard", initial)
+                for index in range(2):
+                    # These remain unchanged across the selected diff. Binary
+                    # source still counts as an owner of any quoted prose.
+                    prose = text.encode() if index < copies else text.encode().replace(b"waits", b"wa\x80its")
+                    self.write(f"src/image{index}-\udcfe.bin", b'\x80\x00"' + prose + b'"')
+                self.write("src/render.zig", f'const label = "{text}";\r\nconst old = true;\r')
+                base = self.commit()
+                self.write("src/render.zig", f'const label = "{text}";\r\nconst new = true;\r')
+                self.commit()
+                plan = self.plan(base)
+                targets = ["host-launch-integration", "test-logic"] if copies < 2 else ["test-logic"]
+                self.assertEqual(plan["targets"], targets)
+                self.assertEqual(plan["native_targets"], targets)
+
+    def test_revision_bytes_round_trip_and_keep_universal_newlines(self):
+        from select_tests import revision_text
+
+        path = "src/octets.bin"
+        data = bytes(range(256)) + b"\r\nend\rline\n"
+        self.write(path, data)
+        commit = self.commit()
+        with chdir(self.root):
+            source = revision_text(commit, path)
+            self.assertIsNone(revision_text(commit, "src/absent.bin"))
+        self.assertEqual(source.encode("utf-8", "surrogateescape"),
+                         data.replace(b"\r\n", b"\n").replace(b"\r", b"\n"))
 
 
 class AssertedTextSelectionTest(unittest.TestCase):
