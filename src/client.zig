@@ -5548,7 +5548,7 @@ test "capture routing round trips six placements without conflating selector and
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     const Peer = struct {
-        fn serve(listener: *std.Io.net.Server, expected_store: []const u8) !void {
+        fn serve(listener: *std.Io.net.Server, expected_store: []const u8) anyerror!void {
             for (0..3) |_| {
                 const connection = try listener.accept(std.testing.io);
                 defer connection.close(std.testing.io);
@@ -5570,7 +5570,7 @@ test "capture routing round trips six placements without conflating selector and
                 }
                 try std.testing.expectEqualStrings(expected, request[0..body_used]);
                 var body: protocol.ResponseBuffer = .{};
-                const info: @import("host_reply.zig").HostInfo = .{ .store = expected_store, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .routes = protocol.routesAll(.unserved) };
+                const info: @import("host_reply.zig").HostInfo = .{ .store = expected_store, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .routes = protocol.routesAll(.unserved), .doublewrite = null };
                 try body.render(@import("host_reply.zig").renderHostInfo, .{info});
                 var head_buffer: [512]u8 = undefined;
                 const head = try std.fmt.bufPrint(&head_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\nConnection: close\r\n\r\n", .{body.len});
@@ -5620,6 +5620,7 @@ test "capture routing round trips six placements without conflating selector and
             listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
             future = try io.concurrent(Peer.serve, .{ &listener.?, paths.store_identity.slice() });
         }
+        defer if (kind == .mysql) std.Io.Dir.cwd().deleteTree(io, std.fs.path.dirname(paths.socket.slice()).?) catch @panic("routing test runtime cleanup failed");
         defer if (listener) |*server| server.deinit(io);
         defer if (future) |*pending| {
             _ = pending.cancel(io) catch {};
