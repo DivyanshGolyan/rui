@@ -762,14 +762,19 @@ test "configure parent inherits binding without a task, uses the create round bu
             child.configuration.parent.state = .value;
             try child.configuration.parent.value.set(parent.slice());
             var meter: RoundMeter = .{ .storage = &storage };
-            meter.start();
+            // COM_QUERY counts belong to one connection; replay reconnects reset them.
+            // Measure only the ordinary path whose budget is asserted below.
+            if (!case.rerun) meter.start();
+            const reconnects_before = if (case.rerun) storage.engine.mysql.state.testing_shape.reconnects else 0;
             const result = try storage.configure(&child, .{});
             try std.testing.expect(result == .accepted);
-            meter.stop(.configure);
             if (!case.rerun) {
+                meter.stop(.configure);
                 const measured = meter.measured.get(.configure).?;
                 try std.testing.expectEqual(round_budgets.get(.configure), measured.rounds);
                 if (case.engine == .mysql) try std.testing.expectEqual(measured.shape.expected(), measured.shape.queries);
+            } else {
+                try std.testing.expect(storage.engine.mysql.state.testing_shape.reconnects > reconnects_before);
             }
             const session = result.accepted.session;
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND parent_ref=?2 AND workspace=?3 AND provider='codex'", .{ session.slice(), parent.slice(), workspace }));
