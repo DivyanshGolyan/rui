@@ -47,6 +47,126 @@ def covered(target, targets):
             or target == "stack-frames" and "check" in targets)
 
 
+class BinarySourceSelectionTest(unittest.TestCase):
+    """Exercise the production CLI against committed blobs and a real index."""
+
+    def repository(self, root, embedded):
+        ci = root / "tests/ci"
+        ci.mkdir(parents=True)
+        for source in Path(__file__).resolve().parent.glob("*.py"):
+            shutil.copyfile(source, ci / source.name)
+        (root / "build.zig").write_text("\n".join(f'b.step("{name}", "");' for name in sorted(AVAILABLE)))
+        (root / "src").mkdir()
+        (root / "src/logic_tests.zig").write_text("const cores = .{\n};\n")
+        (root / "src/tests.zig").write_text(embedded, encoding="utf-8", errors="surrogateescape")
+        integration = root / "tests/integration"
+        integration.mkdir()
+        for script in ("host_launch_integration.py", "login_signal_integration.py"):
+            (integration / script).write_text('message = "A binary fixture draws this message"\n')
+        self.git(root, "init", "-q")
+        self.git(root, "config", "user.email", "selector@example.invalid")
+        self.git(root, "config", "user.name", "Selector regression")
+
+    def git(self, root, *args):
+        return subprocess.check_output(["git", "-C", str(root), *args])
+
+    def commit(self, root):
+        self.git(root, "add", "-A")
+        self.git(root, "commit", "-qm", "fixture state")
+        return self.git(root, "rev-parse", "HEAD").decode().strip()
+
+    def plan(self, root, base):
+        result = subprocess.run([sys.executable, str(root / "tests/ci/select_tests.py"),
+                                 "--base", base], cwd=root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_binary_add_edit_delete_preserve_graph_fallback_and_asserted_text(self):
+        payload = b'"A binary fixture draws this message"\r\n' + bytes(range(256))
+        for filename in ("octets.bin", "pixel.png", "octets.zig", "octets-\udcff.bin"):
+            for graph in (False, True):
+                for change in ("add", "edit", "delete"):
+                    with self.subTest(filename=filename, graph=graph, change=change), tempfile.TemporaryDirectory() as directory:
+                        root = Path(directory)
+                        path = "src/codecs/fixtures/image-input/" + filename
+                        embedded = f'const image = @embedFile("{path[4:]}");\n' if graph else ""
+                        self.repository(root, embedded)
+                        asset = root / path
+                        asset.parent.mkdir(parents=True)
+                        if change != "add":
+                            asset.write_bytes(payload)
+                        base = self.commit(root)
+                        if change == "delete":
+                            asset.unlink()
+                        else:
+                            asset.write_bytes(payload + (b"\x80edited" if change == "edit" else b""))
+                        self.commit(root)
+                        plan = self.plan(root, base)
+                        expected = ({"test-native", "host-launch-integration", "login-signal-integration", "stack-frames"}
+                                    if graph else {"check", "login-signal-integration"})
+                        if filename.endswith(".zig"):
+                            expected.discard("stack-frames")
+                        self.assertEqual(set(plan["targets"]), expected)
+                        self.assertEqual(set(plan["native_targets"]), expected - {"login-signal-integration", "stack-frames"})
+                        self.assertIn("Asserted text: a fixture waits for text this file draws", plan["reasons"])
+                        self.assertIn("Import graph: the unit roots and fixtures that reach the changed file"
+                                      if graph else "Source no import or rule reaches: full fallback", plan["reasons"])
+
+    def test_unchanged_binary_beside_text_edit_preserves_asserted_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.repository(root, 'const render = @import("render.zig");\n')
+            (root / "src/unchanged-\udcff.bin").write_bytes(bytes(range(256)))
+            render = root / "src/render.zig"
+            render.write_bytes(b'const label = "A binary fixture draws this message";\r\n')
+            base = self.commit(root)
+            render.write_bytes(render.read_bytes() + b"// textual edit\r")
+            self.commit(root)
+            plan = self.plan(root, base)
+            self.assertEqual(set(plan["targets"]), {"test-native", "host-launch-integration", "login-signal-integration"})
+            self.assertEqual(set(plan["native_targets"]), {"test-native", "host-launch-integration"})
+            self.assertIn("Asserted text: a fixture waits for text this file draws", plan["reasons"])
+
+    def test_unchanged_binary_files_count_toward_asserted_text_prevalence(self):
+        for binary_count in (1, 2):
+            with self.subTest(binary_count=binary_count), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.repository(root, 'const render = @import("render.zig");\n')
+                for index in range(binary_count):
+                    (root / f"src/unchanged{index}.bin").write_bytes(
+                        b'"A binary fixture draws this message"\n' + bytes(range(256)))
+                render = root / "src/render.zig"
+                render.write_text('const label = "A binary fixture draws this message";\n')
+                base = self.commit(root)
+                render.write_text(render.read_text() + "// textual edit\n")
+                self.commit(root)
+                plan = self.plan(root, base)
+                asserted = binary_count == 1  # Fewer than three production files.
+                self.assertEqual(set(plan["targets"]), {"test-native"} |
+                                 ({"host-launch-integration", "login-signal-integration"} if asserted else set()))
+                self.assertEqual(set(plan["native_targets"]), {"test-native"} |
+                                 ({"host-launch-integration"} if asserted else set()))
+                self.assertEqual("Asserted text: a fixture waits for text this file draws" in plan["reasons"], asserted)
+
+    def test_revision_text_preserves_bytes_and_universal_newlines(self):
+        from select_tests import revision_text
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.repository(root, "")
+            payload = bytes(range(256)) + b"\r\nend\rline\n"
+            (root / "src/octet.bin").write_bytes(payload)
+            commit = self.commit(root)
+            # revision_text uses the caller's Git repository, just like main.
+            original = subprocess.run
+            with patch("select_tests.subprocess.run") as run:
+                run.side_effect = lambda args, **kwargs: original(args, cwd=root, **kwargs)
+                text = revision_text(commit, "src/octet.bin")
+                self.assertEqual(text.encode("utf-8", "surrogateescape"),
+                                 payload.replace(b"\r\n", b"\n").replace(b"\r", b"\n"))
+                self.assertIsNone(revision_text(commit, "src/absent.bin"))
+
+
 class AssertedTextSelectionTest(unittest.TestCase):
     def test_fixture_reader_collects_python_fstring_and_shell_literals(self):
         from select_tests import tree_fixture_literals
