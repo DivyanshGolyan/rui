@@ -182,7 +182,9 @@ if [ "$part" = parallel ] || [ "$part" = callers ]; then
         # unit runner prints each test's name as it starts, so a run killed
         # at its deadline names the stalled test in this case's log, which a
         # job timeout would discard (#755 stalled 34 minutes as "cancelled").
-        run_case execution native with_deadline 1200 python3 "$directory/host_process.py" exec env RUI_TEST_EXACT_INACTIVITY=0 --unit-roots "$test_binary" "$@"
+        if [ -n "$test_binary" ]; then
+            run_case execution native with_deadline 1200 python3 "$directory/host_process.py" exec env RUI_TEST_EXACT_INACTIVITY=0 --unit-roots "$test_binary" "$@"
+        fi
     fi
     cases
     set -- $pids

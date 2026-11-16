@@ -432,7 +432,7 @@ SETUP_CACHE_LINE = re.compile(r"cache", re.IGNORECASE)
 CACHE_LINE = re.compile(r"zig[-_ ]?cache|\.cache/zig|cache[-_]dir|cache_root|has_side_effects|ci-compiled|build-cache"
                         r"|publish-caches|cache-execution", re.IGNORECASE)
 # Files that are cache policy, or the proof that it never caches acceptance.
-CACHE_POLICY = (".github/scripts/prune-caches.cjs", "tests/ci/cache_execution.py", "tests/ci/zig_cache_restat.c",
+CACHE_POLICY = (".github/actions/setup/caches/save-keys.cjs", ".github/scripts/prune-caches.cjs", "tests/ci/cache_execution.py", "tests/ci/zig_cache_restat.c",
                 "tests/ci/run_selected.py")
 
 
@@ -651,9 +651,9 @@ BUILD_MODULES = {
     # the terminal. Its renderer harnesses are nonblocking (renderer-contracts.yml).
     "build/screen.zig": ("check-full", "skills-integration", "upgrade-integration"),
     # The unit roots, their runners and filters, the deadline witness and the
-    # portable logic root. check and check-full run the same unit binaries,
-    # and test runs them alone.
-    "build/unit.zig": ("test", "test-full", "test-logic"),
+    # portable logic root, plus the transport roots named by its registry.
+    # check and check-full run the same unit binaries; test runs native/Store.
+    "build/unit.zig": ("test", "test-full", "test-logic", "test-h2", "test-pg", "mysql-wire-integration"),
     # The Go measurement packages and the macOS measure-* campaigns, which no PR runs.
     "build/measurement.zig": ("measurement-check",),
     # The table of simple process fixtures: an edit to one row selects that
@@ -670,6 +670,7 @@ BUILD_MODULES = {
     # its setup. Zig's cache is content-addressed and acceptance runs are never
     # cached (cache_execution checks that), so a restore cannot pass a stale test.
     ".github/actions/setup/caches/action.yml": ("test-logic",),
+    ".github/actions/setup/caches/save-keys.cjs": ("test-logic",),
     # One target for each tool it installs: Python packages, Go, Node and tmux.
     ".github/actions/setup/fixtures/action.yml":
         ("dispatch-integration", "measurement-check", "ts-client", "upgrade-integration"),

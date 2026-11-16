@@ -28,6 +28,17 @@ SHARDS_BESIDE_LONG_GATE = 3
 # producer compiles them in parallel, separately from the remaining gates.
 # build.zig refuses a split producer whose selection does not reach it.
 UNIT_TARGETS = frozenset(("test", "test-native", "test-store", "check", "check-full"))
+FULL_PARTS = ("execution", "callers")
+
+
+def matrix_name(target, part="all"):
+    return f"full-{part}" if target == "check-full" and part in FULL_PARTS else target
+
+
+def matrix_targets(name):
+    """Recover actual build targets/parts from this owner's Linux matrix names."""
+    aliases = {matrix_name("check-full", part): ("check-full", part) for part in FULL_PARTS}
+    return tuple(aliases.get(member, (member, "all")) for member in name.split("+") if member)
 
 
 def split_build(targets):
@@ -52,12 +63,10 @@ def shards(targets, platform="linux", limit=LINUX_SHARDS, *, mysql_suites=None):
         # three workers, leaving room for another PR; never queue ten compilers.
         rows = []
         if "check-full" in targets:
-            rows.extend([
-                dict(name="full-execution", targets=["check-full"] +
-                     (["test-logic"] if "test-logic" in targets else []),
-                     part="execution", resource=False, args=[]),
-                dict(name="full-callers", targets=["check-full"], part="callers", resource=False, args=[]),
-            ])
+            for part in FULL_PARTS:
+                rows.append(dict(name=matrix_name("check-full", part), targets=["check-full"] +
+                                 (["test-logic"] if part == "execution" and "test-logic" in targets else []),
+                                 part=part, resource=False, args=[]))
         remaining = [t for t in targets if t not in RESOURCES and t != "check-full"
                      and not (t == "test-logic" and "check-full" in targets)]
         if remaining:
@@ -74,8 +83,8 @@ def shards(targets, platform="linux", limit=LINUX_SHARDS, *, mysql_suites=None):
                 rows.append(dict(name=f"{target}-{scenario}", targets=[target],
                                  part="all", resource=True, args=args))
         elif target == "check-full":
-            for part in ("execution", "callers"):
-                rows.append(dict(name=f"full-{part}", targets=[target], part=part, resource=False, args=[]))
+            for part in FULL_PARTS:
+                rows.append(dict(name=matrix_name(target, part), targets=[target], part=part, resource=False, args=[]))
         elif target in RESOURCES:
             rows.append(dict(name=target, targets=[target], part="all", resource=True, args=[]))
         else:
