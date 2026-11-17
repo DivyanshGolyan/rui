@@ -711,6 +711,12 @@ test "served work intents imply admission across permission and control states" 
                         }
                     }
                 }
+                if (scenario == .message_decline or scenario == .mixed) {
+                    var late: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = old_action, .decision = .allow_once };
+                    try late.key.set("intent-late-allow");
+                    const rejected = storage.decidePermission(&late, .{});
+                    try std.testing.expect(rejected == .rejected and rejected.rejected.code == .action_not_pending);
+                }
                 var request: protocol.ActivityPage = .{};
                 request.session = session;
                 const work = (try store_core.activityPageForTesting(&storage, request)).work.work;
@@ -727,12 +733,6 @@ test "served work intents imply admission across permission and control states" 
                     const permissions = report.value.object.get("actionable_permissions").?.array.items;
                     try std.testing.expectEqual(@as(usize, if (scenario == .mixed) 2 else 0), permissions.len);
                     for (permissions) |permission| try std.testing.expect((try std.fmt.parseInt(u64, permission.object.get("action").?.string, 10)) != old_action);
-                }
-                if (scenario == .message_decline or scenario == .mixed) {
-                    var late: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = old_action, .decision = .allow_once };
-                    try late.key.set("intent-late-allow");
-                    const rejected = storage.decidePermission(&late, .{});
-                    try std.testing.expect(rejected == .rejected and rejected.rejected.code == .action_not_pending);
                 }
                 switch (intent) {
                     .stop => if (work.actions.stop) {
