@@ -130,10 +130,10 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn('sparse-checkout: tests/ci', admission)
         self.assertIn('ref: ${{ needs.plan.outputs.candidate_ref }}', admission)
         self.assertIn('run: python3 tests/ci/pr_shape.py --screens', admission)
-        self.assertLess(admission.index('- name: Require screen evidence'),
+        self.assertLess(admission.index('- name: Require Screens CI'),
                         admission.index('- name: Require candidate acceptance'))
-        for name in ('PR_BODY', 'PR_NUMBER', 'GITHUB_REPOSITORY', 'GH_TOKEN'):
-            screen_step = admission.split('- name: Require screen evidence', 1)[1].split('\n      - ', 1)[0]
+        for name in ('PR_BODY', 'PR_NUMBER', 'PR_HEAD_SHA', 'GITHUB_REPOSITORY', 'GH_TOKEN'):
+            screen_step = admission.split('- name: Require Screens CI', 1)[1].split('\n      - ', 1)[0]
             self.assertIn(name + ':', screen_step)
 
     def test_cold_native_compile_budget_does_not_extend_runtime_deadlines(self):
