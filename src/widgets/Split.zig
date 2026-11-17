@@ -26,7 +26,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try child.draw(ctx.withConstraints(.{}, ctx.max)) };
         return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children };
     }
-    const default = @import("../widget_style.zig").line(.{}, .vertical);
+    const default = @import("Stitch.zig").cell(true, .vertical, .{});
     const divider_style = self.divider orelse Divider{ .grapheme = default.char.grapheme, .style = default.style };
     std.debug.assert(ctx.stringWidth(divider_style.grapheme) == 1);
     const left_width = @min(self.left_width, size.width - 1);

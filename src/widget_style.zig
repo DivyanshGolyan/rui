@@ -3,15 +3,13 @@ const vaxis = @import("vaxis");
 const view = @import("overview_view.zig");
 const theme = @import("theme.zig");
 
-pub const Line = enum { horizontal, vertical };
+const stitch = @import("widgets/Stitch.zig");
+
+pub const Line = stitch.Line;
 
 /// The one cell every rule and divider draws: a running stitch in the thread colour.
 pub fn line(caps: view.Caps, which: Line) vaxis.Cell {
-    const glyph = switch (which) {
-        .horizontal => if (caps.unicode) "┄" else "-",
-        .vertical => if (caps.unicode) "┆" else "|",
-    };
-    return .{ .char = .{ .grapheme = glyph, .width = 1 }, .style = of(caps, .{ .colour = .rule }) };
+    return stitch.cell(caps.unicode, which, of(caps, .{ .colour = .rule }));
 }
 
 test "line stitches use thread in every capability" {

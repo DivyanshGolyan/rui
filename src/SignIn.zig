@@ -1141,7 +1141,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .ground = self.style,
         .selection = self.selection_style,
         .quiet = self.quiet,
-        .caps = self.caps,
+        .rule = @import("widget_style.zig").line(self.caps, .horizontal),
         .scroll = self.scroll,
     };
     const panel_surface = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = size.height - footer_height }));

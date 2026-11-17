@@ -53,7 +53,7 @@ selection: vaxis.Style = .{ .reverse = true },
 hover_style: vaxis.Style = .{ .ul_style = .single },
 title_style: vaxis.Style = .{ .bold = true },
 quiet: vaxis.Style = .{},
-caps: @import("../overview_view.zig").Caps = .{},
+rule: ?vaxis.Cell = null,
 scroll: usize = 0,
 targets: []const Target = &.{},
 hover: Hover = .{},
@@ -249,7 +249,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         self.body.height = 0;
         return surface;
     }
-    if (self.top_rule) for (0..size.width) |col| surface.writeCell(@intCast(col), 0, @import("../widget_style.zig").line(self.caps, .horizontal));
+    if (self.top_rule) for (0..size.width) |col| surface.writeCell(@intCast(col), 0, self.rule orelse @import("Stitch.zig").cell(self.unicode, .horizontal, .{}));
     var children: std.array_list.Managed(vxfw.SubSurface) = .init(ctx.arena);
     if (self.show_title and size.height > title_row) {
         _ = paint(ctx, surface, try displayText(ctx.arena, self.title, self.unicode), 1, title_row, self.title_style);
@@ -693,7 +693,7 @@ test "Panel shared ASCII rendering keeps rules choices tails and canonical value
     defer arena.deinit();
     try std.testing.expectEqualStrings("- + . . ^v <> ?", try displayText(arena.allocator(), "┄ ✓ · … ↑↓ ‹› 界", false));
     const original = "model 界";
-    var panel: Self = .{ .title = "Title", .unicode = false, .caps = .{ .unicode = false }, .fields = &.{.{ .label = "Model", .value = original, .tail = " · saving…" }} };
+    var panel: Self = .{ .title = "Title", .unicode = false, .fields = &.{.{ .label = "Model", .value = original, .tail = " · saving…" }} };
     panel.openChoice(&.{ "one", "✓ two" }, 1);
     for ([_]u16{ 1, 19, 28, 46, 99 }) |width| {
         const drawn = try panel.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 9 }, .cell_size = .{} });
