@@ -38,10 +38,17 @@ module.exports = async function pruneCaches({github, context, core}) {
     if (retained.has(retentionGroup)) obsolete.push(cache);
     retained.add(retentionGroup);
   }
+  const deleting = new Set(obsolete.map(cache => cache.id));
+  const bytes = {};
+  for (const {cache, group} of candidates) {
+    if (group === null || deleting.has(cache.id)) continue;
+    bytes[group] = (bytes[group] || 0) + cache.size_in_bytes;
+  }
+  core.info(`Retained main cache bytes by group: ${JSON.stringify(bytes)}`);
   for (const cache of obsolete) {
     try {
       await actions.deleteActionsCacheById({...context.repo, cache_id: cache.id});
-      core.info(`Deleted cache ${cache.id} (${cache.ref}, ${cache.size_in_bytes} bytes)`);
+      core.info(`Deleted cache ${cache.id} (${cache.ref}, ${cache.size_in_bytes} bytes, key=${cache.key}, version=${cache.version})`);
     } catch (error) {
       if (error.status !== 404) throw error;
       core.info(`Cache ${cache.id} was already removed`);

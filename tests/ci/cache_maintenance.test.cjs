@@ -18,9 +18,10 @@ function cache(id, ref, platform = 'Linux-X64', part = 'all') {
 async function run(caches, faults = {}) {
   const remaining = new Map(caches.map(c => [c.id, c]));
   let error;
+  const logs = [];
   try {
     await prune({
-      context: {repo: {owner: 'test', repo: 'rui'}}, core: {info() {}},
+      context: {repo: {owner: 'test', repo: 'rui'}}, core: {info(message) { logs.push(message); }},
       github: {
         paginate: async () => {
           if (faults.inventory) throw new Error('Inventory unavailable');
@@ -39,7 +40,7 @@ async function run(caches, faults = {}) {
       },
     });
   } catch (failure) { error = failure; }
-  return {ids: [...remaining.keys()].sort((a, b) => a - b), error};
+  return {ids: [...remaining.keys()].sort((a, b) => a - b), error, logs};
 }
 
 test('prune every PR snapshot and old main snapshots without crossing platform or partition boundaries', async () => {
@@ -64,6 +65,18 @@ test('prune every PR snapshot and old main snapshots without crossing platform o
   const result = await run(caches);
   assert.ifError(result.error);
   assert.deepEqual(result.ids, [3, 7, 8, 9, 10, 14, 15, 16, 18, 20, 21]);
+});
+
+test('maintenance attributes deleted snapshots and reports retained group bytes', async () => {
+  const main = 'refs/heads/main';
+  const old = {...cache(1, main), version: 'old-format'};
+  const newest = {...cache(2, main), size_in_bytes: 6400};
+  const compiler = {...cache(3, main), key: 'rui-compiler-Linux-X64-0.17.1', size_in_bytes: 86};
+  const result = await run([old, newest, compiler]);
+  assert.ifError(result.error);
+  assert.deepEqual(result.ids, [2, 3]);
+  assert.equal(result.logs[0], 'Retained main cache bytes by group: {"compiler/Linux-X64":86,"build/Linux-X64/all":6400}');
+  assert.ok(result.logs.some(line => line.includes(`key=${old.key}, version=old-format`)));
 });
 
 test('build layouts share partition groups across repins without crossing parts', async () => {

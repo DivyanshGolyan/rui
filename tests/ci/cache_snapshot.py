@@ -1,9 +1,10 @@
 """Audit superseded Linux CLI outputs in the pinned Zig cache.
 
-Keep complete manifest outputs and referenced output directories across both
-cache roots. The compiler owns discovered-hash calculation (zig cache-cat).
-Only understood CLI executable directories are candidates; other namespaces,
-C objects, libraries, generated inputs and unknown outputs remain untouched.
+Preserve manifest inputs, current installed executables and unknown outputs.
+Historical CLI-own manifests can outlive the Git revision they compile; remove
+those proven owners before their obsolete executable directories. The compiler
+owns discovered-hash calculation (zig cache-cat). Other namespaces, C objects,
+libraries and generated inputs remain untouched.
 """
 import argparse
 import hashlib
@@ -50,6 +51,21 @@ def records(raw):
     return paths
 
 
+def real_namespace(directory):
+    """Reject aliases at every existing or broken component, before any use."""
+    directory = Path(directory).absolute()
+    if any(part.is_symlink() for part in (directory, *directory.parents)):
+        raise SnapshotError(f"symlinked namespace: {directory}")
+    if not directory.is_dir():
+        raise SnapshotError(f"missing directory: {directory}")
+
+
+def cache_namespaces(roots):
+    for root in roots:
+        for directory in (root, root / "h", root / "o"):
+            real_namespace(directory)
+
+
 def manifests(roots):
     # The producer must have exited before audit. Detect ordinary concurrent
     # writes as well: validation and cache-cat must inspect the same bytes.
@@ -57,10 +73,7 @@ def manifests(roots):
     paths = []
     contents = {}
     listings = {}
-    for root in roots:
-        for directory in (root, root / "h", root / "o"):
-            if any(part.is_symlink() for part in (directory.absolute(), *directory.absolute().parents)):
-                raise SnapshotError(f"symlinked cache namespace: {directory}")
+    cache_namespaces(roots)
     for root in roots:
         directory = root / "h"
         if not directory.is_dir():
@@ -159,8 +172,11 @@ def file_digest(path):
 def protected_outputs(local, prefixes, manifest_roots):
     current = {}
     for prefix in prefixes:
+        real_namespace(prefix)
         for name in PRODUCTS:
             executable = Path(prefix) / name
+            if executable.is_symlink():
+                raise SnapshotError(f"symlinked current CLI: {executable}")
             if executable.exists():
                 if not native_cli(executable):
                     raise SnapshotError(f"unknown current CLI: {executable}")
@@ -229,6 +245,7 @@ def invalidate_manifest_owners(report, local):
     sweep can leave unused outputs, never complete manifests for removed ones.
     """
     local = Path(local).absolute()
+    cache_namespaces([local])
     manifests_to_remove = {}
     for item in report["removable"]:
         directory = Path(item["path"]).absolute()
@@ -259,6 +276,36 @@ def compact(local, global_cache, *, prefixes):
     return report
 
 
+def publication_prefix(env):
+    """The existing producer receipt owns freshness, profile and selection."""
+    if (env.get("GITHUB_REF") != "refs/heads/main" or env.get("GITHUB_EVENT_NAME") not in ("push", "workflow_dispatch", "workflow_call", "schedule")
+            or env.get("RUNNER_OS") != "Linux" or env.get("RUNNER_ARCH") != "X64"):
+        raise SnapshotError("only the native Linux x86_64 main publisher compacts")
+    if env.get("SETUP_OUTCOME") != "success" or env.get("WORK_OUTCOME") != "success":
+        raise SnapshotError("setup and complete compilation must succeed")
+    key = env.get("RUI_CACHE_BUILD_KEY", "")
+    if not re.fullmatch(r"rui-build-v3-Linux-X64-0\.17\.1-[a-f0-9]{64}-compiled\.[a-f0-9]{64}-[a-f0-9]{64}", key):
+        raise SnapshotError("no missing exact Linux compiled v3 publication key")
+    import build_artifact
+    temporary = Path(env["RUNNER_TEMP"])
+    receipt = json.loads((temporary / "rui-compiled" / "compiled.json").read_text())
+    inputs = receipt.get("inputs")
+    if (not isinstance(inputs, dict) or inputs.get("format") != 5 or inputs.get("pr_ci") is not False
+            or inputs.get("part") not in ("all", "rest")):
+        raise SnapshotError("producer receipt does not describe complete LLVM compilation")
+    targets = inputs.get("targets")
+    if not isinstance(targets, list) or "check-full" not in targets or any(not isinstance(target, str) for target in targets):
+        raise SnapshotError("producer did not compile the full gate")
+    if (receipt.get("source_sha") != build_artifact.git("rev-parse", "HEAD")
+            or str(receipt.get("run_id")) != env.get("GITHUB_RUN_ID")
+            or str(receipt.get("run_attempt")) != env.get("GITHUB_RUN_ATTEMPT")
+            or inputs != build_artifact.identity(targets, inputs["part"])):
+        raise SnapshotError("producer receipt is stale or differs from this compilation")
+    if subprocess.check_output(["zig", "version"], text=True).strip() != "0.17.1":
+        raise SnapshotError("manifest format is qualified only for Zig 0.17.1")
+    return temporary / "rui-compiled-build" / "bin"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--local", type=Path, default=Path(".zig-cache"))
@@ -268,10 +315,13 @@ def main():
     args = parser.parse_args()
     try:
         if args.prune:
-            report = compact(args.local, args.global_cache, prefixes=args.protect_prefix)
+            prefix = publication_prefix(os.environ)
+            if args.protect_prefix and args.protect_prefix != [prefix]:
+                raise SnapshotError("publisher uses only its current producer prefix")
+            report = compact(args.local, args.global_cache, prefixes=[prefix])
         else:
             report = audit(args.local, args.global_cache, prefixes=args.protect_prefix)
-    except (SnapshotError, OSError, subprocess.CalledProcessError) as error:
+    except (SnapshotError, OSError, KeyError, json.JSONDecodeError, subprocess.CalledProcessError) as error:
         report = dict(skipped=str(error), removable=[], removable_bytes=0)
     print(json.dumps(report, sort_keys=True))
 
