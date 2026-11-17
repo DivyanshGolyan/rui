@@ -1134,6 +1134,17 @@ while True:
                 self.assertIsNone(self.helper["frame_row_failure"](state, row))
         self.assertIsNone(self.helper["frame_row_failure"]({"name": "unrelated"}, " ○ 9xt4vy  now"))
 
+    def test_raw_id_guard_recognizes_legacy_and_stitched_dividers_in_old_recipes(self):
+        from terminal_screen import DIVIDER_GLYPHS
+        failure = self.helper["frame_row_failure"]
+        for recipe_glyph in DIVIDER_GLYPHS[:2]:
+            pattern = r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:" + recipe_glyph + r".*)?$"
+            state = {"name": "read-image-approval", "absent_regex": [pattern]}
+            for divider in DIVIDER_GLYPHS:
+                with self.subTest(recipe=recipe_glyph, frame=divider):
+                    self.assertIsNotNone(failure(state, f" ○ 9xt4vy  now {divider} chat"))
+                    self.assertIsNone(failure(state, f" ○ New Session  now {divider} chat"))
+
     def test_empty_chat_roundtrips_and_current_chat_labels_exclude_raw_ids(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}

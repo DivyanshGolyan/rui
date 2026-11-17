@@ -2707,6 +2707,9 @@ def frame_row_failure(state, plain):
         if re.search(pattern, plain, re.MULTILINE) is None:
             return f"missing row matching {pattern!r}"
     for pattern in frame_absent_regex(state):
+        if "[0123456789abcdefghjkmnpqrstvwxyz]{6}" in pattern:
+            literal_divider = "|".join(re.escape(glyph) for glyph in DIVIDER_GLYPHS if glyph != "|")
+            pattern = re.sub(r"(?<=\(\?:)(?:" + literal_divider + r")(?=\.\*)", lambda _: DIVIDER_PATTERN, pattern)
         if match := re.search(pattern, plain, re.MULTILINE):
             return f"unexpected row matching {pattern!r}: {match.group(0)!r}"
     return None
