@@ -1,5 +1,7 @@
 test {
     _ = @import("InputCapture.zig");
+    _ = @import("image_intake.zig");
+    _ = @import("image_file_source.zig");
     _ = @import("read_image_arguments.zig");
     _ = @import("os/read_image_file.zig");
     _ = @import("server_read_image.zig");

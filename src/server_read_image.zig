@@ -8,6 +8,8 @@ const source_file = @import("os/read_image_file.zig");
 const fenceDispatch = @import("server_host.zig").fenceDispatch;
 const tool_settle = @import("tool_settle.zig");
 const result_fault = @import("result_fault.zig");
+const image_intake = @import("image_intake.zig");
+const FileSource = @import("image_file_source.zig").FileSource;
 
 pub const capacity = 16;
 
@@ -22,7 +24,8 @@ const Active = struct {
     path: arguments.Path = .{},
     length: u64 = 0,
     deadline: std.Io.Clock.Timestamp = undefined,
-    window: [InputCapture.window_bytes]u8 = undefined,
+    file_source: FileSource = undefined,
+    intake: image_intake.Intake = .{},
 
     fn recordFailure(self: *Active, failure: result_fault.Failure) anyerror {
         self.preparation_failure = failure;
@@ -107,23 +110,18 @@ pub const Calls = struct {
             } else if (std.Io.Clock.Timestamp.now(host.io, .awake).raw.nanoseconds >= active.deadline.raw.nanoseconds) {
                 settleText(host, active, .timed_out, "Image read timed out before its result was saved.");
             } else {
-                const progress_result = advance(host.io, active) catch |err| {
-                    _ = tool_settle.failure(host, active.slot("image read failure publication"), "image snapshot capture", .{ .capture = err });
-                    active.destroy(host);
-                    entry.* = null;
-                    progress = true;
-                    continue;
-                };
+                const progress_result = active.intake.step();
                 progress = true;
                 switch (progress_result) {
                     .pending => continue,
-                    .input_failed => |fault| {
+                    .failed => |fault| {
                         failInput(host, active, fault);
                         active.destroy(host);
                         entry.* = null;
                         continue;
                     },
-                    .complete => {},
+                    .kept => {},
+                    .ready => unreachable,
                 }
                 publish(host, active);
             }
@@ -238,50 +236,30 @@ noinline fn prepare(host: *Host, active: *Active) !void {
         }
     }.handoff) catch |err| return if (active.preparation_failure != null) err else active.recordFailure(.{ .store = err });
     active.length = (active.source.?.stat(host.io) catch |err| return active.recordFailure(.{ .source = err })).size;
-    // Check size before allocating storage or reading any payload.
-    _ = @import("input_media.zig").Scanner.init(active.length, null, .{}) catch |err| return active.recordFailure(.{ .source = err });
+    // Validate size before allocating scratch or reading payload bytes.
+    active.file_source = .{ .io = host.io, .file = active.source.?, .length = active.length };
+    switch (active.intake.begin(active.file_source.source(), .{})) {
+        .failed => |fault| return active.recordFailure(fault),
+        .ready => {},
+        else => unreachable,
+    }
     active.capture = .{ .io = host.io, .resources = null };
     @import("server_input_scratch.zig").init(host, active.binding.action_id, &active.capture.?) catch |err| return active.recordFailure(.{ .capture = err });
-    active.capture.?.begin(.{ .image = .{} }, active.length) catch |err| return active.recordFailure(.{ .capture = err });
+    switch (active.intake.attach(&active.capture.?)) {
+        .failed => |fault| return active.recordFailure(fault),
+        .pending => {},
+        else => unreachable,
+    }
 }
 
-const Progress = union(enum) { pending, complete, input_failed: result_fault.Failure };
-
-/// File, validation and scratch-capacity failures settle explicitly through the
-/// existing failure path. Capture I/O still fences: its outcome is uncertain.
-fn advance(io: std.Io, active: *Active) !Progress {
-    const capture = &active.capture.?;
-    const remaining = active.length - capture.length;
-    const count = active.source.?.readPositionalAll(io, active.window[0..@intCast(@min(remaining, active.window.len))], capture.length) catch |err| return .{ .input_failed = .{ .source = err } };
-    if (count == 0 and remaining != 0) return .{ .input_failed = .{ .source = error.ImageFileChanged } };
-    var allowance: usize = count;
-    _ = capture.append(active.window[0..count], &allowance, false) catch |err| {
-        const fault: result_fault.Failure = .{ .capture = err };
-        switch (result_fault.classify(fault)) {
-            .rejected, .storage_full => return .{ .input_failed = fault },
-            else => {},
-        }
-        return err;
-    };
-    if (capture.length != active.length) return .pending;
-    var extra: [1]u8 = undefined;
-    const more = active.source.?.readPositionalAll(io, &extra, active.length) catch |err| return .{ .input_failed = .{ .source = err } };
-    if (more != 0) return .{ .input_failed = .{ .source = error.ImageFileChanged } };
-    capture.end() catch |err| {
-        const fault: result_fault.Failure = .{ .capture = err };
-        switch (result_fault.classify(fault)) {
-            .rejected, .storage_full => return .{ .input_failed = fault },
-            else => {},
-        }
-        return err;
-    };
-    return .complete;
-}
-
-const TestCase = enum { snapshot, missing, invalid, oversized, stop, background, source_io, capture, seal, publication, shutdown, payload_capacity, index_capacity };
+const TestCase = enum { snapshot, missing, invalid, oversized, stop, stop_between_ticks, background, source_io, capture, seal, publication, shutdown, payload_capacity, index_capacity };
 
 test "read_image custody owns snapshot publication stop background and recovery" {
     try testReadImage(&.{ .snapshot, .missing, .invalid, .oversized, .stop, .background, .source_io, .capture, .seal, .publication, .shutdown });
+}
+
+test "read_image stop between bounded file reads releases custody" {
+    try testReadImage(&.{.stop_between_ticks});
 }
 
 test "read_image payload growth exhaustion settles failure and releases custody" {
@@ -298,6 +276,7 @@ fn testReadImage(cases: []const TestCase) !void {
     const protocol = @import("protocol.zig");
     const retention = @import("output_retention.zig");
     const png = @embedFile("codecs/fixtures/image-input/pixel.png");
+    const multi_png = @embedFile("codecs/fixtures/image-input/pixel-multi-window.png");
     for (cases) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -323,7 +302,7 @@ fn testReadImage(cases: []const TestCase) !void {
             .decoded_arguments = "{\"path\":\"image.png\"}",
         }});
         if (case != .missing) {
-            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.png", .data = if (case == .invalid) "not an image" else png });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.png", .data = if (case == .invalid) "not an image" else if (case == .payload_capacity or case == .stop_between_ticks) multi_png else png });
             if (case == .oversized) {
                 const file = try tmp.dir.openFile(std.testing.io, "image.png", .{ .mode = .read_write });
                 defer file.close(std.testing.io);
@@ -335,7 +314,7 @@ fn testReadImage(cases: []const TestCase) !void {
         var used: std.atomic.Value(u64) = .init(baseline);
         var retained: [2]retention.Entry = @splat(.{});
         const limit: u64 = baseline + switch (case) {
-            .payload_capacity => png.len - 1,
+            .payload_capacity => InputCapture.window_bytes + 1,
             .index_capacity => png.len + @import("input_parts.zig").Record.byte_length - 1,
             else => 1024 * 1024,
         };
@@ -354,11 +333,12 @@ fn testReadImage(cases: []const TestCase) !void {
             try std.testing.expectEqual(@as(usize, 1), host.custody.occupied());
             try std.testing.expect(calls.contains(selected.action_id));
             try std.testing.expectError(error.DispatchPermitConsumed, host.custody.consumeLaunchAuthority(active.token, .{ .action = active.binding }, .now(std.testing.io, .awake)));
-            if (case == .payload_capacity) {
-                // Retain an initial payload charge before later growth fails.
-                var allowance: usize = 1;
-                try std.testing.expectEqual(@as(usize, 1), try active.capture.?.append(png[0..1], &allowance, false));
-                try std.testing.expectEqual(baseline + 1, used.load(.acquire));
+            if (case == .payload_capacity or case == .stop_between_ticks) {
+                // A real multi-window file must yield before a second read.
+                try std.testing.expect(calls.service(&host));
+                try std.testing.expect(calls.any());
+                try std.testing.expectEqual(@as(u64, InputCapture.window_bytes), active.file_source.offset);
+                try std.testing.expectEqual(baseline + InputCapture.window_bytes, used.load(.acquire));
             }
             if (case == .capture) {
                 capture_vtable.fileWritePositional = struct {
@@ -373,7 +353,7 @@ fn testReadImage(cases: []const TestCase) !void {
                 try tmp.dir.rename("image.png", tmp.dir, "original.png", std.testing.io);
                 try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.png", .data = "replacement" });
             }
-            if (case == .stop) {
+            if (case == .stop or case == .stop_between_ticks) {
                 var stop = try store.testingCompleteSessionStop("image-stop", session.slice());
                 try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
             }
@@ -388,16 +368,17 @@ fn testReadImage(cases: []const TestCase) !void {
                     }
                 }.read;
                 source_io.vtable = &source_vtable;
-                const outcome = try advance(source_io, active);
-                try std.testing.expect(outcome == .input_failed);
-                try std.testing.expect(outcome.input_failed == .source);
-                failInput(&host, active, outcome.input_failed);
+                active.file_source.io = source_io;
+                const outcome = active.intake.step();
+                try std.testing.expect(outcome == .failed);
+                try std.testing.expect(outcome.failed == .source);
+                failInput(&host, active, outcome.failed);
                 active.destroy(&host);
                 calls.entries[0] = null;
                 try std.testing.expect(host.launchAllowed());
             } else if (case == .seal) {
-                const complete = try advance(std.testing.io, active);
-                try std.testing.expect(complete == .complete);
+                const complete = active.intake.step();
+                try std.testing.expect(complete == .kept);
                 try active.capture.?.resources.?.index.setLength(std.testing.io, 0);
                 publish(&host, active);
                 calls.shutdown(&host);
@@ -431,7 +412,7 @@ fn testReadImage(cases: []const TestCase) !void {
         }
         const code = switch (case) {
             .snapshot, .background => "succeeded",
-            .stop => "cancelled",
+            .stop, .stop_between_ticks => "cancelled",
             .payload_capacity, .index_capacity => "storage_failed",
             .capture, .seal, .publication, .shutdown => "indeterminate",
             else => "failed",
