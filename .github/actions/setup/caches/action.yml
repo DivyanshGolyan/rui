@@ -79,8 +79,8 @@ runs:
       run: |
         set -euo pipefail
         # Diagnostic branch only: use exactly the same warm compiled snapshot.
-        if [ "$CHECK_PART" = compiled ]; then
-          echo "key=rui-build-v2-macOS-ARM64-0.17.1-3fb932d7b927781edb38f5fa6c38969238328794b856d2f9e92fcc6ccf30666d-compiled.ae250980b89b5a7184be3f1d8c3f432af85a7379cea039b8f92c523326b38d0a-1e7ba81bc2304c4384cd36c9e201bf6b4bb975e3996af881394d1189e5fd1fc5" >> "$GITHUB_OUTPUT"
+        if [ "$CHECK_PART" = compiled ] && [ -n "${RUI_BENCHMARK_CACHE_KEY:-}" ]; then
+          echo "key=$RUI_BENCHMARK_CACHE_KEY" >> "$GITHUB_OUTPUT"
           exit 0
         fi
         seed="${PREFIX}baseline.$DEPS-"
@@ -151,11 +151,11 @@ runs:
           ${{ steps.build-keys.outputs.prefix-legacy-part }}
           ${{ steps.build-keys.outputs.prefix-seed }}
     - name: Require the pinned compiled snapshot for this experiment
-      if: ${{ inputs.save-only != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' && inputs.check-part == 'compiled' }}
+      if: ${{ inputs.save-only != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' && inputs.check-part == 'compiled' && env.RUI_BENCHMARK_CACHE_KEY != '' }}
       shell: bash
       env:
         MATCHED: ${{ steps.build-cache.outputs.cache-matched-key }}
-      run: test "$MATCHED" = 'rui-build-v2-macOS-ARM64-0.17.1-3fb932d7b927781edb38f5fa6c38969238328794b856d2f9e92fcc6ccf30666d-compiled.ae250980b89b5a7184be3f1d8c3f432af85a7379cea039b8f92c523326b38d0a-1e7ba81bc2304c4384cd36c9e201bf6b4bb975e3996af881394d1189e5fd1fc5'
+      run: test "$MATCHED" = "$RUI_BENCHMARK_CACHE_KEY"
     - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       id: packages-cache
       if: ${{ inputs.save-only != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}

@@ -472,6 +472,8 @@ jobs:
           setup-outcome: ${{ steps.setup.outcome }}
           work-outcome: ${{ steps.compile.outcome }}
   macos_build:
+    env:
+      RUI_BENCHMARK_CACHE_KEY: rui-build-v2-macOS-ARM64-0.17.1-3fb932d7b927781edb38f5fa6c38969238328794b856d2f9e92fcc6ccf30666d-compiled.ae250980b89b5a7184be3f1d8c3f432af85a7379cea039b8f92c523326b38d0a-1e7ba81bc2304c4384cd36c9e201bf6b4bb975e3996af881394d1189e5fd1fc5
     needs: [plan, mac_runner]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.native == 'true' }}
     runs-on: ${{ fromJSON(needs.mac_runner.outputs.runs_on || '"macos-15"') }}
