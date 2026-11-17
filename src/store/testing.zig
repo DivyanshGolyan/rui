@@ -620,6 +620,18 @@ fn dropPinOrganization(storage: *Store) !void {
         }
     };
     try dropBackgroundUpgradeShape(storage);
+    if (storage.engine == .mysql) {
+        try Native.exec(storage, "SET @rui_creator_ddl=(SELECT CONCAT('ALTER TABLE session DROP FOREIGN KEY `',REPLACE(CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='session' AND COLUMN_NAME='creator_ref' AND REFERENCED_TABLE_NAME='session')");
+        try Native.exec(storage, "PREPARE rui_creator FROM @rui_creator_ddl");
+        try Native.exec(storage, "EXECUTE rui_creator");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_creator");
+        try Native.exec(storage, "SET @rui_creator_ddl=(SELECT CONCAT('ALTER TABLE session DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='session' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('creator_ref',cc.CHECK_CLAUSE)>0)");
+        try Native.exec(storage, "PREPARE rui_creator FROM @rui_creator_ddl");
+        try Native.exec(storage, "EXECUTE rui_creator");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_creator");
+        try Native.exec(storage, "SET @rui_creator_ddl=NULL");
+    }
+    try Native.exec(storage, "ALTER TABLE session DROP COLUMN creator_ref");
     try Native.exec(storage, "DROP TABLE session_pin");
     try Native.exec(storage, "DROP TABLE session_pin_command");
     if (storage.engine == .mysql) {

@@ -1087,7 +1087,7 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
         settings.* = .{};
         defer settings.deinit();
         var fixtures: providers.Fixtures = .{};
-        _ = try admitHost(init, parsed, selected, settings, &fixtures, &failure);
+        _ = try admitHost(init, parsed, selected, settings, &fixtures, &failure, .detached);
         return;
     }
     const result = if (command == .host_settings)
@@ -1254,7 +1254,10 @@ fn reportHostLaunch(io: std.Io, result: *const HostLaunchResult, quiet: bool, ov
     if (writer.buffered().len != 0) _ = stderr.write(writer.buffered());
     switch (result.outcome) {
         .ready => |*ready| try reportStartedHost(io, ready, quiet, overrides and ready.adopted),
-        .failed => |failure| return failure.cause.err,
+        .failed => |*failure| {
+            if (failure.refusal) |*refusal| return writeRefusal(io, refusal, caller_exit.knownError(failure.cause.err));
+            return failure.cause.err;
+        },
     }
 }
 
@@ -2081,13 +2084,15 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var preparation_failure: start_report.Failure = undefined;
-    const prepared = try admitHost(init, parsed, selected, settings, &tuning.fixtures, &preparation_failure);
+    const prepared = try admitHost(init, parsed, selected, settings, &tuning.fixtures, &preparation_failure, .foreground);
     var failure: ?start_report.Failure = null;
     return finishServe(io, host_start.shutdownPolicy(settings), host_start.storeKind(settings), &failure, server.serve(io, std.heap.c_allocator, selected, prepared, tuning, &failure));
 }
 
-fn admitHost(init: std.process.Init, parsed: *const cli_args.Parsed, selected: []const u8, settings: *host_settings.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure) !host_settings.Prepared {
-    host_start.intake(init, parsed, selected, settings, fixtures, failure) catch |err| {
+/// Shared by serve and settings --check: intake, then the proxy precondition,
+/// then Store selection and preparation. Refusals are reported here.
+fn admitHost(init: std.process.Init, parsed: *const cli_args.Parsed, selected: []const u8, settings: *host_settings.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure, admission: host_start.Admission) !host_settings.Prepared {
+    host_start.intake(init, parsed, selected, settings, fixtures, failure, admission) catch |err| {
         if (err == error.SettingsInvalid) return writeRefusal(init.io, failure, caller_exit.knownError(err));
         return err;
     };
@@ -2165,6 +2170,48 @@ test "start report CLI publishes once before settling every Host outcome" {
             }
         }
     }
+}
+
+test "public Host starter preserves every typed refusal before and after waiting" {
+    const Probe = struct {
+        var output: [4096]u8 = undefined;
+        var used: usize = 0;
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            if (operation == .file_write_streaming and operation.file_write_streaming.file.handle == 1) {
+                const write = operation.file_write_streaming;
+                var out = std.Io.Writer.fixed(output[used..]);
+                out.writeAll(write.header) catch return .{ .file_write_streaming = error.NoSpaceLeft };
+                for (write.data, 0..) |bytes, index| {
+                    const repeats = if (index == write.data.len - 1) write.splat else 1;
+                    for (0..repeats) |_| out.writeAll(bytes) catch return .{ .file_write_streaming = error.NoSpaceLeft };
+                }
+                used += out.buffered().len;
+                return .{ .file_write_streaming = out.buffered().len };
+            }
+            return std.testing.io.vtable.operate(userdata, operation);
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.operate = Probe.operate;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    const saved_status = exit_status;
+    defer exit_status = saved_status;
+    const causes = [_]struct { err: anyerror, status: caller_exit.Status }{
+        .{ .err = error.HostStartupFailed, .status = .unclassified },
+        .{ .err = error.StoreIdentityMismatch, .status = .environment },
+        .{ .err = error.StoreAlreadyOwned, .status = .environment },
+    };
+    for (causes) |cause| for (std.enums.values(start_report.StartError)) |code| for ([_]bool{ false, true }) |waited| for ([_]bool{ false, true }) |quiet| {
+        var result: HostLaunchResult = .failed(.child_refused, cause.err);
+        result.outcome.failed.refusal = .init(code, "the original typed refusal, including its reason");
+        if (waited) result.wait = .init(0);
+        Probe.used = 0;
+        exit_status = .done;
+        try std.testing.expectError(error.Reported, reportHostLaunch(io, &result, quiet, false, 0));
+        var expected: [start_report.max_line_bytes]u8 = undefined;
+        try std.testing.expectEqualStrings(start_report.line(&result.outcome.failed.refusal.?, &expected), Probe.output[0..Probe.used]);
+        try std.testing.expectEqual(if (waited) cause.status else .invalid, exit_status);
+    };
 }
 
 noinline fn writeRefusal(io: std.Io, failure: *const start_report.Failure, status: caller_exit.Status) error{Reported} {

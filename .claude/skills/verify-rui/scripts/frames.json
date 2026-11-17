@@ -61,6 +61,468 @@
       ]
     },
     {
+      "name": "sidebar-current",
+      "theme": "night",
+      "upgrade": "current",
+      "open": "overview",
+      "steps": [],
+      "expect": [
+        "Settings",
+        "{upgrade_version}"
+      ],
+      "absent": [
+        "Notifications",
+        "enter open"
+      ],
+      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
+      "expect_next": {
+        "Settings": "{upgrade_version}"
+      },
+      "expect_regex": [
+        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+{upgrade_version}\\s*(?:│.*)?$"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Settings",
+            "{upgrade_version}"
+          ],
+          "expect_next": {},
+          "expect_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          ],
+          "absent": [
+            "Notifications",
+            "Update to ",
+            "Updating…",
+            "Update failed",
+            "enter open"
+          ]
+        }
+      }
+    },
+    {
+      "name": "sidebar-available",
+      "theme": "night",
+      "upgrade": "available",
+      "open": "overview",
+      "steps": [],
+      "expect": [
+        "Settings",
+        "Update to {available_version}"
+      ],
+      "absent": [
+        "Notifications",
+        "enter open"
+      ],
+      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
+      "expect_next": {
+        "Settings": "Update to {available_version}"
+      },
+      "expect_regex": [
+        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Update to {available_version}\\s*(?:│.*)?$"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Settings",
+            "{upgrade_version}"
+          ],
+          "expect_next": {},
+          "expect_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          ],
+          "absent": [
+            "Notifications",
+            "Update to ",
+            "Updating…",
+            "Update failed",
+            "enter open"
+          ]
+        }
+      }
+    },
+    {
+      "name": "sidebar-updating",
+      "theme": "night",
+      "upgrade": "updating",
+      "open": "overview",
+      "steps": [],
+      "expect": [
+        "Settings",
+        "Updating…"
+      ],
+      "absent": [
+        "Notifications",
+        "enter open"
+      ],
+      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
+      "expect_next": {
+        "Settings": "Updating…"
+      },
+      "expect_regex": [
+        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Updating…\\s*(?:│.*)?$"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Settings",
+            "{upgrade_version}",
+            "Publishing; cancelling no longer rolls back"
+          ],
+          "expect_next": {},
+          "expect_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          ],
+          "absent": [
+            "Notifications",
+            "Update to ",
+            "Updating…",
+            "Update failed",
+            "enter open"
+          ]
+        }
+      }
+    },
+    {
+      "name": "sidebar-failure",
+      "theme": "night",
+      "upgrade": "failure",
+      "open": "overview",
+      "steps": [],
+      "expect": [
+        "Settings",
+        "Update failed: Couldn't reach GitHub"
+      ],
+      "absent": [
+        "Notifications",
+        "Host paused",
+        "enter open",
+        "Reading this Session"
+      ],
+      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
+      "expect_next": {
+        "Settings": "Update failed: Couldn't reach GitHub"
+      },
+      "expect_regex": [
+        "^\\s*(?:\\d+(?:\\.\\d+)? (?:MB|GB)\\s+)?Update failed: Couldn't reach GitHub\\s*(?:│.*)?$"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Settings",
+            "{upgrade_version}",
+            "! Couldn't reach GitHub; nothing changed"
+          ],
+          "expect_next": {},
+          "expect_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          ],
+          "absent": [
+            "Notifications",
+            "Update to ",
+            "Updating…",
+            "Update failed",
+            "enter open",
+            "Host paused",
+            "Reading this Session"
+          ]
+        }
+      }
+    },
+    {
+      "name": "chat-after-upgrade",
+      "theme": "night",
+      "upgrade": "chat",
+      "open": "Upgrade witness",
+      "steps": [],
+      "expect": [
+        "alt+i info",
+        "Upgrade witness"
+      ],
+      "absent": [
+        "Upgraded to ",
+        " · upgraded to ",
+        "Checking for updates",
+        "Preparing Upgrade",
+        "Upgrade failed",
+        "Update cancelled",
+        "Update failed",
+        "Updating…",
+        "Publishing; cancelling no longer rolls back",
+        "restart rui to continue",
+        "enter open"
+      ],
+      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
+      "cast": [
+        {
+          "label": "Upgrade witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Upgrade witness"
+          ]
+        }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Upgrade witness",
+            "Upgraded to {upgrade_version}"
+          ],
+          "absent": [
+            "Checking for updates",
+            "Preparing Upgrade",
+            "Upgrade failed",
+            "Update cancelled",
+            "Update failed",
+            "Updating…",
+            "Publishing; cancelling no longer rolls back",
+            "restart rui to continue",
+            "Update failed",
+            "Updating…",
+            "Publishing; cancelling no longer rolls back",
+            "restart rui to continue",
+            "enter open"
+          ]
+        }
+      }
+    },
+    {
+      "name": "day-sidebar-current",
+      "theme": "day",
+      "upgrade": "current",
+      "open": "overview",
+      "steps": [],
+      "expect": [
+        "Settings",
+        "{upgrade_version}"
+      ],
+      "absent": [
+        "Notifications",
+        "enter open"
+      ],
+      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
+      "expect_next": {
+        "Settings": "{upgrade_version}"
+      },
+      "expect_regex": [
+        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+{upgrade_version}\\s*(?:│.*)?$"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Settings",
+            "{upgrade_version}"
+          ],
+          "expect_next": {},
+          "expect_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          ],
+          "absent": [
+            "Notifications",
+            "Update to ",
+            "Updating…",
+            "Update failed",
+            "enter open"
+          ]
+        }
+      }
+    },
+    {
+      "name": "day-sidebar-available",
+      "theme": "day",
+      "upgrade": "available",
+      "open": "overview",
+      "steps": [],
+      "expect": [
+        "Settings",
+        "Update to {available_version}"
+      ],
+      "absent": [
+        "Notifications",
+        "enter open"
+      ],
+      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
+      "expect_next": {
+        "Settings": "Update to {available_version}"
+      },
+      "expect_regex": [
+        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Update to {available_version}\\s*(?:│.*)?$"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Settings",
+            "{upgrade_version}"
+          ],
+          "expect_next": {},
+          "expect_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          ],
+          "absent": [
+            "Notifications",
+            "Update to ",
+            "Updating…",
+            "Update failed",
+            "enter open"
+          ]
+        }
+      }
+    },
+    {
+      "name": "day-sidebar-updating",
+      "theme": "day",
+      "upgrade": "updating",
+      "open": "overview",
+      "steps": [],
+      "expect": [
+        "Settings",
+        "Updating…"
+      ],
+      "absent": [
+        "Notifications",
+        "enter open"
+      ],
+      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
+      "expect_next": {
+        "Settings": "Updating…"
+      },
+      "expect_regex": [
+        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Updating…\\s*(?:│.*)?$"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Settings",
+            "{upgrade_version}",
+            "Publishing; cancelling no longer rolls back"
+          ],
+          "expect_next": {},
+          "expect_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          ],
+          "absent": [
+            "Notifications",
+            "Update to ",
+            "Updating…",
+            "Update failed",
+            "enter open"
+          ]
+        }
+      }
+    },
+    {
+      "name": "day-sidebar-failure",
+      "theme": "day",
+      "upgrade": "failure",
+      "open": "overview",
+      "steps": [],
+      "expect": [
+        "Settings",
+        "Update failed: Couldn't reach GitHub"
+      ],
+      "absent": [
+        "Notifications",
+        "Host paused",
+        "enter open",
+        "Reading this Session"
+      ],
+      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
+      "expect_next": {
+        "Settings": "Update failed: Couldn't reach GitHub"
+      },
+      "expect_regex": [
+        "^\\s*(?:\\d+(?:\\.\\d+)? (?:MB|GB)\\s+)?Update failed: Couldn't reach GitHub\\s*(?:│.*)?$"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Settings",
+            "{upgrade_version}",
+            "! Couldn't reach GitHub; nothing changed"
+          ],
+          "expect_next": {},
+          "expect_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          ],
+          "absent": [
+            "Notifications",
+            "Update to ",
+            "Updating…",
+            "Update failed",
+            "enter open",
+            "Host paused",
+            "Reading this Session"
+          ]
+        }
+      }
+    },
+    {
+      "name": "day-chat-after-upgrade",
+      "theme": "day",
+      "upgrade": "chat",
+      "open": "Day upgrade witness",
+      "steps": [],
+      "expect": [
+        "alt+i info",
+        "Day upgrade witness"
+      ],
+      "absent": [
+        "Upgraded to ",
+        " · upgraded to ",
+        "Checking for updates",
+        "Preparing Upgrade",
+        "Upgrade failed",
+        "Update cancelled",
+        "Update failed",
+        "Updating…",
+        "Publishing; cancelling no longer rolls back",
+        "restart rui to continue",
+        "enter open"
+      ],
+      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
+      "cast": [
+        {
+          "label": "Day upgrade witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Day upgrade witness"
+          ]
+        }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Day upgrade witness",
+            "Upgraded to {upgrade_version}"
+          ],
+          "absent": [
+            "Checking for updates",
+            "Preparing Upgrade",
+            "Upgrade failed",
+            "Update cancelled",
+            "Update failed",
+            "Updating…",
+            "Publishing; cancelling no longer rolls back",
+            "restart rui to continue",
+            "Update failed",
+            "Updating…",
+            "Publishing; cancelling no longer rolls back",
+            "restart rui to continue",
+            "enter open"
+          ]
+        }
+      }
+    },
+    {
       "name": "wide-launch",
       "note": "Bare launch opens an empty chat beside the list at wide widths",
       "open": "overview",

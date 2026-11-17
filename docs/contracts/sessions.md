@@ -5,6 +5,25 @@
 
 ## Accepted contract
 
+### Session provenance
+
+A Session's nullable `creator` identifies the Session supplied by validated creation `parent` input.
+The Store saves it once as `session.creator_ref` for both attached and detached creation.
+Creation without a parent leaves it null.
+A non-null creator is another existing Session's canonical six-character reference.
+Subsequent configuration and command replay preserve the original creator.
+
+Creator records provenance; `session.parent_ref` records lifecycle attachment.
+An attached child has both facts, while a detached child retains its creator without a lifecycle parent.
+Only lifecycle attachment controls parent-caused stops, child-ending Messages, and ancestor Activity forwarding.
+A creator alone grants none of those effects.
+[Agent identity and peer composition](model-io.md#agent-identity-and-peer-composition) owns those lifecycle rules.
+
+[Store format and upgrades](store.md#store-format-and-upgrades) owns migration of historical provenance.
+Existing parent links provide a known creator; an older detached Session's unknown creator remains null.
+Peer Message senders, Labels, and shared Workspaces never establish a creator.
+[Session listing](cli.md#session-listing) and [public Session activity](inspection.md#public-session-activity) expose this saved fact.
+
 ### Stops and terminal outcomes
 
 #### Stopping selected work
@@ -159,6 +178,12 @@ A crash reopens committed queue/selection facts without inventing a terminal out
 
 ## Required evidence
 
+
+### Provenance reads
+
+| Contract | Canonical checks | Limits and exceptions |
+| --- | --- | --- |
+| [Creator provenance](#session-provenance) on listing and Activity | `protocol_reply.zig`: `Session list facts own complete rows and render semantic output after scratch reuse` and `Session list facts reject malformed metadata and consequential ambiguity`; `activity_golden_tests.zig`: `activity golden every kind`; `clients/ts/test/unit.test.ts`: `session summaries preserve independent creator and parent references and nulls`. | These check public creator values and decoding, not creation, lifecycle effects, migration, or native restart. Creator persistence and backfill need separate Store evidence. |
 
 ### Durable controls
 

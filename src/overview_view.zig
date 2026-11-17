@@ -325,6 +325,7 @@ pub const Event = union(enum) {
     memory: Memory,
 
     upgrade: upgrade_status.Run,
+    available_upgrade: ?upgrade_status.Version,
     conversed: Conversed,
 
     models: ModelsRead,
@@ -336,7 +337,7 @@ pub const Event = union(enum) {
     observed: Observed,
     conversation: ?Reference,
 
-    clicked: struct { target: Click },
+    clicked: struct { target: Click, upgrade_admitted: bool = true },
 
     unconfirmed: Unconfirmed,
 };
@@ -348,6 +349,7 @@ pub const Click = union(enum) {
     sessions,
     archived,
     settings,
+    update: upgrade_status.Target,
 };
 
 pub fn clickOf(state: *const State, item: Item) ?Click {
@@ -569,9 +571,8 @@ pub const Said = struct {
     stoppable: bool,
 };
 
-pub fn conversation(state: *const State, ref: Reference, work: Kind, caps: Caps, buffer: *[upgrade_status.max_line_bytes]u8) Said {
-    const line = statusSaid(state, caps, buffer);
-    return .{ .text = if (line) |value| value.text else null, .notice = footerNotice(state), .stoppable = stoppable(state, ref, work) };
+pub fn conversation(state: *const State, ref: Reference, work: Kind) Said {
+    return .{ .text = null, .notice = footerNotice(state), .stoppable = stoppable(state, ref, work) };
 }
 
 fn statusSaid(state: *const State, caps: Caps, buffer: *[upgrade_status.max_line_bytes]u8) ?StatusLine {
@@ -1187,6 +1188,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 },
                 .sessions => try selectView(state, .active, &effects),
                 .archived => try selectView(state, .archived, &effects),
+                .update => |target| if (input.upgrade_admitted and std.meta.eql(target, upgrade_status.Target{ .available = state.upgrade.available, .run = state.upgrade.run }) and !state.upgrading()) startUpgrade(state),
                 .settings => {
                     state.selected = .settings;
                     effects.add(.open_settings);
@@ -1349,9 +1351,6 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         .upgrade => |run| {
             state.upgrade.stand(run);
             if (run == .ended) {
-                var said: [upgrade_status.max_line_bytes]u8 = undefined;
-                const line = upgrade_status.line(run, &said, .unicode);
-                if (line.lasts == .notice) state.say(if (line.tone == .attention) .attention else .normal, "{s}", .{line.text});
                 state.next_list_ms = 0;
             }
         },
@@ -1359,6 +1358,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         .defaults_saved => |saved| {
             if (saved) |binding| state.default = binding;
         },
+        .available_upgrade => |available| state.upgrade.available = available,
         .start_upgrade => startUpgrade(state),
     }
     for (effects.slice()) |effect| switch (effect) {
@@ -2210,7 +2210,7 @@ pub fn layout(state: *const State) Layout {
     return .{ .top = top, .list = .{ .start = top, .end = settings }, .settings = .{ .start = settings, .end = host }, .host = .{ .start = host, .end = input }, .input = input };
 }
 
-const settings_rows = 2;
+const settings_rows = 3;
 
 fn statusRows(state: *const State) u16 {
     var buffer: StatusBuffer = undefined;
@@ -2996,8 +2996,6 @@ const kind_cases = [_]struct { state: WorkState, unicode: []const u8, ascii: []c
     .{ .state = .{ .stopped = .{ .since = test_now_s - 2 * 86400, .cause = .interruption } }, .unicode = " ■ Write the notes                                                           2d", .ascii = " # Write the notes                                                           2d", .colour = .normal, .stoppable = false },
 };
 
-var test_said: [upgrade_status.max_line_bytes]u8 = undefined;
-
 test "every work state follows the rules table, in Unicode and ASCII" {
     comptime std.debug.assert(kind_cases.len == std.enums.values(Kind).len);
     for (kind_cases, std.enums.values(Kind)) |case, kind| {
@@ -3360,22 +3358,55 @@ fn expectSaid(text: ?[]const u8, stoppable_: bool, said: Said) !void {
     try std.testing.expectEqual(stoppable_, said.stoppable);
 }
 
+test "conversation footer domain carries chat notices but never upgrade status" {
+    var state = try testState();
+    defer state.deinit();
+    const version: upgrade_status.Version = .{ .schema = 60, .patch = 0 };
+    const endings = [_]upgrade_status.Ended{
+        .{ .up_to_date = version },    .{ .superseded = version }, .cancelled,
+        .{ .refused = .source_build }, .{ .failed = .download },   .{ .upgraded = .{ .version = version, .restarted = true } },
+        .{ .incompatible = version },
+    };
+    const runs = [_]?upgrade_status.Run{
+        null,                                                                    .checking,                                                                .cancelling,
+        .{ .installing = .{ .found = .{ .host = .none }, .step = .preparing } }, .{ .installing = .{ .found = .{ .host = .none }, .step = .publishing } }, .{ .installing = .{ .found = .{ .host = .none }, .step = .restarting } },
+    };
+    for ([_]?upgrade_status.Version{ null, version }) |available| for (runs) |run| for ([_]bool{ false, true }) |notice| {
+        state.upgrade.available = available;
+        state.upgrade.run = run;
+        state.notice = null;
+        if (notice) state.say(.normal, "Copied 3 lines", .{});
+        const said = conversation(&state, "k7m2qx".*, .working);
+        try std.testing.expect(said.text == null);
+        try std.testing.expectEqualStrings(if (notice) "Copied 3 lines" else "", said.notice orelse "");
+    };
+    for (endings) |how| for (std.enums.values(upgrade_status.Outcome)) |outcome| {
+        state.notice = null;
+        state.upgrade.run = .checking;
+        _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = how, .outcome = outcome } } });
+        const said = conversation(&state, "k7m2qx".*, .finished);
+        try std.testing.expect(said.text == null);
+        try std.testing.expect(said.notice == null);
+        try std.testing.expect(!said.stoppable);
+    };
+}
+
 test "ctrl-x in a conversation stops its Session as on its row, listed or not" {
     var state = try testState();
     defer state.deinit();
     const ref = "k7m2qx".*;
     const ctrl_x: Conversed = .{ .reference = ref, .work = .working, .input = .stop };
-    try expectSaid(null, true, conversation(&state, ref, .working, .{}, &test_said));
+    try expectSaid(null, true, conversation(&state, ref, .working));
     try expectEffects(&.{.{ .stop = ref }}, try step(&state, .{ .conversed = ctrl_x }));
-    try std.testing.expect(!conversation(&state, ref, .working, .{}, &test_said).stoppable);
+    try std.testing.expect(!conversation(&state, ref, .working).stoppable);
     try expectEffects(&.{}, try step(&state, .{ .conversed = ctrl_x }));
     try expectNotice(&state, "k7m2qx: Stopping");
-    try expectSaid("k7m2qx: Stopping", false, conversation(&state, ref, .working, .{}, &test_said));
+    try expectSaid("k7m2qx: Stopping", false, conversation(&state, ref, .working));
     try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .input = .other } }));
-    try std.testing.expectEqual(@as(?[]const u8, null), conversation(&state, ref, .working, .{}, &test_said).text);
+    try std.testing.expectEqual(@as(?[]const u8, null), conversation(&state, ref, .working).text);
     try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = ref, .outcome = .{ .failed = "session_not_found" } } }));
     try expectNotice(&state, "! k7m2qx not stopped: session_not_found");
-    try std.testing.expect(conversation(&state, ref, .working, .{}, &test_said).stoppable and !conversation(&state, ref, .finished, .{}, &test_said).stoppable);
+    try std.testing.expect(conversation(&state, ref, .working).stoppable and !conversation(&state, ref, .finished).stoppable);
     try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .finished, .input = .stop } }));
     try expectNotice(&state, "k7m2qx is already finished.");
 }
@@ -4400,7 +4431,7 @@ test "the status bar says the Upgrade at work, else the newest notice, else an U
     try expectStatus(&state, "Preparing Upgrade · no Hosts running · esc cancels", .normal);
     _ = try press(&state, .next);
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 60, .patch = 0 }, .restarted = false } }, .outcome = .compatible } } });
-    try std.testing.expectEqualStrings("Upgraded to 0.60.0", footerNotice(&state).?);
+    try std.testing.expect(footerNotice(&state) == null);
     try expectStatus(&state, "! Not confirmed · rui request recover " ++ key, .attention);
     _ = try press(&state, .next);
     try expectStatus(&state, "! Not confirmed · rui request recover " ++ key, .attention);
@@ -5240,7 +5271,8 @@ test "Upgrade runs inline: Esc cancels it before the draft, checking or preparin
     try expectEffects(&.{.cancel_upgrade}, try press(&state, .clear));
 
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } } });
-    try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", state.notice.?.text());
+    try std.testing.expect(state.notice == null);
+    try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", upgrade_status.line(state.upgrade.run.?, &buffer, .unicode).text);
     try expectEffects(&.{}, try step(&state, .start_upgrade));
     _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none } } } });
 
@@ -5289,7 +5321,7 @@ test "every place an Upgrade run can stand decides the hold, Esc and another Upg
         .{ .run = .{ .installing = .{ .found = found, .step = .restarting } }, .going = true, .escape = false },
         .{ .run = .cancelling, .going = true, .escape = true },
         .{ .run = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } }, .going = false, .escape = false },
-        .{ .run = .{ .ended = .{ .how = .superseded, .outcome = .unchanged } }, .going = false, .escape = false },
+        .{ .run = .{ .ended = .{ .how = .{ .superseded = upgrade_status.Version{ .schema = 60, .patch = 0 } }, .outcome = .unchanged } }, .going = false, .escape = false },
         .{ .run = .{ .ended = .{ .how = .{ .incompatible = upgrade_status.Version{ .schema = 60, .patch = 0 } }, .outcome = .incompatible } }, .going = false, .escape = false },
     };
     for (cases) |case| {
@@ -6166,6 +6198,21 @@ test "session list has exactly one noninteractive gap only between both pin grou
         }
         _ = try press(&state, .next);
         try std.testing.expectEqual(Selection.settings, state.selected);
+    };
+}
+
+test "sidebar update admission binds drawn availability run and frontend readiness" {
+    const versions = [_]?upgrade_status.Version{ null, .{ .schema = 76, .patch = 0 }, .{ .schema = 77, .patch = 0 } };
+    const failed: upgrade_status.Run = .{ .ended = .{ .how = .{ .failed = .download }, .outcome = .unchanged } };
+    for (versions) |drawn| for (versions) |current| for ([_]?upgrade_status.Run{ null, failed, .checking }) |drawn_run| for ([_]?upgrade_status.Run{ null, failed, .checking }) |current_run| for ([_]bool{ false, true }) |admitted| {
+        var state: State = undefined;
+        try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
+        defer state.deinit();
+        _ = try step(&state, .{ .available_upgrade = current });
+        state.upgrade.run = current_run;
+        const expected = admitted and std.meta.eql(drawn, current) and std.meta.eql(drawn_run, current_run) and (current_run == null or !current_run.?.going());
+        _ = try step(&state, .{ .clicked = .{ .target = .{ .update = .{ .available = drawn, .run = drawn_run } }, .upgrade_admitted = admitted } });
+        if (expected) try std.testing.expect(state.upgrade.run.? == .checking) else try std.testing.expect(std.meta.eql(current_run, state.upgrade.run));
     };
 }
 

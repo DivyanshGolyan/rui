@@ -395,6 +395,14 @@ class RuleMatchTest(unittest.TestCase):
 
 class BuildModuleTest(unittest.TestCase):
 
+    def test_ci_producer_changes_compile_and_execute_its_integration_products(self):
+        result = select(["tests/ci/build_artifact.py"], "review", AVAILABLE)
+        for platform in ("targets", "native_targets"):
+            with self.subTest(platform=platform):
+                self.assertTrue({"check-full", "admission-debug-integration", "test-full"}
+                                <= set(result[platform]))
+        self.assertFalse(result["typecheck_macos"])
+
     def test_every_build_module_is_mapped(self):
         modules = {path.relative_to(build_files.ROOT).as_posix()
                    for path in [*build_files.files(), *build_files.ROOT.glob(SETUP_PARTS),

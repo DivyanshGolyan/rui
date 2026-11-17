@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 import build_files
+import build_artifact
 import prepush
 import report_issue
 
@@ -118,8 +119,8 @@ AssertionError
         self.assertEqual(checks[0][1], ["zig", "build", "-j1", "request-wait-integration", "--summary", "line"])
 
     def test_compile_jobs_use_known_commands(self):
-        for name, command in (("linux_build_unit", [*prepush.UNIT_COMPILE, "-j1"]),
-                              ("linux_build", ["zig", "build", "-j1", "ci-build", "-Dci-targets=request-wait-integration", "-Dci-part=all", "--summary", "line"]),
+        for name, command in (("linux_build_unit", prepush.unit_compile()),
+                              ("linux_build", [*build_artifact.compile_command(["request-wait-integration"], jobs=1), "--summary", "line"]),
                               ("macos_typecheck", ["zig", "build", "-j1", "typecheck-macos", "--summary", "line"]),
                               ("linux_codegen", prepush.STACK_FRAMES)):
             with self.subTest(job=name):
