@@ -7,6 +7,7 @@ or writes the user's default Store, credentials or tmux server.
 """
 import argparse
 import copy
+import datetime
 import functools
 import hashlib
 import html
@@ -840,7 +841,7 @@ def tap_main(args):
 # ---------------------------------------------------------------- new run
 
 
-def launch_host(run, *, restartable=False):
+def launch_host(run, *, restartable=False, without_preload=False):
     """Start this run's Host from the options saved at `new`; return its ready status."""
     options = run.meta["host_options"]
     host_argv = [str(run.rui), "host", "serve", "--store", str(run.store),
@@ -853,6 +854,8 @@ def launch_host(run, *, restartable=False):
     for assignment in options["host_setenv"]:
         key, _, value = assignment.partition("=")
         host_env[key] = value
+    if without_preload:
+        host_env.pop("LD_PRELOAD", None)
     host = subprocess.Popen(host_argv, env=host_env, cwd=run.project, stdin=subprocess.DEVNULL,
                             stdout=open(run.evidence / "host.stdout.log", "a"), stderr=open(run.evidence / "host.log", "a"),
                             start_new_session=True)
@@ -2332,7 +2335,7 @@ def validate_scenario(data, sizes=None):
         suspended = False
         for step in steps:
             require(isinstance(step, dict), f"{name}: step must be an object")
-            actions = set(step) - {"timeout", "repaint", "min_columns", "empty_composer"}
+            actions = set(step) - {"timeout", "repaint", "min_columns", "empty_composer", "shot_clock_advance", "shot_settle_message"}
             require(len(actions) == 1 and actions <= {"text", "keys", "wait", "gone", "sleep", "send", "host", "mouse", "exited"}, f"{name}: unknown or ambiguous step {step}")
             action = next(iter(actions))
             require("repaint" not in step or action == "mouse" and type(step["repaint"]) is bool, f"{name}: invalid repaint (mouse boolean only)")
@@ -2341,6 +2344,8 @@ def validate_scenario(data, sizes=None):
                     f"{name}: invalid min_columns (positive integer for wait/gone only)")
             require("empty_composer" not in step or action == "wait" and type(step["empty_composer"]) is bool,
                     f"{name}: invalid empty_composer (wait boolean only)")
+            require("shot_clock_advance" not in step or action == "sleep" and type(step["shot_clock_advance"]) is int and step["shot_clock_advance"] >= 0, f"{name}: shot_clock_advance requires nonnegative whole seconds on a sleep")
+            require("shot_settle_message" not in step or action == "host" and step[action] == "suspend" and step["shot_settle_message"] is True, f"{name}: shot_settle_message requires Host suspension")
             value = step[action]
             require("timeout" not in step or action in ("wait", "gone", "exited") and duration(step["timeout"]), f"{name}: invalid timeout")
             if action == "mouse":
@@ -2450,11 +2455,13 @@ def frame_request(run, result, settle="answered", sid=None):
 
 
 def seed_cast(run, entries, *, ordered=False):
-    # The overview orders equal work states by whole-second settlement time,
-    # then by the Host-allocated Session ID. Start the next cast member in a
-    # later second so random IDs cannot change the order of settled rows.
+    # Shots assign distinct seconds to cast settlements. Ordinary frames keep
+    # their real clock; both continue to use Host-allocated Session IDs.
     for entry in cast_entries(entries):
-        if ordered and (previous := getattr(run, "_cast_settled_at", None)) is not None:
+        if ordered and getattr(run, "_shot_clock", None) is not None:
+            run._shot_clock.next_cast()
+            run._shot_clock.cast_times[entry["label"]] = run._shot_clock.current
+        elif ordered and (previous := getattr(run, "_cast_settled_at", None)) is not None:
             delay = 1.01 - (time.monotonic() - previous)
             if delay > 0:
                 time.sleep(delay)
@@ -2519,6 +2526,7 @@ class FrameTerminal:
         from terminal_screen import ScreenCapture
         self.run, self.state = run, state
         self.condition = threading.Condition()
+        self.last_commit_ns = None
         self.pressed = None
         self.log = run.evidence / "frames-pty" / state["name"]
         self.log.mkdir(parents=True, exist_ok=True)
@@ -2563,6 +2571,7 @@ class FrameTerminal:
 
     def _committed(self, _text, _x, _y):
         t_ns = now_ns()
+        self.last_commit_ns = t_ns
         frame = self.capture.frame
         append_jsonl(self.log / "frames.jsonl", {"t_ns": t_ns, "generation": self.capture.generation,
                                                 "cursor": list(frame.cursor), "visible": frame.visible,
@@ -2616,6 +2625,24 @@ class FrameTerminal:
                 if remaining <= 0:
                     raise FrameFailure(f"timeout waiting for {description}")
                 self.condition.wait(remaining)
+
+    def settle_shot(self, *, allow_exit=False):
+        """Wait for 300 ms without a committed frame, for at most five seconds."""
+        with self.condition:
+            started = now_ns()
+            deadline = started + 5_000_000_000
+            while True:
+                self.process.output.check()
+                if not allow_exit and self.status is not None:
+                    raise FrameFailure(f"Rui exited with status {self.status} before shot settled")
+                if self.capture.frame is None or self.last_commit_ns is None:
+                    raise FrameFailure("Rui produced no committed frame before shot settled")
+                now = now_ns()
+                quiet_since = max(started, self.last_commit_ns)
+                remaining = min(deadline - now, quiet_since + 300_000_000 - now)
+                if remaining <= 0:
+                    return self.capture.frame
+                self.condition.wait(remaining / 1_000_000_000)
 
     def resize(self, size):
         import fcntl
@@ -2734,11 +2761,19 @@ def frame_wait(run, terminal, text, absent=False, timeout=20, allow_exit=False, 
                   f"{'absence of ' if absent else ''}{text!r}", timeout, allow_exit)
 
 
-def frame_host_suspension(run, suspend):
+def frame_host_suspension(run, suspend, *, settle_message=False):
     held = getattr(run, "frame_suspended_host", None)
     if suspend:
         if held is not None:
             raise FrameFailure("this frame already suspended its Host")
+        clock = getattr(run, "_shot_clock", None)
+        if clock is not None and settle_message:
+            label = run._shot_open_label
+            if label not in clock.cast_times:
+                raise FrameFailure(f"suspended shot requires a seeded Session: {label}")
+            listing = frame_command(run.rui_cmd("request", "list", log=False), "list prior requests")
+            run._shot_suspended = {"before": set(json.loads(listing.stdout)), "session": run.sid(label),
+                                   "at": clock.cast_times[label]}
         hosts = [record for record in run.owned() if record["kind"] == "host"
                  and (current := process_start(record["pid"])) is not None
                  and current[0] == record["lstart"]]
@@ -2756,6 +2791,62 @@ def frame_host_suspension(run, suspend):
     append_jsonl(run.evidence / "injections.jsonl", {
         "t_ns": now_ns(), "wall": wall(), "via": "kill", "target": "host",
         "pid": held["pid"], "lstart": held["lstart"], "signal": "STOP" if suspend else "CONT"})
+
+
+def frame_resume_settled_shot(run):
+    """Finish the captured original while the resumed Host has a unique fixture second."""
+    held = getattr(run, "frame_suspended_host", None)
+    shot = getattr(run, "_shot_suspended", None)
+    if held is None or shot is None:
+        return frame_host_suspension(run, False)
+    clock = run._shot_clock
+    try:
+        deadline = time.monotonic() + 10
+        handle = None
+        while time.monotonic() < deadline:
+            listing = frame_command(run.rui_cmd("request", "list", log=False), "list suspended requests")
+            candidates = []
+            for key in set(json.loads(listing.stdout)) - shot["before"]:
+                if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", key):
+                    raise FrameFailure("invalid generated request handle")
+                path = run.home / ".config/rui/requests" / (key + ".json")
+                try:
+                    record = json.loads(path.read_text())
+                except (OSError, ValueError):
+                    continue
+                if (record.get("key") == key and record.get("kind") == "message"
+                        and record.get("session") == shot["session"] and record.get("store") == str(run.store)):
+                    candidates.append(key)
+            if len(candidates) > 1:
+                raise FrameFailure("multiple original suspended Session requests")
+            if candidates:
+                handle = candidates[0]
+                break
+            time.sleep(0.05)
+        if handle is None:
+            raise FrameFailure("no captured original suspended Session request")
+        clock.set(shot["at"])
+        frame_host_suspension(run, False)
+        record_path = run.home / ".config/rui/requests" / (handle + ".json")
+        result = run.rui_cmd("request", "recover", "--store", run.store, "--record", record_path, "--kind", "message")
+        frame_command(result, "recover original suspended request")
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline:
+            result = run.rui_cmd("request", "inspect", "--store", run.store, "--key", handle, log=False)
+            if result.returncode == 0:
+                observed = json.loads(result.stdout).get("observation", {})
+                if observed.get("target") != shot["session"] or observed.get("kind") != "message":
+                    raise FrameFailure("recovered request binding differs from suspended Session")
+                if observed.get("state") in ("completed", "failed", "cancelled", "rejected"):
+                    return
+            time.sleep(0.1)
+        raise FrameFailure("original suspended request did not settle")
+    finally:
+        try:
+            frame_host_suspension(run, False)
+        finally:
+            clock.reset()
+            run._shot_suspended = None
 
 
 def frame_steps(run, terminal, steps, exiting=False):
@@ -2788,13 +2879,20 @@ def frame_steps(run, terminal, steps, exiting=False):
         elif "sleep" in step:
             # An explicit scenario hold also keeps draining/recording output.
             time.sleep(step["sleep"])
+            if getattr(run, "_shot_clock", None) is not None and "shot_clock_advance" in step:
+                run._shot_clock.advance(step["shot_clock_advance"])
         elif "send" in step:
             message = step["send"]
             sid = run.sid(message["to"])
             result = run.rui_cmd("session", "send", "--store", run.store, "--to", sid, input=message["text"])
             frame_request(run, result, "answered" if message.get("wait", True) else "pending", sid)
         elif step["host"] in ("suspend", "resume"):
-            frame_host_suspension(run, step["host"] == "suspend")
+            if step["host"] == "resume":
+                frame_resume_settled_shot(run)
+            elif step.get("shot_settle_message"):
+                frame_host_suspension(run, True, settle_message=True)
+            else:
+                frame_host_suspension(run, True)
         elif step["host"] == "pause":
             frame_command(run.rui_cmd("host", "pause", "--store", run.store), "pause Host")
         else:
@@ -3046,6 +3144,9 @@ def frame_upgrade_run(run, state, build):
         isolated.home = run.scratch / "upgrades" / state["name"] / "home"
         isolated.store = isolated.home.parent / "store"
         isolated.home.mkdir(parents=True)
+        isolated.project = isolated.home / "code/rui"
+        shutil.copytree(run.project, isolated.project)
+        isolated.meta["project"] = str(isolated.project)
         shutil.copytree(run.home / ".config", isolated.home / ".config")
         host_build = isolated.home / ".local/lib/rui/actor"
         (host_build / "bin").mkdir(parents=True)
@@ -3071,7 +3172,19 @@ def frame_upgrade_run(run, state, build):
             (selected / "THIRD_PARTY_NOTICES.md").write_text("Synthetic selected release\n")
         frame_command(subprocess.run([str(actor), "--publish-install", str(isolated.home), str(selected), "released-install"],
                                      env=isolated.env(), capture_output=True, text=True, timeout=25), "select managed release")
-        ready = launch_host(isolated, restartable=True)
+        # Persist deterministic cast timestamps first; upgrade ownership rejects
+        # loader overrides, so retire that Host before starting the real upgrade Host.
+        staged_clock = getattr(isolated, "_shot_clock", None)
+        if staged_clock is not None and state.get("cast"):
+            launch_host(isolated, restartable=True)
+            try:
+                seed_cast(isolated, state["cast"], ordered=True)
+            finally:
+                staged_clock.reset()
+            frame_pause_owned_host(isolated)
+            isolated._upgrade_seeded = True
+        ready = (launch_host(isolated, restartable=True, without_preload=True) if staged_clock is not None
+                 else launch_host(isolated, restartable=True))
         isolated.meta["upgrade_previous_instance"] = json.loads(ready.stdout)["instance"]
         replacements = {"{upgrade_version}": version, "{available_version}": available}
         def expand(value, regex=False):
@@ -3264,8 +3377,39 @@ def require_upgrade_fixture_user():
         die("upgrade frames require a dedicated fixture account and VERIFY_RUI_UPGRADE_FIXTURE_USER matching its login; never use an account with unrelated Rui Hosts")
 
 
-def shots_fixture_env():
-    """Share one advancing wall-clock offset across the shot's processes."""
+class ShotsClock:
+    """A common stopped wall clock, with deterministic cast settlement seconds."""
+    base = datetime.datetime(2026, 1, 1, 12, 0, 0)
+    def __init__(self, path, cast_count):
+        if cast_count > 300:
+            raise ValueError("shots support at most 300 cast entries")
+        self.path = pathlib.Path(path)
+        self.cast_count = cast_count
+        self.cast_start = self.base - datetime.timedelta(seconds=max(0, cast_count - 1))
+        self.ordinal = 0
+        self.cast_times = {}
+        self.reset()
+
+    def set(self, value):
+        self.current = value
+        atomic_write(self.path, value.strftime("%Y-%m-%d %H:%M:%S") + "\n")
+
+    def reset(self):
+        self.set(self.base)
+
+    def advance(self, seconds):
+        self.set(self.current + datetime.timedelta(seconds=seconds))
+
+    def next_cast(self):
+        value = self.cast_start + datetime.timedelta(seconds=self.ordinal)
+        if self.ordinal >= self.cast_count:
+            raise FrameFailure("shot cast exceeds the planned cast entries")
+        self.ordinal += 1
+        self.set(value)
+
+
+def shots_fixture_env(clock_path):
+    """Share a stopped, externally controlled wall clock across shot processes."""
     override = os.environ.get("VERIFY_RUI_FAKETIME_LIB")
     if override:
         candidates = [pathlib.Path(override).expanduser()]
@@ -3276,9 +3420,8 @@ def shots_fixture_env():
     library = next((path.resolve() for path in candidates if path.is_file()), None)
     if library is None:
         raise ValueError("shots requires libfaketime; install it or set VERIFY_RUI_FAKETIME_LIB to libfaketime.so.1")
-    offset = 1767268800 - int(time.time())  # 2026-01-01 12:00 UTC
-    return {"LD_PRELOAD": str(library), "FAKETIME": f"{offset:+d}s",
-            "FAKETIME_DONT_FAKE_MONOTONIC": "1", "TZ": "UTC",
+    return {"LD_PRELOAD": str(library), "FAKETIME_TIMESTAMP_FILE": str(clock_path),
+            "FAKETIME_NO_CACHE": "1", "FAKETIME_DONT_FAKE_MONOTONIC": "1", "TZ": "UTC",
             "RUI_TEST_MEMORY_BYTES": "33554432"}
 
 
@@ -3311,9 +3454,20 @@ def run_frames(args):
         probe = subprocess.run(["node", str(HERE.with_name("frames_png.js")), "--check"], capture_output=True, text=True)
         if probe.returncode:
             die("frames requires node and Playwright with Chromium; use --no-png")
+    clock_dir = None
     try:
-        fixture_env = shots_fixture_env() if getattr(args, "shots_fixture", False) else {}
+        if getattr(args, "shots_fixture", False):
+            clock_dir = pathlib.Path(tempfile.mkdtemp(prefix="rui-shots-clock-"))
+            cast_count = sum(sum(1 for _ in cast_entries(state.get("cast", [])))
+                             for state in scenario["states"])
+            shot_clock = ShotsClock(clock_dir / "clock", cast_count)
+            fixture_env = shots_fixture_env(shot_clock.path)
+        else:
+            shot_clock = None
+            fixture_env = {}
     except ValueError as error:
+        if clock_dir is not None:
+            shutil.rmtree(clock_dir)
         die(str(error))
     # Keep the existing new command as the one run/fixture owner.
     output = io.StringIO()
@@ -3331,8 +3485,11 @@ def run_frames(args):
                     cmd_cleanup(argparse.Namespace(run=str(candidates[-1]), no_export=True))
                 except SystemExit:
                     pass
+        if clock_dir is not None and not args.keep:
+            shutil.rmtree(clock_dir)
         raise
     run = Run(output.getvalue().strip())
+    run._shot_clock = shot_clock
     # Match the review's home-relative working directory even in the empty overview.
     run.project = run.home / "code/rui"
     run.project.mkdir(parents=True, exist_ok=True)
@@ -3366,9 +3523,15 @@ def run_frames(args):
         (out / "scenario.json").write_text(json.dumps(scenario_snapshot(scenario), indent=2) + "\n")
         last = max(i for i, state in enumerate(scenario["states"]) if state["name"] in selected)
         parent_paused = False
+        cast_ordinal = 0
         for state in scenario["states"][:last + 1]:
+            if shot_clock is not None:
+                shot_clock.ordinal = cast_ordinal
+                cast_ordinal += sum(1 for _ in cast_entries(state.get("cast", [])))
             if state.get("upgrade") and state["name"] not in selected:
                 continue
+            if shot_clock is not None:
+                shot_clock.reset()
             state_started = time.monotonic_ns() if getattr(args, "timing", False) else None
             if state.get("upgrade") and not parent_paused:
                 frame_pause_owned_host(run)
@@ -3393,7 +3556,14 @@ def run_frames(args):
             is_selected = frame_capture_selected(state, selected)
             try:
                 run, state, upgrade_fixture = upgrade_scope.enter_context(frame_upgrade_run(run, state, build))
-                seed_cast(run, state.get("cast", []), ordered=getattr(args, "shots_fixture", False))
+                run._shot_clock = shot_clock
+                try:
+                    if not getattr(run, "_upgrade_seeded", False):
+                        seed_cast(run, state.get("cast", []), ordered=getattr(args, "shots_fixture", False))
+                finally:
+                    if shot_clock is not None:
+                        shot_clock.reset()
+                run._shot_open_label = state["open"]
                 steps = state["steps"]
                 launch_size = state_sizes[0]
                 if state.get("upgrade") and launch_size[0] < 100:
@@ -3406,6 +3576,8 @@ def run_frames(args):
                                        if "The Host stopped." in step.get("wait", "")), None)
                 first_wait = steps[0].get("wait") if steps else None
                 frame_initial_ready(target, first_wait, allow_exit=bool(stopped_marker))
+                if getattr(args, "shots_fixture", False):
+                    target.settle_shot(allow_exit=bool(stopped_marker))
                 frame_drive_upgrade(run, target, state, upgrade_fixture)
                 exiting = frame_steps(run, target, steps, exiting=bool(stopped_marker))
                 if launch_size != state_sizes[0]:
@@ -3440,9 +3612,14 @@ def run_frames(args):
                                 target.resize(size)
                                 frame_upgrade_viewport(run, target, state)
                                 frame_ready(target, state, allow_exit=exiting, sessions=run.meta.get("sessions", {}))
-                            # The first viewport is already sized. Capture directly
-                            # after its steps/wait, while a transient is still visible.
-                            record = frame_capture(run, target, out, state, size, reason)
+                            # Ordinary frames preserve the first committed transition.
+                            # Shots settle each viewport after its last step or resize.
+                            capture_target = target
+                            if getattr(args, "shots_fixture", False):
+                                # Freeze the settled frame under the collector lock;
+                                # later commits must not replace it before rendering.
+                                capture_target = argparse.Namespace(frame=target.settle_shot(allow_exit=exiting))
+                            record = frame_capture(run, capture_target, out, state, size, reason)
                         except (Exception, SystemExit) as error:
                             failed = True
                             failure_reason = reason or str(error)
@@ -3468,7 +3645,7 @@ def run_frames(args):
             finally:
                 try:
                     try:
-                        frame_host_suspension(run, False)
+                        frame_resume_settled_shot(run)
                     finally:
                         if opened:
                             try:
@@ -3554,6 +3731,8 @@ def run_frames(args):
                     cmd_cleanup(argparse.Namespace(run=str(run.root), no_export=True))
                 except SystemExit as error:
                     failed = failed or bool(error.code)
+        if clock_dir is not None and not args.keep:
+            shutil.rmtree(clock_dir)
     print(out)
     if failed:
         raise SystemExit(1)
