@@ -250,6 +250,7 @@ def prove_mcp_mixed(root):
         store = state / "store"
         token = state / "token"
         token.write_text("t")
+        token.chmod(0o600)
         processes.append(fixture.start_host(
             store, f"http://127.0.0.1:{endpoint.server_port}/responses",
             "--set", f"tools.mcp.images.url=http://127.0.0.1:{mcp.server_port}/mcp",
