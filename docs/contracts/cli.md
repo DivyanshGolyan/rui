@@ -40,17 +40,16 @@ Renaming introduces no new runtime entity or authority, deeper command hierarchy
 
 #### Configuration and input
 
-Ordinary fresh `session configure` without a Session selector or preset captures creation intent and concrete resolved Workspace/provider/model/defaults before transmission; the Store allocates the ID at commit and the accepted reply returns it.
+Ordinary fresh `session configure` without a Session selector or preset captures creation intent and the selected Workspace, provider and model before transmission; the Host resolves omitted settings; the Store allocates the ID at commit and the accepted reply returns it.
 Fully explicit settings bypass unused preferences.
-`session configure --preset NAME` captures the named Host Settings preset and only explicitly supplied overrides, without filling fresh defaults. The shared resolver applies the complete preset first. Presets are not supported on `session start`; they cannot be used to update an addressed Session. On preset creation, `default` sends null for policy overrides: a null output reservation clears it, a null effort clears it only where the model permits, and null compactAt is refused by the shared validator. Empty instructions, empty tool lists, `--label ""` and `--text-output` remain explicit overrides.
+`session configure --preset NAME` captures the named Host Settings preset and only explicitly supplied overrides, without filling fresh defaults. The shared resolver applies the preset first, then the Host fills remaining omitted settings. Presets are not supported on `session start`; they cannot be used to update an addressed Session. On preset creation, `default` sends null for policy overrides: a null output reservation clears it, while null effort and compactAt request the Host defaults. Empty instructions, empty tool lists, `--label ""` and `--text-output` remain explicit overrides.
 The CLI checks every supplied model's syntax before capture, input reads or Session mutation.
 A refused model diagnostic names the ID and lists the [IDs Rui lists](#supported-model-ids).
 A typed ID with valid syntax that Rui does not list is admitted with one line, `Rui does not list ID; it uses default limits`, and runs with [default limits](model-io.md#choosing-and-validating-compacted-context).
 `session configure --parent ID` without a Session selector and `session start --parent ID` capture the existing create-only parent relation.
-They send the same complete creation spec through the native inherit-and-narrow owner: provider, Workspace and saved Bash environment come from the parent, configured allowed tool names and Permission Mode may only narrow, and explicit provider or Workspace overrides remain present for canonical refusal even when equal.
+They send the creation spec through the native inherit-and-narrow owner: provider, Workspace and saved Bash environment come from the parent, configured allowed tool names and Permission Mode may only narrow, and explicit provider or Workspace overrides remain present for canonical refusal even when equal.
 The CLI adds neither its default provider nor its current directory to an attached spec.
-For attached creation without a preset, other required creation fields retain the ordinary CLI defaults, including model, tools, Permission Mode, effort and compactAt; no parent preflight read substitutes for commit-time admission.
-The compactAt default still comes from the ordinary saved/product binding used to resolve those defaults, which may differ from the inherited provider; an explicit `--compaction-trigger TOKENS` fixes the threshold and is preserved.
+For attached creation without a preset, the CLI sends the selected model and any explicit or applicable saved choices; the Host resolves omitted settings at admission. An omitted compaction trigger uses the inherited provider: with a Codex parent and `gpt-6.1-sol` it is 244,800 tokens whether the saved provider is OpenAI or Codex. Before this change the saved OpenAI case sent 945,000 while the saved Codex case sent 244,800. An explicit `--compaction-trigger TOKENS` fixes the threshold and is preserved.
 An attached spec with explicit model, effort, Permission Mode and concrete compactAt bypasses unused binding preferences, so an absent HOME or stale saved provider cannot prevent its canonical parent refusal.
 Missing or archived parents and parent on an addressed update reach the saved native refusals.
 Addressed configuration preserves the exact canonical ID and sparse update inputs.
@@ -66,8 +65,8 @@ Only the accepted `session start` receipt adds `configuration` immediately after
 For an unattached start, `provider` is the concrete resolved provider.
 For an attached start, `provider` is null and `parent` is the captured parent ID: the receipt reports the omitted inherited binding without guessing its value.
 The effort source is `flag` whenever `--reasoning-effort` was given (including `default`), otherwise `saved` when `model_capability.startEffort` selected the saved override, otherwise `model_default`.
-Without an override, the effective effort is the client product choice: `low` when supported (also for an unlisted model), otherwise the lowest listed effort, otherwise null.
-These values come from the CLI-resolved configuration and parent relation sent with the Message, never a new Host read; rejection output and `session send` receipts are unchanged.
+Without an override, the effective effort is the Host product choice: `low` when supported (also for an unlisted model), otherwise the lowest listed effort, otherwise null.
+The provider, model and effective effort come from the creating command’s immutable first revision in the Host’s Full report, including on replay. This read can grow with Session history. If it fails after acceptance, the CLI still emits the accepted receipt and request handle without `configuration`, then reports the read failure; rejection output and `session send` receipts are unchanged.
 Replay returns the original allocated ID, Message admission and result even after cancellation or restart; changed creation settings or Message bytes conflict with the original request key.
 Rejection creates no Session.
 Any canonical failure rolls back allocation, revision and Message together.
@@ -316,7 +315,7 @@ For duplicate IDs, models.dev's OpenAI entry wins, otherwise the first provider'
 For each Host consumer operation, the Store selects the saved source's generation and facts together; only absence of a saved source selects shipped facts.
 A saved generation is authoritative even when empty, or when the requested ID is absent: neither case merges in or resurrects a shipped entry.
 Capability and list renderers take the caller's selected facts explicitly; they do not own a mutable catalog or read the Store themselves.
-`rui session configure --help` and offline CLI configuration/default calculations use shipped facts, need no Host or credentials, and do not claim to show a Host's saved facts.
+`rui session configure --help` uses shipped facts, needs no Host or credentials, and does not claim to show a Host’s saved facts.
 There is no Host help request or fact-discovery extension to the wire.
 Help and invalid-model errors render shipped OpenAI IDs in catalog order; help's effort exceptions derive from those same entries.
 ChatGPT's Host model list instead renders the selected generation's OpenAI IDs in catalog order.
@@ -333,11 +332,11 @@ A provider refusal of an effort update follows [effort inside the history](model
 Missing or unreadable future defaults do not prevent a Host from serving existing saved work.
 A pin with invalid syntax rejects fresh CLI creation before capture rather than falling back to the recommendation.
 
-CLI and TUI clients supply explicit fresh spec values: a saved effort if accepted, otherwise the product effort `low` if accepted, otherwise the lowest listed effort, otherwise no effort.
-ChatGPT sign-in's default compactAt is the smaller of the provider-keyed client product default 244,800 tokens and 90% of the catalog window, using the unlisted context estimate for a missing or null window.
+The Host resolves omitted fresh effort to the product effort `low` if accepted, otherwise the lowest listed effort, otherwise no effort. Clients may supply an applicable personal saved effort explicitly.
+ChatGPT sign-in’s default compactAt is the smaller of the provider-keyed product default 244,800 tokens and 90% of the catalog window, using the unlisted context estimate for a missing or null window.
 This keeps 244,800 tokens for large windows but uses 115,200 for a 128,000-token window such as `gpt-5.3-codex-spark`, including when resetting compactAt to its default.
 Other providers default to 90% of the catalog window, or 115,200 tokens for a missing or null window.
-These client choices do not change existing Sessions, the Host's fixed fallback for stored null thresholds, or frozen Operations.
+Omitted updates preserve existing settings; explicit default requests use the Host rule. Frozen Operations do not change.
 
 The fetched live lists are a Host's OpenAI key list and its ChatGPT plan list behind [`/v1/model-list`](inspection.md#public-session-activity); the ChatGPT device sign-in uses the selected catalog's OpenAI IDs because its backend publishes no list.
 A live list supplies model IDs only: context windows and efforts always come from the selected catalog.
@@ -345,7 +344,7 @@ The Host refreshes the models.dev fact catalog and saves it across Host runs.
 Host Session configuration admission uses operation-scoped selected facts for effort support and known-window bounds; successful refreshes affect later configuration admissions, not existing Session settings or frozen Operations.
 Each new model Operation freezes the selected catalog's effective context window on its own row (D238).
 Historical compaction escalation reads only that frozen value, so a refresh between admission, overflow settlement and successor admission cannot change the failed Operation's deeper floor or make the two decisions disagree.
-Offline CLI defaults can therefore be refused by Host admission when its saved facts differ; the CLI does not silently substitute another model, effort or threshold.
+Host admission uses its selected facts for omitted settings and validates explicit choices against them.
 There is no model-list command.
 Help needs no Host or credentials.
 Clients do not read credentials for peer configuration.
@@ -360,7 +359,8 @@ Persisted model syntax and transport encoding remain independent of the compiled
 | --- | --- | --- |
 | [Mutation presentation](#public-operations) and canonical envelope | `canonical-failure-integration`, modes `producers`, `committed`, `interactive`, `presentMutationReply` tests | Negatives fail at exact assertion, not setup. PTYs use one unrenewed ten-second exit deadline. No macOS, power-loss or aggregate claim |
 | [Caller capture and recovery](#caller-capture-and-recovery) | `human_cli_integration.py` | Uncertain Bash effect never replayed |
-| Attached CLI creation | `cli_args.zig` parent grammar, `configure_input.zig` parent creation defaults, `client.zig` parent capture through native ingress, `cli.zig` attached start receipt, native `configure parent` Store tests and `attached_creation_cases.py` | Provider-dependent compactAt uses the CLI default binding unless explicit; no parent preflight read |
+| Attached CLI creation | `cli_args.zig` parent grammar, `configure_input.zig` parent preference/read dependencies, `client.zig` parent capture through native ingress, `cli.zig` attached start receipt, native `configure parent` Store tests and `attached_creation_cases.py` | Omitted compactAt uses the inherited parent provider and resolved model; no parent preflight read |
+| Immutable creation receipts | `protocol_reply.zig` `session start settings stay bound to creation through later revisions and replay` and `session start creation settings stream past large historical content with bounded scratch`; `start_receipt_cases.py` through `human_cli_integration.py start-receipt` | The real CLI read is held after admission while another configure commits revision two; receipt and replay retain revision one. Report failure preserves accepted identity and capture. Full-report transfer grows with history while decoder scratch stays fixed. |
 | [Saved defaults](#store-selection-and-defaults) | `'preference edits'`, `human_cli_integration.py` | Not credential, launch, Mac or power-loss |
 | [One ChatGPT sign-in, last login wins](#store-selection-and-defaults) | `preferences.zig` `'replaces the other sign-in to its account'` (every saved provider, login and pin) and `'sign-in screen's save keeps the model'`; `cli.zig` `'auth status says each ChatGPT way in'` (every pair of readinesses), `'default receipt'` and `'auth login reads its provider'`; `chatgpt_login_integration.py` | Synthetic issuer only; no live device-code or browser sign-in |
 | [One logout ends both ChatGPT logins](#store-selection-and-defaults) (Divyansh chose this on 2026-11-13) | `cli.zig` `'logout says how it left each ChatGPT login'` (every pair of the five local states with the revocation confirmed, and unconfirmed for each state holding a browser sign-in (said on stdout, exit 0), and a credential path Rui cannot resolve on either side alone and on both: stdout, stderr and exit written by hand); `chatgpt_plan_login.zig` `'logout ends the device-code sign-in in each state'` (real files: absent, already signed out, ready, refresh pending and unreadable, beside an absent or unreadable browser record); `codex_credential_policy.zig` `'signing out keeps the account'` (a device-code record signs out and round-trips without a client id); `chatgpt_login_integration.py`: both logins ended, status reads not signed in and a Host serving both routes refuses each, nothing left, only the device-code login, an unconfirmed revocation said on stdout with exit 0, and a relative `RUI_CHATGPT_CREDENTIAL_FILE` or `RUI_CODEX_CREDENTIAL_FILE` still ending the other login and exiting 1. Mutations that must fail: leaving the device-code record usable, exiting 0 when one login could not be ended, and a path failure ending the command before the other login | Synthetic issuer only. The device-code token is removed locally, never revoked remotely. Failed local reads are unit-tested, not driven through the CLI |

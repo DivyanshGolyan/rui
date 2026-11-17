@@ -37,7 +37,7 @@ Unknown IDs reject as `unknown_session`, presented as `no session k7m2qx in this
 Noncanonical references, including old UUID and NUL-bearing references, reject rather than normalize.
 
 Configure, creating Messages, `start_agent` and connect-time presets use one plain camelCase agent spec: `workspace`, `provider`, `model`, `instructions`, `tools`, `loadedTools`, `permissionMode`, `outputSchema`, `compactAt`, `outputReservation`, `effort` and `label`.
-An absent member keeps the current value or creation default; `null` clears a nullable setting; a direct value sets it.
+An absent member keeps the current value on an update; on creation the Host resolves omitted settings. A direct value sets the setting; explicit null requests the Host default for effort and compactAt and clears other nullable settings.
 Token policies are JSON integers and tool lists normalize into byte order with no duplicate names.
 `instructions` is a text string; `outputSchema` is a JSON object or `null`, as in the shipped `start_agent` and presets.
 Ingress streams instructions and schema objects to sealed content files rather than retaining their bodies in metadata; schemas have the content bound, not the smaller metadata bound.
@@ -45,17 +45,15 @@ Every schema object is a schema, including an object with keys such as `state`, 
 Only the parser's internal metadata uses an empty array as the out-of-band schema-custody marker; an array is not a schema object and is refused on the wire.
 The CLI refuses a malformed schema file before capture publication, since malformed JSON cannot be an object in the plain spec.
 Schema bytes are compact JSON with normalized string escapes, preserving member order and number spelling as the shipped object serializer did; configuration identity hashes these parsed bytes, not the request's whitespace or spelling of string escapes.
-A creation configuration requires an exact nonempty model, explicit effort, a token-count `compactAt`, a tools list and Permission Mode (D104, D111, D113).
-A missing required field is a missing-field request error; an empty tools list means no tools and has no Host default.
+A supplied model must be an exact nonempty model; otherwise the Host selects the recommended model. The Host resolves omitted effort, `compactAt`, tools, loaded tools and Permission Mode using the product defaults and model capabilities. An explicit empty tools list means no tools.
 The agent spec also accepts instructions, output schema and label; provider defaults to the Host's single served provider, and a Host serving several has no default, so a creation must name one (D133, D221).
-Workspace is required when tools includes Bash and is unused for execution otherwise.
-A supplied Workspace is checked like any other, and a spec without Bash that omits it saves `/`, because the Store's Workspace column is never empty.
-Enabling Bash later runs it in the saved Workspace, which a later configure cannot change.
+A standalone creation carries the caller’s Workspace, including when its tools do not include Bash; a child inherits its parent’s Workspace. A supplied Workspace is checked before creation. Enabling Bash later runs it in the saved Workspace, which a later configure cannot change.
 Creation atomically establishes Session, baseline, Workspace bookkeeping, access scope and request answer.
-The CLI and TUI send their own explicit creation defaults: Bash and web search, `bypass`, a supported saved effort or the product's effort choice, and the provider's compactAt default as described under [Supported model IDs](cli.md#supported-model-ids).
+The CLI and TUI send personal saved effort and Permission Mode when applicable; otherwise the Host resolves those settings and the other omitted creation defaults. The report exposes the resolved configuration.
 Addressed configure preserves every omitted setting; provider and Workspace remain immutable, while the model may change within the provider (D192).
 A creating spec may also name `parent`, a Session ID relation, never a revisioned setting (D178).
 The child inherits that Session's Workspace and provider and may only narrow its configured tool names and Permission Mode, through the same admission owner as `start_agent` (D122, D140).
+For an omitted child `compactAt`, the Host uses the inherited provider, not a personal saved provider. For example, with a Codex parent and `gpt-6.1-sol`, the threshold is 244,800 tokens whether the client saved OpenAI or Codex; before this change the saved OpenAI case sent 945,000 while the saved Codex case sent 244,800.
 Naming provider or Workspace, even equal values, is refused, as is a wider tool set or bypass under an asking parent; refusals name the field and never silently intersect the spec.
 Missing parents and parents with an archive intent are refused as `unknown_session`; an update naming `parent` is refused as `parent_on_update`.
 A native configure creation admits no task Message. Child approval forwarding and ending Messages use the saved parent relation as for attached agents.
@@ -267,6 +265,7 @@ A deliberate second submission uses a new identity.
 | --- | --- | --- |
 | [Capture, recovery and descriptor bound](cli.md#caller-capture-and-recovery) | `'capture retransmits'`, `'capture publication'`, `'saved request wire mismatch'`, `human_cli_integration.py`, `saved_request_resources.py BASELINE CANDIDATE` | The `fsync` cut is Linux-only and not power loss. The resource fixture needs `/proc` and samples descriptors without asserting the bound |
 | Configuration revisions, Message admission and selection | `'start_agent and configure parse the same plain agent spec'`, `'initial Message ingress streams the plain spec'`, `'model revisions'`, `'model switch'`, `'message admissions remain'`, `'runnable discovery'`, `dispatch_integration.py`, `canonical_failure_integration.py` | The shared plain spec covers all table fields, nullable/omitted states, object schemas with canonical digest parity, schema objects larger than metadata, and three streamed creating-Message contents. Sizes are qualification workloads, not request quotas |
+| Host-resolved creation settings | `configuration_defaults.zig` domain matrix; `core_tools.zig` sparse-spec cases; `empty_creation_cases.py` through settings integration | Omitted, explicit and null states across listed, unlisted and no-effort models and parent authority; CLI, TUI and TypeScript results on SQLite and live MySQL. Retain a reverting mutation at the defaults owner. |
 | [Loaded tools](execution.md#authorizing-exact-actions) | `store/tests/` `'loaded tools configure'`; loaded-set history and call rejection regressions in `store/sqlite_tests/`; schema 53-to-54 forward migration | Strict subsets require a future `find_tools` catalog entry; visibility tests seed stored subsets |
 | [MCP missing tool admission](conversation.md#selecting-current-settings) | `'MCP missing tools'`, `'start_agent narrows configured tool names'`, `'replies the Host renders'`, `'openapi requests parse'`, TypeScript request-error tests; `stack-frames -Dcpu=baseline` | All empty-server combinations, one/multiple empty servers, no servers and all servers with records; saved-copy admission across create/update/creating Message/start_agent; same-key refusal replay, maximum advisory size, and a mutation removing the server check. Native Store cases cover SQLite; live MySQL requires its configured fixture |
 | Core key domain, including empty keys | `'core preserves empty keys'` | 128-byte accept and 129-byte reject bounds, recovery-binding retention: none located |
