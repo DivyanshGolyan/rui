@@ -1,7 +1,8 @@
 const std = @import("std");
 const InputCapture = @import("../InputCapture.zig");
 const media = @import("../input_media.zig");
-const max_parts = @import("../input_parts.zig").max_parts;
+const input_parts = @import("../input_parts.zig");
+const max_parts = input_parts.max_parts;
 const utf8 = @import("../utf8_validation.zig");
 const document = @import("document.zig");
 const result_parts = @import("result_parts.zig");
@@ -22,10 +23,18 @@ pub const Capture = struct {
     virtual_count: u32 = 0,
     virtual_image_bytes: u64 = 0,
     suffix: bool = false,
-    replaying: bool = false,
-    single_text_mode: bool = false,
-    suffix_length: u64 = 0,
+    run_lengths: [max_parts]u64 = undefined,
+    run_index: usize = 0,
+    run_bytes: u64 = 0,
+    run_open: bool = false,
+    record_runs: bool = false,
     ended: ?result_text.Ended = null,
+    dry_run: bool = false,
+    counted_text_bytes: u64 = 0,
+    planned_bytes: u64 = 0,
+    omitted_ever: bool = false,
+    hint: []const u8 = "",
+    sanitized_out: ?*std.Io.Writer = null,
 
     pub fn init(self: *Capture, capture: *InputCapture) void {
         self.* = .{ .capture = capture };
@@ -37,31 +46,73 @@ pub const Capture = struct {
         return self;
     }
 
-    pub fn render(self: *Capture, ended: result_text.Ended) !result_text.Code {
+    pub const Plan = struct { scratch_bytes: u64, omitted: bool };
+
+    pub fn plan(self: *Capture, ended: result_text.Ended, hint: []const u8) !Plan {
+        const summary = try self.preflight(ended, hint);
+        return .{ .scratch_bytes = summary.scratch_bytes, .omitted = summary.omitted };
+    }
+
+    const Summary = struct { scratch_bytes: u64, omitted: bool, text_bytes: u64, no_images: bool, code: result_text.Code };
+
+    fn preflight(self: *Capture, ended: result_text.Ended, hint: []const u8) !Summary {
         self.ended = ended;
-        self.single_text_mode = allImagesBad(ended, self.capture.limits);
-        self.suffix = self.single_text_mode;
+        self.hint = hint;
+        self.resetRun();
+        self.dry_run = true;
+        self.record_runs = true;
+        self.sanitized_out = null;
         const code = result_text.renderParts(self.sink(), ended) catch |err| return self.failure orelse err;
         try self.finish();
-        if (self.suffix) {
-            const length = self.suffix_length;
-            try self.capture.begin(.text, length);
-            self.text_len = 0;
-            self.shown = 0;
-            self.omitted = 0;
-            self.virtual_count = 0;
-            self.virtual_image_bytes = 0;
-            self.suffix = self.single_text_mode;
-            self.replaying = true;
-            _ = result_text.renderParts(self.sink(), ended) catch |err| return self.failure orelse err;
-            try self.finish();
-            try self.capture.end();
-        }
-        return code;
+        return .{ .scratch_bytes = self.planned_bytes, .omitted = self.omitted_ever, .text_bytes = self.counted_text_bytes, .no_images = self.virtual_image_bytes == 0, .code = code };
+    }
+
+    pub fn render(self: *Capture, ended: result_text.Ended) !result_text.Code {
+        return self.renderWithHint(ended, "");
+    }
+
+    pub fn renderWithHint(self: *Capture, ended: result_text.Ended, hint: []const u8) !result_text.Code {
+        const summary = try self.preflight(ended, hint);
+        self.resetRun();
+        self.dry_run = false;
+        self.record_runs = false;
+        _ = result_text.renderParts(self.sink(), ended) catch |err| return self.failure orelse err;
+        try self.finish();
+        return summary.code;
+    }
+
+    pub fn writeSanitized(self: *Capture, out: *std.Io.Writer, ended: result_text.Ended, hint: []const u8) !void {
+        self.ended = ended;
+        self.hint = hint;
+        self.resetRun();
+        self.dry_run = true;
+        self.record_runs = false;
+        self.sanitized_out = out;
+        defer self.sanitized_out = null;
+        _ = result_text.renderParts(self.sink(), ended) catch |err| return self.failure orelse err;
+        try self.finish();
+    }
+
+    fn resetRun(self: *Capture) void {
+        self.text_len = 0;
+        self.shown = 0;
+        self.omitted = 0;
+        self.virtual_count = 0;
+        self.virtual_image_bytes = 0;
+        self.suffix = false;
+        self.run_index = 0;
+        self.run_bytes = 0;
+        self.run_open = false;
+        self.record_runs = false;
+        self.counted_text_bytes = 0;
+        self.planned_bytes = 0;
+        self.omitted_ever = false;
+        self.failure = null;
     }
 
     pub fn finish(self: *Capture) !void {
-        try self.flushText();
+        try self.flushTextWithExtra(if (self.omitted_ever) self.hint else "");
+        try self.endRun();
     }
 
     fn appendText(self: *Capture, bytes: []const u8) void {
@@ -71,9 +122,14 @@ pub const Capture = struct {
         self.text_len += count;
         self.shown += count;
         self.omitted += bytes.len - count;
+        self.omitted_ever = self.omitted_ever or count != bytes.len;
     }
 
     fn flushText(self: *Capture) !void {
+        try self.flushTextWithExtra("");
+    }
+
+    fn flushTextWithExtra(self: *Capture, extra: []const u8) !void {
         if (self.omitted != 0) {
             const complete = utf8.completePrefix(self.text[0..self.text_len]).len;
             self.omitted += self.text_len - complete;
@@ -82,31 +138,39 @@ pub const Capture = struct {
             self.text_len += note.len;
             self.omitted = 0;
         }
-        if (self.text_len == 0) return;
-        if (self.virtual_count >= max_parts - 1) self.suffix = true;
-        if (self.suffix) {
-            if (self.replaying) {
-                var at: usize = 0;
-                while (at < self.text_len) {
-                    var allowance = self.text_len - at;
-                    at += try self.capture.append(self.text[at..self.text_len], &allowance, false);
-                }
-            } else self.suffix_length += self.text_len;
-        } else {
-            if (!self.replaying) try self.writePart(.text, self.text[0..self.text_len]);
-            self.virtual_count += 1;
+        if (self.text_len == 0 and extra.len == 0) return;
+        const length = self.text_len + extra.len;
+        self.counted_text_bytes += length;
+        self.run_bytes += length;
+        if (!self.dry_run) {
+            if (!self.run_open) {
+                try self.capture.begin(.text, self.run_lengths[self.run_index]);
+                self.run_open = true;
+            }
+            try self.appendBytes(self.text[0..self.text_len]);
+            try self.appendBytes(extra);
         }
         self.text_len = 0;
     }
 
-    fn writePart(self: *Capture, kind: InputCapture.Incoming, bytes: []const u8) !void {
-        try self.capture.begin(kind, bytes.len);
+    fn endRun(self: *Capture) !void {
+        if (self.run_bytes == 0) return;
+        std.debug.assert(self.run_index < max_parts);
+        if (self.record_runs) self.run_lengths[self.run_index] = self.run_bytes;
+        if (self.run_open) try self.capture.end();
+        self.planned_bytes += self.run_bytes + input_parts.Record.byte_length;
+        self.virtual_count += 1;
+        self.run_index += 1;
+        self.run_bytes = 0;
+        self.run_open = false;
+    }
+
+    fn appendBytes(self: *Capture, bytes: []const u8) !void {
         var at: usize = 0;
         while (at < bytes.len) {
             var allowance: usize = bytes.len - at;
             at += try self.capture.append(bytes[at..], &allowance, false);
         }
-        try self.capture.end();
     }
 
     fn diagnostic(self: *Capture, reason: []const u8) !void {
@@ -115,6 +179,7 @@ pub const Capture = struct {
         // Diagnostics are not subject to the text budget and never contain data.
         if (self.text.len - self.text_len < reason.len + 21 + self.text_budget - self.shown) try self.flushText();
         const message = try std.fmt.bufPrint(self.text[self.text_len..], "[Image unavailable: {s}]", .{reason});
+        if (self.sanitized_out) |out| try out.writeAll(message);
         self.text_len += message.len;
     }
 
@@ -123,15 +188,6 @@ pub const Capture = struct {
     }
 
     pub fn image(self: *Capture, image_block: result_parts.Image, raw: []const u8) !void {
-        if (!self.single_text_mode) {
-            if (self.suffix) return self.diagnostic("image part limit");
-            const preceding = self.virtual_count + @as(u32, if (self.text_len != 0 or self.omitted != 0) 1 else 0);
-            const reserve = if (preceding < max_parts - 1) false else if (preceding >= max_parts) true else try moreAfter(self.ended.?, raw);
-            if (reserve) {
-                self.suffix = true;
-                return self.diagnostic("image part limit");
-            }
-        }
         const format: media.Format = if (document.keyIs(image_block.mime, "image/png")) .png else if (document.keyIs(image_block.mime, "image/jpeg")) .jpeg else {
             return self.diagnostic("unsupported MIME type");
         };
@@ -150,10 +206,22 @@ pub const Capture = struct {
             _ = scanner.advance(bytes, &allowance) catch |err| return self.diagnostic(@errorName(err));
         }
         _ = scanner.finish() catch |err| return self.diagnostic(@errorName(err));
+        {
+            if (self.suffix) return self.diagnostic("image part limit");
+            const preceding = self.virtual_count + @as(u32, if (self.run_bytes != 0 or self.text_len != 0 or self.omitted != 0) 1 else 0);
+            const reserve = if (preceding < max_parts - 1) false else if (preceding >= max_parts) true else (self.hint.len != 0 and self.omitted_ever) or try moreAfter(self.ended.?, raw);
+            if (reserve) {
+                self.suffix = true;
+                return self.diagnostic("image part limit");
+            }
+        }
         try self.flushText();
+        try self.endRun();
         self.virtual_count += 1;
         self.virtual_image_bytes = total;
-        if (self.replaying) return;
+        self.planned_bytes += length + input_parts.Record.byte_length;
+        if (self.sanitized_out) |out| try out.writeAll("[Image]");
+        if (self.dry_run) return;
         try self.capture.begin(.{ .image = .{ .assertion = format } }, length);
         decoder = result_parts.Decoder.init(image_block.data);
         while (true) {
@@ -172,10 +240,18 @@ pub const Capture = struct {
         const self: *Capture = @fieldParentPtr("writer", writer);
         var count: usize = 0;
         for (parts[0 .. parts.len - 1]) |part| {
+            if (self.sanitized_out) |out| out.writeAll(part) catch |err| {
+                self.failure = err;
+                return error.WriteFailed;
+            };
             self.appendText(part);
             count += part.len;
         }
         for (0..splat) |_| {
+            if (self.sanitized_out) |out| out.writeAll(parts[parts.len - 1]) catch |err| {
+                self.failure = err;
+                return error.WriteFailed;
+            };
             self.appendText(parts[parts.len - 1]);
             count += parts[parts.len - 1].len;
         }
@@ -222,50 +298,6 @@ const Lookahead = struct {
         return count;
     }
 };
-
-// A result made entirely of unusable images must seal as one text part. Check
-// before writing, since InputCapture cannot merge parts after they are ended.
-fn allImagesBad(ended: result_text.Ended, limits: media.Limits) bool {
-    const result = switch (ended.ended) {
-        .outcome => |outcome| switch (outcome) {
-            .result => |result| result,
-            else => return false,
-        },
-        else => return false,
-    };
-    var found = false;
-    var items = document.Items.init(result.content);
-    while (items.next()) |block| switch (result_parts.classify(block)) {
-        .bad_image => found = true,
-        .image => |candidate| {
-            found = true;
-            const format: media.Format = if (document.keyIs(candidate.mime, "image/png")) .png else if (document.keyIs(candidate.mime, "image/jpeg")) .jpeg else continue;
-            const length = result_parts.decodedLength(candidate.data) catch continue;
-            var scanner = media.Scanner.init(length, format, limits) catch continue;
-            var decoder = result_parts.Decoder.init(candidate.data);
-            var window: [InputCapture.window_bytes]u8 = undefined;
-            var valid = true;
-            while (true) {
-                const bytes = decoder.next(&window) catch {
-                    valid = false;
-                    break;
-                };
-                if (bytes.len == 0) break;
-                var allowance = bytes.len;
-                _ = scanner.advance(bytes, &allowance) catch {
-                    valid = false;
-                    break;
-                };
-            }
-            if (valid) {
-                _ = scanner.finish() catch continue;
-                return false;
-            }
-        },
-        else => {},
-    };
-    return found;
-}
 
 fn testCapture(capture: *InputCapture, dir: std.Io.Dir, used: *std.atomic.Value(u64), limit: u64) !void {
     const spool = try dir.createFile(std.testing.io, "spool", .{ .read = true });
@@ -413,7 +445,7 @@ test "result capture reserves final part for excess image diagnostics" {
     var input: InputCapture = undefined;
     try testCapture(&input, tmp.dir, &used, 10_000_000);
     defer input.close();
-    input.limits.max_bytes = jpg.len * (max_parts - 1);
+    input.limits.max_bytes = jpg.len * count;
     var capture: Capture = undefined;
     capture.init(&input);
     _ = try capture.render(.{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = content, .is_error = false, .structured = null } } } });
@@ -554,4 +586,170 @@ test "result capture accepts exact image part limit and diagnoses one over" {
         if (count > max_parts) try expectPart(&cursor, "[Image unavailable: image part limit][Image unavailable: image part limit]", false);
         try std.testing.expect((try cursor.next()) == null);
     }
+}
+
+test "result capture keeps image after maximum-sized bad-image text run" {
+    const jpg = @embedFile("../testing/fixtures/input-baseline.jpg");
+    const alloc = std.testing.allocator;
+    const encoded = try alloc.alloc(u8, std.base64.standard.Encoder.calcSize(jpg.len));
+    defer alloc.free(encoded);
+    _ = std.base64.standard.Encoder.encode(encoded, jpg);
+    const last = try std.fmt.allocPrint(alloc, "{{\"type\":\"image\",\"data\":\"{s}\",\"mimeType\":\"image/jpeg\"}}]", .{encoded});
+    defer alloc.free(last);
+    const block = "{\"type\":\"image\"},";
+    const count = (result_text.max_answer_bytes - last.len - 1) / block.len;
+    const content = try alloc.alloc(u8, 1 + count * block.len + last.len);
+    defer alloc.free(content);
+    content[0] = '[';
+    var at: usize = 1;
+    for (0..count) |_| {
+        @memcpy(content[at..][0..block.len], block);
+        at += block.len;
+    }
+    @memcpy(content[at..], last);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var used = std.atomic.Value(u64).init(0);
+    var input: InputCapture = undefined;
+    try testCapture(&input, tmp.dir, &used, 20_000_000);
+    defer input.close();
+    var capture: Capture = undefined;
+    capture.init(&input);
+    const ended: result_text.Ended = .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = content, .is_error = false, .structured = null } } } };
+    const planned = try capture.plan(ended, "");
+    _ = try capture.render(ended);
+    try std.testing.expectEqual(planned.scratch_bytes, used.load(.acquire));
+    const loan = try input.seal();
+    try std.testing.expectEqual(@as(u32, 2), loan.count);
+    var cursor = loan.cursor();
+    try std.testing.expect((try cursor.next()).?.kind == .text);
+    try expectPart(&cursor, jpg, true);
+    try std.testing.expect((try cursor.next()) == null);
+}
+
+test "result capture plans exact scratch and retains sanitized full text" {
+    const jpg = @embedFile("../testing/fixtures/input-baseline.jpg");
+    const alloc = std.testing.allocator;
+    const encoded = try alloc.alloc(u8, std.base64.standard.Encoder.calcSize(jpg.len));
+    defer alloc.free(encoded);
+    _ = std.base64.standard.Encoder.encode(encoded, jpg);
+    const content = try std.fmt.allocPrint(alloc, "[{{\"type\":\"text\",\"text\":\"abcdef\"}},{{\"type\":\"image\",\"data\":\"{s}\",\"mimeType\":\"image/jpeg\"}},{{\"type\":\"image\"}},{{\"type\":\"text\",\"text\":\"tail\"}}]", .{encoded});
+    defer alloc.free(content);
+    const ended: result_text.Ended = .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = content, .is_error = false, .structured = null } } } };
+    const hint = "\nFull output: /tmp/result\n";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var used = std.atomic.Value(u64).init(0);
+    var input: InputCapture = undefined;
+    try testCapture(&input, tmp.dir, &used, 100_000);
+    defer input.close();
+    var capture: Capture = undefined;
+    capture.init(&input);
+    capture.text_budget = 3;
+    const plan = try capture.plan(ended, hint);
+    try std.testing.expect(plan.omitted);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try capture.writeSanitized(&writer, ended, hint);
+    try std.testing.expectEqualStrings("abcdef[Image][Image unavailable: missing image data]\ntail", writer.buffered());
+    _ = try capture.renderWithHint(ended, hint);
+    try std.testing.expectEqual(plan.scratch_bytes, used.load(.acquire));
+    var cursor = (try input.seal()).cursor();
+    try expectPart(&cursor, "abc\n[3 more bytes not shown]", false);
+    try expectPart(&cursor, jpg, true);
+    try expectPart(&cursor, "[Image unavailable: missing image data]\n[5 more bytes not shown]\nFull output: /tmp/result\n", false);
+    try std.testing.expect((try cursor.next()) == null);
+}
+
+test "result capture reserves trailing hint at exact part limit" {
+    const jpg = @embedFile("../testing/fixtures/input-baseline.jpg");
+    const alloc = std.testing.allocator;
+    const encoded = try alloc.alloc(u8, std.base64.standard.Encoder.calcSize(jpg.len));
+    defer alloc.free(encoded);
+    _ = std.base64.standard.Encoder.encode(encoded, jpg);
+    const block = try std.fmt.allocPrint(alloc, ",{{\"type\":\"image\",\"data\":\"{s}\",\"mimeType\":\"image/jpeg\"}}", .{encoded});
+    defer alloc.free(block);
+    const prefix = "[{\"type\":\"text\",\"text\":\"abcdef\"}";
+    const content = try alloc.alloc(u8, prefix.len + (max_parts - 1) * block.len + 1);
+    defer alloc.free(content);
+    @memcpy(content[0..prefix.len], prefix);
+    var at = prefix.len;
+    for (0..max_parts - 1) |_| {
+        @memcpy(content[at..][0..block.len], block);
+        at += block.len;
+    }
+    content[at] = ']';
+    const ended: result_text.Ended = .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = content, .is_error = false, .structured = null } } } };
+    const hint = "\nFull output: /tmp/result\n";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var used = std.atomic.Value(u64).init(0);
+    var input: InputCapture = undefined;
+    try testCapture(&input, tmp.dir, &used, 10_000_000);
+    defer input.close();
+    var capture: Capture = undefined;
+    capture.init(&input);
+    capture.text_budget = 3;
+    const plan = try capture.plan(ended, hint);
+    const output = try alloc.alloc(u8, 20_000);
+    defer alloc.free(output);
+    var writer: std.Io.Writer = .fixed(output);
+    try capture.writeSanitized(&writer, ended, hint);
+    try std.testing.expect(std.mem.endsWith(u8, writer.buffered(), "[Image unavailable: image part limit]"));
+    _ = try capture.renderWithHint(ended, hint);
+    try std.testing.expectEqual(plan.scratch_bytes, used.load(.acquire));
+    const loan = try input.seal();
+    try std.testing.expectEqual(max_parts, loan.count);
+    var cursor = loan.cursor();
+    try expectPart(&cursor, "abc\n[3 more bytes not shown]", false);
+    for (0..max_parts - 2) |_| try expectPart(&cursor, jpg, true);
+    try expectPart(&cursor, "[Image unavailable: image part limit]\nFull output: /tmp/result\n", false);
+    try std.testing.expect((try cursor.next()) == null);
+}
+
+test "result capture coalesces diagnostics after exhausted text budget before image" {
+    const jpg = @embedFile("../testing/fixtures/input-baseline.jpg");
+    const alloc = std.testing.allocator;
+    const encoded = try alloc.alloc(u8, std.base64.standard.Encoder.calcSize(jpg.len));
+    defer alloc.free(encoded);
+    _ = std.base64.standard.Encoder.encode(encoded, jpg);
+    const image = try std.fmt.allocPrint(alloc, "{{\"type\":\"image\",\"data\":\"{s}\",\"mimeType\":\"image/jpeg\"}}]", .{encoded});
+    defer alloc.free(image);
+    const prefix = "[{\"type\":\"text\",\"text\":\"abcdef\"},";
+    const bad = "{\"type\":\"image\"},";
+    const count = 2500;
+    const content = try alloc.alloc(u8, prefix.len + count * bad.len + image.len);
+    defer alloc.free(content);
+    @memcpy(content[0..prefix.len], prefix);
+    var at: usize = prefix.len;
+    for (0..count) |_| {
+        @memcpy(content[at..][0..bad.len], bad);
+        at += bad.len;
+    }
+    @memcpy(content[at..], image);
+    const ended: result_text.Ended = .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = content, .is_error = false, .structured = null } } } };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var used = std.atomic.Value(u64).init(0);
+    var input: InputCapture = undefined;
+    try testCapture(&input, tmp.dir, &used, 1_000_000);
+    defer input.close();
+    var capture: Capture = undefined;
+    capture.init(&input);
+    capture.text_budget = 3;
+    const plan = try capture.plan(ended, "");
+    const output = try alloc.alloc(u8, 200_000);
+    defer alloc.free(output);
+    var writer: std.Io.Writer = .fixed(output);
+    try capture.writeSanitized(&writer, ended, "");
+    try std.testing.expect(std.mem.endsWith(u8, writer.buffered(), "[Image]"));
+    _ = try capture.render(ended);
+    try std.testing.expectEqual(plan.scratch_bytes, used.load(.acquire));
+    const loan = try input.seal();
+    try std.testing.expectEqual(@as(u32, 2), loan.count);
+    var cursor = loan.cursor();
+    try std.testing.expect((try cursor.next()).?.kind == .text);
+    try expectPart(&cursor, jpg, true);
+    try std.testing.expect((try cursor.next()) == null);
 }

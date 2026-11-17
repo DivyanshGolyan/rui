@@ -208,26 +208,9 @@ noinline fn prepare(host: *Host, active: *Active) !void {
     active.length = (try active.source.?.stat(host.io)).size;
     // Check size before allocating storage or reading any payload.
     _ = try @import("input_media.zig").Scanner.init(active.length, null, .{});
-    const spool = try scratchFile(host, active.binding.action_id, 1);
-    var transferred = false;
-    defer if (!transferred) spool.close(host.io);
-    const index = try scratchFile(host, active.binding.action_id, 2);
-    active.capture = .{ .io = host.io, .resources = .{ .spool = spool, .index = index, .budget = host.retention.sharedBudget() } };
-    transferred = true;
+    active.capture = .{ .io = host.io, .resources = null };
+    try @import("server_input_scratch.zig").init(host, active.binding.action_id, &active.capture.?);
     try active.capture.?.begin(.{ .image = .{} }, active.length);
-}
-
-/// Numeric names belong to startup scratch recovery until unlink succeeds.
-/// No payload or charge is acquired while a name remains visible.
-fn scratchFile(host: *Host, action: u64, ordinal: u64) !std.Io.File {
-    var name_buffer: [96]u8 = undefined;
-    const name = try @import("named_scratch.zig").NumericName.@"image-input".format(&name_buffer, action, ordinal);
-    var directory = try std.Io.Dir.openDirAbsolute(host.io, host.retention.scratch_path, .{});
-    defer directory.close(host.io);
-    const file = try directory.createFile(host.io, name, .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
-    errdefer file.close(host.io);
-    try directory.deleteFile(host.io, name);
-    return file;
 }
 
 const Progress = union(enum) { pending, complete, input_failed: anyerror };

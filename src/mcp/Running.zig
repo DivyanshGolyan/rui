@@ -105,31 +105,47 @@ pub fn deadlineMs(self: *const Running) u64 {
     return self.deadline_ms;
 }
 
+pub const ResultHandler = struct {
+    ctx: *anyopaque,
+    accept: *const fn (*anyopaque, result_text.Ended) anyerror!bool,
+};
+
 pub fn service(self: *Running, now_ms: u64, out: *std.Io.Writer) !?result_text.Code {
+    return self.serviceWithResult(now_ms, out, null);
+}
+
+pub fn serviceWithResult(self: *Running, now_ms: u64, out: *std.Io.Writer, handler: ?ResultHandler) !?result_text.Code {
     switch (self.state) {
         .done => return null,
-        .init_failed => |err| return try self.finish(out, .{ .not_sent = err }),
+        .init_failed => |err| return try self.finish(out, handler, .{ .not_sent = err }),
         .active => {},
     }
     if (now_ms >= self.deadline_ms) {
         const sent = self.call.requestSent();
         self.call.deinit();
         self.state = .done;
-        return try self.finish(out, .{ .timed_out = .{ .after_ms = self.timeout_ms, .sent = sent } });
+        return try self.finish(out, handler, .{ .timed_out = .{ .after_ms = self.timeout_ms, .sent = sent } });
     }
     const outcome = self.call.advance() catch |err| {
         const ending: result_text.Ending = if (err == error.AnswerTooLarge)
             .{ .oversized = self.call.answerPrefix() }
         else if (self.call.requestSent()) .{ .lost = err } else .{ .not_sent = err };
-        return try self.finish(out, ending);
+        return try self.finish(out, handler, ending);
     };
     if (outcome == .waiting) return null;
-    return try self.finish(out, .{ .outcome = outcome });
+    return try self.finish(out, handler, .{ .outcome = outcome });
 }
 
-fn finish(self: *Running, out: *std.Io.Writer, ending: result_text.Ending) !result_text.Code {
-    defer self.deinit();
+fn finish(self: *Running, out: *std.Io.Writer, handler: ?ResultHandler, ending: result_text.Ending) !result_text.Code {
+    // An accepting handler borrows the answer until the caller releases Running.
+    // It can consume the result after the Store dispatch handoff has returned.
+    var retained = false;
+    defer if (!retained) self.deinit();
     const ended: result_text.Ended = .{ .server_name = self.server_name, .ended = ending };
+    if (handler) |h| if (try h.accept(h.ctx, ended)) {
+        retained = true;
+        return result_text.classify(ending);
+    };
     const excerpt = try result_text.writeExcerpt(out, ended);
     if (excerpt.omitted and self.bash_offered) {
         if (self.retention) |retention| {

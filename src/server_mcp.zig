@@ -127,13 +127,16 @@ pub const Calls = struct {
             var out: std.Io.Writer.Allocating = .init(host.allocator);
             defer out.deinit();
             var code: ?@import("mcp/result_text.zig").Code = null;
+            var result_capture: ResultCapture = .{ .host = host, .active = active };
+            defer result_capture.close();
+            const handler: Running.ResultHandler = .{ .ctx = &result_capture, .accept = ResultCapture.accept };
             if (!active.running.requestSent()) {
-                host.store.withActionDispatchHandoff(active.binding, .{ .host = host, .active = active, .now = now, .out = &out.writer, .code = &code }, struct {
+                host.store.withActionDispatchHandoff(active.binding, .{ .host = host, .active = active, .now = now, .out = &out.writer, .code = &code, .handler = handler }, struct {
                     fn handoff(context: anytype) !void {
                         try context.host.withEffectLaunch(context, send);
                     }
                     fn send(context: anytype) !void {
-                        context.code.* = try context.active.running.service(context.now, context.out);
+                        context.code.* = try context.active.running.serviceWithResult(context.now, context.out, context.handler);
                     }
                 }.handoff) catch |err| {
                     switch (err) {
@@ -147,7 +150,7 @@ pub const Calls = struct {
                     continue;
                 };
             } else {
-                code = active.running.service(now, &out.writer) catch |err| {
+                code = active.running.serviceWithResult(now, &out.writer, handler) catch |err| {
                     fenceDispatch(host, "MCP result rendering", err);
                     active.destroy(host);
                     entry.* = null;
@@ -155,13 +158,29 @@ pub const Calls = struct {
                 };
             }
             if (code) |result| {
-                settle(host, active, switch (result) {
+                const resolution: store.ActionResolutionCode = switch (result) {
                     .succeeded => .succeeded,
                     .failed => .failed,
                     .spawn_failed => .spawn_failed,
                     .indeterminate => .indeterminate,
                     .cancelled => .cancelled,
-                }, out.written());
+                };
+                if (result_capture.ended) |ended| {
+                    result_capture.captureResult(ended) catch |err| {
+                        result_capture.failure = err;
+                    };
+                }
+                if (result_capture.failure) |err| {
+                    if (err == error.ScratchCapacityExceeded) {
+                        settle(host, active, .storage_failed, "MCP image capture failed: ScratchCapacityExceeded.");
+                    } else {
+                        fenceDispatch(host, "MCP image capture", err);
+                    }
+                } else if (result_capture.capture) |capture| {
+                    publishParts(host, active, resolution, capture);
+                } else {
+                    settle(host, active, resolution, out.written());
+                }
                 active.destroy(host);
                 entry.* = null;
                 progress = true;
@@ -177,6 +196,98 @@ pub const Calls = struct {
         };
     }
 };
+
+const InputCapture = @import("InputCapture.zig");
+const ResultCapture = struct {
+    host: *Host,
+    active: *Active,
+    capture: ?*InputCapture = null,
+    ended: ?@import("mcp/result_text.zig").Ended = null,
+    failure: ?anyerror = null,
+    prepaid: u64 = 0,
+    prepaid_used: std.atomic.Value(u64) = .init(0),
+
+    fn close(self: *ResultCapture) void {
+        if (self.capture) |capture| {
+            capture.close();
+            self.host.allocator.destroy(capture);
+        }
+        if (self.prepaid != 0) self.host.retention.sharedBudget().release(self.prepaid);
+    }
+
+    fn accept(ctx: *anyopaque, ended: @import("mcp/result_text.zig").Ended) !bool {
+        const self: *ResultCapture = @ptrCast(@alignCast(ctx));
+        const content = switch (ended.ended) {
+            .outcome => |outcome| switch (outcome) {
+                .result => |result| result.content,
+                else => return false,
+            },
+            else => return false,
+        };
+        if (!@import("mcp/result_parts.zig").anyImage(content)) return false;
+        self.ended = ended;
+        return true;
+    }
+
+    noinline fn captureResult(self: *ResultCapture, ended: @import("mcp/result_text.zig").Ended) !void {
+        const capture = try self.host.allocator.create(InputCapture);
+        errdefer if (self.capture == null) self.host.allocator.destroy(capture);
+        try @import("server_input_scratch.zig").init(self.host, self.active.binding.action_id, capture);
+        self.capture = capture;
+        const Parts = @import("mcp/result_capture.zig").Capture;
+        const parts = try self.host.allocator.create(Parts);
+        defer self.host.allocator.destroy(parts);
+        parts.init(capture);
+        if (!self.active.running.bash_offered) {
+            _ = try parts.render(ended);
+            return;
+        }
+        const refusal = "\nFull output was not retained.\n";
+        var name_buffer: [96]u8 = undefined;
+        const name = try @import("named_scratch.zig").NumericName.@"mcp-output".format(&name_buffer, self.active.binding.action_id, @import("attempt.zig").action_attempt_ordinal);
+        const success = std.fmt.allocPrint(self.host.allocator, "\nFull output: {s}/{s}\n", .{ self.host.retention.scratch_path, name }) catch null;
+        defer if (success) |value| self.host.allocator.free(value);
+        const refused = try parts.plan(ended, refusal);
+        if (!refused.omitted) {
+            _ = try parts.render(ended);
+            return;
+        }
+        var hint: []const u8 = refusal;
+        const shared = self.host.retention.sharedBudget();
+        if (success) |success_hint| {
+            const accepted = try parts.plan(ended, success_hint);
+            const reserve = @max(accepted.scratch_bytes, refused.scratch_bytes);
+            if (shared.allocate(reserve)) {
+                self.prepaid = reserve;
+                capture.resources.?.budget = .{ .used = &self.prepaid_used, .limit = reserve };
+                var counter: std.Io.Writer.Discarding = .init(&.{});
+                if (parts.writeSanitized(&counter.writer, ended, success_hint)) |_| {
+                    const Context = struct {
+                        parts: *Parts,
+                        ended: @import("mcp/result_text.zig").Ended,
+                        hint: []const u8,
+                        fn write(out: *std.Io.Writer, context: @This()) !void {
+                            try context.parts.writeSanitized(out, context.ended, context.hint);
+                        }
+                    };
+                    if (self.host.retention.writeFile(name, counter.fullCount(), Context{ .parts = parts, .ended = ended, .hint = success_hint }, Context.write)) hint = success_hint;
+                } else |_| {}
+            }
+        }
+        _ = try parts.renderWithHint(ended, hint);
+    }
+};
+
+noinline fn publishParts(host: *Host, active: *Active, code: store.ActionResolutionCode, capture: *InputCapture) void {
+    const loan = capture.seal() catch |err| {
+        fenceDispatch(host, "MCP image sealing", err);
+        return;
+    };
+    if (!host.custody.claimTerminalDelivery(active.token)) return;
+    _ = host.store.settleActionAttemptParts(active.binding, code, loan, host.hooks.storeFaults(.action_result)) catch |err| {
+        fenceDispatch(host, "MCP settlement", err);
+    };
+}
 
 fn nowMs(host: *const Host) u64 {
     return @intCast(@divTrunc(std.Io.Clock.Timestamp.now(host.io, .awake).raw.nanoseconds, std.time.ns_per_ms));
