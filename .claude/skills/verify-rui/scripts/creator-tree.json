@@ -1049,10 +1049,12 @@
       "comparison": {
         "before": {
           "expect": [],
-          "expect_regex": []
+          "expect_regex": [],
+          "final_full_overview": true
         }
       },
-      "note": "Alt-? opens an actual attention Session"
+      "note": "Alt-? opens an actual attention Session",
+      "final_full_overview": false
     },
     {
       "name": "edge-below-ascii",
@@ -1178,10 +1180,12 @@
       "comparison": {
         "before": {
           "expect": [],
-          "expect_regex": []
+          "expect_regex": [],
+          "final_full_overview": true
         }
       },
-      "note": "ASCII Alt-? opens an actual attention Session"
+      "note": "ASCII Alt-? opens an actual attention Session",
+      "final_full_overview": false
     }
   ]
 }

@@ -361,6 +361,29 @@ class FramesTest(unittest.TestCase):
             self.assertFalse(record["ok"])
             self.assertEqual(record["reason"], "state left full overview before capture")
 
+    def test_edge_open_finishes_in_chat_only_on_the_new_version(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("creator-tree.json"))
+        for name in ("edge-open-unicode", "edge-open-ascii"):
+            state = next(item for item in scenario["states"] if item["name"] == name)
+            self.assertTrue(state["full_overview"])
+            self.assertFalse(state["final_full_overview"])
+            before = {**state, **state["comparison"]["before"]}
+            self.assertTrue(before["final_full_overview"])
+            self.assertIn("Allow once", state["expect"])
+            split = committed("+ New Session".ljust(40) + "│ chat\nQuestion leaf\nAllow once\nSettings", columns=140)
+            outcomes = []
+            terminal = types.SimpleNamespace(frame=split, wait=lambda predicate, *_a, **_k:
+                outcomes.append(predicate(types.SimpleNamespace(frame=split, completed=split.text))))
+            self.helper["frame_ready"](terminal, state)
+            self.helper["frame_ready"](terminal, before)
+            self.assertEqual(outcomes, [True, False])
+            run = types.SimpleNamespace(meta={"sha": "a" * 40, "sessions": {}})
+            with tempfile.TemporaryDirectory() as temp:
+                after_capture = self.helper["frame_capture"](run, terminal, Path(temp), state, (140, 40), None)
+                before_capture = self.helper["frame_capture"](run, terminal, Path(temp), before, (140, 40), None)
+            self.assertTrue(after_capture["ok"])
+            self.assertEqual(before_capture["reason"], "state left full overview before capture")
+
     def test_creator_birth_uses_public_tool_and_proves_both_relationships(self):
         creator_birth = self.helper["creator_birth"]
         for attached in (True, False):

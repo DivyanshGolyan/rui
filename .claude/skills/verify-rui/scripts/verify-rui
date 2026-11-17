@@ -2189,8 +2189,10 @@ def validate_scenario(data, sizes=None):
         require(state.get("upgrade") in (None, "current", "available", "updating", "failure", "chat"), f"{name}: invalid upgrade scenario")
         sides = state.get("comparison", {})
         require(isinstance(sides, dict) and set(sides) <= {"before", "after"}
-                and all(isinstance(value, dict) and set(value) <= {"expect", "absent", "expect_next", "expect_last", "expect_dim", "absent_regex", "expect_regex", "expect_viewport"}
+                and all(isinstance(value, dict) and set(value) <= {"expect", "absent", "expect_next", "expect_last", "expect_dim", "absent_regex", "expect_regex", "expect_viewport", "final_full_overview"}
                         for value in sides.values()), f"{name}: invalid comparison oracle")
+        require(all(type(value.get("final_full_overview", True)) is bool for value in sides.values()),
+                f"{name}: comparison final_full_overview must be boolean")
         viewports = state.get("expect_viewport", {})
         require(isinstance(viewports, dict), f"{name}: expect_viewport must be an object")
         for size, checks in viewports.items():
@@ -2240,6 +2242,9 @@ def validate_scenario(data, sizes=None):
         require(type(state.get("full_overview", False)) is bool and
                 (not state.get("full_overview") or state.get("open") == "overview"),
                 f"{name}: full_overview requires overview")
+        require(type(state.get("final_full_overview", True)) is bool and
+                ("final_full_overview" not in state or state.get("full_overview")),
+                f"{name}: final_full_overview requires full_overview")
         require(type(state.get("first_run", False)) is bool, f"{name}: first_run must be a boolean")
         require(not state.get("first_run") or state.get("open") == "overview", f"{name}: first_run opens overview")
         state_sizes = parse_sizes(state["sizes"]) if "sizes" in state else default_sizes
@@ -2871,7 +2876,7 @@ def frame_ready(terminal, state, allow_exit=False, sessions=None):
     if state.get("first_frame", False):
         return
     expected, absent = frame_expectations(state), frame_absences(state, sessions)
-    terminal.wait(lambda c: (not state.get("full_overview") or is_full_overview(c.frame))
+    terminal.wait(lambda c: (not state.get("final_full_overview", state.get("full_overview")) or is_full_overview(c.frame))
                   and all(frame_contains(text, c.completed) for text in expected)
                   and all(text not in c.completed for text in absent)
                   and frame_row_failure(state, c.completed) is None,
@@ -2888,7 +2893,7 @@ def frame_capture(run, target, out, state, size, reason):
     frame = target.frame
     state = frame_viewport_state(state, frame.columns, frame.lines)
     plain, ansi, page = cells_render(frame)
-    if state.get("full_overview") and not is_full_overview(frame) and reason is None:
+    if state.get("final_full_overview", state.get("full_overview")) and not is_full_overview(frame) and reason is None:
         reason = "state left full overview before capture"
     missing = next((text for text in frame_expectations(state) if not frame_contains(text, plain)), None)
     if missing is not None and reason is None:
