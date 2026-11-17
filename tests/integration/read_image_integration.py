@@ -13,6 +13,7 @@ import time
 import host_process
 from host_process import canonical_fixture_root, dispose_all, retain_failure_state
 import model_fixture as fixture
+import os_semantics
 from bash_fixture import action_for, allow, rows
 
 
@@ -66,7 +67,7 @@ def prove_case(root, name):
     try:
         store = state / "store"
         pending = name.startswith(("ask-", "deny-")) or name.endswith("-pending")
-        tracer = shutil.which("strace") if sys.platform.startswith("linux") and pending else None
+        tracer = os_semantics.file_access_tracer() if pending else None
         trace = state / "file-access.trace"
         url = f"http://127.0.0.1:{endpoint.server_port}/responses"
         if tracer:
