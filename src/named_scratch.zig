@@ -11,6 +11,7 @@ pub const NumericName = enum {
     @"bash-stderr",
     @"bash-stdin",
     @"mcp-output",
+    @"image-input",
     report,
     @"history-memo",
 

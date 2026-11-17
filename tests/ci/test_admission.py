@@ -119,6 +119,23 @@ class PlanFixture:
 
 
 class AdmissionTest(unittest.TestCase):
+    def test_screen_check_is_selected_by_plan_and_precedes_acceptance(self):
+        text = CHECK.read_text()
+        plan = job(text, 'plan')
+        admission = job(text, 'admission')
+        self.assertIn('screens_required: ${{ steps.shape.outputs.screens_required }}', plan)
+        self.assertIn('- name: Require PR Shape\n        id: shape', plan)
+        self.assertIn('python3 tests/ci/pr_shape.py "$BASE"', plan)
+        self.assertEqual(admission.count("if: ${{ needs.plan.outputs.screens_required == 'true' }}"), 2)
+        self.assertIn('sparse-checkout: tests/ci', admission)
+        self.assertIn('ref: ${{ needs.plan.outputs.candidate_ref }}', admission)
+        self.assertIn('run: python3 tests/ci/pr_shape.py --screens', admission)
+        self.assertLess(admission.index('- name: Require screen evidence'),
+                        admission.index('- name: Require candidate acceptance'))
+        for name in ('PR_BODY', 'PR_NUMBER', 'GITHUB_REPOSITORY', 'GH_TOKEN'):
+            screen_step = admission.split('- name: Require screen evidence', 1)[1].split('\n      - ', 1)[0]
+            self.assertIn(name + ':', screen_step)
+
     def test_cold_native_compile_budget_does_not_extend_runtime_deadlines(self):
         text = CHECK.read_text()
 
@@ -590,7 +607,10 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
     @staticmethod
     def aggregate(workflow, name, script, output, results, draft=False):
         env = {}
-        for key, expression in re.findall(r'(?m)^          ([A-Z_]+): \$\{\{ (.*?) \}\}$', job(workflow, name)):
+        body = job(workflow, name)
+        if name == 'admission':
+            body = body.split('      - name: Require candidate acceptance\n', 1)[1].split('\n      - ', 1)[0]
+        for key, expression in re.findall(r'(?m)^          ([A-Z_]+): \$\{\{ (.*?) \}\}$', body):
             if expression.startswith('needs.plan.outputs.'):
                 env[key] = output[expression.removeprefix('needs.plan.outputs.')]
             elif expression == 'github.event.pull_request.draft':

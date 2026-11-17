@@ -1024,15 +1024,19 @@ pub const Store = struct {
     }
 
     pub fn readAction(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
-        return self.queue().run(readActionHeld, .{ self, request, out });
+        return self.queue().run(readActionHeld, .{ self, request, action_read_domain.Projection.bytes, out });
     }
 
-    fn readActionHeld(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
+    pub fn readActionForTool(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
+        return self.queue().run(readActionHeld, .{ self, request, action_read_domain.Projection.model_tool, out });
+    }
+
+    fn readActionHeld(self: *Store, request: *const @import("../action_read.zig").Request, projection: action_read_domain.Projection, out: *@import("../action_read.zig").Read) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.action_read, action_read_domain.actionRead(&access, request, out));
+        return entry.finish(Ordinary.action_read, action_read_domain.actionRead(&access, request, projection, out));
     }
 
     pub fn actionArguments(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {
@@ -1187,6 +1191,7 @@ pub const Store = struct {
     pub fn readActionExecutionInput(self: *Store, comptime runner: tool_record.Runner, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
         return switch (runner) {
             .bash => self.queue().run(readBashExecutionInputHeld, .{ self, binding, out }),
+            .read_image => self.queue().run(readImageExecutionInputHeld, .{ self, binding, out }),
             .mcp => self.queue().run(readMcpExecutionInputHeld, .{ self, binding, out }),
             .core, .provider => @compileError("only Action runners have execution input"),
         };
@@ -1198,6 +1203,14 @@ pub const Store = struct {
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.action_attempt, action_domain.readMcpExecutionInput(&access, binding, out));
+    }
+
+    fn readImageExecutionInputHeld(self: *Store, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.action_attempt, action_domain.readImageExecutionInput(&access, binding, out));
     }
 
     fn readBashExecutionInputHeld(self: *Store, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
@@ -1445,7 +1458,7 @@ pub const Store = struct {
     }
 
     pub fn nextAction(self: *Store, comptime runner: tool_record.Runner, capacity: action_domain.Capacity) !?ReadyAction {
-        if (runner != .bash and runner != .mcp) @compileError("only Action runners can select Actions");
+        if (runner != .bash and runner != .mcp and runner != .read_image) @compileError("only Action runners can select Actions");
         return self.queue().run(nextActionHeld, .{ self, runner, capacity });
     }
     fn nextActionHeld(self: *Store, runner: tool_record.Runner, capacity: action_domain.Capacity) !?ReadyAction {
@@ -1456,6 +1469,7 @@ pub const Store = struct {
         return entry.finish(Ordinary.none, switch (runner) {
             .bash => action_domain.nextAction(&access, .bash, capacity),
             .mcp => action_domain.nextAction(&access, .mcp, capacity),
+            .read_image => action_domain.nextAction(&access, .read_image, capacity),
             .core, .provider => unreachable,
         });
     }
