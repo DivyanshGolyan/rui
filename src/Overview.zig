@@ -898,7 +898,12 @@ fn settingsWidget(self: *Self) vxfw.Widget {
 
 fn drawSettings(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
-    return self.app_settings_line.widget().draw(ctx.withConstraints(.{}, .{ .width = ctx.max.width, .height = @min(ctx.max.height.?, view.layout(&self.state).settings.len()) }));
+    const height = @min(ctx.max.height.?, view.layout(&self.state).settings.len());
+    const drawn = try self.app_settings_line.widget().draw(ctx.withConstraints(.{}, .{ .width = ctx.max.width, .height = @min(height, 2) }));
+    if (height <= drawn.size.height) return drawn;
+    const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
+    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = drawn };
+    return .{ .widget = self.settingsWidget(), .size = .{ .width = drawn.size.width, .height = height }, .buffer = &.{}, .children = children };
 }
 
 fn drawBottom(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -950,6 +955,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
         @memset(ground.buffer, .{ .style = normal });
         return ground;
     }
+    self.state.sidebar_rule = if (part == .list) self.root.bottom.rule else null;
     const host = if (part == .list) null else hostNotice(self);
     self.state.host_line = host != null;
     _ = try view.step(&self.state, .{ .resized = .{ .width = size.width, .height = size.height } });
@@ -5547,6 +5553,52 @@ test "chat pinned controls preserve late-listed Sessions and the physical last-r
             try std.testing.expectEqualStrings(draft, frontend.input.composition().bytes);
         };
     };
+    frontend.info_open = false;
+    for ([_]u16{ 46, 140 }) |width| for ([_]enum { idle, notice, unconfirmed, rejected, info }{ .idle, .notice, .unconfirmed, .rejected, .info }) |mode| {
+        errdefer std.debug.print("geometry mode={s} width={d}\n", .{ @tagName(mode), width });
+        frontend.shown_notice.dismiss();
+        frontend.submission.intent = null;
+        frontend.info_open = mode == .info;
+        if (mode == .notice) frontend.shown_notice.show("Copied 3 lines", @intCast(@max(std.Io.Clock.real.now(overview.init.io).toMilliseconds(), 0)));
+        if (mode == .unconfirmed or mode == .rejected or mode == .info) {
+            frontend.submission.intent = .{ .decision = .{ .action = 19, .decision = .allow_once } };
+            frontend.submission.state = if (mode == .rejected) .rejected else .unconfirmed;
+            frontend.submission.key = @splat('K');
+        }
+        var shown = try rig.shown(width, 30);
+        defer shown.deinit();
+        const row: u16 = if (mode == .unconfirmed or mode == .rejected) 27 else 28;
+        const chat_column: u16 = if (width >= Root.split_at) Root.list_width + 1 else 0;
+        try std.testing.expectEqual(row, overview.root.bottom.rule.?);
+        try std.testing.expectEqualStrings("─", shown.screen.readCell(chat_column, row).?.char.grapheme);
+        if (mode == .notice) try std.testing.expect(std.mem.indexOf(u8, try shown.line(29), "Copied 3 lines") != null);
+        if (mode == .unconfirmed) try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Decision not confirmed") != null);
+        if (mode == .rejected) try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Rejected") != null);
+        if (width >= Root.split_at) {
+            try std.testing.expectEqual(row, view.layout(&overview.state).settings.start);
+            try std.testing.expectEqualStrings("─", shown.screen.readCell(0, row).?.char.grapheme);
+            try std.testing.expectEqualStrings("┼", shown.screen.readCell(Root.list_width, row).?.char.grapheme);
+            try std.testing.expect(std.mem.startsWith(u8, try shown.line(row + 1), "     Settings"));
+        }
+    };
+    frontend.info_open = false;
+    for ([_]bool{ false, true }) |decision| for (1..9) |h| {
+        frontend.submission.intent = if (decision) .{ .decision = .{ .action = 19, .decision = .allow_once } } else null;
+        frontend.submission.state = .unconfirmed;
+        frontend.submission.key = @splat('K');
+        const height: u16 = @intCast(h);
+        var shown = try rig.shown(140, height);
+        defer shown.deinit();
+        const bottom = overview.root.bottom;
+        if (bottom.rule) |row| {
+            try std.testing.expectEqualStrings("─", shown.screen.readCell(Root.list_width + 1, row).?.char.grapheme);
+            try std.testing.expectEqualStrings("─", shown.screen.readCell(0, row).?.char.grapheme);
+            try std.testing.expectEqualStrings("┼", shown.screen.readCell(Root.list_width, row).?.char.grapheme);
+        } else {
+            for (0..height) |row| try std.testing.expect(!std.mem.eql(u8, "┼", shown.screen.readCell(Root.list_width, @intCast(row)).?.char.grapheme));
+        }
+    };
+    frontend.submission.intent = null;
     frontend.info_open = false;
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);

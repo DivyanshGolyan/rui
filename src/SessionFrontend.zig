@@ -395,6 +395,7 @@ fn focusCandidates(raw: *anyopaque, items: *[std.enums.values(@import("app_input
 
 pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widget {
     self.app_hooks = hooks;
+    self.app_input.bottom = &hooks.root.bottom;
     hooks.root.session_focus = .{ .context = self, .changed = focusChanged, .accepts_tab = acceptsTab, .modal = modalFocus, .candidates = focusCandidates };
     self.app_info = .{ .backend = self.infoBackend(), .home = self.home };
     if (hooks.drafts) |drafts| if (drafts.take(self.init.gpa, self.session)) |draft| {

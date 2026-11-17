@@ -673,6 +673,7 @@ pub const State = struct {
     default: ?Default = null,
 
     size: Size = .{},
+    sidebar_rule: ?u16 = null,
     launch: enum { sizing, waiting, creating, done } = .done,
 
     host_line: bool = false,
@@ -2261,7 +2262,7 @@ pub fn layout(state: *const State) Layout {
     const height = state.size.height;
     if (height == 0 or state.size.width == 0) return .{};
     const top: u16 = @intCast(@min(topRows(state), height));
-    const settings = @max(top, height -| @import("draft_layout.zig").fixedBottom(height).rows());
+    const settings = @max(top, state.sidebar_rule orelse (@import("draft_layout.zig").fixedBottom(height, 0, .overview).rule orelse height));
     const footer_rows: u16 = @intFromBool(footerShown(state));
     const input = @max(top, settings -| (statusRows(state) + footer_rows));
     const host = @max(top, input -| @intFromBool(state.host_line));

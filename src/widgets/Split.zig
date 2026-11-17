@@ -9,6 +9,7 @@ left_width: u16,
 min_width: u16,
 narrow: enum { left, right },
 divider: Divider = .{},
+junction_row: ?*const ?u16 = null,
 
 pub const Divider = struct {
     grapheme: []const u8 = "│",
@@ -36,16 +37,16 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const left_width = @min(self.left_width, size.width - 1);
     const right_width = size.width - left_width - 1;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 3);
+    children[2] = .{ .origin = .{ .row = 0, .col = left_width + 1 }, .surface = try self.right.draw(ctx.withConstraints(.{}, .{ .width = right_width, .height = size.height })) };
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.left.draw(ctx.withConstraints(.{}, .{ .width = left_width, .height = size.height })) };
     const divider = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = 1, .height = size.height });
     @memset(divider.buffer, .{ .char = .{ .grapheme = self.divider.grapheme, .width = 1 }, .style = self.divider.style });
-    if (self.divider.junction) |junction| if (junction.row < size.height) {
+    if (self.divider.junction) |junction| if (if (self.junction_row) |row| row.* else @as(?u16, junction.row)) |at| if (at < size.height) {
         const grapheme = if (junction.both) self.divider.cross else self.divider.left;
         std.debug.assert(ctx.stringWidth(grapheme) == 1);
-        divider.writeCell(0, junction.row, .{ .char = .{ .grapheme = grapheme, .width = 1 }, .style = self.divider.style });
+        divider.writeCell(0, at, .{ .char = .{ .grapheme = grapheme, .width = 1 }, .style = self.divider.style });
     };
     children[1] = .{ .origin = .{ .row = 0, .col = left_width }, .surface = divider };
-    children[2] = .{ .origin = .{ .row = 0, .col = left_width + 1 }, .surface = try self.right.draw(ctx.withConstraints(.{}, .{ .width = right_width, .height = size.height })) };
     return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children };
 }
 
