@@ -265,13 +265,14 @@ def prove_model_action_read(state, *, deadline=None):
         first = json.loads(endpoint.requests[0])
         offered = [tool["name"] for item in first["input"] if item.get("type") == "additional_tools" for tool in item["tools"]]
         assert "read_action" in offered, first
-        pending = command("action", "read", "--store", store, "--session", session, "--action", identity)
-        model_read("pending-read", pending)
-        assert len(endpoint.requests) == 4 and not (workspace / "launches").exists()
         allow(case, store, "allow", session, identity)
         wait_for(lambda: (workspace / "ready").exists(), "fsynced single producer launch")
         pid = int((workspace / "launches").read_text())
         assert process_exists(pid)
+        running = command("action", "read", "--store", store, "--session", session, "--action", identity)
+        assert running["state"] == "attempted" and running["final"] is None, running
+        model_read("running-read", running)
+        assert len(endpoint.requests) == 4
         with endpoint.lock:
             endpoint.responses.append(fixture.sse_answer("delivered-answer", "delivered-reason", "delivered-message", "final delivered")[0])
         gate.release()

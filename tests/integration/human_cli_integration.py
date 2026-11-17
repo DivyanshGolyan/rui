@@ -1888,8 +1888,9 @@ def main(selected="all"):
     sibling_arguments = json.dumps({"cmd": f"touch {shlex.quote(str(sibling_started))}; "
         f"while [ ! -e {shlex.quote(str(sibling_release))} ]; do sleep 0.05; done; "
         "printf y >> sibling-effect", "description": "Write delayed sibling effect", "timeout_ms": None}, separators=(",", ":"))
+    first_call_release = threading.Event()
     endpoint = fixture.SuccessEndpoint([
-        fixture.sse_tool_calls("human-calls", [("bash", control_call, control_arguments)]),
+        (fixture.ResponseSpec(fixture.sse_tool_calls("human-calls", [("bash", control_call, control_arguments)]), {}), first_call_release),
         fixture.sse_answer("human-answer", "human-reason", "human-message", "first answer")[0],
         fixture.sse_answer("second-answer", "second-reason", "second-message", "second answer")[0],
         fixture.sse_tool_calls("sibling-calls", [("bash", "pending-call", arguments),
@@ -2394,6 +2395,9 @@ def main(selected="all"):
         assert record.read_bytes() == captured
         assert len(endpoint.requests) == 1, endpoint.requests
 
+        queued = admit(home, "session", "send", "--to", session,
+            input="queued behind permission")["request"]
+        first_call_release.set()
         attention = fixture.wait_for(lambda: (value if (value := fixture.observe(store, first))["state"]
             == "waiting_for_permission" else None), "first request attention")
         assert attention["work"]["state"]["kind"] == "approval", attention
@@ -2401,8 +2405,6 @@ def main(selected="all"):
         blocked = fixture.command("session", "inspect", "--store", store, "--session", session)
         assert blocked["selected_message"] == first and blocked["work"]["state"]["kind"] == "approval", blocked
         assert [entry["action"] for entry in blocked["actionable_permissions"]] == [action], blocked
-        queued = admit(home, "session", "send", "--to", session,
-            input="queued behind permission")["request"]
         queued_fact = fixture.command("request", "inspect", "--store", store, "--key", queued)["observation"]
         assert queued_fact["status"] == "accepted" and "result" not in queued_fact, queued_fact
         assert queued_fact["state"] == "waiting_for_permission" and "binding" not in queued_fact, queued_fact
@@ -3186,6 +3188,7 @@ def main(selected="all"):
         print("human CLI: saved recovery, one-shot observation/re-entry, exact PTY approval, bounded input and Host restart passed")
     finally:
         dispose_all(
+            first_call_release.set,
             sibling_release.touch,
             lambda: failure_release.set() if failure_release is not None else None,
             lambda: stop_release.set() if stop_release is not None else None,
