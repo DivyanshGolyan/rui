@@ -94,9 +94,9 @@ fn captureInput(allocator: std.mem.Allocator, io: std.Io, argv: []const []const 
         if (!moved.progressed and (!closed[0] or !closed[1])) try std.Io.sleep(io, .fromMilliseconds(1), .awake);
     }
     const term = try child.wait(io);
-    const output = try stdout.toOwnedSlice(allocator);
-    errdefer allocator.free(output);
-    return .{ .term = term, .stdout = output, .stderr = try stderr_bytes.toOwnedSlice(allocator) };
+    const captured_stdout = try stdout.toOwnedSlice(allocator);
+    errdefer allocator.free(captured_stdout);
+    return .{ .term = term, .stdout = captured_stdout, .stderr = try stderr_bytes.toOwnedSlice(allocator) };
 }
 
 pub fn run(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, cancellation: ?*const client.Cancellation, limit: usize) !Result {
