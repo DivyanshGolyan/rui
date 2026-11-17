@@ -6,6 +6,34 @@ pub fn check(cancellation: ?*const client.Cancellation) error{Cancelled}!void {
     if (cancellation) |token| if (token.stopped.load(.acquire)) return error.Cancelled;
 }
 
+/// The existing file-held upgrade interposition, with an acknowledgement so
+/// fixtures order peers by a reached transition rather than a scheduling race.
+/// No gate variable means no effects. The fixture owns both temporary names.
+pub fn waitForTestGate(allocator: std.mem.Allocator, io: std.Io, selected_gate: ?[]const u8, cancellation: ?*const client.Cancellation, timeout: std.Io.Duration) !void {
+    const gate = selected_gate orelse return;
+    try check(cancellation);
+    const held = std.Io.Dir.cwd().openFile(io, gate, .{}) catch |err| {
+        if (err == error.FileNotFound) return;
+        return err;
+    };
+    held.close(io);
+    const entered = try std.fmt.allocPrint(allocator, "{s}.entered", .{gate});
+    defer allocator.free(entered);
+    const signal = try std.Io.Dir.cwd().createFile(io, entered, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+    signal.close(io);
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = timeout, .clock = .awake });
+    while (true) {
+        try check(cancellation);
+        const file = std.Io.Dir.cwd().openFile(io, gate, .{}) catch |err| {
+            if (err == error.FileNotFound) return;
+            return err;
+        };
+        file.close(io);
+        if (deadline.durationFromNow(io).raw.nanoseconds <= 0) return error.Timeout;
+        try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+    }
+}
+
 pub const Result = std.process.RunResult;
 
 /// Per-invocation context, never a mutation of the coordinator process. The
@@ -375,4 +403,32 @@ test "upgrade process download cancellation and expired deadline start no child"
     const missing = "/nonexistent/rui-download-child";
     try std.testing.expectError(error.Cancelled, download.outputUntil(allocator, io, request, &cancellation, 1024, missing, .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake })));
     try std.testing.expectError(error.Timeout, download.outputUntil(allocator, io, request, null, 1024, missing, .fromNow(io, .{ .raw = .fromSeconds(-1), .clock = .awake })));
+}
+
+test "upgrade test gate is opt-in, acknowledges only held gates and bounds cancellation and timeout" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(directory);
+    const gate = try std.fmt.allocPrint(allocator, "{s}/held", .{directory});
+    defer allocator.free(gate);
+    const entered = try std.fmt.allocPrint(allocator, "{s}.entered", .{gate});
+    defer allocator.free(entered);
+    var token: client.Cancellation = .{};
+    token.requestStop();
+    // Unset gate is inert, even for an already cancelled caller.
+    try waitForTestGate(allocator, io, null, &token, .fromSeconds(0));
+    // A released/absent gate creates no acknowledgement.
+    try waitForTestGate(allocator, io, gate, null, .fromSeconds(0));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, entered, .{}));
+    const file = try std.Io.Dir.cwd().createFile(io, gate, .{});
+    file.close(io);
+    try std.testing.expectError(error.Cancelled, waitForTestGate(allocator, io, gate, &token, .fromSeconds(0)));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, entered, .{}));
+    try std.testing.expectError(error.Timeout, waitForTestGate(allocator, io, gate, null, .fromSeconds(0)));
+    _ = try std.Io.Dir.cwd().statFile(io, entered, .{});
+    // The held input still belongs to the fixture, including on timeout.
+    _ = try std.Io.Dir.cwd().statFile(io, gate, .{});
 }
