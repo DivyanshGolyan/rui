@@ -21,7 +21,7 @@ For an unresolved or rejected submission, Alt-D or **alt+d details** opens the s
 
 ## Driving it with verify-rui
 
-Frame states: `chat`, `fold-hover`, `tool-open`, `tool-open-two`, `tool-open-long`, `tool-open-nocolor`, `chat-scrolled`, `chat-top`, `chat-new-below`, `markdown`, `markdown-wrapped`, `chat-info`, `chat-info-model`, `chat-info-archive`, `chat-info-copied`, `chat-info-stacked-actions`
+Frame states: `chat`, `fold-hover`, `tool-open`, `tool-open-two`, `tool-open-long`, `tool-open-nocolor`, `chat-scrolled`, `chat-top`, `chat-new-below`, `markdown`, `markdown-wrapped`, `chat-info`, `chat-info-model`, `chat-info-archive`, `chat-info-copied`, `chat-info-stacked-actions`, `panels-chat-info`
 
 Run `$V frames FULLSHA --only chat,fold-hover,tool-open,tool-open-two,tool-open-long,tool-open-nocolor,chat-scrolled,chat-top,chat-new-below,markdown,markdown-wrapped,chat-info,chat-info-model,chat-info-archive,chat-info-copied,chat-info-stacked-actions`.
 

@@ -1083,11 +1083,16 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
 
         .width = ctx.max.width.?,
     });
-    self.app_screen.overlay_reserves_space = self.info_open or self.app_info.standaloneOpen();
     self.app_info.narrow = !list_visible;
     if (self.info_open) {
         self.app_input.facts = self.app_info.footerWidget();
         self.app_input.status = null;
+    }
+    if (self.app_hooks.root.input.layer.settingsOpen()) {
+        self.app_input.panel = self.app_hooks.root.settings_page.bodyWidget();
+        self.app_input.facts = self.app_hooks.root.settings_page.footerWidget();
+        self.app_input.status = null;
+        self.app_input.permission = null;
     }
     self.app_preview.size = .{};
     self.app_content.size = .{};
@@ -3372,6 +3377,15 @@ const HeldFrontend = struct {
         return error.TestUnexpectedResult;
     }
 
+    fn drawnPanel(held: *HeldFrontend, base: vxfw.Surface) !vxfw.SubSurface {
+        const input = try held.drawnInput(base);
+        const composer = input.surface.children[0];
+        var panel = composer.surface.children[0];
+        panel.origin.row += input.origin.row + composer.origin.row;
+        panel.origin.col += input.origin.col + composer.origin.col;
+        return panel;
+    }
+
     fn shown(held: *HeldFrontend) ![]const u8 {
         const width = held.size.width.?;
         const height = held.size.height.?;
@@ -4552,15 +4566,18 @@ test "chat info opens from the chat line above the input at 140 and 46 columns a
         try std.testing.expect(held.self.info_open and held.self.inspection.status_requested);
         try std.testing.expectEqual(Screen.ViewKind.feed, held.screen.view);
         const surface = try held.draw();
-        try std.testing.expectEqual(@as(usize, 2), surface.children.len);
+        try std.testing.expectEqual(@as(usize, 1), surface.children.len);
         const base = surface.children[0].surface;
-        const panel = surface.children[1];
-        try std.testing.expectEqual(@as(u8, 2), panel.z_index);
-        try std.testing.expectEqual((try held.drawnInput(base)).origin.row, panel.origin.row + panel.surface.size.height);
+        const panel = try held.drawnPanel(base);
+        const input = try held.drawnInput(base);
+        try std.testing.expectEqual(input.origin.row + 1, panel.origin.row);
+        try std.testing.expectEqual(@as(u16, width), panel.surface.size.width);
+        try std.testing.expect(panel.surface.size.height > 0);
+        try std.testing.expectEqual(input.surface.children[1].origin.row - 3, panel.surface.size.height);
         try std.testing.expect((try rowWith(held, "Fix retry deadline")) != null);
         try std.testing.expect((try rowWith(held, "Folder")) != null);
         try std.testing.expect((try rowWith(held, "alt+i info")) == null);
-        try std.testing.expect((try rowWith(held, "esc close")) != null);
+        try std.testing.expect((try rowWith(held, "esc")) != null);
         try held.keys("\r");
         try std.testing.expect(held.self.app_info.hasChoice());
         try held.keys("\x07");
@@ -4599,12 +4616,13 @@ test "chat info hint click and Alt-I share natural panel opening and Escape rest
         for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, ordinary, .{ .row = row, .col = col, .button = .left, .mods = .{}, .type = kind });
         try std.testing.expect(held.self.info_open and held.self.inspection.status_requested);
         const clicked = try held.draw();
-        const panel = clicked.children[1];
         const base = clicked.children[0].surface;
+        const panel = try held.drawnPanel(base);
         const draft = (try held.drawnInput(base));
         try std.testing.expect(panel.origin.row > 0);
-        try std.testing.expectEqual(base.children[0].surface.size.height, panel.origin.row);
-        try std.testing.expectEqual(draft.origin.row, panel.origin.row + panel.surface.size.height);
+        try std.testing.expectEqual(base.children[0].surface.size.height, draft.origin.row);
+        try std.testing.expectEqual(draft.origin.row + 1, panel.origin.row);
+        try std.testing.expectEqual(draft.origin.row + draft.surface.children[1].origin.row - 2, panel.origin.row + panel.surface.size.height);
         try std.testing.expect((try rowWith(held, "latest feed line")) != null);
         const footer_row: i16 = @intCast(draft.origin.row + draft.surface.children[1].origin.row);
         for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, clicked, .{ .row = footer_row, .col = col, .button = .left, .mods = .{}, .type = kind });
@@ -4615,8 +4633,9 @@ test "chat info hint click and Alt-I share natural panel opening and Escape rest
         try held.keys("\x1bi");
         const keyed = try held.draw();
         try std.testing.expect(held.self.info_open);
-        try std.testing.expectEqual(panel.origin, keyed.children[1].origin);
-        try std.testing.expectEqual(panel.surface.size, keyed.children[1].surface.size);
+        const keyed_panel = try held.drawnPanel(keyed.children[0].surface);
+        try std.testing.expectEqual(panel.origin, keyed_panel.origin);
+        try std.testing.expectEqual(panel.surface.size, keyed_panel.surface.size);
         try held.keys("\x1b");
         try std.testing.expect(!held.self.info_open and held.left == null);
         try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
@@ -6525,11 +6544,11 @@ test "App Session question mark encodings append ordinary text to empty and none
             if (has_draft) try fixture.press(.{ .codepoint = 'a', .text = "a" });
             try fixture.press(key);
             _ = try fixture.draw();
-            try std.testing.expect(self.app_screen.overlay == null);
+            try std.testing.expect(self.app_input.panel == null);
             try std.testing.expectEqualStrings(if (has_draft) "a?" else "?", self.input.composition().bytes);
             try fixture.press(key);
             _ = try fixture.draw();
-            try std.testing.expect(self.app_screen.overlay == null);
+            try std.testing.expect(self.app_input.panel == null);
             try std.testing.expectEqualStrings(if (has_draft) "a??" else "??", self.input.composition().bytes);
         }
     }
@@ -9273,18 +9292,20 @@ test "chat info supplies the one bottom footer after the input and both dividers
         const footer = input.surface.children[1];
         try std.testing.expectEqual(@as(i17, size.height - 1), input.origin.row + footer.origin.row);
         try std.testing.expectEqual(@as(u16, 1), footer.surface.size.height);
-        try std.testing.expectEqual(input.origin.row, surface.children[1].origin.row + surface.children[1].surface.size.height);
+        const panel = try held.drawnPanel(base);
+        try std.testing.expectEqual(input.origin.row + 1, panel.origin.row);
+        try std.testing.expectEqual(@as(i17, size.height - 3), panel.origin.row + panel.surface.size.height);
         const text = try held.shown();
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "· info"));
+        try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, text, "· info"));
         try std.testing.expect(std.mem.indexOf(u8, text, "alt+i info") == null);
         var rows = std.mem.splitScalar(u8, text, '\n');
         var row: usize = 0;
         var previous: []const u8 = "";
         while (rows.next()) |line| : (row += 1) {
             if (row == size.height - 1) {
-                try std.testing.expect(std.mem.indexOf(u8, line, "Fix retry deadline · info") != null);
-                try std.testing.expect(std.mem.indexOf(u8, line, "esc close") != null);
-            } else if (row == size.height - 2 or row == size.height - 4) {
+                try std.testing.expect(std.mem.startsWith(u8, line, "Fix retry deadline"));
+                try std.testing.expect(std.mem.endsWith(u8, std.mem.trimEnd(u8, line, " "), "esc"));
+            } else if (row == size.height - 2 or row == @as(usize, @intCast(input.origin.row))) {
                 try std.testing.expect(std.mem.startsWith(u8, line, "──"));
             } else if (row == size.height - 3) {
                 try std.testing.expect(std.mem.indexOf(u8, line, "kept draft") != null);
@@ -9300,7 +9321,7 @@ test "chat info supplies the one bottom footer after the input and both dividers
     };
 }
 
-test "App Session palette total budget stays input anchored without reserving feed rows" {
+test "App Session palette total budget stays between input rules and reserves feed rows" {
     const Find = struct {
         fn widget(surface: vxfw.Surface, target: vxfw.Widget) ?vxfw.SubSurface {
             if (surface.widget.eql(target)) return .{ .origin = .{ .row = 0, .col = 0 }, .surface = surface };
@@ -9320,9 +9341,8 @@ test "App Session palette total budget stays input anchored without reserving fe
     const feed_before = held.self.app_content.size;
     try held.keys("/");
     const after = try held.draw();
-    try std.testing.expectEqual(input_before.origin, Find.widget(after, held.self.app_input.widget()).?.origin);
-    try std.testing.expectEqual(feed_before, held.self.app_content.size);
-    try std.testing.expect(!held.self.app_screen.overlay_reserves_space);
+    try std.testing.expect(Find.widget(after, held.self.app_input.widget()).?.origin.row < input_before.origin.row);
+    try std.testing.expect(held.self.app_content.size.height < feed_before.height);
     held.self.menu.shown.?.highlight = held.self.menu.shown.?.list.count - 1;
     for (1..49) |height| {
         held.size.height = @intCast(height);
@@ -9332,8 +9352,10 @@ test "App Session palette total budget stays input anchored without reserving fe
         const limit = @max(1, height / 3 -| 1);
         try std.testing.expectEqual(limit, held.self.app_palette.max_height);
         try std.testing.expect(panel.surface.size.height <= limit);
-        try std.testing.expectEqual(input.origin.row, panel.origin.row + panel.surface.size.height);
-        if (input.origin.row == 0) {
+        const composer = Find.widget(surface, held.self.app_input.composer.widget()).?;
+        const rule: u16 = if (composer.surface.size.height >= 3) 1 else 0;
+        try std.testing.expectEqual(input.origin.row + rule, panel.origin.row);
+        if (panel.surface.size.height == 0) {
             try std.testing.expectEqual(@as(u16, 0), panel.surface.size.height);
             try std.testing.expectEqual(.hidden, held.self.menu.shown.?.seen);
         } else {
@@ -9476,11 +9498,15 @@ test "App Session palette clicks requests rows with an empty draft as Enter does
     _ = try held.draw();
     var events = held.context();
     const widget_ = held.self.app_palette.widget();
+    const index = for (held.self.menu.shown.?.list.shown(), 0..) |entry, index| {
+        if (std.mem.indexOf(u8, entry.word, older) != null) break index;
+    } else return error.TestExpectedRow;
+    const target = held.self.app_palette.hover.targets[index - held.self.app_palette.first];
     try widget_.handleEvent(&events, .mouse_enter);
-    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 2, .button = .none, .type = .motion, .mods = .{} } });
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = @intCast(target.col), .row = @intCast(target.row), .button = .none, .type = .motion, .mods = .{} } });
     try std.testing.expectEqual(@as(usize, 0), held.self.menu.shown.?.highlight);
     try widget_.handleEvent(&events, .mouse_leave);
-    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 2, .button = .left, .type = .press, .mods = .{} } });
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = @intCast(target.col), .row = @intCast(target.row), .button = .left, .type = .press, .mods = .{} } });
     try std.testing.expectEqualStrings("/result " ++ older, held.self.input.queuedCommand().?);
     try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
 }
@@ -9508,14 +9534,15 @@ test "App Session palette clicks replace the caret skill without sending or movi
     try std.testing.expectEqualStrings("/review", held.self.menu.shown.?.list.entries[1].shown);
     const widget_ = held.self.app_palette.widget();
     var events = held.context();
+    const target = held.self.app_palette.hover.targets[1 - held.self.app_palette.first];
     try widget_.handleEvent(&events, .mouse_enter);
-    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 2, .button = .none, .type = .motion, .mods = .{} } });
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = @intCast(target.col), .row = @intCast(target.row), .button = .none, .type = .motion, .mods = .{} } });
     _ = try held.draw();
     try std.testing.expectEqual(@as(usize, 0), held.self.menu.shown.?.highlight);
     try std.testing.expectEqualStrings("please /re now", held.self.input.composition().bytes);
     for (events.cmds.items) |command| try std.testing.expect(command != .request_focus);
     try widget_.handleEvent(&events, .mouse_leave);
-    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 2, .button = .left, .type = .press, .mods = .{} } });
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = @intCast(target.col), .row = @intCast(target.row), .button = .left, .type = .press, .mods = .{} } });
     try std.testing.expectEqualStrings("please /review now", held.self.input.composition().bytes);
     try std.testing.expectEqual("please /review".len, held.self.input.composition().cursor);
     try std.testing.expectEqual(null, held.self.input.queuedCommand());

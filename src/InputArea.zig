@@ -9,6 +9,7 @@ const status_lines = @import("slash_commands.zig").short_result_lines;
 
 composer: Composer,
 permission: ?*PermissionCard = null,
+panel: ?vxfw.Widget = null,
 facts: vxfw.Widget = empty.widget(),
 status: ?vxfw.Widget = empty.widget(),
 facts_at: enum { top, bottom } = .top,
@@ -30,10 +31,12 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const footer_rows = facts_rows + if (status) |drawn| @min(drawn.size.height, status_room) else 0;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 1 + facts_rows + @intFromBool(status != null));
     const room = size.height - footer_rows;
+    self.composer.panel = self.panel;
+    self.composer.max_rows = @import("draft_layout.zig").cap(size.height);
     const content = if (self.permission) |card|
         try card.drawInput(ctx.withConstraints(.{}, .{ .width = size.width, .height = room }), if (card.consent.row == .draft) self.composer.widget() else null)
     else
-        try self.composer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = @min(room, @import("draft_layout.zig").cap(size.height) + 2) }));
+        try self.composer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = room }));
     const row = ctx.withConstraints(.{ .width = size.width, .height = 1 }, .{ .width = size.width, .height = 1 });
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = content };
     const status_rows = footer_rows - facts_rows;

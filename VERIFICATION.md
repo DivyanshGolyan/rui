@@ -18,6 +18,10 @@ Git history keeps earlier test specifications and dated results.
 
 The [Session UI contract](docs/contracts/session-ui.md#required-evidence) requires owner-domain tests for memory fitting, update-button states and drawn-target admission, and chat-only footer feedback, including narrow widths. Reverting mutations must fail the relevant assertions. Capture current, available, updating and failed sidebar states and the chat after an update in day and night at 140×40 and 46×30 using verify-rui, before and after. Frames are renderer evidence, not physical-input evidence.
 
+## Input-contained panels
+
+The [Session UI contract](docs/contracts/session-ui.md#required-evidence) requires shared placement evidence for the command list, chat info and Settings inside the input rules, plain unboxed backgrounds and the usual selection bar, compact command overflow and matching `esc` footers. The `panels-command-list`, `panels-chat-info` and `panels-settings` verify-rui recipes cover night at 140×40 and 46×30. Run the affected native owner tests, the panel integration group and verify-rui recipe unit/map tests. Frame recipes are required capture inputs, not a claim that frames have been captured.
+
 ## Contract index
 
 ARCHITECTURE owns behavior; tests own cases.

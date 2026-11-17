@@ -113,8 +113,8 @@ class Chrome:
             message = admit(self.home, "session", "send", "--to", session, input=text)
             fixture.wait_for(lambda key=message["request"]: fixture.completed_observation(self.store, key), "saved answer")
 
-    def open(self, session, ready, *, columns=80):
-        master, slave = open_pty(columns, ROWS)
+    def open(self, session, ready, *, columns=80, height=ROWS):
+        master, slave = open_pty(columns, height)
         self.descriptors += [master, slave]
         caller = spawn([str(fixture.RUI), "session", "resume", "--", session],
             env={**os.environ, "HOME": str(self.home)}, cwd=str(self.workspace),
@@ -148,7 +148,7 @@ def composing(screen, draft):
     expected = {(" › " + draft).rstrip()}
     if not draft:
         expected.add(" › Type a task")
-    return (len(shown) == ROWS and bounds is not None and bounds[1] == bounds[0] + 2
+    return (bounds is not None and bounds[1] == bounds[0] + 2
             and shown[bounds[0] + 1].rstrip() in expected)
 
 
@@ -380,6 +380,56 @@ def scroll_marker_case():
     print("session chrome: Shift-↑ and PgUp draw ↓, draft End keeps the view, ↓ N new counts arrivals, Ctrl-End and Esc return; empty PgUp is unchanged and the chip never changes feed height", flush=True)
 
 
+def assert_plain_panel(master, screen, *, left=None):
+    capture = terminal_capture(master)
+    frame = capture.frame
+    assert frame.text == screen, (frame.text, screen)
+    def pane_cells(index):
+        cells = frame.cells[index]
+        divider = next((column for column, cell in enumerate(cells) if cell.data == "│"), None)
+        return cells[divider + 1:] if divider is not None else cells
+
+    bounds = composer_bounds(screen)
+    if bounds is None:
+        return
+    prompt = next(index for index in range(bounds[0] + 1, bounds[1])
+                  if composer_line(screen, index).startswith((" ›", " >")))
+    assert prompt > bounds[0] + 1, ("panel between lifted rule and draft", screen)
+    plain = frame.colors(pane_cells(prompt)[-1])[1]
+    if left is not None:
+        assert composer_line(screen, len(rows(screen)) - 1).split() == left.split() + ["esc"], screen
+        for cell in pane_cells(-1):
+            assert frame.colors(cell)[1] == plain, screen
+    backgrounds = set()
+    for index in range(bounds[0] + 1, prompt):
+        line = composer_line(screen, index)
+        assert not any(char in line for char in "┌┐└┘│"), screen
+        for cell in pane_cells(index):
+            backgrounds.add(frame.colors(cell)[1])
+    assert plain in backgrounds and len(backgrounds) <= 2, ("plain panel plus selection bar", backgrounds, screen)
+
+
+def command_panel_case():
+    with Chrome("rui-chrome-command-panel.", []) as chrome:
+        session = chrome.session()
+        for width, height in ((140, 40), (46, 30)):
+            master, caller, _ = chrome.open(session, lambda screen: True, columns=width, height=height)
+            opened = chrome.frame(master, b"/", lambda screen: "/new" in screen and "more" in screen)
+            assert_plain_panel(master, opened)
+            assert "type to narrow" not in opened, opened
+            bounds = composer_bounds(opened)
+            panel = [composer_line(opened, index) for index in range(bounds[0] + 1, bounds[1] - 1)]
+            assert any(re.fullmatch(r"\s*[1-9][0-9]* more", line) for line in panel), opened
+            for command in ("archive", "model", "pin"):
+                for line in panel:
+                    if re.match(r"\s*/" + command + r"(?:\s|$)", line):
+                        assert line.strip() == "/" + command, opened
+            closed = chrome.frame(master, b"\x7f", lambda screen: composing(screen, "") and "/new" not in screen)
+            assert composer_bounds(closed)[0] > bounds[0], (opened, closed)
+            chrome.leave(master, caller)
+    print("session chrome: command list lifts the input rule at both frame sizes, stays plain, omits redundant descriptions, and shows only N more", flush=True)
+
+
 def pages_case():
     release = threading.Event()
     with Chrome("rui-chrome-pages.", []) as chrome:
@@ -399,6 +449,7 @@ def pages_case():
             choice = model_choice_frame(master, b"\x1b[B\x1b[B\x1b[B\r", query="")
             assert "kept draft" in choice, choice
             assert_chat_info_layout(choice, context=True)
+            assert_plain_panel(master, choice)
             chrome.frame(master, b"\x1b", lambda screen: not model_choice_shown(screen) and "Copy last answer" in screen)
             chrome.frame(master, b"\x1b[B\rCANCELLED-NAME", lambda screen: "CANCELLED-NAME" in screen)
             chrome.frame(master, b"\x1b", lambda screen: "CANCELLED-NAME" not in screen and "Copy last answer" in screen)
@@ -426,7 +477,7 @@ def pages_case():
             release.set()
             chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
             working = chat_info_open(master)
-            assert rows(working)[-1].endswith("esc close"), working
+            assert rows(working)[-1].endswith("esc"), working
             returned = chrome.frame(master, b"\x1b", lambda screen:
                                     "⠹ Held call · " in screen and marker(screen) is None
                                     and footer(screen).endswith("ctrl+x stop")
@@ -474,12 +525,13 @@ def info_natural_height_case():
             opened = None
             for column in columns:
                 opened = chrome.frame(master, footer_click(live, column=column),
-                                      lambda screen: "Copy last answer" in screen and " · info" in screen and "unavailable" not in screen)
+                                      lambda screen: "Copy last answer" in screen and rows(screen)[-1].endswith("esc") and "unavailable" not in screen)
                 assert_chat_info_layout(opened, context=True)
+                assert_plain_panel(master, opened, left="Natural height")
                 base = chat_info_geometry(opened)
                 if height >= 30:
                     assert base["top"] > 0 and any("FEED-" in row for row in base["feed"]), opened
-                chrome.frame(master, footer_click(opened, marker=" · info") + b"\x1b[B\r",
+                chrome.frame(master, footer_click(opened, marker="Natural height") + b"\x1b[B\r",
                              lambda screen: "ask first" in screen and "run without asking" in screen)
                 clicked = chrome.frame(master, b"\x1b",
                                        lambda screen: "ask first" not in screen and "Copy last answer" in screen)
@@ -504,7 +556,7 @@ def info_natural_height_case():
                 assert short["top"] - expanded["top"] == growth - 2, (choice, filtered)
                 assert short["input"] == base["input"], filtered
             else:
-                assert "kept draft" in choice and rows(choice)[-1].endswith("esc close"), choice
+                assert "kept draft" in choice and rows(choice)[-1].endswith("esc"), choice
             closed = chrome.frame(master, b"\x1b", lambda screen:
                                   not model_choice_shown(screen) and "Copy last answer" in screen)
             assert chat_info_geometry(closed) == base, closed
@@ -614,13 +666,19 @@ def keys_case():
             else:
                 chrome.frame(master, b"\x1b", lambda screen: "Settings" in screen and not any(line.startswith(" ‹ ") for line in rows(screen)))
                 gesture = b"\x1b[F\r"
-            chrome.frame(master, gesture, lambda screen: "Notifications" in screen and "Version" in screen)
+            settings = chrome.frame(master, gesture, lambda screen: "Notifications" in screen and "Version" in screen)
+            assert_plain_panel(master, settings, left="Settings")
             keys = chrome.frame(master, b"\x1b[B" * 6 + b"\r", lambda screen: "earlier message" in screen)
             expected = keys_reference()
             columns = 2 if width == 140 else 1
             key_widths = [max(len(key) for key, _ in expected[column::columns])
                           for column in range(columns)]
-            pane_rows = conversation_text(keys).split("\n")
+            bounds = composer_bounds(keys)
+            assert bounds is not None, keys
+            prompt = next(index for index in range(bounds[0] + 1, bounds[1])
+                          if composer_line(keys, index).startswith((" ›", " >")))
+            pane_rows = [chat_content_row(composer_line(keys, index))
+                         for index in range(bounds[0] + 1, prompt)]
             positions = [[] for _ in range(columns)]
             for start in range(0, len(expected), columns):
                 entries = expected[start:start + columns]
@@ -680,6 +738,7 @@ def notice_case():
 
 
 def main():
+    command_panel_case()
     send_state_case()
     send_recovery_case()
     activity_case()

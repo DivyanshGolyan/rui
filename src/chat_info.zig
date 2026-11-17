@@ -53,7 +53,7 @@ narrow: bool = false,
 session: status.Session = undefined,
 ready: bool = false,
 read_failed: bool = false,
-panel: Panel = .{ .title = "Chat", .action_gap = 1, .natural_height = true },
+panel: Panel = .{ .title = "Chat", .action_gap = 1, .natural_height = true, .top_rule = false },
 fields: [6]Panel.Field = undefined,
 actions: [3][]const u8 = undefined,
 failures: [9]?[]const u8 = @splat(null),
@@ -193,17 +193,12 @@ fn bind(self: *Self) void {
     const caps = self.backend.caps(self.backend.context);
     self.panel.unicode = caps.unicode;
     self.model_choice.unicode = caps.unicode;
-    self.panel.ground = widget_style.of(caps, .{ .background = .bar });
+    self.panel.ground = widget_style.of(caps, .{});
     self.panel.selection = widget_style.of(caps, .{ .background = .selection });
     self.panel.hover_style = widget_style.of(caps, .{ .background = .hover });
-    self.panel.title_style = widget_style.of(caps, .{ .background = .bar, .colour = .strong, .bold = true });
-    self.panel.quiet = widget_style.of(caps, .{ .background = .bar, .colour = .quiet });
-    self.panel.rule_style = widget_style.of(caps, .{ .background = .bar, .colour = .rule });
-    if (self.standalone != null) {
-        self.panel.ground = widget_style.of(caps, .{});
-        self.panel.title_style = widget_style.of(caps, .{ .colour = .strong, .bold = true });
-        self.panel.quiet = widget_style.of(caps, .{ .colour = .quiet });
-    }
+    self.panel.title_style = widget_style.of(caps, .{ .colour = .strong, .bold = true });
+    self.panel.quiet = widget_style.of(caps, .{ .colour = .quiet });
+    self.panel.rule_style = widget_style.of(caps, .{ .colour = .rule });
     self.model_choice.show_more = self.standalone == null;
     self.model_choice.ground = self.panel.ground;
     self.model_choice.selection = self.panel.selection;
@@ -543,8 +538,8 @@ fn drawFooterContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
     const caps = self.backend.caps(self.backend.context);
     const name = try safe(ctx.arena, self.title());
     const footer: Footer = .{
-        .left = try Panel.displayText(ctx.arena, try std.fmt.allocPrint(ctx.arena, "{s}{s} · info", .{ if (self.narrow) " ‹ " else " ", name }), caps.unicode),
-        .right = try Panel.displayText(ctx.arena, if (self.narrow) "esc close" else if (self.tool_draft != null) "↑↓ · space toggle · enter save · esc close" else "↑↓ rows · ←→ actions · tab · enter · esc close", caps.unicode),
+        .left = try Panel.displayText(ctx.arena, name, caps.unicode),
+        .right = "esc",
         .style = widget_style.of(caps, .{ .colour = .quiet }),
     };
     var surface = try footer.widget().draw(ctx);
@@ -707,14 +702,14 @@ test "Chat info draws standalone ground and facts at 99 and 46 columns" {
         try std.testing.expect(std.mem.indexOf(u8, text, "   Folder          ~/code/rui\n") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Context         18 of 244,800\n") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Rename     Archive     Copy last answer\n") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, if (page.narrow) " ‹ Fix retry deadline · info" else " Fix retry deadline · info") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Fix retry deadline") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "k7m2qx") == null);
         std.debug.print("\nCHAT INFO {d}x12\n{s}END CHAT INFO\n", .{ width, text });
         const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} });
         const panel = drawn.children[0].surface;
-        try std.testing.expect(panel.readCell(1, 1).style.bold);
-        try std.testing.expectEqual(page.panel.selection.bg, panel.readCell(0, 2).style.bg);
-        try std.testing.expectEqual(page.panel.ground.bg, panel.readCell(0, 10).style.bg);
+        try std.testing.expect(panel.readCell(1, 0).style.bold);
+        try std.testing.expectEqual(page.panel.selection.bg, panel.readCell(0, 1).style.bg);
+        try std.testing.expectEqual(page.panel.ground.bg, panel.readCell(0, 9).style.bg);
     }
     for (0..10) |width| for (0..8) |height| {
         _ = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
@@ -966,8 +961,8 @@ test "Chat info model choice is a full-width field and saves a typed model" {
         try std.testing.expectEqual(@as(i17, 0), child.origin.col);
         try std.testing.expectEqual(width, child.surface.size.width);
         try std.testing.expectEqual(@as(u16, 19), surface.cursor.?.col);
-        try std.testing.expectEqual(@as(u16, 6), surface.cursor.?.row);
-        try std.testing.expectEqualStrings("C", surface.children[0].surface.readCell(3, 7 + page.panel.custom_height).char.grapheme);
+        try std.testing.expectEqual(@as(u16, 5), surface.cursor.?.row);
+        try std.testing.expectEqualStrings("C", surface.children[0].surface.readCell(3, 6 + page.panel.custom_height).char.grapheme);
         try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 20), "Filter:") == null);
     }
     try typeText(&page, &ctx, "5.5");
@@ -977,9 +972,9 @@ test "Chat info model choice is a full-width field and saves a typed model" {
         try surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
         try std.testing.expect(screen.cursor_vis);
         try std.testing.expectEqual(@as(u16, 22), screen.cursor.col);
-        try std.testing.expectEqual(@as(u16, 6), screen.cursor.row);
-        try std.testing.expectEqualStrings("5", screen.readCell(19, 6).?.char.grapheme);
-        try std.testing.expectEqualStrings("C", screen.readCell(3, 7 + page.panel.custom_height).?.char.grapheme);
+        try std.testing.expectEqual(@as(u16, 5), screen.cursor.row);
+        try std.testing.expectEqualStrings("5", screen.readCell(19, 5).?.char.grapheme);
+        try std.testing.expectEqualStrings("C", screen.readCell(3, 6 + page.panel.custom_height).?.char.grapheme);
     }
     const id = page.model_choice.menu.entries[page.model_choice.focus.selected().?].id;
     try press(&page, &ctx, vaxis.Key.enter);
@@ -1137,7 +1132,7 @@ test "Chat info shared ASCII capability reaches tools model rename failures and 
             const text = try dump(&page, arena.allocator(), width, 20);
             for (text) |byte| try std.testing.expect(byte < 0x80);
             try std.testing.expect(!page.panel.unicode and !page.model_choice.unicode);
-            try std.testing.expect(std.mem.indexOf(u8, text, if (page.narrow) " < Fix retry deadline . info" else " Fix retry deadline . info") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "Fix retry deadline") != null);
             if (state == 2) try std.testing.expect(std.mem.indexOf(u8, text, "+ bash") != null);
             if (state >= 3) {
                 try std.testing.expect(std.mem.indexOf(u8, text, "Filter:") == null);
@@ -1158,7 +1153,11 @@ test "Chat info footer stays plain in both themes and widths" {
         fixture.background = background;
         const surface = try page.footerWidget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
         const plain = widget_style.of(fixture.backend().caps(&fixture), .{ .colour = .quiet });
-        for (surface.buffer) |cell| try std.testing.expectEqual(plain, cell.style);
+        for (surface.buffer, 0..) |cell, col| {
+            try std.testing.expectEqual(plain, cell.style);
+            const expected = if (col < page.title().len) page.title()[col] else if (col >= width - 3) "esc"[col - (width - 3)] else ' ';
+            try std.testing.expectEqual(expected, cell.char.grapheme[0]);
+        }
     };
 }
 
@@ -1180,8 +1179,9 @@ test "Chat info hosted body excludes its independent single-row footer" {
         try std.testing.expect(std.mem.indexOf(u8, body, " info") == null);
         try std.testing.expect(std.mem.indexOf(u8, body, "esc close") == null);
         try std.testing.expect(std.mem.indexOf(u8, footer, "Fix retry deadline") != null);
-        try std.testing.expect(std.mem.indexOf(u8, footer, if (unicode) " · info" else " . info") != null);
-        try std.testing.expect(std.mem.indexOf(u8, footer, "esc close") != null);
+        try std.testing.expect(std.mem.indexOf(u8, footer, "info") == null);
+        try std.testing.expect(std.mem.indexOf(u8, footer, "esc close") == null);
+        try std.testing.expect(std.mem.endsWith(u8, footer, "esc\n"));
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, footer, "\n"));
         try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena.allocator(), "{s}{s}", .{ body, footer }), complete);
         if (!unicode) for (body) |byte| try std.testing.expect(byte < 0x80);
@@ -1444,7 +1444,7 @@ test "Chat info natural body matches the mock grows by actual Model rows and shr
         defer arena.deinit();
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 40 }, .cell_size = .{} };
-        const base_height: u16 = if (context) 11 else 10;
+        const base_height: u16 = if (context) 10 else 9;
         const body = try page.bodyWidget().draw(ctx);
         try std.testing.expectEqual(base_height, body.size.height);
         const complete = try page.widget().draw(ctx);
@@ -1457,14 +1457,14 @@ test "Chat info natural body matches the mock grows by actual Model rows and shr
         const all = try page.bodyWidget().draw(ctx);
         try std.testing.expectEqual(base_height + 8, all.size.height);
         try std.testing.expectEqual(@as(u16, 8), page.panel.custom_height);
-        try std.testing.expectEqual(@as(u16, 6), all.cursor.?.row);
+        try std.testing.expectEqual(@as(u16, 5), all.cursor.?.row);
         try std.testing.expectEqual(@as(usize, 7), page.model_choice.hits.len);
         try typeText(&page, &events, "9");
         const narrowed = try page.bodyWidget().draw(ctx);
         try std.testing.expectEqual(base_height + 1, narrowed.size.height);
         try std.testing.expectEqual(@as(u16, 1), page.panel.custom_height);
         try std.testing.expectEqual(@as(usize, 1), page.model_choice.hits.len);
-        try std.testing.expectEqual(@as(u16, 6), narrowed.cursor.?.row);
+        try std.testing.expectEqual(@as(u16, 5), narrowed.cursor.?.row);
         try std.testing.expectEqual(@as(u16, 20), narrowed.cursor.?.col);
         const narrowed_text = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 40);
         try std.testing.expect(std.mem.indexOf(u8, narrowed_text, "model-9") != null);
@@ -1493,28 +1493,28 @@ test "Chat info hover follows editable fields and action click regions without c
         try page.widget().handleEvent(&events, .mouse_enter);
         for (0..page.fields.len) |index| {
             const selectable = index != 3 and index != 5;
-            const mouse: vaxis.Mouse = .{ .col = @intCast(width - 1), .row = @intCast(2 + index), .button = .none, .type = .motion, .mods = .{} };
+            const mouse: vaxis.Mouse = .{ .col = @intCast(width - 1), .row = @intCast(1 + index), .button = .none, .type = .motion, .mods = .{} };
             try page.widget().handleEvent(&events, .{ .mouse = mouse });
             const drawn = try page.widget().draw(draw_ctx);
             try std.testing.expectEqual(selectable, page.panel.hover.pointing);
-            try std.testing.expectEqual(if (index == 0) page.panel.selection else if (selectable) page.panel.hover_style else page.panel.ground, drawn.children[0].surface.readCell(width - 1, @intCast(2 + index)).style);
+            try std.testing.expectEqual(if (index == 0) page.panel.selection else if (selectable) page.panel.hover_style else page.panel.ground, drawn.children[0].surface.readCell(width - 1, @intCast(1 + index)).style);
             try std.testing.expectEqual(@as(usize, 0), page.panel.selected);
             try std.testing.expectEqual(@as(?Edit, null), fixture.edit);
         }
         for ([_]u16{ 3, 14, 26 }) |col| {
-            try page.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(col), .row = 9, .button = .none, .type = .motion, .mods = .{} } });
+            try page.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(col), .row = 8, .button = .none, .type = .motion, .mods = .{} } });
             const drawn = try page.widget().draw(draw_ctx);
-            try std.testing.expectEqual(page.panel.hover_style, drawn.children[0].surface.readCell(col, 9).style);
+            try std.testing.expectEqual(page.panel.hover_style, drawn.children[0].surface.readCell(col, 8).style);
             try std.testing.expect(page.panel.hover.pointing);
             try std.testing.expectEqual(@as(usize, 0), page.panel.selected);
         }
         try page.widget().handleEvent(&events, .mouse_leave);
         try std.testing.expect(!page.panel.hover.pointing);
         for (events.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
-        try page.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(width - 1), .row = 3, .button = .left, .type = .press, .mods = .{} } });
+        try page.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(width - 1), .row = 2, .button = .left, .type = .press, .mods = .{} } });
         try std.testing.expectEqual(@as(usize, 1), page.panel.choice.?.field);
         _ = try page.widget().draw(draw_ctx);
-        try page.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(width - 1), .row = 4, .button = .left, .type = .press, .mods = .{} } });
+        try page.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(width - 1), .row = 3, .button = .left, .type = .press, .mods = .{} } });
         try std.testing.expectEqual(@as(@FieldType(status.Session, "permission"), .bypass), fixture.edit.?.permission);
     }
 }

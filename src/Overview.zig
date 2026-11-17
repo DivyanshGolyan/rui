@@ -348,6 +348,8 @@ attention: *TerminalApp.Attention = undefined,
 root: Root = undefined,
 sign_in: SignIn = .{},
 app_screen: AppScreen.Overview = undefined,
+settings_editor: @import("DraftEditor.zig") = .init(&.{}),
+settings_input: @import("InputArea.zig") = undefined,
 app_sessions: GroupedList = .{},
 app_new_session: OverviewLines.SessionControls = undefined,
 session_drafts: @import("session_drafts.zig").Drafts = .{},
@@ -893,6 +895,16 @@ fn bottomWidget(self: *Self) vxfw.Widget {
 
 fn drawBottom(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.root.input.layer.settingsOpen() and self.root.session == null) {
+        self.settings_input = .{
+            .composer = .{ .editor = &self.settings_editor, .caret = false },
+            .panel = self.root.settings_page.bodyWidget(),
+            .facts = self.root.settings_page.footerWidget(),
+            .status = null,
+        };
+        self.settings_input.composer.setCaps(self.caps);
+        return self.settings_input.widget().draw(ctx);
+    }
     const footer = try ctx.arena.create(@import("widgets/Footer.zig"));
     footer.* = .{
         .left = "",
@@ -5181,13 +5193,14 @@ test "App settings Enter reaches Root at both widths with and without a retained
             try std.testing.expectEqual(width >= Root.split_at, overview.root.listVisible());
             var shown = try rig.shown(width, 24);
             defer shown.deinit();
-            try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Rui") != null);
+            const settings_origin = Settings.origin(opened, focus, .{ .row = 0, .col = 0 }).?;
+            try std.testing.expect(std.mem.indexOf(u8, try shown.line(@intCast(settings_origin.row)), "Rui") != null);
             try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Notifications") != null);
             if (previous) |widget_| {
                 try std.testing.expect(overview.root.session.?.eql(widget_));
                 try std.testing.expect(overview.app_session.?.frontend.? == frontend.?);
                 try std.testing.expectEqualStrings("retained draft", frontend.?.input.composition().bytes);
-                try std.testing.expect(Settings.origin(opened, widget_, .{ .row = 0, .col = 0 }) == null);
+                try std.testing.expect(Settings.origin(opened, widget_, .{ .row = 0, .col = 0 }) != null);
             } else try std.testing.expect(overview.root.session == null);
             try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
             try std.testing.expectEqual(@as(usize, 0), overview.retired.items.len);
@@ -6127,7 +6140,7 @@ test "App settings Sign-in Enter and click use the Overview owner and return to 
         if (busy) overview.defaults_save = .pending;
         ctx.cmds.clearRetainingCapacity();
         if (click) {
-            try page.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 3, .row = 2 + @backingInt(AppSettings.Row.sign_in), .button = .left, .type = .press, .mods = .{} } });
+            try page.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 3, .row = @intCast(page.panel.body.top + @as(u16, @backingInt(AppSettings.Row.sign_in))), .button = .left, .type = .press, .mods = .{} } });
         } else {
             page.select(.sign_in);
             try app_events.send(&ctx, "\r", overview.root.widget(), page.widget());

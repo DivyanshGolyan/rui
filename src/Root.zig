@@ -104,8 +104,6 @@ pub fn focusInput(self: *Self, ctx: *vxfw.EventContext) !void {
     try self.navigate(ctx, .focus_input);
 }
 
-/// Settings takes the place of the main pane; it is no content of a feed.
-/// The page reloads first, so a failed reload leaves the layer as it was.
 pub fn openSettings(self: *Self, ctx: *vxfw.EventContext) !void {
     try self.settings_page.refresh();
     self.closeMainPresentation();
@@ -359,7 +357,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .overview => self.overview,
         .session => self.session.?,
         .sign_in => self.sign_in.?,
-        .settings => self.settings_page.widget(),
+        .settings => self.session orelse self.overview,
     };
     const child = if (layout.split) split: {
         const split = try ctx.arena.create(Split);
@@ -566,10 +564,10 @@ test "App root opens settings in both layouts and Escape closes the choice, then
         try std.testing.expectEqual(width < split_at, root.settings_page.narrow);
         const layout = opened.children[0].surface;
         const page = if (width >= split_at) layout.children[2].surface else layout;
-        try std.testing.expect(page.widget.eql(root.settings_page.widget()));
+        try std.testing.expect(page.widget.eql(whole.widget()));
         try std.testing.expectEqual(@as(u16, if (width >= split_at) 99 else 46), page.size.width);
         if (width >= split_at) try std.testing.expect(layout.children[0].surface.widget.eql(list.widget()));
-        try std.testing.expect(!containsWidget(opened, whole.widget()));
+        try std.testing.expect(containsWidget(opened, whole.widget()));
 
         const escape: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.escape } };
         root.settings_page.select(.keys);

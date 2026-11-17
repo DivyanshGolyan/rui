@@ -1275,12 +1275,11 @@
         }
       ],
       "expect": [
-        "/archive        archive this chat",
+        "/archive",
         "/clear          start a new chat",
         "/copy           copy the last answer",
-        "/effort         change effort",
-        "/model          change model",
-        "more \u00b7 type to narrow"
+        "/effort",
+        "/model"
       ],
       "absent": [
         "/configure",
@@ -1292,21 +1291,13 @@
         "future defaults",
         "stop active work",
         "code its",
-        "append catal"
+        "append catal",
+        "type to narrow"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ],
-      "expect_dim": [
-        {
-          "text": "archive this chat",
-          "dim": false
-        },
-        {
-          "text": "change model",
-          "dim": false
-        }
-      ]
+      "expect_dim": []
     },
     {
       "name": "appcmds-conversation-end",
@@ -1339,12 +1330,11 @@
         }
       ],
       "expect": [
-        "/rename         rename this chat",
+        "/rename",
         "/requests       recover a lost request",
         "/result         show a saved answer",
         "/setup          defaults for new chats",
-        "/unarchive      restore this chat",
-        "more \u00b7 type to narrow"
+        "/unarchive      restore this chat"
       ],
       "absent": [
         "/configure",
@@ -1356,10 +1346,11 @@
         "future defaults",
         "stop active work",
         "code its",
-        "append catal"
+        "append catal",
+        "type to narrow"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ],
       "expect_dim": [
         {
@@ -4032,7 +4023,7 @@
     },
     {
       "name": "slash",
-      "note": "21-slash: listed chat commands with their descriptions",
+      "note": "Listed commands omit redundant descriptions; plain panel between the input rules",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -4050,7 +4041,6 @@
       ],
       "expect": [
         "/copy",
-        "copy the last answer",
         "/effort",
         "/model"
       ],
@@ -4058,10 +4048,11 @@
         "/help",
         "/status",
         "/configure",
-        "code \u00b7 file"
+        "code · file",
+        "type to narrow"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -4318,7 +4309,7 @@
       "expect_style": [
         {
           "text": "/new",
-          "within": "\u203a /new",
+          "within": "› /new",
           "foreground": "#a9b6ec"
         },
         {
@@ -4333,7 +4324,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ],
       "expect_background": {
         "/new            start": "#2b2f45"
@@ -4502,7 +4493,7 @@
       "expect_style": [
         {
           "text": "/new",
-          "within": "\u203a /new",
+          "within": "› /new",
           "foreground": "#1f2d6b"
         },
         {
@@ -4517,7 +4508,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ],
       "theme": "day",
       "expect_background": {
@@ -4583,17 +4574,19 @@
         "Folder",
         "Model",
         "Copy last answer",
-        "Retry deadline info \u00b7 info",
-        "esc close",
+        "Retry deadline info",
+        "esc",
         "~/code/rui",
         "Backoff stays within time left.",
         "The retry draft is ready.",
-        "\u203a keep this retry draft"
+        "› keep this retry draft"
       ],
       "absent": [
         "Context",
         "unknown of",
-        "alt+i info"
+        "alt+i info",
+        "esc close",
+        "Retry deadline info · info"
       ],
       "cast": [
         {
@@ -4607,7 +4600,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -4638,28 +4631,30 @@
           ]
         },
         {
-          "wait": "\u2713"
+          "wait": "✓"
         }
       ],
       "expect": [
         "Model",
         "gpt-6.1-sol",
-        "Retry deadline info \u00b7 info",
-        "esc close",
-        "\u2713",
+        "Retry deadline info",
+        "esc",
+        "✓",
         "Backoff stays within time left.",
         "The retry draft is ready.",
-        "\u203a keep this retry draft"
+        "› keep this retry draft"
       ],
       "absent": [
         "Context",
         "unknown of",
         "alt+i info",
         "Filter:",
-        "\u2191 "
+        "↑ ",
+        "esc close",
+        "Retry deadline info · info"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -5311,7 +5306,9 @@
         "Copy last answer"
       ],
       "absent": [
-        "Copied"
+        "Copied",
+        "esc close",
+        "Retry deadline info · info"
       ],
       "cast": [
         {
@@ -5364,7 +5361,9 @@
       ],
       "absent": [
         "Copy last answer",
-        "couldn't copy"
+        "couldn't copy",
+        "esc close",
+        "Retry deadline info · info"
       ],
       "cast": [
         {
@@ -5556,7 +5555,9 @@
         "Copy last answer"
       ],
       "absent": [
-        "Copied"
+        "Copied",
+        "esc close",
+        "Retry deadline info · info"
       ],
       "cast": [
         {
@@ -6241,6 +6242,136 @@
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "panels-command-list",
+      "note": "Panel inside the input rules on the plain background; night at both review widths",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "text": "/"
+        },
+        {
+          "wait": "/copy"
+        },
+        {
+          "gone": "/details"
+        },
+        {
+          "gone": "/effort LEVEL"
+        }
+      ],
+      "expect": [
+        "/copy",
+        "/effort",
+        "/model"
+      ],
+      "absent": [
+        "/help",
+        "/status",
+        "/configure",
+        "code · file",
+        "type to narrow"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      ],
+      "theme": "night",
+      "sizes": [
+        "140x40",
+        "46x30"
+      ]
+    },
+    {
+      "name": "panels-chat-info",
+      "note": "Panel inside the input rules on the plain background; night at both review widths",
+      "open": "Retry deadline info",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "text": "keep this retry draft"
+        },
+        {
+          "keys": [
+            "M-i"
+          ]
+        },
+        {
+          "wait": "Copy last answer"
+        }
+      ],
+      "expect": [
+        "Effort",
+        "Permissions",
+        "Tools",
+        "Folder",
+        "Model",
+        "Copy last answer",
+        "Retry deadline info",
+        "esc",
+        "~/code/rui",
+        "Backoff stays within time left.",
+        "The retry draft is ready.",
+        "› keep this retry draft"
+      ],
+      "absent": [
+        "Context",
+        "unknown of",
+        "alt+i info",
+        "esc close",
+        "Retry deadline info · info"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      ],
+      "theme": "night",
+      "sizes": [
+        "140x40",
+        "46x30"
+      ]
+    },
+    {
+      "name": "panels-settings",
+      "note": "Panel inside the input rules on the plain background; night at both review widths",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "keys": [
+            "Left"
+          ]
+        },
+        {
+          "keys": [
+            "End",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Notifications"
+        }
+      ],
+      "expect": [
+        "Notifications",
+        "Sign-in",
+        "Version",
+        "Keys",
+        "Settings",
+        "esc"
+      ],
+      "absent": [
+        "Type a task",
+        "esc close"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      ],
+      "theme": "night",
+      "sizes": [
+        "140x40",
+        "46x30"
       ]
     }
   ]

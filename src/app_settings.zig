@@ -39,7 +39,8 @@ narrow: bool = false,
 keys_open: bool = false,
 values: preferences.Values = .{},
 read_failed: bool = false,
-panel: Panel = .{ .title = "Rui" },
+panel: Panel = .{ .title = "Rui", .top_rule = false, .natural_height = true },
+footer: Footer = .{ .left = "Settings", .right = "esc" },
 model_choice: ModelChoice = .{},
 fields: [row_count]Panel.Field = undefined,
 saving_row: ?Row = null,
@@ -51,6 +52,15 @@ upgrade_buffer: [upgrade_status.max_line_bytes]u8 = undefined,
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
+}
+
+pub fn bodyWidget(self: *Self) vxfw.Widget {
+    return self.widget();
+}
+
+pub fn footerWidget(self: *Self) vxfw.Widget {
+    self.footer.style = widget_style.of(if (self.backend) |backend| backend.caps(backend.context) else .{}, .{ .colour = .quiet });
+    return self.footer.widget();
 }
 
 pub fn hasChoice(self: *const Self) bool {
@@ -181,12 +191,12 @@ fn bind(self: *Self) void {
     const caps = if (self.backend) |b| b.caps(b.context) else view.Caps{};
     self.panel.unicode = caps.unicode;
     self.model_choice.unicode = caps.unicode;
-    self.panel.ground = widget_style.of(caps, .{ .background = .bar });
+    self.panel.ground = widget_style.of(caps, .{});
     self.panel.selection = widget_style.of(caps, .{ .background = .selection });
     self.panel.hover_style = widget_style.of(caps, .{ .background = .hover });
-    self.panel.title_style = widget_style.of(caps, .{ .background = .bar, .colour = .strong, .bold = true });
-    self.panel.quiet = widget_style.of(caps, .{ .background = .bar, .colour = .quiet });
-    self.panel.rule_style = widget_style.of(caps, .{ .background = .bar, .colour = .rule });
+    self.panel.title_style = widget_style.of(caps, .{ .colour = .strong, .bold = true });
+    self.panel.quiet = widget_style.of(caps, .{ .colour = .quiet });
+    self.panel.rule_style = widget_style.of(caps, .{ .colour = .rule });
     self.model_choice.show_more = true;
     self.model_choice.ground = self.panel.ground;
     self.model_choice.selection = self.panel.selection;
@@ -341,22 +351,18 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         return surface;
     }
     self.bind();
+    self.panel.top_rule = false;
+    self.panel.natural_height = true;
     const size = ctx.max.size();
     if (size.width == 0 or size.height == 0) return .empty(self.widget());
     const memory = if (self.backend) |backend| (if (backend.memory) |read| read(backend.context) else null) else null;
     const text = try @import("memory_text.zig").fit(ctx.arena, memory, self.panel.unicode, size.width -| Panel.value_column);
     self.fields[@backingInt(Row.memory)].value = text;
     self.fields[@backingInt(Row.memory)].visible = text.len != 0;
-    const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
-    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.panel.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height - 1 })) };
-    const footer = try ctx.arena.create(Footer);
-    footer.* = .{
-        .left = try Panel.displayText(ctx.arena, if (self.narrow) " ‹ Rui · settings" else " Rui · settings", self.panel.unicode),
-        .right = try Panel.displayText(ctx.arena, if (self.narrow) "esc close" else "↑↓ · enter change · esc close", self.panel.unicode),
-        .style = widget_style.of(if (self.backend) |b| b.caps(b.context) else .{}, .{ .colour = .quiet }),
-    };
-    children[1] = .{ .origin = .{ .row = size.height - 1, .col = 0 }, .surface = try footer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 })) };
-    return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children, .cursor = children[0].surface.cursor };
+    const surface = try self.panel.widget().draw(ctx);
+    const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
+    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = surface };
+    return .{ .widget = self.widget(), .size = surface.size, .buffer = &.{}, .children = children, .cursor = surface.cursor };
 }
 
 const Fixture = struct {
@@ -563,6 +569,38 @@ test "App settings completion uses the backend outcome and reports read failures
     }
 }
 
+test "App settings and nested Keys share Composer input lines and preserve the draft" {
+    var fixture: Fixture = .{};
+    var page: Self = .{ .backend = fixture.backend() };
+    try page.refresh();
+    var bytes = "retained draft".*;
+    var editor: @import("DraftEditor.zig") = .initText(&bytes, &bytes, 4);
+    var input: @import("InputArea.zig") = .{
+        .composer = .{ .editor = &editor, .caret = false },
+        .panel = page.bodyWidget(),
+        .facts = page.footerWidget(),
+        .status = null,
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 } }) |size| {
+        for ([_]bool{ false, true }) |keys| {
+            page.keys_open = keys;
+            const shown = try input.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
+            const composer = shown.children[0].surface;
+            try std.testing.expect(composer.widget.eql(input.composer.widget()));
+            try std.testing.expectEqual(@as(i17, 1), composer.children[0].origin.row);
+            try std.testing.expect(composer.children[0].surface.widget.eql(page.bodyWidget()));
+            try std.testing.expectEqualStrings("─", composer.readCell(0, 0).char.grapheme);
+            try std.testing.expectEqualStrings("─", composer.readCell(0, composer.size.height - 1).char.grapheme);
+            try std.testing.expectEqualStrings("r", composer.readCell(3, composer.size.height - 2).char.grapheme);
+            try std.testing.expectEqualStrings("S", shown.children[1].surface.readCell(0, 0).char.grapheme);
+            try std.testing.expectEqualStrings("retained draft", editor.text());
+            try std.testing.expectEqual(@as(usize, 4), editor.cursor());
+        }
+    }
+}
+
 test "App settings footer stays plain in both themes and widths" {
     var fixture: Fixture = .{};
     var page: Self = .{ .backend = fixture.backend() };
@@ -571,9 +609,13 @@ test "App settings footer stays plain in both themes and widths" {
     defer arena.deinit();
     for ([_]?view.Rgb{ null, .{ 255, 255, 255 } }) |background| for ([_]u16{ 140, 46 }) |width| {
         fixture.background = background;
-        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} });
+        const surface = try page.footerWidget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
         const plain = widget_style.of(fixture.backend().caps(&fixture), .{ .colour = .quiet });
-        for (surface.children[1].surface.buffer) |cell| try std.testing.expectEqual(plain, cell.style);
+        for (surface.buffer, 0..) |cell, col| {
+            try std.testing.expectEqual(plain, cell.style);
+            const expected = if (col < "Settings".len) "Settings"[col] else if (col >= width - 3) "esc"[col - (width - 3)] else ' ';
+            try std.testing.expectEqual(expected, cell.char.grapheme[0]);
+        }
     };
 }
 
@@ -606,10 +648,10 @@ test "App settings page text and ground at 99x20 and 46x20" {
         try std.testing.expect(std.mem.indexOf(u8, text, "   Sign-in         ChatGPT") != null);
         try std.testing.expect(std.ascii.findIgnoreCase(text, "codex") == null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Version         0.60.0 · up to date") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, if (page.narrow) " ‹ Rui · settings" else " Rui · settings") != null);
-        const ground = widget_style.of(.{}, .{ .background = .bar });
-        try std.testing.expectEqual(ground.bg, screen.readCell(0, 15).?.style.bg);
-        try std.testing.expectEqual(widget_style.of(.{}, .{ .background = .selection }).bg, screen.readCell(0, 2).?.style.bg);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Rui") != null);
+        const ground = widget_style.of(.{}, .{});
+        try std.testing.expectEqual(ground.bg, screen.readCell(0, surface.size.height - 1).?.style.bg);
+        try std.testing.expectEqual(widget_style.of(.{}, .{ .background = .selection }).bg, screen.readCell(0, 1).?.style.bg);
     }
 }
 
@@ -743,9 +785,9 @@ test "App settings Model shares the provider list at full width and preserves ma
         try std.testing.expectEqualStrings(" ", choice.surface.readCell(2, 0).char.grapheme);
         try std.testing.expectEqual(@as(usize, 1), page.model_choice.hits.len);
         try std.testing.expectEqual(@as(u16, 19), drawn.cursor.?.col);
-        try std.testing.expectEqual(@as(u16, 2), drawn.cursor.?.row);
-        try std.testing.expectEqualStrings("E", drawn.children[0].surface.readCell(3, 4).char.grapheme);
-        try std.testing.expectEqualStrings(" ", drawn.children[0].surface.readCell(19, 2).char.grapheme);
+        try std.testing.expectEqual(@as(u16, 1), drawn.cursor.?.row);
+        try std.testing.expectEqualStrings("E", drawn.children[0].surface.readCell(3, 3).char.grapheme);
+        try std.testing.expectEqualStrings(" ", drawn.children[0].surface.readCell(19, 1).char.grapheme);
     }
     try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'f', .text = "future" } });
     try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'z', .text = "zzzz" } });
@@ -757,8 +799,8 @@ test "App settings Model shares the provider list at full width and preserves ma
         try drawn.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
         try std.testing.expect(screen.cursor_vis);
         try std.testing.expectEqual(@as(u16, 25), screen.cursor.col);
-        try std.testing.expectEqual(@as(u16, 2), screen.cursor.row);
-        try std.testing.expectEqualStrings("f", screen.readCell(19, 2).?.char.grapheme);
+        try std.testing.expectEqual(@as(u16, 1), screen.cursor.row);
+        try std.testing.expectEqualStrings("f", screen.readCell(19, 1).?.char.grapheme);
     }
     page.cancelChoice();
     try std.testing.expectEqual(@as(?preferences.Edit, null), fixture.last_edit);
@@ -797,8 +839,9 @@ test "App settings shared ASCII capability reaches the panel model choice tails 
             const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
             try Check.ascii(surface);
             try std.testing.expect(!page.panel.unicode and !page.model_choice.unicode);
-            try std.testing.expectEqualStrings("-", surface.children[0].surface.readCell(0, 0).char.grapheme);
-            if (page.narrow) try std.testing.expectEqualStrings("<", surface.children[1].surface.readCell(1, 0).char.grapheme);
+            const footer = try page.footerWidget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
+            try Check.ascii(footer);
+            try std.testing.expectEqualStrings("S", footer.readCell(0, 0).char.grapheme);
         }
     }
 }
@@ -845,12 +888,12 @@ test "App settings mouse hover and click use the same field choices as Enter" {
         try page.refresh();
         _ = try page.widget().draw(draw_ctx);
         try page.widget().handleEvent(&events, .mouse_enter);
-        const permissions_row = 2 + @backingInt(Row.permissions);
+        const permissions_row = 1 + @backingInt(Row.permissions);
         var mouse: vaxis.Mouse = .{ .col = 1, .row = permissions_row, .button = .none, .type = .motion, .mods = .{} };
         try page.widget().handleEvent(&events, .{ .mouse = mouse });
         var surface = try page.widget().draw(draw_ctx);
         try std.testing.expectEqual(page.panel.hover_style.bg, surface.children[0].surface.readCell(1, permissions_row).style.bg);
-        try std.testing.expectEqual(page.panel.selection.bg, surface.children[0].surface.readCell(1, 2).style.bg);
+        try std.testing.expectEqual(page.panel.selection.bg, surface.children[0].surface.readCell(1, 1).style.bg);
         try std.testing.expectEqual(@as(usize, 0), page.panel.selected);
         try std.testing.expectEqual(@as(?preferences.Edit, null), fixture.last_edit);
         try page.widget().handleEvent(&events, .mouse_leave);
@@ -894,7 +937,7 @@ test "App settings Keys is last and opens by Enter or click without a backend" {
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         if (click) {
             _ = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
-            try page.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .row = 2 + @as(u16, @backingInt(Row.version)) + 1, .col = 4, .mods = .{} } });
+            try page.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .row = @intCast(page.panel.body.top + @as(u16, @backingInt(Row.keys)) - 1), .col = 4, .mods = .{} } });
         } else {
             page.select(.keys);
             try press(&page, &ctx, vaxis.Key.enter);

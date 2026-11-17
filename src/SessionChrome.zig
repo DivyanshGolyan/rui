@@ -128,7 +128,7 @@ pub fn place(self: *Self, screen: *AppScreen.Session, input: *@import("InputArea
     screen.tail = null;
     self.marker.label = chrome.marker(&self.marker_text, view.new_entries);
     screen.marker = if (view.browsing) self.marker.widget() else empty_marker.widget();
-    screen.overlay = view.overlay;
+    input.panel = view.overlay;
 }
 
 fn stateText(text: []const u8, key: []const u8) []const u8 {
@@ -336,7 +336,7 @@ test "SessionChrome puts notices in Footer without a state row and preserves nee
     self.place(&screen, &input, .{ .width = 80, .notice = "Copied 12 lines", .overlay = palette.widget() });
     try std.testing.expectEqualStrings("Copied 12 lines", self.status.bar.notice.?);
     try std.testing.expectEqualStrings("", self.state.text);
-    try std.testing.expect(screen.overlay.?.eql(palette.widget()));
+    try std.testing.expect(input.panel.?.eql(palette.widget()));
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     for ([_]u16{ 46, 140 }) |width| {
@@ -357,7 +357,7 @@ test "SessionChrome puts notices in Footer without a state row and preserves nee
     }
 
     self.place(&screen, &input, .{ .width = 80 });
-    try std.testing.expect(screen.overlay == null);
+    try std.testing.expect(input.panel == null);
     self.place(&screen, &input, .{ .width = 80, .notice = "Copied 12 lines", .needs = "! Not confirmed · ctrl+r retries", .needs_key = "ctrl+r retries" });
     try std.testing.expectEqualStrings("! Not confirmed · ctrl+r retries", self.status.bar.left);
     try std.testing.expectEqualStrings("ctrl+r retries", self.status.key.label);
