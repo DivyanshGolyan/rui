@@ -28,6 +28,35 @@ def committed(text, columns=100, lines=20):
 
 
 class VerifyRuiTest(unittest.TestCase):
+    def test_resize_ignores_inflight_spinner_until_reset_frame_commits(self):
+        import io
+        import threading
+
+        terminal_type = runpy.run_path(str(SCRIPT))["FrameTerminal"]
+        terminal = terminal_type.__new__(terminal_type)
+        capture = types.SimpleNamespace(generation=7, reset_generation=0, frame_reset_generation=0)
+        capture.resize = lambda *_: None
+        terminal.capture = capture
+        terminal.condition = threading.Condition()
+        terminal.master = 41
+        terminal.output_events = io.StringIO()
+        terminal.process = types.SimpleNamespace(output=types.SimpleNamespace(complete=False))
+        accepted = []
+
+        def wait(predicate, _description, **_kwargs):
+            capture.generation += 1
+            accepted.append(predicate(capture))
+            capture.reset_generation += 1
+            accepted.append(predicate(capture))
+            capture.frame_reset_generation = capture.reset_generation
+            capture.generation += 1
+            accepted.append(predicate(capture))
+
+        terminal.wait = wait
+        with patch("fcntl.ioctl"):
+            terminal.resize((46, 30))
+        self.assertEqual(accepted, [False, False, True])
+
     def test_host_launcher_uses_exact_credential_free_generic_settings(self):
         launch = runpy.run_path(str(SCRIPT))["launch_host"]
         with tempfile.TemporaryDirectory() as directory:
@@ -265,6 +294,106 @@ class FramesTest(unittest.TestCase):
                 {"label": "Fix it", "workspace": "code/rui", "mode": "bypass", "messages": ["rich answer"]}
             ], "steps": [{"text": "/help"}, {"keys": ["Enter"]}, {"wait": "Keys", "timeout": 2}]},
         ]}
+
+    def test_host_suspension_validates_actions_and_lifetime(self):
+        for steps in ([{"host": "suspend"}], [{"host": "suspend"}, {"host": "resume"}],
+                      [{"host": "suspend"}, {"host": "resume"}, {"host": "pause"}]):
+            data = self.scenario()
+            data["states"][0].update(steps=steps, expect=[])
+            self.helper["validate_scenario"](data)
+        for steps in ([{"host": "resume"}], [{"host": "suspend"}, {"host": "suspend"}],
+                      [{"host": "suspend"}, {"host": "pause"}], [{"host": "suspend"}, {"host": "start"}]):
+            data = self.scenario()
+            data["states"][0].update(steps=steps, expect=[])
+            with self.assertRaisesRegex(ValueError, "Host"):
+                self.helper["validate_scenario"](data)
+
+    def test_host_suspension_signals_only_the_verified_owned_process_and_logs_it(self):
+        control = self.helper["frame_host_suspension"]
+        host = {"kind": "host", "pid": 123, "lstart": "owned start"}
+        run = types.SimpleNamespace(owned=lambda: [host], evidence=Path("/evidence"))
+        with patch.dict(control.__globals__, {"process_start": lambda _pid: ("owned start", "rui host serve"),
+                "append_jsonl": unittest.mock.Mock()}), patch.object(os, "kill") as kill:
+            log = control.__globals__["append_jsonl"]
+            control(run, True)
+            with self.assertRaisesRegex(self.helper["FrameFailure"], "already suspended"):
+                control(run, True)
+            control(run, False)
+            control(run, False)
+            self.assertEqual(kill.call_args_list, [unittest.mock.call(123, self.helper["signal"].SIGSTOP),
+                                                  unittest.mock.call(123, self.helper["signal"].SIGCONT)])
+            self.assertEqual([call.args[1]["signal"] for call in log.call_args_list], ["STOP", "CONT"])
+            self.assertIsNone(run.frame_suspended_host)
+        for owned, current in (([], None), ([host], None), ([host], ("reused PID", "other")),
+                               ([host, {**host, "pid": 124}], ("owned start", "rui host serve"))):
+            with self.subTest(owned=owned, current=current):
+                run = types.SimpleNamespace(owned=lambda: owned, evidence=Path("/evidence"))
+                with patch.dict(control.__globals__, {"process_start": lambda _pid: current}), \
+                        patch.object(os, "kill") as kill, self.assertRaises(self.helper["FrameFailure"]):
+                    control(run, True)
+                kill.assert_not_called()
+        run = types.SimpleNamespace(frame_suspended_host=host, evidence=Path("/evidence"))
+        with patch.dict(control.__globals__, {"process_start": lambda _pid: ("reused PID", "other")}), \
+                patch.object(os, "kill") as kill, self.assertRaises(self.helper["FrameFailure"]):
+            control(run, False)
+        kill.assert_not_called()
+
+    def test_host_suspension_retains_cleanup_authority_when_logging_or_resume_fails(self):
+        control = self.helper["frame_host_suspension"]
+        host = {"kind": "host", "pid": 123, "lstart": "owned start"}
+        run = types.SimpleNamespace(owned=lambda: [host], evidence=Path("/evidence"))
+        with patch.dict(control.__globals__, {"process_start": lambda _pid: ("owned start", "rui host serve"),
+                "append_jsonl": unittest.mock.Mock(side_effect=OSError("log unavailable"))}), \
+                patch.object(os, "kill") as kill:
+            with self.assertRaisesRegex(OSError, "log unavailable"):
+                control(run, True)
+            self.assertEqual(run.frame_suspended_host, host)
+            with self.assertRaisesRegex(OSError, "log unavailable"):
+                control(run, False)
+            self.assertIsNone(run.frame_suspended_host)
+            self.assertEqual(kill.call_count, 2)
+        run.frame_suspended_host = host
+        with patch.dict(control.__globals__, {"process_start": lambda _pid: ("owned start", "rui host serve")}), \
+                patch.object(os, "kill", side_effect=PermissionError("no resume")):
+            with self.assertRaisesRegex(PermissionError, "no resume"):
+                control(run, False)
+            self.assertEqual(run.frame_suspended_host, host)
+
+    def test_frame_state_resumes_owned_host_on_success_and_capture_or_step_failure(self):
+        command = self.helper["cmd_frames"]
+        scenario = {"sizes": ["140x40"], "states": [{"name": name, "open": "overview", "steps": []} for name in ("empty", "chat")]}
+        for capture_ok, failing in ((True, None), (False, None), (True, "chat")):
+            with self.subTest(capture_ok=capture_ok, failing=failing):
+                resume = unittest.mock.Mock()
+                with patch.dict(command.__globals__, {"frame_host_suspension": resume}), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    if capture_ok and failing is None:
+                        calls, _records = self.run_frames_scenario(scenario)
+                        self.assertIn(("close",), calls)
+                    else:
+                        with self.assertRaises(SystemExit):
+                            self.run_frames_scenario(scenario, capture_ok=capture_ok, failing_state=failing)
+                self.assertEqual(resume.call_count, 2)
+                self.assertTrue(all(call.args[1] is False for call in resume.call_args_list))
+
+    def test_empty_composer_wait_rejects_pre_enter_draft_and_accepts_feed_message(self):
+        wait = self.helper["frame_wait"]
+        samples = [committed("› witness"), committed("› witness\n›"), committed("› witness\n›")]
+        samples[0] = samples[0]._replace(cursor=Cursor(9, 0), visible=True)
+        samples[1] = samples[1]._replace(cursor=Cursor(2, 1), visible=True)
+        samples[2] = samples[2]._replace(cursor=Cursor(2, 1), visible=False)
+        outcomes = []
+        terminal = types.SimpleNamespace(wait=lambda predicate, *_args: outcomes.extend(
+            predicate(types.SimpleNamespace(completed=frame.text, frame=frame)) for frame in samples))
+        wait(None, terminal, "witness", empty_composer=True)
+        self.assertEqual(outcomes, [False, True, False])
+        data = self.scenario()
+        data["states"][0].update(steps=[{"wait": "witness", "empty_composer": True}])
+        self.helper["validate_scenario"](data)
+        for step in ({"gone": "witness", "empty_composer": True}, {"wait": "witness", "empty_composer": 1}):
+            data["states"][0].update(steps=[step], expect=[])
+            with self.assertRaisesRegex(ValueError, "empty_composer"):
+                self.helper["validate_scenario"](data)
 
     def test_dim_expectations_validate_and_assert_saved_cells_not_text_alone(self):
         for value in (None, {}, [{"text": "", "dim": True}], [{"text": "Row", "dim": 1}],
@@ -927,7 +1056,7 @@ while True:
         self.assertGreater(len(default["states"]), 25)
 
     def test_regex_absences_validate_and_roundtrip_before_launch(self):
-        pattern = r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        pattern = r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
         data = self.scenario()
         data["states"][0]["absent_regex"] = [pattern]
         validated = self.helper["validate_scenario"](data)
@@ -940,12 +1069,12 @@ while True:
 
     def test_regex_absences_reject_dynamic_rows_in_readiness_and_saved_captures(self):
         state = {"name": "no-empty-rows", "steps": [], "expect": ["Settings"],
-                 "absent_regex": [r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"]}
-        clean = "  + New Session\n ✓ Existing conversation  3h\n  Settings"
+                 "absent_regex": [r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"]}
+        clean = " + New Session\n   Existing conversation  3h\n   Settings"
         run = types.SimpleNamespace(meta={"sha": "a" * 40})
         for size in ((140, 40), (46, 30)):
-            for sid, age in (("9xt4vy", "42s"), ("emged6", "7m"), ("000000", "3h"), ("zzzzzz", "12d"),
-                             ("9xt4vy", "0s │"), ("emged6", "42s│ Model")):
+            for sid, age in (("9xt4vy", "now"), ("emged6", "7m"), ("000000", "3h"), ("zzzzzz", "12d"),
+                             ("9xt4vy", "now │"), ("emged6", "7m│ Model")):
                 with self.subTest(size=size, sid=sid, age=age), tempfile.TemporaryDirectory() as temp:
                     bad = f"{clean}\n ○ {sid}                  {age}"
 
@@ -972,14 +1101,14 @@ while True:
                     " ○ 9xt4vy", "text mentions ○ 9xt4vy  2m"):
             with self.subTest(named_or_nonrow=row):
                 self.assertIsNone(self.helper["frame_row_failure"](state, clean + "\n" + row))
-        for row in (" ○ 9xt4vy  0s │", " ○ emged6  42s│ Model", " ○ 000000  2m │chat text"):
+        for row in (" ○ 9xt4vy  now │", " ○ emged6  now│ Model", " ○ 000000  2m │chat text"):
             with self.subTest(raw_sidebar=row):
                 self.assertIsNotNone(self.helper["frame_row_failure"](state, row))
-        for row in (" ○ New Session  0s │", " ○ New Session  0s │Model",
+        for row in (" ○ New Session  now │", " ○ New Session  now │Model",
                     " ○ Existing 9xt4vy  2m │chat", " ○ 9xt4vy extra  2m │chat"):
             with self.subTest(named_sidebar=row):
                 self.assertIsNone(self.helper["frame_row_failure"](state, row))
-        self.assertIsNone(self.helper["frame_row_failure"]({"name": "unrelated"}, " ○ 9xt4vy  0s"))
+        self.assertIsNone(self.helper["frame_row_failure"]({"name": "unrelated"}, " ○ 9xt4vy  now"))
 
     def test_empty_chat_roundtrips_and_current_chat_labels_exclude_raw_ids(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
@@ -995,7 +1124,7 @@ while True:
             if state.get("first_run"):
                 continue
             with self.subTest(raw_id_excluded_in_state=name):
-                self.assertIsNotNone(self.helper["frame_row_failure"](state, " ○ 9xt4vy  0s │ chat"))
+                self.assertIsNotNone(self.helper["frame_row_failure"](state, " ○ 9xt4vy  now │ chat"))
         for name in ("chat-empty", "start-model", "start-effort", "start-picked"):
             state = states[name]
             steps = state["steps"]
@@ -1003,7 +1132,7 @@ while True:
             self.assertEqual(steps[typed_ready + 1], {"wait": "○ New Session", "min_columns": 140})
             self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
             self.assertIsNone(self.helper["frame_row_failure"](
-                {"name": name, "absent_regex": state["absent_regex"]}, " ○ New Session  0s │chat"))
+                {"name": name, "absent_regex": state["absent_regex"]}, " ○ New Session  now │chat"))
         for name in ("empty-chat-left", "empty-chat-model-left", "empty-chat-two-left"):
             state = states[name]
             self.assertTrue(state["first_frame"])
@@ -1604,7 +1733,7 @@ while True:
                 self.assertTrue(records[0]["ok"])
 
     def test_initial_readiness_accepts_editorless_list_and_legacy_prompt(self):
-        listed = "  + New Session\n  Settings"
+        listed = " + New Session\n   Settings"
         self.assertNotIn("Type a task", listed)
         def accepts_list(predicate, _description, **_kwargs):
             self.assertTrue(predicate(types.SimpleNamespace(completed=listed)),
@@ -1643,7 +1772,7 @@ while True:
         )
         cases = [("", False), ("Sign in to Rui", False), (modal, True),
                  (modal + "Opening…", False),
-                 ("  + New Session\n  Settings", True), (" › Type a task", True)]
+                 (" + New Session\n   Settings", True), (" › Type a task", True)]
         cases.extend((modal.replace(label, ""), False) for label in
                      ("Sign in to Rui", "ChatGPT", "API key", "Close", "Tab / Shift-Tab"))
 
@@ -1979,7 +2108,7 @@ while True:
         self.helper["frame_ready"](terminal, state)
         terminal.wait.assert_not_called()
         failure = self.helper["frame_row_failure"]
-        wrong = "■ Stop the slow job  0s\n   Old completed answer\n■ Another Session\n   Stopped\n■ Stopped"
+        wrong = "■ Stop the slow job  now\n   Old completed answer\n■ Another Session\n   Stopped\n■ Stopped"
         self.assertIsNotNone(failure(state, wrong))
         self.assertIsNone(failure(state, wrong.replace("Old completed answer", "Stopped")))
 
@@ -2000,7 +2129,7 @@ while True:
             good = "\n" * (height - 1) + "Sidebar chat  alt+i info\n"
             self.assertIsNone(failure(state, good))
             self.assertIsNotNone(failure(state, good + "\n"))
-            self.assertIsNotNone(failure(state, good + "  Settings  │\n"))
+            self.assertIsNotNone(failure(state, good + "   Settings  │\n"))
 
     def test_stop_waits_for_a_running_bash_not_an_approval(self):
         running = self.helper["frame_bash_running"]

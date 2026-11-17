@@ -18,9 +18,13 @@ The user types a request at `› `, sees exactly that text in the composer, pres
 
 ## Driving it with verify-rui
 
-Frame states: `chat-draft-kept`, `chat-draft-multiline`
+Frame states: `chat-draft-kept`, `chat-draft-multiline`, `send-optimistic-night`, `send-failed-night`, `send-optimistic-day`, `send-failed-day`
 
 Run `$V frames FULLSHA --only chat-draft-kept,chat-draft-multiline` to check a draft and caret after leaving and reopening, and a wrapped multiline draft.
+
+Run `$V frames FULLSHA --only send-optimistic-night,send-failed-night,send-optimistic-day,send-failed-day --sizes 140x40,46x30` for optimistic sending and attached failure. Each state opens a separate real conversation, types and verifies its draft, suspends only the identity-checked owned Host, then presses Enter through the PTY. The optimistic state waits for the original Message and a cleared composer within three seconds, before the admission deadline; the failure state waits for the real admission timeout and the exact quiet `Not confirmed · ctrl+r retries original` note immediately below the Message body. Every state rejects `Sending…` and resumes the owned Host in `finally` before closing its terminal, including errors. A provider hold cannot substitute for this admission hold. PNG rendering runs after cell captures, outside the brief optimistic interval.
+
+Inspect text and HTML/PNG in both themes and sizes: the optimistic original is in the feed, not in the composer, with a normal message band; the failure and retry action are attached to that same original, not a generic footer notice. The attached note uses semantic quiet ink on conversation ground, not the terminal dim attribute. Check cursor/composer placement, exactly one original Message and its captured request identity. These are L1 protocol-path captures, not physical keyboard proof. Host STOP/CONT injections remain in the run evidence. The failure scenario is an unconfirmed admission caused by transport inactivity, not a provider-answer failure or a Host rejection.
 
 Preconditions:
 

@@ -57,7 +57,7 @@ class NavigationTests(unittest.TestCase):
         with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
             from human_cli_fixture import composer_bounds, footer_click
             from session_chrome_cases import composing, feed_bottom, status, transcript_rows
-        for persistent in ([], ["Sending…"], ["held line 1", "held line 2", "held line 3"]):
+        for persistent in ([], ["Opening…"], ["held line 1", "held line 2", "held line 3"]):
             for draft in ("", "kept draft"):
                 for split in (False, True):
                     for right in ("alt+i info", "! Unknown command /nosuch"):
@@ -142,13 +142,13 @@ class OverviewTests(unittest.TestCase):
             def wait(self, predicate, *, label):
                 assert predicate(), label
 
-        frame = "  + New Session\n  ✓ TD4 saved conversation\n  Settings"
+        frame = " + New Session\n   TD4 saved conversation\n   Settings"
         escaped_overview(Terminal(frame), "TD4 saved conversation")
         for marker in ("+ New Session", "TD4 saved conversation", "Settings"):
             with self.subTest(missing=marker), self.assertRaisesRegex(AssertionError, "overview after expired standalone Esc"):
                 escaped_overview(Terminal(frame.replace(marker, "missing")), "TD4 saved conversation")
         with self.assertRaisesRegex(AssertionError, "overview after expired standalone Esc"):
-            escaped_overview(Terminal(frame.replace("✓ TD4 saved conversation", "○ a1b2c3")),
+            escaped_overview(Terminal(frame.replace("  TD4 saved conversation", "○ a1b2c3")),
                              "TD4 saved conversation")
         for editor, failure in (("Type a task", "overview has an editor"),
                                 (" › ab", "overview has a composer"),

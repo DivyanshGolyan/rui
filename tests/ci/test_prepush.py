@@ -146,6 +146,28 @@ class PrepushTest(unittest.TestCase):
         self.assertNotIn("TypeScript client", commands)
         self.assertIn("hosted acceptance", commands)
 
+    def test_client_locality_inputs_run_the_gate_and_self_checks(self):
+        for path in ("src/client.zig", "src/nested/client_rule.zig", "clients/ts/src/client.ts",
+                     "clients/ts/src/nested/client.ts", "tests/ci/client_locality.py",
+                     "tests/ci/test_client_locality.py", "tests/ci/caller_errors.py", "tests/ci/host_settings_locality.py",
+                     "tests/ci/select_tests.py", "tests/ci/import_architecture.py", "tests/ci/stack_frames.json"):
+            for mode in ("default", "quick"):
+                for deleted in (False, True):
+                    with self.subTest(path=path, mode=mode, deleted=deleted):
+                        if deleted:
+                            (self.root / path).unlink(missing_ok=True)
+                        else:
+                            self.file(path)
+                        commands = dict(prepush.checks([path], AVAILABLE, "BASE", mode))
+                        self.assertEqual(commands["client locality"],
+                                         [sys.executable, "-B", "tests/ci/client_locality.py"])
+                        self.assertIn("test_client_locality.py", commands["tests/ci: test_client_locality.py"])
+        for path in ("docs/example.md", "clients/ts/README.md", "tests/integration/activity_integration.py"):
+            with self.subTest(path=path):
+                commands = dict(prepush.checks([path], AVAILABLE, "BASE"))
+                self.assertNotIn("client locality", commands)
+                self.assertNotIn("tests/ci: test_client_locality.py", commands)
+
     def test_deleted_files_select_owner_checks_not_file_tools(self):
         commands = self.commands(["src/cli_args.zig"], deleted=["src/cli_args.zig"])
         self.assertIn("caller errors", commands)
