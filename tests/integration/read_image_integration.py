@@ -26,7 +26,7 @@ PNG = fixture.ROOT / "src/codecs/fixtures/image-input/pixel.png"
 
 def prove_case(root, name):
     state = root / name
-    state.mkdir()
+    state.mkdir(mode=0o700)
     workspace = state / "workspace"
     workspace.mkdir()
     source = workspace / "input.bin"
