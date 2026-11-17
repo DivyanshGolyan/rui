@@ -296,6 +296,11 @@ class AdmissionTest(unittest.TestCase):
                 self.assertNotIn(forbidden, body)
         self.assertNotIn('paths-ignore', text)
 
+    def test_policy_runs_live_client_locality_with_trusted_main_history(self):
+        policy = job(CHECK.read_text(), 'policy')
+        self.assertIn('fetch-depth: 0', policy)
+        self.assertIn('        run: python3 -B tests/ci/client_locality.py\n', policy)
+
     def test_policy_skips_only_the_named_unchanged_self_checks(self):
         script = step_script(job(CHECK.read_text(), 'policy'), 'Run tests/ci, less self-checks whose inputs are unchanged')
         modules = {
