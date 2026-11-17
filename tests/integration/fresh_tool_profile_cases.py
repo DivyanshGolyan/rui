@@ -143,9 +143,9 @@ def discovery():
     loaded = DEFAULTS.loaded_tools.split(",")
     with world("tool-profile-discovery") as w:
         w.endpoint.responses_by_input = None
-        for name, args, words, initial, final, tools in (
-            ("fresh", [], "stop_action", loaded, sorted(set(loaded) | {"stop_action"}), allowed),
-            ("restricted", ["--tools", "find_tools"], "bash", ["find_tools"], ["find_tools"], ["find_tools"]),
+        for name, args, words, initial, final, offered, tools in (
+            ("fresh", [], "read_action", loaded, sorted(set(loaded) | {"read_action"}), set(loaded) | {"read_action", "stop_action"}, allowed),
+            ("restricted", ["--tools", "find_tools"], "bash", ["find_tools"], ["find_tools"], {"find_tools"}, ["find_tools"]),
         ):
             session = w.session(*args)
             profile(w, session, tools, initial)
@@ -157,12 +157,12 @@ def discovery():
             finished(w, session)
             first, second = requests_for(w, session)
             assert declarations(first) == set(initial), first
-            assert declarations(second) == set(final), second
+            assert declarations(second) == offered, second
             output, = [item for item in second["input"] if item.get("call_id") == name + "-find"
                        and item.get("type") == "function_call_output"]
             assert output["output"], output
             profile(w, session, tools, final)
-    print("tool profiles: discovery loads an allowed deferred stop_action and never widens a restricted Session", flush=True)
+    print("tool profiles: discovery loads deferred read_action, projects stop_action, and preserves a restricted Session", flush=True)
 
 
 class ChildReplies(dict):
