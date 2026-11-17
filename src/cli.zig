@@ -4508,6 +4508,8 @@ const LaunchFixture = struct {
 };
 
 test "Host launch owner returns one result for terminal and screen across its whole outcome domain" {
+    const saved_status = exit_status;
+    defer exit_status = saved_status;
     const Case = struct { scenario: LaunchFixture.Scenario, kind: ?Overview.HostLaunch.Failure.Kind = null, err: ?anyerror = null, words: []const u8 = "", terminal: []const u8 = "", success: bool = false, typed: bool = false };
     const cases = [_]Case{
         .{ .scenario = .success, .success = true, .terminal = LaunchFixture.note },
@@ -4630,7 +4632,8 @@ test "Host launch owner returns one result for terminal and screen across its wh
         const diagnostic_length = try stderr_file.readPositionalAll(io, &diagnostics, 0);
         const text = diagnostics[0..diagnostic_length];
         if (surface == .terminal or surface == .quiet) {
-            try std.testing.expectEqual(if (case.typed) error.Reported else case.err, terminal_error);
+            const expected_error: ?anyerror = if (case.typed) error.Reported else case.err;
+            try std.testing.expectEqual(expected_error, terminal_error);
             try std.testing.expectEqual(case.typed or (case.success and surface == .terminal), out_length != 0);
             if (case.success) {
                 if (surface == .terminal) try std.testing.expect(std.mem.indexOf(u8, out[0..out_length], "\"status\":\"ready\"") != null);
