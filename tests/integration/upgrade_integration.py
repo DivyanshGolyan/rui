@@ -598,7 +598,148 @@ def install_cases(root, binary, releases):
         assert host.poll() is None and c.status()["instance"] == previous["instance"]
 
 
+def frozen_upgrade_cases(root, binary, releases):
+    """Later admission reads B; after retirement only checked B reaches start."""
+    none = {"codex": "unserved", "openai": "unserved", "chatgpt": "unserved"}
+    exact = {"openai": {"endpoint": "http://127.0.0.1:9/v1/responses", "unauthenticated": True}}
+
+    def save(path, value):
+        path.write_text(json.dumps(value))
+        path.chmod(0o600)
+
+    for source_kind, mutation in (("saved", "changed"), ("file", "malformed"), ("assignment-file", "removed")):
+        with contextlib.ExitStack() as interfaces, case(root, binary, releases, f"frozen-upgrade-{source_kind}") as c:
+            runtime = interfaces.enter_context(host_process.short_interface_directory())
+            c.store.mkdir(mode=0o700)
+            saved = c.store / "host.json"
+            placement = {"interface": {"dir": str(runtime)}, "providers": {}}
+            save(saved, placement)
+            c.old_selection()
+            retained = c.build("retained-frozen-source")
+            c.binary = retained / "bin/rui"
+            c.ready = {"socket": str(runtime / "rui.sock")}
+            arguments = []
+            if source_kind == "saved":
+                source = saved
+                admitted_a = {**placement, "execution": {"paused": False, "activeCapacity": 2}}
+            elif source_kind == "file":
+                source = c.root / "settings.json"
+                admitted_a = {"providers": {}, "execution": {"paused": False, "activeCapacity": 2}}
+                arguments = ["--settings", source]
+            else:
+                source = c.root / "execution.json"
+                admitted_a = {"paused": False, "activeCapacity": 2}
+                arguments = ["--set", f"execution=@{source}"]
+            save(source, admitted_a)
+            # Exercise the existing public detached starter, not foreground
+            # serve: the observed child carries consumed private-fd provenance.
+            started = c.json("host", "start", "--store", c.store, *arguments)
+            previous = c.status()
+            old_pid = peer_pid(c.ready["socket"])
+            assert started["instance"] == previous["instance"] and previous["paused"] is False, previous
+            assert previous["active_capacity"] == "2" and previous["capabilities"]["providers"] == none, previous
+            assert os_semantics.process_executable(old_pid) == retained / "bin/rui"
+
+            admitted_b = json.loads(json.dumps(admitted_a))
+            execution_b = admitted_b if source_kind == "assignment-file" else admitted_b["execution"]
+            execution_b.update(paused=True, activeCapacity=7)
+            if source_kind != "assignment-file":
+                admitted_b["providers"] = exact
+            save(source, admitted_b)
+            # Editing a source changes next admission, never the live A Host.
+            assert c.status()["instance"] == previous["instance"] and c.status()["paused"] is False
+            expected_providers = none if source_kind == "assignment-file" else {**none, "openai": "endpoint"}
+            gate = c.root / "checked-before-start.gate"
+            gate.touch(mode=0o600)
+            c.env["RUI_TEST_UPGRADE_BEFORE_START_GATE"] = str(gate)
+            restart = c.spawn_upgrade()
+            try:
+                def checked_and_retired():
+                    if restart.poll() is not None:
+                        output, diagnostic = restart.communicate(timeout=3)
+                        raise AssertionError(("Upgrade exited before checked-frame retirement gate", restart.returncode,
+                                              output, diagnostic))
+                    return gate.with_name(gate.name + ".entered").exists()
+
+                wait_for(checked_and_retired, "target admitted B and old frozen-source Host retired", timeout=30)
+                assert gate.exists() and restart.poll() is None
+                assert old_pid not in os_semantics.processes_executing(retained / "bin/rui")
+                assert c.status()["status"] == "unavailable"
+                if mutation == "changed":
+                    admitted_c = json.loads(json.dumps(admitted_a))
+                    admitted_c["execution"]["activeCapacity"] = 11
+                    save(source, admitted_c)
+                elif mutation == "malformed":
+                    source.write_text("{malformed-after-check")
+                else:
+                    source.unlink()
+                assert gate.exists() and restart.poll() is None
+            finally:
+                gate.unlink(missing_ok=True)
+            output = c.finish_upgrade(restart)
+            assert "Installed Rui" in output and "restarted on " in output, output
+            # C remains in place through full verification. Malformed/deleted
+            # C is an explicit source, not the saved DIR locator; no locator
+            # restoration or alternate verification route hides a failure.
+            direct = settings_fixture.host_info(runtime / "rui.sock", str(c.store))
+            current = c.status()
+            for facts in (direct, current):
+                assert facts["instance"] != previous["instance"] and facts["paused"] is True, (source_kind, facts)
+                assert facts["active_capacity"] == "2", "observed active capacity is projected last"
+                assert facts["capabilities"]["providers"] == expected_providers, facts
+                assert facts["store"] == previous["store"], facts
+            assert direct["instance"] == current["instance"]
+            assert os_semantics.process_executable(peer_pid(c.ready["socket"])) == c.link.resolve()
+            if mutation == "malformed":
+                assert source.read_text() == "{malformed-after-check"
+            elif mutation == "removed":
+                assert not source.exists()
+            else:
+                assert json.loads(source.read_text()) == admitted_c
+                # A subsequent deliberate restart rereads C as NEW intent;
+                # neither the original A nor consumed checked B is a registry.
+                c.select(c.build("next-intent-target"))
+                next_output = c.run("host", "restart", "--all", timeout=60)
+                assert "1 restarted" in next_output, next_output
+                next_status = c.status()
+                assert next_status["instance"] != current["instance"] and next_status["paused"] is False, next_status
+                assert next_status["active_capacity"] == "2" and next_status["capabilities"]["providers"] == none, next_status
+            print(f"upgrade native: frozen {source_kind} A -> new checked B -> {mutation} C consumed B; full verification passed", flush=True)
+
+
+def pre_freeze_target_case(root, binary, releases, pre_freeze_binary):
+    """An actual earlier native target's public check is not frame capability."""
+    with contextlib.ExitStack() as interfaces, case(root, binary, releases, "actual-pre-freeze-target") as c:
+        runtime = interfaces.enter_context(host_process.short_interface_directory())
+        c.store.mkdir(mode=0o700)
+        saved = c.store / "host.json"
+        saved.write_text(json.dumps({"interface": {"dir": str(runtime)}, "providers": {},
+                                     "execution": {"activeCapacity": 2}}))
+        saved.chmod(0o600)
+        old, previous = c.start_host(sources_only=True)
+        target = c.build("actual-pre-freeze-build")
+        shutil.copy2(pre_freeze_binary, target / "bin/rui")
+        public_check = subprocess.run([target / "bin/rui", "host", "settings", "--check", "--store", c.store],
+                                      env=c.env, capture_output=True, text=True, timeout=30)
+        assert public_check.returncode == 0, (public_check.returncode, public_check.stdout, public_check.stderr)
+        c.select(target)
+        # Keep the CURRENT coordinator; the selected target is deliberately old.
+        gate = c.root / "must-not-stop.gate"
+        gate.touch(mode=0o600)
+        c.env["RUI_TEST_UPGRADE_BEFORE_START_GATE"] = str(gate)
+        try:
+            output = c.run("host", "restart", "--all", timeout=60)
+            assert "left running" in output and "target build cannot safely check" in output, output
+            assert not gate.with_name(gate.name + ".entered").exists(), "unsupported target reached the post-stop boundary"
+            assert old.poll() is None and peer_pid(c.ready["socket"]) == old.pid
+            assert c.status()["instance"] == previous["instance"], output
+        finally:
+            gate.unlink(missing_ok=True)
+        print("upgrade native: actual pre-1480 public-check-capable target refused before stop; old PID/instance unchanged", flush=True)
+
+
 def lifecycle_cases(root, binary, releases):
+    frozen_upgrade_cases(root, binary, releases)
     with case(root, binary, releases, "managed-host-restart") as c:
         c.old_selection()
         old_host, previous = c.start_host()
@@ -1060,7 +1201,7 @@ def known_target_case(root, binary, releases, baseline, known_bad):
 
         previous = old_status()
         try:
-            for name, target, reason in (("no-settings-check", baseline, "launch configuration cannot be safely reconstructed"),
+            for name, target, reason in (("no-settings-check", baseline, "target build cannot safely check"),
                                          ("known-bad-check", known_bad, "target build cannot safely check")):
                 build = c.build(name)
                 shutil.copy2(target, build / "bin/rui")
@@ -1926,11 +2067,11 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
 
 
 def main():
-    modes = ("restart-all", "lifecycle", "custody", "download", "terminal", "startup", "future-target", "known-target")
+    modes = ("restart-all", "lifecycle", "custody", "download", "terminal", "startup", "future-target", "known-target", "frozen-settings", "pre-freeze-target")
     if len(sys.argv) not in (2, 3, 4, 5) or (len(sys.argv) >= 3 and sys.argv[2] not in modes):
-        sys.exit("usage: python3 tests/integration/upgrade_integration.py REAL_RUI [restart-all|lifecycle|custody|terminal|startup|future-target FUTURE_REAL_RUI|known-target BASELINE_RUI KNOWN_BAD_RUI]")
+        sys.exit("usage: python3 tests/integration/upgrade_integration.py REAL_RUI [restart-all|lifecycle|custody|terminal|startup|future-target FUTURE_REAL_RUI|known-target BASELINE_RUI KNOWN_BAD_RUI|frozen-settings|pre-freeze-target PRE_FREEZE_REAL_RUI]")
     selection = sys.argv[2] if len(sys.argv) >= 3 else "all"
-    assert len(sys.argv) == (4 if selection == "future-target" else 5 if selection == "known-target" else 2 if selection == "all" else 3), "supply the native binaries required by this mode"
+    assert len(sys.argv) == (4 if selection in ("future-target", "pre-freeze-target") else 5 if selection == "known-target" else 2 if selection == "all" else 3), "supply the native binaries required by this mode"
     binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
     target_binary = pathlib.Path(sys.argv[3]).resolve(strict=True) if selection == "future-target" else binary
     root = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-upgrade-"))
@@ -1949,6 +2090,10 @@ def main():
     releases = Releases(target_binary, version)
     complete = False
     try:
+        if selection == "frozen-settings":
+            frozen_upgrade_cases(root, binary, releases)
+        if selection == "pre-freeze-target":
+            pre_freeze_target_case(root, binary, releases, pathlib.Path(sys.argv[3]).resolve(strict=True))
         if selection == "future-target":
             future_target_case(root, binary, releases)
         if selection == "known-target":

@@ -306,15 +306,15 @@ test "upgrade process cancellation kills a child after it records readiness" {
     defer allocator.free(directory);
     const marker = try std.fmt.allocPrint(allocator, "{s}/ready", .{directory});
     defer allocator.free(marker);
-    var token: client.Cancellation = .{};
     const Worker = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         marker: []const u8,
         token: *const client.Cancellation,
+        input: ?[]const u8,
         failure: ?anyerror = null,
         fn execute(self: *@This()) void {
-            const result = run(self.allocator, self.io, &.{ "sh", "-c", ": > \"$1\"; exec sleep 300", "upgrade-child", self.marker }, self.token, 1024) catch |err| {
+            const result = runIn(self.allocator, self.io, &.{ "sh", "-c", ": > \"$1\"; exec sleep 300", "upgrade-child", self.marker }, self.token, 1024, .fromSeconds(300), .{ .input = self.input }) catch |err| {
                 self.failure = err;
                 return;
             };
@@ -328,16 +328,23 @@ test "upgrade process cancellation kills a child after it records readiness" {
             return true;
         }
     };
-    var worker: Worker = .{ .allocator = allocator, .io = io, .marker = marker, .token = &token };
-    {
-        const thread = try std.Thread.spawn(.{}, Worker.execute, .{&worker});
-        defer thread.join();
-        defer token.requestStop();
-        const poll = @import("test_poll");
-        try poll.waitUntil(io, poll.after(io, .fromSeconds(5)), &worker, Worker.ready);
-        token.requestStop();
+    const input = try allocator.alloc(u8, 256 * 1024);
+    defer allocator.free(input);
+    @memset(input, 'i');
+    for ([_]?[]const u8{ null, input }) |pending| {
+        var token: client.Cancellation = .{};
+        var worker: Worker = .{ .allocator = allocator, .io = io, .marker = marker, .token = &token, .input = pending };
+        {
+            const thread = try std.Thread.spawn(.{}, Worker.execute, .{&worker});
+            defer thread.join();
+            defer token.requestStop();
+            const poll = @import("test_poll");
+            try poll.waitUntil(io, poll.after(io, .fromSeconds(5)), &worker, Worker.ready);
+            token.requestStop();
+        }
+        try std.testing.expectEqual(error.Cancelled, worker.failure.?);
+        try std.Io.Dir.cwd().deleteFile(io, marker);
     }
-    try std.testing.expectEqual(error.Cancelled, worker.failure.?);
 }
 
 test "upgrade process deadline covers wait after child closes its output pipes" {

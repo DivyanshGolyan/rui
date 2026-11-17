@@ -52,8 +52,43 @@ LAUNCH_PROBE = r"""
 
 extern int rui_launch_detached(const char *, const char *const *, size_t);
 extern int rui_launch_detached_observed(const char *, const char *const *, size_t, int *);
+extern int rui_launch_detached_reported(const char *, const char *const *, size_t, int, int *, int *, int *, unsigned long long *);
+extern int rui_launch_input_pipe(int *, int *);
 
 int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "settings-descendant") == 0) {
+        errno = 0;
+        if (fcntl(5, F_GETFD) != -1 || errno != EBADF) return 112;
+        return write(1, "isolated", 8) == 8 ? 0 : 113;
+    }
+    if (argc == 2 && strcmp(argv[1], "settings-child") == 0) {
+        char bytes[6];
+        if (fcntl(5, F_GETFD) != 0 || read(5, bytes, sizeof(bytes)) != 5 || memcmp(bytes, "frame", 5)) return 114;
+        if (read(5, bytes, sizeof(bytes)) != 0 || fcntl(5, F_SETFD, FD_CLOEXEC) != 0) return 115;
+        const char *next[] = {argv[0], "settings-descendant", NULL};
+        execv(argv[0], (char *const *)next);
+        return 116;
+    }
+    if (argc == 3 && strcmp(argv[1], "input-launch") == 0) {
+        int mask = atoi(argv[2]);
+        for (int fd = 0; fd < 3; fd++) if (mask & (1 << fd)) close(fd);
+        int reader = -1, writer = -1;
+        if (rui_launch_input_pipe(&reader, &writer) || write(writer, "frame", 5) != 5) return 117;
+        close(writer);
+        const char *next[] = {argv[0], "settings-child", NULL};
+        int startup = -1, output = -1, pid = 0;
+        unsigned long long started = 0;
+        if (rui_launch_detached_reported(argv[0], next, 2, reader, &startup, &output, &pid, &started)) return 118;
+        if (pid <= 0 || started == 0 || fcntl(reader, F_GETFD) != FD_CLOEXEC) return 119;
+        close(reader);
+        struct pollfd ready = {.fd = output, .events = POLLIN};
+        if (poll(&ready, 1, 3000) <= 0) return 120;
+        char reply[9];
+        ssize_t count = read(output, reply, sizeof(reply));
+        close(output);
+        close(startup);
+        return count == 8 && !memcmp(reply, "isolated", 8) ? 0 : 121;
+    }
     if (argc == 2 && strcmp(argv[1], "startup-failure") == 0) {
         const char failure[] = "error: StartupProbeFailed (exit status 1)\n";
         if (write(2, failure, sizeof(failure) - 1) != sizeof(failure) - 1) return 108;
@@ -135,6 +170,10 @@ def assert_launch_adapter(root, env):
     result = subprocess.run([actor, "launch"], cwd=root, env=probe_env,
                             capture_output=True, timeout=5)
     assert result.returncode == 0, result
+    for mask in range(8):
+        result = subprocess.run([actor, "input-launch", str(mask)], env=probe_env,
+                                capture_output=True, timeout=5)
+        assert result.returncode == 0, ("private input inheritance and descendant isolation", mask, result)
     for mask in range(1, 8):
         result = subprocess.run([actor, "closed-startup", str(mask)], env=probe_env,
                                 capture_output=True, timeout=5)

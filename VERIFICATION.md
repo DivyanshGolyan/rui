@@ -35,6 +35,6 @@ The subsystem references keep accepted behavior and required evidence together. 
 - [CLI operations and configuration](docs/contracts/cli.md#required-evidence).
 - [Session UI and terminal lifetime](docs/contracts/session-ui.md#required-evidence).
 - [Reports, Activity, and local protocol](docs/contracts/inspection.md#required-evidence).
-- [Host ownership and lifetime](docs/contracts/host.md#required-evidence).
+- [Host ownership and lifetime](docs/contracts/host.md#required-evidence), including frozen detached consumption, later-source upgrade admission and private-target capability refusal.
 - [Resources and selection progress](docs/contracts/resources.md#required-evidence).
 - [Diagnostic records and stderr](docs/contracts/diagnostics.md#required-evidence).
