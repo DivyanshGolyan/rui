@@ -130,13 +130,13 @@ def manifests(roots):
     return hashes, references, owners, len(files), len(paths)
 
 
-def obsolete_cli(directory):
+def obsolete_cli(directory, products=PRODUCTS):
     entries = list(directory.iterdir())
     names = {path.name for path in entries}
-    products = names & PRODUCTS
-    if len(products) != 1:
+    matches = names & products
+    if len(matches) != 1:
         return False
-    product = products.pop()
+    product = matches.pop()
     if names - {product, product + "_zcu.o"}:
         return False
     for path in entries:
@@ -181,9 +181,9 @@ def protected_outputs(local, prefixes, manifest_roots):
                 if not native_cli(executable):
                     raise SnapshotError(f"unknown current CLI: {executable}")
                 current.setdefault(name, set()).add((executable.stat().st_size, file_digest(executable)))
-    required = PRODUCTS - {"rui-pr-check"}
+    required = {"rui-release-safe-check", "rui-release-small-check", "rui-debug-check"}
     if not required <= current.keys():
-        raise SnapshotError("current LLVM producer does not emit all four protected CLIs")
+        raise SnapshotError("current LLVM producer does not emit all three production CLIs")
     covered = {name: set() for name in current}
     protected = set()
     for directory in (local / "o").iterdir():
@@ -202,29 +202,29 @@ def protected_outputs(local, prefixes, manifest_roots):
                         covered[name].add(identity)
     if covered != current:
         raise SnapshotError("current installed CLI has no matching cache provenance")
-    return protected
+    return protected, set(current)
 
 
 def audit(local, global_cache, *, prefixes=()):
     roots = [Path(local), Path(global_cache)]
     outputs, references, owners, manifest_count, input_count = manifests(roots)
     live = outputs | references
-    protected = protected_outputs(roots[0], prefixes, live) if prefixes else set()
+    protected, products = protected_outputs(roots[0], prefixes, live) if prefixes else (set(), PRODUCTS)
     # Revision-specific generated options give old CLI compiles distinct input
     # manifests. Their own old output hashes are not active graph roots. Keep
     # ALL input references, nested/unknown output classes, and the actual
     # installed current executables; only this explicit CLI class may expire.
     cli_live = references | protected if prefixes else live
     report = dict(manifests=manifest_count, inputs=input_count, retained_hashes=len(live),
-                  protected_hashes=sorted(protected),
+                  protected_hashes=sorted(protected), eligible_products=sorted(products),
                   removable_bytes=0, removable=[], retained_cli=[], unknown=[])
     for directory in sorted((roots[0] / "o").iterdir()):
         if not HEX.fullmatch(directory.name) or directory.is_symlink() or not directory.is_dir():
             report["unknown"].append(str(directory))
         elif directory.name in cli_live:
-            if obsolete_cli(directory):
+            if obsolete_cli(directory, products):
                 report["retained_cli"].append(str(directory))
-        elif obsolete_cli(directory):
+        elif obsolete_cli(directory, products):
             local_owners = [owner for owner in owners.get(directory.name, [])
                             if Path(owner["path"]).parent == roots[0] / "h"]
             if prefixes and not local_owners:
@@ -296,7 +296,8 @@ def publication_prefix(env):
             or inputs.get("part") not in ("all", "rest")):
         raise SnapshotError("producer receipt does not describe complete LLVM compilation")
     targets = inputs.get("targets")
-    if not isinstance(targets, list) or "check-full" not in targets or any(not isinstance(target, str) for target in targets):
+    if (not isinstance(targets, list) or any(not isinstance(target, str) for target in targets)
+            or not {"check", "check-full"}.intersection(targets)):
         raise SnapshotError("producer did not compile the full gate")
     if (receipt.get("source_sha") != build_artifact.git("rev-parse", "HEAD")
             or str(receipt.get("run_id")) != env.get("GITHUB_RUN_ID")

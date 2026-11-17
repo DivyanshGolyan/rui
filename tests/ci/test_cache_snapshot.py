@@ -168,6 +168,20 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual([item["path"] for item in report["removable"]], [str(obsolete)])
         self.assertEqual(len(report["protected_hashes"]), 4)
 
+    def test_ordinary_main_three_product_publisher_retains_unselected_optional_profiles(self):
+        prefix = self.current_prefix()
+        (prefix / "rui-upgrade-release-fixture").unlink()
+        expected = {"rui-debug-check", "rui-release-safe-check", "rui-release-small-check"}
+        for index, name in enumerate(("rui-debug-check", "rui-upgrade-release-fixture", "rui-pr-check"), 400):
+            directory = self.executable(f"{index:032x}", name)
+            with (directory / name).open("ab") as out:
+                out.write(b"old revision")
+            self.add_manifest(self.roots[0], f"{index + 100:032x}", directory.name)
+        report = snapshot.audit(*self.roots, prefixes=[prefix])
+        self.assertEqual(set(report["eligible_products"]), expected)
+        self.assertEqual([Path(item["path"]).name for item in report["removable"]], [f"{400:032x}"])
+        self.assertEqual(len(report["protected_hashes"]), 3)
+
     def test_referenced_historical_cli_is_preserved(self):
         prefix = self.current_prefix()
         obsolete = self.executable("c" * 32)
@@ -417,11 +431,12 @@ class PublicationTest(unittest.TestCase):
     def test_current_full_llvm_producer_can_prepare_a_save(self):
         for event in ("push", "workflow_dispatch", "workflow_call", "schedule"):
             for part in ("all", "rest"):
-                with self.subTest(event=event, part=part):
-                    self.env["GITHUB_EVENT_NAME"] = event
-                    self.inputs["part"] = part
-                    self.write()
-                    self.assertEqual(snapshot.publication_prefix(self.env), self.root / "rui-compiled-build/bin")
+                for gate in ("check", "check-full"):
+                    with self.subTest(event=event, part=part, gate=gate):
+                        self.env["GITHUB_EVENT_NAME"] = event
+                        self.inputs.update(part=part, targets=[gate])
+                        self.write()
+                        self.assertEqual(snapshot.publication_prefix(self.env), self.root / "rui-compiled-build/bin")
 
     def test_nonpublishers_failed_work_partitions_and_exact_hits_do_not_compact(self):
         cases = (("GITHUB_REF", "refs/pull/1/merge"), ("GITHUB_REF", "refs/heads/feature"),
@@ -442,7 +457,7 @@ class PublicationTest(unittest.TestCase):
     def test_stale_malformed_narrower_or_wrong_profile_receipts_do_not_compact(self):
         changes = (("source_sha", "previous-head"), ("run_id", 41), ("run_attempt", 1),
                    ("inputs", dict(self.inputs, pr_ci=True)), ("inputs", dict(self.inputs, part="unit")),
-                   ("inputs", dict(self.inputs, targets=["test-logic"])), ("inputs", dict(self.inputs, format=4)),
+                   ("inputs", dict(self.inputs, targets=["test-logic"])), ("inputs", dict(self.inputs, targets=[{}])), ("inputs", dict(self.inputs, format=4)),
                    ("inputs", dict(self.inputs, compiler="different")), ("inputs", None))
         original = copy.deepcopy(self.receipt)
         for field, value in changes:
