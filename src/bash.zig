@@ -524,7 +524,7 @@ pub const Execution = struct {
 
     /// Build the shared result from the two finished capture files. Adoption
     /// transfers an already charged file only after its excerpt was cut.
-    pub fn writeResult(self: *Execution, scratch: Scratch, queue: *output_retention.Queue, result: *@import("tool_result.zig").Result) !store.ActionResolutionCode {
+    pub fn writeResult(self: *Execution, scratch: Scratch, queue: *output_retention.Queue, result: anytype) !store.ActionResolutionCode {
         const code = self.resultCode(scratch);
         var header_buffer: [4096]u8 = undefined;
         var header = std.Io.Writer.fixed(&header_buffer);
@@ -770,13 +770,13 @@ const TestOutcome = struct {
     }
 };
 
-fn testOutcome(execution: *Execution, scratch: Scratch, queue: *output_retention.Queue, out: *TestOutcome) !void {
+fn testOutcome(execution: *Execution, scratch: Scratch, queue: *output_retention.Queue, out: *TestOutcome, comptime Host: type, comptime Result: type) !void {
     // Exercise the unavailable-retention path without transferring either
     // capture; Bash's real profile always offers retention.
     var no_entries: [0]output_retention.Entry = .{};
     var unavailable = output_retention.Queue.initialize(scratch.io, scratch.path, queue.budget, &no_entries);
-    var host: @import("server_host.zig").Host = .{ .io = scratch.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &unavailable };
-    const result = try @import("tool_result.zig").Result.create(&host, 1, .{ .excerpt_bytes = excerpt_bytes, .retain = true });
+    var host: Host = .{ .io = scratch.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &unavailable };
+    const result = try Result.create(&host, 1, .{ .excerpt_bytes = excerpt_bytes, .retain = true });
     defer result.destroy();
     out.code = try execution.writeResult(scratch, &unavailable, result);
     const finished = result.finish();
@@ -1304,7 +1304,7 @@ test "prepared cleanup reclaims partially and retries through the same owner" {
     try std.testing.expectEqual(baseline, used.load(.acquire));
 }
 
-fn launchForTest(root: []const u8, budget: ScratchBudget, retention: *output_retention.Queue, ordinal: u64, command: []const u8, out: *TestOutcome) !void {
+fn launchForTest(root: []const u8, budget: ScratchBudget, retention: *output_retention.Queue, ordinal: u64, command: []const u8, out: *TestOutcome, comptime Host: type, comptime Result: type) !void {
     const scratch: Scratch = .{ .io = std.testing.io, .path = root, .budget = budget };
     var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
     try workspace.set(root);
@@ -1329,7 +1329,7 @@ fn launchForTest(root: []const u8, budget: ScratchBudget, retention: *output_ret
     var window: [copy_window_bytes]u8 = undefined;
     const service = .{ .execution = &execution, .scratch = scratch, .window = &window };
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(30)), service, bash_service.retired);
-    try testOutcome(&execution, scratch, retention, out);
+    try testOutcome(&execution, scratch, retention, out, Host, Result);
     try execution.reclaim(scratch, retention);
 }
 
@@ -1408,7 +1408,7 @@ test "MySQL Bash preserves a short runtime alias with an overlong canonical targ
         try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(30)), service, bash_service.retired);
         defer execution.reclaim(scratch, &retention) catch @panic("Bash execution cleanup failed");
         var output: TestOutcome = undefined;
-        try testOutcome(&execution, scratch, &retention, &output);
+        try testOutcome(&execution, scratch, &retention, &output, @import("server_host.zig").Host, @import("tool_result.zig").Result);
         try std.testing.expectEqual(store.ActionResolutionCode.succeeded, output.code);
         var child_runtime_buffer: [protocol.max_store_bytes]u8 = undefined;
         const length = try execution.stdout_capture.file.?.readPositionalAll(io, &child_runtime_buffer, 0);
@@ -1452,7 +1452,7 @@ test "launched Bash starts with default signal actions, an empty mask and no /de
         .{ "echo begin; for f in /dev/fd/*; do n=${f##*/}; [ \"$n\" -gt 2 ] && [ \"$f\" -ef /dev/null ] && echo leaked-$n; done | sort -t- -k2,2n; echo checked", succeeded, expected_descriptors },
     }, 1..) |case, ordinal| {
         var result: TestOutcome = undefined;
-        try launchForTest(root, budget, &retention, ordinal, case[0], &result);
+        try launchForTest(root, budget, &retention, ordinal, case[0], &result, @import("server_host.zig").Host, @import("tool_result.zig").Result);
         const text = result.text();
         if (std.mem.indexOf(u8, text, case[1]) == null or std.mem.indexOf(u8, text, case[2]) == null) {
             std.debug.print("expected {s} and {s}; got:\n{s}\n", .{ case[1], case[2], text });
@@ -1473,7 +1473,7 @@ test "launched Bash leads its own session, so no terminal can reach its prompts"
     var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
     defer retention.cleanupAll();
     var result: TestOutcome = undefined;
-    try launchForTest(root, budget, &retention, 1, "python3 -c 'import os; print(\"own-session\" if os.getsid(0) == os.getppid() else \"shared\")'; exec 3</dev/tty || echo no-terminal", &result);
+    try launchForTest(root, budget, &retention, 1, "python3 -c 'import os; print(\"own-session\" if os.getsid(0) == os.getppid() else \"shared\")'; exec 3</dev/tty || echo no-terminal", &result, @import("server_host.zig").Host, @import("tool_result.zig").Result);
     const text = result.text();
     if (std.mem.indexOf(u8, text, "own-session\nno-terminal\n") == null) {
         std.debug.print("expected own-session and no-terminal; got:\n{s}\n", .{text});
@@ -1638,7 +1638,7 @@ test "Bash excerpts preserve heads tails UTF-8 boundaries and newline cuts" {
         .{ "head -c 50000 /dev/zero | tr '\\0' a; head -c 4000 /dev/zero | tr '\\0' '\\377' >&2", "Bash succeeded. Exit code: 0.\nstdout:\n" ++ @as([5000]u8, @splat('a')) ++ "\n[40000 bytes left out]\n" ++ @as([5000]u8, @splat('a')) ++ "\nstderr:\n" ++ replacements ++ "\n[668 bytes left out]\n" ++ replacements ++ "\nFull output was not retained.\n" },
     }, 100..) |case, ordinal| {
         var result: TestOutcome = undefined;
-        try launchForTest(root, budget, &retention, ordinal, case[0], &result);
+        try launchForTest(root, budget, &retention, ordinal, case[0], &result, @import("server_host.zig").Host, @import("tool_result.zig").Result);
         try std.testing.expectEqualStrings(case[1], result.text());
     }
 }
@@ -1799,7 +1799,7 @@ test "Bash capture reclaims MCP output from the same scratch budget" {
     try std.testing.expectEqual(@as(u64, length), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), retention.occupied());
     var result: TestOutcome = undefined;
-    try launchForTest(root, retention.sharedBudget(), &retention, 2, "printf bash", &result);
+    try launchForTest(root, retention.sharedBudget(), &retention, 2, "printf bash", &result, @import("server_host.zig").Host, @import("tool_result.zig").Result);
     try std.testing.expectEqual(store.ActionResolutionCode.succeeded, result.code);
     try std.testing.expectEqualStrings("Bash succeeded. Exit code: 0.\nstdout:\nbash", result.text());
     try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "mcp-output-1-1.tmp", .{}));
