@@ -71,6 +71,7 @@ def manifests(roots):
     # writes as well: validation and cache-cat must inspect the same bytes.
     files = []
     paths = []
+    unfinalized = []
     contents = {}
     listings = {}
     cache_namespaces(roots)
@@ -85,8 +86,17 @@ def manifests(roots):
             if not HEX.fullmatch(path.name) or not path.is_file() or path.is_symlink():
                 raise SnapshotError(f"unknown manifest entry: {path}")
             raw = path.read_bytes()
-            paths.extend(records(raw))
             contents[path] = raw
+            # Cache.Manifest.checkLocked treats size zero as never finalized,
+            # not a complete hit. Keep the placeholder, but it owns no inputs
+            # or outputs. Nonempty malformed streams still block the audit.
+            if not raw:
+                unfinalized.append(str(path))
+                continue
+            try:
+                paths.extend(records(raw))
+            except SnapshotError as error:
+                raise SnapshotError(f"{path}: {error}") from error
             files.append(path)
     if not files:
         raise SnapshotError("no complete manifests")
@@ -127,7 +137,7 @@ def manifests(roots):
             references.update(REFERENCE.findall(spelling))
             if spelling == "o" or spelling.endswith("/o"):
                 raise SnapshotError("manifest references a whole output namespace")
-    return hashes, references, owners, len(files), len(paths)
+    return hashes, references, owners, len(files), len(paths), unfinalized
 
 
 def obsolete_cli(directory, products=PRODUCTS):
@@ -207,7 +217,7 @@ def protected_outputs(local, prefixes, manifest_roots):
 
 def audit(local, global_cache, *, prefixes=()):
     roots = [Path(local), Path(global_cache)]
-    outputs, references, owners, manifest_count, input_count = manifests(roots)
+    outputs, references, owners, manifest_count, input_count, unfinalized = manifests(roots)
     live = outputs | references
     protected, products = protected_outputs(roots[0], prefixes, live) if prefixes else (set(), PRODUCTS)
     # Revision-specific generated options give old CLI compiles distinct input
@@ -215,7 +225,8 @@ def audit(local, global_cache, *, prefixes=()):
     # ALL input references, nested/unknown output classes, and the actual
     # installed current executables; only this explicit CLI class may expire.
     cli_live = references | protected if prefixes else live
-    report = dict(manifests=manifest_count, inputs=input_count, retained_hashes=len(live),
+    report = dict(manifests=manifest_count, inputs=input_count, unfinalized_manifests=unfinalized,
+                  retained_hashes=len(live),
                   protected_hashes=sorted(protected), eligible_products=sorted(products),
                   removable_bytes=0, removable=[], retained_cli=[], unknown=[])
     for directory in sorted((roots[0] / "o").iterdir()):
@@ -284,8 +295,8 @@ def publication_prefix(env):
     if env.get("SETUP_OUTCOME") != "success" or env.get("WORK_OUTCOME") != "success":
         raise SnapshotError("setup and complete compilation must succeed")
     key = env.get("RUI_CACHE_BUILD_KEY", "")
-    if not re.fullmatch(r"rui-build-v3-Linux-X64-0\.17\.1-[a-f0-9]{64}-compiled\.[a-f0-9]{64}-[a-f0-9]{64}", key):
-        raise SnapshotError("no missing exact Linux compiled v3 publication key")
+    if not re.fullmatch(r"rui-build-v4-Linux-X64-0\.17\.1-[a-f0-9]{64}-compiled\.[a-f0-9]{64}-[a-f0-9]{64}", key):
+        raise SnapshotError("no missing exact Linux compiled v4 publication key")
     import build_artifact
     temporary = Path(env["RUNNER_TEMP"])
     receipt = json.loads((temporary / "rui-compiled" / "compiled.json").read_text())
