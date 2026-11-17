@@ -379,7 +379,7 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(report["removable"], [])
         active_owner = self.roots[0] / "h" / f"{180:032x}"
         active_owner.write_bytes(b"")
-        with self.assertRaisesRegex(snapshot.SnapshotError, "current installed CLI has no matching cache provenance"):
+        with self.assertRaisesRegex(snapshot.SnapshotError, "current CLI is absent from manifest roots"):
             snapshot.audit(*self.roots, prefixes=[prefix])
 
     def test_colliding_complete_and_empty_manifests_do_not_fabricate_local_owners(self):

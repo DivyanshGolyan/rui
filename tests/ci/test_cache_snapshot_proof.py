@@ -346,6 +346,24 @@ class ParserTests(unittest.TestCase):
         other = WARM.replace("Debug native cached", "Debug native success")
         self.assertFalse(proof.compare(proof.parse_output(miss), proof.parse_output(other))["parity"])
 
+    def test_legacy_compile_statuses_remain_evidence_but_nested_run_misses_do_not(self):
+        for kind in ("build-exe", "build-lib", "build-obj", "test"):
+            with self.subTest(kind=kind):
+                warm = WARM.replace("zig build-lib library", "zig " + kind + " library")
+                rebuilt = warm.replace("Debug native cached", "Debug native success")
+                control, candidate = proof.parse_output(warm), proof.parse_output(rebuilt)
+                self.assertEqual(candidate["problems"], [])
+                self.assertEqual(proof.compare(control, candidate), dict(parity=False, differences=[dict(
+                    field="nodes", node="zig " + kind + " library Debug native",
+                    control={"cached": 1}, candidate={"success": 1})]))
+        for executable in ("zig", "/opt/zig/zig"):
+            for status in ("success", "cached"):
+                with self.subTest(executable=executable, status=status):
+                    text = WARM.replace("run /opt/zig/zig cached", "run " + executable + " " + status)
+                    parsed = proof.parse_output(text)
+                    self.assertEqual(bool(parsed["problems"]), status == "success")
+                    self.assertEqual(proof.compare(parsed, parsed)["parity"], status == "cached")
+
     def test_nested_cc_and_linker_traces_are_counted_without_wall_time(self):
         cc = '/opt/zig/zig clang -c "source with spaces.c" -o /cache/o/' + "a" * 32 + '/file.o\n'
         link = 'ld.lld --shared /cache/o/' + "b" * 32 + '/file.o -o output.so\n'

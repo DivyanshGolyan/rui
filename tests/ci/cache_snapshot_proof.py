@@ -339,7 +339,7 @@ def parse_output(text):
                 name, status = match.groups()
                 nodes[DIGEST.sub("<digest>", name)][status] += 1
                 # screen's child suppresses its own summary; a miss has no inner-node proof.
-                if status == "success" and re.search(r"(?:^|[/ ])zig(?:\.exe)?(?:\s|$)", name):
+                if body.startswith("run ") and status == "success" and re.search(r"(?:^|[/ ])zig(?:\.exe)?(?:\s|$)", name):
                     problems.append("nested build ran without per-node cache evidence: " + name)
             elif not re.search(r"\((?:reused|\+\d+ more reused dependencies)\)$", body):
                 problems.append("unparsed build node: " + body)
