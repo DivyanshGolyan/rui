@@ -112,6 +112,8 @@ def preferences_bridge(binary, root, store_settings, env):
                     record = root / f"cli-{index}.json"
                     receipt = invoke("session", "configure", "--store", store, "--record", record, "--key", f"preferences:cli:{index}",
                                      "--model", model, "--workspace", workspace, *flags)
+                    if index == 0:
+                        parent = receipt["context"]["session"]
                     request = json.loads(record.read_text())
                     assert request["configuration"]["provider"] == "openai", request
                     assert request["configuration"]["model"] == model, request
@@ -126,6 +128,46 @@ def preferences_bridge(binary, root, store_settings, env):
                     replay = invoke("request", "recover", "--store", store, "--record", record)
                     preferences.write_bytes(original)
                     assert replay["answer"]["replayed"] is True and replay["context"]["session"] == receipt["context"]["session"], replay
+
+                # A saved provider must not replace an attached parent's provider.
+                # The selected model still uses the Host catalog for preferences.
+                original = preferences.read_bytes()
+                preferences.write_text(original.decode().replace("provider=openai", "provider=codex"))
+                try:
+                    for index, (model, effort, flags, field) in enumerate([
+                        ("gpt-5.5", "max", (), "omitted"),
+                        ("gpt-6.1-sol", "low", (), "omitted"),
+                        ("gpt-5.5", "high", ("--reasoning-effort", "high"), "high"),
+                        ("gpt-5.5", "high", ("--reasoning-effort", "default"), None),
+                    ]):
+                        record = root / f"attached-{index}.json"
+                        receipt = invoke("session", "configure", "--store", store, "--record", record,
+                                         "--key", f"preferences:attached:{index}", "--parent", parent,
+                                         "--model", model, *flags)
+                        captured = json.loads(record.read_text())["configuration"]
+                        assert captured["parent"] == parent and captured["model"] == model, captured
+                        assert "provider" not in captured and "workspace" not in captured, captured
+                        expected_preferences = {"permission_mode": "bypass"}
+                        if not flags:
+                            expected_preferences["reasoning_effort"] = "max"
+                        assert captured["preferences"] == expected_preferences, captured
+                        if field == "omitted":
+                            assert "effort" not in captured, captured
+                        else:
+                            assert "effort" in captured and captured["effort"] == field, captured
+                        child = receipt["context"]["session"]
+                        saved = inspect(child)
+                        assert (saved["parent"], saved["provider"], saved["workspace"]) == (parent, "openai", str(workspace)), saved
+                        check(saved, model, effort, "bypass")
+                        changed = preferences.read_bytes()
+                        preferences.write_text(changed.decode().replace("reasoning_effort=max", "reasoning_effort=low")
+                                               .replace("permission_mode=bypass", "permission_mode=ask"))
+                        replay = invoke("request", "recover", "--store", store, "--record", record)
+                        preferences.write_bytes(changed)
+                        assert replay["answer"]["replayed"] is True and replay["context"]["session"] == child, replay
+                        assert inspect(child) == saved
+                finally:
+                    preferences.write_bytes(original)
 
                 records = config / "requests"
                 for model, effort in (("gpt-5.5", "max"), ("gpt-6.1-sol", "low")):
