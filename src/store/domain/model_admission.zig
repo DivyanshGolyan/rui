@@ -528,12 +528,15 @@ const context_bytes = rsql.Read(.{
     .Row = struct { uncovered_bytes: ?u64 },
     .cardinality = .one,
 });
+pub const context_bytes_sql = context_bytes.sql;
+
 const context_compound_bytes = rsql.Read(.{
     .sql = "SELECT " ++ uncoveredBytesSql("?1", "?2", "?3", "?4") ++ " AS uncovered_bytes",
     .Args = context_bytes.Args,
     .Row = struct { uncovered_bytes: u64 },
     .cardinality = .one,
 });
+pub const context_compound_bytes_sql = context_compound_bytes.sql;
 
 const pressure_pending_bound = rsql.Read(.{
     .sql = "SELECT coalesce(max(m.admission_id),0) AS cutoff FROM message_admission m @index(message_admission_session_pending) WHERE m.session_ref=?1 AND m.turn_id IS NULL",
