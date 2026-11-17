@@ -132,6 +132,8 @@ def catalog_unusable_trust_run():
 
 if __name__ == "__main__":
     host_process.enter()
+    paths = subprocess.run([fixture.RUI, "host", "settings", "--paths"], capture_output=True, text=True, timeout=15, check=True)
+    assert any(line.startswith("models.catalogUrl\t") for line in paths.stdout.splitlines()), paths.stdout
     catalog_unusable_proxy_run()
     if os_semantics.SSL_CERT_FILE_TRUST:
         catalog_unusable_trust_run()

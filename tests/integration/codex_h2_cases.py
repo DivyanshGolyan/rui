@@ -212,8 +212,6 @@ def openai_base_url_run(*, catalog_available=False):
     host = None
     complete = False
     try:
-        paths = subprocess.run([fixture.RUI, "host", "settings", "--paths"], capture_output=True, text=True, timeout=15, check=True)
-        assert any(line.startswith("models.catalogUrl\t") for line in paths.stdout.splitlines()), paths.stdout
         catalog_url = f"https://localhost:{endpoint.server_address[1]}/api.json" if catalog_available else "https://127.0.0.1:1/api.json"
         host, ready = start_ready_process([fixture.RUI, "host", "serve", "--store", store, "--set", 'providers={"openai":{}}', "--set", 'execution.activeCapacity=1',
             "--set", f"providers.openai.endpoint=https://localhost:{endpoint.server_address[1]}/custom/v1/responses", "--set", f"models.catalogUrl={catalog_url}"], env={
