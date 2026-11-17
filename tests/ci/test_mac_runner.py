@@ -90,6 +90,55 @@ class DecisionTest(unittest.TestCase):
                 exec(compile(source.replace(before, after, 1), "mutant", "exec"), namespace)
                 self.assertTrue(any(namespace["decide"](*args)[0] != expected for args, expected in witnesses))
 
+    def test_queue_decisions_and_mutation_controls(self):
+        base = ("workflow_dispatch", {}, TRUSTED, TRUSTED, REPO, {}, None)
+        zero = {"mac_queued": 0, "hosted_queued": 0, "hosted_running": 0}
+        examples = [
+            ([runner()], dict(zero), SELF),
+            ([runner(busy=True)], dict(zero, hosted_queued=2, mac_queued=1), SELF),
+            ([runner(busy=True)], dict(zero, hosted_queued=1, mac_queued=1), HOSTED),
+            ([runner(busy=True)], dict(zero, hosted_queued=1, mac_queued=2), HOSTED),
+            ([runner(busy=True)], dict(zero, hosted_running=5), SELF),
+            ([runner(busy=True)], dict(zero, hosted_running=4), HOSTED),
+            ([runner(busy=True)], None, HOSTED),
+            ([runner()], None, SELF),
+            ([runner("offline", busy=True)], dict(zero, hosted_queued=3), HOSTED),
+        ]
+        for runners, queue, expected in examples:
+            with self.subTest(runners=runners, queue=queue):
+                actual, reason = mac_runner.decide(*base, runners, queue)
+                self.assertEqual(actual, expected)
+                if queue is not None:
+                    for value in queue.values():
+                        self.assertIn(str(value), reason)
+                else:
+                    self.assertIn("unavailable", reason)
+        for invalid in ({}, {**zero, "mac_queued": -1}, {**zero, "hosted_running": True},
+                        {**zero, "hosted_queued": "1"}, []):
+            self.assertEqual(mac_runner.decide(*base, [runner(busy=True)], invalid)[0], HOSTED)
+            self.assertEqual(mac_runner.decide(*base, [runner()], invalid)[0], SELF)
+        source = Path(mac_runner.__file__).read_text()
+        mutations = [
+            ('runner.get("busy") is False', 'False'),
+            ('runner.get("status") == "online"', 'True'),
+            ('queue["mac_queued"] < queue["hosted_queued"]', 'queue["mac_queued"] <= queue["hosted_queued"]'),
+            ('queue["mac_queued"] < queue["hosted_queued"]', 'queue["mac_queued"] > queue["hosted_queued"]'),
+            ('queue["hosted_running"] >= 5', 'queue["hosted_running"] > 5'),
+            ('and valid_queue\n', 'and True\n'),
+        ]
+        for before, after in mutations:
+            with self.subTest(mutation=before, replacement=after):
+                self.assertIn(before, source)
+                namespace = {"__name__": "mutant"}
+                exec(compile(source.replace(before, after, 1), "mutant", "exec"), namespace)
+                def differs(case):
+                    runners, queue, expected = case
+                    try:
+                        return namespace["decide"](*base, runners, queue)[0] != expected
+                    except (TypeError, KeyError):
+                        return True
+                self.assertTrue(any(differs(case) for case in examples))
+
     def test_missing_or_malformed_values_stay_hosted(self):
         baseline = ("pull_request", {"pull_request": {"head": {"repo": {"full_name": REPO}},
                                                      "user": {"login": TRUSTED}}},
@@ -124,6 +173,27 @@ class AdapterTest(unittest.TestCase):
                 self.assertEqual(json.loads(lines["runs_on"]), expected)
                 self.assertEqual(lines["self_hosted"], str(expected == SELF).lower())
                 self.assertIn("Mac runner:", (temp / "summary").read_text())
+
+    def test_cli_queue_snapshot_and_malformed_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            (temp / "event").write_text("{}")
+            (temp / "runners").write_text(json.dumps({"runners": [runner(busy=True)]}))
+            env = dict(os.environ, GITHUB_EVENT_PATH=str(temp / "event"),
+                       GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_ACTOR=TRUSTED,
+                       GITHUB_TRIGGERING_ACTOR=TRUSTED, GITHUB_REPOSITORY=REPO,
+                       INPUTS="{}", RUNNERS_PATH=str(temp / "runners"), QUEUE_PATH=str(temp / "queue"),
+                       GITHUB_OUTPUT=str(temp / "output"))
+            for content, expected in [(None, HOSTED), ("bad json", HOSTED),
+                                      (json.dumps({"mac_queued": 0, "hosted_queued": 1, "hosted_running": 0}), SELF)]:
+                (temp / "queue").unlink(missing_ok=True)
+                (temp / "output").unlink(missing_ok=True)
+                if content is not None:
+                    (temp / "queue").write_text(content)
+                subprocess.run([sys.executable, str(ROOT / "tests/ci/mac_runner.py")], env=env, check=True,
+                               capture_output=True, text=True)
+                lines = dict(line.split("=", 1) for line in (temp / "output").read_text().splitlines())
+                self.assertEqual(json.loads(lines["runs_on"]), expected)
 
     def test_status_fetch_errors_are_hosted_and_bounded(self):
         text = (ROOT / ".github/workflows/check.yml").read_text()
@@ -483,6 +553,93 @@ class RegistrationTest(unittest.TestCase):
         self.assertEqual(mac_runner.removal_action(fresh, [{"id": 9, "name": "old-host-rui"}], None, False)[0], "repair")
         for record, snapshot in [(None, []), (old, None), (old, [{}]), (old, [{"id": True, "name": "old-host-rui"}])]:
             self.assertEqual(mac_runner.removal_action(record, snapshot, None, False)[0], "repair")
+
+
+class QueueSnapshotWorkflowTest(unittest.TestCase):
+    def test_pagination_counts_and_failed_snapshot_cleanup(self):
+        import http.server
+        import textwrap
+        import threading
+        import urllib.parse
+
+        workflow = (ROOT / ".github/workflows/check.yml").read_text()
+        script = textwrap.dedent(re.search(
+            r"      - name: Read the workflow queue snapshot\n.*?        run: \|\n(.*?)(?=      - name: Choose)",
+            workflow, re.S).group(1))
+        state = {"failure": None, "calls": [], "transition": False}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                parsed = urllib.parse.urlparse(self.path)
+                query = urllib.parse.parse_qs(parsed.query)
+                state["calls"].append((parsed.path, query))
+                if state["failure"] == "http" and parsed.path.endswith("/jobs"):
+                    self.send_error(500)
+                    return
+                page = int(query["page"][0])
+                if parsed.path.endswith("/runs"):
+                    rows = ([{"id": i} for i in range(1, 102)] if query["status"] == ["queued"]
+                            else ([{"id": 1}] if state["transition"] else []))
+                    key = "workflow_runs"
+                else:
+                    run_id = int(parsed.path.split("/")[-2])
+                    rows = ([{"labels": ["rui-mac", "macos-15"], "status": "queued"},
+                             {"labels": ["macos-15"], "status": "in_progress"},
+                             {"labels": ["rui-mac"], "status": "in_progress"},
+                             {"labels": ["other"], "status": "queued"}]
+                            + [{"labels": ["macos-15"], "status": "completed"}] * 100
+                            if run_id == 1 else [])
+                    key = "jobs"
+                payload = {"total_count": len(rows), key: rows[(page - 1) * 100:page * 100]}
+                if state["failure"] == "malformed" and parsed.path.endswith("/jobs"):
+                    payload[key] = None
+                data = json.dumps(payload).encode()
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(data)
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "queue.json"
+                env = dict(os.environ, GITHUB_API_URL=f"http://127.0.0.1:{server.server_port}",
+                           GITHUB_REPOSITORY="owner/repo", GH_TOKEN="test", QUEUE_PATH=str(path))
+                def execute():
+                    return subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script],
+                                          env=env, capture_output=True, text=True)
+                result = execute()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(path.read_text()),
+                                 {"mac_queued": 1, "hosted_queued": 1, "hosted_running": 1})
+                self.assertTrue(any(path_.endswith("/runs") and query["page"] == ["2"]
+                                    for path_, query in state["calls"]))
+                self.assertTrue(any(path_.endswith("/jobs") and query["page"] == ["2"]
+                                    for path_, query in state["calls"]))
+                state["transition"] = True
+                state["calls"].clear()
+                result = execute()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(path.read_text()),
+                                 {"mac_queued": 1, "hosted_queued": 1, "hosted_running": 1})
+                first_job_calls = [(path_, query) for path_, query in state["calls"]
+                                   if path_.endswith("/runs/1/jobs") and query["page"] == ["1"]]
+                self.assertEqual(len(first_job_calls), 1)
+                for failure in ("http", "malformed"):
+                    with self.subTest(failure=failure):
+                        path.write_text("stale")
+                        state["failure"] = failure
+                        self.assertNotEqual(execute().returncode, 0)
+                        self.assertFalse(path.exists())
+                        self.assertFalse(Path(str(path) + ".tmp").exists())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
 
 
 if __name__ == "__main__":

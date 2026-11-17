@@ -95,9 +95,9 @@ class NavigationTests(unittest.TestCase):
                  "   Allowed tools   bash", "   Folder          …/long-parent/specimen",
                  "   Model           gpt-6-luna", "",
                  "   Rename     Archive     Copy last answer", "", "─" * 80, " › ", "─" * 80,
-                 " ‹ Chat · info       esc close"]
+                 " Chat                esc"]
         chat_info_ready(Terminal(lines), "specimen")
-        for label in ("Effort", "Permissions", "Allowed tools", "Folder", "Model", "Rename", "Archive", "Copy last answer", " · info", "esc close"):
+        for label in ("Effort", "Permissions", "Allowed tools", "Folder", "Model", "Rename", "Archive", "Copy last answer", "Chat", "esc"):
             with self.subTest(missing=label), self.assertRaisesRegex(AssertionError, "chat info fields and footer"):
                 chat_info_ready(Terminal([line.replace(label, "missing") for line in lines]), "specimen")
         for label in ("Tools", "Loaded tools", "Model offer"):
@@ -106,7 +106,7 @@ class NavigationTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "chat info fields and footer"):
             chat_info_ready(Terminal([line.replace("…/long-parent/specimen", "unavailable") for line in lines]), "specimen")
         for changed, expected in (
-                ([*lines[:-1], " ‹ Chat · info", lines[-1]], "single bottom info footer"),
+                ([*lines[:-1], " Chat                esc", lines[-1]], "single bottom info footer"),
                 ([line.replace("…/long-parent/specimen", "…/long-parent/spec") for line in lines], "Folder retains basename"),
                 ([*lines[:9], "not a gap", *lines[10:]], "chat info action separator")):
             with self.subTest(expected=expected), self.assertRaisesRegex(AssertionError, expected):

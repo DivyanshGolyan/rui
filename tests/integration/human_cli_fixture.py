@@ -283,7 +283,7 @@ def chat_info_frame(master, timeout=15):
 
 def app_settings_open(master):
     overview_frame(master, lambda screen: "Settings" in screen, b"\x1b[F")
-    return panel_frame(master, lambda screen: screen.splitlines()[-1].split() == ["Settings", "esc"], b"\r")
+    return panel_frame(master, lambda screen: composer_line(screen, len(screen.split("\n")) - 1).split() == ["Settings", "esc"], b"\r")
 
 
 

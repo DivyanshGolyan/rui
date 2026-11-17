@@ -124,7 +124,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     }
     if (count < list.count and count < placed.content.height) {
         const label = try std.fmt.allocPrint(ctx.arena, commands.more, .{list.count - count});
-        _ = body.child(.{ .y_off = @intCast(count), .height = 1 }).printSegment(.{ .text = label, .style = self.quiet }, .{ .wrap = .none });
+        const bounds = RowInset.bounds(placed.content.width);
+        _ = body.child(.{ .x_off = @intCast(bounds.start), .y_off = @intCast(count), .width = bounds.width(), .height = 1 }).printSegment(.{ .text = label, .style = self.quiet }, .{ .wrap = .none });
     }
     return surface;
 }
@@ -475,7 +476,7 @@ test "Palette full-width rows activate and overflow consumes clicks" {
             self.pick = pick;
         }
     };
-    for ([_]bool{ false, true }) |unicode| {
+    for ([_]bool{ false, true }) |unicode| for ([_]u16{ 140, 46 }) |width| {
         var selected: Selected = .{};
         var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 7, commands.conversation.listed()) };
         const shown = &menu.shown.?;
@@ -483,7 +484,7 @@ test "Palette full-width rows activate and overflow consumes clicks" {
         var palette: Self = .{ .menu = &menu, .caps = .{ .unicode = unicode }, .userdata = &selected, .on_select = Selected.select };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const surface = try palette.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} });
+        const surface = try palette.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 5 }, .cell_size = .{} });
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         shown.move(false);
         for (0..surface.size.height) |row| for (0..surface.size.width) |col| {
@@ -499,9 +500,9 @@ test "Palette full-width rows activate and overflow consumes clicks" {
             } else try std.testing.expectEqual(null, selected.pick);
         };
         const label = try std.fmt.allocPrint(arena.allocator(), commands.more, .{shown.list.count - 4});
-        try std.testing.expectEqualStrings(label[0..1], surface.readCell(0, 4).char.grapheme);
-        try std.testing.expectEqual(palette.quiet, surface.readCell(0, 4).style);
-    }
+        try std.testing.expectEqualStrings(label[0..1], surface.readCell(2, 4).char.grapheme);
+        try std.testing.expectEqual(palette.quiet, surface.readCell(2, 4).style);
+    };
 }
 
 test "Palette publishes menu picks and keeps the drawn identity across wheel movement" {

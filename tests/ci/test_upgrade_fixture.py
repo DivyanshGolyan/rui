@@ -141,13 +141,13 @@ class UpgradeEmptyChatTest(unittest.TestCase):
                         self.assertEqual(build, owner.root / "retained")
 
     def test_chat_footer_rejects_upgrade_notices_before_and_after_relaunch(self):
-        self.assertIn("alt+i info", self.observe("alt+i info"))
-        for footer in (self.notice, "Upgraded to another version · Host restarted", "",
+        self.assertIn("gpt-6-luna", self.observe(""))
+        for footer in (self.notice, "Upgraded to another version · Host restarted", "alt+i info",
                        "alt+i info · upgraded to 0.76.0", "alt+i info  Upgraded to 0.76.0"):
             with self.subTest(footer=footer), self.assertRaises(NotReady):
                 self.observe(footer)
         with self.assertRaises(NotReady):
-            self.observe("alt+i info", model="wrong-model")
+            self.observe("", model="wrong-model")
 
     def test_quiet_version_is_below_settings_not_a_version_elsewhere(self):
         version = "0.76.0"
@@ -167,7 +167,7 @@ class UpgradeEmptyChatTest(unittest.TestCase):
                 self.screen.quiet_version(version)
 
     def test_public_identity_and_zero_messages_remain_required(self):
-        footer = "alt+i info"
+        footer = ""
         self.case.json.reset_mock()
         self.observe(footer)
         self.assertEqual(self.case.json.call_args_list, [
