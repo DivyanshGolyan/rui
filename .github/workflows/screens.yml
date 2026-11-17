@@ -127,6 +127,21 @@ jobs:
           chmod +x "$RUNNER_TEMP/screens-zig/zig"
           export PATH="$RUNNER_TEMP/screens-zig:$PATH"
           "$V" build --here > "$RUNNER_TEMP/screens-build/build.json"
+          SCREEN_SOURCE="$GITHUB_WORKSPACE" SCREEN_BUILD="$RUNNER_TEMP/screens-build"
+          # The screen emulator is a nested Zig build and does not inherit the outer CPU target.
+          (cd "$SCREEN_SOURCE"; env -u ZIG_LOCAL_PKG_DIR "$SCREENS_REAL_ZIG" build install --build-file screen-emulator/build.zig -Dcpu=baseline --prefix "$RUNNER_TEMP/portable-screen")
+          python3 - "$SCREEN_BUILD" "$RUNNER_TEMP/portable-screen/lib" <<'PY_PORTABLE'
+          import hashlib, json, pathlib, shutil, sys
+          build, portable = map(pathlib.Path, sys.argv[1:])
+          printed = build / 'build.json'
+          record = json.loads(printed.read_text())
+          library = pathlib.Path(record['screen_library'])
+          shutil.copyfile(portable / library.name, library)
+          record['screen_library_sha256'] = hashlib.sha256(library.read_bytes()).hexdigest()
+          manifest = build / 'cache' / 'builds' / record['sha'] / 'manifest.json'
+          for path in (printed, manifest):
+              path.write_text(json.dumps(record, indent=1) + '\n')
+          PY_PORTABLE
           tar -cf "$RUNNER_TEMP/screens-build.tar" -C "$RUNNER_TEMP" screens-build
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -244,6 +259,21 @@ jobs:
           chmod +x "$RUNNER_TEMP/screens-zig/zig"
           export PATH="$RUNNER_TEMP/screens-zig:$PATH"
           (cd "$RUNNER_TEMP/base-source"; bash src/fetch_dependencies.sh; bash src/fetch_screen_dependencies.sh; "$V" build --here > "$RUNNER_TEMP/screens-baseline-build/build.json")
+          SCREEN_SOURCE="$RUNNER_TEMP/base-source" SCREEN_BUILD="$RUNNER_TEMP/screens-baseline-build"
+          # The screen emulator is a nested Zig build and does not inherit the outer CPU target.
+          (cd "$SCREEN_SOURCE"; env -u ZIG_LOCAL_PKG_DIR "$SCREENS_REAL_ZIG" build install --build-file screen-emulator/build.zig -Dcpu=baseline --prefix "$RUNNER_TEMP/portable-screen")
+          python3 - "$SCREEN_BUILD" "$RUNNER_TEMP/portable-screen/lib" <<'PY_PORTABLE'
+          import hashlib, json, pathlib, shutil, sys
+          build, portable = map(pathlib.Path, sys.argv[1:])
+          printed = build / 'build.json'
+          record = json.loads(printed.read_text())
+          library = pathlib.Path(record['screen_library'])
+          shutil.copyfile(portable / library.name, library)
+          record['screen_library_sha256'] = hashlib.sha256(library.read_bytes()).hexdigest()
+          manifest = build / 'cache' / 'builds' / record['sha'] / 'manifest.json'
+          for path in (printed, manifest):
+              path.write_text(json.dumps(record, indent=1) + '\n')
+          PY_PORTABLE
           tar -cf "$RUNNER_TEMP/screens-baseline-build.tar" -C "$RUNNER_TEMP" screens-baseline-build
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

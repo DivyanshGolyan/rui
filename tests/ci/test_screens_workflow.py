@@ -1,5 +1,6 @@
 """Contract checks for the screen workflow's artifact and writer wiring."""
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -93,6 +94,30 @@ class ScreensWorkflowTest(unittest.TestCase):
                                        (['version'], ['version'])):
                     result = subprocess.check_output([str(tool), *args], env=env, text=True)
                     self.assertEqual(result.splitlines(), expected)
+
+    def test_portable_screen_libraries_update_both_manifests(self):
+        workflow = WORKFLOW.read_text()
+        sections = re.findall(r"(?ms)^          python3 - \"\$SCREEN_BUILD\" \"\$RUNNER_TEMP/portable-screen/lib\" <<'PY_PORTABLE'\n(.*?)^          PY_PORTABLE$", workflow)
+        self.assertEqual(len(sections), 2)
+        self.assertEqual(workflow.count('env -u ZIG_LOCAL_PKG_DIR "$SCREENS_REAL_ZIG" build install --build-file screen-emulator/build.zig -Dcpu=baseline'), 2)
+        for section in sections:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp)
+                build = root / 'build'
+                library = build / 'cache/builds/tree-abc/screen/lib/libghostty-vt.so'
+                library.parent.mkdir(parents=True)
+                library.write_bytes(b'nonportable')
+                portable = root / 'portable/lib'
+                portable.mkdir(parents=True)
+                (portable / library.name).write_bytes(b'portable')
+                record = {'sha': 'tree-abc', 'screen_library': str(library), 'screen_library_sha256': 'old'}
+                (build / 'build.json').write_text(json.dumps(record))
+                manifest = build / 'cache/builds/tree-abc/manifest.json'
+                manifest.write_text(json.dumps(record))
+                subprocess.run([sys.executable, '-c', textwrap.dedent(section), str(build), str(portable)], check=True)
+                self.assertEqual(library.read_bytes(), b'portable')
+                for path in (build / 'build.json', manifest):
+                    self.assertEqual(json.loads(path.read_text())['screen_library_sha256'], hashlib.sha256(b'portable').hexdigest())
 
     def test_every_verify_rui_job_uses_isolated_main_tooling(self):
         workflow = WORKFLOW.read_text()
