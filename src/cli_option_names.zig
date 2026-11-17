@@ -33,6 +33,7 @@ pub const names = [_][]const u8{
     "parent",
     "permission-mode",
     "position",
+    "preset",
     "profile",
     "provider",
     "reasoning-effort",
