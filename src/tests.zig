@@ -33,6 +33,7 @@ test {
     _ = @import("DocumentView.zig");
     _ = @import("FeedView.zig");
     _ = @import("Root.zig");
+    _ = @import("root_focus_owner_tests.zig");
     _ = @import("Chip.zig");
     _ = @import("StatusRow.zig");
     _ = @import("FactsRow.zig");
@@ -124,6 +125,7 @@ test {
     _ = @import("tools.zig");
     _ = @import("core_tools.zig");
     _ = @import("read_action_tool.zig");
+    _ = @import("stop_action_tool.zig");
     _ = @import("read_transcript.zig");
     _ = @import("find_tools.zig");
     _ = @import("find_tools_tests.zig");

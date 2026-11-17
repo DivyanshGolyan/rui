@@ -6,17 +6,54 @@ pub fn check(cancellation: ?*const client.Cancellation) error{Cancelled}!void {
     if (cancellation) |token| if (token.stopped.load(.acquire)) return error.Cancelled;
 }
 
+/// The existing file-held upgrade interposition, with an acknowledgement so
+/// fixtures order peers by a reached transition rather than a scheduling race.
+/// No gate variable means no effects. The fixture owns both temporary names.
+pub fn waitForTestGate(allocator: std.mem.Allocator, io: std.Io, selected_gate: ?[]const u8, cancellation: ?*const client.Cancellation, timeout: std.Io.Duration) !void {
+    const gate = selected_gate orelse return;
+    try check(cancellation);
+    const held = std.Io.Dir.cwd().openFile(io, gate, .{}) catch |err| {
+        if (err == error.FileNotFound) return;
+        return err;
+    };
+    held.close(io);
+    const entered = try std.fmt.allocPrint(allocator, "{s}.entered", .{gate});
+    defer allocator.free(entered);
+    const signal = try std.Io.Dir.cwd().createFile(io, entered, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+    signal.close(io);
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = timeout, .clock = .awake });
+    while (true) {
+        try check(cancellation);
+        const file = std.Io.Dir.cwd().openFile(io, gate, .{}) catch |err| {
+            if (err == error.FileNotFound) return;
+            return err;
+        };
+        file.close(io);
+        if (deadline.durationFromNow(io).raw.nanoseconds <= 0) return error.Timeout;
+        try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+    }
+}
+
 pub const Result = std.process.RunResult;
+
+/// Per-invocation context, never a mutation of the coordinator process. The
+/// caller owns the map through completion (including cancellation/reaping).
+pub const Context = struct {
+    environ_map: ?*const std.process.Environ.Map = null,
+    cwd: std.process.Child.Cwd = .inherit,
+};
 
 pub fn dispose(allocator: std.mem.Allocator, result: Result) void {
     allocator.free(result.stdout);
     allocator.free(result.stderr);
 }
 
-fn capture(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, limit: usize, deadline: std.Io.Clock.Timestamp, done: *std.atomic.Value(bool)) std.process.RunError!Result {
+fn capture(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, limit: usize, deadline: std.Io.Clock.Timestamp, context: Context, done: *std.atomic.Value(bool)) std.process.RunError!Result {
     defer done.store(true, .release);
     return std.process.run(allocator, io, .{
         .argv = argv,
+        .environ_map = context.environ_map,
+        .cwd = context.cwd,
         .stdout_limit = .limited(limit),
         .stderr_limit = .limited(4096),
         .timeout = .{ .deadline = deadline },
@@ -28,15 +65,24 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, c
 }
 
 pub fn runWithTimeout(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, cancellation: ?*const client.Cancellation, limit: usize, timeout: std.Io.Duration) !Result {
+    return runIn(allocator, io, argv, cancellation, limit, timeout, .{});
+}
+
+pub fn runIn(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, cancellation: ?*const client.Cancellation, limit: usize, timeout: std.Io.Duration, context: Context) !Result {
+    try check(cancellation);
     const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = timeout, .clock = .awake });
-    return runUntil(allocator, io, argv, cancellation, limit, deadline);
+    return runUntilIn(allocator, io, argv, cancellation, limit, deadline, context);
 }
 
 fn runUntil(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, cancellation: ?*const client.Cancellation, limit: usize, deadline: std.Io.Clock.Timestamp) !Result {
+    return runUntilIn(allocator, io, argv, cancellation, limit, deadline, .{});
+}
+
+fn runUntilIn(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, cancellation: ?*const client.Cancellation, limit: usize, deadline: std.Io.Clock.Timestamp, context: Context) !Result {
     try check(cancellation);
     if (deadline.durationFromNow(io).raw.nanoseconds <= 0) return error.Timeout;
     var done: std.atomic.Value(bool) = .init(false);
-    var future = try io.concurrent(capture, .{ allocator, io, argv, limit, deadline, &done });
+    var future = try io.concurrent(capture, .{ allocator, io, argv, limit, deadline, context, &done });
     while (!done.load(.acquire)) {
         if (deadline.durationFromNow(io).raw.nanoseconds <= 0) {
             if (future.cancel(io)) |result| dispose(allocator, result) else |_| {}
@@ -268,6 +314,17 @@ test "upgrade process deadline covers wait after child closes its output pipes" 
     _ = try std.Io.Dir.cwd().statFile(io, marker, .{});
 }
 
+test "upgrade process context is scoped to one invocation and closes stdin" {
+    const gpa = std.testing.allocator;
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+    try env.put("RUI_CONTEXT_TEST", "captured\xff");
+    const result = try runIn(gpa, std.testing.io, &.{ "/bin/sh", "-c", "printf '%s:' \"$RUI_CONTEXT_TEST\"; pwd; if read line; then exit 9; fi" }, null, 1024, .fromSeconds(5), .{ .environ_map = &env, .cwd = .{ .path = "/" } });
+    defer dispose(gpa, result);
+    try std.testing.expect(result.term.success());
+    try std.testing.expectEqualStrings("captured\xff:/\n", result.stdout);
+}
+
 test "upgrade process download retry shares its deadline and retains IPv4 only for its run" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -346,4 +403,32 @@ test "upgrade process download cancellation and expired deadline start no child"
     const missing = "/nonexistent/rui-download-child";
     try std.testing.expectError(error.Cancelled, download.outputUntil(allocator, io, request, &cancellation, 1024, missing, .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake })));
     try std.testing.expectError(error.Timeout, download.outputUntil(allocator, io, request, null, 1024, missing, .fromNow(io, .{ .raw = .fromSeconds(-1), .clock = .awake })));
+}
+
+test "upgrade test gate is opt-in, acknowledges only held gates and bounds cancellation and timeout" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(directory);
+    const gate = try std.fmt.allocPrint(allocator, "{s}/held", .{directory});
+    defer allocator.free(gate);
+    const entered = try std.fmt.allocPrint(allocator, "{s}.entered", .{gate});
+    defer allocator.free(entered);
+    var token: client.Cancellation = .{};
+    token.requestStop();
+    // Unset gate is inert, even for an already cancelled caller.
+    try waitForTestGate(allocator, io, null, &token, .fromSeconds(0));
+    // A released/absent gate creates no acknowledgement.
+    try waitForTestGate(allocator, io, gate, null, .fromSeconds(0));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, entered, .{}));
+    const file = try std.Io.Dir.cwd().createFile(io, gate, .{});
+    file.close(io);
+    try std.testing.expectError(error.Cancelled, waitForTestGate(allocator, io, gate, &token, .fromSeconds(0)));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, entered, .{}));
+    try std.testing.expectError(error.Timeout, waitForTestGate(allocator, io, gate, null, .fromSeconds(0)));
+    _ = try std.Io.Dir.cwd().statFile(io, entered, .{});
+    // The held input still belongs to the fixture, including on timeout.
+    _ = try std.Io.Dir.cwd().statFile(io, gate, .{});
 }

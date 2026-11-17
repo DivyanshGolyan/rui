@@ -1,9 +1,10 @@
-"""Pure checks for Upgrade screen readiness; no native fixture is launched."""
+"""Pure checks for Upgrade fixture ownership and readiness; no native fixture is launched."""
 import copy
 import importlib.util
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, call, patch
@@ -50,6 +51,94 @@ class UpgradeEmptyChatTest(unittest.TestCase):
         frame = f"│ › conversation β draft\n│ {model} · low    {footer}"
         self.screen.observe = lambda: frame
         return self.screen.empty_chat(self.case, self.session)
+
+    def test_case_disk_lifetime_follows_successful_process_retirement(self):
+        for body_fails, cleanup_fails in ((False, False), (True, False), (False, True)):
+            with self.subTest(body_fails=body_fails, cleanup_fails=cleanup_fails), tempfile.TemporaryDirectory() as root:
+                directory = Path(root) / "case"
+                directory.mkdir()
+                (directory / "diagnostics").write_text("retained on failure")
+                def retire():
+                    self.assertTrue(directory.exists(), "files removed before process retirement")
+                    if cleanup_fails:
+                        raise RuntimeError("cleanup")
+                value = SimpleNamespace(root=directory, close=Mock(side_effect=retire))
+                releases = SimpleNamespace(gates={}, status={}, latest_location="old", sums_name="old")
+                with patch.object(self.fixture, "Case", return_value=value):
+                    try:
+                        with self.fixture.case(Path(root), None, releases, "case"):
+                            if body_fails:
+                                raise ValueError("body")
+                    except (RuntimeError, ValueError):
+                        self.assertTrue(body_fails or cleanup_fails)
+                    else:
+                        self.assertFalse(body_fails or cleanup_fails)
+                value.close.assert_called_once_with()
+                self.assertEqual(directory.exists(), body_fails or cleanup_fails)
+                self.assertIsNone(releases.latest_location)
+                self.assertIsNone(releases.sums_name)
+
+    def test_shared_home_cases_can_start_distinct_default_retained_installations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary_a, binary_b = root / "binary-a", root / "binary-b"
+            binary_a.write_bytes(b"first retained native artifact")
+            binary_b.write_bytes(b"second retained native artifact")
+            releases = SimpleNamespace(origin="http://fixture.invalid")
+            first = self.fixture.Case(root, binary_a, releases, "first")
+            second = self.fixture.Case(root, binary_b, releases, "second")
+            second.home, second.env, second.link = first.home, first.env, first.link
+            children = [SimpleNamespace(pid=101), SimpleNamespace(pid=102)]
+            ready = [{"socket": "first.sock"}, {"socket": "second.sock"}]
+            first.status = Mock(return_value={"status": "ready", "instance": "first"})
+            second.status = Mock(return_value={"status": "ready", "instance": "second"})
+            # Exercise the actual Case.start_host -> Case.build path and its
+            # file copies; only the native launch/socket observation is mocked.
+            with patch.object(self.fixture, "start_ready_process", side_effect=zip(children, ready)) as start, \
+                    patch.object(self.fixture, "peer_pid", side_effect=[101, 102]):
+                first_child, first_status = first.start_host(sources_only=True)
+                first_executable = Path(start.call_args.args[0][0])
+                original = first_executable.read_bytes()
+                second_child, second_status = second.start_host(sources_only=True)
+                second_executable = Path(start.call_args.args[0][0])
+            self.assertEqual([first_child, second_child], children)
+            self.assertEqual([first_status["instance"], second_status["instance"]], ["first", "second"])
+            self.assertEqual(first.hosts, [children[0]])
+            self.assertEqual(second.hosts, [children[1]])
+            self.assertNotEqual(first_executable, second_executable)
+            self.assertFalse(first_executable.samefile(second_executable))
+            self.assertEqual(first_executable.read_bytes(), original)
+            self.assertEqual(original, binary_a.read_bytes())
+            self.assertEqual(second_executable.read_bytes(), binary_b.read_bytes())
+            for executable in (first_executable, second_executable):
+                build = executable.parent.parent
+                self.assertEqual(build.parent, first.home / ".local/lib/rui")
+                self.assertEqual(executable.relative_to(build), Path("bin/rui"))
+                self.assertTrue(build.name.endswith("-retained-real-host"))
+                self.assertTrue((build / "THIRD_PARTY_NOTICES.md").is_file())
+            self.assertEqual(start.call_count, 2)
+
+    def test_case_build_never_reuses_or_overwrites_its_existing_installation(self):
+        for managed in (False, True):
+            for version in (None, "0.1.0"):
+                with self.subTest(managed=managed, version=version), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    binary = root / "binary"
+                    binary.write_bytes(b"original native artifact")
+                    owner = self.fixture.Case(root, binary, SimpleNamespace(origin="http://fixture.invalid"), "owner")
+                    build = owner.build("retained", version, managed=managed)
+                    executable = build / "bin/rui"
+                    original = executable.read_bytes()
+                    notices = (build / "THIRD_PARTY_NOTICES.md").read_bytes()
+                    binary.write_bytes(b"replacement must not overwrite a retained artifact")
+                    with self.assertRaises(FileExistsError):
+                        owner.build("retained", None if version is None else "0.2.0", managed=managed)
+                    self.assertEqual(executable.read_bytes(), original)
+                    self.assertEqual((build / "THIRD_PARTY_NOTICES.md").read_bytes(), notices)
+                    if managed:
+                        self.assertEqual(build.parent, owner.home / ".local/lib/rui")
+                    else:
+                        self.assertEqual(build, owner.root / "retained")
 
     def test_chat_footer_rejects_upgrade_notices_before_and_after_relaunch(self):
         self.assertIn("alt+i info", self.observe("alt+i info"))

@@ -144,7 +144,7 @@ A changed saved Store cannot redirect this restart.
 The new screen shows the installed version quietly in the sidebar, with no upgrade notice in the chat footer; scroll position resets.
 A run that installs nothing does not relaunch, even if it activates an already-selected Host build.
 An unresolved capture or recovery handle, failed save, retained cleanup path, run failure, activation recovery/owner instruction or PATH warning prevents relaunch: ordinary departure guidance remains intact, including the old-client restart instruction when needed.
-Old-client-only protocol/restart holds do not themselves prevent relaunch: a bounded protocol rejection from the exact launched Host (same peer PID, process generation, pinned executable and target version) is distinct from activation failure or uncertainty, and grants no ordinary-request readiness or invented Host facts.
+Old-client-only protocol/restart holds do not themselves prevent relaunch: verified target-public readiness with a new instance and the answering managed executable's target release version, bracketed by matching authenticated peer generations, is distinct from activation failure or uncertainty. A different wire grants no ordinary-request readiness or invented Host facts; a concurrent same-version owner can satisfy activation.
 Timeouts, malformed replies, failed activation and uncertain/replacement identities still retain their recovery guidance.
 Guidance already known keeps the old screen open; resolving it later does not turn an ordinary quit into a delayed relaunch, and a later successful run cannot swallow an earlier retained report.
 If handoff preparation or process replacement fails, the ordinary departure remains; replacement failure also says the new Rui could not be started.
@@ -180,9 +180,9 @@ The exact v1 bytes are pinned in `relaunch_handoff.zig`.
 
 The thin upgrade coordinator composes `InstallationOutcome` with the restart-all batch of per-Host outcomes. Under its publication lock, `Installation` records `Receipt.selected_after` and `selected_version` from the same chosen build. Upgrade revalidates that pinned build against the receipt identity, never selects through PATH or substitutes the discovered candidate, and calls the restart-all owner once.
 Every versioned result (sidebar number, Settings field and relaunch handoff) uses that receipt version, even if another publisher won or restarting Hosts fails. Before publication, the UI says `Preparing Upgrade` without promising a target version; publishing and restarting remain version-neutral. The optional available release comes only from read-only discovery and never substitutes for the publication receipt.
-For each eligible Host that owner reobserves the exact instance, waits for lease retirement after stopping it, starts the pinned target with preserved settings and verifies readiness before claiming activation.
+For each eligible Host that owner checks semantic sources through the target's public `host settings --check`, reobserves the exact old instance and process generation, stops it, waits for process and runtime/Store lease retirement, then invokes the target's public `host start` with those same sources. Check/start/status share the captured Host environment, cwd `/` and null stdin. Only `host_start.spawn` constructs Host-child argv; Lifecycle constructs public command argv, not a second launch specification.
 Upgrade keeps no single-Store activation path or private launch snapshot in its check. The TUI derives selected-Store compatibility from that Store's per-Host outcome; failure or unsupported-owner guidance from any Store remains visible and prevents a relaunch from swallowing it.
-Per-Host result lines and totals are the same as the standalone command. Any failed/unconfirmed Host produces `host_restart_failed` (operate, exit 6) after reporting the successful binary publication; unsupported Hosts are explained successful skips. Publication is never rolled back for a restart failure.
+Per-Host result lines and totals are the same as the standalone command. A whole bounded typed start refusal crosses the batch and coordinator unchanged; known check/start refusals, failed or unconfirmed Hosts produce `host_restart_failed` (operate, exit 6) after reporting successful binary publication. Unsupported Hosts remain explained successful skips. Unknown future refusal codes or incomplete output never become success. Publication is never rolled back for a restart failure.
 A replacement race, failed stop or start, or unsupported or application-owned launch configuration must not blindly stop another process and is reported as installed but not activated or unconfirmed as appropriate.
 An already-installed target can still need activation of an older running Host.
 Source and release installers invoke the newly published command's `rui host restart --all` after publication; failure prints its receipt and a note without failing or undoing installation.
@@ -192,7 +192,7 @@ Cancellation is checked before handoff; once accepted, the entire batch finishes
 Restart-all similarly completes every discovered target after the originating Host stops, without identifying that Host or reordering it last.
 Closed stdout cannot abort remaining restarts: outcome counts are retained and receipts fall back to the existing optional stderr diagnostic boundary; closed diagnostics remain best-effort, not a new log registry.
 `--all` is required (`option_required` without it); per-Store restart selection is not exposed yet.
-`platform` alone owns per-user runtime naming and socket enumeration, without creating a runtime directory or Store.
+`platform` alone owns per-user runtime naming and socket enumeration, without creating a runtime directory or Store. Client discovery unions those sockets with same-user process hints, uses serve_grammar's single running-source reader and existing saved DIR placement, then authenticates the resolved peer and hinted generation. DIR routing is retained independently of wire Store identity; unreadable positively identified Hosts get individual failures. No registry or start record is added.
 Socket discovery retries transient refusal for at most 200 ms inside the shared observation deadline; failed transport alone never establishes absence.
 Under the Store lease, `platform.StoreLease.listen` atomically publishes the canonical Store path beside a standard SQLite socket as `<hash>.store` (0600) before binding.
 Clean socket retirement removes its hint only after unlink succeeds; a crash leaves the hint for read-only discovery. MySQL and settings-document sockets publish no hint.
@@ -202,8 +202,8 @@ The hint is only routing information, never a liveness flag, Host registry or ac
 The client authenticates a socket peer, takes its launch Store as a hint, validates the canonical socket through `platform`, then confirms Store, PID and instance with the current or released-9 read-only observation profiles.
 Unreadable identities are reported rather than guessed; relative or unavailable Store hints cannot grant activation authority.
 `host_restart_all` observes and activates one Host at a time through `HostLifecycle`, requiring the same discovered instance before activation; it keeps no Host registry or mirrored launch policy.
-Its pure report function consumes every `ActivationOutcome` and `Limitation`, keeping each Store-first line and success/failure category together; failures and unconfirmed restarts yield an operational caller error.
-A verified pinned launch answering with a different protocol (`client_incompatible`) counts as restarted with explicit selected-client advice, not ordinary Host readiness; it is not an uncertain activation.
+Its pure report function consumes every `ActivationOutcome` and `Limitation`, keeping each Host-directory-first line and success/failure category together; failures and unconfirmed restarts yield an operational caller error.
+A new ready instance on DIR's socket whose answering managed executable has the target release version counts as restarted, even if a concurrent starter won. Neither an exact launched child nor the pinned executable path is required. For a different wire, target public status supplies bounded instance/Store/capacity facts bracketed by matching authenticated peer generations; only that complete proof permits `client_incompatible` success with selected-client advice. Negative final observations, unknown status envelopes and version/instance mismatches never establish success.
 Already-target and newer Hosts remain untouched, and unsupported launches are left running with their reason.
 Managed released and source Host builds are eligible; source Host versions come from their retained executable's bounded `--version` output through the same numeric version parser as restart-all's target.
 Unknown managed, ineligible and foreign builds remain application-owned; a managed source build without a verified numeric version grants no activation plan.
@@ -215,9 +215,9 @@ Source/release installers and `rui upgrade` use this one install-wide restart ow
 Lifecycle control observation is separate from ordinary client readiness.
 Upgrade can read the complete bounded Host-info envelope using only the current wire or the historical wire `17`, `16`, `15`, `14`, `13` and `9` profiles, with matching HTTP and body versions and peer PID from that same connection.
 Only an explicit wrong-wire response permits the historical read-only profile; malformed, unavailable or unknown profiles grant no authority.
-A historical managed Host is paused through its retained executable with the captured exact instance, then the same Store lease must retire.
-Target readiness still requires the current protocol and the pinned launch identity; historical control facts never grant Session access.
-Target configuration, exact-stop support, the current launch helper and private launch buffers are prepared before interruption.
+A historical managed Host is paused through its retained executable with the captured exact instance. Its process generation (gone or zombie) and runtime/Store lease must retire; a different authenticated owner holding the lease is eligible for adoption, never another stop. Historical control facts never grant Session access.
+Target source admission precedes interruption and covers read/apply, detached rejection, placement/anchoring, provider finishing, resolution and sealing without database access. Released v0.75.0 is a witnessed capability exception: foreground-only check accepts stdin lifetime but detached start refuses it, so restarting onto that target is refused before stopping the running Host. Targets with no check are also refused before stop; intentional source builds are not excluded by version text alone.
+MySQL follows ordered stop then start: the replacement's own Store lock acquisition/readiness, not runtime retirement or coordinator SQL polling, proves database ownership. A typed start failure does not abandon later batch entries.
 When departure guidance prevents relaunch, a terminal client that cannot speak the new Host's protocol retains its draft and unresolved handles in a local recovery hold rather than reattaching or resending work.
 
 `src/Installation.zig` is the sole final publication owner; source and release shell installers invoke the same staged native helper.
@@ -282,6 +282,14 @@ Large incremental imports must not retain payload-sized dirty-page memory.
 Verify effective spill/cache/heap enforcement, not merely setter success.
 Use the exclusive WAL and `FULL` sync of [Store durability](#store-durability), mmap off, file-backed temporary work, immediate `busy_timeout=0`, foreign keys, defensive/untrusted-schema configuration and disabled unused attachment/extension/trigger/worker features.
 Required features need concrete consumers.
+
+#### Compound Content values
+
+A value-holding owner names one Content row. Its form is bytes or parts; existing rows and every value containing exactly one Text part use bytes, with their existing identity and semantic digest. A parts value is public and holds one to 1,500 ordered Text or Image parts, except that a single Text is never a parts value. Each part names ordinary public bytes Content. A saved refusal retains its original input as primary content and any diagnostic as secondary content; legacy refusals whose input was not retained leave it unavailable.
+
+The parts payload is the canonical manifest: each entry contains its kind, byte length, digest and kind metadata, followed by the entry count. Its identity uses the `rui/input-parts/v1` domain and is the existing ordered input digest. The id-only `content_part` index holds each part alive with foreign keys; the manifest alone owns ordering, kind, metadata and count. Saving looks up the manifest first and owns all parts and index writes in the producer's transaction. A Cursor certifies the manifest digest and canonical decoding, contiguous index ordinals, and each part's public byte form, length and digest before yielding any part. Inconsistency fences the Store.
+
+Readers that cannot project parts verify the complete value before returning `InputPartsNotSupported`. Public byte identity and metadata routes return `ContentIsParts` for a parts value. Until request lowering accounts for images, context size counts the manifest bytes, and parts values do not reach providers. This representation keeps existing owner references and byte accounting, avoids per-Message association reads on text, and keeps kind metadata out of SQL; a new kind extends the manifest codec rather than the schema.
 
 #### Canonical content reads and retention
 

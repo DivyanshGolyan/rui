@@ -45,6 +45,13 @@ Fully explicit settings bypass unused preferences.
 The CLI checks every supplied model's syntax before capture, input reads or Session mutation.
 A refused model diagnostic names the ID and lists the [IDs Rui lists](#supported-model-ids).
 A typed ID with valid syntax that Rui does not list is admitted with one line, `Rui does not list ID; it uses default limits`, and runs with [default limits](model-io.md#choosing-and-validating-compacted-context).
+`session configure --parent ID` without a Session selector and `session start --parent ID` capture the existing create-only parent relation.
+They send the same complete creation spec through the native inherit-and-narrow owner: provider, Workspace and saved Bash environment come from the parent, configured allowed tool names and Permission Mode may only narrow, and explicit provider or Workspace overrides remain present for canonical refusal even when equal.
+The CLI adds neither its default provider nor its current directory to an attached spec.
+Other required creation fields retain the ordinary CLI defaults, including model, tools, Permission Mode, effort and compactAt; no parent preflight read substitutes for commit-time admission.
+The compactAt default still comes from the ordinary saved/product binding used to resolve those defaults, which may differ from the inherited provider; an explicit `--compaction-trigger TOKENS` fixes the threshold and is preserved.
+An attached spec with explicit model, effort, Permission Mode and concrete compactAt bypasses unused binding preferences, so an absent HOME or stale saved provider cannot prevent its canonical parent refusal.
+Missing or archived parents and parent on an addressed update reach the saved native refusals.
 Addressed configuration preserves the exact canonical ID and sparse update inputs.
 It does not probe existence, inherit the configuring agent's settings or apply creation defaults to an existing peer.
 `session send` requires an already configured Session.
@@ -54,10 +61,12 @@ A later send failure does not undo accepted configuration.
 Initial configuration accepts the same agent spec and streamed instruction and schema content as Configure; with Message text, one request carries at most three sealed content values.
 Inside one Store transaction, it validates the sender and configuration, allocates an ID through the same collision-safe allocator as configure, and admits the first Message to that new ID.
 Its successful stdout is the same JSON mutation receipt as `session send`, with the allocated six-character ID in `.context.session` and the request handle in `.context.key`, followed by newline: admission rather than execution or completion.
-Only the accepted `session start` receipt adds `configuration` immediately after `context`, containing the resolved `provider`, `model`, effective `reasoning_effort` and `effort_source`.
+Only the accepted `session start` receipt adds `configuration` immediately after `context`, containing `provider`, `model`, effective `reasoning_effort` and `effort_source`.
+For an unattached start, `provider` is the concrete resolved provider.
+For an attached start, `provider` is null and `parent` is the captured parent ID: the receipt reports the omitted inherited binding without guessing its value.
 The effort source is `flag` whenever `--reasoning-effort` was given (including `default`), otherwise `saved` when `model_capability.startEffort` selected the saved override, otherwise `model_default`.
 Without an override, the effective effort is the client product choice: `low` when supported (also for an unlisted model), otherwise the lowest listed effort, otherwise null.
-These values come from the CLI-resolved configuration sent with the Message, never a new Host read; rejection output and `session send` receipts are unchanged.
+These values come from the CLI-resolved configuration and parent relation sent with the Message, never a new Host read; rejection output and `session send` receipts are unchanged.
 Replay returns the original allocated ID, Message admission and result even after cancellation or restart; changed creation settings or Message bytes conflict with the original request key.
 Rejection creates no Session.
 Any canonical failure rolls back allocation, revision and Message together.
@@ -247,7 +256,9 @@ Their destinations are captured exactly, with explicit Action targets where requ
 A direct-core mutation generates a fresh core key and durably captures its complete inputs in one private, enumerable caller record before transmission.
 Pre-send recovery notices use stderr; failed announcement prevents original transmission but leaves the capture recoverable.
 A fresh client can inspect or recover that original request, or create a fresh record for new intent.
-Recovery does not reread changed files or preferences, reapply settings or retarget an established result.
+Recovery does not reread changed input files or preferences, reapply request settings or retarget an established result.
+New generated and explicit records have a private bounded `.routing` companion containing the canonical Host-directory selector, or the runtime hint for legacy opaque MySQL selection, separately from immutable wire request bytes. The capture owner durably publishes routing before publishing the request marker, under the same lock; orphan routing alone is neither enumerable work nor admission authority. The raw request format is unchanged.
+Recover, inspect, wait and read-result share captured routing resolution through the placement owner and compare discovered Store identity with the captured identity before dispatch. They may follow edited saved placement only when that identity still matches; invalid, insecure or unknown-format companions refuse rather than fall back. Missing companions retain old-record lookup behavior. Read-only observation reads the bounded capture identity, not an entire replay body, and closes its reader before waiting. Explicit retry guidance names the selected directory; private record-parent aliases remain supported.
 A recovered Message carries the recovering process's environment, never one saved with the record, because the record never holds one.
 The explicit-key/record commands remain available.
 Records are recovery custody, not a Session directory, job database, dispatch queue or work-status authority.
@@ -346,6 +357,7 @@ Persisted model syntax and transport encoding remain independent of the compiled
 | --- | --- | --- |
 | [Mutation presentation](#public-operations) and canonical envelope | `canonical-failure-integration`, modes `producers`, `committed`, `interactive`, `presentMutationReply` tests | Negatives fail at exact assertion, not setup. PTYs use one unrenewed ten-second exit deadline. No macOS, power-loss or aggregate claim |
 | [Caller capture and recovery](#caller-capture-and-recovery) | `human_cli_integration.py` | Uncertain Bash effect never replayed |
+| Attached CLI creation | `cli_args.zig` parent grammar, `configure_input.zig` parent creation defaults, `client.zig` parent capture through native ingress, `cli.zig` attached start receipt, native `configure parent` Store tests and `attached_creation_cases.py` | Provider-dependent compactAt uses the CLI default binding unless explicit; no parent preflight read |
 | [Saved defaults](#store-selection-and-defaults) | `'preference edits'`, `human_cli_integration.py` | Not credential, launch, Mac or power-loss |
 | [One ChatGPT sign-in, last login wins](#store-selection-and-defaults) | `preferences.zig` `'replaces the other sign-in to its account'` (every saved provider, login and pin) and `'sign-in screen's save keeps the model'`; `cli.zig` `'auth status says each ChatGPT way in'` (every pair of readinesses), `'default receipt'` and `'auth login reads its provider'`; `chatgpt_login_integration.py` | Synthetic issuer only; no live device-code or browser sign-in |
 | [One logout ends both ChatGPT logins](#store-selection-and-defaults) (Divyansh chose this on 2026-11-13) | `cli.zig` `'logout says how it left each ChatGPT login'` (every pair of the five local states with the revocation confirmed, and unconfirmed for each state holding a browser sign-in (said on stdout, exit 0), and a credential path Rui cannot resolve on either side alone and on both: stdout, stderr and exit written by hand); `chatgpt_plan_login.zig` `'logout ends the device-code sign-in in each state'` (real files: absent, already signed out, ready, refresh pending and unreadable, beside an absent or unreadable browser record); `codex_credential_policy.zig` `'signing out keeps the account'` (a device-code record signs out and round-trips without a client id); `chatgpt_login_integration.py`: both logins ended, status reads not signed in and a Host serving both routes refuses each, nothing left, only the device-code login, an unconfirmed revocation said on stdout with exit 0, and a relative `RUI_CHATGPT_CREDENTIAL_FILE` or `RUI_CODEX_CREDENTIAL_FILE` still ending the other login and exiting 1. Mutations that must fail: leaving the device-code record usable, exiting 0 when one login could not be ended, and a path failure ending the command before the other login | Synthetic issuer only. The device-code token is removed locally, never revoked remotely. Failed local reads are unit-tested, not driven through the CLI |

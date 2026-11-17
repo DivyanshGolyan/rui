@@ -383,6 +383,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
     var fallback_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const prospective_store: ?[]const u8 = if (values.store.len != 0) values.store.slice() else preferences.defaultStore(home, &fallback_buffer) catch null;
     const available_store: ?platform.Paths = if (prospective_store) |path| platform.resolveClientPaths(init.io, path) catch null else null;
+    // Preferences live in HOME, so a saved Store redirects every Workspace.
     if (reader == .command_line and edit.store != .keep) notice: {
         var bytes: [4 * std.Io.Dir.max_path_bytes + 256]u8 = undefined;
         var notice = std.Io.Writer.fixed(&bytes);
@@ -395,7 +396,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
         .changed = changed,
         .store = prospective_store,
         .saved_store = values.store.len != 0,
-        .available_store = if (available_store) |*paths| paths.store.slice() else null,
+        .available_store = if (available_store) |*paths| paths.selector() else null,
         .provider = if (values.provider.len != 0) values.provider.slice() else null,
         .model = if (values.model.len != 0) values.model.slice() else null,
         .notifications = values.notifications,
@@ -442,7 +443,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
         },
     };
     var host_line: [512]u8 = undefined;
-    const host_details: []const u8 = if (available_store) |paths| switch (client.hostStatus(init.io, paths.store.slice())) {
+    const host_details: []const u8 = if (available_store) |paths| switch (client.hostStatusAt(init.io, &paths, null)) {
         .ready => |current| hostProvidersLine(current.capabilities.providers, &host_line),
         .unavailable => "Host: unavailable; setup does not start it.\n",
         .owned_unavailable => "Host: owned but unavailable; inspect before submitting work.\n",
@@ -1004,7 +1005,15 @@ fn rememberStore(init: std.process.Init, path: []const u8, require_existing: boo
     holdStore(path);
     if (!require_existing and std.mem.eql(u8, failure_held.resource orelse "", "host") and std.mem.eql(u8, failure_held.operation orelse "", "status")) return path;
     try validateStoreSpelling(path);
-    _ = platform.resolveClientPaths(init.io, path) catch |err| {
+    const selection = platform.resolveClientSelection(path);
+    _ = (switch (selection) {
+        .directory => platform.sqliteClientPaths(init.io, path),
+        .mysql => selection.paths(init.io),
+    }) catch |err| {
+        // Selector admission checks directories, not a running Host or its
+        // saved startup settings. Those belong to the operation that needs them.
+        // Explicit/HOME Host administration may name an absent destination.
+        // Saved and inherited Stores must still exist; never recreate them.
         if (err != error.FileNotFound or require_existing or !std.mem.eql(u8, failure_held.resource orelse "", "host")) return storeFailure(err);
     };
     return path;
@@ -1033,8 +1042,13 @@ fn readTransportFailure(io: std.Io, store: []const u8, err: anyerror) anyerror {
     holdStore(store);
     if (!client.hostUnreachable(err)) return err;
     const paths = platform.resolveClientPaths(io, store) catch |store_err| return storeFailure(store_err);
-    holdStore(paths.store.slice());
-    return hostTransportFailure(io, paths.store.slice(), err);
+    return readTransportFailureAt(io, &paths, err);
+}
+
+fn readTransportFailureAt(io: std.Io, paths: *const platform.Paths, err: anyerror) anyerror {
+    holdStore(paths.selector());
+    if (!client.hostUnreachable(err)) return err;
+    return classifyHostTransportFailure(err, client.hostLockStateAt(io, paths));
 }
 
 fn hostTransportFailure(io: std.Io, store: []const u8, err: anyerror) anyerror {
@@ -1073,7 +1087,7 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
         settings.* = .{};
         defer settings.deinit();
         var fixtures: providers.Fixtures = .{};
-        _ = try admitHost(init, parsed, selected, settings, &fixtures, &failure);
+        _ = try admitHost(init, parsed, selected, settings, &fixtures, &failure, .detached);
         return;
     }
     const result = if (command == .host_settings)
@@ -1150,16 +1164,16 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
         .incompatible => return error.IncompatibleHost,
         .access_failure => return error.StoreAccessFailed,
     };
-    const paths = try platform.resolveClientPaths(io, selected);
+    const paths = try client.resolveClientPaths(io, selected);
     const hex = std.fmt.bytesToHex(target, .lower);
     var notice_bytes: [4 * protocol.max_store_bytes + 256]u8 = undefined;
     var notice = std.Io.Writer.fixed(&notice_bytes);
     try notice.writeAll("rui: pause interrupts all work in this Store until a Host starts again. Retry only this exact target: rui host pause --store ");
-    try TerminalText.writeShellWord(&notice, paths.store.slice());
+    try TerminalText.writeShellWord(&notice, selected);
     try notice.print(" --instance {s}\n", .{&hex});
     try std.Io.File.stderr().writeStreamingAll(io, notice.buffered());
     var reply: client.ReplyBuffer = .{};
-    const outcome = client.stopHost(io, .{ .store = paths.store.slice(), .instance = target }, &reply) catch |err| {
+    const outcome = client.stopHost(io, .{ .store = selected, .instance = target }, &reply) catch |err| {
         stderr.diagnostic("rui: pause reply unconfirmed ({s}); inspect this Store and retry only the same --instance target. Do not target a replacement implicitly.\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
         return err;
     };
@@ -1168,8 +1182,8 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
             var output: JsonOutput = undefined;
             const writer = output.init(io, .stdout);
             try writer.print("{{\"version\":\"{s}\",\"type\":\"host_pause\",\"status\":\"acknowledged\",\"store\":", .{protocol.wire_version});
-            try std.json.Stringify.value(paths.store.slice(), .{}, writer);
-            const retired = try @import("HostLifecycle.zig").awaitRetirement(io, paths.store.slice());
+            try std.json.Stringify.value(paths.store_identity.slice(), .{}, writer);
+            const retired = try @import("HostLifecycle.zig").awaitRetirement(io, selected);
             try writer.print(",\"instance\":\"{s}\",\"retirement\":\"{s}\"}}\n", .{ &hex, if (retired) "confirmed" else "unconfirmed" });
             try output.finish();
             if (!retired) stderr.diagnostic("rui: the Host acknowledged the pause but still holds this Store after {d} seconds, usually because cleanup is still running. A new Host can start once rui host status reports unavailable.\n", .{product_defaults.host_shutdown_seconds});
@@ -1240,7 +1254,10 @@ fn reportHostLaunch(io: std.Io, result: *const HostLaunchResult, quiet: bool, ov
     if (writer.buffered().len != 0) _ = stderr.write(writer.buffered());
     switch (result.outcome) {
         .ready => |*ready| try reportStartedHost(io, ready, quiet, overrides and ready.adopted),
-        .failed => |failure| return failure.cause.err,
+        .failed => |*failure| {
+            if (failure.refusal) |*refusal| return writeRefusal(io, refusal, caller_exit.knownError(failure.cause.err));
+            return failure.cause.err;
+        },
     }
 }
 
@@ -1249,11 +1266,17 @@ fn reportStartedHost(io: std.Io, ready: *const HostLaunchResult.Ready, quiet: bo
         var bytes: [4 * protocol.max_store_bytes + 512]u8 = undefined;
         var notice = std.Io.Writer.fixed(&bytes);
         notice.writeAll("rui: the running Host keeps its settings; --set assignments apply only to a new Host. Changing settings means pausing this Host and all its work: rui host pause --store ") catch break :notice;
-        TerminalText.writeShellWord(&notice, ready.facts.store.slice()) catch break :notice;
+        TerminalText.writeShellWord(&notice, ready.selector.slice()) catch break :notice;
         notice.writeByte('\n') catch break :notice;
         stderr.diagnostic("{s}", .{notice.buffered()});
     }
     if (!quiet) try writeHostStatus(io, .{ .ready = ready.facts }, ready.diagnostics_directory.slice());
+}
+
+fn writeRetainedHostNotice(writer: *std.Io.Writer, selector: []const u8) !void {
+    try writer.writeAll("rui: the running Host keeps its settings; --set assignments apply only to a new Host. Changing settings means pausing this Host and all its work: rui host pause --store ");
+    try TerminalText.writeShellWord(writer, selector);
+    try writer.writeByte('\n');
 }
 
 fn loginProvider(name: []const u8, device_code: bool) ?protocol.Provider {
@@ -1695,8 +1718,8 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
     try requireInteractiveTerminal(init, "to open the overview");
     if (try RelaunchStartup.read(init, options.store)) |restored| {
         defer restored.handoff.deinit();
-        return openExistingOverview(init, restored.paths.store.slice(), if (restored.handoff.value.open) |id| id[0..protocol.session_id_bytes].* else null, .{
-            .store = restored.paths.store.slice(),
+        return openExistingOverview(init, restored.paths.selector(), if (restored.handoff.value.open) |id| id[0..protocol.session_id_bytes].* else null, .{
+            .store = restored.paths.selector(),
             .provider = options.provider,
             .model = options.model,
         }, &restored.handoff.value);
@@ -1750,8 +1773,8 @@ const RelaunchStartup = struct {
             if (handoff.read(init, home, "")) |value| value.deinit();
             return null;
         };
-        const paths = try platform.resolveClientPaths(init.io, destination);
-        return .{ .paths = paths, .handoff = handoff.read(init, home, paths.store.slice()) orelse return null };
+        const paths = try preflightExistingOverview(init.io, destination);
+        return .{ .paths = paths, .handoff = handoff.read(init, home, paths.selector()) orelse return null };
     }
 };
 
@@ -1928,7 +1951,12 @@ fn prepareOverviewUsing(init: std.process.Init, options: NewSessionOptions, entr
         defer memory.deinit();
         const assignments: []const []const u8 = if (connection) |value| &.{try host_start.connectionAssignment(init, memory.allocator(), value)} else &.{};
         startSelectedOverviewHost(init, destination.path, binding, &readiness, assignments, ops, &entry.launch.?);
-        if (entry.launch.?.outcome == .ready) entry.store = entry.launch.?.outcome.ready.facts.store;
+        // Keep the Host directory selector: Store identity alone loses saved placement.
+        if (entry.launch.?.outcome == .ready) {
+            var canonical: [protocol.max_store_bytes]u8 = undefined;
+            const selection = platform.resolveClientSelection(destination.path);
+            try entry.store.set(if (selection == .mysql) destination.path else try platform.canonicalStoreDestination(init.io, destination.path, &canonical));
+        }
     }
 }
 
@@ -1962,14 +1990,16 @@ fn startSelectedOverviewHost(init: std.process.Init, store: []const u8, binding:
     if (result.outcome == .failed) return;
     const provider = std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).?;
     if (protocol.routeOf(result.outcome.ready.facts.capabilities.providers, provider) == .unserved) {
-        const canonical = result.outcome.ready.facts.store;
-        launchFailure(result, .provider_unserved, error.HostModelUnavailable, canonical.slice());
+        const selector = result.outcome.ready.selector;
+        launchFailure(result, .provider_unserved, error.HostModelUnavailable, selector.slice());
     }
 }
 
 fn preflightNewSession(io: std.Io, destination: []const u8, saved: bool) !void {
     holdStore(destination);
     if (saved) {
+        // Admission proves saved placement, not that a MySQL Host is already
+        // running. The starter owns the first connection and automatic start.
         _ = platform.resolveClientPaths(io, destination) catch |err| return storeFailure(err);
     } else platform.validateStoreDestination(io, destination) catch |err| return storeFailure(err);
 }
@@ -2054,13 +2084,15 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var preparation_failure: start_report.Failure = undefined;
-    const prepared = try admitHost(init, parsed, selected, settings, &tuning.fixtures, &preparation_failure);
+    const prepared = try admitHost(init, parsed, selected, settings, &tuning.fixtures, &preparation_failure, .foreground);
     var failure: ?start_report.Failure = null;
-    return finishServe(io, host_start.shutdownPolicy(settings), host_start.storeKind(settings), &failure, server.serve(io, std.heap.c_allocator, prepared, tuning, &failure));
+    return finishServe(io, host_start.shutdownPolicy(settings), host_start.storeKind(settings), &failure, server.serve(io, std.heap.c_allocator, selected, prepared, tuning, &failure));
 }
 
-fn admitHost(init: std.process.Init, parsed: *const cli_args.Parsed, selected: []const u8, settings: *host_settings.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure) !host_settings.Prepared {
-    host_start.intake(init, parsed, selected, settings, fixtures, failure) catch |err| {
+/// Shared by serve and settings --check: intake, then the proxy precondition,
+/// then Store selection and preparation. Refusals are reported here.
+fn admitHost(init: std.process.Init, parsed: *const cli_args.Parsed, selected: []const u8, settings: *host_settings.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure, admission: host_start.Admission) !host_settings.Prepared {
+    host_start.intake(init, parsed, selected, settings, fixtures, failure, admission) catch |err| {
         if (err == error.SettingsInvalid) return writeRefusal(init.io, failure, caller_exit.knownError(err));
         return err;
     };
@@ -2140,6 +2172,48 @@ test "start report CLI publishes once before settling every Host outcome" {
     }
 }
 
+test "public Host starter preserves every typed refusal before and after waiting" {
+    const Probe = struct {
+        var output: [4096]u8 = undefined;
+        var used: usize = 0;
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            if (operation == .file_write_streaming and operation.file_write_streaming.file.handle == 1) {
+                const write = operation.file_write_streaming;
+                var out = std.Io.Writer.fixed(output[used..]);
+                out.writeAll(write.header) catch return .{ .file_write_streaming = error.NoSpaceLeft };
+                for (write.data, 0..) |bytes, index| {
+                    const repeats = if (index == write.data.len - 1) write.splat else 1;
+                    for (0..repeats) |_| out.writeAll(bytes) catch return .{ .file_write_streaming = error.NoSpaceLeft };
+                }
+                used += out.buffered().len;
+                return .{ .file_write_streaming = out.buffered().len };
+            }
+            return std.testing.io.vtable.operate(userdata, operation);
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.operate = Probe.operate;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    const saved_status = exit_status;
+    defer exit_status = saved_status;
+    const causes = [_]struct { err: anyerror, status: caller_exit.Status }{
+        .{ .err = error.HostStartupFailed, .status = .unclassified },
+        .{ .err = error.StoreIdentityMismatch, .status = .environment },
+        .{ .err = error.StoreAlreadyOwned, .status = .environment },
+    };
+    for (causes) |cause| for (std.enums.values(start_report.StartError)) |code| for ([_]bool{ false, true }) |waited| for ([_]bool{ false, true }) |quiet| {
+        var result: HostLaunchResult = .failed(.child_refused, cause.err);
+        result.outcome.failed.refusal = .init(code, "the original typed refusal, including its reason");
+        if (waited) result.wait = .init(0);
+        Probe.used = 0;
+        exit_status = .done;
+        try std.testing.expectError(error.Reported, reportHostLaunch(io, &result, quiet, false, 0));
+        var expected: [start_report.max_line_bytes]u8 = undefined;
+        try std.testing.expectEqualStrings(start_report.line(&result.outcome.failed.refusal.?, &expected), Probe.output[0..Probe.used]);
+        try std.testing.expectEqual(if (waited) cause.status else .invalid, exit_status);
+    };
+}
+
 noinline fn writeRefusal(io: std.Io, failure: *const start_report.Failure, status: caller_exit.Status) error{Reported} {
     recordExit(status);
     host_start.report(io, failure);
@@ -2199,6 +2273,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     };
     if (input.reload_skills and named == null) return usage();
     if (named != null and named.?.len == 0) return usage();
+    if (parsed.get("parent")) |reference| input.parent = .{ .present = true, .value = reference };
     if (parsed.get("provider")) |name| input.provider = .{ .present = true, .value = name };
     if (parsed.get("model")) |model| {
         try admitModel(model);
@@ -2224,17 +2299,25 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
             .provider = if (input.provider.present) input.provider.value else null,
             .model = if (input.model.present) input.model.value else null,
         };
-        const reads_binding_defaults = intent.provider == null or intent.model == null;
-        const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (reads_binding_defaults or !input.permission_mode.present) blk: {
-            const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration without explicit binding or permission mode reads saved defaults");
+        const reads = input.creationReads();
+        const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (reads.preferences) blk: {
+            const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration with omitted defaults reads saved preferences");
             break :blk preferences.load(home) catch |err| return preferenceFailure(err);
         } else .{} };
-        saved_effort = if (reads_binding_defaults) snapshot.defaults.reasoning_effort else null;
-        binding = try snapshot.resolveUnprompted();
-        input.provider = .{ .present = true, .value = binding.provider.slice() };
-        input.model = .{ .present = true, .value = binding.model.slice() };
-        input.completeCreation(std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).?, binding.model.slice(), saved_effort, snapshot.defaults.permission_mode, &compaction_buffer);
-        if (!input.workspace.present) {
+        saved_effort = if (reads.saved_effort) snapshot.defaults.reasoning_effort else null;
+        if (reads.binding) {
+            binding = try snapshot.resolveUnprompted();
+            input.model = .{ .present = true, .value = binding.model.slice() };
+            if (!input.parent.present) input.provider = .{ .present = true, .value = binding.provider.slice() };
+        }
+        input.completeCreation(
+            if (reads.binding) std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).? else null,
+            input.model.value,
+            saved_effort,
+            snapshot.defaults.permission_mode,
+            &compaction_buffer,
+        );
+        if (!input.parent.present and !input.workspace.present) {
             var cwd = try std.Io.Dir.cwd().openDir(io, ".", .{});
             defer cwd.close(io);
             const length = try cwd.realPath(io, &workspace_buffer);
@@ -2287,7 +2370,7 @@ fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed:
     const reply = blk: {
         defer captured.close(io);
         if (!interactive) try announceCapture(io, &captured);
-        break :blk takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), captured.identity().*, captured.replay);
+        break :blk takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), &captured);
     } catch |err| {
         if (human and interactive and err != error.CallerFailure) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
@@ -2335,6 +2418,7 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     const address = init.environ_map.get("RUI_ADDRESS");
     const sender_store = init.environ_map.get("RUI_STORE");
     const handle = init.environ_map.get("RUI_SENDER_HANDLE");
+    var sender_paths: platform.Paths = undefined;
     if (address != null or sender_store != null or handle != null) {
         if (address == null or sender_store == null or handle == null or
             !protocol.validSessionId(address.?) or sender_store.?.len == 0 or handle.?.len == 0 or
@@ -2342,18 +2426,19 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
         {
             return error.InvalidRuiAddress;
         }
+        sender_paths = try client.resolveClientPaths(io, sender_store.?);
         const elsewhere = if (parsed.get("store")) |override|
-            !(try platform.resolveClientPaths(io, override)).store.eql((try platform.resolveClientPaths(io, sender_store.?)).store.slice())
+            !(try client.resolveClientPaths(io, override)).store_identity.eql(sender_paths.store_identity.slice())
         else
             false;
         if (!elsewhere) {
-            input.sender = .{ .store = sender_store.?, .session = address.? };
+            input.sender = .{ .store = sender_paths.store_identity.slice(), .session = address.? };
             input.sender_handle = handle;
         }
     }
     step.* = .store;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    input.store = if (input.sender != null) sender_store.? else try selectedStore(init, parsed.get("store"), &selected_buffer);
+    input.store = if (input.sender != null) sender_paths.selector() else try selectedStore(init, parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try takeCapture(step, client.captureMessage(io, input, target));
@@ -2362,7 +2447,7 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     defer captured.close(io);
     try announceCapture(io, &captured);
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), captured.identity().*, captured.replay);
+    const reply = try takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), &captured);
     if (!reply.isAccepted()) return writeMutationReply(io, reply, .json, captured.replay);
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
@@ -2384,18 +2469,19 @@ fn takeCapture(step: *?client.Step, stepped: anytype) !client.CapturedRecord {
     return captured;
 }
 
-fn takeReply(step: *?client.Step, stepped: anytype, context: protocol_reply.MutationIdentity, replay: client.Replay) !protocol_reply.MutationReply {
-    holdStore(context.store.slice());
+fn takeReply(step: *?client.Step, stepped: anytype, captured: *const client.CapturedRecord) !protocol_reply.MutationReply {
+    holdStore(captured.selector());
     const reply = takeStep(step, stepped) catch |err| {
         if (step.*) |failed| {
             if (failed.mayHaveReachedHost()) {
                 recordExit(caller_exit.forCode(.unconfirmed, .reply_unconfirmed));
-                reportUnconfirmed(context, replay, err);
+                reportUnconfirmed(captured.identity().*, captured.replay, err);
                 if (err == error.Cancelled or err == error.Canceled) return err;
                 return error.CallerFailure;
             }
             if (failed == .connect or failed == .endpoint) {
-                return hostTransportFailure(std.Io.Threaded.global_single_threaded.io(), context.store.slice(), err);
+                if (captured.paths) |*paths| return readTransportFailureAt(std.Io.Threaded.global_single_threaded.io(), paths, err);
+                return hostTransportFailure(std.Io.Threaded.global_single_threaded.io(), captured.selector(), err);
             }
             if (failed == .store) return storeFailure(err);
         }
@@ -2564,9 +2650,13 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const reference = parsed.positional orelse parsed.get("session").?;
     try requireInteractiveTerminal(init, "to resume a Session");
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const paths = try platform.resolveClientPaths(init.io, try selectedStore(init, parsed.get("store"), &fallback));
-    const destination = paths.store.slice();
+    const destination = try selectedStore(init, parsed.get("store"), &fallback);
+    _ = try preflightExistingOverview(init.io, destination);
     return openExistingOverview(init, destination, reference[0..protocol.session_id_bytes].*, .{ .store = parsed.get("store") }, null);
+}
+
+fn preflightExistingOverview(io: std.Io, destination: []const u8) !platform.Paths {
+    return platform.resolveClientPaths(io, destination);
 }
 
 fn openExistingOverview(init: std.process.Init, destination: []const u8, open: ?overview_view.Reference, selectors: new_session_selection.Intent, restoration: ?*const @import("relaunch_handoff.zig").Payload) !void {
@@ -2881,7 +2971,7 @@ fn decodeInteractive(input: []u8, tokens: [][]const u8, split: bool) !usize {
 
 pub fn sessionRequests(init: std.process.Init, read: client.ReadContext, store: []const u8, session_ref: []const u8, out: *std.Io.Writer, picks: *session_reads.SavedRequests) anyerror!void {
     const requester = read.requests();
-    const canonical = try platform.resolveClientPaths(init.io, store);
+    const canonical = try client.resolveClientPaths(init.io, store);
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const directory = try requestDirectory(init, &path);
     try out.writeAll("Rui: Local recovery handles (not Host work status):\n");
@@ -2900,7 +2990,7 @@ pub fn sessionRequests(init: std.process.Init, read: client.ReadContext, store: 
             error.Canceled => return err,
             else => continue,
         };
-        if (!saved.store.eql(canonical.store.slice())) continue;
+        if (!saved.store.eql(canonical.store_identity.slice())) continue;
         if ((saved.kind == .configure or saved.kind == .message) and saved.session.len == 0) {
             var reply: client.ObservationBuffer = .{};
             const observed = try checkedObservation(init.io, requester.observeCommand(store, saved.key.slice(), null, &reply) catch |err| return readTransportFailure(init.io, store, err), saved.key.slice());
@@ -3042,7 +3132,7 @@ fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecor
     const reply = blk: {
         defer captured.close(io);
         try announceCapture(io, captured);
-        break :blk try takeReply(step, sender.sendCaptured(captured, environment, &reply_buffer), captured.identity().*, captured.replay);
+        break :blk try takeReply(step, sender.sendCaptured(captured, environment, &reply_buffer), captured);
     };
     try writeMutationReply(io, reply, presentation, replay);
 }
@@ -3101,7 +3191,7 @@ fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const identity = try requestIdentity(init, parsed);
     const target = identity.key.slice();
     var reply_buffer: client.ObservationBuffer = .{};
-    const reply = client.observeCommand(io, identity.store.slice(), target, null, &reply_buffer) catch |err| return readTransportFailure(io, identity.store.slice(), err);
+    const reply = (client.Requests{ .io = io }).observeCommandAt(&identity.paths, target, null, &reply_buffer, null) catch |err| return readTransportFailureAt(io, &identity.paths, err);
     const observation = try checkedObservation(io, reply, target);
     try writeObservation(io, &observation, observationTime(io));
 }
@@ -3153,8 +3243,8 @@ fn waitRequest(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const identity = try requestIdentity(init, parsed);
     var interrupt = WaitInterrupt.init();
     defer interrupt.deinit();
-    const result = client.waitCommand(init.io, identity.store.slice(), identity.key.slice(), (try parsed.number(u32, "timeout-seconds")) orelse @import("request_wait.zig").default_timeout_seconds, &wait_cancellation) catch |err| {
-        const failure = readTransportFailure(init.io, identity.store.slice(), err);
+    const result = client.waitCommandAt(init.io, &identity.paths, identity.key.slice(), (try parsed.number(u32, "timeout-seconds")) orelse @import("request_wait.zig").default_timeout_seconds, &wait_cancellation) catch |err| {
+        const failure = readTransportFailureAt(init.io, &identity.paths, err);
         if (client.hostUnreachable(err)) {
             var read_failure: protocol_reply.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
             try read_failure.diagnostic.type.set("invocation_error");
@@ -3267,13 +3357,13 @@ fn readResult(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const identity = try requestIdentity(init, parsed);
     const target = identity.key.slice();
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = client.readResult(
-        io,
-        identity.store.slice(),
+    const reply = client.readResultAt(
+        .{ .io = io },
+        &identity.paths,
         target,
         std.Io.File.stdout(),
         &reply_buffer,
-    ) catch |err| return readTransportFailure(io, identity.store.slice(), err);
+    ) catch |err| return readTransportFailureAt(io, &identity.paths, err);
     switch (reply) {
         .answer => {},
         .failure => |failure| {
@@ -3482,9 +3572,9 @@ fn writeUnconfirmed(notice: *std.Io.Writer, context: protocol_reply.MutationIden
         .generated => try notice.writeAll(context.key.slice()),
         .explicit => |record| {
             try notice.writeAll("--store ");
-            try TerminalText.writeShellWord(notice, context.store.slice());
+            try TerminalText.writeShellWord(notice, if (record.host_directory.len != 0) record.host_directory.slice() else context.store.slice());
             try notice.writeAll(" --record ");
-            try TerminalText.writeShellWord(notice, record);
+            try TerminalText.writeShellWord(notice, record.record);
             switch (context.kind) {
                 inline else => |kind| try notice.print(" --kind {s}", .{comptime retryName(kind)}),
             }
@@ -3572,7 +3662,8 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
 }
 
 const StartConfiguration = struct {
-    provider: []const u8,
+    provider: ?[]const u8,
+    parent: ?[]const u8 = null,
     model: []const u8,
     reasoning_effort: ?[]const u8,
     effort_source: enum { flag, saved, model_default },
@@ -3580,7 +3671,8 @@ const StartConfiguration = struct {
     fn resolve(input: configure_input.ConfigureInput, effort_flag: bool, saved_effort: ?model_capability.ReasoningEffort) StartConfiguration {
         const model = input.model.value;
         return .{
-            .provider = input.provider.value,
+            .provider = if (input.parent.present) null else input.provider.value,
+            .parent = if (input.parent.present) input.parent.value else null,
             .model = model,
             .reasoning_effort = input.reasoning_effort.value,
             .effort_source = if (effort_flag) .flag else if (model_capability.startEffort(model_catalog.shipped, saved_effort, model) != null) .saved else .model_default,
@@ -3599,7 +3691,16 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
     if (configuration) |value| {
         std.debug.assert(reply.isAccepted() and reply.target == .message and reply.target.message.creates_session);
         try writer.writeAll(",\"configuration\":");
-        try std.json.Stringify.value(value, .{}, writer);
+        if (value.parent != null) {
+            try std.json.Stringify.value(value, .{}, writer);
+        } else {
+            try std.json.Stringify.value(.{
+                .provider = value.provider,
+                .model = value.model,
+                .reasoning_effort = value.reasoning_effort,
+                .effort_source = value.effort_source,
+            }, .{}, writer);
+        }
     }
     switch (reply.target) {
         .model_interruption => |target| try writer.print(",\"request_target\":{{\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{ target.turn, target.operation }),
@@ -3691,7 +3792,7 @@ test "session start configuration reports resolved effort and its source" {
             .model = .{ .present = true, .value = case.model },
             .reasoning_effort = .{ .present = case.present, .value = case.override },
         }, case.flag, case.saved);
-        try std.testing.expectEqualStrings("openai", value.provider);
+        try std.testing.expectEqualStrings("openai", value.provider.?);
         try std.testing.expectEqualStrings(case.model, value.model);
         try std.testing.expectEqual(case.source, value.effort_source);
         if (case.effort) |effort| {
@@ -3713,6 +3814,18 @@ test "session start mutation receipt adds configuration without changing send" {
     var writer = std.Io.Writer.fixed(&buffer);
     try writeMutationJson(&writer, reply, .{ .provider = "codex", .model = "gpt-6.1-sol", .reasoning_effort = "low", .effort_source = .model_default });
     try std.testing.expectEqualStrings(context ++ ",\"configuration\":{\"provider\":\"codex\",\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\",\"effort_source\":\"model_default\"}" ++ tail, writer.buffered());
+    writer.end = 0;
+    const attached = StartConfiguration.resolve(.{
+        .store = "/store",
+        .session = .create,
+        .parent = .{ .present = true, .value = "09azvw" },
+        .model = .{ .present = true, .value = "unlisted-model" },
+        .reasoning_effort = .{ .present = true, .value = "low" },
+    }, false, null);
+    try std.testing.expect(attached.provider == null);
+    try std.testing.expectEqualStrings("09azvw", attached.parent.?);
+    try writeMutationJson(&writer, reply, attached);
+    try std.testing.expectEqualStrings(context ++ ",\"configuration\":{\"provider\":null,\"parent\":\"09azvw\",\"model\":\"unlisted-model\",\"reasoning_effort\":\"low\",\"effort_source\":\"model_default\"}" ++ tail, writer.buffered());
     writer.end = 0;
     reply.target.message.creates_session = false;
     try writeMutationJson(&writer, reply, null);
@@ -3807,8 +3920,14 @@ test "unconfirmed guidance names the generated handle or the quoted explicit rec
     try writeUnconfirmed(&generated, context, .generated, error.TruncatedResponse);
     try std.testing.expectEqualStrings(prefix ++ "0f8fad5b-d9cb-469f-a165-70867728950e" ++ suffix, generated.buffered());
     var explicit = std.Io.Writer.fixed(&buffer);
-    try writeUnconfirmed(&explicit, context, .{ .explicit = "stop\x1b.json" }, error.TruncatedResponse);
+    try writeUnconfirmed(&explicit, context, .{ .explicit = .{ .record = "stop\x1b.json" } }, error.TruncatedResponse);
     try std.testing.expectEqualStrings(prefix ++ "--store $'/it\\'s \\\\store' --record $'stop\\033.json' --kind session-stop" ++ suffix, explicit.buffered());
+    // The immutable request identity is not a round-trip command selector.
+    var replay: client.Replay = .{ .explicit = .{ .record = "stop.json" } };
+    try replay.explicit.host_directory.set("/selected-host");
+    explicit = std.Io.Writer.fixed(&buffer);
+    try writeUnconfirmed(&explicit, context, replay, error.TruncatedResponse);
+    try std.testing.expectEqualStrings(prefix ++ "--store $'/selected-host' --record $'stop.json' --kind session-stop" ++ suffix, explicit.buffered());
 }
 
 const SavedRequest = protocol_reply.MutationIdentity;
@@ -3819,19 +3938,19 @@ fn savedRequest(init: std.process.Init, handle: []const u8) !SavedRequest {
 }
 
 const RequestIdentity = struct {
-    store: protocol.Bounded(protocol.max_store_bytes) = .{},
+    paths: platform.Paths,
     key: protocol.Bounded(protocol.max_key_bytes) = .{},
 };
 
 fn requestIdentity(init: std.process.Init, parsed: *const cli_args.Parsed) !RequestIdentity {
     if (parsed.positional) |handle| {
-        const saved = try savedRequest(init, handle);
-        return .{ .store = saved.store, .key = saved.key };
+        var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const captured = try client.inspectCapturedRequest(init.io, try requestDirectory(init, &directory_buffer), handle);
+        return .{ .paths = captured.paths, .key = captured.identity.key };
     }
-    var identity: RequestIdentity = .{};
-    try identity.key.set(parsed.get("key").?);
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    try identity.store.set(try selectedStore(init, parsed.get("store"), &selected_buffer));
+    var identity: RequestIdentity = .{ .paths = try client.resolveClientPaths(init.io, try selectedStore(init, parsed.get("store"), &selected_buffer)) };
+    try identity.key.set(parsed.get("key").?);
     return identity;
 }
 
@@ -3947,7 +4066,7 @@ fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const reply = blk: {
         defer captured.close(init.io);
         var step: ?client.Step = null;
-        break :blk try takeReply(&step, (client.Requests{ .io = init.io }).sendCaptured(&captured, .{ .map = init.environ_map }, &buffer), captured.identity().*, replay);
+        break :blk try takeReply(&step, (client.Requests{ .io = init.io }).sendCaptured(&captured, .{ .map = init.environ_map }, &buffer), &captured);
     };
     try writeMutationReply(init.io, reply, .json, replay);
 }
@@ -4234,6 +4353,7 @@ const LaunchFixture = struct {
     startup_fd: c_int = -1,
     openai: bool = true,
     chatgpt: bool = false,
+    store_identity: ?[]const u8 = null,
     assignments: usize = 0,
     expected_assignment: ?[]const u8 = null,
     assignments_match: bool = true,
@@ -4277,7 +4397,9 @@ const LaunchFixture = struct {
             else => false,
         });
         if (!ready) return .unavailable;
-        return .{ .ready = .{ .store = paths.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = if (self.openai and (self.launches != 0 or self.scenario == .already_ready)) .key_file else .unserved, .chatgpt = if (self.chatgpt) .chatgpt_plan else .unserved } } } };
+        var store = paths.store_identity;
+        if (self.store_identity) |value| store.set(value) catch unreachable;
+        return .{ .ready = .{ .store = store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = if (self.openai and (self.launches != 0 or self.scenario == .already_ready)) .key_file else .unserved, .chatgpt = if (self.chatgpt) .chatgpt_plan else .unserved } } } };
     }
     fn verify(raw: ?*anyopaque, _: std.Io, _: *const platform.Paths, pid: c_int, started: u64, _: []const u8, _: ?i128, _: *protocol_reply.HostInfoFacts) bool {
         return cast(raw).exact_identity and cast(raw).scenario != .competitor and pid == 42 and started == 12;
@@ -5184,6 +5306,21 @@ test "Host launch guided activation requires frozen pair and exact fresh identit
     }
 }
 
+test "Host launch saved MySQL preflight needs no running Host or login" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory = try tmp.dir.createDirPathOpen(io, "host", .{ .permissions = .fromMode(0o700) });
+    defer directory.close(io);
+    const file = try directory.createFile(io, "host.json", .{ .permissions = .fromMode(0o600) });
+    defer file.close(io);
+    try file.writeStreamingAll(io, "{\"store\":{\"mysql\":{\"url\":{\"env\":\"PR5B_UNRESOLVED_LOGIN\"}}}}");
+    var buffer: [protocol.max_store_bytes]u8 = undefined;
+    const dir = buffer[0..try directory.realPath(io, &buffer)];
+    try std.testing.expectEqual(platform.Kind.mysql, (try host_start.savedPlacement(io, dir)).kind);
+    try preflightNewSession(io, dir, true);
+}
+
 test "Host launch chosen usable bindings attach before startup document admission" {
     const Document = enum { missing, standard, custom, malformed, insecure, unreadable };
     const io = std.testing.io;
@@ -5303,4 +5440,105 @@ test "Host launch scoped readiness still discovers selected private keys and req
         try std.testing.expect(entry.launch.?.outcome == .ready);
         try std.testing.expectEqual(@as(usize, 0), fixture.launches);
     }
+}
+
+test "Host selection round trips every Store placement and interface through defaults resume relaunch and guidance" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    var memory: std.heap.ArenaAllocator = .init(gpa);
+    defer memory.deinit();
+    const arena = memory.allocator();
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &memory, .gpa = gpa, .io = io, .environ_map = &environment, .preopens = .empty };
+    const Kind = enum { sqlite, moved_sqlite, mysql };
+    const mysql_identity = "0123456789abcdef0123456789abcdef";
+    for (std.enums.values(Kind)) |kind| for ([_]bool{ false, true }) |explicit| {
+        errdefer std.debug.print("selector kind={s} explicit={}\n", .{ @tagName(kind), explicit });
+        const name = try std.fmt.allocPrint(arena, "{s}-{s}", .{ @tagName(kind), if (explicit) "explicit" else "default" });
+        const dir = try std.fs.path.join(arena, &.{ tmp.root[0..tmp.root_len], name });
+        const data = try std.fs.path.join(arena, &.{ dir, "data" });
+        const home = try std.fs.path.join(arena, &.{ dir, "home" });
+        const interface = try std.fs.path.join(arena, &.{ dir, "interface" });
+        var failure: start_report.Failure = undefined;
+        try host_start.savedEdit(init, dir, "providers", "{}", &failure);
+        switch (kind) {
+            .sqlite => {},
+            .moved_sqlite => try host_start.savedEdit(init, dir, "store.sqlite.dir", data, &failure),
+            .mysql => try host_start.savedEdit(init, dir, "store.mysql.url", "env:PR5B_NEVER_RESOLVE_LOGIN", &failure),
+        }
+        if (explicit) try host_start.savedEdit(init, dir, "interface.dir", interface, &failure);
+        var home_dir = try std.Io.Dir.cwd().createDirPathOpen(io, home, .{ .permissions = .fromMode(0o700) });
+        home_dir.close(io);
+        try environment.put("HOME", home);
+        const paths = try platform.resolveClientPaths(io, dir);
+        try std.testing.expectEqualStrings(dir, paths.host_directory.slice());
+        try std.testing.expectEqualStrings(dir, paths.selector());
+        try std.testing.expectEqualStrings(switch (kind) {
+            .sqlite => dir,
+            .moved_sqlite => data,
+            .mysql => "",
+        }, paths.store_identity.slice());
+        const readiness: preferences.Readinesses = .initFill(.configured);
+        _ = try preferences.update(home, .{ .store = .{ .set = dir } }, &readiness);
+        const saved = try preferences.load(home);
+        try std.testing.expectEqualStrings(dir, saved.store.slice());
+        const selected = try platform.resolveClientPaths(io, saved.store.slice());
+        try std.testing.expectEqualStrings(paths.socket.slice(), selected.socket.slice());
+        try std.testing.expectEqualStrings(paths.store_identity.slice(), selected.store_identity.slice());
+        try preflightNewSession(io, saved.store.slice(), true);
+        for ([_]bool{ false, true }) |ready| {
+            errdefer std.debug.print("resume ready={}\n", .{ready});
+            const preflight = preflightExistingOverview(io, saved.store.slice());
+            if (std.meta.isError(preflight)) std.debug.print("placement-only resume preflight unexpectedly required Host readiness\n", .{});
+            try std.testing.expect(!std.meta.isError(preflight));
+            const admitted = try preflight;
+            try std.testing.expectEqualStrings(dir, admitted.selector());
+            var fixture: LaunchFixture = .{ .scenario = if (ready) .already_ready else .success, .store_identity = if (kind == .mysql) mysql_identity else null };
+            const result = try gpa.create(HostLaunchResult);
+            defer gpa.destroy(result);
+            result.* = .{ .outcome = .{ .failed = .{ .cause = .{ .kind = .setup, .err = error.FixtureUninitialized } } } };
+            host_start.spawn(init, .{ .dir = admitted.selector() }, fixture.ops(), null, result);
+            try std.testing.expect(result.outcome == .ready);
+            try std.testing.expectEqual(if (ready) @as(usize, 0) else 1, fixture.launches);
+            try std.testing.expectEqualStrings(dir, result.outcome.ready.selector.slice());
+            try std.testing.expectEqualStrings(if (kind == .mysql) mysql_identity else paths.store_identity.slice(), result.outcome.ready.facts.store.slice());
+            var command: std.Io.Writer.Allocating = .init(gpa);
+            defer command.deinit();
+            try writeRetainedHostNotice(&command.writer, result.outcome.ready.selector.slice());
+            var word: std.Io.Writer.Allocating = .init(gpa);
+            defer word.deinit();
+            try TerminalText.writeShellWord(&word.writer, dir);
+            try std.testing.expect(std.mem.endsWith(u8, command.written(), try std.fmt.allocPrint(arena, "{s}\n", .{word.written()})));
+            const handoff = @import("relaunch_handoff.zig");
+            const bytes = try handoff.encode(gpa, .{ .v = 1, .store = dir, .overview = .{ .bytes = "overview α", .cursor = 3 }, .drafts = &.{.{ .id = "aaaaaa", .snapshot = .{ .bytes = "draft β", .cursor = 2 } }}, .line = "Host restart receipt" });
+            defer gpa.free(bytes);
+            const path = try handoff.writeEncoded(init, home, bytes);
+            defer gpa.free(path);
+            try environment.put("RUI_RELAUNCH", path);
+            const restored = (try RelaunchStartup.read(init, dir)).?;
+            defer restored.handoff.deinit();
+            try std.testing.expectEqualStrings(dir, restored.paths.selector());
+            try std.testing.expectEqualStrings("draft β", restored.handoff.value.drafts[0].snapshot.bytes);
+            try std.testing.expectEqualStrings("overview α", restored.handoff.value.overview.bytes);
+            try std.testing.expectEqual(@as(usize, 3), restored.handoff.value.overview.cursor);
+            var argv: [7][]const u8 = undefined;
+            const args = relaunchArguments("/target/bin/rui", restored.paths.selector(), .{}, &argv);
+            try std.testing.expectEqualStrings(dir, args[2]);
+            var lease_paths = paths;
+            lease_paths.host_directory.len = 0;
+            lease_paths.store_identity = result.outcome.ready.facts.store;
+            lease_paths.retainReachableDirectory(io, dir);
+            try std.testing.expectEqualStrings(dir, lease_paths.selector());
+            var binding: new_session_selection.Binding = .{};
+            try binding.provider.set("openai");
+            try binding.model.set("test-model");
+            var unserved: LaunchFixture = .{ .scenario = .already_ready, .openai = false, .store_identity = if (kind == .mysql) mysql_identity else null };
+            startSelectedOverviewHost(init, dir, binding, &readiness, &.{}, unserved.ops(), result);
+            try std.testing.expectEqual(host_launch.Summary.Failure.Kind.provider_unserved, result.outcome.failed.cause.kind);
+            try std.testing.expectEqualStrings(dir, result.outcome.failed.store.slice());
+        }
+    };
 }

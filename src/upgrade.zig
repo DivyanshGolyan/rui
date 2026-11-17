@@ -128,7 +128,7 @@ pub fn checkDiscovered(init: std.process.Init, allocator: std.mem.Allocator, sto
     const owned_home = try allocator.dupe(u8, home);
     errdefer allocator.free(owned_home);
     const paths = platform.resolveClientPaths(init.io, store) catch null;
-    const owned_store = try allocator.dupe(u8, if (paths) |value| value.store.slice() else store);
+    const owned_store = try allocator.dupe(u8, if (paths) |value| value.selector() else store);
     errdefer allocator.free(owned_store);
     const executable = try std.process.executablePathAlloc(init.io, allocator);
     errdefer allocator.free(executable);
@@ -198,22 +198,12 @@ pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *c
 }
 
 fn waitAfterPublication(init: std.process.Init, cancellation: ?*const client.Cancellation) !void {
-    if (init.environ_map.get("RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE")) |gate| {
-        while (true) {
-            try process.check(cancellation);
-            const file = std.Io.Dir.cwd().openFile(init.io, gate, .{}) catch |err| {
-                if (err == error.FileNotFound) break;
-                return err;
-            };
-            file.close(init.io);
-            try std.Io.sleep(init.io, .fromMilliseconds(10), .awake);
-        }
-    }
+    return process.waitForTestGate(init.arena.allocator(), init.io, init.environ_map.get("RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"), cancellation, .fromSeconds(300));
 }
 
 pub fn compatible(result: *const Result) bool {
     return switch (result.selectedActivation()) {
-        .client_incompatible, .unconfirmed, .failed, .replacement_observed => false,
+        .client_incompatible, .unconfirmed, .failed, .replacement_observed, .refused => false,
         else => true,
     };
 }
@@ -313,10 +303,10 @@ test "upgrade restart results cover every activation for selected and other Stor
                 };
                 const guided = switch (activation) {
                     .not_needed, .superseded, .already_ready, .ready, .client_incompatible => false,
-                    .unsupported, .replacement_observed, .cancelled, .failed, .unconfirmed => true,
+                    .unsupported, .replacement_observed, .cancelled, .failed, .unconfirmed, .refused => true,
                 };
                 const safe = !selected or switch (activation) {
-                    .client_incompatible, .unconfirmed, .failed, .replacement_observed => false,
+                    .client_incompatible, .unconfirmed, .failed, .replacement_observed, .refused => false,
                     else => true,
                 };
                 try std.testing.expectEqual(safe, compatible(&result));
@@ -387,4 +377,17 @@ test "adopted candidate stays owned until fresh check preconditions permit consu
     try std.testing.expectError(error.HomeUnavailable, checkDiscovered(init, allocator, "/fixture", null, &download, &candidate));
     try std.testing.expectEqual(identity, candidate.?.archive_url.ptr);
     try std.testing.expectEqual(.ipv4, download.family);
+}
+
+test "upgrade selected activation routes by Host directory not SQLite data or MySQL identity" {
+    const receipt: Installation.Receipt = .{ .operation_build = "/prepared", .selected_after = "/selected" };
+    for ([_][]const u8{ "/data", "0123456789abcdef0123456789abcdef" }) |identity| {
+        var entries = [_]restart_all.Entry{
+            .{ .socket = "/first.sock", .directory = "/first-host", .store = "/selected-host", .state = .{ .outcome = .not_needed } },
+            .{ .socket = "/selected.sock", .directory = "/selected-host", .store = identity, .state = .{ .outcome = .{ .unsupported = .configuration_unavailable } } },
+        };
+        const result: Result = .{ .installation = .{ .installed = receipt }, .store = "/selected-host", .hosts = .{ .entries = &entries } };
+        try std.testing.expectEqual(HostLifecycle.Limitation.configuration_unavailable, result.selectedActivation().unsupported);
+        try std.testing.expect(result.hosts.selectedOutcome(identity) == .not_needed);
+    }
 }

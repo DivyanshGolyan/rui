@@ -499,10 +499,10 @@ def opening_case():
         chrome.answered(session, long_text)
         try:
             admit(chrome.home, "session", "send", "--to", session, input="HOLD-QUESTION")
-            release.set()
             fixture.wait_for(lambda: len(chrome.endpoint.requests) >= 2, "held request", timeout=20)
             for index in range(2):
                 admit(chrome.home, "session", "send", "--to", session, input=f"WAITING-{index}")
+            release.set()
             master, caller, opened = chrome.open(session, lambda screen: "◌ 2 · WAITING-1" in screen and "⠹ Held call · " in screen)
             tail = tail_rows(opened)
             assert tail[-2].startswith("⠹ Held call · ") and tail[-1] == "◌ 2 · WAITING-1", opened

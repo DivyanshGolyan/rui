@@ -46,8 +46,8 @@ rui host restart --all
 ```
 
 `--all` is required; this command does not accept `--store` yet.
-It discovers this user's running Hosts through their private runtime sockets and restarts eligible Hosts one at a time on the selected installed build, preserving capacity and saved work.
-Each line names the Store and reports restarted, already current, left running with a reason, or failure with recovery instructions; a total follows.
+It discovers this user's running Hosts through private runtime sockets and same-user process hints, authenticates each resolved socket peer, and restarts eligible Hosts one at a time on the selected installed build, preserving capacity and saved work. Process hints are not stop authority; saved DIR placement finds nested MySQL and moved interfaces without a registry.
+Each line names the Host directory (independently of its Store identity) and reports restarted, already current, left running with a reason, or failure with recovery instructions; a total follows.
 Socket discovery retries transient connection refusal for up to 200 ms inside its observation deadline.
 A standard SQLite Host publishes a private same-owner `<hash>.store` routing hint beside its socket under the Store lease, atomically before binding; clean retirement removes it after the socket, while a crash leaves it.
 For an unreachable socket, discovery skips silently only when `platform` validates the hint and exact socket mapping and observes the Store lease free. It deletes nothing.
@@ -55,7 +55,7 @@ A held or inaccessible lease, absent/untrusted hint (including an older Host), o
 It does not reclaim sockets or infer absence from failed transport.
 No running Hosts prints `No running Hosts.` and starts nothing.
 A newer Host is not downgraded; unsupported, application-owned and unconfirmed-ownership launches are left running with a reason.
-A verified exact pinned launch with a different protocol is reported as restarted with advice to use the selected Rui client, never as ordinary Host readiness.
+Success requires readiness on DIR's socket, a different instance from the stopped Host, and the answering managed executable's target release version. A concurrent starter of that version may win; it need not be our child or the selected executable path. If only the target client can read the new wire, its public status is bracketed by authenticated peer generations and the result advises using that client; incompatible transport alone is never success.
 A failed or unconfirmed restart returns an operational caller error; installer activation failures print a note without failing the completed install.
 The selected build must report a verified release version; an unversioned source target cannot be activated by the existing lifecycle and is reported without stopping Hosts.
 
@@ -65,12 +65,13 @@ A Host that an earlier release started with its retired flags (`--provider`, `--
 Installation and activation are reported separately.
 Unsupported or application-owned Hosts remain running with an explained successful skip. A failed or unconfirmed Host restart returns `host_restart_failed` (exit 6) after the installation receipt; the binary upgrade is not rolled back.
 Automatic activation supports released and source managed `host serve` launches whose public settings can be preserved and whose executable reports a verified numeric version.
-Unknown managed builds, foreign executables, application-owned `--settings -`, hidden-option, and relative Bash/CA-path launches are not paused.
-`--settings FILE` retains argv replay, including relative file names; this step does not inspect or snapshot the document.
+Unknown managed builds, foreign executables and hidden-option launches are not paused. Before any stop, the target's public `host settings --check` must admit the same DIR, settings file and ordered assignments the target's public `host start` will receive. Stdin documents/lifetime, relative paths and refused documents remain running with the target's typed start failure; these refusals count as failed (exit 6), rather than an unsupported successful skip.
+`--settings FILE` replay requires an absolute file name. Admission reads its current contents before retirement; it does not snapshot the document. Running-source syntax is shared with socket discovery, including translation of retired flags.
 This does not make a selected source installation eligible for `rui upgrade`; Upgrade still requires a selected managed release.
 When that selection is released but its running Host came from a managed source build, the usual version comparison applies: a newer Host stays running without a downgrade; an equal or older Host can restart on the pinned release.
-Private launch environment is observed only in memory and wiped after the operation.
-Upgrade waits for the observed Host's lease to retire and checks the pinned target's readiness before reporting activation.
+Check, start and status receive the same captured Host environment with cwd `/` and null stdin. Snapshots, normalized source buffers, environment copies and subprocess captures are kept only in memory and wiped after the operation.
+Saved moved SQLite storage, explicit interfaces and MySQL use the shared starter. DIR is retained separately from wire Store identity; unsaved nondefault placement remains subject to the ordinary detached starter's discoverability rule.
+After exact-instance stop, upgrade waits for the old process generation to retire (an unreaped zombie is retired) and its runtime/Store lease to retire before starting. A concurrent new owner is never stopped. Released v0.75.0 is refused as a target before stop because its check admits stdin lifetime while its detached starter refuses it; older targets without `settings --check` also leave the old Host running. Intentional source builds are not labelled from version text alone.
 
 Updates keep saved work and sign-in.
 Retained earlier builds are not an unconditional rollback after a Store migration.
@@ -132,12 +133,38 @@ The order is defaults, saved settings, `--settings FILE|-`, then repeatable `--s
 Use `rui host set --store PATH SETTING @FILE` to read a JSON value from a file.
 `settings` fills in defaults and shows secret sources, not secret bytes; saved literal secrets are refused.
 `unset` removes the saved assignment, restoring its default when no later source overrides it.
+`settings --check` checks a detached start without opening or locking a Store: it reads and applies every source, refuses stdin lifetime and unrooted paths, checks saved placement, resolves credentials, anchors and seals. Pass absolute `--settings FILE`, `@FILE` and path/secret sources; unlike a newly typed `host start`, this check does not rebase argv. It does not prove database availability or lock acquisition.
 Changes apply to the next Host; they do not reconfigure a running one.
 `rui host start` takes `--settings FILE` but not `-`, because a started Host has no stdin; pass a document on stdin with `rui host serve --settings -`.
-Bare `rui` and `rui host start` reach a Host only in `PATH`, so they refuse settings that move it elsewhere: a MySQL Store, `interface.dir`, or a `store.sqlite.dir` other than `PATH`.
+Clients given `--store PATH` read that directory's saved placement, including MySQL, a moved `interface.dir`, or a different `store.sqlite.dir`.
+Pause the Host before changing placement: directory-based clients immediately use the saved location, while a running Host keeps its original settings.
+Directory-based lookup checks an existing explicit interface directory with the same private-directory admission as legacy MySQL lookup before connecting; missing saved interface directories remain startable.
+Save Store and interface placement with `rui host set`; a differing placement supplied only through `host start --settings` or `--set` is refused because a later client cannot see it.
+Other one-off settings still apply to a new Host. Foreground `host serve` permits unsaved placement, but directory-based clients need the same placement saved.
+New generated and explicit request captures retain the selected Host directory in a private `.routing` companion, separately from the immutable request's Store identity. HANDLE-based recover, inspect, wait and read-result rediscover that directory's current saved placement and refuse if it identifies a different Store. Legacy opaque MySQL selection retains its runtime hint. Keep the companion with the request; older records without one retain their existing identity-based lookup.
 A started Host runs in `/` without stdin. Relative paths you type on the command line (`--settings FILE`, `@FILE`, and `--set` paths or `file:` sources) are taken from the directory you run the command in.
 A relative path saved in `host.json` or written inside a document has no such directory, so bare `rui` and `rui host start` refuse it, as they refuse `interface.lifetime` `stdin`; give an absolute path.
 Run such a Host with `rui host serve --store PATH`.
+
+## MySQL
+
+After an operator creates the database and applies `rui store schema --engine mysql`, save a login source and open the TUI:
+
+```sh
+export DATABASE_URL='mysql://USER:PASSWORD@HOST:3306/DATABASE'
+rui host set --store /absolute/host-dir store.mysql.url env:DATABASE_URL
+rui --store /absolute/host-dir
+```
+
+The Host resolves `DATABASE_URL`; clients do not read the login bytes.
+`rui host start --store /absolute/host-dir` starts it without opening the TUI; Session, request and Host commands use the same `--store /absolute/host-dir`.
+Without an explicit interface, MySQL uses a short private per-user directory derived from the canonical Host directory; SQLite keeps its existing short hashed default socket.
+Long Host directory names therefore do not hit the explicit interface directory's 94-byte limit.
+To choose another interface, save `rui host set --store /absolute/host-dir interface.dir /absolute/private-interface` before starting.
+Upgrade stops the exact observed MySQL Host and waits for its process and runtime retirement, then invokes the target starter. Runtime retirement does not prove `GET_LOCK` release: replacement readiness proves its own Store lock acquisition. Database lock/start failures retain their typed start report; other Hosts in the batch are still processed.
+
+The existing foreground and opaque-id form remains supported: start `rui host serve --store /absolute/host-dir` with its settings, then use `RUI_RUNTIME_DIR=/absolute/interface rui --store STOREID`, where `STOREID` comes from Host readiness and the interface is the Host's actual interface directory.
+Do not put the login URL in argv. Literal secrets are accepted only in a foreground stdin document.
 
 ## Run in the foreground
 
