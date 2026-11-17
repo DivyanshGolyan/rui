@@ -35,8 +35,9 @@ from urllib.parse import quote
 CACHE = pathlib.Path(os.environ.get("VERIFY_RUI_CACHE", pathlib.Path.home() / ".cache/verify-rui"))
 SCRATCH_PARENT = pathlib.Path("/private/tmp" if sys.platform == "darwin" else "/tmp")  # short paths: Unix socket limits
 HERE = pathlib.Path(__file__).resolve()
-HORIZONTAL_RULE = "┄"
-VERTICAL_DIVIDER = "┆"
+if len(HERE.parents) > 4 and (HERE.parents[4] / "tests/integration/terminal_screen.py").is_file():
+    sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
+    from terminal_screen import DIVIDER_GLYPHS, DIVIDER_PATTERN, RULE_GLYPHS, RULE_PATTERN
 REPO_URL = "https://github.com/DivyanshGolyan/rui.git"
 
 
@@ -2312,7 +2313,7 @@ def validate_scenario(data, sizes=None):
 
 
 def load_scenario(path, sizes=None):
-    text = pathlib.Path(path).read_text().replace("{divider}", VERTICAL_DIVIDER).replace("{rule}", HORIZONTAL_RULE)
+    text = pathlib.Path(path).read_text().replace("{divider}", json.dumps(DIVIDER_PATTERN)[1:-1]).replace("{rule}", json.dumps(RULE_PATTERN)[1:-1])
     return validate_scenario(json.loads(text), sizes)
 
 
@@ -2602,8 +2603,8 @@ def frame_wait(run, terminal, text, absent=False, timeout=20, allow_exit=False, 
         x, y = capture.frame.cursor
         if y >= len(lines):
             return False
-        line = lines[y].rsplit(VERTICAL_DIVIDER, 1)[-1].strip()
-        return capture.frame.visible and line == "›"
+        line = re.split(DIVIDER_PATTERN, lines[y])[-1].strip()
+        return capture.frame.visible and line in ("›", ">")
     terminal.wait(ready,
                   f"{'absence of ' if absent else ''}{text!r}", timeout, allow_exit)
 
@@ -2962,7 +2963,7 @@ def frame_chat_ready(plain, witness=None, empty=False):
 
     def is_rule(line):
         line = line.strip()
-        return bool(line) and (set(line) <= {HORIZONTAL_RULE} or set(line) <= {"-"})
+        return bool(line) and any(set(line) == {glyph} for glyph in RULE_GLYPHS)
 
     for index in range(max(1, len(lines) - 6), len(lines) - 1):
         def cell_width(text):
@@ -2971,7 +2972,7 @@ def frame_chat_ready(plain, witness=None, empty=False):
 
         divider = None
         if not is_rule(lines[index]):
-            for separator in (VERTICAL_DIVIDER, "|"):
+            for separator in DIVIDER_GLYPHS:
                 left, found, right = lines[index].partition(separator)
                 if found and is_rule(right):
                     divider = (cell_width(left), separator)
@@ -3095,7 +3096,7 @@ def frame_upgrade_journey(run, terminal, state, fixture, out, size):
         gate.release.set()
         selected = run.home / ".local/bin/rui"
         quiet = {"expect_next": {"Settings": version},
-                 "expect_regex": [rf"^\s*\d+(?:\.\d+)? (?:MB|GB)\s+{re.escape(version)}\s*(?:{VERTICAL_DIVIDER}.*)?$"]}
+                 "expect_regex": [rf"^\s*\d+(?:\.\d+)? (?:MB|GB)\s+{re.escape(version)}\s*(?:{DIVIDER_PATTERN}.*)?$"]}
         terminal.wait(lambda c: selected.resolve() != run.home / ".local/lib/rui/old/bin/rui"
                       and frame_row_failure(quiet, c.completed) is None
                       and "Updating…" not in c.completed and "Update failed" not in c.completed

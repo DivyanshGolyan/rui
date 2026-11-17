@@ -224,6 +224,18 @@ class UpgradeEmptyChatTest(unittest.TestCase):
         self.assertEqual(readiness, [False, False, True])
         self.assertEqual(self.screen.observe.call_count, 3)
 
+    def test_legacy_and_stitch_dividers_preserve_overview_and_upgrade_readiness(self):
+        for divider in self.fixture.DIVIDER_GLYPHS:
+            with self.subTest(divider=divider):
+                sidebar = f"+ New Session {divider} chat\nSettings {divider} model\n"
+                with self.assertRaises(NotReady):
+                    self.hidden(sidebar + f"{divider} › unsent draft")
+                self.screen.observe = lambda: f"Settings {divider} chat\n 38 MB 0.76.0 {divider} model"
+                self.assertIn("0.76.0", self.screen.quiet_version("0.76.0"))
+                self.case.json.side_effect = [copy.deepcopy(self.report), copy.deepcopy(self.listing)]
+                self.screen.observe = lambda: f"{divider} gpt-6-luna · low"
+                self.assertIn("gpt-6-luna", self.screen.empty_chat(self.case, self.session))
+
     def test_hidden_projection_does_not_weaken_stored_identity_or_zero_messages(self):
         frame = "+ New Session\nSettings"
         self.case.json.reset_mock()

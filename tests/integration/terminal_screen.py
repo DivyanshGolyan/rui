@@ -10,6 +10,10 @@ import weakref
 
 HORIZONTAL_RULE = "┄"
 VERTICAL_DIVIDER = "┆"
+RULE_GLYPHS = (HORIZONTAL_RULE, "─", "-")
+DIVIDER_GLYPHS = (VERTICAL_DIVIDER, "│", "|")
+RULE_PATTERN = "[" + re.escape("".join(RULE_GLYPHS)) + "]"
+DIVIDER_PATTERN = "[" + re.escape("".join(DIVIDER_GLYPHS)) + "]"
 
 LIMIT = 1024 * 1024
 RESIZE_RESET = b"\x1b[H\x1b[m\x1b[J\x1b[?25l"
@@ -447,7 +451,7 @@ class ScreenCapture:
         cells = self.completed_cells[cursor.y]
         origin = 0
         if "".join(cell.data for cell in cells[:2]) not in (" ›", " >"):
-            origin = next((at + 1 for at, cell in enumerate(cells[:cursor.x]) if cell.data == VERTICAL_DIVIDER), 0)
+            origin = next((at + 1 for at, cell in enumerate(cells[:cursor.x]) if cell.data in DIVIDER_GLYPHS), 0)
         line = "".join(cell.data for cell in cells[origin:]).rstrip()
         margin = 1 if line.startswith(" ") and not prompt.startswith(" ") else 0
         matches = line[margin:] == (prompt + unicodedata.normalize("NFC", text)).rstrip()

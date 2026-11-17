@@ -395,6 +395,30 @@ class FramesTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "empty_composer"):
                 self.helper["validate_scenario"](data)
 
+    def test_frame_glyph_owner_accepts_legacy_stitch_and_ascii_in_both_layouts(self):
+        from terminal_screen import DIVIDER_GLYPHS, RULE_GLYPHS
+        wait = self.helper["frame_wait"]
+        ready = self.helper["frame_chat_ready"]
+        for rule, divider in zip(RULE_GLYPHS, DIVIDER_GLYPHS):
+            for split in (False, True):
+                prefix = f"sidebar {divider} " if split else ""
+                prompt = ">" if divider == "|" else "›"
+                samples = [f"{prefix}{prompt} witness\n{prefix}{prompt}",
+                           f"{prefix}{prompt} witness\n{prefix}{prompt} draft"]
+                frames = [committed(text)._replace(cursor=Cursor(len(prefix) + len(prompt), 1), visible=True)
+                          for text in samples]
+                outcomes = []
+                terminal = types.SimpleNamespace(wait=lambda predicate, *_args: outcomes.extend(
+                    predicate(types.SimpleNamespace(completed=frame.text, frame=frame)) for frame in frames))
+                with self.subTest(rule=rule, divider=divider, split=split):
+                    wait(None, terminal, "witness", empty_composer=True)
+                    self.assertEqual(outcomes, [True, False])
+                    chat = "\n".join([prefix + "witness", prefix + rule * 12,
+                                       prefix + prompt + " Type a task", prefix + rule * 12,
+                                       prefix + "model · low"])
+                    self.assertTrue(ready(chat, "witness", empty=True))
+                    self.assertFalse(ready(chat.replace("Type a task", "draft"), empty=True))
+
     def test_dim_expectations_validate_and_assert_saved_cells_not_text_alone(self):
         for value in (None, {}, [{"text": "", "dim": True}], [{"text": "Row", "dim": 1}],
                       [{"text": "Row", "dim": True, "min_columns": False}],
