@@ -151,17 +151,7 @@ def prove_case(root, name):
         else:
             wait(lambda: fixture.completed_observation(store, "message", deadline=deadline), "model continuation after tool outcome")
             assert fixture.read_result(store, "message", deadline=deadline) == b"continued"
-        if expected == "succeeded":
-            # Both byte-only Action reads and Full reports refuse compound parts.
-            # Check the sole canonical Resolution and the typed provider output.
-            def image_resolution():
-                saved = rows(store, "SELECT resolution_code,acceptance_position FROM action_operation WHERE session_ref=? AND action_id=?", (session, int(action)))
-                assert len(saved) == 1, saved
-                return saved[0] if saved[0][0] is not None else None
-
-            final = wait(image_resolution, "saved image Resolution")
-            assert final[0] == expected and final[1] > 0, final
-        else:
+        if expected != "succeeded":
             report = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
             actions = report["full"]["actions"]
             assert len(actions) == 1, report
@@ -195,6 +185,12 @@ def prove_case(root, name):
         host_process.wait_for_execution_release(
             lambda remaining: fixture.command("session", "inspect", "--store", store, "--session", session,
                                               timeout=remaining)["execution"], deadline)
+        if expected == "succeeded":
+            # Byte-only readers refuse parts. The provider proves typed delivery;
+            # inspect the committed Resolution after releasing the Store lease.
+            fixture.stop_host(processes.pop())
+            saved = rows(store, "SELECT resolution_code,acceptance_position FROM action_operation WHERE session_ref=? AND action_id=?", (session, int(action)))
+            assert len(saved) == 1 and saved[0][0] == expected and saved[0][1] > 0, saved
         print("read_image " + name + ": " + expected)
     finally:
         fixture.dispose_dispatch(processes, endpoints, [])
