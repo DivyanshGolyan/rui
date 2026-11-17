@@ -6336,7 +6336,6 @@ test "session list has exactly one noninteractive gap only between both pin grou
                     seen += 1;
                 },
                 .empty => try std.testing.expectEqual(@as(usize, 0), n),
-                else => return error.UnexpectedListItem,
             }
             const sessions_before = @min(n, line -| @intFromBool(both and line > pins));
             try std.testing.expectEqual(n - sessions_before, sessionsFrom(&state, line));
