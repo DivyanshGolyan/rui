@@ -16,7 +16,7 @@ def suite(skips: list[str], start: str = "tests/ci") -> unittest.TestSuite:
             elif not test.id().startswith(prefixes):
                 yield test
 
-    return unittest.TestSuite(kept(unittest.defaultTestLoader.discover(start)))
+    return unittest.TestSuite(kept(unittest.TestLoader().discover(start)))
 
 
 def main(argv=None) -> int:
