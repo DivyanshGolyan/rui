@@ -282,6 +282,14 @@ Verify effective spill/cache/heap enforcement, not merely setter success.
 Use the exclusive WAL and `FULL` sync of [Store durability](#store-durability), mmap off, file-backed temporary work, immediate `busy_timeout=0`, foreign keys, defensive/untrusted-schema configuration and disabled unused attachment/extension/trigger/worker features.
 Required features need concrete consumers.
 
+#### Compound Content values
+
+A value-holding owner names one Content row. Its form is bytes or parts; existing rows and every value containing exactly one Text part use bytes, with their existing identity and semantic digest. A parts value is public and holds one to 1,500 ordered Text or Image parts, except that a single Text is never a parts value. Each part names ordinary public bytes Content. A saved refusal retains its original input as primary content and any diagnostic as secondary content; legacy refusals whose input was not retained leave it unavailable.
+
+The parts payload is the canonical manifest: each entry contains its kind, byte length, digest and kind metadata, followed by the entry count. Its identity uses the `rui/input-parts/v1` domain and is the existing ordered input digest. The id-only `content_part` index holds each part alive with foreign keys; the manifest alone owns ordering, kind, metadata and count. Saving looks up the manifest first and owns all parts and index writes in the producer's transaction. A Cursor certifies the manifest digest and canonical decoding, contiguous index ordinals, and each part's public byte form, length and digest before yielding any part. Inconsistency fences the Store.
+
+Readers that cannot project parts verify the complete value before returning `InputPartsNotSupported`. Public byte identity and metadata routes return `ContentIsParts` for a parts value. Until request lowering accounts for images, context size counts the manifest bytes, and parts values do not reach providers. This representation keeps existing owner references and byte accounting, avoids per-Message association reads on text, and keeps kind metadata out of SQL; a new kind extends the manifest codec rather than the schema.
+
 #### Canonical content reads and retention
 
 A canonical Content Reference is a durable identity, not an open file or transferable SQLite handle.

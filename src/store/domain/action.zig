@@ -143,6 +143,10 @@ pub fn stoppedSql(comptime session: []const u8, comptime selected: []const u8) [
         ") OR EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=" ++ session ++ " AND owed.settled=0))";
 }
 
+pub fn messageDeclinesApprovalSql(comptime action: []const u8) []const u8 {
+    return "EXISTS(SELECT 1 FROM message_admission m WHERE m.session_ref=" ++ action ++ ".session_ref AND m.source_action_id IS NULL AND m.admission_position>" ++ action ++ ".approval_position)";
+}
+
 pub fn actionStoppedSql(comptime action: []const u8, comptime operation: []const u8) []const u8 {
     return "(" ++ stoppedSql(action ++ ".session_ref", selectedStopSql(action, operation)) ++ " OR EXISTS(SELECT 1 FROM action_stop direct_stop WHERE direct_stop.target_action_id=" ++ action ++ ".action_id))";
 }
@@ -180,16 +184,23 @@ const next_action_attempt = rsql.Read(.{
 pub const next_action_attempt_sql = next_action_attempt.sql;
 
 const next_core_action = rsql.Read(.{
-    .sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref AS session," ++ coreCaseSql(1) ++
+    .compound = true,
+    .sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref AS session,0 AS auto_deny," ++ coreCaseSql(1) ++
         "FROM action_operation action @index(action_operation_executable) JOIN model_operation operation " ++
         "ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
         "JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
         "AND (active.outcome_code IS NULL OR action.background_position IS NOT NULL) AND NOT " ++ actionStoppedSql("action", "operation") ++ " AND " ++ coreCallSql(1) ++ " " ++
         "AND NOT EXISTS(SELECT 1 FROM action_stop waiting JOIN action_operation target ON target.action_id=waiting.target_action_id WHERE waiting.source_action_id=action.action_id AND target.resolution_code IS NULL) " ++
-        "ORDER BY action.action_id LIMIT 1",
+        "UNION ALL SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref AS session,1 AS auto_deny,'read_action' AS tool " ++
+        "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+        "JOIN turn active ON active.turn_id=operation.turn_id JOIN session s ON s.session_ref=action.session_ref " ++
+        "WHERE action.authorized=0 AND action.resolution_code IS NULL AND action.approval_position IS NOT NULL " ++
+        "AND ((active.outcome_code IS NULL AND active.operation_id=operation.operation_id) OR action.background_position IS NOT NULL) AND NOT " ++ actionStoppedSql("action", "operation") ++ " " ++
+        "AND " ++ messageDeclinesApprovalSql("action") ++ " " ++
+        "ORDER BY auto_deny DESC,action_id LIMIT 1",
     .Args = CoreNames.Args(struct {}),
-    .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: Bounded(session_id.max_reference_bytes), tool: CoreTool },
+    .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: Bounded(session_id.max_reference_bytes), auto_deny: bool, tool: CoreTool },
     .cardinality = .optional,
 });
 
@@ -220,6 +231,7 @@ pub const CoreWork = union(enum) {
     stop: OwedStop,
     ending: OwedEnding,
     forward: u64,
+    auto_deny: struct { action_id: u64, session: Bounded(session_id.max_reference_bytes) },
     action: CoreActionInput,
     mcp: ReadyAction,
 };
@@ -335,6 +347,7 @@ pub fn nextCoreWork(a: anytype, capacity: Capacity) !?CoreWork {
             return .{ .mcp = .{ .action_id = call.action_id.get(), .runner = .mcp, .background = call.background, .server = call.server } };
     }
     const found = next orelse return null;
+    if (found.auto_deny) return .{ .auto_deny = .{ .action_id = found.action_id.get(), .session = found.session } };
     return .{ .action = .{
         .binding = .{ .turn_id = found.turn_id.get(), .parent_operation_id = found.parent_operation_id.get(), .action_id = found.action_id.get() },
         .tool = found.tool,
@@ -608,21 +621,36 @@ pub fn actionSupersededByStop(a: anytype, binding: ActionAttemptBinding) !?Super
 }
 
 const dispatch_facts = rsql.Read(.{
-    .sql = "SELECT operation.turn_id," ++ actionStoppedSql("action", "operation") ++ " AS stopped " ++
+    .sql = "SELECT operation.turn_id,coalesce((SELECT max(m.admission_id) FROM message_admission m WHERE m.session_ref=action.session_ref),0) AS message_cutoff," ++ actionStoppedSql("action", "operation") ++ " AS stopped " ++
         "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql ++ " AND action.resolution_code IS NULL",
     .Args = struct { action_id: u64, parent_operation_id: u64 },
-    .Row = struct { turn_id: rsql.Positive, stopped: bool },
+    .Row = struct { turn_id: rsql.Positive, message_cutoff: u64, stopped: bool },
     .cardinality = .optional,
 });
 
-pub fn validateActionDispatch(a: anytype, binding: ActionAttemptBinding) !void {
+pub fn validateActionDispatch(a: anytype, binding: ActionAttemptBinding) !u64 {
     var facts: dispatch_facts.Result = undefined;
     a.read(dispatch_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, &facts);
     try a.run();
     const found = facts orelse return error.StaleActionAttemptBinding;
     if (found.turn_id.get() != binding.turn_id) return error.StaleActionAttemptBinding;
     if (found.stopped) return error.SupersededByControl;
+    return found.message_cutoff;
+}
+
+const message_after_launch = rsql.Read(.{
+    .sql = "SELECT EXISTS(SELECT 1 FROM message_admission m WHERE m.session_ref=action.session_ref AND m.admission_id>?2 AND m.turn_id IS NULL AND m.source_action_id IS NULL) AS present FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id WHERE action.action_id=?1 AND action.background_position IS NULL AND action.resolution_code IS NULL AND active.outcome_code IS NULL AND NOT " ++ actionStoppedSql("action", "operation"),
+    .Args = struct { action_id: u64, cutoff: u64 },
+    .Row = struct { present: bool },
+    .cardinality = .optional,
+});
+
+pub fn messageAfterLaunch(a: anytype, binding: ActionAttemptBinding, cutoff: u64) !bool {
+    var result: message_after_launch.Result = undefined;
+    a.read(message_after_launch, .{ .action_id = binding.action_id, .cutoff = cutoff }, &result);
+    try a.run();
+    return if (result) |row| row.present else false;
 }
 
 const settle_facts = rsql.Read(.{

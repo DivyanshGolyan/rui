@@ -182,8 +182,9 @@ def prove_reused_session(state):
     )
     fast_command = f"printf fast >> {shlex.quote(str(settlement_order))}"
     retry_failure_release = threading.Event()
+    first_calls_release = threading.Event()
     responses = [
-        fixture.sse_tool_calls(
+        (fixture.ResponseSpec(fixture.sse_tool_calls(
             "reuse-calls",
             [
                 (
@@ -199,7 +200,7 @@ def prove_reused_session(state):
                 ),
                 ("bash", "reuse-invalid-call", '{"cmd":7}'),
             ],
-        ),
+        ), {}), first_calls_release),
         fixture.sse_answer(
             "reuse-first-answer",
             "reuse-first-reasoning",
@@ -243,13 +244,7 @@ def prove_reused_session(state):
             state, store, "reuse-first", session, "first work"
         )
         reuse_submitted = True
-        actions = fixture.wait_for(
-            lambda: actions_for(store, session, 2),
-            "two permission-blocked reused-Session Actions",
-        )
-        actions_by_ordinal = {action["call_ordinal"]: action for action in actions}
-        assert set(actions_by_ordinal) == {"0", "2"}, actions
-
+        fixture.wait_for(lambda: len(endpoint.requests) == 1, "first streaming model request")
         queued_admission = fixture.message(
             state,
             store,
@@ -257,6 +252,13 @@ def prove_reused_session(state):
             session,
             "queued during permission",
         )
+        first_calls_release.set()
+        actions = fixture.wait_for(
+            lambda: actions_for(store, session, 2),
+            "two permission-blocked reused-Session Actions",
+        )
+        actions_by_ordinal = {action["call_ordinal"]: action for action in actions}
+        assert set(actions_by_ordinal) == {"0", "2"}, actions
         queued = fixture.observe(store, "reuse-queued")
         assert queued["state"] == "waiting_for_permission" and "binding" not in queued, queued
         assert queued["work"]["state"]["kind"] == "approval", queued
@@ -526,6 +528,7 @@ def prove_reused_session(state):
         assert fixture.read_result(store, "reuse-second") == b"second-turn-answer"
     finally:
         active_failure = sys.exception()
+        first_calls_release.set()
         retry_failure_release.set()
         slow_release.touch(exist_ok=True)
         cleanup_gate.unlink(missing_ok=True)

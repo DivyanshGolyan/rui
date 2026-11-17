@@ -72,6 +72,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../domain/command.zig"),
         @embedFile("../domain/configuration.zig"),
         @embedFile("../domain/content.zig"),
+        @embedFile("../domain/content_parts.zig"),
         @embedFile("../domain/find_tools.zig"),
         @embedFile("../domain/historical.zig"),
         @embedFile("../domain/history_floor.zig"),
@@ -602,6 +603,9 @@ test "each Store entry point takes its round budget on its common path" {
             try storage.withActionDispatchHandoff(action, {}, Launch.run);
             meter.stop(.withActionDispatchHandoff);
             meter.start();
+            _ = try storage.messageAfterActionLaunch(action, 0);
+            meter.stop(.messageAfterActionLaunch);
+            meter.start();
             try std.testing.expect(try storage.actionSupersededByStop(action) == null);
             meter.stop(.actionSupersededByStop);
             meter.start();
@@ -620,7 +624,9 @@ test "each Store entry point takes its round budget on its common path" {
             var deny: protocol.PermissionDecisionCommand = .{ .action_id = denied, .decision = .deny };
             try deny.key.set("budget-deny");
             try deny.session.set(session.slice());
-            try std.testing.expect(storage.decidePermission(&deny, .{}) == .accepted);
+            meter.start();
+            try std.testing.expect(storage.declineForMessage(&deny, .{}) == .accepted);
+            meter.stop(.declineForMessage);
             meter.start();
             try std.testing.expect(!try storage.recoverOneUncertainAction(ActiveOperationFilter.empty()));
             meter.stop(.recoverOneUncertainAction);
