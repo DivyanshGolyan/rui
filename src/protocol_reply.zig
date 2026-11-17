@@ -157,7 +157,7 @@ pub const ActivityPage = struct {
         const Items = JsonArray(Item, 16);
         const CallEntry = struct { operation: JsonString(20), ordinal: JsonString(20), presentation: JsonToolPresentation };
         const Calls = JsonArray(CallEntry, 3);
-        const Work = struct { read_version: JsonString(protocol.SinceToken.max_bytes), state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), last_line: ?struct { position: JsonString(20), text: ?JsonString(session_list.max_last_line_bytes) } = null, revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
+        const Work = struct { creator: ?JsonString(protocol.session_id_bytes), read_version: JsonString(protocol.SinceToken.max_bytes), state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), last_line: ?struct { position: JsonString(20), text: ?JsonString(session_list.max_last_line_bytes) } = null, revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
         const Queued = struct { count: JsonString(20), oldest_position: JsonString(20), newest_admission: JsonString(20), newest_position: JsonString(20) };
         const Wire = struct { version: JsonString(8), type: JsonString(32), delta: JsonEnum(enum { full }), since: ?JsonString(SessionToken.max_bytes), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, queued: Queued, work: Work };
         var storage: [2 * activity_reply.max_page_bytes]u8 = undefined;
@@ -297,6 +297,10 @@ pub const ActivityPage = struct {
         }
         if ((work.turn == null) != (work.operation == null)) return error.InvalidActivityPage;
         if (wire.work.last_line) |line| facts.last_line = .{ .position = try id(line.position, false), .text = if (line.text) |text| text.value else null };
+        if (wire.work.creator) |creator| {
+            if (!protocol.validSessionId(creator.slice())) return error.InvalidActivityPage;
+            facts.creator = creator.value;
+        }
         facts.read_version = protocol.SinceToken.parse(wire.work.read_version.slice()) catch return error.InvalidActivityPage;
         facts.revision = try id(wire.work.revision, false);
         if (!std.fs.path.isAbsolute(wire.work.workspace.slice())) return error.InvalidActivityPage;
@@ -1366,6 +1370,7 @@ pub const SessionListPage = struct {
                 pin_order: ?JsonString(20),
                 reference: JsonString(protocol.max_session_bytes),
                 parent: ?JsonString(protocol.session_id_bytes),
+                creator: ?JsonString(protocol.session_id_bytes),
                 workspace: JsonString(protocol.max_workspace_bytes),
                 provider: JsonEnum(protocol.Provider),
                 model: JsonString(protocol.max_model_bytes),
@@ -1387,6 +1392,7 @@ pub const SessionListPage = struct {
         fn decode(wire: anytype) !Row {
             if (!protocol.validSessionId(wire.reference.slice()) or wire.workspace.value.len == 0 or wire.model.value.len == 0) return error.InvalidCharacter;
             if (wire.parent) |parent| if (!protocol.validSessionId(parent.slice()) or parent.eql(wire.reference.slice())) return error.InvalidCharacter;
+            if (wire.creator) |creator| if (!protocol.validSessionId(creator.slice())) return error.InvalidCharacter;
             if (wire.label) |label| if (!protocol.validLabel(label.slice())) return error.InvalidCharacter;
             var row: Row = .{
                 .read_version = try protocol.SinceToken.parse(wire.read_version.slice()),
@@ -1394,6 +1400,7 @@ pub const SessionListPage = struct {
                 .pin_order = if (wire.pin_order) |rank| try ActivityPage.id(rank, false) else null,
                 .reference = wire.reference.value,
                 .parent = if (wire.parent) |parent| parent.value else null,
+                .creator = if (wire.creator) |creator| creator.value else null,
                 .workspace = wire.workspace.value,
                 .provider = wire.provider.value,
                 .model = wire.model.value,
@@ -2107,6 +2114,33 @@ test "activity page preserves the canonical row preview with its work" {
     }
 }
 
+test "activity page creator is required nullable canonical provenance" {
+    var facts: protocol.ActivityFacts = .{ .end = 0, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    try facts.work.workspace.set("/work");
+    var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+    for ([_]?[]const u8{ null, "cr3at0" }) |creator| {
+        facts.work.creator = if (creator) |reference| try .from(reference) else null;
+        var out = std.Io.Writer.fixed(&buffer);
+        try activity_reply.writePage(&out, &facts);
+        const parsed = try ActivityPage.parse(out.buffered(), .{});
+        if (creator) |reference| {
+            try std.testing.expectEqualStrings(reference, parsed.facts.work.creator.?.slice());
+        } else try std.testing.expect(parsed.facts.work.creator == null);
+    }
+    facts.work.creator = null;
+    var out = std.Io.Writer.fixed(&buffer);
+    try activity_reply.writePage(&out, &facts);
+    for ([_][]const u8{ "", "\"creator\":0,", "\"creator\":{},", "\"creator\":\"\",", "\"creator\":\"short\",", "\"creator\":\"abcdefg\",", "\"creator\":\"k7m2qX\",", "\"creator\":\"k7m2qi\",", "\"creator\":null,\"creator\":null," }) |replacement| {
+        const malformed = try std.mem.replaceOwned(u8, std.testing.allocator, out.buffered(), "\"creator\":null,", replacement);
+        defer std.testing.allocator.free(malformed);
+        try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(malformed, .{}));
+    }
+    const escaped = try std.mem.replaceOwned(u8, std.testing.allocator, out.buffered(), "\"creator\":null", "\"creator\":\"cr3at\\u0030\"");
+    defer std.testing.allocator.free(escaped);
+    const parsed = try ActivityPage.parse(escaped, .{});
+    try std.testing.expectEqualStrings("cr3at0", parsed.facts.work.creator.?.slice());
+}
+
 test "activity page requires a canonical read version" {
     var facts: protocol.ActivityFacts = .{ .end = 0, .work = .{ .revision = 1 } };
     try facts.work.workspace.set("/work");
@@ -2664,9 +2698,9 @@ test "canonical failure classifier bounds deep wide and escaped maximum replies"
 
 const testing_list_facts = "],\"delta\":\"full\",\"since\":\"abababababababababababababababab.42\",\"next\":";
 const testing_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null" ++ testing_row_details;
-const testing_row_details = ",\"parent\":null,\"label\":null,\"created_at\":\"1\",\"revision\":\"1\",\"end\":\"0\",\"first_message\":null,\"last_line\":null," ++
+const testing_row_details = ",\"parent\":null,\"creator\":null,\"label\":null,\"created_at\":\"1\",\"revision\":\"1\",\"end\":\"0\",\"first_message\":null,\"last_line\":null," ++
     "\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null},\"peers\":{\"from_person_at\":null}";
-const testing_started_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\",\"revision\":\"1\",\"end\":\"9\"," ++
+const testing_started_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":null,\"creator\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\",\"revision\":\"1\",\"end\":\"9\"," ++
     "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}," ++
     "\"last_line\":null,\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1792925300\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null},\"peers\":{\"from_person_at\":\"1792925001\"}";
 
@@ -2677,7 +2711,7 @@ test "Session list facts own complete rows and render semantic output after scra
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
     const digest = @as([64]u8, @splat('a'));
-    const facts = "\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"label\":\"Review \\u0050R\",\"created_at\":\"1792925000\",\"revision\":\"3\",\"end\":\"9\"," ++
+    const facts = "\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review \\u0050R\",\"created_at\":\"1792925000\",\"revision\":\"3\",\"end\":\"9\"," ++
         "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":{\"session\":\"p33rs1\"},\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ digest ++ "\"}}," ++
         "\"last_line\":{\"position\":\"8\",\"text\":\"Saved preview\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null}," ++
         "\"peers\":{\"from_person_at\":\"1792925200\"}";
@@ -2691,6 +2725,7 @@ test "Session list facts own complete rows and render semantic output after scra
     const row = &page.rows[0];
     try std.testing.expectEqualStrings("k7m2qx", row.reference.slice());
     try std.testing.expectEqualStrings("p33rs1", row.parent.?.slice());
+    try std.testing.expectEqualStrings("cr3at0", row.creator.?.slice());
     try std.testing.expectEqualStrings("/w\nµ", row.workspace.slice());
     try std.testing.expectEqualStrings("Review PR", row.label.?.slice());
     try std.testing.expectEqual(@as(u64, 1792925000), row.created_at);
@@ -2705,7 +2740,7 @@ test "Session list facts own complete rows and render semantic output after scra
     var writer = std.Io.Writer.fixed(&output);
     try page.writeJson(&writer);
     try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"reference\":\"k7m2qx\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
-        "\"parent\":\"p33rs1\",\"label\":\"Review PR\"" ++ facts["\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"label\":\"Review \\u0050R\"".len..] ++ "}" ++ testing_list_facts ++ "null}", writer.buffered());
+        "\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review PR\"" ++ facts["\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review \\u0050R\"".len..] ++ "}" ++ testing_list_facts ++ "null}", writer.buffered());
     var exhausted = std.Io.Writer.fixed(&.{});
     try std.testing.expectError(error.WriteFailed, page.writeJson(&exhausted));
 }
@@ -2850,6 +2885,15 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
         .{ "\"pin_order\":null", "\"pin_order\":\"0\"" },
         .{ "\"pin_order\":null", "\"pin_order\":1" },
         .{ "\"pin_order\":null", "\"pin_order\":\"9223372036854775808\"" },
+        .{ ",\"creator\":null", "" },
+        .{ "\"creator\":null", "\"creator\":0" },
+        .{ "\"creator\":null", "\"creator\":{}" },
+        .{ "\"creator\":null", "\"creator\":\"\"" },
+        .{ "\"creator\":null", "\"creator\":\"k7m2qX\"" },
+        .{ "\"creator\":null", "\"creator\":\"short\"" },
+        .{ "\"creator\":null", "\"creator\":\"abcdefg\"" },
+        .{ "\"creator\":null", "\"creator\":\"k7m2qi\"" },
+        .{ "\"creator\":null", "\"creator\":null,\"creator\":null" },
         .{ "\"parent\":null", "\"parent\":\"k7m2qX\"" },
         .{ "\"parent\":null", "\"parent\":\"k7m2qx\"" },
         .{ "\"parent\":null", "\"parent\":\"abcdefg\"" },
@@ -3041,6 +3085,8 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
     const largest = std.math.maxInt(i64);
     var maximal: protocol.SessionRow = .{ .read_version = .{ .instance = @splat(0xab), .generation = std.math.maxInt(u64) }, .archive_state = .archiving, .provider = .codex, .tools = try .of(&.{"bash"}), .permission_mode = .bypass, .label = .{}, .created_at = largest, .revision = largest, .end = largest };
+    maximal.creator = .{};
+    try maximal.creator.?.set("zzzzzz");
     maximal.parent = .{};
     try maximal.parent.?.set("zzzzzz");
     try maximal.workspace.set(&workspace);

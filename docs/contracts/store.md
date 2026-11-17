@@ -68,6 +68,10 @@ Unpin and archive intent clear that pointer with a typed Session-head update, re
 The SQLite step preserves all Commands and their references while widening the kind CHECK.
 The operator-run MySQL step resolves the exact old kind CHECK in the current database catalog, because its generated name can differ between fresh and previously migrated Stores.
 An absent or ambiguous match refuses before DDL; unrelated checks and foreign keys remain unchanged.
+The step to 80 adds nullable `session.creator_ref` as a foreign key to `session.session_ref`, with a CHECK excluding self-creation.
+Both engine migrations backfill it from existing `parent_ref` values and leave unknown historical detached creators null.
+Validated creation writes this immutable provenance for attached and detached children; lifecycle attachment remains in `parent_ref`.
+[Session provenance](sessions.md#session-provenance) owns the distinction and its public meaning.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.

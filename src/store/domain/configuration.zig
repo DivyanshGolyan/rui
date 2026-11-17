@@ -443,7 +443,7 @@ pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, configuration:
     if (failure) |refused| return refused.code;
     reads.next.provider = reads.inherited.provider;
     reads.workspace_digest = store_core.workspaceDigest(reads.next.workspace.slice());
-    if (reads.attach_parent) reads.parent = configuration.parent.value.slice()[0..session_id.bytes].*;
+    reads.creator = configuration.parent.value.slice()[0..session_id.bytes].*;
     return null;
 }
 
@@ -468,7 +468,7 @@ pub const ConfigurationReads = struct {
     loaded_tools: ?tool_set.Selection = null,
     saved_tools: command_input.ToolsField = undefined,
     saved_loaded: command_input.ToolsField = undefined,
-    parent: ?[session_id.bytes]u8 = null,
+    creator: ?[session_id.bytes]u8 = null,
     inherits_parent: bool = false,
     attach_parent: bool = true,
     inherited: parent_settings.Row = undefined,
@@ -500,8 +500,8 @@ const creation_facts = rsql.Read(.{
 
 const insert_session = rsql.Write(.{
     .sql = "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,next_position," ++
-        "provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at,created_seq,workspace_key,parent_ref,loaded_tool_set_id) " ++
-        "VALUES(@session(?1),?2,?3,?4,?5,?6,?7,1,1,?8,?9,?10,?11,?12,?13,?14,@now,?15,?16,?17,?18)",
+        "provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at,created_seq,workspace_key,parent_ref,loaded_tool_set_id,creator_ref) " ++
+        "VALUES(@session(?1),?2,?3,?4,?5,?6,?7,1,1,?8,?9,?10,?11,?12,?13,?14,@now,?15,?16,?17,?18,?19)",
     .Args = struct {
         session: rsql.SessionHead,
         workspace: []const u8,
@@ -521,11 +521,12 @@ const insert_session = rsql.Write(.{
         workspace_key: u64,
         parent: ?Bounded(session_id.bytes),
         loaded_tool_set_id: ?u64,
+        creator: ?Bounded(session_id.bytes),
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentConfiguration, workspace_digest: *const [32]u8, created_seq: u64, parent: ?*const [session_id.bytes]u8) void {
+pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentConfiguration, workspace_digest: *const [32]u8, created_seq: u64, parent: ?*const [session_id.bytes]u8, creator: ?*const [session_id.bytes]u8) void {
     var parent_ref: ?Bounded(session_id.bytes) = null;
     if (parent) |reference| {
         parent_ref = .{};
@@ -550,6 +551,7 @@ pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentCon
         .workspace_key = head.workspace_key.get(),
         .parent = parent_ref,
         .loaded_tool_set_id = next.loaded_tool_set_id,
+        .creator = if (creator) |reference| Bounded(session_id.bytes).from(reference) catch unreachable else null,
     });
 }
 
@@ -975,7 +977,8 @@ fn insertCreated(a: anytype, request: *const Request, reads: *ConfigurationReads
         .workspace_key = if (reads.creation.workspace_key) |key| key else .of(created_seq),
         .next_position = .of(1),
     };
-    insertSession(a, head, &reads.next, &reads.workspace_digest, created_seq, if (reads.parent) |*parent| parent else null);
+    const creator = if (reads.creator) |*reference| reference else null;
+    insertSession(a, head, &reads.next, &reads.workspace_digest, created_seq, if (reads.attach_parent) creator else null, creator);
     try accept(request, reads, head, &reads.reference);
     if (try skills_domain.Appending.initial(head, request.initial_skills)) |appending| {
         reads.step.applying.catalog = appending;
