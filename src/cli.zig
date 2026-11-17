@@ -4589,6 +4589,7 @@ test "Host launch owner returns one result for terminal and screen across its wh
                         try std.testing.expectEqual(fixture.reads + 1, fixture.observations);
                     }
                     if (case.scenario == .competitor_pending) {
+                        try std.testing.expect(result.outcome == .ready);
                         try std.testing.expect(result.outcome.ready.adopted);
                         try std.testing.expect(fixture.pauses > 0);
                         try std.testing.expectEqual(fixture.reads, fixture.observations);
