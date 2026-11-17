@@ -131,6 +131,7 @@ test {
     _ = @import("store/tests/access.zig");
     _ = @import("store/tests/access_rules.zig");
     _ = @import("store/tests/action.zig");
+    _ = @import("store/tests/action_parts.zig");
     _ = @import("store/tests/activity.zig");
     _ = @import("store/tests/agent.zig");
     _ = @import("store/tests/compaction.zig");

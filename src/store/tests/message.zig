@@ -914,7 +914,9 @@ test "compound Message retains ordered input across replay and saved refusal" {
                 position = item.position;
                 if (item.kind == .tool_results) break;
             }
-            try std.testing.expectError(error.InputPartsNotSupported, action_history.nextToolResult());
+            const compound_result = (try action_history.nextToolResult()).?;
+            try std.testing.expect(compound_result.input != null);
+            try std.testing.expect(compound_result.output == null);
             try std.testing.expect(!storage.isFenced());
 
             // One captured Text has the same identity and replay as the scalar path.

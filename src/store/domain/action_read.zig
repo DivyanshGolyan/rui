@@ -38,6 +38,10 @@ pub fn actionRead(a: anytype, request: *const read.Request, out: *read.Read) !vo
         if (request.offset != 0) return error.InvalidCursor;
         return;
     };
+    if (final.value.reference == .parts) {
+        try @import("content_parts.zig").verify(a, final.value);
+        return error.InputPartsNotSupported;
+    }
     const reference = final.location.reference;
     if (request.offset > reference.length) return error.InvalidCursor;
     out.status = .{ .resolved = .{
@@ -62,6 +66,7 @@ pub fn actionRead(a: anytype, request: *const read.Request, out: *read.Read) !vo
 /// background final input rendering. Both stream its existing content.
 pub const SavedResolution = struct {
     resolution: read.Resolution,
+    value: content.Value,
     location: content.ContentLocation,
 };
 
@@ -79,9 +84,11 @@ fn resolution(a: anytype, row: metadata.Row) !?SavedResolution {
     };
     const content_id = (row.resolution_content_id orelse return error.CorruptStore).get();
     const info: content.content_metadata.Row = .{ .byte_length = row.length orelse return error.CorruptStore, .digest = row.digest orelse return error.CorruptStore, .private = row.private orelse return error.CorruptStore, .form = row.form orelse return error.CorruptStore };
-    _ = try @import("content_parts.zig").publicMetadata(a, content_id, &info);
+    if (info.private) return error.CorruptStore;
+    const value = try content.Value.of(content_id, info.form, info.byte_length, info.digest);
     const reference: content.ContentReference = .{ .length = info.byte_length, .digest = info.digest };
     return .{
+        .value = value,
         .resolution = .{ .position = position.get(), .code = row.resolution_code orelse return error.CorruptStore, .content = .{ .length = reference.length, .digest = reference.digest } },
         .location = .{ .store = a.store, .content_id = @intCast((row.resolution_content_id orelse return error.CorruptStore).get()), .reference = reference },
     };

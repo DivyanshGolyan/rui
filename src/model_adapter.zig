@@ -556,7 +556,8 @@ pub const Preparation = struct {
         emission: Emission = .none,
         history_position: u64 = 0,
         replayed_images: u16 = 0,
-        input_sender: bool = false,
+        input_prefix: enum { none, sender, action_final } = .none,
+        input_kind: enum { message, tool_result } = .message,
         declaration: ?store.Declaration = null,
         declaration_open: bool = false,
         after_declaration: Stage = .history,
@@ -774,7 +775,7 @@ pub const Preparation = struct {
             .settings => {
                 try self.page.settings(&self.settings);
                 if (self.page.compound_inputs) {
-                    // Rebuild every compound Message so all selected images are
+                    // Rebuild every compound input so all selected images are
                     // counted; planSpan still checks the durable prefix seal.
                     self.state.memos = null;
                     self.writer.encoded_limit = max_ordered_request_bytes;
@@ -821,8 +822,17 @@ pub const Preparation = struct {
                     .user, .instruction, .skill => {
                         if (entry.input) |input| {
                             try self.page.openMessage(input);
-                            self.state.input_sender = entry.sender != null;
-                            if (entry.sender) |sender| self.sender = sender;
+                            self.state.input_kind = .message;
+                            self.state.input_prefix = .none;
+                            if (entry.sender) |sender| {
+                                self.sender = sender;
+                                self.state.input_prefix = .sender;
+                            }
+                            if (entry.source_action) |action| {
+                                const text = std.fmt.bufPrint(&self.source_action, "{d}", .{action.id}) catch unreachable;
+                                self.source_action_len = text.len;
+                                self.state.input_prefix = .action_final;
+                            }
                             self.state.stage = .input_open;
                             return .pending;
                         }
@@ -895,14 +905,21 @@ pub const Preparation = struct {
                 return self.loadItemHeader(.{ .image_message_open = .user }, 0);
             },
             .input_parts => {
-                if (self.state.input_sender) {
-                    self.state.input_sender = false;
-                    self.handles[0] = .sender;
-                    return self.loadItemHeader(.input_text, 0b1);
+                switch (self.state.input_prefix) {
+                    .none => {},
+                    inline else => |prefix| {
+                        self.state.input_prefix = .none;
+                        self.handles[0] = switch (prefix) {
+                            .sender => .sender,
+                            .action_final => .action_final,
+                            .none => unreachable,
+                        };
+                        return self.loadItemHeader(.input_text, 0b1);
+                    },
                 }
                 const part = try self.page.nextMessagePart() orelse {
-                    self.state.stage = .history;
-                    return self.loadItemHeader(.image_message_close, 0);
+                    self.state.stage = if (self.state.input_kind == .message) .history else .tool_results;
+                    return self.loadItemHeader(if (self.state.input_kind == .message) .image_message_close else .image_tool_close, 0);
                 };
                 self.handles[0] = .{ .content = part.content };
                 return switch (part.kind) {
@@ -920,7 +937,14 @@ pub const Preparation = struct {
                     return .pending;
                 };
                 self.handles[0] = .{ .content = result.call_id };
-                self.handles[1] = .{ .content = result.output };
+                if (result.input) |input| {
+                    try self.page.openMessage(input);
+                    self.state.input_kind = .tool_result;
+                    self.state.input_prefix = .none;
+                    self.state.stage = .input_parts;
+                    return self.loadItemHeader(.image_tool_open, 0b1);
+                }
+                self.handles[1] = .{ .content = result.output orelse return error.CorruptStore };
                 return self.loadItemHeader(.tool_result, 0b11);
             },
             .covered_tool_results => {
@@ -5543,7 +5567,9 @@ test "a prepared request's bytes stay as pinned over pages, tool results and pag
                         11 => past_bound,
                         else => try std.fmt.bufPrint(&result_buffer, "result {d}", .{index}),
                     };
-                    _ = try storage.settleActionAttempt(action, .succeeded, result, .{});
+                    if (index == 3 or index == 11) {
+                        try testing.settleTestActionParts(&storage, &tmp, action, &.{.{ .bytes = result }});
+                    } else _ = try storage.settleActionAttempt(action, .succeeded, result, .{});
                 }
             },
             .bounds => {
@@ -5597,17 +5623,15 @@ const OrderedTestPart = struct {
     kind: @import("InputCapture.zig").Incoming = .text,
 };
 
-fn submitOrderedForTesting(setup: *PreparationTestSetup, session: []const u8, key: []const u8, parts: []const OrderedTestPart, sender: ?[]const u8, handle: ?protocol.Bounded(32)) !void {
-    const Capture = @import("InputCapture.zig");
-    const custody = @import("content_custody.zig");
-    var used: std.atomic.Value(u64) = .init(0);
+fn captureOrderedForTesting(setup: *PreparationTestSetup, parts: []const OrderedTestPart, used: *std.atomic.Value(u64), capture: *@import("InputCapture.zig")) !@import("InputCapture.zig").Loan {
     const spool = try setup.tmp.dir.createFile(std.testing.io, "ordered-spool", .{ .read = true });
+    errdefer spool.close(std.testing.io);
     const index = try setup.tmp.dir.createFile(std.testing.io, "ordered-index", .{ .read = true });
+    errdefer index.close(std.testing.io);
     try setup.tmp.dir.deleteFile(std.testing.io, "ordered-spool");
     try setup.tmp.dir.deleteFile(std.testing.io, "ordered-index");
-    var capture: Capture = undefined;
-    capture.init(std.testing.io, spool, index, .{ .used = &used, .limit = 4 * 1024 * 1024 });
-    defer capture.close();
+    capture.init(std.testing.io, spool, index, .{ .used = used, .limit = 4 * 1024 * 1024 });
+    errdefer if (capture.resources) |resources| resources.budget.release(resources.charged);
     for (parts) |part| {
         try capture.begin(part.kind, part.bytes.len);
         var at: usize = 0;
@@ -5617,7 +5641,27 @@ fn submitOrderedForTesting(setup: *PreparationTestSetup, session: []const u8, ke
         }
         try capture.end();
     }
-    const loan = try capture.seal();
+    return capture.seal();
+}
+
+fn settleOrderedForTesting(setup: *PreparationTestSetup, binding: store.ActionAttemptBinding, parts: []const OrderedTestPart) !void {
+    var used: std.atomic.Value(u64) = .init(0);
+    var capture: @import("InputCapture.zig") = undefined;
+    const loan = try captureOrderedForTesting(setup, parts, &used, &capture);
+    defer capture.close();
+    _ = try setup.storage.settleActionAttemptParts(binding, .succeeded, loan, .{});
+}
+
+fn proposeOrderedActionsForTesting(setup: *PreparationTestSetup, binding: store.AttemptBinding, calls: []const ComposedCall) !void {
+    try settleComposedForTesting(setup, binding, "ordered-action-calls", .reasoning, "{\"type\":\"reasoning\",\"id\":\"ordered-plan\",\"encrypted_content\":\"opaque\"}", calls);
+}
+
+fn submitOrderedForTesting(setup: *PreparationTestSetup, session: []const u8, key: []const u8, parts: []const OrderedTestPart, sender: ?[]const u8, handle: ?protocol.Bounded(32)) !void {
+    const custody = @import("content_custody.zig");
+    var used: std.atomic.Value(u64) = .init(0);
+    var capture: @import("InputCapture.zig") = undefined;
+    const loan = try captureOrderedForTesting(setup, parts, &used, &capture);
+    defer capture.close();
     var command: custody.MessageCommand = .{};
     try command.key.set(key);
     try command.session.set(session);
@@ -6017,4 +6061,247 @@ test "canonical ordered Message rejects invalid forms behind warm and cold Text 
         try std.testing.expectError(error.CorruptStore, prepareMemoForTesting(&setup, binding, if (warm) &memos else null, .{}));
         try std.testing.expect(setup.storage.isFenced());
     };
+}
+
+test "canonical ordered Action Resolution lowers Text PNG JPEG and one Text on every Responses codec" {
+    const mixed = [_]OrderedTestPart{
+        .{ .bytes = "before \"quoted\"\n雪\x00" },
+        .{ .bytes = @embedFile("codecs/fixtures/image-input/pixel.png"), .kind = .{ .image = .{} } },
+        .{ .bytes = "between" },
+        .{ .bytes = @embedFile("testing/fixtures/input-baseline.jpg"), .kind = .{ .image = .{} } },
+        .{ .bytes = "after" },
+    };
+    const image_only = [_]OrderedTestPart{.{ .bytes = @embedFile("testing/fixtures/input-progressive.jpg"), .kind = .{ .image = .{} } }};
+    const text_only = [_]OrderedTestPart{ .{ .bytes = "first" }, .{ .bytes = "" }, .{ .bytes = "last" } };
+    for (std.enums.values(protocol.Codec)) |codec| {
+        for ([_][]const OrderedTestPart{ &mixed, &image_only, &text_only }) |parts| {
+            var setup: PreparationTestSetup = undefined;
+            try setup.init();
+            defer setup.close();
+            const session = try setup.configure("ordered-actions");
+            try store.testing.exec(&setup.storage, "UPDATE session SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
+            try setup.submit("ordered-action-seed", "ordered-action-seed", session.slice(), "observe");
+            const model = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try proposeOrderedActionsForTesting(&setup, model, &.{ .{ .item_id = "shot-item", .call_id = "shot\\\"" }, .{ .item_id = "text-item", .call_id = "text-call" } });
+            const first = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+            const second = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+            // Completion order differs from call order; one captured Text stays bytes.
+            try settleOrderedForTesting(&setup, second, &.{.{ .bytes = "plain \"text\"\n" }});
+            try settleOrderedForTesting(&setup, first, parts);
+            const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const result = try prepareMemoForTesting(&setup, binding, null, .{});
+            defer std.testing.allocator.free(result.bytes);
+            const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
+            defer parsed.deinit();
+            var seen: usize = 0;
+            var messages: usize = 0;
+            for (parsed.value.object.get("input").?.array.items) |item| {
+                const typ = item.object.get("type") orelse {
+                    messages += 1;
+                    continue;
+                };
+                if (!std.mem.eql(u8, typ.string, "function_call_output")) continue;
+                if (seen == 0) {
+                    try std.testing.expectEqualStrings("shot\"", item.object.get("call_id").?.string);
+                    try expectOrderedPartsForTesting(item.object.get("output").?.array.items, parts);
+                } else {
+                    try std.testing.expectEqualStrings("text-call", item.object.get("call_id").?.string);
+                    try std.testing.expectEqualStrings("plain \"text\"\n", item.object.get("output").?.string);
+                }
+                seen += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 2), seen);
+            try std.testing.expectEqual(@as(usize, 1), messages);
+            try std.testing.expect(std.mem.indexOf(u8, result.bytes, "{\"type\":\"function_call_output\",\"call_id\":\"text-call\",\"output\":\"plain \\\"text\\\"\\n\"}") != null);
+            var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+            const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{setup.root});
+            try setup.storage.close();
+            try setup.storage.open(std.testing.io, database, setup.root);
+            const reopened = try prepareMemoForTesting(&setup, binding, null, .{});
+            defer std.testing.allocator.free(reopened.bytes);
+            try std.testing.expectEqualStrings(result.bytes, reopened.bytes);
+        }
+    }
+}
+
+test "canonical ordered Action Resolution bypasses Text memos and caps the complete encoded request" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("ordered-action-memo");
+    try setup.submit("ordered-action-prefix", "ordered-action-prefix", session.slice(), "memo prefix");
+    const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var entries: [1]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    const initial = try prepareMemoForTesting(&setup, first, &memos, .{});
+    defer std.testing.allocator.free(initial.bytes);
+    const original = memos.held(session.slice()).?;
+    try proposeOrderedActionsForTesting(&setup, first, &.{.{ .item_id = "memo-shot", .call_id = "memo-shot" }});
+    const action = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+    try settleOrderedForTesting(&setup, action, &.{ .{ .bytes = "description" }, .{ .bytes = image_test_png, .kind = .{ .image = .{} } } });
+    const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const whole = try prepareMemoForTesting(&setup, binding, &memos, .{});
+    defer std.testing.allocator.free(whole.bytes);
+    try std.testing.expectEqual(@as(usize, 0), whole.copied);
+    try std.testing.expect(original.identical(&memos.held(session.slice()).?));
+    const cold = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(cold.bytes);
+    try std.testing.expectEqualStrings(whole.bytes, cold.bytes);
+    for ([_]bool{ false, true }) |exact| {
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var prep: Preparation = undefined;
+        prep.page.open(binding);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), &memos, .{}, &retained);
+        defer if (prep.state.active) prep.cancel();
+        var steps: usize = 0;
+        while (prep.writer.encoded_limit == null) : (steps += 1) {
+            try std.testing.expect(steps < 64);
+            switch (advanceTesting(&prep, &setup.storage, 1, 1)) {
+                .pending => {},
+                .failed => |err| return err,
+                .prepared, .read => return error.TestUnexpectedResult,
+            }
+        }
+        try std.testing.expectEqual(@as(?u64, 512_000_000), prep.writer.encoded_limit);
+        prep.writer.encoded_limit = whole.bytes.len - @intFromBool(!exact);
+        if (exact) {
+            const request = try drainLivePreparation(&prep, &setup.storage, 7, 3, 1 << 16);
+            try std.testing.expectEqual(@as(u64, whole.bytes.len), request.length);
+            request.deinit(std.testing.io, prep.writer.budget);
+        } else {
+            try std.testing.expectError(error.OrderedInputLimit, drainLivePreparation(&prep, &setup.storage, 7, 3, 1 << 16));
+            prep.cancel();
+        }
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expect(retained == null);
+        try std.testing.expect(!setup.storage.isFenced());
+    }
+    var flipped = (try setup.storage.prefixSealForTesting(binding)).?;
+    flipped.digest[0] ^= 1;
+    try setup.storage.setPrefixSealForTesting(binding, &flipped);
+    try std.testing.expectError(error.EncodingDrift, prepareMemoForTesting(&setup, binding, &memos, .{}));
+}
+
+test "canonical ordered Action Resolution counts images with Message parts at the request limit" {
+    for ([_]usize{ 1500, 1501 }) |count| {
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        const session = try setup.configure("ordered-action-limit");
+        const parts = try std.testing.allocator.alloc(OrderedTestPart, count - 750);
+        defer std.testing.allocator.free(parts);
+        @memset(parts, .{ .bytes = image_test_png, .kind = .{ .image = .{} } });
+        try submitOrderedForTesting(&setup, session.slice(), "ordered-action-images", parts[0..750], null, null);
+        const model = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try proposeOrderedActionsForTesting(&setup, model, &.{.{ .item_id = "limit-shot", .call_id = "limit-shot" }});
+        const action = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+        try settleOrderedForTesting(&setup, action, parts);
+        const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        if (count == 1501) {
+            try std.testing.expectError(error.OrderedInputLimit, prepareMemoWithAllowanceForTesting(&setup, binding, null, .{}, 16384));
+        } else {
+            const result = try prepareMemoWithAllowanceForTesting(&setup, binding, null, .{}, 16384);
+            defer std.testing.allocator.free(result.bytes);
+            try std.testing.expectEqual(@as(usize, 1500), std.mem.count(u8, result.bytes, "\"type\":\"input_image\""));
+        }
+        try std.testing.expect(!setup.storage.isFenced());
+    }
+}
+
+test "canonical ordered Action Resolution cancellation releases readers and reopened corruption fences" {
+    for ([_][]const u8{ image_test_png, @embedFile("testing/fixtures/input-baseline.jpg") }) |image| {
+        inline for ([_]u32{ 0, 1 }) |ordinal| {
+            var setup: PreparationTestSetup = undefined;
+            try setup.init();
+            defer setup.close();
+            const session = try setup.configure("ordered-action-corrupt-config");
+            try setup.submit("ordered-action-corrupt", "ordered-action-corrupt-seed", session.slice(), "observe");
+            const model = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try proposeOrderedActionsForTesting(&setup, model, &.{.{ .item_id = "corrupt-shot", .call_id = "corrupt-shot" }});
+            const action = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+            try settleOrderedForTesting(&setup, action, &.{ .{ .bytes = "description" }, .{ .bytes = image, .kind = .{ .image = .{} } } });
+            const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var used: std.atomic.Value(u64) = .init(0);
+            var retained: ?named_scratch.Owner = null;
+            var prep: Preparation = undefined;
+            prep.page.open(binding);
+            try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+            defer if (prep.state.active) prep.cancel();
+            var steps: usize = 0;
+            while (prep.state.emission != .base64) : (steps += 1) {
+                try std.testing.expect(steps < 1 << 16);
+                switch (advanceTesting(&prep, &setup.storage, 1, 1)) {
+                    .pending => {},
+                    .failed => |err| return err,
+                    .prepared, .read => return error.TestUnexpectedResult,
+                }
+            }
+            try prep.checkIntegrity(binding);
+            prep.cancel();
+            try std.testing.expect(prep.page.message_cursor == null);
+            try std.testing.expectEqual(@as(usize, 0), prep.page.outstandingReaders());
+            try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+            var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+            const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{setup.root});
+            try setup.storage.close();
+            try setup.storage.open(std.testing.io, database, setup.root);
+            try store.testing.zeroContent(&setup.storage, "SELECT part_content_id FROM content_part WHERE content_id=" ++
+                "(SELECT resolution_content_id FROM action_operation) AND ordinal=" ++ std.fmt.comptimePrint("{d}", .{ordinal}));
+            prep.page.open(binding);
+            try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+            try std.testing.expectError(error.CorruptStore, drainLivePreparation(&prep, &setup.storage, 7, 3, 1 << 16));
+            try std.testing.expect(setup.storage.isFenced());
+            prep.cancel();
+            try std.testing.expect(prep.page.message_cursor == null);
+            try std.testing.expectEqual(@as(usize, 0), prep.page.outstandingReaders());
+            try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+            try std.testing.expect(retained == null);
+        }
+    }
+}
+
+test "canonical ordered Action Resolution background final prefixes the same parts as user input" {
+    for (std.enums.values(protocol.Codec)) |codec| {
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        const session = try setup.configure("ordered-action-background");
+        try store.testing.exec(&setup.storage, "UPDATE session SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
+        try setup.submit("ordered-background-seed", "ordered-background-seed", session.slice(), "observe");
+        const model = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try proposeOrderedActionsForTesting(&setup, model, &.{.{ .item_id = "background-shot", .call_id = "background-shot" }});
+        const selected = (try setup.storage.nextAction(.bash, .fromFree(2, true))).?;
+        const action = (try setup.storage.admitActionAttempt(selected, 30_000, .{})).?.permit.binding;
+        var promotion: @import("command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = selected.action_id };
+        try promotion.key.set("ordered-promote");
+        try std.testing.expect(setup.storage.backgroundAction(.{ .command = &promotion }, .{}) == .accepted);
+        const continuation = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try store.testing.settleItemsForTesting(&setup.storage, &setup.tmp, continuation, &.{"{\"type\":\"message\",\"id\":\"background-answer\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done.\"}]}"}, "Done.");
+        const parts = [_]OrderedTestPart{ .{ .bytes = image_test_png, .kind = .{ .image = .{} } }, .{ .bytes = "final description" } };
+        try settleOrderedForTesting(&setup, action, &parts);
+        const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const result = try prepareMemoForTesting(&setup, binding, null, .{});
+        defer std.testing.allocator.free(result.bytes);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
+        defer parsed.deinit();
+        const input = parsed.value.object.get("input").?.array.items;
+        const final = input[input.len - 1];
+        try std.testing.expectEqualStrings("user", final.object.get("role").?.string);
+        const content = final.object.get("content").?.array.items;
+        try std.testing.expectEqual(@as(usize, 3), content.len);
+        const prefix = try std.fmt.allocPrint(std.testing.allocator, "[Rui: background Action {d} reached its final Resolution. The result follows.]\n", .{selected.action_id});
+        defer std.testing.allocator.free(prefix);
+        try std.testing.expectEqualStrings(prefix, content[0].object.get("text").?.string);
+        try expectOrderedPartsForTesting(content[1..], &parts);
+        var results: usize = 0;
+        for (input) |item| if (item.object.get("type")) |kind| {
+            if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
+            try std.testing.expectEqualStrings("background-shot", item.object.get("call_id").?.string);
+            try std.testing.expect(item.object.get("output").? == .string);
+            results += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), results);
+    }
 }
