@@ -81,7 +81,7 @@ fn captureInput(allocator: std.mem.Allocator, io: std.Io, argv: []const []const 
     var closed = [2]bool{ false, false };
     var buffers: [2][8192]u8 = undefined;
     defer std.crypto.secureZero(u8, std.mem.asBytes(&buffers));
-    while (!closed[0] or !closed[1]) {
+    while (delivery.input >= 0 or !closed[0] or !closed[1]) {
         if (deadline.durationFromNow(io).raw.nanoseconds <= 0) return error.Timeout;
         const moved = delivery.step(.{}, .{
             .{ .fd = if (closed[0]) -1 else child.stdout.?.handle, .buffer = &buffers[0] },
@@ -91,7 +91,7 @@ fn captureInput(allocator: std.mem.Allocator, io: std.Io, argv: []const []const 
         try stdout.appendSlice(allocator, buffers[0][0..moved.counts[0]]);
         try stderr_bytes.appendSlice(allocator, buffers[1][0..moved.counts[1]]);
         for (0..2) |i| closed[i] = closed[i] or moved.closed[i];
-        if (!moved.progressed and (!closed[0] or !closed[1])) try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+        if (!moved.progressed and (delivery.input >= 0 or !closed[0] or !closed[1])) try std.Io.sleep(io, .fromMilliseconds(1), .awake);
     }
     const term = try child.wait(io);
     const captured_stdout = try stdout.toOwnedSlice(allocator);
@@ -490,6 +490,11 @@ test "frozen launch forwarding drains both diagnostics before oversized-pipe inp
     try std.testing.expectEqualStrings("err:", result.stderr);
     try std.testing.expectEqualStrings("out:", result.stdout[0..4]);
     try std.testing.expectEqualSlices(u8, input, result.stdout[4..]);
+    const quiet = try runIn(gpa, std.testing.io, &.{ "/bin/sh", "-c", "exec 1>&- 2>&-; cat >/dev/null" }, null, 1024, .fromSeconds(5), .{ .input = input });
+    defer dispose(gpa, quiet);
+    try std.testing.expect(quiet.term.success());
+    try std.testing.expectEqual(@as(usize, 0), quiet.stdout.len);
+    try std.testing.expectEqual(@as(usize, 0), quiet.stderr.len);
     const refused = try runIn(gpa, std.testing.io, &.{ "/bin/sh", "-c", "exec 0<&-; printf 'refused'; printf 'reason' >&2; exit 2" }, null, 1024, .fromSeconds(5), .{ .input = input });
     defer dispose(gpa, refused);
     try std.testing.expect(!refused.term.success());

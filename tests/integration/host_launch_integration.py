@@ -811,7 +811,7 @@ def frozen_settings_launches(root, env):
         path.write_text(json.dumps(value))
         path.chmod(0o600)
 
-    def held_start(directory, arguments, mutate):
+    def held_start(directory, arguments, mutate, *, expected_refusal=None):
         gate = directory.parent / (directory.name + ".after-freeze.gate")
         gate.touch(mode=0o600)
         entered = gate.with_name(gate.name + ".entered")
@@ -838,6 +838,12 @@ def frozen_settings_launches(root, env):
             assert gate.exists() and child.poll() is None
             gate.unlink()
             output, diagnostic = child.communicate(timeout=COMMAND_TIMEOUT)
+            if expected_refusal is not None:
+                assert child.returncode == 1, (child.returncode, output, diagnostic)
+                report = json.loads(output)["rui_start_error"]
+                assert report["code"] == "settings_invalid" and expected_refusal in report["message"], report
+                assert not matching_processes(directory) and not (directory / "rui.sqlite3").exists()
+                return report
             assert child.returncode == 0, (child.returncode, output, diagnostic)
             ready = json.loads(output)
             assert instance(ready, 2)
@@ -845,6 +851,20 @@ def frozen_settings_launches(root, env):
         finally:
             dispose_all(lambda: gate.unlink(missing_ok=True),
                         lambda: stop_process(child) if child is not None else None)
+
+    # A frozen source reference is not a frozen credential value. A child-only
+    # resolution failure still crosses both startup channels as the ORIGINAL
+    # typed refusal, rather than a generic child-closed outcome.
+    failure_root = private / "referenced-file-refusal"
+    failure_root.mkdir(mode=0o700)
+    key = failure_root / "private-key"
+    key.write_text("frozen-source-test-key")
+    key.chmod(0o600)
+    source = failure_root / "settings.json"
+    write_source(source, {"providers": {"openai": {"endpoint": "http://127.0.0.1:9/v1/responses", "key": {"file": str(key)}}}})
+    report = held_start(failure_root / "host", ["--settings", source], key.unlink,
+                        expected_refusal="providers.openai.key")
+    assert "frozen-source-test-key" not in json.dumps(report), report
 
     checked = 0
     # Every source door sees a valid changed B, malformed B, and removed B.
