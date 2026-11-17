@@ -85,6 +85,7 @@ const cores = .{
     .{ "mcp/result_parts.zig", @import("mcp/result_parts.zig") },
     .{ "mcp/result_parts_legacy_test.zig", @import("mcp/result_parts_legacy_test.zig") },
     .{ "mcp/result_text.zig", @import("mcp/result_text.zig") },
+    .{ "mcp/result_text_golden_test.zig", @import("mcp/result_text_golden_test.zig") },
     .{ "mcp/result_text_legacy_test.zig", @import("mcp/result_text_legacy_test.zig") },
     .{ "mcp/shape.zig", @import("mcp/shape.zig") },
     .{ "memory_text.zig", @import("memory_text.zig") },
