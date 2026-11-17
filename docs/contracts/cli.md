@@ -40,15 +40,16 @@ Renaming introduces no new runtime entity or authority, deeper command hierarchy
 
 #### Configuration and input
 
-Fresh `session configure` without a Session selector captures creation intent and concrete resolved Workspace/provider/model/defaults before transmission; the Store allocates the ID at commit and the accepted reply returns it.
+Ordinary fresh `session configure` without a Session selector or preset captures creation intent and concrete resolved Workspace/provider/model/defaults before transmission; the Store allocates the ID at commit and the accepted reply returns it.
 Fully explicit settings bypass unused preferences.
+`session configure --preset NAME` captures the named Host Settings preset and only explicitly supplied overrides, without filling fresh defaults. The shared resolver applies the complete preset first. Presets are not supported on `session start`; they cannot be used to update an addressed Session. On preset creation, `default` sends null for policy overrides: a null output reservation clears it, a null effort clears it only where the model permits, and null compactAt is refused by the shared validator. Empty instructions, empty tool lists, `--label ""` and `--text-output` remain explicit overrides.
 The CLI checks every supplied model's syntax before capture, input reads or Session mutation.
 A refused model diagnostic names the ID and lists the [IDs Rui lists](#supported-model-ids).
 A typed ID with valid syntax that Rui does not list is admitted with one line, `Rui does not list ID; it uses default limits`, and runs with [default limits](model-io.md#choosing-and-validating-compacted-context).
 `session configure --parent ID` without a Session selector and `session start --parent ID` capture the existing create-only parent relation.
 They send the same complete creation spec through the native inherit-and-narrow owner: provider, Workspace and saved Bash environment come from the parent, configured allowed tool names and Permission Mode may only narrow, and explicit provider or Workspace overrides remain present for canonical refusal even when equal.
 The CLI adds neither its default provider nor its current directory to an attached spec.
-Other required creation fields retain the ordinary CLI defaults, including model, tools, Permission Mode, effort and compactAt; no parent preflight read substitutes for commit-time admission.
+For attached creation without a preset, other required creation fields retain the ordinary CLI defaults, including model, tools, Permission Mode, effort and compactAt; no parent preflight read substitutes for commit-time admission.
 The compactAt default still comes from the ordinary saved/product binding used to resolve those defaults, which may differ from the inherited provider; an explicit `--compaction-trigger TOKENS` fixes the threshold and is preserved.
 An attached spec with explicit model, effort, Permission Mode and concrete compactAt bypasses unused binding preferences, so an absent HOME or stale saved provider cannot prevent its canonical parent refusal.
 Missing or archived parents and parent on an addressed update reach the saved native refusals.
