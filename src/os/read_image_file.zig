@@ -76,6 +76,15 @@ test "read_image regular acquisition rejects directories missing files and devic
     var bytes: [5]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 5), try file.readPositionalAll(std.testing.io, &bytes, 0));
     try std.testing.expectEqualStrings("exact", &bytes);
+    var fixture = try @import("../socket_fixture.zig").Directory.init();
+    defer fixture.cleanup();
+    var buffer: [@import("../socket_fixture.zig").max_path_bytes]u8 = undefined;
+    const address = try fixture.address("image.sock", &buffer);
+    var listener = try address.listen(std.testing.io, .{});
+    defer listener.deinit(std.testing.io);
+    // Removing the pinned-kind check makes the Linux procfs reopen fail
+    // instead of rejecting the socket at this assertion.
+    try std.testing.expectError(error.ImageNotRegular, open(std.testing.io, fixture.root[0..fixture.root_len], "image.sock"));
 }
 
 test "read_image portable acquisition reads regular relative absolute and symlink paths" {
