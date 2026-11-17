@@ -298,6 +298,7 @@ This relies on the direct worker-child process relationship checked in `actions/
 Never run `job-started.sh` directly: a rejected invocation kills its calling process.
 The process-supervision test runs in a disposable subprocess; installation and native Actions behavior still need verification on the Mac.
 It deletes the global Zig cache before a job when that cache exceeds 40 GiB.
+After admission it also stops every other `ruici` process outside its own runner ancestry and empties `ruici`'s TMPDIR, because only one job runs at a time and a hosted VM would have discarded both; a leftover `rui host serve` otherwise shows up in a later job's Host discovery.
 The separate account isolates local files; it still executes trusted PR code on a personal Mac.
 
 Pause scheduling with `gh variable set RUI_MAC_RUNNER --repo DivyanshGolyan/rui --body off` (unset it or set `on` to resume).
