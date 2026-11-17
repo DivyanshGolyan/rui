@@ -182,13 +182,7 @@ const saved_identity = &[_]PositionalConflict{
     .{ .code = .handle_names_store_and_key, .option = "key" },
     .{ .code = .handle_names_store_and_key, .option = "key-hex" },
 };
-const tool_choices = blk: {
-    var text: []const u8 = "";
-    for (std.enums.values(@import("built_in_tool.zig").BuiltInTool), 0..) |tool, i| {
-        text = text ++ (if (i == 0) "" else ",") ++ @tagName(tool);
-    }
-    break :blk text ++ "|none";
-};
+const tool_choices = product_defaults.tools ++ "|none";
 const settings = settingOptions(.settings, false);
 const start_settings = settingOptions(.settings, true);
 
@@ -758,7 +752,7 @@ test "tool help lists every built-in including skill in name order" {
         var help: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer help.deinit();
         try command.definition().help(&help.writer);
-        try std.testing.expect(std.mem.indexOf(u8, help.written(), "--tools bash,find_tools,message_agent,read_action,read_transcript,skill,start_agent,stop_action,web_search|none") != null);
+        try std.testing.expect(std.mem.indexOf(u8, help.written(), "--tools " ++ product_defaults.tools ++ "|none") != null);
     }
 }
 
