@@ -328,6 +328,7 @@ def fixture_main(args):
     Policy (by the latest user text, or by a pending tool result):
       * after a function_call_output: echo tool summary, or believable prose in realistic mode
       * text containing "tool demonstration": three Bash calls (ls, exit 127, stderr+exit 1)
+      * text containing "image consent check": one read_image call for design/checkout.png (needs approval in ask mode)
       * text containing "consent check": one 32-line Bash command (needs approval in ask mode)
       * text containing "long tool output": one Bash call that prints 32 numbered lines
       * text containing "long bash": one Bash command that sleeps 8 s
@@ -454,6 +455,10 @@ def fixture_main(args):
                 # A stream the provider adapter cannot read: the Turn fails.
                 kind = "invalid-output"
                 payload = b"data: {not json\n\n"
+            elif user_text and "image consent check" in user_text:
+                kind = "image-consent-call"
+                payload = fixture.sse_tool_calls(f"r{n}", [
+                    ("read_image", f"c{n}", json.dumps({"path": "design/checkout.png"}))])
             elif user_text and "consent check" in user_text:
                 kind = "consent-call"
                 command = "set -eu\n" + "\n".join(f"printf 'step {k:02d}\\n' >> progress.log" for k in range(1, 31)) + "\nwc -l progress.log"

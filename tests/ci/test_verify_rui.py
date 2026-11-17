@@ -10,6 +10,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.request
 import types
 import unittest
 from unittest.mock import patch
@@ -53,6 +55,51 @@ class VerifyRuiTest(unittest.TestCase):
                 "--set", "providers.codex.endpoint=http://127.0.0.1:1234/responses",
                 "--set", "providers.codex.unauthenticated=true", "--test-retry-waits-ms", "50,100,150"])
             self.assertEqual(captured["env"]["HOST_ONLY"], "secret")
+
+    def test_image_consent_fixture_emits_one_typed_image_call_then_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scratch = root / "scratch"
+            scratch.mkdir()
+            (root / "run.json").write_text(json.dumps({
+                "id": "image-consent-test", "scratch": str(scratch),
+                "home": str(scratch / "home"), "store": str(scratch / "store"),
+                "project": str(scratch), "binary": "/unused/rui",
+                "source": str(SCRIPT.parents[4]),
+            }))
+            with subprocess.Popen([sys.executable, str(SCRIPT), "_fixture", str(root)],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE) as provider:
+                try:
+                    port = scratch / "fixture.port"
+                    deadline = time.monotonic() + 10
+                    while not port.exists() and provider.poll() is None and time.monotonic() < deadline:
+                        time.sleep(.01)
+                    self.assertTrue(port.exists(), "image fixture did not start")
+                    url = "http://127.0.0.1:" + port.read_text() + "/responses"
+                    user = {"role": "user", "content": "Review with an image consent check."}
+
+                    def request(items):
+                        body = json.dumps({"input": items}).encode()
+                        with urllib.request.urlopen(urllib.request.Request(url, body,
+                                {"Content-Type": "application/json"}), timeout=5) as reply:
+                            return [json.loads(line[6:]) for line in reply.read().decode().splitlines()
+                                    if line.startswith("data: {")]
+
+                    events = request([user])
+                    calls = [event["item"] for event in events
+                             if event.get("type") == "response.output_item.done"
+                             and event.get("item", {}).get("type") == "function_call"]
+                    self.assertEqual(len(calls), 1, events)
+                    self.assertEqual(calls[0]["name"], "read_image")
+                    self.assertEqual(json.loads(calls[0]["arguments"]), {"path": "design/checkout.png"})
+                    request([user, {"type": "function_call_output", "call_id": calls[0]["call_id"],
+                                    "output": "Image read denied."}])
+                    records = [json.loads(line) for line in (root / "evidence/provider.jsonl").read_text().splitlines()]
+                    self.assertEqual([row["kind"] for row in records if "kind" in row],
+                                     ["image-consent-call", "tool-summary"])
+                finally:
+                    provider.terminate()
+                    provider.communicate(timeout=5)
 
     def test_child_imports_user_site_with_synthetic_home(self):
         run_type = runpy.run_path(str(SCRIPT))["Run"]
