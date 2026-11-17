@@ -2196,8 +2196,13 @@ test "public Host starter preserves every typed refusal before and after waiting
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     const saved_status = exit_status;
     defer exit_status = saved_status;
-    for (std.enums.values(start_report.StartError)) |code| for ([_]bool{ false, true }) |waited| for ([_]bool{ false, true }) |quiet| {
-        var result: HostLaunchResult = .failed(.child_refused, error.HostStartupFailed);
+    const causes = [_]struct { err: anyerror, status: caller_exit.Status }{
+        .{ .err = error.HostStartupFailed, .status = .unclassified },
+        .{ .err = error.StoreIdentityMismatch, .status = .environment },
+        .{ .err = error.StoreAlreadyOwned, .status = .environment },
+    };
+    for (causes) |cause| for (std.enums.values(start_report.StartError)) |code| for ([_]bool{ false, true }) |waited| for ([_]bool{ false, true }) |quiet| {
+        var result: HostLaunchResult = .failed(.child_refused, cause.err);
         result.outcome.failed.refusal = .init(code, "the original typed refusal, including its reason");
         if (waited) result.wait = .init(0);
         Probe.used = 0;
@@ -2205,7 +2210,7 @@ test "public Host starter preserves every typed refusal before and after waiting
         try std.testing.expectError(error.Reported, reportHostLaunch(io, &result, quiet, false, 0));
         var expected: [start_report.max_line_bytes]u8 = undefined;
         try std.testing.expectEqualStrings(start_report.line(&result.outcome.failed.refusal.?, &expected), Probe.output[0..Probe.used]);
-        try std.testing.expectEqual(if (waited) caller_exit.knownError(error.HostStartupFailed) else .invalid, exit_status);
+        try std.testing.expectEqual(if (waited) cause.status else .invalid, exit_status);
     };
 }
 
