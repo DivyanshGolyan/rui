@@ -36,7 +36,7 @@ The subsystem references keep accepted behavior and required evidence together. 
 
 - [Admission and Session configuration](docs/contracts/admission.md#required-evidence).
 - [Conversation, settings, and skills](docs/contracts/conversation.md#required-evidence).
-- [Model requests and provider context](docs/contracts/model-io.md#required-evidence).
+- [Model requests and provider context](docs/contracts/model-io.md#required-evidence), including the shared tool-result route, MCP image ordering, a single text budget, failure and replay, and synthetic provider request evidence.
 - [Tools, execution, and recovery](docs/contracts/execution.md#required-evidence).
 - [Store transactions and representation](docs/contracts/store.md#required-evidence).
 - [Session stops and outcomes](docs/contracts/sessions.md#required-evidence).
@@ -44,7 +44,7 @@ The subsystem references keep accepted behavior and required evidence together. 
 - [Session UI and terminal lifetime](docs/contracts/session-ui.md#required-evidence), including footer-domain and SessionChrome tests crossing visible/hidden list with context below, at and above half used at 46 and 140 columns. Require list-dependent name visibility, thresholded `N% context left`, no permanent info hint, retained clickable chat info and Alt-I in Keys; `human_cli_integration.py session-chrome` checks the native path, and frame recipes include context below half. The same contract requires shared full-list/sidebar row marks, state-age boundaries, alignment, 100 ms spinner frames and the earliest visible row-age/quota-countdown deadline, including header-only countdowns and minute-scale quota wording. Native empty-chat Escape and spinner repaint tests preserve all four row states at narrow width; frame resize tests reject old-viewport spinner commits until the resize reset and repaint commit. Input and User-message appearance evidence includes both widths and themes, preserved input/rule positions, the shared timestamp domain and indexed before/after frames; see the owning evidence table.
 - [Reports, Activity, and local protocol](docs/contracts/inspection.md#required-evidence).
 - [Host ownership and lifetime](docs/contracts/host.md#required-evidence), including frozen detached consumption, later-source upgrade admission and private-target capability refusal.
-- [Resources and selection progress](docs/contracts/resources.md#required-evidence).
+- [Resources and selection progress](docs/contracts/resources.md#required-evidence), including fitting output, optional spill yielding, live scratch charges and retained-queue handoff.
 - [Diagnostic records and stderr](docs/contracts/diagnostics.md#required-evidence).
 
 Upgrade discovery handoff verification runs the `UpgradeJob` discovery-handoff domain and the adopted-candidate precondition domain, including in-flight success/failure, cancellation, retained candidate custody and recovered transport. `upgrade-integration` keeps the exact `terminal_download_recovery` curl-attempt sequence: normal lookup failure, IPv4 lookup and checksums, then the archive over the same IPv4 owner, without a second discovery.

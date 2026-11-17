@@ -54,6 +54,7 @@ const cores = .{
     .{ "endpoint_value.zig", @import("endpoint_value.zig") },
     .{ "environment.zig", @import("environment.zig") },
     .{ "error_set.zig", @import("error_set.zig") },
+    .{ "excerpt.zig", @import("excerpt.zig") },
     .{ "failure_class.zig", @import("failure_class.zig") },
     .{ "feed_reads.zig", @import("feed_reads.zig") },
     .{ "find_tools_words.zig", @import("find_tools_words.zig") },
@@ -81,7 +82,11 @@ const cores = .{
     .{ "mcp/headers.zig", @import("mcp/headers.zig") },
     .{ "mcp/post.zig", @import("mcp/post.zig") },
     .{ "mcp/reply.zig", @import("mcp/reply.zig") },
+    .{ "mcp/result_parts.zig", @import("mcp/result_parts.zig") },
+    .{ "mcp/result_parts_legacy_test.zig", @import("mcp/result_parts_legacy_test.zig") },
     .{ "mcp/result_text.zig", @import("mcp/result_text.zig") },
+    .{ "mcp/result_text_golden_test.zig", @import("mcp/result_text_golden_test.zig") },
+    .{ "mcp/result_text_legacy_test.zig", @import("mcp/result_text_legacy_test.zig") },
     .{ "mcp/shape.zig", @import("mcp/shape.zig") },
     .{ "memory_text.zig", @import("memory_text.zig") },
     .{ "message_admission.zig", @import("message_admission.zig") },
@@ -114,6 +119,8 @@ const cores = .{
     .{ "read_image_arguments.zig", @import("read_image_arguments.zig") },
     .{ "replay_recipe.zig", @import("replay_recipe.zig") },
     .{ "request_wait.zig", @import("request_wait.zig") },
+    .{ "result_fault.zig", @import("result_fault.zig") },
+    .{ "result_layout.zig", @import("result_layout.zig") },
     .{ "retention_capacity.zig", @import("retention_capacity.zig") },
     .{ "retry_policy.zig", @import("retry_policy.zig") },
     .{ "schema_json.zig", @import("schema_json.zig") },
@@ -195,6 +202,18 @@ test {
     _ = @import("tools.zig");
     _ = @import("core_tools.zig");
     inline for (cores) |core| _ = core[1];
+}
+
+test "positional I/O errors retain provenance across the whole domain" {
+    const fault = @import("result_fault.zig");
+    inline for (.{ std.Io.File.ReadPositionalError, std.Io.File.WritePositionalError }) |ErrorSet| {
+        inline for (@typeInfo(ErrorSet).error_set.error_names.?) |name| {
+            const err = @field(anyerror, name);
+            try std.testing.expectEqual(fault.Fault.rejected, fault.classify(.{ .source = err }));
+            try std.testing.expectEqual(fault.Fault.uncertain, fault.classify(.{ .capture = err }));
+            try std.testing.expectEqual(fault.Fault.uncertain, fault.classify(.{ .store = err }));
+        }
+    }
 }
 
 test "functional cores stay within the core boundary" {
