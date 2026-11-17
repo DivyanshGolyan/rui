@@ -665,6 +665,9 @@ test "each Store entry point takes its round budget on its common path" {
             try storage.readActionExecutionInput(.bash, action, &input);
             meter.stop(.readBashExecutionInput);
             meter.start();
+            try std.testing.expect((try storage.publishActionValue(input.sender_handle.slice(), "budget-value", "value")) == .accepted);
+            meter.stop(.publishActionValue);
+            meter.start();
             try storage.withActionDispatchHandoff(action, {}, Launch.run);
             meter.stop(.withActionDispatchHandoff);
             meter.start();

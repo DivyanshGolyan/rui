@@ -771,12 +771,7 @@ pub const Store = struct {
     }
 
     fn publishActionValueHeld(self: *Store, handle: []const u8, key: []const u8, payload: []const u8, faults: Faults) !@import("domain/action_value.zig").Result {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: store_access.Access(.write, error{}) = .open(&entry);
-        defer access.deinit();
-        defer access.abandon(.{}) catch {};
-        return entry.finish(error{InjectedCommitFailure}, access.end(faults, @import("domain/action_value.zig").publish(&access, handle, key, payload, faults)));
+        return transition.apply(self, @import("domain/action_value.zig").Publish, .{ .handle = handle, .key = key, .bytes = payload }, faults);
     }
 
     pub fn backgroundAction(self: *Store, source: action_control_domain.Control.Source, faults: Faults) @import("../action_control.zig").Reply {
