@@ -150,7 +150,7 @@ Reserve growth before I/O with checked arithmetic and serialized owner accountin
 Charge sparse gaps and simultaneous copies; overwrites need no new charge.
 Return a provably unused reservation after short/error writes; an unknown partial write retains its submitted increment until safe cleanup.
 Ingress charges decoded file growth, not HTTP framing or escaping, and transfers each charge with its sealed file.
-Failed removal retains only that file’s charge until restart cleanup.
+Failed removal retains that file’s charge until its owner successfully reclaims it or startup cleanup removes it.
 After the owner closes its final descriptor, an already-absent private name establishes reclamation; otherwise private scratch charge survives unlink and pending I/O, releasing only after successful shrink or safe final closure.
 No writable alias may bypass accounting; no per-write heap allocation, directory scan, SQLite transaction or global lock across disk I/O.
 Logical bytes do not model block rounding/cache/compression or reserve real disk space.

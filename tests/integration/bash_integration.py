@@ -969,7 +969,8 @@ def main():
         "head -c 2097152 /dev/zero | tr '\\0' q",
         timeout_ms=None,
     )
-    add_exchange(responses, "cleanup", "printf cleaned")
+    cleanup_marker = state / "cleanup-launches"
+    add_exchange(responses, "cleanup", f"printf x >> {shlex.quote(str(cleanup_marker))}; printf cleaned")
     add_exchange(responses, "preparation", "printf never")
     add_exchange(responses, "spawn", "printf never")
     add_exchange(responses, "arguments", "printf never")
@@ -1880,10 +1881,14 @@ def main():
             lambda: resolution(store, session) == "succeeded",
             "known result before cleanup failure",
         )
-        cleanup_report = fixture.command(
-            "session", "inspect", "--store", store, "--session", session
+        cleanup_report = fixture.wait_for(
+            lambda: (report if (report := fixture.command(
+                "session", "inspect", "--store", store, "--session", session
+            ))["execution"]["dispatch_fenced"] else None),
+            "cleanup-failure dispatch fence",
         )
-        assert cleanup_report["execution"]["dispatch_fenced"] is True, cleanup_report
+        saved_cleanup_result = result_text(store, session)
+        assert saved_cleanup_result == "Bash succeeded. Exit code: 0.\nstdout:\ncleaned", saved_cleanup_result
         assert int(cleanup_report["execution"]["custody_occupied"]) > 0, cleanup_report
         assert list((store / "scratch").glob("bash-*-*.tmp"))
         cleanup_gate.unlink()
@@ -1895,8 +1900,9 @@ def main():
             "cleanup-failure original owner reclamation",
         )
         cleanup_attempt = f"{cleanup_action['action']}-1.tmp"
-        assert (store / "scratch" / f"bash-stdout-{cleanup_attempt}").exists()
-        assert (store / "scratch" / f"bash-stderr-{cleanup_attempt}").exists()
+        assert not (store / "scratch" / f"bash-stdout-{cleanup_attempt}").exists()
+        assert not (store / "scratch" / f"bash-stderr-{cleanup_attempt}").exists()
+        assert result_text(store, session) == saved_cleanup_result
         fixture.stop_host(host)
         host = fixture.start_host(store, endpoint_url)
         assert resolution(store, session) == "succeeded"
@@ -1904,6 +1910,16 @@ def main():
             lambda: fixture.completed_observation(store, "cleanup-message"),
             "cleanup-failure continuation",
         )
+        assert result_text(store, session) == saved_cleanup_result
+        assert fixture.read_result(store, "cleanup-message") == b"continued"
+        assert cleanup_marker.read_bytes() == b"x", "cleanup failure replayed the Bash command"
+        cleanup_outputs = [
+            item["output"]
+            for request in endpoint.requests
+            for item in json.loads(request)["input"]
+            if item.get("type") == "function_call_output" and item.get("call_id") == "cleanup-call"
+        ]
+        assert cleanup_outputs and all(output == saved_cleanup_result for output in cleanup_outputs), cleanup_outputs
 
         for name, fault, expected in (
             ("preparation", "bash-preparation", "storage_failed"),
