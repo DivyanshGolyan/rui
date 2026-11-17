@@ -6,6 +6,7 @@ makes passes an explicit --store under the run's synthetic HOME; nothing reads
 or writes the user's default Store, credentials or tmux server.
 """
 import argparse
+import copy
 import functools
 import hashlib
 import html
@@ -120,6 +121,7 @@ class Run:
             "XDG_DATA_HOME": str(self.home / ".local/share"),
             "TMUX_TMPDIR": str(self.scratch / "tmux"),
         }
+        env.update(self.meta.get("frame_env", {}))
         env.update(extra)
         return env
 
@@ -180,7 +182,11 @@ def cmd_build(args):
     build = CACHE / "builds" / sha
     manifest = build / "manifest.json"
     if manifest.exists() and not args.force:
-        print(json.dumps(json.loads(manifest.read_text()), indent=1))
+        record = json.loads(manifest.read_text())
+        if getattr(args, "upgrade", False):
+            build_upgrade_actor(record, args, jobs)
+            manifest.write_text(json.dumps(record, indent=1) + "\n")
+        print(json.dumps(record, indent=1))
         return
     origin = args.repo or str(HERE.parents[4])
     if not source.exists():
@@ -221,8 +227,39 @@ def cmd_build(args):
               "build_seconds": round(time.monotonic() - started, 1),
               "zig": subprocess.run(["zig", "version"], capture_output=True, text=True).stdout.strip(),
               "host": os.uname().nodename, "macos": macos_version()}
+    if getattr(args, "upgrade", False):
+        build_upgrade_actor(record, args, jobs)
     manifest.write_text(json.dumps(record, indent=1) + "\n")
     print(json.dumps(record, indent=1))
+
+
+def build_upgrade_actor(record, args, jobs):
+    source = pathlib.Path(record["source"])
+    head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+    dirty = subprocess.check_output(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"], text=True)
+    if head != record["sha"] or dirty:
+        die("upgrade actor requires the clean pinned source")
+    env = dict(os.environ)
+    if args.pkg_dir:
+        env["ZIG_LOCAL_PKG_DIR"] = args.pkg_dir
+    build = CACHE / "builds" / record["sha"]
+    with open(build / "upgrade-build.log", "w") as log:
+        result = subprocess.run(["zig", "build", "upgrade-fixture", f"-j{jobs}"], cwd=source,
+                                env=env, stdout=log, stderr=subprocess.STDOUT)
+    if result.returncode:
+        die(f"upgrade actor build failed; see {build / 'upgrade-build.log'}")
+    actor = build / "bin/rui-upgrade-release-fixture"
+    shutil.copy2(source / "zig-out/bin/rui-upgrade-release-fixture", actor)
+    record["upgrade_actor"] = {"binary": str(actor), "sha256": sha256(actor), "sha": record["sha"], "tree": record["tree"]}
+
+
+def upgrade_actor(build):
+    actor = build.get("upgrade_actor", {})
+    path = pathlib.Path(actor.get("binary", ""))
+    if (actor.get("sha") != build["sha"] or actor.get("tree") != build["tree"]
+            or not path.is_file() or sha256(path) != actor.get("sha256")):
+        die(f"missing pinned upgrade actor; run: verify-rui build {build['sha']} --upgrade")
+    return path
 
 
 def load_build(sha):
@@ -726,13 +763,15 @@ def tap_main(args):
 # ---------------------------------------------------------------- new run
 
 
-def launch_host(run):
+def launch_host(run, *, restartable=False):
     """Start this run's Host from the options saved at `new`; return its ready status."""
     options = run.meta["host_options"]
     host_argv = [str(run.rui), "host", "serve", "--store", str(run.store),
                  "--set", f"execution.activeCapacity={options['active_capacity']}",
                  "--set", "providers={}", "--set", f"providers.codex.endpoint={run.meta['fixture_url']}",
-                 "--set", "providers.codex.unauthenticated=true", "--test-retry-waits-ms", "50,100,150"]
+                 "--set", "providers.codex.unauthenticated=true"]
+    if not restartable:
+        host_argv += ["--test-retry-waits-ms", "50,100,150"]
     host_env = run.env()
     for assignment in options["host_setenv"]:
         key, _, value = assignment.partition("=")
@@ -2139,6 +2178,11 @@ def validate_scenario(data, sizes=None):
         names.add(name)
         require(isinstance(state.get("theme", "night"), str) and state.get("theme", "night") in THEMES, f"{name}: invalid theme")
         require(type(state.get("record", False)) is bool, f"{name}: record must be boolean")
+        require(state.get("upgrade") in (None, "current", "available", "updating", "failure", "chat"), f"{name}: invalid upgrade scenario")
+        sides = state.get("comparison", {})
+        require(isinstance(sides, dict) and set(sides) <= {"before", "after"}
+                and all(isinstance(value, dict) and set(value) <= {"expect", "absent", "expect_next", "expect_last", "expect_dim", "absent_regex", "expect_regex"}
+                        for value in sides.values()), f"{name}: invalid comparison oracle")
         env = state.get("env", {})
         require(isinstance(env, dict) and all(isinstance(k, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k)
                                              and isinstance(v, str) and "\0" not in v for k, v in env.items()), f"{name}: invalid env")
@@ -2237,6 +2281,10 @@ def validate_scenario(data, sizes=None):
             else:
                 require(isinstance(value, dict) and isinstance(value.get("to"), str) and value["to"] in labels and isinstance(value.get("text"), str)
                         and type(value.get("wait", True)) is bool, f"{name}: invalid send or unknown cast label")
+        regexes = state.get("expect_regex", [])
+        require(isinstance(regexes, list) and all(isinstance(pattern, str) for pattern in regexes), f"{name}: expect_regex must be a list")
+        for pattern in regexes:
+            re.compile(pattern)
         frame_absent_regex(state)
         for text in frame_absences(state):
             match = re.fullmatch(r"\{session:(.+)\}", text)
@@ -2244,6 +2292,12 @@ def validate_scenario(data, sizes=None):
                     f"{name}: unknown cast label in absent: {text}")
         normalized_states.append({**state, "sizes": override or state_sizes, "expect": frame_expectations(state),
                                   "absent": frame_absences(state)})
+    if any(state.get("comparison") for state in states):
+        for side in ("before", "after"):
+            variants = [{**state, **state.get("comparison", {}).get(side, {})} for state in states]
+            for variant in variants:
+                variant.pop("comparison", None)
+            validate_scenario({**data, "states": variants}, sizes)
     return {**data, "sizes": override or default_sizes, "states": normalized_states}
 
 
@@ -2597,6 +2651,9 @@ def frame_row_failure(state, plain):
         at = next((i for i, line in enumerate(lines) if row in line), None)
         if at is None or at + 1 >= len(lines) or detail not in lines[at + 1]:
             return f"row {row!r} must be followed by {detail!r}"
+    for pattern in state.get("expect_regex", []):
+        if re.search(pattern, plain, re.MULTILINE) is None:
+            return f"missing row matching {pattern!r}"
     for pattern in frame_absent_regex(state):
         if match := re.search(pattern, plain, re.MULTILINE):
             return f"unexpected row matching {pattern!r}: {match.group(0)!r}"
@@ -2735,6 +2792,234 @@ def frame_capture_selected(state, selected):
     return state["name"] in selected
 
 
+def frame_pause_owned_host(run):
+    sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
+    from host_process import wait_for
+    active = [entry for entry in run.owned() if entry["kind"] == "host"
+              and (start := process_start(entry["pid"])) and start[0] == entry["lstart"]]
+    before = json.loads(frame_command(run.rui_cmd("host", "status", "--store", run.store, timeout=5), "observe current Host instance").stdout)
+    instance = before.get("instance")
+    if before["status"] == "ready":
+        paused = json.loads(frame_command(run.rui_cmd("host", "pause", "--store", run.store, "--instance", instance),
+                                          "pause current Host before UID-global Upgrade").stdout)
+        if paused.get("instance") != instance or paused.get("status") != "acknowledged" or paused.get("retirement") != "confirmed":
+            raise FrameFailure("current Host instance retirement was not confirmed; another UID-global Upgrade is unsafe")
+    elif before["status"] != "unavailable":
+        raise FrameFailure("current Host ownership is unresolved; another UID-global Upgrade is unsafe")
+    def retired():
+        status = run.rui_cmd("host", "status", "--store", run.store, timeout=2)
+        return (status.returncode == 0 and json.loads(status.stdout)["status"] == "unavailable"
+                and all(not (start := process_start(entry["pid"])) or start[0] != entry["lstart"] for entry in active))
+    wait_for(retired, "current Host retirement before UID-global Upgrade", timeout=30)
+    append_jsonl(run.evidence / "upgrade-host-lifecycle.jsonl", {"event": "paused", "store": str(run.store),
+                                                              "instance": instance, "retirement": "confirmed" if instance else "already-unavailable",
+                                                              "pids": [entry["pid"] for entry in active]})
+
+
+@contextlib.contextmanager
+def frame_upgrade_run(run, state, build):
+    if not state.get("upgrade"):
+        yield run, state, None
+        return
+    sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
+    from upgrade_fixture import Releases
+    actor = upgrade_actor(build)
+    version_text = subprocess.check_output([str(actor), "--version"], text=True, timeout=5)
+    match = re.search(r"\brui (\d+\.\d+\.\d+)\b", version_text)
+    if match is None:
+        raise FrameFailure(f"upgrade actor is not a release: {version_text}")
+    version = match.group(1)
+    schema, patch, revision = map(int, version.split("."))
+    available = f"{schema}.{patch}.{revision + 1}"
+    mode = state["upgrade"]
+    candidate = available if mode == "available" else version
+    from host_process import dispose_all
+    releases = isolated = gate = None
+    try:
+        releases = Releases(actor, candidate)
+        isolated = copy.copy(run)
+        isolated.meta = copy.deepcopy(run.meta)
+        isolated.home = run.scratch / "upgrades" / state["name"] / "home"
+        isolated.store = isolated.home.parent / "store"
+        isolated.home.mkdir(parents=True)
+        shutil.copytree(run.home / ".config", isolated.home / ".config")
+        host_build = isolated.home / ".local/lib/rui/actor"
+        (host_build / "bin").mkdir(parents=True)
+        isolated.rui = host_build / "bin/rui"
+        shutil.copy2(actor, isolated.rui)
+        (host_build / "THIRD_PARTY_NOTICES.md").write_text("Synthetic release actor\n")
+        isolated.meta.update(binary=str(isolated.rui), home=str(isolated.home), store=str(isolated.store), sessions={},
+                             frame_env={"RUI_TEST_UPGRADE_RELEASES_URL": releases.origin + "/releases",
+                                        "PATH": f"{isolated.home}/.local/bin:{isolated.rui.parent}:/usr/bin:/bin:/usr/sbin:/sbin"})
+        gate = isolated.home.parent / "publication.gate" if mode == "updating" else None
+        if gate is not None:
+            gate.touch()
+            isolated.meta["frame_env"]["RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"] = str(gate)
+        if mode == "failure":
+            releases.status["/releases/latest"] = 403
+        selected = host_build
+        if mode != "current":
+            selected = isolated.home / ".local/lib/rui/old"
+            (selected / "bin").mkdir(parents=True)
+            old = selected / "bin/rui"
+            old.write_text("#!/bin/sh\n[ \"$1\" = --version ] || exit 91\nprintf '%s\\n' 'rui 0.1.0 (synthetic selected release)'\n")
+            old.chmod(0o755)
+            (selected / "THIRD_PARTY_NOTICES.md").write_text("Synthetic selected release\n")
+        frame_command(subprocess.run([str(actor), "--publish-install", str(isolated.home), str(selected), "released-install"],
+                                     env=isolated.env(), capture_output=True, text=True, timeout=25), "select managed release")
+        ready = launch_host(isolated, restartable=True)
+        isolated.meta["upgrade_previous_instance"] = json.loads(ready.stdout)["instance"]
+        replacements = {"{upgrade_version}": version, "{available_version}": available}
+        def expand(value, regex=False):
+            if isinstance(value, str):
+                for key, replacement in replacements.items():
+                    value = value.replace(key, re.escape(replacement) if regex else replacement)
+                return value
+            if isinstance(value, list):
+                return [expand(item, regex) for item in value]
+            if isinstance(value, dict):
+                return {expand(key): expand(item, key in ("expect_regex", "absent_regex")) for key, item in value.items()}
+            return value
+        observed = {"actor": build["upgrade_actor"], "version": version, "candidate": candidate,
+                    "selected": str(selected), "mode": mode}
+        atomic_write(run.evidence / f"{state['name']}-upgrade.json", json.dumps(observed, indent=2) + "\n")
+        yield isolated, expand(state), (releases, gate, version)
+    finally:
+        dispose_all(
+            lambda: gate.unlink(missing_ok=True) if gate is not None else None,
+            lambda: releases.close() if releases is not None else None,
+            lambda: frame_pause_owned_host(isolated) if isolated is not None and isolated.store.exists() else None,
+            lambda: atomic_write(run.root / "run.json", json.dumps(run.meta, indent=1) + "\n"),
+            lambda: atomic_write(run.evidence / f"{state['name']}-release-requests.json", json.dumps(releases.requests, indent=2) + "\n") if releases is not None else None)
+
+
+def frame_upgrade_viewport(run, terminal, state):
+    if not state.get("upgrade") or state["upgrade"] == "chat":
+        return
+    if terminal.frame.columns >= 100:
+        if terminal.frame.visible:
+            frame_steps(run, terminal, [{"keys": ["Left"]}])
+            terminal.wait(lambda c: c.frame is not None and not c.frame.visible, "native list focus hid the input cursor")
+    elif "Settings" not in terminal.capture.completed:
+        frame_steps(run, terminal, [{"keys": ["Esc"]}, {"wait": "Settings"}])
+
+
+def frame_failure_settled(terminal, before):
+    marker = "! Couldn't reach GitHub; nothing changed" if before else "Update failed"
+    terminal.wait(lambda c: marker in c.completed and "Host paused" not in c.completed
+                  and "Reading this Session" not in c.completed
+                  and (before or "alt+i info" in c.completed), "failed Upgrade reread the open conversation")
+
+
+def frame_drive_upgrade(run, terminal, state, fixture):
+    if fixture is None:
+        return
+    releases, gate, version = fixture
+    if state["upgrade"] != "chat":
+        frame_wait(run, terminal, "Type a task")
+    before = state.get("comparison_side") == "before"
+    if state["upgrade"] in ("current", "available"):
+        if before:
+            return
+        terminal.wait(lambda _c: f"/releases/tag/v{releases.version}" in releases.requests, "release discovery HTTP response")
+        return
+    if before:
+        frame_steps(run, terminal, [{"mouse": {"at": "Settings", "do": "click"}}, {"wait": "Notifications"},
+                                    {"keys": ["Down"] * 5 + ["Enter"]}])
+    else:
+        frame_wait(run, terminal, version)
+        terminal.mouse({"at": version, "do": "click"})
+    if gate is not None:
+        if before:
+            frame_wait(run, terminal, " · publishing", timeout=40)
+        else:
+            selected = run.home / ".local/bin/rui"
+            terminal.wait(lambda c: selected.resolve() != run.home / ".local/lib/rui/old/bin/rui"
+                          and "Updating…" in c.completed, "published release held before Host activation", timeout=40)
+    elif state["upgrade"] == "failure":
+        frame_wait(run, terminal, "couldn't reach GitHub" if before else "Update failed")
+    else:
+        selected = run.home / ".local/bin/rui"
+        import os_semantics
+        terminal.wait(lambda c: os_semantics.process_executable(terminal.process.pid) == selected.resolve()
+                      and (f"Upgraded to {version}" if before else "alt+i info") in c.completed
+                      and "Notifications" not in c.completed,
+                      "installed release relaunched the same conversation", timeout=40)
+        status = json.loads(frame_command(run.rui_cmd("host", "status", "--store", run.store), "upgraded Host status").stdout)
+        if status["instance"] == run.meta["upgrade_previous_instance"]:
+            raise FrameFailure("Upgrade did not replace the original Host instance")
+        return
+    if before:
+        frame_steps(run, terminal, [{"keys": ["Esc"]}, {"gone": "Notifications"}])
+    if state["upgrade"] == "failure":
+        frame_failure_settled(terminal, before)
+
+
+def frame_finish_held_upgrade(run, terminal, fixture):
+    if fixture is None or fixture[1] is None:
+        return
+    import os_semantics
+    fixture[1].unlink(missing_ok=True)
+    selected = run.home / ".local/bin/rui"
+    terminal.wait(lambda c: os_semantics.process_executable(terminal.process.pid) == selected.resolve()
+                  and selected.resolve() != run.home / ".local/lib/rui/old/bin/rui"
+                  and "Notifications" not in c.completed, "released publication gate completed relaunch", timeout=40)
+
+
+def frame_upgrade_journey(run, terminal, state, fixture, out, size):
+    if state.get("upgrade") != "failure" or state.get("comparison_side") == "before":
+        return
+    releases, _gate, version = fixture
+    directory = out / "journeys" / state["name"]
+    directory.mkdir(parents=True)
+    records = []
+    steps = []
+    def shot(name, expected, absent, **oracles):
+        specimen = {"name": name, "expect": expected, "absent": absent, **oracles}
+        frame_ready(terminal, specimen)
+        records.append(frame_capture(run, terminal, directory, specimen, size, None))
+        steps.append({"name": name, "generation": terminal.capture.generation})
+        if not records[-1]["ok"]:
+            raise FrameFailure(records[-1]["reason"])
+    gate = releases.gate_archive()
+    try:
+        releases.status.pop("/releases/latest", None)
+        steps.append({"name": "failed-both-viewports-captured", "generation": terminal.capture.generation})
+        terminal.mouse({"at": "Update failed", "do": "click"})
+        terminal.wait(lambda _c: gate.entered.is_set(), "retry archive HTTP gate")
+        shot("retry-updating", ["Updating…"], ["Update failed", "Notifications"])
+        gate.release.set()
+        selected = run.home / ".local/bin/rui"
+        quiet = {"expect_next": {"Settings": version},
+                 "expect_regex": [rf"^\s*\d+(?:\.\d+)? (?:MB|GB)\s+{re.escape(version)}\s*(?:│.*)?$"]}
+        terminal.wait(lambda c: selected.resolve() != run.home / ".local/lib/rui/old/bin/rui"
+                      and frame_row_failure(quiet, c.completed) is None
+                      and "Updating…" not in c.completed and "Update failed" not in c.completed
+                      and "Notifications" not in c.completed, "retry installed the selected release", timeout=40)
+        status = json.loads(frame_command(run.rui_cmd("host", "status", "--store", run.store), "retry Host status").stdout)
+        if status["status"] != "ready" or status["instance"] == run.meta["upgrade_previous_instance"]:
+            raise FrameFailure("retry did not replace the original Host with a ready Host")
+        shot("retry-completed", [version, "Settings"], ["Updating…", "Update failed", "Notifications"], **quiet)
+        frame_steps(run, terminal, [{"mouse": {"at": "Settings", "do": "click"}}, {"wait": "Notifications"},
+                                    {"keys": ["Down"] * 5 + ["Enter"]}, {"wait": " · up to date"}])
+        shot("settings-version-up-to-date", ["Version", " · up to date"], ["Update failed"])
+        frame_steps(run, terminal, [{"keys": ["Esc"]}, {"gone": "Notifications"}])
+    finally:
+        gate.release.set()
+        atomic_write(directory / "journey.json", json.dumps({"method": "L1 PTY native clicks", "steps": steps,
+                     "records": records, "selected": str((run.home / ".local/bin/rui").resolve())}, indent=2) + "\n")
+
+
+def require_upgrade_fixture_user():
+    if os.getuid() == 0 or os.geteuid() == 0:
+        die("upgrade frames refuse root: Upgrade discovers and restarts UID-global Hosts; use a dedicated fixture account")
+    import pwd
+    actual = pwd.getpwuid(os.geteuid()).pw_name
+    expected = os.environ.get("VERIFY_RUI_UPGRADE_FIXTURE_USER")
+    if os.getuid() != os.geteuid() or not expected or actual != expected:
+        die("upgrade frames require a dedicated fixture account and VERIFY_RUI_UPGRADE_FIXTURE_USER matching its login; never use an account with unrelated Rui Hosts")
+
+
 def run_frames(args):
     try:
         scenario = load_scenario(args.scenario or HERE.with_name("frames.json"), args.sizes)
@@ -2745,7 +3030,12 @@ def run_frames(args):
                              "; valid states: " + ", ".join(s["name"] for s in scenario["states"]))
     except (OSError, ValueError, TypeError) as error:
         die(str(error))
+    upgrading = any(state.get("upgrade") for state in scenario["states"] if state["name"] in selected)
+    if upgrading:
+        require_upgrade_fixture_user()
     build = load_build(args.sha)
+    if upgrading:
+        upgrade_actor(build)
     require_screen(build)
     os.environ["RUI_TEST_GHOSTTY_VT"] = build["screen_library"]
     record_requested = getattr(args, "record", False) or any(s.get("record", False) for s in scenario["states"] if s["name"] in selected)
@@ -2790,10 +3080,25 @@ def run_frames(args):
         out.mkdir(parents=True, exist_ok=True)
         (out / "scenario.json").write_text(json.dumps(scenario_snapshot(scenario), indent=2) + "\n")
         last = max(i for i, state in enumerate(scenario["states"]) if state["name"] in selected)
+        parent_paused = False
         for state in scenario["states"][:last + 1]:
+            if state.get("upgrade") and state["name"] not in selected:
+                continue
+            if state.get("upgrade") and not parent_paused:
+                frame_pause_owned_host(run)
+                parent_paused = True
+            elif not state.get("upgrade") and parent_paused:
+                launch_host(run)
+                append_jsonl(run.evidence / "upgrade-host-lifecycle.jsonl", {"event": "parent-restored", "store": str(run.store)})
+                parent_paused = False
+            state = {**state, **state.get("comparison", {}).get(getattr(args, "comparison_side", "after"), {}),
+                     "comparison_side": getattr(args, "comparison_side", "after")}
+            upgrade_scope = contextlib.ExitStack()
+            parent_run = run
             state_sizes = state["sizes"]
             cols, rows = state_sizes[0]
             target = None
+            upgrade_fixture = None
             reason = None
             exiting = False
             opened = False
@@ -2801,9 +3106,13 @@ def run_frames(args):
             first_record = len(records)
             is_selected = frame_capture_selected(state, selected)
             try:
+                run, state, upgrade_fixture = upgrade_scope.enter_context(frame_upgrade_run(run, state, build))
                 seed_cast(run, state.get("cast", []))
                 steps = state["steps"]
-                target = FrameTerminal(run, state, state_sizes[0])
+                launch_size = state_sizes[0]
+                if state.get("upgrade") and launch_size[0] < 100:
+                    launch_size = (140, launch_size[1])
+                target = FrameTerminal(run, state, launch_size)
                 opened = True
                 # Initial readiness is a committed Rui frame, not elapsed wall
                 # time or a terminal query. State-specific waits own later readiness.
@@ -2811,7 +3120,12 @@ def run_frames(args):
                                        if "The Host stopped." in step.get("wait", "")), None)
                 first_wait = steps[0].get("wait") if steps else None
                 frame_initial_ready(target, first_wait, allow_exit=bool(stopped_marker))
+                frame_drive_upgrade(run, target, state, upgrade_fixture)
                 exiting = frame_steps(run, target, steps, exiting=bool(stopped_marker))
+                if launch_size != state_sizes[0]:
+                    frame_upgrade_viewport(run, target, state)
+                    target.resize(state_sizes[0])
+                frame_upgrade_viewport(run, target, state)
                 frame_ready(target, state, allow_exit=exiting, sessions=run.meta.get("sessions", {}))
             except (Exception, SystemExit) as error:
                 reason = str(error)
@@ -2836,7 +3150,9 @@ def run_frames(args):
                             if index > 0:
                                 if target is None:
                                     raise FrameFailure("terminal did not launch")
+                                frame_upgrade_viewport(run, target, state)
                                 target.resize(size)
+                                frame_upgrade_viewport(run, target, state)
                                 frame_ready(target, state, allow_exit=exiting, sessions=run.meta.get("sessions", {}))
                             # The first viewport is already sized. Capture directly
                             # after its steps/wait, while a transient is still visible.
@@ -2849,10 +3165,21 @@ def run_frames(args):
                         if not record["ok"] and reason is None:
                             print(f"verify-rui: {state['name']}@{record['size']}: {record['reason']}", file=sys.stderr)
                         records.append(record)
+                    if reason is None:
+                        try:
+                            frame_upgrade_journey(run, target, state, upgrade_fixture, out, state_sizes[-1])
+                        except (Exception, SystemExit) as error:
+                            failed = True
+                            for record in records[first_record:]:
+                                record.update(ok=False, status="failed", reason=record["reason"] or f"native retry journey: {error}")
+                            print(f"verify-rui: {state['name']}: native retry journey failed: {error}", file=sys.stderr)
             finally:
                 if opened:
                     try:
-                        target.close()
+                        try:
+                            frame_finish_held_upgrade(run, target, upgrade_fixture)
+                        finally:
+                            target.close()
                     except (Exception, SystemExit) as error:
                         if is_selected:
                             failed = True
@@ -2864,6 +3191,19 @@ def run_frames(args):
                         else:
                             print(f"verify-rui: warning: {state['name']}: disposal failed: {error} "
                                   "(not selected; its failure does not fail this run)", file=sys.stderr)
+                try:
+                    upgrade_scope.close()
+                except (Exception, SystemExit) as error:
+                    if is_selected:
+                        failed = True
+                        for record in records[first_record:]:
+                            record.update(ok=False, status="failed", reason=record["reason"] or str(error))
+                    print(f"verify-rui: {state['name']}: upgrade disposal failed: {error}", file=sys.stderr)
+                    if is_selected:
+                        frames_index(out, records, False)
+                    raise SystemExit(1)
+                finally:
+                    run = parent_run
                 if is_selected:
                     frames_index(out, records, False)
         if not args.no_png:
@@ -3014,6 +3354,7 @@ def cmd_frames(args):
         failed = False
         for side, sha in (("before", base), ("after", head)):
             child = argparse.Namespace(**{**vars(args), "sha": sha, "out": str(out / side), "before": None})
+            child.comparison_side = side
             child.scenario = str(before_path if side == "before" else after_path)
             if side == "before":
                 child.only = ",".join(state["name"] for state in before_scenario["states"]
@@ -3256,6 +3597,7 @@ def main():
     p.add_argument("sha"); p.add_argument("--repo"); p.add_argument("--pkg-dir"); p.add_argument("--force", action="store_true")
     p.add_argument("--source", help="existing clean detached worktree of SHA (default: cache worktree)")
     p.add_argument("--no-screen", action="store_true", help="skip the committed-screen observer library")
+    p.add_argument("--upgrade", action="store_true", help="also pin the same-source synthetic release actor")
     p.set_defaults(func=cmd_build)
     p = sub.add_parser("new", help="new run: synthetic HOME/Store, fixture provider, Host, Sessions demo(bypass)/approve(ask)")
     p.add_argument("sha"); p.add_argument("--seed", type=int, default=0, help="seed N answered messages into demo")

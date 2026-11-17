@@ -67,3 +67,5 @@ Working, queued, stopped and failed messages are Chat states; [work and stop](./
 - [Working, queued and stopped](./work-stop.md): running tools, queued messages, stop, failed replies and Host recovery.
 - [Terminal themes and input focus](./appearance.md): night, day, mist, no-color, input tint and focus.
 - [Named frames](./frames.md): scenario format, capture selection and evidence limits.
+
+- [Sidebar memory and updates](./sidebar-upgrade.md): native version, update, failure and post-upgrade chat frames.

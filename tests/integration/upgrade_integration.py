@@ -2,7 +2,6 @@
 import contextlib
 import hashlib
 import http.server
-import io
 import itertools
 import json
 import os
@@ -16,7 +15,6 @@ import socket
 import stat
 import subprocess
 import sys
-import tarfile
 import tempfile
 import threading
 from urllib.parse import quote
@@ -29,114 +27,10 @@ import os_semantics
 from host_process import canonical_fixture_root, dispose_all, start_ready_process, stop_process, wait_for
 from terminal_process import COLUMNS, ROWS, answers_to, terminal_process
 from terminal_screen import ScreenCapture, shown
+from upgrade_fixture import Gate, Releases
 
 
 TERMINAL_COLUMNS = max(COLUMNS, 140)
-
-
-class Gate:
-
-    def __init__(self):
-        self.entered = threading.Event()
-        self.release = threading.Event()
-
-    def hold(self):
-        self.entered.set()
-        wait_for(self.release.is_set, "fixture release gate", timeout=45)
-
-
-class Releases:
-
-    def __init__(self, binary, version):
-        target = os_semantics.native_release_target()
-        assert target is not None, "Upgrade supports darwin-arm64 and linux-x86_64"
-        self.version = version
-        self.name = f"rui-{version}-{target}.tar.gz"
-        self.archive = self.make_archive(binary)
-        self.digest = hashlib.sha256(self.archive).hexdigest()
-        self.requests = []
-        self.gates = {}
-        self.status = {}
-        self.errors = []
-        self.latest_location = None
-        self.sums_name = None
-        owner = self
-
-        class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                owner.requests.append(self.path)
-                try:
-                    if self.path in owner.gates:
-                        owner.gates[self.path].hold()
-                    status = owner.status.get(self.path, 200)
-                    location = None
-                    if self.path == "/releases/latest":
-                        status = owner.status.get(self.path, 302)
-                        location = owner.latest_location if owner.latest_location is not None else owner.origin + "/releases/redirect"
-                        body = b""
-                    elif self.path == "/releases/redirect":
-                        status = owner.status.get(self.path, 302)
-                        location = owner.origin + f"/releases/tag/v{owner.version}"
-                        body = b""
-                    elif self.path == f"/releases/tag/v{owner.version}":
-                        body = b"fixture release page; HTML is not release metadata"
-                    elif self.path == owner.sums_path:
-                        body = f"{owner.digest}  {owner.sums_name or owner.name}\n".encode()
-                    elif self.path == owner.archive_path:
-                        body = owner.archive
-                    else:
-                        status, body = owner.status.get(self.path, 404), b"unexpected fixture endpoint"
-                    self.send_response(status)
-                    if location:
-                        self.send_header("Location", location)
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                except (BrokenPipeError, ConnectionResetError):
-                    pass
-                except BaseException as error:
-                    owner.errors.append(error)
-
-            def log_message(self, *args):
-                pass
-
-        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.server.daemon_threads = False
-        self.origin = f"http://127.0.0.1:{self.server.server_port}"
-        self.archive_path = f"/releases/download/v{version}/{self.name}"
-        self.sums_path = f"/releases/download/v{version}/SHA256SUMS"
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
-
-    def make_archive(self, binary, *, invalid=False):
-        output = io.BytesIO()
-        root = self.name.removesuffix(".tar.gz")
-        with tarfile.open(fileobj=output, mode="w:gz") as archive:
-            if invalid:
-                data = b"not an executable\n"
-                entry = tarfile.TarInfo(f"{root}/bin/rui")
-                entry.mode, entry.size = 0o755, len(data)
-                archive.addfile(entry, io.BytesIO(data))
-            else:
-                archive.add(binary, arcname=f"{root}/bin/rui", recursive=False)
-            notices = b"Synthetic Upgrade fixture notices; native executable supplied by caller.\n"
-            entry = tarfile.TarInfo(f"{root}/THIRD_PARTY_NOTICES.md")
-            entry.mode, entry.size = 0o644, len(notices)
-            archive.addfile(entry, io.BytesIO(notices))
-        return output.getvalue()
-
-    def gate_archive(self):
-        gate = self.gates[self.archive_path] = Gate()
-        return gate
-
-    def close(self):
-        for gate in self.gates.values():
-            gate.release.set()
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=5)
-        assert not self.thread.is_alive(), "release server did not retire"
-        assert not self.errors, self.errors
 
 
 class CurlAttempts:
@@ -831,14 +725,27 @@ class TerminalScreen:
         self.empty_session(case, session)
         return frame
 
-    def empty_chat(self, case, session, *, expected_notice=None):
+    def empty_chat(self, case, session):
         facts = self.empty_session(case, session)
-        footer = "alt+i info" if expected_notice is None else expected_notice
-        assert footer, "empty chat requires an info action or an exact retained notice"
-        frame = wait_for(self.observe, "empty chat model facts and expected footer", timeout=15,
+        frame = wait_for(self.observe, "empty chat model facts and chat-only footer", timeout=15,
                          ready=lambda screen: shown(f"│ {facts['model']} · ", screen)
-                         and shown(footer, screen))
+                         and shown("alt+i info", screen)
+                         and "Upgraded to " not in screen and " · upgraded to " not in screen)
         return frame
+
+    def quiet_version(self, version):
+        pattern = re.compile(rf"\s*(?:\d+(?:\.\d+)? (?:MB|GB)\s+)?{re.escape(version)}\s*")
+
+        def ready(frame):
+            if "Upgraded to " in frame or " · upgraded to " in frame:
+                return False
+            rows = frame.splitlines()
+            return any(row.split("│", 1)[0].strip() == "Settings"
+                       and index + 1 < len(rows)
+                       and pattern.fullmatch(rows[index + 1].split("│", 1)[0])
+                       for index, row in enumerate(rows))
+
+        return wait_for(self.observe, "quiet version below Settings without upgrade notices", timeout=15, ready=ready)
 
     def leave_empty_chat(self, case, session):
         self.send("\x1b")
@@ -1388,7 +1295,7 @@ def proof_relaunched(c, screen, process):
 
     wait_for(observed, "selected release replaced the original TUI PID after terminal restoration",
              timeout=15, ready=lambda value: value[:3] == (installed, 2, 1))
-    screen.contains(f"Upgraded to {c.releases.version} · Host restarted")
+    screen.quiet_version(c.releases.version)
     assert screen.capture.alternate
 
 
@@ -1456,7 +1363,7 @@ def terminal_cases(root, binary, releases, artifacts):
             screen.start_upgrade()
             screen.contains(" · up to date")
             screen.close_settings()
-            screen.contains(f"Rui is up to date ({releases.version})")
+            screen.quiet_version(releases.version)
             assert os_semantics.process_executable(process.pid) == c.link.resolve()
             screen.ignored_overview_input("unchanged δ ignored", "unchanged δ ignored")
             screen.save(artifacts, "overview-unchanged")
@@ -1501,13 +1408,13 @@ def conversation_case(root, binary, releases, artifacts):
             screen.start_upgrade()
             screen.contains(" · publishing")
             screen.close_settings()
-            screen.contains("Publishing; cancelling no longer rolls back")
+            frame = screen.contains("Updating…")
+            assert "Publishing; cancelling" not in frame, frame
             screen.send("\x01\x0bconversation β draft\x01\x1b[C\x1b[C\x1b[C")
             screen.draft("conversation β draft", 5)
             published.unlink()
             proof_relaunched(c, screen, process)
-            screen.empty_chat(c, session,
-                              expected_notice=f"Upgraded to {c.releases.version} · Host restarted")
+            screen.empty_chat(c, session)
             screen.draft("conversation β draft", 5)
             screen.save(artifacts, "conversation-installed")
             proof_ready(c, previous, old_host)
@@ -1577,7 +1484,7 @@ def terminal_download_recovery(root, binary, releases, artifacts):
             screen.contains(f" · upgraded to {releases.version}")
             screen.save(artifacts, "download-recovered-settings")
             screen.close_settings()
-            screen.contains(f"Upgraded to {releases.version}")
+            screen.quiet_version(releases.version)
             proof_ready(c, previous, old_host)
             screen.save(artifacts, "download-recovered")
             curl.assert_attempts([("/releases/latest", "normal", 6),
@@ -1611,7 +1518,7 @@ def terminal_download_failure(root, binary, releases, artifacts):
             assert screen.entries == 1 and screen.restorations == 0, "failed check relaunched"
             screen.save(artifacts, "download-failure-settings")
             screen.close_settings()
-            screen.contains("Couldn't reach GitHub; nothing changed")
+            screen.contains("Update failed")
             receipt = exit_on_sigint(screen, process, "restored curl download failure report")
             assert b"curl: (22)" in receipt and b"403" in receipt, receipt.decode()
             assert b"could not download release information" in receipt, receipt.decode()
@@ -1639,7 +1546,7 @@ def terminal_cancellation_guidance(root, binary, releases, artifacts):
             screen.start_upgrade()
             screen.contains(f" · upgraded to {releases.version}")
             screen.close_settings()
-            screen.contains(f"Upgraded to {releases.version}")
+            screen.quiet_version(releases.version)
             proof_ready(c, previous, old_host)
             assert os_semantics.process_executable(process.pid) == binary
             screen.save(artifacts, "cancellation-guidance-installed")
@@ -1663,7 +1570,7 @@ def terminal_path_guidance(root, binary, releases, artifacts):
             screen.start_upgrade()
             screen.contains(f" · upgraded to {releases.version}")
             screen.close_settings()
-            screen.contains(f"Upgraded to {releases.version}")
+            screen.quiet_version(releases.version)
             proof_ready(c, previous, old_host)
             screen.ignored_overview_input("guidance ε ignored", "guidance ε ignored")
             assert os_semantics.process_executable(process.pid) == binary
@@ -1718,8 +1625,9 @@ def startup_cases(root, binary, releases, artifacts):
                     screen.start_upgrade()
                     screen.contains(" · publishing")
                     screen.close_settings()
-                    screen.contains("Publishing; cancelling no longer rolls back")
+                    frame = screen.contains("Updating…" if screen_kind == "resume" else "Publishing; cancelling no longer rolls back")
                     if screen_kind == "resume":
+                        assert "Publishing; cancelling" not in frame, frame
                         screen.send("\x01\x0bstartup α draft\x01\x1b[C\x1b[C\x1b[C")
                         screen.draft("startup α draft", 5)
                     else:
@@ -1738,8 +1646,7 @@ def startup_cases(root, binary, releases, artifacts):
                     proof_relaunched(c, screen, process)
                     proof_ready(c, previous, old_host)
                     if screen_kind == "resume":
-                        screen.empty_chat(c, session,
-                                          expected_notice=f"Upgraded to {c.releases.version} · Host restarted")
+                        screen.empty_chat(c, session)
                         screen.draft("startup α draft", 5)
                         screen.send("X")
                         screen.draft("staXrtup α draft", 6)
@@ -1905,7 +1812,7 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
                 gate.release.set()
                 screen.contains(" · upgrade failed")
                 screen.close_settings()
-                screen.contains("Upgrade failed; nothing changed")
+                screen.contains("Update failed")
                 screen.save(artifacts, "dual-failure-status")
                 assert retained.is_dir(), "cleanup receipt did not identify an existing retained stage"
                 assert c.link.resolve() == c.original
