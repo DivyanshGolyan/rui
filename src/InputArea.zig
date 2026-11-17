@@ -7,9 +7,11 @@ const Self = @This();
 const empty: vxfw.Text = .{ .text = "" };
 const status_lines = @import("slash_commands.zig").short_result_lines;
 
+pub const Panel = union(enum) { inline_panel: vxfw.Widget, full: vxfw.Widget };
+
 composer: Composer,
 permission: ?*PermissionCard = null,
-panel: ?vxfw.Widget = null,
+panel: ?Panel = null,
 facts: vxfw.Widget = empty.widget(),
 status: ?vxfw.Widget = empty.widget(),
 facts_at: enum { top, bottom } = .top,
@@ -31,9 +33,15 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const footer_rows = facts_rows + if (status) |drawn| @min(drawn.size.height, status_room) else 0;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 1 + facts_rows + @intFromBool(status != null));
     const room = size.height - footer_rows;
-    self.composer.panel = self.panel;
+    self.composer.panel = if (self.panel) |panel| switch (panel) {
+        .inline_panel, .full => |widget_| widget_,
+    } else null;
     self.composer.max_rows = @import("draft_layout.zig").cap(size.height);
-    const content = if (self.permission) |card|
+    const permission = if (self.panel) |panel| switch (panel) {
+        .inline_panel => self.permission,
+        .full => null,
+    } else self.permission;
+    const content = if (permission) |card|
         try card.drawInput(ctx.withConstraints(.{}, .{ .width = size.width, .height = room }), if (card.consent.row == .draft) self.composer.widget() else null)
     else
         try self.composer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = room }));

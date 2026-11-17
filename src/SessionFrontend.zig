@@ -924,7 +924,8 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                 self.reading.phase = .activity;
                 self.app_consent.adopt(request);
                 self.app_input.permission = &self.app_card;
-                try ctx.requestFocus(self.app_card.widget());
+                if (!self.info_open and !self.app_info.standaloneOpen() and !self.app_hooks.root.input.layer.settingsOpen())
+                    try ctx.requestFocus(self.app_card.widget());
                 self.dirty = true;
             };
             try self.app_card.widget().handleEvent(ctx, .tick);
@@ -1079,7 +1080,16 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .notice = self.shown_notice.current(now_ms) orelse said.notice,
         .overview = said.text,
 
-        .overlay = if (self.info_open) self.app_info.bodyWidget() else if (self.app_info.standaloneOpen()) self.app_info.standaloneWidget() else palette,
+        .overlay = if (self.app_hooks.root.input.layer.settingsOpen())
+            .{ .full = self.app_hooks.root.settings_page.bodyWidget() }
+        else if (self.info_open)
+            .{ .full = self.app_info.bodyWidget() }
+        else if (self.app_info.standaloneOpen())
+            .{ .full = self.app_info.standaloneWidget() }
+        else if (palette) |widget_|
+            .{ .inline_panel = widget_ }
+        else
+            null,
 
         .width = ctx.max.width.?,
     });
@@ -1089,10 +1099,8 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         self.app_input.status = null;
     }
     if (self.app_hooks.root.input.layer.settingsOpen()) {
-        self.app_input.panel = self.app_hooks.root.settings_page.bodyWidget();
         self.app_input.facts = self.app_hooks.root.settings_page.footerWidget();
         self.app_input.status = null;
-        self.app_input.permission = null;
     }
     self.app_preview.size = .{};
     self.app_content.size = .{};
@@ -10603,4 +10611,86 @@ test "Session modal custody changes before a new focus projection is drawn" {
         try held.keys("\t");
         try std.testing.expectEqual(expected, focus.currentFocus(held.root.input));
     }
+}
+
+test "consent and full panels compose across adoption, nested choices, and draft focus" {
+    const PanelCase = enum { settings, info };
+    const Steps = struct {
+        fn open(held: *HeldFrontend, panel: PanelCase) !void {
+            switch (panel) {
+                .settings => {
+                    var ctx = held.context();
+                    try held.root.openSettings(&ctx);
+                },
+                .info => try held.keys("\x1bi"),
+            }
+        }
+        fn choice(held: *HeldFrontend, panel: PanelCase) !void {
+            switch (panel) {
+                .settings => {
+                    _ = try held.shown();
+                    held.root.settings_page.select(.permissions);
+                    held.root.settings_page.panel.openChoice(&.{ "run without asking", "ask first" }, 0);
+                    try std.testing.expect(held.root.settings_page.hasChoice());
+                },
+                .info => {
+                    try held.keys("\x1b[B\r");
+                    try std.testing.expect(held.self.app_info.hasChoice());
+                },
+            }
+        }
+        fn closeChoice(held: *HeldFrontend, panel: PanelCase) !void {
+            switch (panel) {
+                .settings => held.root.settings_page.cancelChoice(),
+                .info => try held.keys("\x07"),
+            }
+        }
+        fn close(held: *HeldFrontend, panel: PanelCase) !void {
+            switch (panel) {
+                .settings => {
+                    var ctx = held.context();
+                    try held.root.showMain(&ctx);
+                },
+                .info => try held.keys("\x07"),
+            }
+        }
+    };
+    for (std.enums.values(PanelCase)) |panel| for ([_]bool{ false, true }) |adopt_before| for ([_]bool{ false, true }) |draft| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        try captureInfo(held, "Panel test chat");
+        var file: ?std.Io.File = null;
+        defer if (file) |f| f.close(std.testing.io);
+        if (adopt_before) {
+            file = try held.adopt(3);
+            if (draft) try held.keys("draft");
+        }
+        try Steps.open(held, panel);
+        try Steps.choice(held, panel);
+        if (!adopt_before) file = try held.adopt(3);
+        try std.testing.expectEqual(@as(?u64, 0xa), held.self.app_consent.request);
+        try std.testing.expect(held.self.app_input.permission == &held.self.app_card);
+        const choice_text = try held.shown();
+        try std.testing.expect(std.mem.indexOf(u8, choice_text, "Allow once") == null);
+        try std.testing.expect(std.mem.indexOf(u8, choice_text, if (panel == .settings) "ask first" else "run without asking") != null);
+        try Steps.closeChoice(held, panel);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "Allow once") == null);
+        try Steps.close(held, panel);
+        if (!adopt_before and draft) {
+            try held.keys("draft");
+            try Steps.open(held, panel);
+            try Steps.choice(held, panel);
+            _ = try held.shown();
+            try Steps.closeChoice(held, panel);
+            try Steps.close(held, panel);
+        }
+        try std.testing.expectEqual(if (draft) ConsentPolicy.Row.draft else .selector, held.self.app_consent.row);
+        if (draft) {
+            try std.testing.expectEqualStrings("draft", held.self.input.composition().bytes);
+            try held.keys("\x1b");
+        }
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "Allow once") != null);
+        try std.testing.expectEqual(@as(?u64, 0xa), held.self.app_consent.request);
+        try std.testing.expect(held.self.submission.intent == null);
+    };
 }

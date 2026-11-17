@@ -20,7 +20,7 @@ The [Session UI contract](docs/contracts/session-ui.md#required-evidence) requir
 
 ## Input-contained panels
 
-The [Session UI contract](docs/contracts/session-ui.md#required-evidence) requires shared placement evidence for the command list, chat info and Settings inside the input rules, plain unboxed backgrounds and the usual selection bar, compact command overflow and matching `esc` footers. The `panels-command-list`, `panels-chat-info` and `panels-settings` verify-rui recipes cover night at 140×40 and 46×30. Run the affected native owner tests, the panel integration group and verify-rui recipe unit/map tests. Frame recipes are required capture inputs, not a claim that frames have been captured.
+The [Session UI contract](docs/contracts/session-ui.md#required-evidence) requires shared placement evidence for the command list, chat info and Settings inside the input rules, plain unboxed backgrounds and the usual selection bar, compact command overflow and matching `esc` footers. The `panels-command-list`, `panels-chat-info` and `panels-settings` verify-rui recipes cover night at 140×40 and 46×30. Run the affected native owner tests, including the consent/panel adoption and focus domain and the single-list Settings layout domain, the panel integration group and verify-rui recipe unit/map tests. Frame recipes are required capture inputs, not a claim that frames have been captured.
 
 ## Contract index
 

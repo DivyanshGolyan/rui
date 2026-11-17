@@ -439,6 +439,18 @@ fn listWidget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .drawFn = appListDraw };
 }
 
+fn inputHostWidget(self: *Self) vxfw.Widget {
+    return .{ .userdata = self, .drawFn = appInputHostDraw };
+}
+
+fn appInputHostDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    self.app_screen.style = @import("widget_style.zig").of(self.caps, .{});
+    var surface = try self.app_screen.drawPart(ctx, .input_host);
+    surface.widget = self.inputHostWidget();
+    return surface;
+}
+
 fn paintDivider(self: *Self) void {
     self.root.divider = .{
         .grapheme = if (self.caps.unicode) "│" else "|",
@@ -898,7 +910,7 @@ fn drawBottom(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     if (self.root.input.layer.settingsOpen() and self.root.session == null) {
         self.settings_input = .{
             .composer = .{ .editor = &self.settings_editor, .caret = false },
-            .panel = self.root.settings_page.bodyWidget(),
+            .panel = .{ .full = self.root.settings_page.bodyWidget() },
             .facts = self.root.settings_page.footerWidget(),
             .status = null,
         };
@@ -1032,7 +1044,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .caps = .of(.{ .lc_all = init.environ_map.get("LC_ALL"), .lc_ctype = init.environ_map.get("LC_CTYPE"), .lang = init.environ_map.get("LANG"), .no_color = init.environ_map.get("NO_COLOR"), .colorterm = init.environ_map.get("COLORTERM") }),
         .interrupted = interrupted,
     };
-    self.root = .{ .settings_control = self.app_settings_line.widget(), .settings_activate = OverviewLines.Settings.activate, .main_presentation = .{ .context = self, .close = closeMainPresentation }, .overview = self.widget(), .overview_keys = .{ .context = self, .take = appKey }, .list = self.listWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .area = .list, .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
+    self.root = .{ .settings_control = self.app_settings_line.widget(), .settings_activate = OverviewLines.Settings.activate, .main_presentation = .{ .context = self, .close = closeMainPresentation }, .overview = self.widget(), .settings_input_host = self.inputHostWidget(), .overview_keys = .{ .context = self, .take = appKey }, .list = self.listWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .area = .list, .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
     self.sign_in = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .scratch = hooks.scratch, .userdata = self, .on_done = signedIn, .on_close = closeSignIn };
     try self.sign_in.target.set(options.store);
     self.root.sign_in = self.sign_in.widget();
@@ -3338,6 +3350,56 @@ test "Host line and Settings tail show together without overlap at wide and narr
     const at = view.layout(&overview.state);
     try std.testing.expectEqual(@as(u16, 0), at.host.len());
     try std.testing.expectEqual(at.settings.end, at.input);
+}
+
+test "Settings composes the Overview list at most once with and without a retained Session" {
+    const Count = struct {
+        fn widget(surface: vxfw.Surface, target: vxfw.Widget) usize {
+            var total: usize = @intFromBool(surface.widget.eql(target));
+            for (surface.children) |child| total += @This().widget(child.surface, target);
+            return total;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    HostRecovery.dir = tmp.dir;
+    HostRecovery.availability = .ready;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, HostRecovery.operations(), &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    overview.hooks.scratch = HostRecovery.scratch;
+    _ = try overview.event(.{ .tick = test_now_s * 1000 });
+    try std.testing.expect(try rig.settle() == null);
+    for ([_]bool{ false, true }) |retained| {
+        if (retained) {
+            try std.testing.expect(try rig.next(.{ .open = .{ .reference = "k7m2qx".* } }) == null);
+        }
+        defer if (retained) {
+            const frontend = overview.app_session.?.frontend.?;
+            frontend.stop();
+            frontend.reader.join() catch {};
+            overview.disposeSession(overview.app_session.?);
+            overview.app_session = null;
+        };
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try overview.root.openSettings(&ctx);
+        for ([_]u16{ 46, 100, 140 }) |width| {
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const surface = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} });
+            const list_count: usize = @intFromBool(width >= Root.split_at);
+            try std.testing.expectEqual(list_count, Count.widget(surface, overview.app_sessions.widget()));
+            try std.testing.expectEqual(list_count, Count.widget(surface, overview.app_new_session.widget()));
+            try std.testing.expectEqual(list_count, Count.widget(surface, overview.app_settings_line.widget()));
+            try std.testing.expectEqual(@as(usize, 1), Count.widget(surface, overview.root.settings_page.bodyWidget()));
+            if (!retained) try std.testing.expectEqual(@as(usize, 1), Count.widget(surface, overview.inputHostWidget()));
+            var shown = try rig.shown(width, 30);
+            defer shown.deinit();
+            try std.testing.expectEqual(list_count, std.mem.count(u8, try shown.text(), "+ New Session"));
+        }
+    }
 }
 
 test "Host recovery keeps the open widget drafts and scroll and starts only on an empty draft r" {

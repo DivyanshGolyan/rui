@@ -37,6 +37,7 @@ pub const MainPresentation = struct {
 main_presentation: ?MainPresentation = null,
 
 overview: vxfw.Widget,
+settings_input_host: ?vxfw.Widget = null,
 overview_keys: ?Keys = null,
 session_focus: ?FocusOwner = null,
 settings_control: ?vxfw.Widget = null,
@@ -357,7 +358,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .overview => self.overview,
         .session => self.session.?,
         .sign_in => self.sign_in.?,
-        .settings => self.session orelse self.overview,
+        .settings => self.session orelse self.settings_input_host orelse self.overview,
     };
     const child = if (layout.split) split: {
         const split = try ctx.arena.create(Split);

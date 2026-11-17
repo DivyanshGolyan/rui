@@ -58,7 +58,7 @@ pub const View = struct {
     facts: Identity = .{},
     notice: ?[]const u8 = null,
     overview: ?[]const u8 = null,
-    overlay: ?vxfw.Widget = null,
+    overlay: ?@import("InputArea.zig").Panel = null,
     choice: chrome.ChoiceState = .closed,
     width: u16,
 };
@@ -333,10 +333,10 @@ test "SessionChrome puts notices in Footer without a state row and preserves nee
     var screen: AppScreen.Session = .{ .content = &facade, .input = input.widget(), .userdata = &recorder, .on_event = Recorder.event };
     const palette: vxfw.Text = .{ .text = "/setup" };
 
-    self.place(&screen, &input, .{ .width = 80, .notice = "Copied 12 lines", .overlay = palette.widget() });
+    self.place(&screen, &input, .{ .width = 80, .notice = "Copied 12 lines", .overlay = .{ .inline_panel = palette.widget() } });
     try std.testing.expectEqualStrings("Copied 12 lines", self.status.bar.notice.?);
     try std.testing.expectEqualStrings("", self.state.text);
-    try std.testing.expect(input.panel.?.eql(palette.widget()));
+    try std.testing.expect(input.panel.?.inline_panel.eql(palette.widget()));
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     for ([_]u16{ 46, 140 }) |width| {

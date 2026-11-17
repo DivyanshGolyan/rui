@@ -29,7 +29,9 @@ fn Screen(comptime Body: type) type {
         userdata: *anyopaque,
         on_event: *const fn (*anyopaque, *vxfw.EventContext, vxfw.Event) anyerror!void,
 
-        pub const Part = enum { whole, list };
+        pub const Part = enum { whole, list, input_host };
+
+        const empty: vxfw.Text = .{ .text = "" };
 
         pub fn widget(self: *Self) vxfw.Widget {
             return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
@@ -58,13 +60,14 @@ fn Screen(comptime Body: type) type {
             const own = switch (part) {
                 .whole => self.widget(),
                 .list => self.listWidget(),
+                .input_host => self.widget(),
             };
             const size = ctx.max.size();
             if (size.width == 0 or size.height == 0) return .empty(own);
             const lower = try ctx.arena.create(Stack);
             const lower_children = try ctx.arena.alloc(Stack.Child, 4);
             var count: usize = 1;
-            lower_children[0] = .{ .widget = self.content.widget(), .sizing = .fill };
+            lower_children[0] = .{ .widget = if (part == .input_host) empty.widget() else self.content.widget(), .sizing = .fill };
             if (part == .whole) if (self.marker) |marker| {
                 const row = try ctx.arena.create(Marker);
                 row.* = .{ .child = marker, .style = self.style };
@@ -75,7 +78,7 @@ fn Screen(comptime Body: type) type {
                 lower_children[count] = .{ .widget = tail };
                 count += 1;
             };
-            if (part != .list) if (self.host) |host| {
+            if (part == .whole) if (self.host) |host| {
                 lower_children[count] = .{ .widget = host };
                 count += 1;
             };
@@ -88,10 +91,10 @@ fn Screen(comptime Body: type) type {
             const upper = try ctx.arena.create(Stack);
             const upper_children = try ctx.arena.alloc(Stack.Child, 2);
             count = 0;
-            if (self.header) |header| {
+            if (part != .input_host) if (self.header) |header| {
                 upper_children[count] = .{ .widget = header };
                 count += 1;
-            }
+            };
             upper_children[count] = .{ .widget = feed, .sizing = .fill };
             upper.* = .{ .children = upper_children[0 .. count + 1] };
             const column = try ctx.arena.create(Stack);
@@ -290,7 +293,7 @@ test "App screens render the original composition with painted marker rows" {
         screen.header = if (flags & 1 != 0) header.widget() else null;
         screen.tail = if (flags & 2 != 0) tail.widget() else null;
         screen.marker = if (flags & 4 != 0) marker.widget() else null;
-        input.panel = if (flags & 8 != 0) overlay.widget() else null;
+        input.panel = if (flags & 8 != 0) .{ .inline_panel = overlay.widget() } else null;
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} };
         const surface = try screen.widget().draw(ctx);
         try std.testing.expectEqual(@as(usize, 0), surface.buffer.len);
