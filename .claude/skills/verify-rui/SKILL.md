@@ -20,7 +20,7 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
 
    If packages are missing, run `src/fetch_dependencies.sh` for the shared package directory and run each pinned worktree’s `src/fetch_screen_dependencies.sh` before building it. Keep its `screen-emulator/zig-pkg` local to that worktree: symlinking it elsewhere breaks relative generator paths in Zig.
 
-   The build refuses a dirty or mismatched checkout. Set `RUI_BUILD_JOBS` to a positive integer to control parallelism for both builds (default `2`; use `1` on constrained containers). It runs `zig build -Doptimize=ReleaseSafe` and copies `zig-out/bin` to `~/.cache/verify-rui/builds/SHA/bin`. It then runs `zig build screen-emulator`, which installs the libghostty-vt that decodes committed frames into `~/.cache/verify-rui/builds/SHA/screen`. It also writes `manifest.json` with the SHA, tree and binary and library sha256 values. A cold build takes about 5 minutes on an M-series Mac, plus about 5 for libghostty-vt. A line saying `failed command: sh ./src/build_transport.sh` in the log is normal when rc=0. Use `build FULLSHA --no-screen` to skip libghostty-vt: the manifest records `screen_library: null`. The tap, tapped `term`, `wait` and `frames` refuse such builds with one line; direct untapped tmux terminals still work. A build made before the library existed has none; rebuild it with `--force` to add it.
+   The build refuses a dirty or mismatched checkout. Set `RUI_BUILD_JOBS` to a positive integer to control parallelism for both builds (default: available CPUs; use `1` on constrained containers). It runs `zig build -Doptimize=ReleaseSafe` and copies `zig-out/bin` to `~/.cache/verify-rui/builds/SHA/bin`. It then runs `zig build screen-emulator`, which installs the libghostty-vt that decodes committed frames into `~/.cache/verify-rui/builds/SHA/screen`. It also writes `manifest.json` with the SHA, tree and binary and library sha256 values. A cold build takes about 5 minutes on an M-series Mac, plus about 5 for libghostty-vt. A line saying `failed command: sh ./src/build_transport.sh` in the log is normal when rc=0. Use `build FULLSHA --no-screen` to skip libghostty-vt: the manifest records `screen_library: null`. The tap, tapped `term`, `wait` and `frames` refuse such builds with one line; direct untapped tmux terminals still work. A cached build without the library is rebuilt when a screen-enabled build is requested.
 
 2. **New run, one per experiment.**
 
@@ -58,6 +58,28 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
    - `--no-tap` (tmux only): runs Rui directly in the pane, as a control for harness effects. It records no input bytes.
 
    Each Rui runs under the tap: an inner PTY proxy that records every byte Rui receives and emits.
+
+## Preview all screens
+
+Use `shots` to preview every state in a build's recipe at its own sizes and compare it with a baseline:
+
+```sh
+$V shots --out CANDIDATE --baseline BASELINE
+```
+
+With no build identifier, `shots` builds the current checkout, including uncommitted changes, in ReleaseSafe and keys it by its content tree, HEAD and release tag (`tree-...`). It defaults to available CPU parallelism; `RUI_BUILD_JOBS` overrides that. Pass a build identifier to `shots` to use an existing build: a full 40-hex commit SHA or a `tree-...` content ID. Set `VERIFY_RUI_CACHE` to an absolute path to override the default `~/.cache/verify-rui`; the build cache must be outside the checkout for current-checkout builds. Make a baseline with `shots` first, and pass its output directory as `--baseline`. Use `--only a,b` to select states or `--no-png` to omit PNGs.
+
+Open `index.html` to review changed and new screens and failures first. `diff.json` lists changed, new and removed entries, the same count and failures. Changes alone succeed; capture failures exit 1. `shots.json` retains each name, size, status, reason, fingerprint and files. The fingerprint covers committed cells, styles, dimensions and terminal colours, excluding cursor and timing.
+
+Full captures include upgrade states and require a dedicated non-root account with `VERIFY_RUI_UPGRADE_FIXTURE_USER` set to its login. Fixture clocks, Session ordering and live memory can vary between runs, so inspect reported differences before attributing them to a build.
+
+For a large preview, use `--shard i/n` to partition states by index modulo n (i is 1-based), then combine the output directories:
+
+```sh
+$V shots-merge OUT1 OUT2 ... --out MERGED --baseline BASELINE
+```
+
+Review failures and fingerprint comparisons in the merged output. See [frames and previews](features/frames.md) for targeted captures and publication.
 
 ## Frames
 

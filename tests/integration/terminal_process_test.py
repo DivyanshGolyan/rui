@@ -55,7 +55,7 @@ class TerminalProcessTest(unittest.TestCase):
     def test_composer_oracles_follow_the_caret_pane(self):
         from human_cli_fixture import composer_empty, composer_ready
 
-        for prefix in (" ", "list text│ ", "中       │ "):
+        for prefix in (" ", "list text│ ", "中       │ ", " " * 40 + "| ", "中" + " " * 38 + "| "):
             for text, caret in (("café", 6), ("x │ y", 7)):
                 with self.subTest(prefix=prefix, text=text):
                     capture = ScreenCapture(columns=80, rows=4)
@@ -78,6 +78,57 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertEqual(conversation_text("list│ › line1    01:23\nlist│   line2\n    │ edited 2"),
                          "› line1    01:23\n  line2\nedited 2")
 
+    def test_composer_rules_follow_rendered_junctions(self):
+        from human_cli_fixture import composer_bounds, composer_line, chat_footer_row, footer_click, pane_content
+
+        for horizontal, vertical, crossing, ending, prompt in (("─", "│", "┼", "┤", "›"),
+                                                                  ("-", "|", "+", "+", ">")):
+            with self.subTest(horizontal=horizontal):
+                left = " " * 40
+                screen = "\n".join((horizontal * 40 + ending + " " * 20,
+                                    left + vertical + horizontal * 30,
+                                    left + vertical + " " + prompt + " literal │ and +",
+                                    horizontal * 40 + crossing + horizontal * 30,
+                                    left + vertical + " model · low"))
+                self.assertEqual(composer_bounds(screen), (1, 3))
+                self.assertEqual(composer_line(screen, 2), " " + prompt + " literal │ and +")
+                self.assertEqual(chat_footer_row(screen), 4)
+                self.assertEqual(footer_click(screen, marker="model"), b"\x1b[<0;43;5M\x1b[<0;43;5m")
+                self.assertEqual(footer_click(screen, column=70), b"\x1b[<0;71;5M\x1b[<0;71;5m")
+                with self.assertRaises(AssertionError):
+                    footer_click(screen, column=71)
+                self.assertEqual(pane_content(horizontal * 40 + ending + " " * 20), " " * 20)
+                self.assertIsNone(composer_bounds("\n".join((horizontal * 40 + ending + " " * 20,
+                                                              left + vertical + horizontal * 30))))
+                narrow = "\n".join((horizontal * 46, " " + prompt + " literal │ and +",
+                                     horizontal * 46, " model · low"))
+                self.assertEqual(composer_bounds(narrow), (0, 2))
+                self.assertEqual(composer_line(narrow, 1), " " + prompt + " literal │ and +")
+                self.assertEqual(chat_footer_row(narrow), 3)
+                self.assertIsNone(composer_bounds(horizontal * 20 + "x\n" + horizontal * 20))
+
+    def test_split_pane_row_handles_rendered_dividers_and_unsplit_text(self):
+        from human_cli_fixture import split_pane_row
+
+        for horizontal, vertical, crossing, ending in (("─", "│", "┼", "┤"), ("-", "|", "+", "+")):
+            sidebar = horizontal * 40
+            for glyph, pane in ((crossing, horizontal * 30), (ending, " " * 30)):
+                with self.subTest(glyph=glyph, pane=pane):
+                    self.assertEqual(split_pane_row(sidebar + glyph + pane), (sidebar, glyph, pane))
+            self.assertEqual(split_pane_row(" " * 40 + vertical + " › literal │ +"),
+                             (" " * 40, vertical, " › literal │ +"))
+            self.assertEqual(split_pane_row(horizontal * 46), ("", "", horizontal * 46))
+        self.assertEqual(split_pane_row("中" + " " * 38 + "| pane"), ("中" + " " * 38, "|", " pane"))
+        for text in (" › literal │ + ┼ ┤", " > literal │ +", "   + New Session", "plain | text"):
+            self.assertEqual(split_pane_row(text), ("", "", text))
+
+    def test_conversation_keeps_junction_characters_in_chat_text(self):
+        from human_cli_fixture import conversation_text
+
+        self.assertEqual(conversation_text("list│ message │ ┼ ┤ +\n › literal │ +"),
+                         "message │ ┼ ┤ +\n› literal │ +")
+        self.assertEqual(conversation_text(" " * 40 + "| message + |"), "message + |")
+
     def test_draft_oracle_matches_empty_placeholder_without_losing_text_or_caret(self):
         from types import SimpleNamespace
         import unicodedata
@@ -95,7 +146,7 @@ class TerminalProcessTest(unittest.TestCase):
             current.view = SimpleNamespace(cursor=SimpleNamespace(x=len(prefix) + caret, y=1))
             return current
 
-        for prefix in ([" "], ["l", "│", " "], ["中", "", "│", " "]):
+        for prefix in ([" "], ["l", "│", " "], ["中", "", "│", " "], [" "] * 40 + ["|", " "], ["中", ""] + [" "] * 38 + ["|", " "]):
             for prompt in ("› ", "> "):
                 for text in ("", "kept", "café", "é", "Type a task"):
                     normalized = unicodedata.normalize("NFC", text)
@@ -169,6 +220,7 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertTrue(predicate(listed, 0, 0))
         self.assertFalse(predicate(listed.replace("Settings", ""), 0, 0))
         self.assertFalse(predicate(listed + "\n › Type a task", 3, 3))
+        self.assertFalse(predicate(listed + "\n" + " " * 40 + "| > Type a task", 43, 2))
         self.assertFalse(predicate(" › Type a task\ngpt-6-luna", 3, 0))
 
     def test_app_settings_open_recognizes_only_the_settings_pane_footer(self):

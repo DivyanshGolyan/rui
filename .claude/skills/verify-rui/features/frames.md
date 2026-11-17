@@ -4,6 +4,16 @@
 
 Output defaults to `RUN/evidence/frames/`: `.txt`, `.ansi`, `.html`, `.png`, ordered `index.html` and `frames.json` results. Failed states retain captures/reasons; later states still run, and any selected failure exits nonzero. Cleanup preserves evidence. `--keep` retains the Host, fixture and Store, not live PTYs. Raw PTY output, exact injected bytes, terminal replies, mouse events (including no emitted bytes) and commit times live under `RUN/evidence/frames-pty/STATE/`.
 
+## Previewing all screens
+
+`$V shots [BUILD] [--baseline DIR] [--only a,b] [--shard i/n] [--out DIR] [--no-png]` captures every state in the build's recipe at its own sizes. With no BUILD it builds the current checkout, including uncommitted changes, in ReleaseSafe under a `tree-...` key derived from the content tree, HEAD and release tag. Pass a full 40-hex commit SHA or a `tree-...` content ID to use an existing build. `VERIFY_RUI_CACHE` can override the default `~/.cache/verify-rui` with an absolute path; the build cache must be outside the checkout for current-checkout builds. Build parallelism defaults to available CPUs and can be set with `RUI_BUILD_JOBS`. A pinned SHA build needs `--upgrade` to capture the upgrade states; `build --here` includes that actor.
+
+Make a baseline with `shots`, then pass its output directory as `--baseline` when capturing the candidate. `shots.json` records name, size, status, reason, fingerprint and files. The fingerprint compares committed cells, styles, dimensions and terminal colours, excluding cursor and timing. The comparison writes `diff.json` with changed, new, removed, same count and failed entries, and `index.html` puts changed/new screens and failures first. Failures exit 1; differences alone do not.
+
+Full captures include upgrade states and require a dedicated non-root account with `VERIFY_RUI_UPGRADE_FIXTURE_USER` set to its login. The fixture currently includes wall-clock message times, Session ordering and live memory figures, so repeated fingerprints can differ without a product change; inspect the frames before attributing a difference to the build.
+
+`--shard i/n` assigns states by index modulo n (i is 1-based). Combine shard outputs with `$V shots-merge OUT1 OUT2 ... --out OUT [--baseline DIR]` and review the merged comparison and failures. Use `frames` below for selected states, sizes or recordings, and `publish` to attach selected evidence to a PR.
+
 ## Scenario
 
 List each new frame state in exactly one feature file's `Frame states:` line; `python3 -m unittest tests/ci/test_verify_rui_map.py` enforces this map.

@@ -16,7 +16,7 @@ Git history keeps earlier test specifications and dated results.
 
 ## Sidebar and upgrade feedback
 
-The [Session UI contract](docs/contracts/session-ui.md#required-evidence) requires owner-domain tests for memory fitting, update-button states and drawn-target admission, and chat-only footer feedback, including narrow widths. Reverting mutations must fail the relevant assertions. Capture current, available, updating and failed sidebar states and the chat after an update in day and night at 140×40 and 46×30 using verify-rui, before and after. Frames are renderer evidence, not physical-input evidence.
+The [Session UI contract](docs/contracts/session-ui.md#required-evidence) requires owner-domain tests for memory fitting, the divider immediately above a single row with Settings and either memory or an update control, update-button states and separate drawn-target admission, and chat-only footer feedback, including narrow widths. Available, running and failed update labels replace memory completely, even when both would fit. Current and completed versions have no bottom label or target; available reads `Update to <version>`, running reads `Updating…`, and failure reads exactly `Update failed`, with its full diagnostic retained in Settings Version. Reverting mutations must fail the relevant assertions. Capture current, available, updating and failed sidebar states and the chat after an update in day and night at 140×40 and 46×30 using verify-rui, before and after. Frames are renderer evidence, not physical-input evidence.
 
 ## Input-contained panels
 
@@ -57,7 +57,7 @@ The subsystem references keep accepted behavior and required evidence together. 
 
 Upgrade discovery handoff verification runs the `UpgradeJob` discovery-handoff domain and the adopted-candidate precondition domain, including in-flight success/failure, cancellation, retained candidate custody and recovered transport. `upgrade-integration` keeps the exact `terminal_download_recovery` curl-attempt sequence: normal lookup failure, IPv4 lookup and checksums, then the archive over the same IPv4 owner, without a second discovery.
 
-Sidebar fix-round verification covers the retained divider, owner-supplied compact failure reason and whole-label fallback at narrow widths, and transient paused/publication lines ending with the attempt. Day and night failure recipes wait for the same settled overview state without relying on the removed open hint; the Settings Version row retains the complete diagnostic.
+Sidebar verification covers the retained divider immediately above Settings, shared row geometry, updates replacing memory completely and whole update labels at narrow widths, hidden current/completed versions, exact short failure text, and transient paused/publication lines ending with the attempt. Day and night failure recipes wait for the same settled overview state without relying on the removed open hint; the Settings Version row retains the complete diagnostic.
 
 Receipt-version control verification crosses discovered candidate versions below, equal to and above the selected receipt version with installed and unchanged publication outcomes and each Host outcome. Superseded endings retain the receipt version, not the old running client version, and update offers compare against that selected version.
 
