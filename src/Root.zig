@@ -38,6 +38,7 @@ main_presentation: ?MainPresentation = null,
 presentation_hold: ?struct { context: *anyopaque, held: *const fn (*anyopaque, u16) bool } = null,
 
 overview: vxfw.Widget,
+settings_input_host: ?vxfw.Widget = null,
 overview_keys: ?Keys = null,
 session_focus: ?FocusOwner = null,
 settings_control: ?vxfw.Widget = null,
@@ -106,8 +107,6 @@ pub fn focusInput(self: *Self, ctx: *vxfw.EventContext) !void {
     try self.navigate(ctx, .focus_input);
 }
 
-/// Settings takes the place of the main pane; it is no content of a feed.
-/// The page reloads first, so a failed reload leaves the layer as it was.
 pub fn openSettings(self: *Self, ctx: *vxfw.EventContext) !void {
     try self.settings_page.refresh();
     self.closeMainPresentation();
@@ -365,7 +364,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .overview => self.overview,
         .session => self.session.?,
         .sign_in => self.sign_in.?,
-        .settings => self.settings_page.widget(),
+        .settings => self.session orelse self.settings_input_host orelse self.overview,
     };
     const child = if (layout.split) split: {
         const split = try ctx.arena.create(Split);
@@ -577,10 +576,10 @@ test "App root opens settings in both layouts and Escape closes the choice, then
         try std.testing.expectEqual(width < split_at, root.settings_page.narrow);
         const layout = opened.children[0].surface;
         const page = if (width >= split_at) layout.children[2].surface else layout;
-        try std.testing.expect(page.widget.eql(root.settings_page.widget()));
+        try std.testing.expect(page.widget.eql(whole.widget()));
         try std.testing.expectEqual(@as(u16, if (width >= split_at) 99 else 46), page.size.width);
         if (width >= split_at) try std.testing.expect(layout.children[0].surface.widget.eql(list.widget()));
-        try std.testing.expect(!containsWidget(opened, whole.widget()));
+        try std.testing.expect(containsWidget(opened, whole.widget()));
 
         const escape: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.escape } };
         root.settings_page.select(.keys);
@@ -1193,4 +1192,47 @@ test "Root focus projection excludes nested clipped controls and clips negative 
     root.session_focus = null;
     root.projectFocus(surface, .{ .split = true, .pane = .session });
     try std.testing.expectEqual(@as(usize, 0), root.focus_frame.len);
+}
+
+test "Root routes Keys scrolling to Settings over a retained multiline draft" {
+    const app_events = @import("testing/app_events.zig");
+    const draft = "one\ntwo\nthree\nfour\nfive\nsix";
+    for ([_]u16{ 46, 140 }) |width| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const background: vxfw.Text = .{ .text = "Overview" };
+        var root: Self = .{ .overview = background.widget(), .list = background.widget() };
+        var storage: [128]u8 = undefined;
+        var editor: @import("DraftEditor.zig") = .initText(&storage, draft, 7);
+        var input: @import("InputArea.zig") = .{
+            .composer = .{ .editor = &editor, .caret = false },
+            .panel = .{ .full = root.settings_page.bodyWidget() },
+            .facts = root.settings_page.footerWidget(),
+            .status = null,
+        };
+        root.settings_input_host = input.widget();
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} };
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        _ = try root.widget().draw(draw_ctx);
+        try root.openSettings(&events);
+        try std.testing.expect(events.cmds.items[events.cmds.items.len - 1].request_focus.eql(root.settings_page.widget()));
+        root.settings_page.select(.keys);
+        try app_events.send(&events, "\r", root.widget(), root.settings_page.widget());
+        try std.testing.expect(root.settings_page.keys_open);
+        _ = try root.widget().draw(draw_ctx);
+        const page = &root.settings_page;
+        const bottom = page.keys_rows -| page.keys_height;
+        try std.testing.expect(bottom > 0);
+        try app_events.send(&events, "\x1b[B", root.widget(), page.widget());
+        try std.testing.expectEqual(@as(usize, 1), page.keys_offset);
+        try app_events.send(&events, "\x1b[A", root.widget(), page.widget());
+        try std.testing.expectEqual(@as(usize, 0), page.keys_offset);
+        try app_events.send(&events, "\x1b[6~", root.widget(), page.widget());
+        try std.testing.expectEqual(@min(page.keys_height, bottom), page.keys_offset);
+        try app_events.send(&events, "\x1b[5~", root.widget(), page.widget());
+        try std.testing.expectEqual(@as(usize, 0), page.keys_offset);
+        try std.testing.expectEqualStrings(draft, editor.text());
+        try std.testing.expectEqual(@as(usize, 7), editor.cursor());
+        try std.testing.expect(root.input.layer.settingsOpen());
+    }
 }

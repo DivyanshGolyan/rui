@@ -30,6 +30,7 @@ import threading
 import time
 import tempfile
 import unicodedata
+from urllib.parse import quote
 
 CACHE = pathlib.Path(os.environ.get("VERIFY_RUI_CACHE", pathlib.Path.home() / ".cache/verify-rui"))
 SCRATCH_PARENT = pathlib.Path("/private/tmp" if sys.platform == "darwin" else "/tmp")  # short paths: Unix socket limits
@@ -456,7 +457,7 @@ def fixture_main(args):
     """
     run = Run(args.run)
     sys.argv = [sys.argv[0], str(run.rui)]
-    sys.path.insert(0, str(pathlib.Path(run.meta["source"]) / "tests/integration"))
+    sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
     import http.server
     import model_fixture as fixture
     log = run.evidence / "provider.jsonl"
@@ -650,7 +651,7 @@ def tap_main(args):
     require_screen(build)
     term = pathlib.Path(args.term_dir)
     term.mkdir(parents=True, exist_ok=True)
-    sys.path.insert(0, str(source / "tests/integration"))
+    sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
     try:
         os.environ["RUI_TEST_GHOSTTY_VT"] = build["screen_library"]
         from terminal_screen import ScreenCapture
@@ -911,7 +912,7 @@ def cmd_new(args):
     run = Run(root)
     (run.home / ".config/rui").mkdir(parents=True, mode=0o700)
     sys.argv = [sys.argv[0], str(run.rui)]
-    sys.path.insert(0, str(pathlib.Path(run.meta["source"]) / "tests/integration"))
+    sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
     import codex_integration as codex_fixture
     codex_fixture.credentials(run.home / ".config/rui/codex.json")
     python = sys.executable
@@ -3736,8 +3737,11 @@ def cmd_shots(args):
                                              pkg_dir=None, force=False, no_screen=False, upgrade=True))
             identifier = json.loads(output.getvalue())["sha"]
         build = load_build(identifier)
-        raw = subprocess.check_output(["git", "-C", build["source"], "show",
-                                       f"{build['tree']}:.claude/skills/verify-rui/scripts/frames.json"], text=True)
+        if getattr(args, "scenario", None):
+            raw = pathlib.Path(args.scenario).read_text()
+        else:
+            raw = subprocess.check_output(["git", "-C", build["source"], "show",
+                                           f"{build['tree']}:.claude/skills/verify-rui/scripts/frames.json"], text=True)
         scenario = validate_scenario(json.loads(raw), None)
         metadata = {"build": build.get("sha", identifier), "tree": build["tree"],
                     "recipe_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest()}
@@ -3843,6 +3847,216 @@ def cmd_shots_merge(args):
         die(f"cannot merge shots: {error}")
 
 
+def publication_frames(out, states=None, include_same=False):
+    """Select media from the capture manifests, never from unrelated directory files."""
+    if (out / "pairs.json").exists():
+        data = json.loads((out / "pairs.json").read_text())
+        rows, head, base = data["pairs"], data["head"], data["base"]
+    else:
+        frames = json.loads((out / "frames.json").read_text())
+        heads = {r["sha"] for r in frames}
+        if len(heads) != 1:
+            raise ValueError("frames must contain exactly one head SHA")
+        head, base = heads.pop(), None
+        rows = [dict(name=r["name"], size=r["size"], same=False, after=r) for r in frames]
+    for sha in (head, base):
+        if sha is not None and not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise ValueError(f"invalid capture SHA: {sha}")
+    selected = set(states.split(",")) if states else {r["name"] for r in rows}
+    unknown = selected - {r["name"] for r in rows}
+    if unknown:
+        raise ValueError("unknown states: " + ", ".join(sorted(unknown)))
+    rows = [r for r in rows if r["name"] in selected and (include_same or not r["same"])]
+    files = {}
+    for row in rows:
+        for side in (("before", "after") if base and not row.get("new") else ("after",)):
+            record = row[side]
+            if not record["ok"]:
+                raise ValueError(f"cannot publish failed capture: {row['name']}@{row['size']}: {record['reason']}")
+            media = {ext: name for ext, name in record["files"].items() if ext in ("png", "gif")}
+            if "png" not in media:
+                raise ValueError(f"no PNG for {row['name']}@{row['size']}; run frames without --no-png")
+            for ext, name in media.items():
+                path = out / name
+                if (pathlib.Path(name).is_absolute() or path.is_symlink() or not path.resolve().is_relative_to(out.resolve())
+                        or path.suffix != "." + ext or not path.is_file()):
+                    raise ValueError(f"invalid capture file: {name}")
+                files[name] = path
+    if not files:
+        raise ValueError("no changed captures to publish; use --all to include same pairs")
+    return head, base, rows, files
+
+
+def github_repository(url):
+    match = re.fullmatch(r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([\w.-]+)/([\w.-]+?)(?:\.git)?/?", url.strip())
+    if not match:
+        raise ValueError("origin must be a GitHub repository remote")
+    return f"{match[1]}/{match[2]}"
+
+
+def gh(*args, cwd=None):
+    try:
+        result = subprocess.run(["gh", *args], cwd=cwd, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise ValueError("gh 2.104.0+ with --attach is required; install GitHub CLI") from None
+    if result.returncode:
+        raise ValueError(f"gh {args[0]} failed: {result.stderr.strip()}")
+    return result.stdout
+
+
+def require_attachments(repository, cwd):
+    version = re.search(r"gh version (\d+)\.(\d+)\.(\d+)", gh("--version", cwd=cwd))
+    if not version or tuple(map(int, version.groups())) < (2, 104, 0):
+        raise ValueError("gh 2.104.0+ with --attach is required; upgrade GitHub CLI")
+    if "--attach" not in gh("pr", "edit", "--help", cwd=cwd):
+        raise ValueError("gh 2.104.0+ with --attach is required; upgrade GitHub CLI")
+    try:
+        token = gh("auth", "token", cwd=cwd).strip()
+        if not token.startswith(("ghp_", "gho_")):
+            raise ValueError("unsupported token")
+        if json.loads(gh("api", f"repos/{repository}", cwd=cwd)).get("permissions", {}).get("push") is not True:
+            raise ValueError("no push permission")
+    except (ValueError, OSError):
+        raise ValueError("a classic PAT or gh OAuth token with repository push access is required") from None
+
+
+def screens_markdown(head, base, rows):
+    attachments = {}
+    def images(record, side, row):
+        images = []
+        for ext, name in record["files"].items():
+            if ext not in ("png", "gif"):
+                continue
+            alt = f"{row['name']} {row['size']} {side}" + (" recording" if ext == "gif" else "")
+            attachments[name] = alt
+            images.append(f"![{alt}]({quote(name, safe='/@')})")
+        return "\n\n".join(images)
+    lines = ["## Screens", "", f"Head: `{head}`", f"Base: `{base}`" if base else "Base: none (single build)",
+             "Sizes: " + ", ".join(dict.fromkeys(r["size"] for r in rows)), "Surface: plain PTY, L1 synthetic input", ""]
+    for name in dict.fromkeys(row["name"] for row in rows):
+        lines += [f"### {name}", ""]
+        for row in (row for row in rows if row["name"] == name):
+            size = row["size"] + (" (same)" if row["same"] else "")
+            lines += [f"#### {size}", ""]
+            if base:
+                lines += ["Before", ""]
+                lines += ["New screen"] if row.get("new") else images(row["before"], "before", row).splitlines()
+                lines += ["", "After", ""]
+            lines += images(row["after"], "after", row).splitlines() + [""]
+    return "\n".join(lines), attachments
+
+
+def screens_parts(body):
+    """Locate the top-level Screens section without treating fenced examples as headings."""
+    offset, start, fence = 0, None, None
+    for line in body.splitlines(keepends=True):
+        text = line.rstrip("\r\n")
+        if fence:
+            if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + r"{%d,}[ \t]*" % len(fence), text):
+                fence = None
+        elif opened := re.match(r"^ {0,3}(`{3,}|~{3,})", text):
+            fence = opened[1]
+        elif re.match(r"^#{1,2} ", text):
+            if start is not None:
+                return body[:start], body[start:offset], body[offset:]
+            if text.rstrip() == "## Screens":
+                start = offset
+        offset += len(line)
+    if start is not None:
+        return body[:start], body[start:], ""
+    return body.rstrip() + "\n\n", "", ""
+
+
+def verify_attachments(body, attachments, facts):
+    _, screens, _ = screens_parts(body)
+    embedded = dict(re.findall(r"^[ \t]*!\[([^\]\n]*)\]\(\s*(https://github\.com/user-attachments/[^\s)]+)\s*\)[ \t]*$", screens, re.M))
+    if not all(alt in embedded for alt in attachments.values()) or not all(fact in screens for fact in facts):
+        raise ValueError("PR readback is missing embedded Screens attachments; inspect the body before retrying")
+
+
+def publish_attachments(out, repository, number, head, base, rows):
+    """The one upload/readback owner, run locally or copied unchanged over SSH."""
+    require_attachments(repository, cwd=out)
+    endpoint = f"repos/{repository}/pulls/{number}"
+    body = json.loads(gh("api", endpoint, cwd=out))["body"] or ""
+    prefix, _old, suffix = screens_parts(body)
+    screens, attachments = screens_markdown(head, base, rows)
+    body = prefix + screens + "\n" + suffix
+    facts = screens.splitlines()[2:6]
+    uploaded = {}
+    with tempfile.TemporaryDirectory(prefix="verify-rui-attach-") as temporary:
+        body_file = pathlib.Path(temporary) / "body.md"
+        items = list(attachments.items())
+        for offset in range(0, len(items), 50):
+            batch = items[offset:offset + 50]
+            body_file.write_text(body)
+            command = ["gh", "pr", "edit", str(number), "-R", repository, "--body-file", str(body_file)]
+            for name, alt in batch:
+                command += ["--attach", f"{name}#{alt}"]
+            result = subprocess.run(command, cwd=out, capture_output=True, text=True)
+            # The CLI can update the PR even on partial failure; always read it back.
+            body = json.loads(gh("api", endpoint, cwd=out))["body"] or ""
+            if result.returncode:
+                raise ValueError("attachment upload failed (requires a classic PAT or gh OAuth token with push access); PR may be partially updated, inspect its body before retrying")
+            uploaded.update(batch)
+            verify_attachments(body, uploaded, facts)
+    return f"Updated PR #{number}: {len(attachments)} embedded Screens attachments verified by readback"
+
+
+def publish_over_ssh(host, files, job):
+    """Stage one worker and its selected inputs; always remove the owned remote directory."""
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.@:-]*", host):
+        raise ValueError("--ssh must name an SSH host or user@host")
+    def remote(command):
+        result = subprocess.run(["ssh", "-oBatchMode=yes", host, shlex.join(command)], capture_output=True, text=True)
+        if result.returncode:
+            raise ValueError("SSH publisher failed: " + result.stderr.strip())
+        return result.stdout
+    directory = remote(["mktemp", "-d", "/tmp/verify-rui-attachments.XXXXXXXXXX"]).strip()
+    if not re.fullmatch(r"/tmp/verify-rui-attachments\.[A-Za-z0-9_-]+", directory):
+        raise ValueError("SSH publisher returned an unexpected temporary directory")
+    try:
+        with tempfile.TemporaryDirectory(prefix="verify-rui-stage-") as temporary:
+            stage = pathlib.Path(temporary)
+            for name, source in files.items():
+                target = stage / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+            shutil.copyfile(HERE, stage / "__verify_publish_helper__.py")
+            (stage / "__publish_job__.json").write_text(json.dumps(job))
+            result = subprocess.run(["scp", "-oBatchMode=yes", "-r", str(stage) + "/.", f"{host}:{directory}/"],
+                                    capture_output=True, text=True)
+            if result.returncode:
+                raise ValueError("cannot copy selected captures over SSH: " + result.stderr.strip())
+            output = remote(["python3", directory + "/__verify_publish_helper__.py", "_publish", directory + "/__publish_job__.json"])
+    finally:
+        remote(["rm", "-rf", "--", directory])
+    return output.strip()
+
+
+def cmd_publish_worker(args):
+    job = pathlib.Path(args.job).resolve()
+    try:
+        print(publish_attachments(job.parent, **json.loads(job.read_text())))
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+        die(f"publish failed: {error}")
+
+
+def cmd_publish(args):
+    try:
+        out = pathlib.Path(args.directory).resolve()
+        head, base, rows, files = publication_frames(out, args.states, args.all)
+        if args.pr <= 0:
+            raise ValueError("--pr must be a positive PR number")
+        url = subprocess.check_output(["git", "-C", str(HERE.parents[4]), "remote", "get-url", "origin"], text=True).strip()
+        job = dict(repository=github_repository(url), number=args.pr, head=head, base=base, rows=rows)
+        print(publish_over_ssh(args.ssh, files, job) if args.ssh else publish_attachments(out, **job))
+    except FileNotFoundError as error:
+        die("publish failed: gh 2.104.0+ with --attach is required; install GitHub CLI" if error.filename == "gh" else f"publish failed: {error}")
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+        die(f"publish failed: {error}")
+
+
 # ---------------------------------------------------------------- CLI
 
 
@@ -3881,6 +4095,7 @@ def main():
     p = sub.add_parser("shots", help="capture a build's own screen recipe")
     p.add_argument("build", nargs="?", metavar="BUILD")
     p.add_argument("--baseline", metavar="DIR")
+    p.add_argument("--scenario", metavar="FILE", help="use this trusted recipe instead of the build tree recipe")
     p.add_argument("--only", metavar="NAME,...")
     p.add_argument("--shard", metavar="I/N")
     p.add_argument("--out")
@@ -3891,6 +4106,16 @@ def main():
     p.add_argument("--out", required=True)
     p.add_argument("--baseline", metavar="DIR")
     p.set_defaults(func=cmd_shots_merge)
+    p = sub.add_parser("publish", help="attach frames media to a PR Screens section (gh 2.104.0+)")
+    p.add_argument("directory", metavar="DIR")
+    p.add_argument("--pr", required=True, type=int, help="PR number to attach captures to")
+    p.add_argument("--states", metavar="NAME,...")
+    p.add_argument("--all", action="store_true", help="include pairs with identical committed cells")
+    p.add_argument("--ssh", metavar="HOST", help="upload on HOST using its gh credentials (cloud: rui-box)")
+    p.set_defaults(func=cmd_publish)
+    p = sub.add_parser("_publish", help=argparse.SUPPRESS)
+    p.add_argument("job")
+    p.set_defaults(func=cmd_publish_worker)
     p = sub.add_parser("restart-host", help="stop the run's Host and start a fresh one on the same Store and fixture")
     p.add_argument("run")
     p.set_defaults(func=cmd_restart_host)

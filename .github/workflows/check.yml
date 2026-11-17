@@ -195,6 +195,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          filter: blob:none
       - name: Select existing targets
         id: select
         env:
@@ -256,6 +257,7 @@ jobs:
           ref: ${{ github.sha }}
           # Import-cycle and caller-error allowances only shrink from trusted main history.
           fetch-depth: 0
+          filter: blob:none
       - name: Install the pinned packages tests/ci imports
         run: python3 -m pip install --disable-pip-version-check -r tests/integration/requirements.txt -r tests/ci/requirements.txt
       - name: Determine whether caller inventory needs its pinned-stdlib bootstrap
@@ -983,12 +985,11 @@ jobs:
           ref: ${{ needs.plan.outputs.candidate_ref }}
           sparse-checkout: tests/ci
           persist-credentials: false
-      - name: Require Screens CI
+      - name: Require screen evidence
         if: ${{ needs.plan.outputs.screens_required == 'true' }}
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         run: python3 tests/ci/pr_shape.py --screens
