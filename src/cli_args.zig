@@ -152,7 +152,7 @@ const parent_help =
 const preset_help =
     \\--preset NAME creates from a named Host Settings preset; only explicitly supplied settings override it.
     \\Presets are only available to session configure creation; session start does not support them.
-    \\Omitted settings inherit the preset. default sends null: effort and output reservation clear; compaction trigger is refused.
+    \\Omitted settings inherit the preset. default sends null: output reservation clears; effort clears only where the model permits; compaction trigger is refused.
     \\
 ;
 

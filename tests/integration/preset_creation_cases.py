@@ -72,8 +72,12 @@ def preset_creation(binary, root, store_settings, env):
     def sessions():
         return {row["reference"] for row in value("session", "list", "--store", store, "--all")["sessions"]}
 
-    def capture(*args, input=None, expect=4):
+    def capture(*args, input=None, expect=4, unlisted=None):
         result = invoke("session", "configure", "--store", store, *args, input=input, expect=expect)
+        if unlisted is not None:
+            warning = f"rui: this client's catalog does not list {unlisted}; client defaults use estimated limits.\n"
+            assert result.stderr.startswith(warning), result
+            result = subprocess.CompletedProcess(result.args, result.returncode, result.stdout, result.stderr[len(warning):])
         handle = announced(result)
         record = home / ".config/rui/requests" / (handle + ".json")
         routing = record.with_name(record.name + ".routing")
@@ -155,7 +159,7 @@ def preset_creation(binary, root, store_settings, env):
             assert observed == {"status": "rejected", "kind": "configure", "target": "", "code": code}, observed
             loaded_refusals.append((handle, code))
 
-        override, changed_capture = capture("--preset", "restricted", "--model", "gpt-6-luna",
+        override, changed_capture = capture("--preset", "restricted", "--model", "gpt-4.1",
             "--tools", "none", "--loaded-tools", "none", "--permission-mode", "bypass",
             "--reasoning-effort", "default", "--compaction-trigger", "2000", "--output-reservation", "default",
             "--instructions", "-", "--label", "", "--text-output", "--test-drop-reply", "after-commit", input="")
@@ -169,10 +173,25 @@ def preset_creation(binary, root, store_settings, env):
         changed_session = changed_reply["context"]["session"]
         changed = inspect(changed_session)["session"]
         assert changed["provider"] == "openai" and changed["workspace"] == str(workspace), changed
-        assert changed["model"] == "gpt-6-luna" and changed["reasoning_effort_override"] is None, changed
+        assert changed["model"] == "gpt-4.1" and changed["reasoning_effort_override"] is None, changed
         assert changed["tools"] == [] and changed["loaded_tools"] == [] and changed["permission_mode"] == "bypass", changed
         assert changed["compaction_trigger_override"] == "2000" and changed["output_reservation_override"] is None, changed
         assert changed["label"] is None and changed["output_schema"] is None and changed["instructions"]["bytes"] == "0", changed
+
+        # Null effort is admitted for a catalogued model with no efforts and an
+        # unlisted model, but is refused for a catalogued model with efforts.
+        unknown_model = "unlisted-preset-model"
+        unknown_effort, unknown_effort_capture = capture("--preset", "restricted", "--model", unknown_model,
+            "--reasoning-effort", "default", "--test-drop-reply", "after-commit", unlisted=unknown_model)
+        assert unknown_effort_capture["configuration"] == {"model": unknown_model, "effort": None}, unknown_effort_capture
+        unknown_effort_session = recover(unknown_effort)["context"]["session"]
+        unknown_saved = inspect(unknown_effort_session)["session"]
+        assert unknown_saved["model"] == unknown_model and unknown_saved["reasoning_effort_override"] is None, unknown_saved
+        rejected_effort, rejected_effort_capture = capture("--preset", "restricted", "--model", "gpt-6-luna",
+            "--reasoning-effort", "default", expect=3)
+        assert rejected_effort_capture["configuration"] == {"model": "gpt-6-luna", "effort": None}, rejected_effort_capture
+        rejected_effort_reply = recover(rejected_effort, expect=3)["answer"]
+        assert rejected_effort_reply["code"] == "unsupported_reasoning_effort" and rejected_effort_reply["replayed"] is True, rejected_effort_reply
 
         invalid, invalid_capture = capture("--preset", "restricted", "--compaction-trigger", "default", expect=3)
         assert invalid_capture["configuration"] == {"compactAt": None}, invalid_capture
@@ -201,7 +220,7 @@ def preset_creation(binary, root, store_settings, env):
                          input="must not start a task", expect=2)
         assert "[option_unknown]" in refused.stderr and "rui session start:" in refused.stderr and "preset" in refused.stderr, refused
         assert not start_record.exists(), refused
-        assert sessions() - before == {session, native_session, loaded_session, changed_session}
+        assert sessions() - before == {session, native_session, loaded_session, changed_session, unknown_effort_session}
 
         # A later configuration must not rewrite the original Configure admission answer.
         invoke("session", "configure", "--store", store, "--session", session, "--label", "Later label")
@@ -235,7 +254,7 @@ def preset_creation(binary, root, store_settings, env):
             refusal = recover(handle, expect=3)["answer"]
             assert refusal["replayed"] is True and refusal["code"] == code, refusal
         assert value("request", "inspect", unknown_update)["observation"] == unknown_refusal
-        assert sessions() - before == {session, native_session, loaded_session, changed_session}
+        assert sessions() - before == {session, native_session, loaded_session, changed_session, unknown_effort_session}
         assert value("request", "inspect", base)["observation"] == original_admission
         for record, original, routing, route in captures:
             assert record.read_bytes() == original and routing.read_bytes() == route
