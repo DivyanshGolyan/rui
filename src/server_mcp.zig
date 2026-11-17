@@ -131,19 +131,14 @@ pub const Calls = struct {
                 const ready = std.c.poll(@ptrCast(&poll), 1, 0);
                 if (ready == 0) continue;
             }
-            var out: std.Io.Writer.Allocating = .init(host.allocator);
-            defer out.deinit();
-            var code: ?@import("mcp/result_text.zig").Code = null;
-            var result_capture: ResultCapture = .{ .host = host, .active = active };
-            defer result_capture.close();
-            const handler: Running.ResultHandler = .{ .ctx = &result_capture, .accept = ResultCapture.accept };
+            var ended: ?@import("mcp/result_text.zig").Ended = null;
             if (!active.running.requestSent()) {
-                host.store.withActionDispatchHandoff(active.binding, .{ .host = host, .active = active, .now = now, .out = &out.writer, .code = &code, .handler = handler }, struct {
+                host.store.withActionDispatchHandoff(active.binding, .{ .host = host, .active = active, .now = now, .ended = &ended }, struct {
                     fn handoff(context: anytype) !void {
                         try context.host.withEffectLaunch(context, send);
                     }
                     fn send(context: anytype) !void {
-                        context.code.* = try context.active.running.serviceWithResult(context.now, context.out, context.handler);
+                        context.ended.* = context.active.running.poll(context.now);
                     }
                 }.handoff) catch |err| {
                     switch (err) {
@@ -157,39 +152,10 @@ pub const Calls = struct {
                     continue;
                 };
             } else {
-                code = active.running.serviceWithResult(now, &out.writer, handler) catch |err| {
-                    fenceDispatch(host, "MCP result rendering", err);
-                    active.destroy(host);
-                    entry.* = null;
-                    return true;
-                };
+                ended = active.running.poll(now);
             }
-            if (code) |result| {
-                const resolution: store.ActionResolutionCode = switch (result) {
-                    .succeeded => .succeeded,
-                    .failed => .failed,
-                    .spawn_failed => .spawn_failed,
-                    .indeterminate => .indeterminate,
-                    .cancelled => .cancelled,
-                };
-                if (result_capture.ended) |ended| {
-                    result_capture.captureResult(ended) catch |err| {
-                        result_capture.failure = err;
-                    };
-                }
-                if (result_capture.failure) |err| {
-                    const fault: result_fault.Failure = .{ .capture = err };
-                    if (result_fault.classify(fault) == .storage_full) {
-                        _ = tool_settle.failure(host, active.slot(), "MCP image capture", fault);
-                    } else {
-                        // An already-running MCP capture failed; its result is uncertain.
-                        _ = tool_settle.fence(host, "MCP image capture", .{ .capture = err });
-                    }
-                } else if (result_capture.capture) |capture| {
-                    publishParts(host, active, resolution, capture);
-                } else {
-                    _ = tool_settle.result(host, active.slot(), active.profile, resolution, .{ .text = out.written() });
-                }
+            if (ended) |finished| {
+                complete(host, active, finished);
                 active.destroy(host);
                 entry.* = null;
                 progress = true;
@@ -206,93 +172,120 @@ pub const Calls = struct {
     }
 };
 
-const InputCapture = @import("InputCapture.zig");
-const ResultCapture = struct {
-    host: *Host,
-    active: *Active,
-    capture: ?*InputCapture = null,
-    ended: ?@import("mcp/result_text.zig").Ended = null,
-    failure: ?anyerror = null,
-    prepaid: u64 = 0,
-    prepaid_used: std.atomic.Value(u64) = .init(0),
+/// Owns the replay cursor while intake scans and copies the borrowed MCP data.
+const ImageDecoder = struct {
+    encoded: []const u8 = "",
+    decoder: @import("mcp/result_parts.zig").Decoder = undefined,
 
-    fn close(self: *ResultCapture) void {
-        if (self.capture) |capture| {
-            capture.close();
-            self.host.allocator.destroy(capture);
+    pub fn source(self: *ImageDecoder, image: @import("mcp/result_parts.zig").Image) error{ UnsupportedMimeType, InvalidBase64 }!@import("image_intake.zig").Source {
+        const format: @import("input_media.zig").Format = if (@import("mcp/document.zig").keyIs(image.mime, "image/png")) .png else if (@import("mcp/document.zig").keyIs(image.mime, "image/jpeg")) .jpeg else return error.UnsupportedMimeType;
+        self.encoded = image.data;
+        self.decoder = @import("mcp/result_parts.zig").Decoder.init(image.data);
+        var window: [2048]u8 = undefined;
+        var length: u64 = 0;
+        while (true) {
+            const bytes = try self.decoder.next(&window);
+            if (bytes.len == 0) break;
+            length += bytes.len;
         }
-        if (self.prepaid != 0) self.host.retention.sharedBudget().release(self.prepaid);
+        self.decoder = @import("mcp/result_parts.zig").Decoder.init(image.data);
+        return .{ .length = length, .format = format, .context = self, .next = next, .rewind = rewind };
     }
 
-    fn accept(ctx: *anyopaque, ended: @import("mcp/result_text.zig").Ended) !bool {
-        const self: *ResultCapture = @ptrCast(@alignCast(ctx));
-        const content = switch (ended.ended) {
-            .outcome => |outcome| switch (outcome) {
-                .result => |result| result.content,
-                else => return false,
-            },
-            else => return false,
-        };
-        if (!@import("mcp/result_parts.zig").anyImage(content)) return false;
-        self.ended = ended;
-        return true;
+    fn next(context: *anyopaque, window: []u8) anyerror!usize {
+        const self: *ImageDecoder = @ptrCast(@alignCast(context));
+        return (try self.decoder.next(window)).len;
     }
 
-    noinline fn captureResult(self: *ResultCapture, ended: @import("mcp/result_text.zig").Ended) !void {
-        const capture = try self.host.allocator.create(InputCapture);
-        errdefer if (self.capture == null) self.host.allocator.destroy(capture);
-        try @import("server_input_scratch.zig").init(self.host, self.active.binding.action_id, capture);
-        self.capture = capture;
-        const Parts = @import("mcp/result_capture.zig").Capture;
-        const parts = try self.host.allocator.create(Parts);
-        defer self.host.allocator.destroy(parts);
-        parts.init(capture);
-        if (!self.active.running.bash_offered) {
-            _ = try parts.render(ended);
-            return;
-        }
-        const refusal = "\nFull output was not retained.\n";
-        var name_buffer: [96]u8 = undefined;
-        const name = try @import("named_scratch.zig").NumericName.@"mcp-output".format(&name_buffer, self.active.binding.action_id, @import("attempt.zig").action_attempt_ordinal);
-        const success = std.fmt.allocPrint(self.host.allocator, "\nFull output: {s}/{s}\n", .{ self.host.retention.scratch_path, name }) catch null;
-        defer if (success) |value| self.host.allocator.free(value);
-        const refused = try parts.plan(ended, refusal);
-        if (!refused.omitted) {
-            _ = try parts.render(ended);
-            return;
-        }
-        var hint: []const u8 = refusal;
-        const shared = self.host.retention.sharedBudget();
-        if (success) |success_hint| {
-            const accepted = try parts.plan(ended, success_hint);
-            const reserve = @max(accepted.scratch_bytes, refused.scratch_bytes);
-            if (shared.allocate(reserve)) {
-                self.prepaid = reserve;
-                capture.resources.?.budget = .{ .used = &self.prepaid_used, .limit = reserve };
-                var counter: std.Io.Writer.Discarding = .init(&.{});
-                if (parts.writeSanitized(&counter.writer, ended, success_hint)) |_| {
-                    const Context = struct {
-                        parts: *Parts,
-                        ended: @import("mcp/result_text.zig").Ended,
-                        hint: []const u8,
-                        fn write(out: *std.Io.Writer, context: @This()) !void {
-                            try context.parts.writeSanitized(out, context.ended, context.hint);
-                        }
-                    };
-                    if (self.host.retention.writeFile(name, counter.fullCount(), Context{ .parts = parts, .ended = ended, .hint = success_hint }, Context.write)) hint = success_hint;
-                } else |_| {}
-            }
-        }
-        _ = try parts.renderWithHint(ended, hint);
+    fn rewind(context: *anyopaque) anyerror!void {
+        const self: *ImageDecoder = @ptrCast(@alignCast(context));
+        self.decoder = @import("mcp/result_parts.zig").Decoder.init(self.encoded);
     }
 };
 
-noinline fn publishParts(host: *Host, active: *Active, code: store.ActionResolutionCode, capture: *InputCapture) void {
-    const loan = capture.seal() catch |err| {
-        _ = tool_settle.fence(host, "MCP image sealing", .{ .capture = err });
+const Rendered = union(enum) { code: @import("mcp/result_text.zig").Code, failed: @import("result_fault.zig").Failure };
+
+/// The ending and decoder borrow Running's answer until this function returns.
+fn renderResult(result: *@import("tool_result.zig").Result, ended: @import("mcp/result_text.zig").Ended) Rendered {
+    var sink: ResultSink = .{ .out = result.text(), .result = result };
+    const code = @import("mcp/result_text.zig").render(&sink, ended) catch |err| return .{ .failed = sink.failure orelse .{ .capture = err } };
+    return .{ .code = code };
+}
+
+const ResultSink = struct {
+    out: *std.Io.Writer,
+    result: *@import("tool_result.zig").Result,
+    failure: ?@import("result_fault.zig").Failure = null,
+
+    fn diagnostic(self: *ResultSink, reason: []const u8) !void {
+        try @import("image_intake.zig").writeInPlace(self.out, reason);
+    }
+
+    pub fn badImage(self: *ResultSink, reason: []const u8, _: []const u8) !void {
+        try self.diagnostic(reason);
+    }
+
+    pub fn image(self: *ResultSink, image_block: @import("mcp/result_parts.zig").Image, _: []const u8, last: bool) !void {
+        var decoder: ImageDecoder = .{};
+        const source = decoder.source(image_block) catch |err| return self.diagnostic(switch (err) {
+            error.UnsupportedMimeType => "unsupported MIME type",
+            error.InvalidBase64 => "invalid base64",
+        });
+        var progress = self.result.beginImage(source, last);
+        while (true) switch (progress) {
+            .pending => progress = self.result.stepImage(),
+            .kept => return,
+            .rejected => |rejection| return self.diagnostic(switch (rejection) {
+                .reason => |reason| reason,
+                .failure => |failure| switch (failure) {
+                    inline else => |err| @errorName(err),
+                },
+            }),
+            .failed => |failure| {
+                self.failure = failure;
+                return error.ResultFailure;
+            },
+        };
+    }
+};
+
+/// Complete while Running still owns the response and any borrowed bytes.
+noinline fn complete(host: *Host, active: *Active, ended: @import("mcp/result_text.zig").Ended) void {
+    const result = @import("tool_result.zig").Result.create(host, active.binding.action_id, active.profile) catch |err| {
+        _ = tool_settle.fence(host, "MCP result creation", .{ .capture = err });
         return;
     };
-    _ = tool_settle.result(host, active.slot(), active.profile, code, .{ .parts = loan });
+    defer result.destroy();
+    const rendered = renderResult(result, ended);
+    const code = switch (rendered) {
+        .failed => |failure| {
+            settleFailure(host, active, failure, false);
+            return;
+        },
+        .code => |code| code,
+    };
+    const resolution: store.ActionResolutionCode = switch (code) {
+        .succeeded => .succeeded,
+        .failed => .failed,
+        .spawn_failed => .spawn_failed,
+        .indeterminate => .indeterminate,
+        .cancelled => .cancelled,
+    };
+    const finished = result.finish();
+    switch (finished) {
+        .failed => |failed| settleFailure(host, active, failed.failure, failed.seal),
+        .value => |value| if (tool_settle.result(host, active.slot(), active.profile, resolution, value) == .delivered) result.keep(),
+    }
+}
+
+fn settleFailure(host: *Host, active: *Active, failure: result_fault.Failure, seal: bool) void {
+    if (seal) {
+        _ = tool_settle.fence(host, "MCP image sealing", failure);
+    } else if (result_fault.classify(failure) == .storage_full) {
+        _ = tool_settle.failure(host, active.slot(), "MCP result capture", failure);
+    } else {
+        _ = tool_settle.fence(host, "MCP result capture", failure);
+    }
 }
 
 fn nowMs(host: *const Host) u64 {
@@ -344,12 +337,6 @@ noinline fn prepare(host: *Host, active: *Active) !void {
         .id = 1,
         .server_name = config.name,
         .timeout_ms = input.timeout_ms,
-        .bash_offered = input.runner.mcp.bash_offered,
-        .retention = .{
-            .queue = host.retention,
-            .action_id = active.binding.action_id,
-            .attempt_ordinal = @import("attempt.zig").action_attempt_ordinal,
-        },
     };
     try host.store.withActionLaunchHandoff(active.binding, .{ .host = host, .active = active, .input = start }, struct {
         fn handoff(context: anytype, cutoff: u64) !void {
@@ -378,14 +365,7 @@ fn readContent(host: *Host, allocator: std.mem.Allocator, reference: store.Conte
 fn cancel(host: *Host, active: *Active) void {
     const sent = active.started and active.running.requestSent();
     const text = @import("mcp/action_text.zig");
-    var buffer: [@max(text.stop_unknown.len, text.stop_not_sent.len)]u8 = undefined;
-    var out: std.Io.Writer = .fixed(&buffer);
-    const code = @import("mcp/result_text.zig").write(&out, .{ .server_name = "", .ended = .{ .stopped = sent } }) catch unreachable;
-    settle(host, active, switch (code) {
-        .cancelled => .cancelled,
-        .indeterminate => .indeterminate,
-        else => unreachable,
-    }, out.buffered());
+    settle(host, active, if (sent) .indeterminate else .cancelled, if (sent) text.stop_unknown else text.stop_not_sent);
 }
 
 test "MCP Host call bound refuses admission before touching the Store" {
@@ -608,5 +588,306 @@ test "MCP ordinary custody covers preparation failure init failure stop shutdown
         try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
         const recycled = host.custody.reserve().?;
         try host.custody.releaseUnused(recycled);
+    }
+}
+// Helpers for MCP adapter tests; keep the returned ending alive with Running.
+const adapter_test_text = @import("mcp/result_text.zig");
+const adapter_test_retention = @import("output_retention.zig");
+const adapter_test_script = @import("mcp/test_server.zig");
+
+fn adapterTestInput(port: u16) Running.Input {
+    var target = @import("http1/request.zig").parseTarget("http://127.0.0.1:1/mcp") catch unreachable;
+    target.port = port;
+    return .{
+        .server = .{ .target = target, .bearer_token = "t" },
+        .client = .{ .name = "rui", .version = "test" },
+        .name = "search",
+        .input_schema = "{\"properties\":{\"q\":{}}}",
+        .arguments = "{\"q\":\"x\"}",
+        .caller = .{ .session_id = "s", .parent_session_id = null, .root_session_id = "s", .turn_id = "t" },
+        .id = 7,
+        .server_name = "test",
+        .timeout_ms = 600_000,
+    };
+}
+
+fn adapterTestDrive(running: *Running) !adapter_test_text.Ended {
+    const Drive = struct {
+        running: *Running,
+        ended: ?adapter_test_text.Ended = null,
+        fn step(self: *@This()) !bool {
+            self.ended = self.running.poll(1);
+            return self.ended != null;
+        }
+    };
+    var context: Drive = .{ .running = running };
+    const poll = @import("test_poll");
+    try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(10)), &context, Drive.step);
+    return context.ended.?;
+}
+
+test "MCP Result renders and retains text across outcomes and frozen offers" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [@import("protocol.zig").max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(0);
+    var entries: [4]adapter_test_retention.Entry = @splat(.{});
+    var queue = adapter_test_retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = Running.max_answer_bytes }, &entries);
+    defer queue.cleanupAll();
+    var host: @import("server_host.zig").Host = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = undefined, .retention = &queue };
+    const running = try gpa.create(Running);
+    defer gpa.destroy(running);
+    const Case = struct { length: usize, kind: enum { text, mixed_error, structured, rpc_error, refused } = .text };
+    for ([_]bool{ false, true }) |bash_offered| {
+        for ([_]Case{
+            .{ .length = 32 },
+            .{ .length = adapter_test_text.excerpt_bytes },
+            .{ .length = adapter_test_text.excerpt_bytes + 128 },
+            .{ .length = adapter_test_text.excerpt_bytes + 128, .kind = .mixed_error },
+            .{ .length = adapter_test_text.excerpt_bytes + 128, .kind = .structured },
+            .{ .length = adapter_test_text.excerpt_bytes + 128, .kind = .rpc_error },
+            .{ .length = adapter_test_text.excerpt_bytes + 128, .kind = .refused },
+        }) |case| {
+            const payload = try gpa.alloc(u8, case.length);
+            defer gpa.free(payload);
+            @memset(payload, 'x');
+            if (case.length > adapter_test_text.excerpt_bytes) @memcpy(payload[adapter_test_text.excerpt_bytes - 1 ..][0..2], "é");
+            const body = switch (case.kind) {
+                .text => try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}}}", .{payload}),
+                .mixed_error => try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{{\"isError\":true,\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}},{{\"type\":\"image\",\"data\":\"x\"}}]}}}}", .{payload}),
+                .structured => try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{{\"content\":[],\"structuredContent\":{{\"data\":\"{s}\"}}}}}}", .{payload}),
+                .rpc_error => try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{{\"code\":-1,\"message\":\"{s}\"}}}}", .{payload}),
+                .refused => try gpa.dupe(u8, payload),
+            };
+            defer gpa.free(body);
+            const full = switch (case.kind) {
+                .text, .refused => try std.fmt.allocPrint(gpa, "{s}{s}", .{ if (case.kind == .refused) "Outcome unknown: The MCP server answered HTTP 502. The call may or may not have run; it was not retried.\n" else "", payload }),
+                .mixed_error => try std.fmt.allocPrint(gpa, "The tool reported an error:\n{s}\n[Image unavailable: missing image MIME type]", .{payload}),
+                .structured => try std.fmt.allocPrint(gpa, "{{\"data\":\"{s}\"}}", .{payload}),
+                .rpc_error => try std.fmt.allocPrint(gpa, "The MCP server returned error -1: {s}", .{payload}),
+            };
+            defer gpa.free(full);
+            const wire = try std.fmt.allocPrint(gpa, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n{s}", .{ if (case.kind == .refused) "502 Bad Gateway" else "200 OK", if (case.kind == .refused) "text/plain" else "application/json", body.len, body });
+            defer gpa.free(wire);
+            var script: adapter_test_script = .{ .reply = wire };
+            try script.start();
+            defer script.stop();
+            try running.start(gpa, adapterTestInput(script.port), 0);
+            defer running.deinit();
+            const ended = try adapterTestDrive(running);
+            const result = try @import("tool_result.zig").Result.create(&host, 17, .{ .excerpt_bytes = adapter_test_text.excerpt_bytes, .retain = bash_offered });
+            defer result.destroy();
+            const rendered = renderResult(result, ended);
+            const expected_code: adapter_test_text.Code = switch (case.kind) {
+                .text, .structured => .succeeded,
+                .refused => .indeterminate,
+                else => .failed,
+            };
+            try std.testing.expect(rendered == .code);
+            try std.testing.expectEqual(expected_code, rendered.code);
+            const finished = result.finish();
+            try std.testing.expect(finished == .value and finished.value == .text);
+            const output = finished.value.text;
+            result.keep();
+            if (full.len <= adapter_test_text.excerpt_bytes) {
+                try std.testing.expectEqualStrings(full, output);
+                try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+                try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "mcp-output-17-1.tmp", .{}));
+            } else {
+                const kept = @import("utf8_validation.zig").scalarStart(full, adapter_test_text.excerpt_bytes);
+                var expected: std.Io.Writer.Allocating = .init(gpa);
+                defer expected.deinit();
+                try expected.writer.print("{s}\n[{d} more bytes not shown]", .{ full[0..kept], full.len - kept });
+                if (bash_offered) try expected.writer.print("\nFull output: {s}/mcp-output-17-1.tmp\n", .{root});
+                try std.testing.expectEqualStrings(expected.written(), output);
+                if (bash_offered) {
+                    const saved = try tmp.dir.readFileAlloc(std.testing.io, "mcp-output-17-1.tmp", gpa, .limited(Running.max_answer_bytes));
+                    defer gpa.free(saved);
+                    try std.testing.expectEqualStrings(full, saved);
+                    try std.testing.expectEqual(@as(u64, full.len), used.load(.acquire));
+                    try std.testing.expectEqual(@as(usize, 1), queue.occupied());
+                    queue.cleanupAll();
+                    try std.testing.expectEqualStrings(expected.written(), output);
+                } else {
+                    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+                    try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "mcp-output-17-1.tmp", .{}));
+                }
+            }
+            try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        }
+    }
+}
+
+test "MCP Result reports retention refusal without changing success" {
+    const gpa = std.testing.allocator;
+    const payload: [adapter_test_text.excerpt_bytes + 1]u8 = @splat('x');
+    const wire = adapter_test_script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"" ++ payload ++ "\"}]}}");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [@import("protocol.zig").max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    const running = try gpa.create(Running);
+    defer gpa.destroy(running);
+    const Reason = enum { budget, capacity, reserved, sequence, create, missing };
+    for (std.meta.tags(Reason)) |reason| {
+        var used: std.atomic.Value(u64) = .init(0);
+        var entries: [2]adapter_test_retention.Entry = @splat(.{});
+        var missing_buffer: [@import("protocol.zig").max_store_bytes]u8 = undefined;
+        const scratch_root = if (reason == .missing) try std.fmt.bufPrint(&missing_buffer, "{s}/missing", .{root}) else root;
+        var queue = adapter_test_retention.Queue.initialize(std.testing.io, scratch_root, .{ .used = &used, .limit = if (reason == .budget) 1 else Running.max_answer_bytes }, if (reason == .capacity) &.{} else &entries);
+        defer queue.cleanupAll();
+        if (reason == .reserved) _ = try queue.reservePair("protected-out", 0, "protected-err", 0);
+        if (reason == .sequence) queue.next_sequence = std.math.maxInt(u64);
+        if (reason == .create) try tmp.dir.createDir(std.testing.io, "mcp-output-17-1.tmp", .default_dir);
+        defer if (reason == .create) tmp.dir.deleteDir(std.testing.io, "mcp-output-17-1.tmp") catch {};
+        var script: adapter_test_script = .{ .reply = wire };
+        try script.start();
+        defer script.stop();
+        var host: @import("server_host.zig").Host = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = undefined, .retention = &queue };
+        try running.start(gpa, adapterTestInput(script.port), 0);
+        defer running.deinit();
+        const ended = try adapterTestDrive(running);
+        const result = try @import("tool_result.zig").Result.create(&host, 17, .{ .excerpt_bytes = adapter_test_text.excerpt_bytes, .retain = true });
+        defer result.destroy();
+        const rendered = renderResult(result, ended);
+        try std.testing.expect(rendered == .code);
+        try std.testing.expectEqual(adapter_test_text.Code.succeeded, rendered.code);
+        const finished = result.finish();
+        try std.testing.expect(finished == .value and finished.value == .text);
+        try std.testing.expectEqualStrings(payload[0..adapter_test_text.excerpt_bytes] ++ "\n[1 more bytes not shown]\nFull output was not retained.\n", finished.value.text);
+        result.keep();
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expectEqual(@as(usize, if (reason == .reserved) 2 else 0), queue.occupied());
+    }
+}
+
+test "Running oversized JSON and SSE answers preserve borrowed evidence until release" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [@import("protocol.zig").max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(0);
+    var entries: [1]adapter_test_retention.Entry = @splat(.{});
+    var queue = adapter_test_retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = Running.max_answer_bytes + 1024 }, &entries);
+    defer queue.cleanupAll();
+    var host: @import("server_host.zig").Host = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = undefined, .retention = &queue };
+    const running = try gpa.create(Running);
+    defer gpa.destroy(running);
+    const response = try gpa.alloc(u8, Running.max_answer_bytes + 1024);
+    defer gpa.free(response);
+    const Case = struct { prefix: []const u8, code: adapter_test_text.Code, status: u16 = 200 };
+    for ([_]bool{ false, true }) |sse| {
+        for ([_]Case{
+            .{ .prefix = "not a JSON-RPC answer: ", .code = .failed, .status = 403 },
+            .{ .prefix = "not a JSON-RPC answer: ", .code = .indeterminate, .status = 502 },
+            .{ .prefix = "{\"jsonrpc\":\"2.0\",\"id\":8,\"result\":{\"isError\":false,\"content\":[", .code = .failed, .status = 403 },
+            .{ .prefix = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"resultType\":\"input_required\",\"isError\":false,\"content\":[", .code = .indeterminate },
+            .{ .prefix = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"resultType\":\"complete\",\"isError\":false,\"content\":\"", .code = .indeterminate },
+            .{ .prefix = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"resultType\":\"complete\",\"isError\":false,\"content\":[{\"type\":\"text\",\"text\":\"", .code = .succeeded },
+            .{ .prefix = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"resultType\":\"complete\",\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"", .code = .failed },
+            .{ .prefix = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"", .code = .indeterminate },
+            .{ .prefix = "{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{\"code\":-32602,\"message\":\"bad\",\"data\":\"", .code = .failed },
+        }) |case| {
+            var wire: std.Io.Writer = .fixed(response);
+            const body_len = Running.max_answer_bytes + 1;
+            try wire.print("HTTP/1.1 {d} Test\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n", .{ case.status, if (sse) "text/event-stream" else "application/json", body_len + @as(usize, if (sse) 6 else 0) });
+            if (sse) try wire.writeAll("data: ");
+            try wire.writeAll(case.prefix);
+            try wire.splatByteAll('x', body_len - case.prefix.len);
+            var script: adapter_test_script = .{ .reply = wire.buffered() };
+            try script.start();
+            defer script.stop();
+            try running.start(gpa, adapterTestInput(script.port), 0);
+            defer running.deinit();
+            const ended = try adapterTestDrive(running);
+            try std.testing.expectEqual(case.code, adapter_test_text.classify(ended.ended));
+            const answer = switch (ended.ended) {
+                .oversized => |value| value,
+                else => return error.ExpectedOversized,
+            };
+            try std.testing.expect(std.mem.indexOf(u8, answer.bytes, case.prefix) != null);
+            try std.testing.expect(answer.bytes.len > adapter_test_text.excerpt_bytes);
+            const result = try @import("tool_result.zig").Result.create(&host, 17, .{ .excerpt_bytes = adapter_test_text.excerpt_bytes, .retain = true });
+            defer result.destroy();
+            const rendered = renderResult(result, ended);
+            try std.testing.expect(rendered == .code);
+            try std.testing.expectEqual(case.code, rendered.code);
+            const finished = result.finish();
+            try std.testing.expect(finished == .value and finished.value == .text);
+            const text = finished.value.text;
+            try std.testing.expect(std.mem.indexOf(u8, text, "4194304-byte limit") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, case.prefix) != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "Full output: ") != null);
+            result.keep();
+            const saved = try tmp.dir.readFileAlloc(std.testing.io, "mcp-output-17-1.tmp", gpa, .limited(Running.max_answer_bytes + 1024));
+            defer gpa.free(saved);
+            try std.testing.expect(std.mem.endsWith(u8, saved, answer.bytes));
+            try std.testing.expectEqualStrings(text[0..adapter_test_text.excerpt_bytes], saved[0..adapter_test_text.excerpt_bytes]);
+            try std.testing.expectEqual(@as(u64, saved.len), used.load(.acquire));
+            queue.cleanupAll();
+            try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+            try std.testing.expectEqual(@as(std.posix.fd_t, -1), running.fd());
+            try std.testing.expectEqual(null, running.poll(1));
+        }
+    }
+}
+
+test "MCP image part limit accounts for empty text tails" {
+    const allocator = std.testing.allocator;
+    const png64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+    const image = "{\"type\":\"image\",\"data\":\"" ++ png64 ++ "\",\"mimeType\":\"image/png\"}";
+    const empty = ",{\"type\":\"text\",\"text\":\"\"}";
+    const part_limit = @import("input_parts.zig").max_parts;
+    for ([_]struct { tail: []const u8, images: usize, text: ?[]const u8 }{
+        .{ .tail = "", .images = part_limit, .text = null },
+        .{ .tail = empty, .images = part_limit, .text = null },
+        .{ .tail = empty ++ empty, .images = part_limit - 1, .text = "[Image unavailable: image part limit]\n" },
+        .{ .tail = ",{\"type\":\"text\",\"text\":\"tail\"}", .images = part_limit - 1, .text = "[Image unavailable: image part limit]tail" },
+        .{ .tail = ",{\"type\":\"image\"}", .images = part_limit - 1, .text = "[Image unavailable: image part limit][Image unavailable: missing image data]" },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+        const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+        var used: std.atomic.Value(u64) = .init(0);
+        var entries: [2]@import("output_retention.zig").Entry = @splat(.{});
+        var queue = @import("output_retention.zig").Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = 2_000_000 }, &entries);
+        defer queue.cleanupAll();
+        var host: Host = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = undefined, .retention = &queue };
+        var content: std.Io.Writer.Allocating = .init(allocator);
+        defer content.deinit();
+        try content.writer.writeByte('[');
+        for (0..part_limit) |i| {
+            if (i != 0) try content.writer.writeByte(',');
+            try content.writer.writeAll(image);
+        }
+        try content.writer.writeAll(case.tail);
+        try content.writer.writeByte(']');
+        const ended: @import("mcp/result_text.zig").Ended = .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = content.written(), .structured = null, .is_error = false } } } };
+        const result = try @import("tool_result.zig").Result.create(&host, 1, .{ .excerpt_bytes = 10_000, .retain = false });
+        defer result.destroy();
+        const rendered = renderResult(result, ended);
+        try std.testing.expect(rendered == .code and rendered.code == .succeeded);
+        const finished = result.finish();
+        try std.testing.expect(finished == .value and finished.value == .parts);
+        var cursor = finished.value.parts.cursor();
+        var image_count: usize = 0;
+        var text_count: usize = 0;
+        while (try cursor.next()) |part| switch (part.kind) {
+            .image => image_count += 1,
+            .text => {
+                text_count += 1;
+                const expected = case.text orelse return error.TestUnexpectedResult;
+                var bytes: [128]u8 = undefined;
+                try std.testing.expectEqual(@as(u64, @intCast(expected.len)), part.range.length);
+                try std.testing.expectEqual(expected.len, try part.range.file.readPositionalAll(std.testing.io, bytes[0..expected.len], part.range.offset));
+                try std.testing.expectEqualStrings(expected, bytes[0..expected.len]);
+            },
+        };
+        try std.testing.expectEqual(case.images, image_count);
+        try std.testing.expectEqual(@as(usize, @intFromBool(case.text != null)), text_count);
     }
 }

@@ -1,8 +1,12 @@
 const std = @import("std");
 const utf8 = @import("utf8_validation.zig");
 
-pub const head_note_max = "\n[".len + 20 + " more bytes not shown]".len;
-pub const left_out_max = "\n[".len + 20 + " bytes left out]\n".len;
+pub const boundary_capacity = 5;
+pub const Count = u64;
+pub const head_note_format = "\n[{d} more bytes not shown]";
+pub const left_out_format = "\n[{d} bytes left out]\n";
+pub const head_note_max = std.fmt.count(head_note_format, .{std.math.maxInt(Count)});
+pub const left_out_max = std.fmt.count(left_out_format, .{std.math.maxInt(Count)});
 pub const not_retained = "\nFull output was not retained.\n";
 pub const footer_max = 1 + 2 * ("Full stderr: ".len + std.posix.PATH_MAX + 1);
 
@@ -14,9 +18,9 @@ pub const footer_max = 1 + 2 * ("Full stderr: ".len + std.posix.PATH_MAX + 1);
 pub const Window = struct {
     remaining: usize,
     run_limit: usize,
-    run_total: u64 = 0,
+    run_total: Count = 0,
     run_shown: usize = 0,
-    tail: [5]u8 = undefined,
+    tail: [boundary_capacity]u8 = undefined,
     tail_len: usize = 0,
     ever_omitted: bool = false,
     exhausted: bool = false,
@@ -41,7 +45,7 @@ pub const Window = struct {
     }
 
     /// Flushes boundary bytes and a note, returning their length. out must have
-    /// at least 5 + head_note_max bytes. Repeated calls without a feed are empty.
+    /// at least boundary_capacity + head_note_max bytes. Repeated calls without a feed are empty.
     pub fn closeRun(self: *Window, out: []u8) []const u8 {
         if (self.run_total == 0) return out[0..0];
         var take = self.tail_len;
@@ -56,7 +60,7 @@ pub const Window = struct {
         if (omitted != 0) {
             self.ever_omitted = true;
             self.exhausted = true;
-            const note = std.fmt.bufPrint(out[written..], "\n[{d} more bytes not shown]", .{omitted}) catch unreachable;
+            const note = std.fmt.bufPrint(out[written..], head_note_format, .{omitted}) catch unreachable;
             written += note.len;
         }
         self.run_total = 0;
@@ -88,8 +92,8 @@ pub fn footer(truncated: []const Retained, retain: bool, out: []u8) []const u8 {
     return writer.buffered();
 }
 
-fn compareOracle(ended: @import("mcp/result_text.zig").Ended, chunk_size: usize) !void {
-    const result_text = @import("mcp/result_text.zig");
+fn compareOracle(ended: @import("mcp/result_text_legacy_test.zig").Ended, chunk_size: usize) !void {
+    const result_text = @import("mcp/result_text_legacy_test.zig");
     const gpa = std.testing.allocator;
     const capacity = 32_000;
     const full = try gpa.alloc(u8, capacity);
@@ -121,7 +125,7 @@ fn compareOracle(ended: @import("mcp/result_text.zig").Ended, chunk_size: usize)
 }
 
 test "window agrees with MCP excerpt over chunked raw and decoded outcomes" {
-    const result_text = @import("mcp/result_text.zig");
+    const result_text = @import("mcp/result_text_legacy_test.zig");
     const reply = @import("mcp/reply.zig");
     const gpa = std.testing.allocator;
     const body = try gpa.alloc(u8, 20_100);
@@ -135,7 +139,7 @@ test "window agrees with MCP excerpt over chunked raw and decoded outcomes" {
                 try compareOracle(ended, chunk);
             }
         }
-        for ([_]usize{ 9965, 9966, 9967, 9968 } ) |body_len| {
+        for ([_]usize{ 9965, 9966, 9967, 9968 }) |body_len| {
             @memset(body, 'x');
             try compareOracle(.{ .server_name = "test", .ended = .{ .outcome = .{ .refused = .{ .status = 403, .body = body[0..body_len] } } } }, chunk);
         }
@@ -167,7 +171,7 @@ test "window shares allowance across runs and footer describes retention" {
 // renderer to validate images: diagnostics are the text a shared result
 // receives after image rejection, followed by the large text block.
 test "window matches legacy excerpt for P1 diagnostic and text volume" {
-    const result_text = @import("mcp/result_text.zig");
+    const result_text = @import("mcp/result_text_legacy_test.zig");
     const gpa = std.testing.allocator;
     const content = try gpa.alloc(u8, 24_000);
     defer gpa.free(content);

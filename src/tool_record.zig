@@ -331,6 +331,9 @@ pub const read_image_record: Record = .{
     .input_schema = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096}},\"required\":[\"path\"],\"additionalProperties\":false}",
 };
 
+/// Largest result excerpt allowance used by any supported runner.
+pub const max_result_excerpt_bytes: u32 = 20_000;
+
 pub const Profile = struct { excerpt_bytes: u32, retain: bool };
 
 pub const Runner = enum {
@@ -343,7 +346,7 @@ pub const Runner = enum {
     /// The offer comes from the frozen tool set of the model operation.
     pub fn resultProfile(self: Runner, bash_offered: bool) Profile {
         return switch (self) {
-            .bash => .{ .excerpt_bytes = 20_000, .retain = true },
+            .bash => .{ .excerpt_bytes = max_result_excerpt_bytes, .retain = true },
             .mcp => .{ .excerpt_bytes = 10_000, .retain = bash_offered },
             .read_image => .{ .excerpt_bytes = 0, .retain = false },
             .core, .provider => unreachable,
@@ -529,11 +532,23 @@ test "MCP missing tools tool set resolution covers every empty-server combinatio
     }
 }
 
-
 test "result profiles follow runner and frozen Bash offer" {
     for ([_]bool{ false, true }) |offer| {
         try std.testing.expectEqualDeep(Profile{ .excerpt_bytes = 20_000, .retain = true }, Runner.bash.resultProfile(offer));
         try std.testing.expectEqualDeep(Profile{ .excerpt_bytes = 10_000, .retain = offer }, Runner.mcp.resultProfile(offer));
         try std.testing.expectEqualDeep(Profile{ .excerpt_bytes = 0, .retain = false }, Runner.read_image.resultProfile(offer));
+    }
+}
+
+test "all result profiles fit the shared excerpt maximum" {
+    inline for (std.meta.tags(Runner)) |runner| {
+        switch (runner) {
+            .core, .provider => {}, // These do not use the Result route.
+            .bash, .mcp, .read_image => {
+                for ([_]bool{ false, true }) |offer| {
+                    try std.testing.expect(runner.resultProfile(offer).excerpt_bytes <= max_result_excerpt_bytes);
+                }
+            },
+        }
     }
 }

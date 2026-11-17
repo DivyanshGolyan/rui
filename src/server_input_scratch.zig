@@ -15,9 +15,9 @@ fn scratchFile(host: *Host, action: u64, ordinal: u64) !std.Io.File {
 }
 
 /// Open both anonymous scratch files and transfer their ownership to capture.
-pub fn init(host: *Host, action: u64, capture: *@import("InputCapture.zig")) !void {
+pub fn init(host: *Host, action: u64, capture: *@import("InputCapture.zig"), budget: @import("ScratchBudget.zig")) !void {
     const spool = try scratchFile(host, action, 1);
     errdefer spool.close(host.io);
     const index = try scratchFile(host, action, 2);
-    capture.init(host.io, spool, index, host.retention.sharedBudget());
+    capture.init(host.io, spool, index, budget);
 }

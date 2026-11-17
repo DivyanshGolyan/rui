@@ -17,6 +17,16 @@ pub const Source = struct {
     rewind: ?*const fn (*anyopaque) anyerror!void = null,
 };
 
+/// Render an unavailable image in the surrounding text stream.
+pub fn writeInPlace(out: *std.Io.Writer, reason: []const u8) std.Io.Writer.Error!void {
+    try out.print("[Image unavailable: {s}]", .{reason});
+}
+
+/// Validate declared size and format without allocating or reading a source.
+pub fn preflight(length: u64, format: ?media.Format, limits: media.Limits) media.Error!media.Scanner {
+    return media.Scanner.init(length, format, limits);
+}
+
 pub const Progress = union(enum) {
     pending,
     /// Validation is complete for replayable sources, or size preflight is
@@ -40,7 +50,7 @@ pub const Intake = struct {
         self.source = source;
         self.offset = 0;
         self.capture = null;
-        self.scanner = media.Scanner.init(source.length, source.format, limits) catch |err| {
+        self.scanner = preflight(source.length, source.format, limits) catch |err| {
             self.phase = .done;
             return .{ .failed = .{ .source = err } };
         };
@@ -245,4 +255,13 @@ test "intake can decline a ready image before beginning another" {
     intake.cancelReady();
     try std.testing.expect(intake.begin(source.source(false), .{}) == .ready);
     intake.cancelReady();
+}
+
+test "image diagnostic is written in place" {
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try writer.writeAll("before ");
+    try writeInPlace(&writer, "invalid base64");
+    try writer.writeAll(" after");
+    try std.testing.expectEqualStrings("before [Image unavailable: invalid base64] after", writer.buffered());
 }

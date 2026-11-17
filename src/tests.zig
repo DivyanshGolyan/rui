@@ -87,7 +87,7 @@ test {
     _ = @import("http1/Exchange.zig");
     _ = @import("mcp/Call.zig");
     _ = @import("mcp/result_text.zig");
-    _ = @import("mcp/result_capture.zig");
+    _ = @import("tool_result.zig");
     _ = @import("mcp/Running.zig");
     _ = @import("mcp/servers.zig");
     _ = @import("mcp/Listing.zig");

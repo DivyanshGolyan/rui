@@ -35,7 +35,7 @@ const image_png = @embedFile("codecs/fixtures/image-input/pixel.png");
 const image_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 const image_reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"before\"},{\"type\":\"image\",\"data\":\"" ++ image_b64 ++ "\",\"mimeType\":\"image/png\"},{\"type\":\"text\",\"text\":\"after\"}]}}");
 const bad_image_reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"image\",\"data\":\"not-base64-secret\",\"mimeType\":\"image/png\"}]}}");
-const Case = enum { success, image, image_bad, image_exhausted, image_stop_race, retention_saved, retention_refused, retention_tight, retention_no_bash, serial, timeout, down, stop, stop_unsent, shutdown, concurrent };
+const Case = enum { success, image, image_bad, image_exhausted, image_stop_race, retention_saved, retention_refused, retention_tight, retention_no_bash, retention_settlement_failure, retention_settlement_unlink_failure, serial, timeout, down, stop, stop_unsent, shutdown, concurrent };
 
 test "Host MCP forwards schema-only arguments and metadata into a historical continuation" {
     try run(.success);
@@ -62,6 +62,11 @@ test "Host MCP retains sanitized full image output only when Bash is offered" {
     try run(.retention_refused);
     try run(.retention_tight);
     try run(.retention_no_bash);
+}
+
+test "Host MCP releases a retained result when settlement fails" {
+    try run(.retention_settlement_failure);
+    try run(.retention_settlement_unlink_failure);
 }
 
 test "Host MCP serializes two calls from one model reply in recorded order" {
@@ -103,8 +108,8 @@ fn run(case: Case) !void {
     const command = try allocator.create(wire_request.ConfigureCommand);
     defer allocator.destroy(command);
     command.* = try store.testingCompleteConfiguration("mcp-config", "", workspace, "model-a");
-    const retention_case = case == .retention_saved or case == .retention_refused or case == .retention_tight or case == .retention_no_bash;
-    command.configuration.tools = try .of(if (case == .retention_saved or case == .retention_refused or case == .retention_tight) &.{ "bash", "fetch_page" } else &.{"fetch_page"});
+    const retention_case = case == .retention_saved or case == .retention_refused or case == .retention_tight or case == .retention_no_bash or case == .retention_settlement_failure or case == .retention_settlement_unlink_failure;
+    command.configuration.tools = try .of(if (case == .retention_saved or case == .retention_refused or case == .retention_tight or case == .retention_settlement_failure or case == .retention_settlement_unlink_failure) &.{ "bash", "fetch_page" } else &.{"fetch_page"});
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("bypass");
     const configured = try storage.configure(command, .{});
@@ -155,12 +160,17 @@ fn run(case: Case) !void {
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, root_buffer)];
     var used: std.atomic.Value(u64) = .init(0);
     var retained: [2]retention.Entry = @splat(.{});
-    var queue = retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = if (case == .image_exhausted) 0 else if (case == .retention_tight) 16 * 1024 else 8 * 1024 * 1024 }, retained[0..(if (case == .retention_refused) 0 else retained.len)]);
-    defer queue.cleanupAll();
+    var remove_gate: std.atomic.Value(bool) = .init(case == .retention_settlement_unlink_failure);
+    var queue = retention.Queue.initializeWithRemoval(std.testing.io, root, .{ .used = &used, .limit = if (case == .image_exhausted) 0 else if (case == .retention_tight) 16 * 1024 else 8 * 1024 * 1024 }, retained[0..(if (case == .retention_refused) 0 else retained.len)], .{ .gated = &remove_gate });
+    defer {
+        remove_gate.store(false, .release);
+        queue.cleanupAll();
+    }
     var custody: [2]execution.CustodyRecord = @splat(.{});
     const host = try allocator.create(Host);
     defer allocator.destroy(host);
     host.* = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = storage, .custody = execution.CustodyPool.initialize(custody[0..(if (case == .concurrent) 2 else 1)]), .mcp_servers = .{ .entries = &servers }, .retention = &queue };
+    if (case == .retention_settlement_failure or case == .retention_settlement_unlink_failure) host.hooks.failures.insert(.result_before_commit);
     var active: mcp.Calls = .{};
     defer {
         _ = host.advance(.stopping);
@@ -290,6 +300,29 @@ fn run(case: Case) !void {
         try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(5)), &script.connection_closed, poll.isSet);
     }
     try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+    if (case == .retention_settlement_failure or case == .retention_settlement_unlink_failure) {
+        try std.testing.expect(storage.isFenced());
+        try std.testing.expect(!host.launchAllowed());
+        var filename_buffer: [128]u8 = undefined;
+        const filename = try std.fmt.bufPrint(&filename_buffer, "mcp-output-{d}-1.tmp", .{try store.testing.sqlite_only.queryU64(storage, "SELECT action_id FROM action_operation", .{})});
+        if (case == .retention_settlement_unlink_failure) {
+            const stat = try tmp.dir.statFile(std.testing.io, filename, .{});
+            try std.testing.expect(stat.size > 0);
+            try std.testing.expectEqual(stat.size, used.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 1), queue.occupied());
+            remove_gate.store(false, .release);
+            queue.cleanupAll();
+        }
+        try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, filename, .{}));
+        try storage.close();
+        try store.testingStoreWith(&.{ .engine = .sqlite }, storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
+        try std.testing.expect(try storage.recoverOneUncertainAction(.empty()));
+        try std.testing.expect(!try storage.recoverOneUncertainAction(.empty()));
+        try std.testing.expectEqual(@as(u64, 1), try store.testing.sqlite_only.queryU64(storage, "SELECT count(*) FROM action_operation WHERE resolution_code='indeterminate'", .{}));
+        return;
+    }
     if (retention_case) {
         try std.testing.expect(host.launchAllowed());
         try std.testing.expect(!storage.isFenced());
@@ -358,7 +391,7 @@ fn run(case: Case) !void {
     }
     const expected = switch (case) {
         .success, .serial => "page payload",
-        .image, .image_bad, .image_exhausted, .image_stop_race, .retention_saved, .retention_refused, .retention_tight, .retention_no_bash => unreachable,
+        .image, .image_bad, .image_exhausted, .image_stop_race, .retention_saved, .retention_refused, .retention_tight, .retention_no_bash, .retention_settlement_failure, .retention_settlement_unlink_failure => unreachable,
         .timeout, .stop => "Outcome unknown",
         .stop_unsent => "not sent",
         .shutdown, .concurrent => "Outcome unknown",

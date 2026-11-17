@@ -30,26 +30,6 @@ pub fn classify(block: []const u8) Block {
     return .{ .other = block };
 }
 
-pub fn anyImage(content: []const u8) bool {
-    var items = document.Items.init(content);
-    while (items.next()) |item| switch (classify(item)) {
-        .image, .bad_image => return true,
-        else => {},
-    };
-    return false;
-}
-
-pub fn decodedLength(data: []const u8) error{InvalidBase64}!u64 {
-    var decoder = Decoder.init(data);
-    var window: [4096]u8 = undefined;
-    var length: u64 = 0;
-    while (true) {
-        const bytes = try decoder.next(&window);
-        if (bytes.len == 0) return length;
-        length += bytes.len;
-    }
-}
-
 /// Decodes JSON string contents and standard padded base64 in bounded windows.
 /// A nonempty window is required; an empty returned slice means end of input.
 pub const Decoder = struct {
@@ -131,12 +111,8 @@ test "result parts classify image typed blocks without leaking malformed images"
     };
     for (cases) |case| {
         try std.testing.expectEqual(case.tag, std.meta.activeTag(classify(case.value)));
-        const array = try std.fmt.allocPrint(std.testing.allocator, "[{s}]", .{case.value});
-        defer std.testing.allocator.free(array);
-        try std.testing.expectEqual(case.tag == .image or case.tag == .bad_image, anyImage(array));
     }
     try std.testing.expectEqualStrings("a\\nb", classify(cases[0].value).text);
-    try std.testing.expect(!anyImage("[]"));
 }
 
 test "result parts base64 decoder matches standard at every window size" {
@@ -155,7 +131,6 @@ test "result parts base64 decoder matches standard at every window size" {
         const data = std.base64.standard.Encoder.encode(&encoded, input[0..len]);
         const size = try std.base64.standard.Decoder.calcSizeForSlice(data);
         try std.base64.standard.Decoder.decode(expected[0..size], data);
-        try std.testing.expectEqual(@as(u64, size), try decodedLength(data));
         for (1..input.len + 2) |width| {
             var decoder = Decoder.init(data);
             var window: [129]u8 = undefined;
@@ -169,8 +144,11 @@ test "result parts base64 decoder matches standard at every window size" {
             try std.testing.expectEqualSlices(u8, expected[0..size], actual[0..at]);
         }
     }
-    try std.testing.expectEqual(@as(u64, 1), try decodedLength("\\u0059Q=="));
+    var escaped = Decoder.init("\\u0059Q==");
+    var escaped_window: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("a", try escaped.next(&escaped_window));
     for ([_][]const u8{ "A", "AAA", "A===", "====", "AA=A", "AA==AAAA", "!!!!", "AB==", "AAA=AAAA", "YQ=\\u003dA" }) |bad| {
-        try std.testing.expectError(error.InvalidBase64, decodedLength(bad));
+        var decoder = Decoder.init(bad);
+        try std.testing.expectError(error.InvalidBase64, decoder.next(&actual));
     }
 }

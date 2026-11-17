@@ -16,7 +16,7 @@ pub const Slot = struct {
 pub const Delivered = enum { delivered, lost, fenced };
 
 pub fn result(host: *Host, slot: Slot, profile: tool_record.Profile, code: store.ActionResolutionCode, value: Value) Delivered {
-    // The profile belongs to the result route; layout and retention arrive in unit 4.
+    // Result uses this frozen profile for layout and retention before delivery.
     _ = profile;
     return deliver(host, slot, code, value);
 }

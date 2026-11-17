@@ -8,30 +8,37 @@ const source_file = @import("os/read_image_file.zig");
 const fenceDispatch = @import("server_host.zig").fenceDispatch;
 const tool_settle = @import("tool_settle.zig");
 const result_fault = @import("result_fault.zig");
+const tool_result = @import("tool_result.zig");
 const image_intake = @import("image_intake.zig");
 const FileSource = @import("image_file_source.zig").FileSource;
 
 pub const capacity = 16;
 
+const PreparationFailure = union(enum) { ordinary: result_fault.Failure, result_creation: result_fault.Failure };
+
 const Active = struct {
     token: execution.CustodyToken,
     profile: @import("tool_record.zig").Profile = undefined,
-    preparation_failure: ?result_fault.Failure = null,
+    preparation_failure: ?PreparationFailure = null,
     binding: store.ActionAttemptBinding,
     source: ?std.Io.File = null,
-    capture: ?InputCapture = null,
+    result: ?*tool_result.Result = null,
     input: store.ActionExecutionInput = undefined,
     path: arguments.Path = .{},
     length: u64 = 0,
     deadline: std.Io.Clock.Timestamp = undefined,
     file_source: FileSource = undefined,
-    intake: image_intake.Intake = .{},
 
     fn recordFailure(self: *Active, failure: result_fault.Failure) anyerror {
-        self.preparation_failure = failure;
+        self.preparation_failure = .{ .ordinary = failure };
         return switch (failure) {
             inline else => |err| err,
         };
+    }
+
+    fn recordResultCreationFailure(self: *Active, err: anyerror) anyerror {
+        self.preparation_failure = .{ .result_creation = .{ .capture = err } };
+        return err;
     }
 
     fn slot(self: *const Active, phase: []const u8) tool_settle.Slot {
@@ -40,8 +47,8 @@ const Active = struct {
 
     fn destroy(self: *Active, host: *Host) void {
         const token = self.token;
+        if (self.result) |result| result.destroy();
         if (self.source) |source| source.close(host.io);
-        if (self.capture) |*capture| capture.close();
         host.allocator.destroy(self);
         host.custody.detach(token) catch unreachable;
         host.custody.cleanupComplete(token) catch unreachable;
@@ -90,7 +97,10 @@ pub const Calls = struct {
             return .admitted;
         };
         prepare(host, active) catch |err| {
-            fail(host, active, active.preparation_failure orelse .{ .source = err });
+            switch (active.preparation_failure orelse PreparationFailure{ .ordinary = .{ .source = err } }) {
+                .ordinary => |fault| fail(host, active, fault),
+                .result_creation => |fault| failInput(host, active, fault),
+            }
             active.destroy(host);
             return .admitted;
         };
@@ -110,7 +120,7 @@ pub const Calls = struct {
             } else if (std.Io.Clock.Timestamp.now(host.io, .awake).raw.nanoseconds >= active.deadline.raw.nanoseconds) {
                 settleText(host, active, .timed_out, "Image read timed out before its result was saved.");
             } else {
-                const progress_result = active.intake.step();
+                const progress_result = active.result.?.stepImage();
                 progress = true;
                 switch (progress_result) {
                     .pending => continue,
@@ -121,7 +131,15 @@ pub const Calls = struct {
                         continue;
                     },
                     .kept => {},
-                    .ready => unreachable,
+                    .rejected => |rejection| {
+                        switch (rejection) {
+                            .failure => |fault| failInput(host, active, fault),
+                            .reason => unreachable,
+                        }
+                        active.destroy(host);
+                        entry.* = null;
+                        continue;
+                    },
                 }
                 publish(host, active);
             }
@@ -143,11 +161,19 @@ pub const Calls = struct {
 /// A completed read cannot be relabelled as a file failure when sealing or
 /// publication fails. Recovery reports the original Attempt as indeterminate.
 fn publish(host: *Host, active: *Active) void {
-    const loan = active.capture.?.seal() catch |err| {
-        _ = tool_settle.fence(host, "image snapshot sealing", .{ .capture = err });
-        return;
+    const result = active.result.?;
+    const value = switch (result.finish()) {
+        .value => |value| value,
+        .failed => |failure| {
+            if (failure.seal) {
+                _ = tool_settle.fence(host, "image snapshot sealing", failure.failure);
+            } else {
+                failInput(host, active, failure.failure);
+            }
+            return;
+        },
     };
-    _ = tool_settle.result(host, active.slot("image read result publication"), active.profile, .succeeded, .{ .parts = loan });
+    if (tool_settle.result(host, active.slot("image read result publication"), active.profile, .succeeded, value) == .delivered) result.keep();
 }
 
 fn settleText(host: *Host, active: *Active, code: store.ActionResolutionCode, text: []const u8) void {
@@ -236,26 +262,30 @@ noinline fn prepare(host: *Host, active: *Active) !void {
         }
     }.handoff) catch |err| return if (active.preparation_failure != null) err else active.recordFailure(.{ .store = err });
     active.length = (active.source.?.stat(host.io) catch |err| return active.recordFailure(.{ .source = err })).size;
-    // Validate size before allocating scratch or reading payload bytes.
+    // Keep declared-size rejection ahead of Result allocation and scratch.
+    _ = image_intake.preflight(active.length, null, .{}) catch |err| return active.recordFailure(.{ .source = err });
     active.file_source = .{ .io = host.io, .file = active.source.?, .length = active.length };
-    switch (active.intake.begin(active.file_source.source(), .{})) {
-        .failed => |fault| return active.recordFailure(fault),
-        .ready => {},
-        else => unreachable,
-    }
-    active.capture = .{ .io = host.io, .resources = null };
-    @import("server_input_scratch.zig").init(host, active.binding.action_id, &active.capture.?) catch |err| return active.recordFailure(.{ .capture = err });
-    switch (active.intake.attach(&active.capture.?)) {
-        .failed => |fault| return active.recordFailure(fault),
+    active.result = tool_result.Result.create(host, active.binding.action_id, active.profile) catch |err| return active.recordResultCreationFailure(err);
+    switch (active.result.?.beginImage(active.file_source.source(), true)) {
         .pending => {},
-        else => unreachable,
+        .failed => |fault| return active.recordFailure(fault),
+        .rejected => |rejection| switch (rejection) {
+            .failure => |fault| return active.recordFailure(fault),
+            // One image with no preceding or following text always fits layout.
+            .reason => unreachable,
+        },
+        .kept => unreachable,
     }
 }
 
-const TestCase = enum { snapshot, missing, invalid, oversized, stop, stop_between_ticks, background, source_io, capture, seal, publication, shutdown, payload_capacity, index_capacity };
+const TestCase = enum { snapshot, missing, invalid, oversized, stop, stop_between_ticks, background, source_io, result_allocation, empty_allocation, oversized_allocation, capture, seal, publication, shutdown, payload_capacity, index_capacity };
 
 test "read_image custody owns snapshot publication stop background and recovery" {
     try testReadImage(&.{ .snapshot, .missing, .invalid, .oversized, .stop, .background, .source_io, .capture, .seal, .publication, .shutdown });
+}
+
+test "read_image preflight precedes result allocation and OOM fences" {
+    try testReadImage(&.{ .empty_allocation, .oversized_allocation, .result_allocation });
 }
 
 test "read_image stop between bounded file reads releases custody" {
@@ -302,8 +332,8 @@ fn testReadImage(cases: []const TestCase) !void {
             .decoded_arguments = "{\"path\":\"image.png\"}",
         }});
         if (case != .missing) {
-            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.png", .data = if (case == .invalid) "not an image" else if (case == .payload_capacity or case == .stop_between_ticks) multi_png else png });
-            if (case == .oversized) {
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.png", .data = if (case == .invalid) "not an image" else if (case == .empty_allocation) "" else if (case == .payload_capacity or case == .stop_between_ticks) multi_png else png });
+            if (case == .oversized or case == .oversized_allocation) {
                 const file = try tmp.dir.openFile(std.testing.io, "image.png", .{ .mode = .read_write });
                 defer file.close(std.testing.io);
                 try file.setLength(std.testing.io, (@as(@import("input_media.zig").Limits, .{})).max_bytes + 1);
@@ -321,12 +351,14 @@ fn testReadImage(cases: []const TestCase) !void {
         var queue = retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = limit }, &retained);
         defer queue.cleanupAll();
         var records: [1]execution.CustodyRecord = @splat(.{});
-        var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .retention = &queue, .custody = execution.CustodyPool.initialize(&records) };
+        // The first allocation admits Active; fail Result.create after admission.
+        var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 1 });
+        var host: Host = .{ .io = std.testing.io, .allocator = if (case == .result_allocation or case == .empty_allocation or case == .oversized_allocation) failing.allocator() else std.testing.allocator, .lease = undefined, .store = &storage, .retention = &queue, .custody = execution.CustodyPool.initialize(&records) };
         var capture_vtable = std.testing.io.vtable.*;
         var calls: Calls = .{};
         defer calls.shutdown(&host);
         try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, calls.admit(&host, selected));
-        if (case == .missing or case == .oversized) {
+        if (case == .missing or case == .oversized or case == .result_allocation or case == .empty_allocation or case == .oversized_allocation) {
             try std.testing.expect(!calls.any());
         } else {
             const active = calls.entries[0].?;
@@ -346,7 +378,7 @@ fn testReadImage(cases: []const TestCase) !void {
                         return error.InputOutput;
                     }
                 }.write;
-                active.capture.?.io.vtable = &capture_vtable;
+                active.result.?.capture.?.io.vtable = &capture_vtable;
             }
             if (case == .snapshot) {
                 // Replacement after acquisition cannot redirect the snapshot.
@@ -369,7 +401,7 @@ fn testReadImage(cases: []const TestCase) !void {
                 }.read;
                 source_io.vtable = &source_vtable;
                 active.file_source.io = source_io;
-                const outcome = active.intake.step();
+                const outcome = active.result.?.stepImage();
                 try std.testing.expect(outcome == .failed);
                 try std.testing.expect(outcome.failed == .source);
                 failInput(&host, active, outcome.failed);
@@ -377,9 +409,9 @@ fn testReadImage(cases: []const TestCase) !void {
                 calls.entries[0] = null;
                 try std.testing.expect(host.launchAllowed());
             } else if (case == .seal) {
-                const complete = active.intake.step();
+                const complete = active.result.?.stepImage();
                 try std.testing.expect(complete == .kept);
-                try active.capture.?.resources.?.index.setLength(std.testing.io, 0);
+                try active.result.?.capture.?.resources.?.index.setLength(std.testing.io, 0);
                 publish(&host, active);
                 calls.shutdown(&host);
             } else if (case == .shutdown) {
@@ -390,7 +422,7 @@ fn testReadImage(cases: []const TestCase) !void {
         try std.testing.expect(!calls.any());
         try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
         try std.testing.expectEqual(baseline, used.load(.acquire));
-        if (case == .capture or case == .seal or case == .publication or case == .shutdown) {
+        if (case == .result_allocation or case == .capture or case == .seal or case == .publication or case == .shutdown) {
             try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NULL", .{selected.action_id}));
             if (case != .shutdown) try std.testing.expect(!host.launchAllowed());
             if (case == .publication) try std.testing.expect(storage.isFenced());
@@ -403,6 +435,13 @@ fn testReadImage(cases: []const TestCase) !void {
             storage_open = true;
             try std.testing.expect(try storage.recoverOneUncertainAction(.empty()));
         }
+        if (case == .empty_allocation or case == .oversized_allocation) {
+            try std.testing.expect(!failing.has_induced_failure);
+            try std.testing.expect(host.launchAllowed());
+            const text = if (case == .empty_allocation) "Image read failed: TruncatedImage." else "Image read failed: ImageResourceLimit.";
+            try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.form=0 AND c.byte_length=?2 AND c.digest=?3", .{ selected.action_id, text.len, testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
+        }
+        if (case == .result_allocation) try std.testing.expect(failing.has_induced_failure);
         if (case == .payload_capacity or case == .index_capacity) {
             try std.testing.expect(host.launchAllowed());
             try std.testing.expect(!storage.isFenced());
@@ -414,7 +453,7 @@ fn testReadImage(cases: []const TestCase) !void {
             .snapshot, .background => "succeeded",
             .stop, .stop_between_ticks => "cancelled",
             .payload_capacity, .index_capacity => "storage_failed",
-            .capture, .seal, .publication, .shutdown => "indeterminate",
+            .result_allocation, .capture, .seal, .publication, .shutdown => "indeterminate",
             else => "failed",
         };
         try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code=?2 AND attempt_ordinal=1", .{ selected.action_id, code }));
