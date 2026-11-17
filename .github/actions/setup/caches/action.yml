@@ -123,13 +123,13 @@ runs:
     # Build/test execution is side-effectful; caches contain no acceptance.
     - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       id: compiler-cache
-      if: ${{ inputs.save-only != 'true' }}
+      if: ${{ inputs.save-only != 'true' && env.RUI_BENCHMARK_SNAPSHOT != 'true' }}
       with:
         path: ${{ runner.temp }}/rui-zig
         key: rui-compiler-${{ runner.os }}-${{ runner.arch }}-0.17.1
     - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       id: build-cache
-      if: ${{ inputs.save-only != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
+      if: ${{ inputs.save-only != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' && env.RUI_BENCHMARK_SNAPSHOT != 'true' }}
       with:
         path: |
           ~/.cache/zig
@@ -147,7 +147,7 @@ runs:
           ${{ steps.build-keys.outputs.prefix-seed }}
     - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       id: packages-cache
-      if: ${{ inputs.save-only != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
+      if: ${{ inputs.save-only != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' && env.RUI_BENCHMARK_SNAPSHOT != 'true' }}
       with:
         path: zig-pkg
         key: rui-packages-v1-${{ hashFiles('build.zig.zon') }}

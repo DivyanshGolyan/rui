@@ -472,6 +472,9 @@ jobs:
           setup-outcome: ${{ steps.setup.outcome }}
           work-outcome: ${{ steps.compile.outcome }}
   macos_build:
+    env:
+      RUI_BENCHMARK_SNAPSHOT: 'true'
+      RUI_BENCHMARK_ARCHIVE_SHA256: 861e9e8ca7ec873addfa3ceb072e0aeffd17ee53c35ec4ee5dd2bbd23312e620
     needs: [plan, mac_runner]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.native == 'true' }}
     runs-on: ${{ fromJSON(needs.mac_runner.outputs.runs_on || '"macos-15"') }}
@@ -483,6 +486,25 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
+      - name: Restore the immutable paired benchmark snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/mac-benchmark-snapshot"
+          mkdir -p "$dir"
+          gh run download 44157868689 --repo "$GITHUB_REPOSITORY" --name mac-benchmark-warm-cache --dir "$dir"
+          archive="$dir/mac-benchmark-cache.tar.gz"
+          echo "$RUI_BENCHMARK_ARCHIVE_SHA256  $archive" | shasum -a 256 -c -
+          echo "Benchmark snapshot SHA256 $RUI_BENCHMARK_ARCHIVE_SHA256; bytes $(stat -f %z "$archive")"
+          mkdir -p "$dir/unpacked" "$HOME/.cache" "$RUNNER_TEMP"
+          tar -xzf "$archive" -C "$dir/unpacked"
+          rm -rf "$HOME/.cache/zig" "$GITHUB_WORKSPACE/.zig-cache" "$GITHUB_WORKSPACE/zig-pkg" "$GITHUB_WORKSPACE/screen-emulator/zig-pkg" "$RUNNER_TEMP/rui-zig"
+          mv "$dir/unpacked/.cache/zig" "$HOME/.cache/zig"
+          mv "$dir/unpacked/.zig-cache" "$GITHUB_WORKSPACE/.zig-cache"
+          mv "$dir/unpacked/zig-pkg" "$GITHUB_WORKSPACE/zig-pkg"
+          mv "$dir/unpacked/screen-emulator/zig-pkg" "$GITHUB_WORKSPACE/screen-emulator/zig-pkg"
+          mv "$dir/unpacked/rui-zig" "$RUNNER_TEMP/rui-zig"
       - uses: ./.github/actions/setup
         id: setup
         with:

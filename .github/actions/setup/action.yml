@@ -98,7 +98,7 @@ runs:
         echo "ZIG_GLOBAL_CACHE_DIR=$root/global" >> "$GITHUB_ENV"
         echo "ZIG_LOCAL_PKG_DIR=$root/packages" >> "$GITHUB_ENV"
     - name: Fetch the existing pinned dependency graph
-      if: ${{ inputs.compiled != 'true' && (inputs.cold == 'true' || steps.caches.outputs.build-hit != 'true') }}
+      if: ${{ inputs.compiled != 'true' && env.RUI_BENCHMARK_SNAPSHOT != 'true' && (inputs.cold == 'true' || steps.caches.outputs.build-hit != 'true') }}
       shell: bash
       env:
         # GitHub-hosted archives come through the API, which anonymous load shedding spares.
@@ -112,6 +112,6 @@ runs:
     # It keeps its own zig-pkg: Zig refuses ghostty's path dependencies from
     # a package directory outside it.
     - name: Fetch the screen observer's pinned package graph
-      if: ${{ steps.fixtures.outputs.screen == 'true' && inputs.compiled != 'true' && (inputs.cold == 'true' || steps.caches.outputs.build-hit != 'true') }}
+      if: ${{ steps.fixtures.outputs.screen == 'true' && inputs.compiled != 'true' && env.RUI_BENCHMARK_SNAPSHOT != 'true' && (inputs.cold == 'true' || steps.caches.outputs.build-hit != 'true') }}
       shell: bash
       run: bash src/fetch_screen_dependencies.sh
