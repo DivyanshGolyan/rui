@@ -215,6 +215,7 @@ test "each Store entry point takes its round budget on its common path" {
             try compactedTurn(&storage, &tmp, &meter);
             try coreTurn(&storage, &tmp, &meter);
             try mcpTurn(case, &meter);
+            try imageTurn(case, &meter);
             try findTurn(&storage, &tmp, &meter);
             try skillTurn(case, &meter);
             stopTurn(case, &meter) catch |err| {
@@ -390,6 +391,34 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try std.testing.expect(storage.pinSession(&pin, .{}) == .accepted);
             meter.stop(.pinSession);
+        }
+
+        fn imageTurn(case: *store_testing.Case, meter: *RoundMeter) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const previous = meter.storage;
+            meter.storage = &storage;
+            defer meter.storage = previous;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var configure = try completeConfiguration("budget-image", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            configure.configuration.tools = try .of(&.{"read_image"});
+            const configured = try storage.configure(&configure, .{});
+            try std.testing.expect(configured == .accepted);
+            const session = configured.accepted.session;
+            try submitTestMessage(&storage, &tmp, "budget-image-input", "budget-image-message", session.slice(), "inspect");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleCallsForTesting(&storage, &tmp, model, "budget-image-calls", &.{
+                .{ .item_id = "image-item", .name = "read_image", .encoded_call_id = "image-call", .decoded_call_id = "image-call", .encoded_arguments = "{\\\"path\\\":\\\"image.png\\\"}", .decoded_arguments = "{\"path\":\"image.png\"}" },
+            });
+            const selected = (try storage.nextAction(.read_image, .fromFree(1, false))).?;
+            const binding = (try storage.admitActionAttempt(selected, 1234, .{})).?.permit.binding;
+            var input: ActionExecutionInput = undefined;
+            meter.start();
+            try storage.readActionExecutionInput(.read_image, binding, &input);
+            meter.stop(.readImageExecutionInput);
         }
 
         fn mcpTurn(case: *store_testing.Case, meter: *RoundMeter) !void {

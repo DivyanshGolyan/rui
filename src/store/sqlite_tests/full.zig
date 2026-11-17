@@ -46,8 +46,8 @@ test "Full Message projection work does not multiply Messages by stops" {
 
             for (1..message_count + 1) |index| {
                 const insert = try std.testing.allocator.printSentinel(
-                    "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at,admission_position) " ++
-                        "VALUES({0},'{1s}','message-{0}',1,NULL,1,{2})",
+                    "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at,admission_position,source_kind) " ++
+                        "VALUES({0},'{1s}','message-{0}',1,NULL,1,{2},1)",
                     .{ index, session.slice(), 1000 + index },
                     0,
                 );

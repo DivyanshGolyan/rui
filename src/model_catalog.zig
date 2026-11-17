@@ -16,15 +16,41 @@ pub const BuiltinInstructions = enum {
     }
 };
 
+// Codex had not published 6.2 templates on 2026-11-17; gpt-6.2-sol and gpt-6.2-astra reuse
+// the 6.1 Sol and Terra/Astra assets until it does (model_instructions/README.md).
 pub fn builtinInstructions(model: []const u8) BuiltinInstructions {
     const reviewed = .{
         .{ "gpt-6-luna", BuiltinInstructions.luna },
         .{ "gpt-6.1-terra", BuiltinInstructions.terra },
         .{ "gpt-6.1-sol", BuiltinInstructions.sol },
         .{ "gpt-6-astra", BuiltinInstructions.astra },
+        .{ "gpt-6.2-sol", BuiltinInstructions.sol },
+        .{ "gpt-6.2-astra", BuiltinInstructions.astra },
     };
     inline for (reviewed) |entry| if (std.mem.eql(u8, model, entry[0])) return entry[1];
     return .generic;
+}
+
+// Image input is unsupported for these exact aliases in the GPT-3.5 Turbo
+// model reference, checked 2026-11-17:
+// https://developers.openai.com/api/docs/models/gpt-3.5-turbo
+// Unknown IDs stay eligible; do not infer capabilities from a model-name prefix.
+pub fn acceptsImages(model: []const u8) bool {
+    const unsupported = [_][]const u8{
+        "gpt-3.5-turbo",
+        "gpt-3.5-turbo-0125",
+        "gpt-3.5-turbo-1106",
+        "gpt-3.5-turbo-instruct",
+    };
+    for (unsupported) |id| if (std.mem.eql(u8, model, id)) return false;
+    return true;
+}
+
+test "model image input excludes only evidenced exact unsupported IDs" {
+    for ([_][]const u8{ "gpt-3.5-turbo", "gpt-3.5-turbo-0125", "gpt-3.5-turbo-1106", "gpt-3.5-turbo-instruct" }) |id|
+        try std.testing.expect(!acceptsImages(id));
+    for ([_][]const u8{ "gpt-6.1-sol", "gpt-4.1", "future-model", "GPT-3.5-TURBO", "gpt-3.5-turbo-next", "openai/gpt-3.5-turbo" }) |id|
+        try std.testing.expect(acceptsImages(id));
 }
 
 pub const max_model_bytes = 256;
@@ -166,18 +192,20 @@ test "model catalog chat facts cover exact types modalities and whole non-chat f
     }
 }
 
-test "built-in instructions select only four exact requested model identities" {
+test "built-in instructions select only six exact requested model identities" {
     const cases = .{
         .{ "gpt-6-luna", BuiltinInstructions.luna, @embedFile("model_instructions/luna.txt") },
         .{ "gpt-6.1-terra", BuiltinInstructions.terra, @embedFile("model_instructions/terra-astra.txt") },
         .{ "gpt-6.1-sol", BuiltinInstructions.sol, @embedFile("model_instructions/sol.txt") },
         .{ "gpt-6-astra", BuiltinInstructions.astra, @embedFile("model_instructions/terra-astra.txt") },
+        .{ "gpt-6.2-sol", BuiltinInstructions.sol, @embedFile("model_instructions/sol.txt") },
+        .{ "gpt-6.2-astra", BuiltinInstructions.astra, @embedFile("model_instructions/terra-astra.txt") },
     };
     inline for (cases) |case| {
         try std.testing.expectEqual(case[1], builtinInstructions(case[0]));
         try std.testing.expectEqualStrings(case[2], builtinInstructions(case[0]).bytes());
     }
-    for ([_][]const u8{ "", "gpt-6-sol", "gpt-6-terra", "gpt-6.1-luna", "GPT-6-LUNA", "openai/gpt-6-luna", "gpt-6-luna-extra", "gpt-6-lun", "gpt-6.1-sol-extra", "gpt-6-astra-2026", "future-chat" }) |model| {
+    for ([_][]const u8{ "", "gpt-6-sol", "gpt-6-terra", "gpt-6.1-luna", "GPT-6-LUNA", "openai/gpt-6-luna", "gpt-6-luna-extra", "gpt-6-lun", "gpt-6.1-sol-extra", "gpt-6-astra-2026", "gpt-6.2-terra", "gpt-6.2-sol-extra", "future-chat" }) |model| {
         try std.testing.expectEqual(BuiltinInstructions.generic, builtinInstructions(model));
         try std.testing.expectEqualStrings("", builtinInstructions(model).bytes());
     }

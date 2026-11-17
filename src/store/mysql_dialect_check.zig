@@ -614,6 +614,42 @@ test "a MySQL Store at the migration baseline with its rows takes every migratio
     writeRecord();
 }
 
+test "schema 82 MySQL migration backfills input sources and preserves admissions" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restoreNamed("USE " ++ database_sql);
+    try setupNamed("DROP DATABASE IF EXISTS " ++ migrated_database_sql ++ ";CREATE DATABASE " ++ migrated_database_sql);
+    try load(migrated_database_sql, store_testing.baseline_mysql_ddl, false);
+    try load(migrated_database_sql, store_testing.baseline_rows, true);
+    inline for (schema.migrations) |step| {
+        if (step.from < 81) try load(migrated_database_sql, schema.mysqlMigration(step.from), false);
+    }
+    try load(migrated_database_sql, "UPDATE message_admission SET sender_session_ref='brhkcj',sender_position=1 WHERE admission_id=1;" ++
+        "UPDATE message_admission SET source_action_id=(SELECT min(action_id) FROM action_operation) WHERE admission_id=2;" ++
+        "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admitted_at) VALUES(3,'rhvzwc','fixture-stop',1,1)", false);
+    const saved_rows = "SELECT admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position,source_action_id FROM message_admission ORDER BY admission_id";
+    var before: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer before.deinit();
+    try writeResult(saved_rows, &before.writer);
+    try std.testing.expect(before.written().len > 0);
+    try load(migrated_database_sql, schema.mysqlMigration(81), false);
+    var after: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer after.deinit();
+    try writeResult(saved_rows, &after.writer);
+    try std.testing.expectEqualStrings(before.written(), after.written());
+    var kinds: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer kinds.deinit();
+    try writeResult("SELECT count(*) FROM message_admission WHERE (admission_id=1 AND source_kind=2 AND message_admission_person_lead IS NULL) OR (admission_id=2 AND source_kind=3 AND message_admission_person_lead IS NULL) OR (admission_id=3 AND source_kind=1 AND message_admission_person_lead=session_ref)", &kinds.writer);
+    try std.testing.expectEqualStrings("\n 1:3", kinds.written());
+    const refusal = (try run("UPDATE message_admission SET source_kind=1 WHERE admission_id=1")) orelse return error.MissingSourceKindRefusal;
+    try std.testing.expectEqual(@as(u16, 3819), refusal.code);
+    try expectCatalog(migrated_database_sql);
+    done.migrations += 1;
+    writeRecord();
+}
+
 test "model call timing MySQL format 68 migration preserves format 67 resolutions with null final attempt timings" {
     const io = std.testing.io;
     mutex.lockUncancelable(io);
@@ -1108,7 +1144,17 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
                 defer std.testing.allocator.free(text);
                 try load(migrated_database_sql, text, false);
             }
-            try load(migrated_database_sql, store_testing.expected_mysql_rows, true);
+            // The expected fixture describes the current schema, while this Store is at format 74.
+            const format_74_rows = comptime blk: {
+                const current = store_testing.expected_mysql_rows;
+                const baseline = store_testing.baseline_rows;
+                const start = std.mem.indexOf(u8, current, "INSERT INTO message_admission(").?;
+                const end = start + std.mem.indexOf(u8, current[start..], ";\n").? + 2;
+                const old_start = std.mem.indexOf(u8, baseline, "INSERT INTO message_admission(").?;
+                const old_end = old_start + std.mem.indexOf(u8, baseline[old_start..], ";\n").? + 2;
+                break :blk current[0..start] ++ baseline[old_start..old_end] ++ current[end..];
+            };
+            try load(migrated_database_sql, format_74_rows, true);
         }
         try load(migrated_database_sql, "CREATE TEMPORARY TABLE original_pin_commands AS SELECT * FROM core_command", false);
         defer restoreNamed("DROP TEMPORARY TABLE " ++ migrated_database_sql ++ ".original_pin_commands");

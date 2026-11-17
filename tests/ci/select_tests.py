@@ -64,6 +64,8 @@ FIXTURES = {
     "admission-debug-integration": ((I + "admission_integration.sh",), (), ()),
     "dispatch-integration": ((I + "dispatch_integration.py",), (), ("src/model_adapter.zig", *MODEL)),
     "dispatch-debug-integration": ((I + "dispatch_integration.py",), (), ()),
+    "read-image-integration": ((I + "read_image_integration.py",), (),
+                               ("src/server_read_image.zig", "src/os/read_image_file.zig", "src/input_media.zig")),
     "bash-integration": ((I + "bash_integration.py",), (), BASH),
     "bash-owner-integration": ((I + "bash_owner_integration.py",), (), BASH),
     "bash-lifecycle-integration": ((I + "bash_lifecycle_integration.py",), (), BASH),
@@ -547,7 +549,7 @@ STACK_FRAMES = ("src/*", "build.zig", "build.zig.zon", "tests/ci/stack_frames.py
 
 CHECK_COVERS = {
     "test", "test-native", "test-store", "test-h2", "test-pg", "admission-integration", "dispatch-integration",
-    "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration",
+    "read-image-integration", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration",
     "bash-integration", "bash-environment-integration", "codex-integration", "control-integration",
     "host-status-integration", "host-launch-integration", "host-stop-integration",
     "descriptor-capacity-integration", "request-wait-integration",
