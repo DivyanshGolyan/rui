@@ -71,33 +71,25 @@ class Screen:
 
 class World:
 
-    def __init__(self, prefix, responses_by_input=None, *, active_capacity=1, host_factory=None):
-        self.root = self.endpoint = self.host = None
-        try:
-            self.root = screen_fixture_root(f"rui-overview-{prefix}.")
-            self.home = self.root / "home"
-            (self.home / ".config/rui").mkdir(parents=True, mode=0o700)
-            codex_fixture.credentials(self.home / ".config/rui/codex.json")
-            self.store = self.root / "store"
-            self.workspace = self.root / "workspace"
-            self.workspace.mkdir()
-            self.env = {key: value for key, value in os.environ.items() if key != "NO_COLOR"}
-            self.env.update(HOME=str(self.home), TERM="xterm-256color", COLORTERM="truecolor")
-            self.endpoint = fixture.SuccessEndpoint([], responses_by_input or {})
-            threading.Thread(target=self.endpoint.serve_forever, daemon=True).start()
-            start_host = host_factory or fixture.start_host
-            self.host = start_host(self.store, f"http://127.0.0.1:{self.endpoint.server_port}/responses",
-                                   active_capacity=active_capacity)
-            self.run("defaults", "configure", "--store", self.store, "--provider", "codex", "--model", "gpt-6-luna")
-        except BaseException:
-            self.close()
-            raise
+    def __init__(self, prefix, responses_by_input=None, *, active_capacity=1):
+        self.root = screen_fixture_root(f"rui-overview-{prefix}.")
+        self.home = self.root / "home"
+        (self.home / ".config/rui").mkdir(parents=True, mode=0o700)
+        codex_fixture.credentials(self.home / ".config/rui/codex.json")
+        self.store = self.root / "store"
+        self.workspace = self.root / "workspace"
+        self.workspace.mkdir()
+        self.env = {key: value for key, value in os.environ.items() if key != "NO_COLOR"}
+        self.env.update(HOME=str(self.home), TERM="xterm-256color", COLORTERM="truecolor")
+        self.endpoint = fixture.SuccessEndpoint([], responses_by_input or {})
+        threading.Thread(target=self.endpoint.serve_forever, daemon=True).start()
+        self.host = fixture.start_host(self.store, f"http://127.0.0.1:{self.endpoint.server_port}/responses",
+                                       active_capacity=active_capacity)
+        self.run("defaults", "configure", "--store", self.store, "--provider", "codex", "--model", "gpt-6-luna")
 
     def close(self):
-        dispose_all(lambda: stop_process(self.host, timeout=5) if self.host is not None else None,
-                    lambda: self.endpoint.shutdown() if self.endpoint is not None else None,
-                    lambda: self.endpoint.server_close() if self.endpoint is not None else None,
-                    lambda: shutil.rmtree(self.root) if self.root is not None else None)
+        dispose_all(lambda: stop_process(self.host, timeout=5), self.endpoint.shutdown, self.endpoint.server_close,
+                    lambda: shutil.rmtree(self.root, ignore_errors=True))
 
     def run(self, *args, expect=0, input=None):
         result = subprocess.run([str(fixture.RUI), *map(str, args)], env=self.env, cwd=self.workspace,

@@ -363,7 +363,6 @@ pub fn build(b: *std.Build) void {
 
     const human_cli = screen_module.screenCommand(b, screen, &.{});
     human_cli.addPrefixedFileArg("RUI_TEST_TERMINAL_NOTICE=", ci.path(terminal_notice));
-    human_cli.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
     human_cli.addArg("python3");
     human_cli.addFileArg(b.path("tests/integration/human_cli_integration.py"));
     human_cli.addFileArg(ci.path(release_safe));

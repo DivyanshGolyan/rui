@@ -18,10 +18,6 @@ def _load():
         values[name] = text if number == "" else int(number)
     triggers = source.split("pub const provider_compaction_triggers", 1)[1].split("};", 1)[0]
     values["provider_compaction_triggers"] = {provider: int(tokens) for provider, tokens in _TRIGGER.findall(triggers)}
-    catalog = (_ROOT / "src" / "built_in_tool.zig").read_text()
-    names = re.search(r"pub const BuiltInTool = enum \{([^}]+)\};", catalog)
-    assert names, "built-in tool catalog missing"
-    values["tools"] = ",".join(name.strip() for name in names.group(1).split(","))
     declared = set(re.findall(r"^pub const (\w+)", source, re.MULTILINE))
     assert set(values) == declared, f"{_SOURCE}: teach this reader {sorted(declared - set(values))}"
     return SimpleNamespace(**values)

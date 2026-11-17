@@ -16,7 +16,6 @@ import canonical_fixture as canonical
 import host_process
 import model_fixture as fixture
 from request_routing_cases import capture_routing
-from attached_creation_cases import attached_creation
 from host_process import HostDiagnostics, canonical_fixture_root, dispose_all
 
 
@@ -310,9 +309,7 @@ def saved_capture_routes(state):
 def main():
     with tempfile.TemporaryDirectory(prefix="rui-request-wait.") as temporary:
         state = canonical_fixture_root(temporary)
-        for scenario in (saved_capture_routes,
-                         lambda root: attached_creation(RUI, root / "attached-store", root, os.environ),
-                         completion, permission, timeout_and_absent, stopped_host,
+        for scenario in (saved_capture_routes, completion, permission, timeout_and_absent, stopped_host,
                          lambda root: interrupted(root, signal.SIGINT),
                          lambda root: interrupted(root, signal.SIGTERM), tier_two, restarted_bash):
             scenario(state)
