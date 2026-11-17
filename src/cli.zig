@@ -289,6 +289,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .request_list => try requests(init),
         .action_read => try readAction(init, parsed),
         .action_background => try backgroundAction(init, parsed),
+        .action_stop => try requestActionStop(init, parsed),
         .action_inspect => try inspectAction(init, .{ .io = init.io }, parsed.get("store"), parsed.get("session").?, (try parsed.number(u64, "action")).?),
         .action_allow => try decideAction(init, parsed, .allow_once),
         .action_deny => try decideAction(init, parsed, .deny),
@@ -3181,6 +3182,19 @@ fn backgroundAction(init: std.process.Init, parsed: *const cli_args.Parsed) !voi
     try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null, .json);
 }
 
+fn requestActionStop(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const input: client.ActionStopInput = .{
+        .store = try selectedStore(init, parsed.get("store"), &selected_buffer),
+        .session = parsed.get("session").?,
+        .action_id = (try parsed.number(u64, "action")).?,
+    };
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const target = try captureTarget(init, parsed, &directory_buffer);
+    var captured = try client.captureActionStop(init.io, input, target);
+    try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null, .json);
+}
+
 fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision: @FieldType(client.PermissionDecisionInput, "decision")) !void {
     const io = init.io;
     var input = client.PermissionDecisionInput{
@@ -3567,8 +3581,9 @@ fn writeSavedRejection(out: *std.Io.Writer, reply: protocol_reply.MutationReply)
         .model_interruption => "interrupt-model",
         .permission_decision => |target| if (target.decision == .allow_once) "allow" else "deny",
         .action_background => "background",
+        .action_stop => "stop",
     };
-    try caller_error.writeSavedLine(out, savedRejectionCode(answer), .{ .resource = if (reply.target == .permission_decision or reply.target == .action_background) "action" else "session", .operation = operation });
+    try caller_error.writeSavedLine(out, savedRejectionCode(answer), .{ .resource = if (reply.target == .permission_decision or reply.target == .action_background or reply.target == .action_stop) "action" else "session", .operation = operation });
 }
 
 fn reportUnconfirmed(context: protocol_reply.MutationIdentity, replay: client.Replay, err: anyerror) void {
@@ -3637,6 +3652,7 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
         .model_interruption => |target| try writer.print("target Turn: {d}; Operation: {d}\n", .{ target.turn, target.operation }),
         .permission_decision => |target| try writer.print("target Action: {d}; decision: {s}\n", .{ target.action, @tagName(target.decision) }),
         .action_background => |action| try writer.print("target Action: {d}\n", .{action}),
+        .action_stop => |action| try writer.print("target Action: {d}\n", .{action}),
         else => {},
     }
     const answer = reply.answer catch |err| {
@@ -3667,6 +3683,9 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
         },
         .session_archive => |value| try writer.print("archived: {}; completion: {s}\n", .{ value.archived, @tagName(value.completion) }),
         .session_pin => |value| try writer.print("pinned: {}\n", .{value.pinned}),
+        .action_stop => |position| {
+            if (position) |p| try writer.print("Resolution position: {d}\n", .{p});
+        },
         .action_background => |selection| try writer.print("Action selection: {s}; position: {d}\n", .{ @tagName(selection.kind), selection.position }),
         .model_interruption, .permission_decision => {},
     };
@@ -3718,6 +3737,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         .model_interruption => |target| try writer.print(",\"request_target\":{{\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{ target.turn, target.operation }),
         .permission_decision => |target| try writer.print(",\"request_target\":{{\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{ target.action, @tagName(target.decision) }),
         .action_background => |action| try writer.print(",\"request_target\":{{\"action\":\"{d}\"}}", .{action}),
+        .action_stop => |action| try writer.print(",\"request_target\":{{\"action\":\"{d}\"}}", .{action}),
         else => {},
     }
     const answer = reply.answer catch |err| {
@@ -3738,6 +3758,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         try std.json.Stringify.value(reply.context.session.slice(), .{}, writer);
     }
     if (reply.target == .permission_decision) try writer.print(",\"action\":\"{d}\",\"decision\":\"{s}\"", .{ reply.target.permission_decision.action, @tagName(reply.target.permission_decision.decision) });
+    if (reply.target == .action_stop) try writer.print(",\"action\":\"{d}\"", .{reply.target.action_stop});
     if (reply.target == .action_background) try writer.print(",\"action\":\"{d}\"", .{reply.target.action_background});
     switch (answer.result) {
         .accepted => |accepted| switch (accepted) {
@@ -3753,6 +3774,10 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
             },
             .session_archive => |value| try writer.print(",\"archived\":{}", .{value.archived}),
             .session_pin => |value| try writer.print(",\"pinned\":{}", .{value.pinned}),
+            .action_stop => |position| {
+                try writer.writeAll(",\"resolution_position\":");
+                if (position) |p| try writer.print("\"{d}\"", .{p}) else try writer.writeAll("null");
+            },
             .action_background => |selection| try writer.print(",\"action_selection\":{{\"kind\":\"{s}\",\"position\":\"{d}\"}}", .{ @tagName(selection.kind), selection.position }),
             .model_interruption, .permission_decision => {},
         },

@@ -885,7 +885,7 @@ test "historical fixture rewinds refuse retained pin background and stop facts b
                             try settleTwoActionsForTesting(&storage, &tmp, model, "rewind-action-calls");
                             const first = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{});
                             const second = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
-                            try store_testing.exec(&storage, "INSERT INTO action_stop(source_action_id,target_action_id) VALUES(?1,?2)", .{ first, second });
+                            try store_testing.exec(&storage, "INSERT INTO action_stop(stop_key,source_action_id,target_action_id) VALUES(?1,?2,?3)", .{ "fixture", first, second });
                         },
                         .stop_cutoff => {
                             _ = try NativePromotion.propose(&storage, &tmp, session.slice());

@@ -70,7 +70,15 @@ The existing Resolution reader validates the reference when model history render
 Eligible final input joins the running Turn at its next input boundary without changing an in-flight model request, and starts a Turn when the Session is idle.
 A Session stop suppresses final input from its selected Actions, retaining readable terminal evidence; archive uses that same stop selection.
 `stop_action` selects one Action owned by the calling Session. The Host stops a running Action through its existing runner, records one cancelled Resolution, and retains its credit until cleanup. A saved per-Action stop also suppresses the Action's final Session input after Host restart. A stop requested after Resolution returns the existing Resolution.
-Native users can also read the sole terminal Resolution through `action read`.
+`rui action stop --session ID --action ACTION` and TypeScript `Session.stopAction(action, { idempotencyKey })` use that same stop owner.
+The native command source is either a model `stop_action` attempt or a client request, recorded atomically with its saved command answer.
+The CLI captures the request before transmission and recovers it through `rui request recover HANDLE` or the explicit record.
+Matching keys and inputs return the original answer; changed inputs conflict.
+An accepted reply includes nullable `resolution_position`, the existing Resolution position if the Action had already ended when selected.
+The TypeScript method returns that position or `null` for a pending stop.
+Selection acknowledges durable intent; it does not assert runner cleanup.
+Unknown Actions and Actions from another Session are refused.
+Native users read the sole terminal Resolution through `action read`.
 A Session Stop keeps the existing runner-aware cancellation and uncertainty rules; Host recovery records uncertainty without replaying an invocation.
 
 Bash arguments require `cmd` and `description`; `stdin` and `timeout_ms` are optional.
@@ -584,6 +592,7 @@ Model replacement follows the retry policy above and may incur duplicate cost.
 
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
+| Per-Action client stop, saved replay, ownership refusal, existing Resolution and suppressed final input | `client Action stop`, `stop_action`, `background_action_integration.py --stop-only`, TypeScript request tests | SQLite owner and native Host cases; MySQL owner cases run with the configured engine. Mutations must break target, replay, final Resolution and stop-wins assertions. |
 | Settlement scenarios in the composed gates | `check`, `check-full` | A fixture marker detects duplicate execution; Store facts remain recovery authority |
 | Background final delivery: delivered and resolved at most once across Host death, stop wins (including an attached parent's owed stop), promotion keeps its credit, a call waiting for a credit runs once deadlines end the holders | `python3 tests/formal/check.py`: TLC checks `tests/formal/background_delivery/BackgroundDelivery.tla`; each guard's mutation must break a named rule. The `verify-background-delivery` skill maps model steps to code | Bounded: one Session, two Actions, one credit, one Host death. #1550 as drafted breaks stop wins through an unsettled owed stop (expected violation until fixed) |
 | Owner invariants at stable checkpoints | `'custody sequences'`, `'slots agree with custody'` | Stable checkpoints only |
