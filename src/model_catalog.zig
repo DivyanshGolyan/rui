@@ -27,6 +27,28 @@ pub fn builtinInstructions(model: []const u8) BuiltinInstructions {
     return .generic;
 }
 
+// Image input is unsupported for these exact aliases in the GPT-3.5 Turbo
+// model reference, checked 2026-11-17:
+// https://developers.openai.com/api/docs/models/gpt-3.5-turbo
+// Unknown IDs stay eligible; do not infer capabilities from a model-name prefix.
+pub fn acceptsImages(model: []const u8) bool {
+    const unsupported = [_][]const u8{
+        "gpt-3.5-turbo",
+        "gpt-3.5-turbo-0125",
+        "gpt-3.5-turbo-1106",
+        "gpt-3.5-turbo-instruct",
+    };
+    for (unsupported) |id| if (std.mem.eql(u8, model, id)) return false;
+    return true;
+}
+
+test "model image input excludes only evidenced exact unsupported IDs" {
+    for ([_][]const u8{ "gpt-3.5-turbo", "gpt-3.5-turbo-0125", "gpt-3.5-turbo-1106", "gpt-3.5-turbo-instruct" }) |id|
+        try std.testing.expect(!acceptsImages(id));
+    for ([_][]const u8{ "gpt-6.1-sol", "gpt-4.1", "future-model", "GPT-3.5-TURBO", "gpt-3.5-turbo-next", "openai/gpt-3.5-turbo" }) |id|
+        try std.testing.expect(acceptsImages(id));
+}
+
 pub const max_model_bytes = 256;
 
 pub const ReasoningEffort = enum { none, low, medium, high, xhigh, max };
