@@ -221,6 +221,8 @@ def cmd_build(args):
         if not sha or not re.fullmatch(r"[0-9a-f]{40}", sha):
             die("build needs a full 40-hex commit SHA or --here")
         source = pathlib.Path(args.source).resolve() if args.source else CACHE / "src" / sha
+    if (CACHE / "builds").resolve().is_relative_to(source.resolve()):
+        die("build cache must be outside the checkout")
     if not here:
         origin = args.repo or str(HERE.parents[4])
         if not source.exists():
@@ -234,7 +236,7 @@ def cmd_build(args):
             die(f"source {source} is not a clean checkout of {sha} (HEAD {head}, dirty={bool(dirty)})")
         tree = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD^{tree}"], capture_output=True, text=True, check=True).stdout.strip()
         tag = release_tag(source)
-    build = pathlib.Path(args.out).resolve() if getattr(args, "out", None) else CACHE / "builds" / sha
+    build = CACHE / "builds" / sha
     manifest = build / "manifest.json"
 
     def ensure_upgrade(record):
@@ -330,9 +332,10 @@ def upgrade_actor(build):
     return path
 
 
-def load_build(sha):
-    candidate = pathlib.Path(sha)
-    manifest = (candidate if candidate.is_dir() else CACHE / "builds" / sha) / "manifest.json"
+def load_build(sha, cache=None):
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|tree-[0-9a-f]{64})", sha):
+        die("build identifier must be a full 40-hex commit SHA or tree- content id")
+    manifest = (CACHE if cache is None else cache) / "builds" / sha / "manifest.json"
     if not manifest.exists():
         die(f"no build for {sha}; run: verify-rui build {sha}")
     return json.loads(manifest.read_text())
@@ -644,7 +647,7 @@ def tap_main(args):
     import tty
     run = Run(args.run)
     source = pathlib.Path(run.meta["source"])
-    build = load_build(run.meta["sha"])
+    build = load_build(run.meta["sha"], cache=run.root.parent.parent)
     require_screen(build)
     term = pathlib.Path(args.term_dir)
     term.mkdir(parents=True, exist_ok=True)
@@ -883,8 +886,7 @@ def cmd_restart_host(args):
 
 
 def build_run_tag(identifier):
-    """Keep directory build identifiers out of generated run paths."""
-    return identifier[:7] if re.fullmatch(r"[0-9a-f]{40}", identifier) else hashlib.sha256(identifier.encode()).hexdigest()[:7]
+    return identifier.removeprefix("tree-")[:7]
 
 
 def cmd_new(args):
@@ -3677,7 +3679,7 @@ def cmd_shots(args):
         if identifier is None:
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                cmd_build(argparse.Namespace(sha=None, here=True, out=None, repo=None, source=None,
+                cmd_build(argparse.Namespace(sha=None, here=True, repo=None, source=None,
                                              pkg_dir=None, force=False, no_screen=False, upgrade=True))
             identifier = json.loads(output.getvalue())["sha"]
         build = load_build(identifier)
@@ -4002,11 +4004,13 @@ def cmd_publish(args):
 
 
 def main():
+    if not CACHE.is_absolute():
+        die("VERIFY_RUI_CACHE must be an absolute path")
     parser = argparse.ArgumentParser(prog="verify-rui", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("build", help="build a pinned SHA once (ReleaseSafe) into the cache")
     p.add_argument("sha", nargs="?"); p.add_argument("--here", action="store_true", help="build the current working tree in place")
-    p.add_argument("--repo"); p.add_argument("--pkg-dir"); p.add_argument("--out", help="build artifact directory"); p.add_argument("--force", action="store_true")
+    p.add_argument("--repo"); p.add_argument("--pkg-dir"); p.add_argument("--force", action="store_true")
     p.add_argument("--source", help="existing clean detached worktree of SHA (default: cache worktree)")
     p.add_argument("--no-screen", action="store_true", help="skip the committed-screen observer library")
     p.add_argument("--upgrade", action="store_true", help="also pin the same-source synthetic release actor")

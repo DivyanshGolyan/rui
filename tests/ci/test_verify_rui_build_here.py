@@ -85,28 +85,13 @@ def check_here_content_cache_and_index(tmp_path):
     assert json.loads(build(repo, env).stdout)['sha'] != first['sha']
 
 
-def check_here_out_jobs_and_load_build(tmp_path):
-    repo, tmp, env = setup(tmp_path)
-    env['RUI_BUILD_JOBS'] = '3'
-    out = tmp / 'artifacts'
-    record = json.loads(build(repo, env, '--out', str(out)).stdout)
-    assert record['dirty'] is False
-    assert Path(record['upgrade_actor']['binary']).is_file()
-    manifest = out / 'manifest.json'
-    assert manifest.exists()
-    Path(record['upgrade_actor']['binary']).unlink()
-    del record['upgrade_actor']
-    manifest.write_text(json.dumps(record))
-    assert Path(json.loads(build(repo, env, '--out', str(out)).stdout)['upgrade_actor']['binary']).is_file()
-    assert '-j3' in (tmp / 'calls').read_text()
+def load_module(cache):
     loader = importlib.machinery.SourceFileLoader('verify_rui_build_test', str(SCRIPT))
     spec = importlib.util.spec_from_loader(loader.name, loader)
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
-    module.CACHE = tmp / 'cache'
-    assert module.load_build(str(out))['sha'] == record['sha']
-    default = json.loads(build(repo, env).stdout)
-    assert module.load_build(default['sha'])['sha'] == default['sha']
+    module.CACHE = cache
+    return module
 
 
 class BuildHereTests(unittest.TestCase):
@@ -160,20 +145,107 @@ class BuildHereTests(unittest.TestCase):
             self.assertFalse(clean['dirty'])
             self.assertGreater(len((tmp / 'calls').read_text()), len(calls))
 
-    def test_explicit_output_requires_force_for_new_identity(self):
+    def test_explicit_output_is_rejected_before_build(self):
+        for pinned in (False, True):
+            with self.subTest(pinned=pinned), tempfile.TemporaryDirectory() as tmp:
+                repo, tmp, env = setup(Path(tmp))
+                out = tmp / 'artifacts'
+                identity = [git(repo, 'rev-parse', 'HEAD'), '--source', str(repo)] if pinned else ['--here']
+                result = subprocess.run([sys.executable, str(SCRIPT), 'build', *identity, '--no-screen',
+                                         '--out', str(out)], cwd=repo, env=env, text=True, capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('--out', result.stderr)
+                self.assertFalse((tmp / 'calls').exists())
+                self.assertFalse(out.exists())
+                self.assertFalse(list((tmp / 'cache/builds').glob('*/manifest.json')))
+
+    def test_cached_builds_remain_reusable_after_later_builds(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, tmp, env = setup(Path(tmp))
-            out = tmp / 'artifacts'
-            first = json.loads(build(repo, env, '--out', str(out)).stdout)
-            git(repo, 'commit', '--allow-empty', '-qm', 'new identity')
-            result = subprocess.run([sys.executable, str(SCRIPT), 'build', '--here', '--no-screen',
-                                     '--out', str(out)], cwd=repo, env=env, text=True, capture_output=True)
+            env['RUI_BUILD_JOBS'] = '3'
+            first = json.loads(build(repo, env).stdout)
+            self.assertTrue(Path(first['upgrade_actor']['binary']).is_file())
+            self.assertTrue((tmp / 'cache/builds' / first['sha'] / 'manifest.json').is_file())
+            self.assertIn('-j3', (tmp / 'calls').read_text())
+            (repo / 'tracked').write_text('later build')
+            second = json.loads(build(repo, env).stdout)
+            self.assertNotEqual(first['sha'], second['sha'])
+            calls = (tmp / 'calls').read_text()
+            (repo / 'tracked').write_text('initial')
+            self.assertEqual(json.loads(build(repo, env).stdout)['sha'], first['sha'])
+            self.assertEqual((tmp / 'calls').read_text(), calls)
+            module = load_module(tmp / 'cache')
+            self.assertEqual(module.load_build(first['sha'])['sha'], first['sha'])
+            self.assertEqual(module.load_build(second['sha'])['sha'], second['sha'])
+
+    def test_cache_inside_checkout_is_rejected_before_build(self):
+        for via_symlink, pinned in ((False, False), (True, False), (False, True)):
+            with self.subTest(via_symlink=via_symlink, pinned=pinned), tempfile.TemporaryDirectory() as tmp:
+                repo, tmp, env = setup(Path(tmp))
+                inside = repo / 'cache'
+                if via_symlink:
+                    link = tmp / 'cache-link'
+                    link.symlink_to(inside, target_is_directory=True)
+                    env['VERIFY_RUI_CACHE'] = str(link)
+                else:
+                    env['VERIFY_RUI_CACHE'] = str(inside)
+                identity = [git(repo, 'rev-parse', 'HEAD'), '--source', str(repo)] if pinned else ['--here']
+                result = subprocess.run([sys.executable, str(SCRIPT), 'build', *identity, '--no-screen'],
+                                        cwd=repo, env=env, text=True, capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((tmp / 'calls').exists())
+                self.assertFalse(list(inside.glob('builds/*/manifest.json')))
+
+    def test_relative_cache_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, tmp, env = setup(Path(tmp))
+            env['VERIFY_RUI_CACHE'] = 'relative-cache'
+            result = subprocess.run([sys.executable, str(SCRIPT), 'build', '--here', '--no-screen'],
+                                    cwd=repo, env=env, text=True, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn('different build; use --force', result.stderr)
-            self.assertEqual(json.loads((out / 'manifest.json').read_text())['sha'], first['sha'])
-            replacement = json.loads(build(repo, env, '--out', str(out), '--force').stdout)
-            self.assertNotEqual(first['sha'], replacement['sha'])
-            self.assertEqual(replacement['head'], git(repo, 'rev-parse', 'HEAD'))
+            self.assertIn('absolute path', result.stderr)
+            self.assertFalse((tmp / 'calls').exists())
+
+    def test_external_absolute_cache_is_reused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, tmp, env = setup(Path(tmp))
+            self.assertTrue(Path(env['VERIFY_RUI_CACHE']).is_absolute())
+            first = json.loads(build(repo, env).stdout)
+            calls = (tmp / 'calls').read_text()
+            second = json.loads(build(repo, env).stdout)
+            self.assertEqual(first['sha'], second['sha'])
+            self.assertEqual((tmp / 'calls').read_text(), calls)
+            self.assertTrue((Path(env['VERIFY_RUI_CACHE']) / 'builds' / first['sha'] / 'manifest.json').is_file())
+
+    def test_load_build_accepts_only_identifiers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, tmp, env = setup(Path(tmp))
+            module = load_module(tmp / 'cache')
+            sha = git(repo, 'rev-parse', 'HEAD')
+            pinned = subprocess.run([sys.executable, str(SCRIPT), 'build', sha, '--source', str(repo),
+                                     '--no-screen'], cwd=repo, env=env, text=True, capture_output=True, check=True)
+            tree = json.loads(build(repo, env).stdout)['sha']
+            self.assertRegex(tree, r'^tree-[0-9a-f]{64}$')
+            for identifier in (sha, tree):
+                with self.subTest(identifier=identifier):
+                    self.assertEqual(module.load_build(identifier)['sha'], identifier)
+                    self.assertTrue((tmp / 'cache/builds' / identifier / 'manifest.json').is_file())
+            self.assertEqual(json.loads(pinned.stdout)['sha'], sha)
+
+            # Existing manifests make path acceptance observable, including traversal.
+            outside = tmp / 'outside'
+            outside.mkdir()
+            (outside / 'manifest.json').write_text(json.dumps({'sha': 'outside'}))
+            cache_builds = tmp / 'cache/builds'
+            invalid = [str(outside), str(cache_builds / sha), f'./{sha}', f'{sha}/',
+                       f'../{sha}', '../../outside', str(outside / '..' / 'outside'),
+                       '', '.', '..', 'a' * 39, 'a' * 41, 'g' * 40,
+                       'tree-' + 'a' * 63, 'tree-' + 'a' * 65, 'tree-' + 'g' * 64,
+                       sha.upper(), 'tree-' + 'A' * 64]
+            for identifier in invalid:
+                with self.subTest(identifier=identifier):
+                    with self.assertRaises(SystemExit):
+                        module.load_build(identifier)
 
     def test_release_tag_changes_cache_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -241,10 +313,6 @@ class BuildHereTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('source changed', result.stderr)
             self.assertFalse(list((tmp / 'cache/builds').glob('*/manifest.json')))
-
-    def test_output_jobs_and_load(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            check_here_out_jobs_and_load_build(Path(tmp))
 
 
 if __name__ == '__main__':

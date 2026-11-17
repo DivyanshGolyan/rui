@@ -29,6 +29,21 @@ class ShotsTest(unittest.TestCase):
         self.module = runpy.run_path(str(SCRIPT))
         self.globals = self.module['cmd_shots'].__globals__
 
+    def test_shots_rejects_directory_build_before_creating_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory = root / 'build'
+            directory.mkdir()
+            (directory / 'manifest.json').write_text(json.dumps({'sha': 'a' * 40}))
+            for identifier in (str(directory), 'build', '../build'):
+                with self.subTest(identifier=identifier):
+                    args = argparse.Namespace(build=identifier, only=None, shard=None, out=str(root / 'out'),
+                                              no_png=True, baseline=None)
+                    with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                        self.module['cmd_shots'](args)
+                    self.assertEqual(error.exception.code, 2)
+                    self.assertFalse(Path(args.out).exists())
+
     def test_diff_orders_failures_and_omits_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -360,12 +375,6 @@ class ShotsTest(unittest.TestCase):
                         self.module['cmd_shots_merge'](args)
                     self.assertEqual(error.exception.code, 2)
                     self.assertFalse(Path(args.out).exists())
-
-    def test_directory_build_run_tag_is_safe_and_deterministic(self):
-        tag = self.module['build_run_tag']('/tmp/build/manifest.json')
-        self.assertEqual(len(tag), 7)
-        self.assertTrue(tag.isalnum())
-        self.assertEqual(tag, self.module['build_run_tag']('/tmp/build/manifest.json'))
 
     def test_resize_failure_saves_last_committed_frame_and_timing(self):
         run_frames = self.module['run_frames']
