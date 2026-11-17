@@ -1089,7 +1089,7 @@ def mysql_restart_cases(root, binary, releases):
     def sql(text):
         return subprocess.run([admin], input=text, text=True, capture_output=True, check=True, timeout=40).stdout.strip()
 
-    for placement in ("default", "external", "contended"):
+    for placement in ("default", "external", "contended", "frozen"):
         database = "rui_upgrade_" + secrets.token_hex(6)
         runtime = None
         waiter = None
@@ -1109,6 +1109,47 @@ def mysql_restart_cases(root, binary, releases):
                 saved.chmod(0o600)
                 old, previous = c.start_host(sources_only=True)
                 runtime = pathlib.Path(c.ready["socket"]).parent
+                if placement == "frozen":
+                    # A real baseline owns DB A. Freeze another admission of
+                    # A, then change the selected URL SOURCE (not its contents)
+                    # at the same interface. Reopening B would fail because its
+                    # credential variable is absent; positive readyA is proof.
+                    stop_process(old)
+                    starter = c.build("frozen-mysql-starter") / "bin/rui"
+                    gate = c.root / "mysql-after-freeze.gate"
+                    gate.touch(mode=0o600)
+                    c.env["RUI_TEST_HOST_AFTER_FREEZE_GATE"] = str(gate)
+                    launcher = subprocess.Popen([starter, "host", "start", "--store", c.store],
+                                                env=c.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    c.children.append(launcher)
+                    try:
+                        def frozen():
+                            if launcher.poll() is not None:
+                                output, diagnostic = launcher.communicate(timeout=3)
+                                raise AssertionError(("MySQL starter exited before freeze", launcher.returncode,
+                                                      output, diagnostic))
+                            return gate.with_name(gate.name + ".entered").exists()
+                        wait_for(frozen, "real MySQL A source frozen before child launch", timeout=30)
+                        assert c.status()["status"] == "unavailable"
+                        missing = "RUI_FROZEN_SOURCE_MUST_STAY_UNUSED"
+                        assert missing not in c.env
+                        changed = json.loads(json.dumps(document))
+                        changed["store"]["mysql"]["url"] = {"env": missing}
+                        changed["execution"] = {"paused": True}
+                        saved.write_text(json.dumps(changed))
+                        assert gate.exists() and launcher.poll() is None
+                    finally:
+                        gate.unlink(missing_ok=True)
+                    output, diagnostic = launcher.communicate(timeout=30)
+                    assert launcher.returncode == 0, (launcher.returncode, output, diagnostic)
+                    ready = json.loads(output)
+                    current = c.status()
+                    assert current["instance"] == ready["instance"] != previous["instance"], (previous, ready, current)
+                    assert current["store"] == previous["store"] != str(c.store) and current["paused"] is False, current
+                    assert current["active_capacity"] == previous["active_capacity"], current
+                    assert json.loads(saved.read_text()) == changed, "B must remain installed through A readiness"
+                    print("MySQL detached freeze passed: admitted source A, changed saved source B at same private interface, consumed A", flush=True)
+                    continue
                 # Only the captured Host has this credential variable. Both
                 # target check and start must use its environment, not caller's.
                 c.env = dict(c.env)
