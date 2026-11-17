@@ -205,7 +205,7 @@ test "GroupedList quiet rows normalize whole lines before selection and hover in
         state.selected = if (selected) .{ .session = listed.reference } else .new_session;
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const first = try view.listSegments(arena.allocator(), &state, .{ .row = 0 }, width, caps, 0);
+        const first = (try view.Lines.at(arena.allocator(), &state, 0, width, caps, 0)).?;
         const rows: []const Row = &.{.{
             .segments = first.segments,
             .target = .{ .open = listed.reference },

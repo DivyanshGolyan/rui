@@ -99,6 +99,7 @@ const cores = .{
     .{ "outcome_code.zig", @import("outcome_code.zig") },
     .{ "output_item.zig", @import("output_item.zig") },
     .{ "overview_style.zig", @import("overview_style.zig") },
+    // Includes the on-demand Lines projection and its fixture domain.
     .{ "overview_view.zig", @import("overview_view.zig") },
     .{ "path_list.zig", @import("path_list.zig") },
     .{ "preset_value.zig", @import("preset_value.zig") },
@@ -457,13 +458,12 @@ test "overview benchmark: batched initial and refreshed listings at 1,000 and 10
             const Source = struct {
                 fn row(userdata: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!GroupedList.Row {
                     const shown: *const overview_view.State = @ptrCast(@alignCast(userdata));
-                    const item = overview_view.listItem(shown, index).?;
-                    const built = try overview_view.listSegments(arena, shown, item, 200, .{}, 0);
+                    const built = (try overview_view.Lines.at(arena, shown, index, 200, .{}, 0)).?;
                     return .{ .segments = built.segments, .heading = built.heading };
                 }
             };
-            list.rows = .{ .userdata = &state, .count = @intCast(overview_view.listLength(&state)), .rowFn = Source.row };
-            list.selected = if (overview_view.selectedLine(&state)) |at| @intCast(at) else null;
+            list.rows = .{ .userdata = &state, .count = @intCast(overview_view.Lines.count(&state)), .rowFn = Source.row };
+            list.selected = if (overview_view.Lines.named(&state)) |at| @intCast(at) else null;
             _ = try list.widget().draw(.{ .arena = frame.allocator(), .cell_arena = frame.allocator(), .min = .{}, .max = .{ .width = 200, .height = 53 }, .cell_size = .{} });
             const footer: @import("widgets/Footer.zig") = .{ .left = "", .right = overview_view.footerRight(&state), .notice = overview_view.footerNotice(&state) };
             _ = try footer.widget().draw(.{ .arena = frame.allocator(), .cell_arena = frame.allocator(), .min = .{}, .max = .{ .width = 200, .height = 1 }, .cell_size = .{} });
